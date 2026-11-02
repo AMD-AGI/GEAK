@@ -379,6 +379,9 @@ const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'war
 const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (2400
   + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900))
   + AGENTX_VALIDATION_LEGS * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600)));
+// Validate's timed windows alone, without a boot, warmup or drain: the least time in which it can return a number.
+const AGENTX_VALIDATE_WINDOWS_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * AGENTX_VALIDATION_LEGS * _declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600);
 // The least an AgentX run needs to return a validated gain: Setup's baseline leg (plus ~10min of
 // preflight and bench scripts), one A/B on the search window (the KB warm start's), then that final
 // phase. Above it the final phase gets its whole cost. Below it, Setup and that A/B keep their time,
@@ -1970,6 +1973,21 @@ function agentxClaimNote(claimed, baseline) {
     'noise band of the claim" and flagged\'s "lower than the claim by more than the band") and arbitrate on ' +
     'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
     'arbitration_note that it is a search-window number.';
+}
+// A trace replay that adopted nothing ships the bundle Setup already measured on the canonical window.
+// Every signal must agree, so no single adoption path can pass a changed bundle off as that one.
+function agentxAdoptedNothing(s) {
+  return IS_AGENTX && !!s.setup && s.baseline > 0 && !s.accepted && s.tput === s.baseline
+    && s.flags === s.setup.flags && s.env === s.setup.env && s.overlay === s.setup.overlay;
+}
+// Why a trace replay does not run Validate, or '' when it does. Validate compares the final bundle with
+// the stock one, so the stock bundle leaves it nothing to measure; and it benches both, so with less
+// time left than their timed windows it cannot return a number. Any Validate that could still finish
+// is attempted.
+function agentxValidateSkip(adoptedNothing, leftMs) {
+  if (!IS_AGENTX) return '';
+  if (adoptedNothing) return 'final_is_baseline';
+  return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
 }
 
 function correctnessEnvBlock(role) {
@@ -3755,6 +3773,7 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+let SETUP_CONFIG = null;   // the config BASELINE_TPUT was measured on; null when this invocation did not run Setup
 
 // The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
 // while packing (and refused the packing if any completed task had invalid evidence), and this
@@ -3900,6 +3919,7 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
+  SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
   if (IS_AGENTX) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
@@ -6613,6 +6633,7 @@ let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
+let validateSkip = '', finalFromAb = false;
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
@@ -6837,6 +6858,10 @@ if (want('final')) {
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
+  // On a trace replay Finalize's number is a search-window leg; the stock bundle's is Setup's canonical one.
+  const adoptedNothing = agentxAdoptedNothing({ setup: SETUP_CONFIG, accepted: allAccepted.length, tput: curTput,
+    baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay });
+  if (adoptedNothing) finalTput = BASELINE_TPUT;
   if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
     await requireE2EValidationCheckpoint('final/e2e_validation.json', {
       phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
@@ -6886,12 +6911,23 @@ if (want('final')) {
   // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
   // (attempting it beats skipping when the clock has drifted). On a trace replay the reserve holds
   // AGENTX_FINAL_PHASE_MS and the search is held to end at its boundary (TRACE-REPLAY SEARCH vs THE
-  // RESERVE), so both canonical legs fit. If the hard kill lands mid-bench the loss is
+  // RESERVE), so both canonical legs fit unless the budget was under the run's minimum. A trace replay
+  // skips it only with nothing to measure or no time to return a number (agentxValidateSkip). If the
+  // hard kill lands mid-bench the loss is
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
   phase('Validate');
-  await finalPhaseFence('validate', 'Validate');
-  validation = await safeAgent(
+  validateSkip = agentxValidateSkip(adoptedNothing, remainingMs());
+  if (validateSkip === 'final_is_baseline') {
+    log(`Validate SKIPPED: this trace replay adopted nothing, so the final bundle is the stock one and ` +
+      `Setup's ${BASELINE_TPUT} tok/s is its canonical-window number.`);
+  } else if (validateSkip === 'no_time') {
+    log(`Validate SKIPPED: ~${remainingMin()}min left, under the ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min ` +
+      `its ${AGENTX_VALIDATION_LEGS} canonical windows take alone, so it could not return a number.`);
+  } else {
+    await finalPhaseFence('validate', 'Validate');
+  }
+  validation = validateSkip ? null : await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
       agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
@@ -6918,9 +6954,18 @@ if (want('final')) {
   // reported as 0 / no_gain downstream.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  // On a trace replay that carried number is Finalize's search-window leg and BASELINE_THROUGHPUT a
+  // canonical one, so their ratio is no speedup. With an accepted head or kernel the return carries
+  // neither: run_e2e.py then reports that A/B's own pair (same session, same window), or no_gain with
+  // the accepted list intact if it finds none on disk.
+  finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
     `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+  if (finalFromAb) {
+    log("Validate gave this trace replay no number: the return carries no final or speedup, so run_e2e.py " +
+      "reports the best accepted A/B's own pair rather than a search-window leg over the canonical baseline.");
+  }
 
   // --- FINAL experience reconciliation (post-gate) -----------------------
   // The per-milestone update_experience (in the Milestone loop above) is the ONLY
@@ -7080,12 +7125,17 @@ const wfReturn = {
   // Trust the Director's independent number ONLY when it is a real positive
   // measurement (validatedOk). A crashed/degenerate Validate falls back to the
   // carried accepted same-session A/B win — never 0 — so a real, parity-checked
-  // gain is not silently demoted to no_gain by run_e2e.py.
-  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
-  throughput_speedup: finalSpeedup,
+  // gain is not silently demoted to no_gain by run_e2e.py. The exception is finalFromAb's
+  // empty pair, which run_e2e.py fills from that A/B on disk.
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
+  throughput_speedup: finalFromAb ? 0 : finalSpeedup,
+  // A trace replay's Validate that returned nothing is spelled as a flagged no-number result, so neither
+  // KB writer records the carried number; on any other workload it stays 'unknown'.
   validation_status: validatedOk ? validation.validation_status
     : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
-       : (want('final') ? 'unknown' : 'phase_partial')),
+       : (!want('final') ? 'phase_partial'
+         : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
+           : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown'))),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,

@@ -232,6 +232,113 @@ console.log("\n# a trace replay's Finalize benches only the leg the reserve hold
     'and the Validate prompt carries the note on the claim it is handed');
 }
 
+console.log('\n# a trace replay skips only a Validate that has nothing to measure or no time to return a number');
+// Validate benches the stock and the final bundle on the canonical window. A run that adopted nothing
+// hands it the stock bundle twice, which Setup already measured there; with less time left than those
+// two timed windows, the run is stopped before it can return a number. Every other Validate runs.
+{
+  const slice = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  const helpersSrc = [
+    slice('const FINAL_RESERVE_CAP_FRAC', 'const TIME_BUDGET_EFFECTIVE_MS'),
+    src.slice(src.indexOf('const WORKLOAD_SPEC ='), src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'))),
+    slice('function agentxFinalizeNote()', 'function correctnessEnvBlock('),
+    'return { agentxAdoptedNothing, agentxValidateSkip, AGENTX_VALIDATE_WINDOWS_MS };',
+  ].join('\n');
+  const helpersFor = (A) => new Function('A', 'TIME_BUDGET_MS', helpersSrc)(A, 12 * 3600 * 1000);
+  const MN = 60000;
+  const AX = { workload_kind: 'agentx_trace_replay' };
+  const ax = helpersFor(AX);
+  const SETUP = { flags: '--max-num-seqs 64', env: 'VLLM_USE_V1=1', overlay: '' };
+  const stock = { setup: SETUP, accepted: 0, tput: 113.325, baseline: 113.325, ...SETUP };
+  ok(ax.agentxAdoptedNothing(stock), "nothing accepted, and the carried number and config still Setup's: the stock bundle");
+  const adoptions = { accepted: 1, tput: 113.9, flags: '--max-num-seqs 128', env: 'VLLM_USE_V1=1 X=1', overlay: '/eval/overlay/kb' };
+  const missed = Object.keys(adoptions).filter((k) => ax.agentxAdoptedNothing({ ...stock, [k]: adoptions[k] }));
+  ok(missed.length === 0, `any single adoption makes it a changed bundle (missed: ${JSON.stringify(missed)})`);
+  ok(!ax.agentxAdoptedNothing({ ...stock, setup: null }) && !ax.agentxAdoptedNothing({ ...stock, tput: 0, baseline: 0 }),
+    'so does a run that did not run Setup itself, or got no baseline from it');
+  ok(!helpersFor({}).agentxAdoptedNothing(stock), 'and a fixed-ISL/OSL run never takes this path');
+  ok(ax.AGENTX_VALIDATE_WINDOWS_MS === 120 * MN, "Validate's two 3600s windows, with no boot at all, take 120min");
+  ok(ax.agentxValidateSkip(true, 600 * MN) === 'final_is_baseline', 'the stock bundle is not re-measured, however much time is left');
+  ok(ax.agentxValidateSkip(false, 121 * MN) === '' && ax.agentxValidateSkip(false, 119 * MN) === 'no_time',
+    'a changed bundle is validated with 121min left; with 119min it is not started');
+  ok(ax.agentxValidateSkip(false, Infinity) === '', 'without time_budget_s it is always attempted');
+  const declared = helpersFor({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } });
+  ok(declared.agentxValidateSkip(false, 61 * MN) === '' && declared.agentxValidateSkip(false, 59 * MN) === 'no_time',
+    'the bar follows the canonical window the run declares (1800s: 60min)');
+  ok(helpersFor({ ...AX, validation_measurement_mode: 'isolated_server', validation_replicas: 3 })
+    .AGENTX_VALIDATE_WINDOWS_MS === 360 * MN, 'an isolated validation counts every fresh server: six windows, 360min');
+  const fixed = helpersFor({});
+  ok(fixed.agentxValidateSkip(true, 0) === '' && fixed.agentxValidateSkip(false, 0) === '',
+    'a fixed-ISL/OSL run always attempts Validate');
+
+  // Wired where it decides: Setup records the config its baseline was measured on; the stock bundle's
+  // number replaces Finalize's search leg before the final-pair gate and Report read it; and a skipped
+  // Validate is neither fenced nor dispatched.
+  const setupAt = src.indexOf('SETUP_CONFIG = {');
+  ok((src.match(/^\s*SETUP_CONFIG = /mg) || []).length === 1
+    && /curOverlay = INIT_BASE_OVERLAY;\s*SETUP_CONFIG = \{ flags: curFlags, env: curEnv, overlay: curOverlay \};/.test(src)
+    && setupAt > src.indexOf("if (want('setup')) {") && setupAt < src.indexOf('// Load carried state from a prior phase invocation'),
+  'SETUP_CONFIG is set in one place: the Setup branch, before any warm start or search');
+  const fb = src.slice(src.indexOf("phase('Finalize');"));
+  const at = (s) => fb.indexOf(s);
+  ok(/agentxAdoptedNothing\(\{ setup: SETUP_CONFIG, accepted: allAccepted\.length, tput: curTput,\s*baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay \}\)/.test(fb)
+    && at('finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;') < at('if (adoptedNothing) finalTput = BASELINE_TPUT;')
+    && at('if (adoptedNothing) finalTput = BASELINE_TPUT;') < at("requireE2EValidationCheckpoint('final/e2e_validation.json'")
+    && at("requireE2EValidationCheckpoint('final/e2e_validation.json'") < at("phase('Report');"),
+  "the stock bundle carries Setup's number into the final-pair gate, Report and Validate's claim");
+  const vb = fb.slice(at("phase('Validate');"), at("label: 'director:validate'"));
+  ok(/^phase\('Validate'\);\s*validateSkip = agentxValidateSkip\(adoptedNothing, remainingMs\(\)\);/.test(vb)
+    && /\} else \{\s*await finalPhaseFence\('validate', 'Validate'\);\s*\}\s*validation = validateSkip \? null : await safeAgent\(\s*roleAgent\('director', 'validate', /.test(vb)
+    && (src.match(/finalPhaseFence\('validate'/g) || []).length === 1,
+  'a skipped Validate is neither fenced nor dispatched; one that runs gets the call it had');
+  ok(/\n  finalFromAb = IS_AGENTX && !validatedOk && allAccepted\.length > 0;/.test(fb)
+    && at('finalFromAb = ') > at('validatedOk = !!(validation'),
+  'a trace replay that accepted a head or kernel and got no Validate number is marked once Validate is over');
+
+  // The return, executed. With no Validate number, a trace replay whose A/B won hands run_e2e.py no
+  // final and no speedup, so it publishes that A/B's own pair, never the search-over-canonical ratio;
+  // its status keeps both KB writers from recording it.
+  const rs = src.indexOf('  final_throughput_tok_s: validatedOk');
+  const re = src.indexOf('  output_parity: validation ? validation.output_parity', rs);
+  const ret = (b) => new Function('validatedOk', 'validation', 'finalFromAb', 'finalTput', 'finalSpeedup',
+    'want', 'validateSkip', 'IS_AGENTX', `return {\n${src.slice(rs, re)}};`)(
+    !!b.validatedOk, b.validation || null, !!b.finalFromAb, b.finalTput, b.finalSpeedup,
+    (p) => p !== 'final' || b.final !== false, b.validateSkip || '', !!b.agentx);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  ok(rs !== -1 && re > rs, "the return's final and status fields are located");
+  ok(same(ret({ agentx: true, validateSkip: 'final_is_baseline', finalTput: 113.325, finalSpeedup: 1.0 }),
+    { final_throughput_tok_s: 113.325, throughput_speedup: 1.0, validation_status: 'skipped_final_is_baseline' }),
+  "the stock bundle returns Setup's number at 1.0x, so run_e2e.py reports no_gain");
+  const noNumber = { final_throughput_tok_s: 0, throughput_speedup: 0, validation_status: 'flagged_no_number_used_carried_ab' };
+  ok(same(ret({ agentx: true, validateSkip: 'no_time', finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005 }), noNumber)
+    && same(ret({ agentx: true, finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005 }), noNumber),
+  'a Validate skipped for time, or one that returned nothing, hands back no pair and a flagged status');
+  ok(ret({ agentx: true, finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005,
+    validation: { validation_status: 'final_bench_failed', director_verified_throughput_tok_s: 0 } })
+    .validation_status === 'final_bench_failed_no_number_used_carried_ab',
+  "a Director that answered without a number keeps its own word in the status, as before");
+  ok(same(ret({ agentx: true, finalTput: 108.2, finalSpeedup: 0.955 }),
+    { final_throughput_tok_s: 108.2, throughput_speedup: 0.955, validation_status: 'flagged_no_number_used_carried_ab' }),
+  'a config-only run keeps the number it carried, flagged');
+  const verified = { validation_status: 'validated_win', director_verified_throughput_tok_s: 119.0 };
+  ok(same(ret({ agentx: true, validatedOk: true, validation: verified, finalTput: 113.9, finalSpeedup: 1.0024 }),
+    { final_throughput_tok_s: 119.0, throughput_speedup: 1.0024, validation_status: 'validated_win' }),
+  "a measured Validate is returned exactly as before");
+  const before = (b) => ({
+    final_throughput_tok_s: b.validatedOk ? b.validation.director_verified_throughput_tok_s : b.finalTput,
+    throughput_speedup: b.finalSpeedup,
+    validation_status: b.validatedOk ? b.validation.validation_status
+      : (b.validation ? `${b.validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+        : (b.final !== false ? 'unknown' : 'phase_partial')),
+  });
+  const FIXED = [{ finalTput: 900, finalSpeedup: 1.1 }, { finalTput: 900, finalSpeedup: 1.1, final: false },
+    { finalTput: 900, finalSpeedup: 1.1, validation: { validation_status: 'flagged', director_verified_throughput_tok_s: 0 } },
+    { finalTput: 900, finalSpeedup: 1.1, validation: {} },
+    { validatedOk: true, validation: { validation_status: 'validated_win', director_verified_throughput_tok_s: 950 },
+      finalTput: 900, finalSpeedup: 1.15 }];
+  ok(FIXED.every((b) => same(ret(b), before(b))), 'a fixed-ISL/OSL run returns exactly what it returned before');
+}
+
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
 ok(/let TIME_FINAL_DEADLINE_HIT = false;/.test(src), 'TIME_FINAL_DEADLINE_HIT exists');
 ok(/TIME_FINAL_DEADLINE_HIT = true;/.test(src) && /}, TIME_BUDGET_EFFECTIVE_MS\);/.test(src),
