@@ -247,6 +247,34 @@ def _invoke(G: dict, args: dict, budget_s: int) -> dict:
         G["E2E_SCRIPT"] = saved
 
 
+def stop_leftovers(G: dict, kf_dir: Path) -> dict:
+    """Stop what the stage left running, however it ended: a leg launched with ``setsid nohup`` outlives the
+    workflow and every agent in it, and would hold the serving GPUs (and their lock) through the main run.
+
+    Uses GEAK's own run reaper (scripts/run_reaper.py, read-only) with the stage dir as the only root: a
+    process is the stage's when it started after this runner did and its command line or working directory
+    is inside ``kf_dir`` -- plus everything under it. The runner and its ancestors are never signalled.
+    """
+    loader = G.get("_run_reaper")
+    if not callable(loader):
+        return {"note": "no run reaper in this runner; nothing stopped"}
+    try:
+        R = loader()
+        roots = R.eval_dir_roots(str(kf_dir))
+        if not roots:
+            return {"note": f"{kf_dir} is too shallow to match on; nothing stopped"}
+        chain = R.protected_pids()
+        st = R._stat(os.getpid())
+        procs = R.snapshot("", roots, st[1] if st else None)
+        chosen = R.select(procs, "exit", set(chain))
+        if not chosen:
+            return {"stopped": [], "survivors": []}
+        stopped, survivors = R.stop(chosen, term_grace_s=R.TERM_GRACE_S, kill_wait_s=R.KILL_WAIT_S)
+        return {"stopped": stopped, "survivors": survivors}
+    except Exception as e:  # noqa: BLE001 -- a cleanup fault must not take the main run down
+        return {"error": f"{type(e).__name__}: {e}"[:500]}
+
+
 def _read_json(p: Path) -> dict | None:
     try:
         d = json.loads(p.read_text())
@@ -303,6 +331,8 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
                 raise
             summary["error"] = f"{type(e).__name__}: {e}"[:2000]
             wf = _unwrap(_read_json(kf_dir / "workflow_return.json"))
+        finally:
+            summary["leftovers"] = stop_leftovers(G, kf_dir)
     elapsed = int(time.time() - t0)
     if wf:
         # The analyst cannot write .md reports from inside the workflow; it returns them and they land here.

@@ -302,3 +302,24 @@ def test_triage_picks_without_a_usable_seam_end_the_stage_as_an_error_not_no_gai
     r = out["result"]
     assert r["status"] == "error" and "seam" in r["reason"]
     assert not [l for l in labels(out, authors=True) if l.startswith(("kf:extract", "kf:author ", "kf:integrate"))]
+
+
+def test_the_workflow_owns_the_output_format_and_the_schema_types_the_seam():
+    out = run("accept")
+    an = next(c for c in out["calls"] if c["label"] == "kf:analyst")
+    p = an["prompt"]
+    # the strategy is authoritative on method, not on output files / formats
+    assert "NOT authoritative on output files or formats" in p and "an OBJECT, never a bare string" in p
+    assert "a list of candidate ids (not a per-candidate flag)" in p
+    cand = an["schema"]["properties"]["candidates"]["items"]
+    assert cand["properties"]["seam"]["type"] == "object" and cand["properties"]["id"]["type"] == "string"
+    assert cand["required"] == ["id"] and "seam" not in cand["required"]          # L3/L4 may have no seam
+    strategy = (E2E_DIR / "kernel_fusion" / "fusion_strategy.md").read_text()
+    assert "out/" not in strategy and "fusion_candidates" not in strategy and "recommended=true" not in strategy
+
+
+def test_a_combined_ab_starts_only_while_the_hard_limit_leaves_room_for_it():
+    src = (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
+    assert re.search(r"hardMs = TIME_BUDGET_MS \* 1\.1 \+ 900000", src)           # kf_stage's hard limit
+    assert "|| DEADLINE_HIT || AB_LATE)" in src and "!DEADLINE_HIT && !RERUN_LATE)" in src
+    assert "stage deadline: less than ${AB_NEEDS_S}s left for the combined A/B" in src

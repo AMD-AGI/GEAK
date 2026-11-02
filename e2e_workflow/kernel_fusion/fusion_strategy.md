@@ -200,7 +200,7 @@ Launch Saved
 
 ### Step 0 — 探索模型和部署【新增】
 
-没弄清楚模型结构，就很难判断哪些 kernel 能 fuse、fuse 之后能否保持正确，所以要先做这一步。结果写到 `out/MODEL_NOTES.md`：
+没弄清楚模型结构，就很难判断哪些 kernel 能 fuse、fuse 之后能否保持正确，所以要先做这一步。结果写成模型结构笔记：
 
 - 读 `model/config.json`，记下关键结构参数：
   - 层数、隐藏维度；
@@ -505,11 +505,9 @@ Trace
 
 ## 六、输出格式
 
-所有输出都写到 `out/` 下【新增】：
-- `out/MODEL_NOTES.md`：Step 0 的结果；
-- `out/REPORT.md`：用中文写，按下面的结构；
-- `out/fusion_candidates.json`：全部 candidate，字段见本节末尾；
-- 分析脚本放在 `out/scripts/` 下。
+本节只规定报告要写什么内容。交付哪些文件、放在哪里、候选清单的机器可读格式（字段名、类型），以调用方（workflow）给出的为准。
+
+需要交付：Step 0 的模型结构笔记；一份按下面结构写的报告（用中文写）；全部 candidate 的机器可读清单。
 
 ### Workload Characterization
 
@@ -558,10 +556,7 @@ Trace
 - correctness
 - E2E performance
 
-【新增】`out/fusion_candidates.json` 是一个数组，每个元素的字段如下：
-`id, rank, level(L1-L4), name, phase, region, kernels[], launches_before, launches_after, occurrences, shape_range, code_location, seam, saved_us_per_step, e2e_gain_pct_upper, e2e_gain_pct_expected, difficulty(1-5), bitwise_parity, risk, conflicts_with[], why_not_smaller, why_not_larger, evidence, notes, recommended(bool)`
-
-【新增】第二阶段会直接用 `recommended=true` 的那组 candidate 来写 kernel，并起服务做 A/B，所以这组 candidate 必须**两两不互斥、可以同时生效**，并且**只能是 L1 / L2**（见【分析原则】第 4 条）。每个 candidate 的 `seam` 字段写替换点：在哪个模块的哪个函数入口把原来的调用换成 fused kernel，要具体到能写 monkeypatch overlay 的程度。
+【新增】第二阶段会直接用推荐的那组 candidate 来写 kernel，并起服务做 A/B，所以这组 candidate 必须**两两不互斥、可以同时生效**，并且**只能是 L1 / L2**（见【分析原则】第 4 条）。每个 candidate 都要给出替换点（seam）：在哪个模块的哪个函数入口把原来的调用换成 fused kernel，要具体到能写 monkeypatch overlay 的程度。
 
 【新增】限制：
 - 只能读本目录和 /sgl-workspace，不要访问其他路径；
@@ -574,7 +569,7 @@ Trace
 1. 有证据：kernel 归属哪段代码、seam 在哪、"不可实现"、"已经融合到上限"等判断，都要有可复查的依据（trace 调用栈、实际读过的源码位置、在当前环境实际跑过的命令和输出）。拿不出证据的判断，不能作为推荐或放弃的理由。
 2. 以实际服务为准：权重、形状（M 的分布）、走哪个平台分支、调用哪个 kernel，都以本次部署实际运行的情况为准，不以默认值、其他平台或函数定义处为准。
 3. 以目标指标为准：按对本次目标指标的预计收益排序；不影响目标指标的候选往后排。
-4. 实现范围：L3/L4 照实排序，但标注「暂不支持」（candidate 的 implementable=false）；交给实现的推荐只能是 L1/L2，且彼此不冲突。报告里单列一节「本阶段实现推荐（L1 / L2）」。
+4. 实现范围：L3/L4 照实排序，但标注「暂不支持」；交给实现的推荐只能是 L1/L2，且彼此不冲突。报告里单列一节「本阶段实现推荐（L1 / L2）」。
 5. 覆盖完整：交付一张「边界清单」，按目标指标对应的 phase 的实际 trace 序列（不能用其他 phase 的序列代替；不同层走不同路径时每种路径都要列）列出每层重复的 kernel 序列和每个 step 头尾只跑一次的 kernel 序列，对其中每个相邻边界写明「列成了哪个候选」或「不融合的原因」。清单里没覆盖到的边界视为没有分析，推荐之前必须补齐。
 
 方法（提炼）：

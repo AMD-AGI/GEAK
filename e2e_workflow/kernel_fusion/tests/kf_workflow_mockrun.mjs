@@ -87,7 +87,7 @@ for (const id of Object.keys(ISO)) {
 
 async function agent(prompt, opts) {
   if ('timeoutMs' in opts) throw new Error('timeoutMs must not reach the agent() call');
-  calls.push({ label: opts.label, phase: opts.phase, prompt });
+  calls.push({ label: opts.label, phase: opts.phase, prompt, ...(opts.label === 'kf:analyst' ? { schema: opts.schema } : {}) });
   if (opts.label.startsWith('kf:author ')) {
     // the fused kernel is written by one author agent against the region UT
     const kernel_path = prompt.match(/TASK_DIR=(\S+)/)[1];

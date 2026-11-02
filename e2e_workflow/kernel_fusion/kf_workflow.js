@@ -107,6 +107,17 @@ if (TIME_BUDGET_MS && typeof setTimeout === 'function') {
   setTimeout(() => { DEADLINE_HIT = true; log('[kf] 85% of the stage budget spent: no new author/apply work starts.'); },
     Math.floor(TIME_BUDGET_MS * 0.85));
 }
+// kf_stage stops the stage at 1.1 x budget + 900 s. A combined A/B (stack gsm8k, a reference leg and a candidate
+// leg) starts only while that hard limit still leaves AB_NEEDS_S; a re-run after a failed stack also needs the
+// per-kernel screen. An A/B cut off mid-leg measures nothing and leaves detached legs on the serving GPUs.
+const AB_NEEDS_S = parseInt(A.kf_ab_needs_s != null ? A.kf_ab_needs_s : 5400, 10);
+const SCREEN_NEEDS_S = parseInt(A.kf_screen_needs_s != null ? A.kf_screen_needs_s : 1800, 10);
+let AB_LATE = false, RERUN_LATE = false;
+if (TIME_BUDGET_MS && typeof setTimeout === 'function') {
+  const hardMs = TIME_BUDGET_MS * 1.1 + 900000;
+  setTimeout(() => { AB_LATE = true; }, Math.max(0, Math.floor(hardMs - AB_NEEDS_S * 1000)));
+  setTimeout(() => { RERUN_LATE = true; }, Math.max(0, Math.floor(hardMs - (AB_NEEDS_S + SCREEN_NEEDS_S) * 1000)));
+}
 
 // Same deployment requirement e2e_workflow.js injects into every kernel task (derived the same way).
 const GRAPH_REQ = ((BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS))
@@ -246,9 +257,18 @@ const SKILL_TRACE_SCHEMA = obj({ trace_dir: { type: 'string' }, workload_json: {
 const AGENTX_PREPARATION_SCHEMA = obj({ delivery_path: { type: 'string' },
   prepared: obj({ head_candidates: arrObj, kernel_candidates: arrObj, failed_tasks: arrObj, deferred_tasks: arrObj },
     ['head_candidates', 'kernel_candidates']) }, ['delivery_path', 'prepared']);
+// Typed where downstream code reads a field: a seam given as prose or a bare string, or ids that are not
+// strings, are rejected here so the analyst rewrites them, instead of silently dropping every pick later.
+const CANDIDATE_SCHEMA = obj({
+  id: { type: 'string' },
+  seam: obj({ target_callable: { type: 'string' }, source_file: { type: 'string' } }),
+  exclusive_with: arrStr,
+  fallback: { type: ['string', 'null'] },
+  kernels: arrStr, phases: arrStr,
+}, ['id']);
 const TOPK_SCHEMA = obj({
   topk_json: { type: 'string' }, report_path: { type: 'string' }, digest_md: { type: 'string' },
-  candidates: arrObj, recommended: arrStr, notes: { type: 'string' },
+  candidates: { type: 'array', items: CANDIDATE_SCHEMA }, recommended: arrStr, notes: { type: 'string' },
   report_md: { type: 'string' }, model_notes_md: { type: 'string' },
 }, ['topk_json', 'candidates', 'recommended', 'report_md']);
 const EXTRACT_SCHEMA = obj({ short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
@@ -424,8 +444,10 @@ if (want('topk')) {
 
 ## Your method is the user's prompt
 Read every one of these files in full: ${PROMPTS.join(', ')}. Together they are the AUTHORITATIVE analysis
-method, ranking rules, deliverable list, deployment and workload description for this task: follow them step
-by step. A file may describe a whole run (launching servers, running GEAK, where outputs go): take from it the
+method, ranking rules, report content, deployment and workload description for this task: follow them step
+by step. They are NOT authoritative on output files or formats: where a file names output paths, an out/ layout
+or a machine-readable candidate format (field names, a per-candidate "recommended" flag, a seam written as
+prose), the sections "Machine-readable result" and "Return JSON" below replace it. A file may describe a whole run (launching servers, running GEAK, where outputs go): take from it the
 deployment, workload, metric and constraints, but your job is only the analysis below. They may also name a
 container, a working directory or a materials/ layout from the setting they were written in; those are NOT
 this environment. Map them onto the inputs below instead:
@@ -458,16 +480,17 @@ ${OUT}/MODEL_NOTES.md.
 Write ${OUT}/topk.json: {"candidates": [...], "recommended": [ids in the order to implement]}, every candidate:
   id (short, [A-Za-z0-9_]), rank, level ("L1".."L4"), region (one line), kernels (device kernel names, in order),
   phases (step kinds it runs in), occurrences {per_layer, per_step, layers}, m_range,
-  seam {target_callable: "pkg.module:Class.method or pkg.module:function" -- ONE Python callable whose body
+  seam (an OBJECT, never a bare string) {target_callable: "pkg.module:Class.method or pkg.module:function" -- ONE Python callable whose body
         covers the whole region, so the region can be rebound to a fused implementation -- the one the LIVE server
         runs: a model can have several implementations of the same layer (generic vs platform-specific modules),
         so confirm the module from the trace's launch frames, not from a name match; source_file; lines},
   inputs_outputs (tensors that cross the region boundary, with shapes/dtypes), launches_before, launches_after,
   region_pct_device_time (weighted), est_gain_pct_upper, est_gain_pct_expected (weighted e2e %),
-  difficulty (1-5), bitwise_exact (bool), exclusive_with [ids], language ("triton" unless you have a reason),
+  difficulty (1-5), bitwise_exact (bool), exclusive_with [ids of conflicting candidates], language ("triton" unless you have a reason),
   fallback (id of the smaller-scope candidate to implement instead if this one fails, or null),
   fused_design (how the fused kernel works: tiling, what stays in registers/LDS, what it no longer writes to HBM).
-"recommended" = the non-conflicting set the prompt's ranking recommends, best first. A candidate whose region
+"recommended" = a list of candidate ids (not a per-candidate flag): the non-conflicting set the prompt's ranking
+recommends, best first. A candidate whose region
 cannot be reached through one Python seam can still be ranked, but must not be recommended.
 
 ## Inputs
@@ -785,9 +808,10 @@ async function screen(list, label) {
   }
   return failed;
 }
-if (!want('apply') || !winners.length || DEADLINE_HIT) {
+if (!want('apply') || !winners.length || DEADLINE_HIT || AB_LATE) {
   for (const r of winners) result.rejected.push({ id: r.c.id, stage: 'apply', isolated_speedup: r.iso,
-    reason: !want('apply') ? 'apply step disabled' : 'stage deadline' });
+    reason: !want('apply') ? 'apply step disabled'
+      : AB_LATE && !DEADLINE_HIT ? `stage deadline: less than ${AB_NEEDS_S}s left for the combined A/B` : 'stage deadline' });
   result.status = 'no_gain';
   return result;
 }
@@ -827,7 +851,7 @@ async function stackAB(members, suffix) {
 let integ = await stackAB(winners, '');
 const correctnessFail = (x) => x && x.gate === 'rejected' &&
   (CORRECTNESS_FAIL.test(String(x.reason || '')) || /fail/i.test(String(x.output_parity || '')));
-if (correctnessFail(integ) && winners.length > 1 && !DEADLINE_HIT) {
+if (correctnessFail(integ) && winners.length > 1 && !DEADLINE_HIT && !RERUN_LATE) {
   const failed = await screen(winners, 'kf:integrate screen');
   if (failed && failed.length && failed.length < winners.length) {
     winners = winners.filter((r) => !failed.includes(r));
