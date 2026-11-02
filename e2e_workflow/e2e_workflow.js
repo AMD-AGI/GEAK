@@ -355,14 +355,8 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%).
 const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
   parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
-// A trace replay's final phase is set by its windows, not by the budget: Finalize benches one search
-// window, and Validate measures the stock and the final stack on the canonical window -- one leg each
-// under warm_server, validation_replicas fresh servers each under isolated_server. Every leg also pays
-// a boot plus the replay's own warmup and drain (agentx_leg_overhead_s; GLM-5.2's legs took 7-13min of
-// the 20min default), and Report, the parity check and the agents' own work get 40min. That sum is an
-// AgentX run's floor: it outranks a smaller reserve and the cap, so the search cannot spend the time
-// Validate needs to return a measured gain. Read from the raw args because the workload declaration
-// below is evaluated later; it must resolve AgentX exactly as IS_AGENTX does.
+// A trace replay's final phase (Finalize's search leg, Validate's canonical legs, 40min for the rest)
+// outranks a smaller reserve and the cap. Read from raw args: it must resolve AgentX as IS_AGENTX does.
 const RESERVE_WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
   ? A.workload_spec
   : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
@@ -374,22 +368,18 @@ const AGENTX_LEG_OVERHEAD_S = Math.max(0,
   parseInt(A.agentx_leg_overhead_s != null ? A.agentx_leg_overhead_s : 1200, 10) || 0);
 const agentxLegS = (windowS) => windowS + AGENTX_LEG_OVERHEAD_S;
 const _declaredWindowS = (v, dflt) => (Number(v) > 0 ? Number(v) : dflt);
+const RESERVE_DURATION_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600);
+const RESERVE_LOOP_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900);
 const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'warm_server') === 'warm_server'
   ? 1 : Math.max(1, parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10) || 1));
-const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (2400
-  + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900))
-  + AGENTX_VALIDATION_LEGS * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600)));
-// Validate's timed windows alone, without a boot, warmup or drain: the least time in which it can return a number.
-const AGENTX_VALIDATE_WINDOWS_MS = !RESERVE_IS_AGENTX ? 0
-  : 1000 * AGENTX_VALIDATION_LEGS * _declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600);
-// The least an AgentX run needs to return a validated gain: Setup's baseline leg (plus ~10min of
-// preflight and bench scripts), one A/B on the search window (the KB warm start's), then that final
-// phase. Above it the final phase gets its whole cost. Below it, Setup and that A/B keep their time,
-// since without them there is nothing to validate, and the final phase gets the rest.
-const AGENTX_AB_OVERHEAD_S = 600;   // the integrator's own build, parity and bookkeeping around an A/B's legs
-const AGENTX_PRE_FINAL_MIN_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (600
-  + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600))
-  + 2 * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (2400 + agentxLegS(RESERVE_LOOP_S) + AGENTX_VALIDATION_LEGS * agentxLegS(RESERVE_DURATION_S));
+// Validate's timed windows alone: the least time in which it can return a number.
+const AGENTX_VALIDATE_WINDOWS_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * AGENTX_VALIDATION_LEGS * RESERVE_DURATION_S;
+// The run's minimum: Setup's leg (+10min), the KB warm start's A/B, then the final phase.
+const AGENTX_AB_OVERHEAD_S = 600;   // the integrator's work around an A/B's legs
+const AGENTX_PRE_FINAL_MIN_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (600 + agentxLegS(RESERVE_DURATION_S) + 2 * agentxLegS(RESERVE_LOOP_S) + AGENTX_AB_OVERHEAD_S);
 const AGENTX_MIN_BUDGET_MS = AGENTX_PRE_FINAL_MIN_MS + AGENTX_FINAL_PHASE_MS;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
   ? (() => {
@@ -414,10 +404,9 @@ const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s 
 const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
 if (RESERVE_IS_AGENTX && TIME_BUDGET_MS != null) {
-  log(`[time-budget] trace replay: Finalize's search leg, Report and Validate's ${AGENTX_VALIDATION_LEGS} ` +
-    `canonical legs need ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min; reserving ` +
-    `${Math.round(FINAL_RESERVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget. ` +
-    `The run's minimum (Setup's baseline, one A/B, that final phase) is ~${Math.round(AGENTX_MIN_BUDGET_MS / 60000)}min.` +
+  log(`[time-budget] trace replay: final phase ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min, reserving ` +
+    `${Math.round(FINAL_RESERVE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min; the run's minimum ` +
+    `is ~${Math.round(AGENTX_MIN_BUDGET_MS / 60000)}min.` +
     (TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS
       ? ' WARNING: the budget is under it, so this run may not return a validated gain — raise time_budget_s.'
       : ''));
@@ -1247,7 +1236,7 @@ const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
 // a cache-cold search number and a cache-warm validation number are not comparable and the gains
 // carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
 // leg, round 1 a full warmup that is discarded, round 2 IS the number. A trace replay has no outer
-// round: each replay warms itself per lane before its window, which is how Hyperloom measures AgentX.
+// round: the replay warms each lane itself.
 // isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
 // what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
 const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
@@ -1951,11 +1940,8 @@ measurement duration. Consequences you must respect:
 `;
 }
 
-// The final reserve (AGENTX_FINAL_PHASE_MS) holds ONE search-window leg for Finalize and the canonical
-// legs of Validate; a canonical leg in Finalize as well runs past it. A search leg replays a different
-// slice of the corpus than Validate's legs, so a claim measured on one is no yardstick for theirs. A
-// claim equal to the baseline is the baseline's own canonical number. Both return '' unless the caller
-// declared a trace replay, so a fixed-ISL/OSL run gets byte-identical prompts.
+// The reserve holds ONE search leg for Finalize, and a search-leg claim is no yardstick for Validate's
+// legs (a claim equal to the baseline is canonical). Both are '' off a trace replay.
 function agentxFinalizeNote() {
   if (!IS_AGENTX) return '';
   return ` On this trace replay the final bench of step 2 is ONE leg on the ${AGENTX.geak_loop_duration_s}s ` +
@@ -1974,16 +1960,12 @@ function agentxClaimNote(claimed, baseline) {
     'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
     'arbitration_note that it is a search-window number.';
 }
-// A trace replay that adopted nothing ships the bundle Setup already measured on the canonical window.
-// Every signal must agree, so no single adoption path can pass a changed bundle off as that one.
+// Every signal must agree, so no single adoption path can pass a changed bundle off as Setup's.
 function agentxAdoptedNothing(s) {
   return IS_AGENTX && !!s.setup && s.baseline > 0 && !s.accepted && s.tput === s.baseline
     && s.flags === s.setup.flags && s.env === s.setup.env && s.overlay === s.setup.overlay;
 }
-// Why a trace replay does not run Validate, or '' when it does. Validate compares the final bundle with
-// the stock one, so the stock bundle leaves it nothing to measure; and it benches both, so with less
-// time left than their timed windows it cannot return a number. Any Validate that could still finish
-// is attempted.
+// Why a trace replay skips Validate, or '': nothing to compare, or less time than its timed windows.
 function agentxValidateSkip(adoptedNothing, leftMs) {
   if (!IS_AGENTX) return '';
   if (adoptedNothing) return 'final_is_baseline';
@@ -2987,8 +2969,7 @@ const bankAccepted = (list, e, kr) => {
 // An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
 // verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
 // can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
-// Finalize/Report/Validate keep the rest. On a trace replay the wait also never reaches into what the
-// final phase itself costs (AGENTX_FINAL_PHASE_MS): Validate's second canonical leg is the one it would cut.
+// Finalize/Report/Validate keep the rest.
 const LATE_VERDICT_RESERVE_FRAC = 0.25;
 async function adoptAbandonedVerdict(integ, label) {
   const run = ABANDONED_RUNS.get(label);
@@ -3051,8 +3032,7 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
     SPEEDUP_REVIEW: { original_measurement: original, estimate },
   };
   delete reviewInputs.SHARED_REF_MED;
-  // Abandoned at the reserve boundary, a confirmation leaves its servers running into Finalize and
-  // confirms nothing.
+  // A confirmation abandoned at the boundary confirms nothing.
   if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {
     pending.reason = 'speedup_review_inconclusive: deferred, the confirmation A/B cannot finish before the final reserve';
     return pending;
@@ -3079,7 +3059,7 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
   return result;
 }
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
-  // Deferred is incomplete, so every caller keeps it PENDING rather than calling it a rejection.
+  // Incomplete, so callers keep it PENDING, not rejected.
   if (abWindowShort(abLegs(inputs), label)) {
     return { gate: 'incomplete', ab_complete: false,
       reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
@@ -3318,10 +3298,8 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it resolves to the raw
-// workflow() result (identical to a direct call), unless a trace replay's reserve bound applies (see
-// laneWindowShort); on cap-expiry it resolves null so the caller's existing null-guards treat it as
-// "no kernel" and continue.
+// A nested kernel workflow under the fast-mode cap and a trace replay's reserve bound, else the raw
+// workflow() result. On expiry it resolves null, which callers' null-guards treat as "no kernel".
 // GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
 // before each nested author. A budget the parent cannot enforce on in-flight work is not
 // a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
@@ -3345,8 +3323,7 @@ async function fastBoundedWorkflow(ref, wfArgs, label) {
     }
   });
 }
-// The Milestone track's lanes: the trace-replay reserve bound alone (the fast-mode and B4 caps above
-// belong to the head track).
+// Milestone lanes: the trace-replay reserve bound alone.
 async function reserveBoundedWorkflow(ref, wfArgs, label) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
   wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
@@ -3363,8 +3340,7 @@ function raceLaneCap(p, capMs, onCap) {
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
 function logLaneAtReserve(label) {
-  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning ` +
-    '(null) so Finalize/Report/Validate start on time; the final-phase fence stops what it left on the GPUs.');
+  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning (null).`);
 }
 
 // --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) -------------------------------------------
@@ -3441,63 +3417,44 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
 // --- TRACE-REPLAY SEARCH vs THE RESERVE ---------------------------------------------------------------
-// The checks above stop new work at the boundary, but on a trace replay the work already running is
-// long: a kernel lane runs for hours and a search A/B for over an hour, so either one started late runs
-// on past the boundary while Finalize and Validate wait for it. These start each one only when what it
-// costs still fits before the boundary. Inert unless IS_AGENTX and time_budget_s (and in the final phase).
-const AGENTX_LANE_ROUND_S = 3600;    // one lane round still in flight at its stop, plus the lane's report
-const AGENTX_EXTRACT_S = 4200;       // kernel extraction, which opens the search (1h10m on GLM-5.2)
+// Trace-replay lanes and A/Bs start only if they fit before the boundary (inert off AgentX/time_budget_s).
+const AGENTX_LANE_ROUND_S = 3600;    // a lane round in flight at its stop, plus the lane's report
+const AGENTX_EXTRACT_S = 4200;       // kernel extraction (1h10m on GLM-5.2)
 const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
 const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
-// A reference leg already on disk (or shared by this head's earlier candidate) is not run again.
+// A reused or resumed reference leg is not run again.
 const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
-// A leg timed over several passes (a speedup review's replicas) is costed as that many legs: exact under
-// isolated_server, where each pass is a fresh server, and an upper bound under warm_server, where the
-// passes share one boot.
+// A leg timed over several passes costs that many legs (an upper bound under warm_server).
 const agentxAbMs = (legs, passes = 1) =>
   1000 * (legs * passes * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
 const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
 const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
-// An A/B started with less than its cost left is abandoned at the boundary with its legs still running
-// into Finalize and Validate, so it is deferred instead: incomplete, pending, surfaced to the caller.
+// need() reads AGENTX, so it runs only once the guard holds.
+function windowShort(need, what, verdict, cost) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = need();
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} ${verdict} — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min ${cost}.`);
+  return true;
+}
+// An A/B that cannot finish is deferred (incomplete, pending), not abandoned mid-leg at the boundary.
 function abWindowShort(legs, what, passes = 1) {
-  if (!agentxGuardsOn()) return false;
-  const windowMs = searchWindowMs(), needMs = agentxAbMs(legs, passes);
-  if (windowMs >= needMs) return false;
-  log(`[time-budget] ${what} DEFERRED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
-    `final reserve, under the ~${Math.round(needMs / 60000)}min a ${legs}-leg trace-replay A/B` +
-    `${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes.`);
-  return true;
+  return windowShort(() => agentxAbMs(legs, passes), what, 'DEFERRED',
+    `a ${legs}-leg trace-replay A/B${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes`);
 }
-// A lane must get one round of work before its stop (laneDeadlineArgs) and still leave the A/B for what
-// it found; with less than that left it is not started.
+// A lane needs one round before its stop plus the A/B for what it found.
 function laneWindowShort(what) {
-  if (!agentxGuardsOn()) return false;
-  const windowMs = searchWindowMs(), needMs = agentxLaneStartMs();
-  if (windowMs >= needMs) return false;
-  log(`[time-budget] ${what} NOT STARTED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
-    `final reserve, under the ~${Math.round(needMs / 60000)}min a kernel lane needs to run a round and ` +
-    'still have its A/B measured before Finalize and Validate.');
-  return true;
+  return windowShort(agentxLaneStartMs, what, 'NOT STARTED', 'a kernel lane and its A/B need');
 }
-// Every search candidate comes out of kernel extraction and needs a lane. With less than both left,
-// nothing the search starts could still be measured, so the run goes from the KB warm start straight
-// to Finalize and Validate and ends early, handing the caller back the time.
+// Every search candidate needs kernel extraction and a lane; without both the run ends early.
 function searchWindowShort(what) {
-  if (!agentxGuardsOn()) return false;
-  const windowMs = searchWindowMs(), needMs = AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs();
-  if (windowMs >= needMs) return false;
-  log(`[time-budget] ${what} SKIPPED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
-    `final reserve, under the ~${Math.round(needMs / 60000)}min kernel extraction plus one kernel lane and ` +
-    'its A/B need. Going straight to Finalize and Validate.');
-  return true;
+  return windowShort(() => AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs(), what, 'SKIPPED',
+    'kernel extraction plus one kernel lane and its A/B need. Going straight to Finalize and Validate');
 }
-// kernel_lane.js stops STARTING rounds at deadline_epoch and finishes the one in flight, so the stop is
-// a lane tail ahead of the boundary. no_stop_s past the whole window keeps the TechLead free to end the
-// lane early, exactly as without a deadline: the lane's refusal to stop early is for fixed-window
-// measurements. The script has no clock (Date.now() breaks resume), so ONE `date +%s` read is anchored
-// to ELAPSED_MS for the run; while it cannot be read the lane runs without a deadline and only the
-// boundary backstop below bounds it.
+// kernel_lane.js starts no round after deadline_epoch, so the stop is a lane tail ahead of the boundary;
+// no_stop_s past the window leaves the TechLead free to end it early. No clock (Date.now() breaks
+// resume): ONE `date +%s` read, anchored to ELAPSED_MS; unreadable, only the backstop bounds the lane.
 const CLOCK_SCHEMA = obj({ epoch: { type: 'number' } }, ['epoch']);
 let EPOCH_AT_T0 = null;
 async function epochNow(phaseName) {
@@ -3517,15 +3474,14 @@ async function laneDeadlineArgs(label, phaseName) {
   if (!(stopInS > 0)) return {};
   const now = await epochNow(phaseName);
   if (now == null) {
-    log(`  [time-budget] ${label}: wall clock unreadable — the lane runs without a round deadline.`);
+    log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
     return {};
   }
-  log(`  [time-budget] ${label}: the lane starts no round after ~${Math.round(stopInS / 60)}min ` +
-    `(${Math.round(agentxLaneTailMs() / 60000)}min ahead of the final reserve, for its last round and its A/B).`);
+  log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
+    `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
   return { deadline_epoch: now + stopInS, no_stop_s: stopInS + 86400 };
 }
-// Backstop: never wait for a lane past the boundary. Abandoned, its agents run on, and the final-phase
-// fence stops what they left on the GPUs.
+// Backstop: never wait for a lane past the boundary.
 const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
 
 // GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
@@ -3773,7 +3729,7 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
-let SETUP_CONFIG = null;   // the config BASELINE_TPUT was measured on; null when this invocation did not run Setup
+let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
 // The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
 // while packing (and refused the packing if any completed task had invalid evidence), and this
@@ -6745,9 +6701,8 @@ if (want('final')) {
     }
     if (abWindowShort(abLegs(pendingIntegrations[0].inputs), `Finalize-gate: ${pendingIntegrations[0].short_name}`)) {
       log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
-        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}) — the next one cannot finish before the ` +
-        'final reserve, which Finalize/Report/Validate need whole. Deferred, not discarded: they are surfaced ' +
-        'in pending_integrations.');
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}): the next cannot finish before the final ` +
+        'reserve. Deferred to pending_integrations.');
       break;
     }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
@@ -6858,7 +6813,7 @@ if (want('final')) {
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
-  // On a trace replay Finalize's number is a search-window leg; the stock bundle's is Setup's canonical one.
+  // The stock bundle's number is Setup's canonical one, not Finalize's search leg.
   const adoptedNothing = agentxAdoptedNothing({ setup: SETUP_CONFIG, accepted: allAccepted.length, tput: curTput,
     baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay });
   if (adoptedNothing) finalTput = BASELINE_TPUT;
@@ -6909,21 +6864,16 @@ if (want('final')) {
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
   // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
-  // (attempting it beats skipping when the clock has drifted). On a trace replay the reserve holds
-  // AGENTX_FINAL_PHASE_MS and the search is held to end at its boundary (TRACE-REPLAY SEARCH vs THE
-  // RESERVE), so both canonical legs fit unless the budget was under the run's minimum. A trace replay
-  // skips it only with nothing to measure or no time to return a number (agentxValidateSkip). If the
-  // hard kill lands mid-bench the loss is
+  // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
+  // A trace replay skips it only per agentxValidateSkip.
   phase('Validate');
   validateSkip = agentxValidateSkip(adoptedNothing, remainingMs());
   if (validateSkip === 'final_is_baseline') {
-    log(`Validate SKIPPED: this trace replay adopted nothing, so the final bundle is the stock one and ` +
-      `Setup's ${BASELINE_TPUT} tok/s is its canonical-window number.`);
+    log(`Validate SKIPPED: nothing adopted, so the final bundle is the stock one (Setup's ${BASELINE_TPUT} tok/s).`);
   } else if (validateSkip === 'no_time') {
-    log(`Validate SKIPPED: ~${remainingMin()}min left, under the ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min ` +
-      `its ${AGENTX_VALIDATION_LEGS} canonical windows take alone, so it could not return a number.`);
+    log(`Validate SKIPPED: ~${remainingMin()}min left, under its ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min of timed windows.`);
   } else {
     await finalPhaseFence('validate', 'Validate');
   }
@@ -6954,17 +6904,13 @@ if (want('final')) {
   // reported as 0 / no_gain downstream.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
-  // On a trace replay that carried number is Finalize's search-window leg and BASELINE_THROUGHPUT a
-  // canonical one, so their ratio is no speedup. With an accepted head or kernel the return carries
-  // neither: run_e2e.py then reports that A/B's own pair (same session, same window), or no_gain with
-  // the accepted list intact if it finds none on disk.
+  // A search leg over a canonical baseline is no speedup: run_e2e.py reports the accepted A/B's own pair.
   finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
     `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
   if (finalFromAb) {
-    log("Validate gave this trace replay no number: the return carries no final or speedup, so run_e2e.py " +
-      "reports the best accepted A/B's own pair rather than a search-window leg over the canonical baseline.");
+    log("Validate gave no number: returning no final or speedup, so run_e2e.py reports the accepted A/B's own pair.");
   }
 
   // --- FINAL experience reconciliation (post-gate) -----------------------
@@ -7125,12 +7071,10 @@ const wfReturn = {
   // Trust the Director's independent number ONLY when it is a real positive
   // measurement (validatedOk). A crashed/degenerate Validate falls back to the
   // carried accepted same-session A/B win — never 0 — so a real, parity-checked
-  // gain is not silently demoted to no_gain by run_e2e.py. The exception is finalFromAb's
-  // empty pair, which run_e2e.py fills from that A/B on disk.
+  // gain is not silently demoted to no_gain by run_e2e.py, except finalFromAb's empty pair, filled from disk.
   final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
   throughput_speedup: finalFromAb ? 0 : finalSpeedup,
-  // A trace replay's Validate that returned nothing is spelled as a flagged no-number result, so neither
-  // KB writer records the carried number; on any other workload it stays 'unknown'.
+  // A Validate that returned nothing is flagged, so no KB writer records the carried number.
   validation_status: validatedOk ? validation.validation_status
     : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
        : (!want('final') ? 'phase_partial'
