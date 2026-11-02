@@ -105,3 +105,29 @@ def test_muse_traces_match_parse_profile(tmp_path):
     assert got == pytest.approx(inside, rel=1e-3)
     verify = g["de_1"]["step_kinds"]["VERIFY"]
     assert verify["graph_replayed"] and 55 <= verify["layer_period"]["repeats"] <= 70
+
+
+def test_live_model_code_names_the_classes_and_files_the_server_runs(tmp_path):
+    ev = [
+        # an eager step: nn.Module call -> its forward frame (platform module), plus a frame from a non-module helper
+        {"ph": "X", "cat": "python_function", "name": "nn.Module: MuseSpark1xMoE_0", "ts": 100, "dur": 50, "pid": 1, "tid": 2},
+        {"ph": "X", "cat": "python_function", "name": "sglang/srt/rocm_muse_spark/model.py(1070): forward",
+         "ts": 100, "dur": 49, "pid": 1, "tid": 2},
+        {"ph": "X", "cat": "python_function", "name": "nn.Module: MuseSpark1xMoE_1", "ts": 200, "dur": 50, "pid": 1, "tid": 2},
+        {"ph": "X", "cat": "python_function", "name": "sglang/srt/rocm_muse_spark/model.py(1070): forward",
+         "ts": 201, "dur": 40, "pid": 1, "tid": 2},
+        {"ph": "X", "cat": "python_function", "name": "sglang/srt/models/muse_spark.py(700): _forward_experts",
+         "ts": 400, "dur": 5, "pid": 1, "tid": 2},
+        {"ph": "X", "cat": "kernel", "name": "k", "ts": 500, "dur": 3, "pid": 3, "tid": 3, "args": {"stream": 7}},
+    ]
+    p = tmp_path / "pt" / "x-TP-0-EP-0.trace.json.gz"
+    p.parent.mkdir()
+    with gzip.open(p, "wt") as f:
+        json.dump({"traceEvents": ev}, f)
+    out = tmp_path / "out"
+    assert D.main(["--trace-dir", str(tmp_path / "pt"), "--out", str(out)]) == 0
+    live = json.loads((out / "digest.json").read_text())["live_model_modules"]
+    assert live == {"MuseSpark1xMoE": {"sglang/srt/rocm_muse_spark/model.py": 2}}
+    md = (out / "digest.md").read_text()
+    assert "## Live model code" in md and "`MuseSpark1xMoE` | `sglang/srt/rocm_muse_spark/model.py`" in md
+    assert "models/muse_spark.py" not in md
