@@ -3220,6 +3220,27 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["error_class"], "timeout")
         self.assertIn("self-stop to flush interface files", out["error"])
 
+    def test_a_silent_timeout_says_what_ran_out_and_how_far_the_run_got(self):
+        """anyio.fail_after raises TimeoutError() with no message; the result must
+        still name the budget and the furthest phase on disk."""
+        self.write_json(self.eval_dir / "baseline" / "bench_summary.json",
+                        {"metric_basis": "aggregate_output_tok_s",
+                         "throughput_tok_s_median": 400.0})
+
+        def silent_timeout(prompt, timeout_s, eval_dir, ps_args=None):
+            raise TimeoutError()
+
+        self.patch_rx("invoke_workflow", silent_timeout)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 0)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "timeout")
+        self.assertEqual(out["error_class"], "timeout")
+        self.assertEqual(out["phase_reached"], "search")
+        self.assertEqual(
+            out["error"],
+            "no workflow return within the 43200s budget (furthest phase on disk: search)")
+
     def test_recovery_failure_after_a_crashed_workflow_is_contained(self):
         """Both the post-crash recovery and the one inside _emit raise; the run
         must degrade to a parseable error file, never propagate."""

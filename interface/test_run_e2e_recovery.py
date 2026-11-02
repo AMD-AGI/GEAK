@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -579,6 +580,73 @@ def test_no_baseline_still_errors(tmp_path):
     eval_dir = tmp_path / "e2e_bare"
     (eval_dir / "overlay").mkdir(parents=True)
     assert rx._recover_completed_no_gain(eval_dir) is None
+
+
+def _make_agentx_no_gain_eval_dir(tmp_path: Path, basis: str) -> Path:
+    """An AgentX run that finished without a win, as the workflow leaves it: Setup's
+    summary is off the output axis, where bench_summarize.py leaves the output
+    throughput alias null, and nothing writes baseline_official.json."""
+    eval_dir = tmp_path / "e2e_agentx_nogain"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "final").mkdir(parents=True)
+    (eval_dir / "bench_e2e.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (eval_dir / "final" / "final_launch.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (eval_dir / "baseline" / "bench_summary.json").write_text(json.dumps({
+        "metric_basis": basis,
+        "throughput_tok_s_median": 113.325,
+        "output_throughput_tok_s_median": None,
+    }), encoding="utf-8")
+    return eval_dir
+
+
+@pytest.mark.parametrize("basis", ["p90_intvty_inferencex", "aggregate_total_token_tok_s"])
+def test_no_gain_recovery_reads_the_selected_metric_basis(tmp_path, basis):
+    """Off the output axis only throughput_tok_s_median carries the baseline; a
+    finished no-win run must still recover as no_gain, not fall through to an error."""
+    eval_dir = _make_agentx_no_gain_eval_dir(tmp_path, basis)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf is not None and wf.get("recovered_no_gain") is True
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(113.325)
+    assert wf["final_throughput_tok_s"] == pytest.approx(113.325)
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["metric_basis"] == basis
+    assert out["baseline_throughput_tok_s"] == pytest.approx(113.325)
+
+
+def test_no_gain_recovery_still_reads_a_summary_with_only_the_output_alias(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    (eval_dir / "baseline" / "baseline_official.json").unlink()
+    wf = rx._recover_completed_no_gain(eval_dir)
+    assert wf is not None
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(601.786)
+
+
+def test_phase_reached_follows_what_each_phase_leaves_on_disk(tmp_path):
+    assert rx._phase_reached("") == ""
+    assert rx._phase_reached(tmp_path / "absent") == ""
+    eval_dir = tmp_path / "e2e_phase"
+    eval_dir.mkdir()
+    assert rx._phase_reached(eval_dir) == "setup"
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text("{}", encoding="utf-8")
+    assert rx._phase_reached(eval_dir) == "search"
+    fence = eval_dir / rx.FINAL_PHASE_FENCE_FILE
+    for stage in ("finalize", "validate"):
+        fence.write_text(json.dumps({"stage": stage, "at": "t", "stopped": 0}), encoding="utf-8")
+        assert rx._phase_reached(str(eval_dir)) == stage
+    fence.write_text("[]", encoding="utf-8")
+    assert rx._phase_reached(eval_dir) == "search"
+
+
+def test_phase_fence_matches_the_reaper_and_the_workflow():
+    spec = importlib.util.spec_from_file_location(
+        "run_reaper", rx.E2E_DIR / "scripts" / "run_reaper.py")
+    reaper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reaper)
+    assert reaper.FENCE_FILE == rx.FINAL_PHASE_FENCE_FILE
+    workflow = rx.E2E_SCRIPT.read_text(encoding="utf-8")
+    assert set(re.findall(r"finalPhaseFence\('(\w+)'", workflow)) == set(rx.FINAL_PHASE_STAGES)
 
 
 def test_workflow_done_marker_ignores_final_launch(tmp_path):
