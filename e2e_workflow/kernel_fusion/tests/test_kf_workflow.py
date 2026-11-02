@@ -327,3 +327,11 @@ def test_a_combined_ab_starts_only_while_the_hard_limit_leaves_room_for_it():
     assert re.search(r"hardMs = TIME_BUDGET_MS \* 1\.1 \+ 900000", src)           # kf_stage's hard limit
     assert "|| DEADLINE_HIT || AB_LATE)" in src and "!DEADLINE_HIT && !RERUN_LATE)" in src
     assert "stage deadline: less than ${AB_NEEDS_S}s left for the combined A/B" in src
+
+
+def test_a_gain_inside_the_noise_band_is_not_handed_on():
+    # c24 r2: one replica per side, +0.22% P90 -- indistinguishable from noise
+    r = run("small_gain")["result"]
+    assert r["status"] == "no_gain" and r["final_overlay"] == "" and not r["accepted"]
+    assert r["validation"]["noise_band_pct"] == 0.5 and "within the noise band 0.5%" in r["validation"]["reason"]
+    assert run("accept")["result"]["status"] == "accepted"                          # +2.5% clears it
