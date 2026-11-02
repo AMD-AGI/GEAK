@@ -258,3 +258,49 @@ def test_the_fusion_strategy_is_read_first_and_can_be_replaced_or_dropped(tmp_pa
     own.write_text("x")
     assert kf_stage.build_args({"strategy": str(own), "prompt": str(deploy)}, ps_args(tmp_path), 60)["kf_prompt"] == f"{own},{deploy}"
     assert kf_stage.build_args({"strategy": False, "prompt": str(deploy)}, ps_args(tmp_path), 60)["kf_prompt"] == str(deploy)
+
+
+def test_the_stage_stops_what_it_left_running_whatever_happened(tmp_path):
+    calls = {}
+
+    class FakeReaper:
+        TERM_GRACE_S, KILL_WAIT_S = 1.0, 1.0
+
+        @staticmethod
+        def eval_dir_roots(d):
+            calls["root"] = d
+            return (d,)
+
+        @staticmethod
+        def protected_pids():
+            return [os.getpid(), 1]
+
+        @staticmethod
+        def _stat(pid):
+            return (1, 12345, False)
+
+        @staticmethod
+        def snapshot(mark, roots, since):
+            calls.update(mark=mark, roots=roots, since=since)
+            return {"p": "leg"}
+
+        @staticmethod
+        def select(procs, mode, keep):
+            calls.update(mode=mode, keep=keep)
+            return [("leg", "run")]
+
+        @staticmethod
+        def stop(chosen, term_grace_s, kill_wait_s):
+            return [{"pid": 77, "name": "bench_e2e.sh", "why": "run"}], []
+
+    for i, exc in enumerate((None, RuntimeError("workflow timed out"))):   # own dir each: no resumed stage
+        R, _ = fake_R({"status": "no_gain", "eval_dir": "/kf"}, exc=exc)
+        R["_run_reaper"] = lambda: FakeReaper
+        kf = kf_stage.run_stage({"kernel_fusion": {"budget_s": 600}}, ps_args(tmp_path / str(i)), 36000, R)
+        assert kf["leftovers"]["stopped"][0]["pid"] == 77
+        # only the stage dir, no run marker (that would select the whole run), the runner's ancestors kept
+        assert calls["root"] == kf["kf_dir"] and calls["mark"] == "" and calls["since"] == 12345
+        assert calls["mode"] == "exit" and os.getpid() in calls["keep"]
+    R, _ = fake_R({"status": "no_gain", "eval_dir": "/kf"})
+    kf = kf_stage.run_stage({"kernel_fusion": {"budget_s": 600}}, ps_args(tmp_path / "b"), 36000, R)
+    assert "nothing stopped" in kf["leftovers"]["note"]
