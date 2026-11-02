@@ -1,5 +1,5 @@
 {
-  "_comment": "Smoke config: no GPU, no tokens. A stub runner plus fake tasks, used to exercise the optimize slot's orchestration, fault tolerance, re-verification and summarization. Point TASKS_DIR at the fake tasks via the environment.",
+  "_comment": "Smoke config: no GPU, no tokens. A stub runner plus fake tasks, used to exercise the optimize slot's orchestration, fault tolerance, re-verification and summarization. Point TASKS_DIR at the fake tasks via the environment. The stub runner writes no artifacts by itself: point STUB_SCRIPT at a script that fakes an attempt -- that is what stands in for the agent.",
   "target": {
     "model": null,
     "enforce": false,

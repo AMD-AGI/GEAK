@@ -4,8 +4,8 @@
 #
 # It exists as evidence for the contract rather than as a testing convenience: the claim
 # that the scheduler knows nothing about agents is only proven when an implementation
-# that is not an agent at all still carries the whole chain through. tests/ and the
-# fault-tolerance drills use it — no tokens, no GPUs.
+# that is not an agent at all still carries the whole chain through. `config/smoke_stub.json`
+# and the fault-tolerance drills use it — no tokens, no GPUs.
 #
 #   bash runners/stub.sh <prompt_file> <workdir> <log_file>
 #

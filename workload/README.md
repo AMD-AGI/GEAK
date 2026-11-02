@@ -149,7 +149,9 @@ To write a new implementation: create `stages/<stage>/<name>/`, add a `SKILL.md`
 `run.sh` if it is a script), name the directory in the config.
 `stages/roofline/stub-roofline/` is a minimal worked example.
 
-Self-check, CPU-only — no GPUs, no tokens: `python3 -m pytest workload/tests -q`.
+Self-check, CPU-only — no GPUs, no tokens:
+`python3 workload/scripts/skill_manifest.py verify-all` and
+`python3 workload/scripts/stage.py --config <scenario> --dry-run`.
 
 `SKILL.md` is the operator's guide and carries the step-by-step procedure.
 

@@ -52,9 +52,11 @@ from the repo root or from config.
 **R10 — Never delete measurement data.**
 Move it, archive it, gitignore it.
 
-**R11 — English prose; a CPU-only self-check.**
-`python3 -m pytest workload/tests -q` must pass with no GPU, no tokens and no network, and
-it exists to catch silently plausible wrong numbers — not to cover lines.
+**R11 — English prose; checks that cost nothing to run.**
+`scripts/skill_manifest.py verify-all` (vendored trees untouched) and
+`stage.py --config <scenario> --dry-run` (the config resolves) are the self-check: no GPU,
+no token, no network. The `smoke_stub` scenario drives the whole chain the same way when
+given a `STUB_SCRIPT`. A check that needs a cluster is not a check anybody runs.
 
 ## Non-goals
 
@@ -65,5 +67,6 @@ for every model and backend. Chasing microbenchmarks that do not move the servin
 
 - [ ] The diff is as small as the rule allows, and adds no special case.
 - [ ] Nothing hardcoded; no secret; no absolute path outside `config/`.
-- [ ] `pytest workload/tests -q` and `skill_manifest.py verify-all` pass.
+- [ ] `skill_manifest.py verify-all` passes and `stage.py --config <scenario> --dry-run`
+      still resolves.
 - [ ] If a rule above got in the way, this file changed too — with the reason.

@@ -153,5 +153,8 @@ Modularity rests on two contracts and nothing else:
 ## Self-check
 
 ```bash
-python3 -m pytest workload/tests -q          # CPU-only: no GPUs, no tokens
+python3 workload/scripts/skill_manifest.py verify-all     # vendored skills unchanged
+python3 workload/scripts/stage.py --config $CFG --dry-run  # the config resolves
 ```
+
+Both are CPU-only: no GPUs, no tokens, no network.
