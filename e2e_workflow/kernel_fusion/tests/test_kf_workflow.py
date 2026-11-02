@@ -34,14 +34,19 @@ def rejected(r):
 def test_all_winners_go_in_together_on_one_ab():
     out = run("accept")
     r = out["result"]
-    # c1 is recommended at difficulty 3, so its smaller exclusive alternative c1s is authored too;
-    # c3 is never touched (not recommended, no seam). Every kernel is written before anything is applied,
-    # then ONE integrator A/B of the whole set -- no per-kernel A/B, no separate director validate.
-    assert labels(out) == ["kf:director:setup", "kf:profiler", "kf:analyst",
+    # the triage agent picks c1, c1s, c2 and c3; c3 has no seam so it is never touched. Every kernel is
+    # written before anything is applied, the select agent picks from the UT results, then ONE integrator
+    # A/B of the whole set -- no per-kernel screen while the stack passes, no separate director validate.
+    assert labels(out) == ["kf:director:setup", "kf:profiler", "kf:analyst", "kf:triage",
                            "kf:extract c1", "kf:extract c1s", "kf:extract c2",
-                           "kf:integrate screen", "kf:integrate kf_stack"]
+                           "kf:select", "kf:integrate kf_stack"]
+    setup = out["calls"][0]["prompt"]
+    assert "MEASUREMENT_MODE: isolated_server" in setup and "REPLICAS: 1" in setup     # no warmup round
+    by = {c["label"]: c["prompt"] for c in out["calls"]}
+    assert "no limit on how many" in by["kf:triage"] and "no minimum gain" in by["kf:triage"]
+    assert "no minimum speedup" in by["kf:select"] and '"isolated_speedup":1.6' in by["kf:select"]
     for c in out["calls"]:
-        if c["label"] != "kf:analyst" and not c["label"].startswith("kf:author "):   # stock GEAK role files
+        if c["label"] not in ("kf:analyst", "kf:triage", "kf:select") and not c["label"].startswith("kf:author "):   # stock GEAK role files
             m = re.search(r"Read (\S+/roles/(\w+)\.md)", c["prompt"])
             assert m and Path(m.group(1)).is_file(), c["label"]
     analyst = out["calls"][2]["prompt"]
@@ -55,18 +60,18 @@ def test_all_winners_go_in_together_on_one_ab():
     # deliverables: fused kernel module, graph-replay unit test, lazy overlay with an ENGAGED banner
     assert f"{KF}/kernels/c1/overlay/sitecustomize.py" in au and "[kf-c1] ENGAGED" in au and "graph replay" in au
     assert "shapes the server actually runs" in au and "weighted by served share" in au
+    assert "whether or not it beats stock" in au
     assert "import only the standard library" in au
-    by = {c["label"]: c["prompt"] for c in out["calls"]}
     assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == ["kf:author c1", "kf:author c1s", "kf:author c2"]
     integ = by["kf:integrate kf_stack"]
     assert "Apply ALL 2 fused kernels" in integ and "ONE e2e A/B" in integ and f"{KF}/overlay/cand_kf_stack" in integ
     for k in ("c1", "c2"):
         assert f'"overlay_dir":"{KF}/kernels/{k}/overlay"' in integ and f"[kf-{k}] ENGAGED" in integ
-    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' not in integ        # the fallback is not needed
-    assert "MEASUREMENT_PURPOSE: validation" in integ and "MEASUREMENT_MODE: isolated_server" in integ and "REPLICAS: 2" in integ
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' not in integ        # not selected
+    assert "MEASUREMENT_PURPOSE: validation" in integ and "MEASUREMENT_MODE: isolated_server" in integ and "REPLICAS: 1" in integ
     # fused kernels are held to task accuracy (the integrator's ACCURACY_GATE), not byte-exact greedy parity
-    for p in (integ, by["kf:integrate screen"]):
-        assert "ACCURACY_GATE: gsm8k" in p and "GSM8K_EVAL_SCRIPT: " in p and "ACCURACY_TOL: 0.01" in p
+    assert "ACCURACY_GATE: gsm8k" in integ and "GSM8K_EVAL_SCRIPT: " in integ and "ACCURACY_TOL: 0.01" in integ
+    assert 'starts with "correctness:"' in integ
     # synthetic acceptance stays on for throughput, off for every correctness check
     assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in integ
     assert "CORRECTNESS_UNSET_ENV: SGLANG_SIMULATE_ACC_LEN SGLANG_SIMULATE_ACC_METHOD" in integ
@@ -77,7 +82,7 @@ def test_all_winners_go_in_together_on_one_ab():
     assert r["status"] == "accepted" and r["final_overlay"] == f"{KF}/overlay/cand_kf_stack"
     assert r["throughput_speedup"] == pytest.approx(1.025)          # cand_med / ref_med of the one A/B
     assert sorted(a["id"] for a in r["accepted"]) == ["c1", "c2"]
-    assert ("c1s", "apply") in rejected(r)
+    assert ("c1s", "select") in rejected(r)
 
 
 def test_fallback_goes_in_when_the_primary_has_no_isolated_win():
@@ -146,10 +151,10 @@ def test_agents_are_told_not_to_end_their_turn_on_a_running_job():
 def test_agentx_uses_the_kernel_extract_skill_for_trace_and_uts():
     out = run("agentx")
     ls = labels(out)
-    assert ls[:3] == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst"]
-    assert ls[-1:] == ["kf:integrate kf_stack"]
+    assert ls[:4] == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst", "kf:triage"]
+    assert ls[-2:] == ["kf:select", "kf:integrate kf_stack"]
     # one prepare agent per region (parallel), a failed region retried once with its blocker
-    assert sorted(ls[3:-1]) == sorted(["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s",
+    assert sorted(ls[4:-2]) == sorted(["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s",
                                        "kf:kernel-extract prepare c1s (retry)", "kf:kernel-extract prepare c2",
                                        "kf:kernel-extract prepare c2 (retry)"])
     by = {c["label"]: c["prompt"] for c in out["calls"]}
@@ -208,7 +213,7 @@ def test_a_measured_baseline_is_reused_not_remeasured():
 def test_a_finished_topk_is_reused_and_uts_follow_the_fusion_contract():
     out = run("reuse_topk")
     # the given analysis arrives in args (kf_stage reads the file): no agent re-types it
-    assert "kf:analyst" not in labels(out) and labels(out)[1] == "kf:extract c1"
+    assert "kf:analyst" not in labels(out) and labels(out)[1:3] == ["kf:triage", "kf:extract c1"]
     assert out["result"]["topk_json"] == "/old/kf/analysis/topk.json"
     ext = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:extract")]
     assert ext and all("FUSION UT CONTRACT" in p and "BASELINE leg only" in p for p in ext)
@@ -222,16 +227,31 @@ def test_agentx_prepare_carries_the_fusion_ut_contract():
     assert preps and all("FUSION UT CONTRACT" in p and "never the member kernels directly" in p for p in preps)
 
 
-def test_each_kernel_is_screened_alone_and_a_broken_one_stays_out_of_the_stack():
-    out = run("screen_fail")
+def test_a_stack_that_fails_accuracy_is_screened_kernel_by_kernel_then_re_run():
+    out = run("stack_fail")
+    assert labels(out)[-3:] == ["kf:integrate kf_stack", "kf:integrate screen", "kf:integrate kf_stack (screened)"]
     by = {c["label"]: c["prompt"] for c in out["calls"]}
     sc = by["kf:integrate screen"]
     assert "CORRECTNESS SCREEN ONLY" in sc and "no throughput legs" in sc and f"{KF}/overlay/screen_" in sc
-    assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in sc
-    integ = by["kf:integrate kf_stack"]
+    assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in sc and "ACCURACY_GATE: gsm8k" in sc
+    integ = by["kf:integrate kf_stack (screened)"]
     assert "Apply ALL 1 fused kernels" in integ and f'"overlay_dir":"{KF}/kernels/c2/overlay"' not in integ
     r = out["result"]
     assert [a["id"] for a in r["accepted"]] == ["c1"] and ("c2", "screen") in rejected(r)
+
+
+def test_the_select_agent_has_no_speedup_floor_but_overlapping_kernels_never_go_in_together():
+    integ = next(c["prompt"] for c in run("select_slow")["calls"] if c["label"] == "kf:integrate kf_stack")
+    assert f'"overlay_dir":"{KF}/kernels/c2/overlay"' in integ            # 0.95x in its UT, picked anyway
+    out = run("select_conflict")
+    integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
+    assert f'"overlay_dir":"{KF}/kernels/c1/overlay"' in integ and f'"overlay_dir":"{KF}/kernels/c1s/overlay"' not in integ
+    assert ("c1s", "select") in rejected(out["result"])
+
+
+def test_without_a_triage_answer_the_recommended_patterns_are_authored():
+    out = run("triage_none")
+    assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == ["kf:author c1", "kf:author c2"]
 
 
 def test_finished_author_results_of_an_earlier_run_are_reused():
@@ -244,33 +264,14 @@ def test_finished_author_results_of_an_earlier_run_are_reused():
 def test_a_correctness_reject_is_final_not_retried():
     out = run("parity_reject")
     assert "kf:integrate kf_stack (finish 1)" not in labels(out)
+    # one kernel in the stack: the stack verdict is already its verdict -- no screen, no second A/B
+    assert "kf:integrate screen" not in labels(out) and "kf:integrate kf_stack (screened)" not in labels(out)
     assert out["result"]["status"] == "no_gain"
-
-
-def test_a_primary_that_fails_the_screen_is_replaced_by_its_screened_fallback():
-    out = run("screen_fallback")
-    assert labels(out)[-3:] == ["kf:integrate screen", "kf:integrate screen (fallbacks)", "kf:integrate kf_stack"]
-    fb = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate screen (fallbacks)")
-    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in fb and f'"overlay_dir":"{KF}/kernels/c2/overlay"' not in fb
-    integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
-    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in integ and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in integ
-    r = out["result"]
-    assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "screen") in rejected(r)
-    assert ("c1s", "apply") not in rejected(r)
-
-
-def test_the_kernel_saving_more_device_time_wins_the_slot_not_the_primary():
-    # c1 (4% of device time) barely beats stock (1.005x); its fallback c1s has a real 1.6x win
-    out = run("pick_fallback")
-    sc = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate screen")
-    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in sc and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in sc
-    r = out["result"]
-    assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "apply") in rejected(r)
 
 
 def test_apply_steps_outlast_the_default_agent_timeout():
     # the combined A/B owns hours of serving legs: a 2 h guard would start a second agent on the same job
     src = (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
-    for label in ("label, schema: SCREEN_SCHEMA", "label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA"):
+    for label in ("label, schema: SCREEN_SCHEMA", "label, schema: INTEGRATE_SCHEMA"):
         assert re.search(re.escape(label) + r", timeoutMs: APPLY_TIMEOUT_MS", src), label
     assert re.search(r"APPLY_TIMEOUT_MS = .*6 \* 3600 \* 1000", src)

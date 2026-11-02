@@ -220,6 +220,9 @@ def test_args_carry_only_what_the_stage_reads(tmp_path):
     assert a["kf_topk"]["recommended"] == ["c0", "c1"]
     assert sorted(c["id"] for c in a["kf_topk"]["candidates"]) == ["c0", "c1", "c9"]
     assert all("evidence" not in c for c in a["kf_topk"]["candidates"])
+    # no cap (the default): the triage agent sees every candidate
+    a = kf_stage.build_args({"topk_json": str(t)}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert len(a["kf_topk"]["candidates"]) == 15 and a["kf_topk"]["recommended"] == ["c0", "c1", "c2", "c3"]
     prep = {"delivery_path": "d", "prepared": {"kernel_candidates": [{"short_name": "c0", "extra": "y" * 9000,
             "prepared_ut": {"phase": "extract", "result": {"task_dir": "/t", "baseline_frozen": True, "unittest_smoke": "pass",
                                                            "editable": True, "log": "z" * 9000}}}]}}

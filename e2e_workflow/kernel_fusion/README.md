@@ -15,11 +15,11 @@ profiler)  strategy skill;     A/B, compounding
 
 | Step | What runs | Reused GEAK code |
 |---|---|---|
-| Setup | eval dir + baseline throughput | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
+| Setup | eval dir + baseline throughput (one fresh server, one timed round, no warmup round) | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
 | `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
 | `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent follows **`fusion_strategy.md`** plus the run's prompt(s) → `analysis/topk.json` + the report the strategy asks for | `parse_profile.py` |
-| `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per candidate, given the region and the UT, no GEAK kernel layer |
-| `apply` | once, after every kernel is written: the UT-passing fused kernels with an isolated win (per slot the primary, else its fallback) each go on the live server alone for an e2e correctness screen (no throughput legs); the passing ones go in together as ONE combined overlay on one A/B vs the reference (validation-length legs); only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
+| `author` | a triage agent reads the whole Top-K and picks, by its own judgement, the patterns worth a kernel (no cap, no gain floor; the one hard line is a Python seam); each: region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per pattern, given the region and the UT, no GEAK kernel layer |
+| `apply` | once, after every kernel is written: a select agent reads the UT results and picks which kernels go on (no speedup floor; one kernel per seam / overlapping region); they go in together as ONE combined overlay on ONE A/B vs the reference (gsm8k on the whole stack first, then validation-length legs). Only if the stack fails accuracy or engagement is each kernel checked alone (correctness only) and the A/B re-run without the failing ones; only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
 
 ## Switch
 
@@ -44,8 +44,9 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `baseline_dir` | `GEAK_KF_BASELINE_DIR` | — | a measured baseline dir of this same stack (`bench_summary.json`, `server.log`); copied, not re-measured |
 | `source_dirs` | `GEAK_KF_SOURCE_DIRS` | installed packages | framework/op-library source for the analyst when it is not importable where the stage runs |
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
-| `author_k` | `GEAK_KF_AUTHOR_K` | 3 | recommended candidates to implement |
-| `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 2 | measurement mode / replicas of the combined A/B |
+| `author_k` | `GEAK_KF_AUTHOR_K` | 0 (no cap) | optional cap on the patterns the triage agent sends to authoring |
+| `baseline_mode` | `GEAK_KF_BASELINE_MODE` | `isolated_server` | lifecycle of the stage's baseline: one fresh server, one timed round, no discarded warmup round |
+| `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 1 | measurement mode / replicas of the combined A/B (one A/B) |
 | `task` | `GEAK_KF_TASK` | — | operator constraints appended to every agent prompt (e.g. directories it must not read) |
 | `budget_s` | `GEAK_KF_BUDGET_S` | min(12 h, ⅓ of the run) | stage wall clock; the main workflow gets the rest |
 | `kf_dir` | `GEAK_KF_DIR` | `<exp_root>/kf_<main eval dir suffix>` | stage output dir |

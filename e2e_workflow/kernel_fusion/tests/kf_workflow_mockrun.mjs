@@ -19,7 +19,10 @@ const CANDS = [
     exclusive_with: ['c1'], seam: { target_callable: 'pkg.moe:compact' }, est_gain_pct_expected: 1.6 },
   { id: 'c3', rank: 5, level: 'L3', region: 'moe stage', kernels: ['a', 'b'], difficulty: 2, seam: {}, est_gain_pct_expected: 9 },
 ];
-const ISO = { c1: scenario === 'fallback' ? 0.97 : scenario === 'pick_fallback' ? 1.005 : 1.4, c2: (scenario === 'accept' || scenario === 'screen_fail' || scenario === 'reuse' || scenario === 'screen_fallback' || scenario === 'pick_fallback') ? 1.2 : 0.95, c1s: 1.6 };
+const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: (scenario === 'accept' || scenario === 'stack_fail' || scenario === 'reuse') ? 1.2 : 0.95, c1s: 1.6 };
+// the select agent's picks (it sees every UT result; the script enforces only the exclusivity line)
+// default: every UT result that beats stock, in the order given
+const SELECT = { select_conflict: ['c1', 'c1s', 'c2'], select_slow: ['c1', 'c2'] }[scenario] || null;
 const won = (gate, d) => ({ gate, ab_complete: true, e2e_throughput_tok_s: 100 + d, ref_med: 100, cand_med: 100 + d,
   e2e_delta_pct: d, accepted_overlay: `${KF}/overlay/cand_${gate}` });
 
@@ -50,15 +53,23 @@ const answers = {
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
-  // each winner alone: correctness only
-  'kf:integrate screen': () => ({ members: [{ short_name: 'c1', correctness: scenario === 'screen_fallback' ? 'fail' : 'pass' },
-    { short_name: 'c1s', correctness: 'pass' },
-    { short_name: 'c2', correctness: scenario === 'screen_fail' ? 'fail' : 'pass', reason: 'garbage output' }] }),
-  'kf:integrate screen (fallbacks)': () => ({ members: [{ short_name: 'c1s', correctness: 'pass' }] }),
+  // which patterns get a kernel + UT: the agent's call (c3 has no seam, the script drops it)
+  'kf:triage': () => (scenario === 'triage_none' ? null : { selected: [{ id: 'c1' }, { id: 'c1s' }, { id: 'c2' }, { id: 'c3' }],
+    skipped: [] }),
+  'kf:select': (prompt) => {
+    const ut = JSON.parse(prompt.split('## UT results\n')[1].split('\n')[0]);
+    const ids = SELECT || ut.filter((u) => u.isolated_speedup > 1).map((u) => u.id);
+    return { selected: ids.map((id) => ({ id, reason: 'mock' })), skipped: [{ id: 'c1s', reason: 'overlaps c1' }] };
+  },
+  // only after the whole stack fails accuracy: each kernel alone, correctness only
+  'kf:integrate screen': () => ({ members: [{ short_name: 'c1', correctness: 'pass' },
+    { short_name: 'c2', correctness: scenario === 'stack_fail' ? 'fail' : 'pass', reason: 'garbage output' }] }),
+  'kf:integrate kf_stack (screened)': () => ({ ...won('accepted', 1.5), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
   // ONE combined A/B of every winner
   'kf:integrate kf_stack': () => ({
     reject: { gate: 'rejected', e2e_throughput_tok_s: 99, ref_med: 100, cand_med: 99, e2e_delta_pct: -1, ab_complete: true, reason: 'slower' },
     parity_reject: { gate: 'rejected', e2e_throughput_tok_s: 100, ref_med: 100, ab_complete: false, output_parity: 'fail', reason: 'parity' },
+    stack_fail: { gate: 'rejected', e2e_throughput_tok_s: 0, ref_med: 100, ab_complete: false, reason: 'correctness: gsm8k 0.80 < 0.93' },
     stack: { ...won('stack', -0.1), accepted_overlay: `${KF}/overlay/cand_kf_stack` },
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
   }[scenario] || { ...won('accepted', 2.5), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
@@ -78,12 +89,12 @@ async function agent(prompt, opts) {
     const kernel_path = prompt.match(/TASK_DIR=(\S+)/)[1];
     workflows.push({ kernel_path, task: prompt });
     const id = kernel_path.split('/').pop().replace(/_task$/, '');
-    return { final_patch: ISO[id] > 1 ? `diff ${id}` : '', isolated_speedup: ISO[id], correctness: 'pass', notes: '',
+    return { final_patch: `diff ${id}`, isolated_speedup: ISO[id], correctness: 'pass', notes: '',
       overlay_dir: `${KF}/kernels/${id}/overlay`, banner: `[kf-${id}] ENGAGED` };
   }
   const f = answers[opts.label];
   if (!f) throw new Error(`unscripted agent ${opts.label}`);
-  return f();
+  return f(prompt);
 }
 async function workflow() { throw new Error('KernelFusion must not start a nested GEAK workflow'); }
 const parallel = (ts) => Promise.all(ts.map((t) => Promise.resolve().then(t).catch(() => null)));

@@ -3,11 +3,11 @@ export const meta = {
   description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), pick the Top-K fusion patterns with a user-supplied analysis prompt, build a region UT and have an agent write each fused kernel against it, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
   whenToUse: 'Started by interface/run_e2e.py before the e2e workflow unless switched off (handoff "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
   phases: [
-    { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput (roles/director.md PHASE=setup)' },
+    { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput, one fresh server and one timed round, no warmup round (roles/director.md PHASE=setup)' },
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
     { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
-    { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
-    { title: 'ApplyBack', detail: 'all UT-passing fused kernels (per slot the primary, else its fallback): e2e correctness screen of each alone, then the passing ones as one combined overlay on one e2e_integrator A/B with validation-length legs' },
+    { title: 'Author', detail: 'a triage agent picks the Top-K patterns worth authoring (no cap, no gain floor); each: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
+    { title: 'ApplyBack', detail: 'a select agent picks from the UT results which kernels go on; they go in as one combined overlay on one e2e_integrator A/B (gsm8k on the whole stack first); only if the stack fails accuracy is each kernel checked alone and the A/B re-run without the failing ones' },
   ],
 };
 
@@ -85,7 +85,9 @@ const KF_ACCURACY_INPUTS = KF_ACCURACY_GATE !== 'none'
       GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
 const VALIDATION_MODE = String(A.kf_validation_mode || 'isolated_server');   // fresh servers: boot-to-boot noise
-const VALIDATION_REPLICAS = parseInt(A.kf_validation_replicas != null ? A.kf_validation_replicas : 2, 10);
+const VALIDATION_REPLICAS = parseInt(A.kf_validation_replicas != null ? A.kf_validation_replicas : 1, 10);   // ONE A/B
+// The stage's own baseline: one fresh server, one timed round -- no discarded full warmup round.
+const BASELINE_MODE = String(A.kf_baseline_mode || 'isolated_server');
 // AgentX trace replays use the kernel-extract skill for both trace capture and UT preparation, as
 // e2e_workflow.js does (its KERNEL_EXTRACT_ON); other workloads keep the profiler / kernel_extractor roles.
 const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object' ? A.workload_spec : {};
@@ -94,7 +96,7 @@ const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/k
 const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy || 'structure_only');
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${A.capture_byte_budget || '8GiB'} ` +
   `CAPTURE_CASE_BYTE_LIMIT=${A.capture_case_byte_limit || '2GiB'} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
-const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 3, 10);
+const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 0, 10);   // 0 = no cap: the triage agent decides
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
 
 // Stop STARTING author/apply work once 85% of the stage budget is gone; in-flight work finishes and the
@@ -256,6 +258,9 @@ const EXTRACT_SCHEMA = obj({ short_name: { type: 'string' }, editable: { type: '
 const SCREEN_SCHEMA = obj({ members: { type: 'array', items: obj({ short_name: { type: 'string' },
   correctness: { type: 'string' }, engaged: { type: 'boolean' }, reason: { type: 'string' } }, ['short_name', 'correctness']) },
   notes: { type: 'string' } }, ['members']);
+const PICK_SCHEMA = obj({ selected: { type: 'array', items: obj({ id: { type: 'string' }, reason: { type: 'string' } }, ['id']) },
+  skipped: { type: 'array', items: obj({ id: { type: 'string' }, reason: { type: 'string' } }, ['id']) },
+  notes: { type: 'string' } }, ['selected']);
 const AUTHOR_SCHEMA = obj({ final_patch: { type: 'string' }, work_dir: { type: 'string' },
   overlay_dir: { type: 'string' }, banner: { type: 'string' },
   isolated_speedup: { type: 'number' }, correctness: { type: 'string' }, launches_after: { type: 'number' },
@@ -303,7 +308,7 @@ if (needsServer) {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT: KF_DIR.replace(/\/[^/]*$/, ''), EVAL_DIR_OVERRIDE: KF_DIR,
       MODEL_NAME_HINT: MODEL_PATH.replace(/\/+$/, '').split('/').pop(), TASK: '', GPU_IDS, WORKLOAD,
       INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY: INIT_OVERLAY, MEASUREMENT_PURPOSE: 'parity',
-      REPLICAS: PARITY_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+      MEASUREMENT_MODE: BASELINE_MODE, REPLICAS: 1, SKILL_DIR: WORKFLOW_DIR,
     }), { phase: 'Setup', label: 'kf:director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) {
     return { eval_dir: KF_DIR, kf_dir: KF_DIR, status: 'error', reason: 'setup failed', accepted: [], final_overlay: INIT_OVERLAY };
@@ -320,7 +325,7 @@ if (needsServer) {
         LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT: KF_DIR.replace(/\/[^/]*$/, ''), EVAL_DIR_OVERRIDE: EVAL_DIR,
         MODEL_NAME_HINT: MODEL_PATH.replace(/\/+$/, '').split('/').pop(), TASK: '', GPU_IDS, WORKLOAD,
         INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY: INIT_OVERLAY, MEASUREMENT_PURPOSE: 'parity',
-        REPLICAS: PARITY_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+        MEASUREMENT_MODE: BASELINE_MODE, REPLICAS: 1, SKILL_DIR: WORKFLOW_DIR,
       }), { phase: 'Setup', label: 'kf:director:setup (baseline)', schema: SETUP_SCHEMA });
     baseTput = (again && again.baseline_throughput_tok_s) || 0;
     if (!(baseTput > 0)) baseTput = await awaitBaseline(EVAL_DIR);
@@ -486,32 +491,37 @@ if (!topk || !(want('author') || want('apply'))) {
   return result;
 }
 // ---------------------------------------------------------------------------
-// Author: one slot per recommended candidate. A slot also authors its FALLBACK -- the smaller-scope
-// pattern the prompt's ranking names for when the recommended one does not pan out (the analyst's
-// `fallback`, else the lowest-difficulty exclusive alternative of a difficulty>=3 candidate). Each
-// job: region unittest (GEAK kernel-extract skill / kernel_extractor) -> fused kernel (one author agent).
+// Author: an agent reads the whole Top-K and decides, by its own judgement, which patterns are worth a
+// fused kernel and a region UT -- no cap on how many, no gain threshold. Each chosen pattern: region
+// unittest (GEAK kernel-extract skill / kernel_extractor) -> fused kernel (one author agent).
 // ---------------------------------------------------------------------------
 phase('Author');
 const byId = new Map((topk.candidates || []).map((c) => [String(c.id), c]));
 const seamOf = (c) => (c && c.seam && c.seam.target_callable) || '';
-function fallbackOf(c, taken) {
-  const named = c.fallback != null ? byId.get(String(c.fallback)) : null;
-  if (named && seamOf(named) && !taken.has(String(named.id))) return named;
-  if (!((c.difficulty || 0) >= 3)) return null;
-  const alts = (c.exclusive_with || []).map((id) => byId.get(String(id)))
-    .filter((a) => a && seamOf(a) && !taken.has(String(a.id)) && (a.difficulty || 9) < (c.difficulty || 0))
-    .sort((a, b) => (b.est_gain_pct_expected || 0) - (a.est_gain_pct_expected || 0));
-  return alts[0] || null;
+const triage = await safeAgent(`You decide which fusion patterns of a Top-K analysis go on to the next step: writing a
+fused kernel and a region unit test for each. Judge each candidate yourself from the analysis (its numbers, the
+report's reasoning, the trace digest, the source) -- there is no limit on how many you pick and no minimum gain;
+pick what you judge worth the effort and say why, and say why for each one you leave out.
+The one hard line: a candidate is authored by rebinding ONE Python callable that covers its whole region
+(seam.target_callable); one without such a seam cannot be authored. Mutually exclusive candidates (exclusive_with)
+may both be picked: which of them goes into the server is decided after their unit tests.
+Read ${topk.topk_json || '(the candidates below)'}${topk.report_md ? ' and the report below' : ''}; read anything else you need.
+
+## Candidates
+${JSON.stringify(topk.candidates || [])}
+
+## Analyst's recommendation
+${JSON.stringify(topk.recommended || [])}
+${topk.report_md ? `\n## Report\n${topk.report_md}\n` : ''}
+${KF_TASK ? `## Operator constraints\n${KF_TASK}\n\n` : ''}Return JSON {"selected": [{"id", "reason"}], "skipped": [{"id", "reason"}]}.`,
+  { phase: 'Author', label: 'kf:triage', schema: PICK_SCHEMA });
+let jobs = ((triage && triage.selected) ? triage.selected.map((x) => x && x.id) : (topk.recommended || []))
+  .map((id) => byId.get(String(id))).filter((c, i, a) => c && seamOf(c) && a.indexOf(c) === i);
+if (AUTHOR_K > 0) jobs = jobs.slice(0, AUTHOR_K);
+for (const x of (triage && triage.skipped) || []) {
+  if (x && byId.has(String(x.id))) result.rejected.push({ id: String(x.id), stage: 'triage', reason: String(x.reason || '').slice(0, 600) });
 }
-const primaries = (topk.recommended || []).map((id) => byId.get(String(id))).filter(Boolean).slice(0, AUTHOR_K);
-const taken = new Set(primaries.map((c) => String(c.id)));
-const slots = primaries.map((c) => {
-  const fb = fallbackOf(c, taken);
-  if (fb) taken.add(String(fb.id));
-  return { primary: c, fallback: fb };
-});
-const jobs = slots.flatMap((s) => [s.primary, s.fallback].filter(Boolean));
-log(`[kf] authoring ${jobs.length} job(s): ${slots.map((s) => s.primary.id + (s.fallback ? `(fallback ${s.fallback.id})` : '')).join(', ')}`);
+log(`[kf] triage: authoring ${jobs.length} pattern(s): ${jobs.map((c) => c.id).join(', ')}`);
 
 const shortOf = (c) => String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
 
@@ -653,8 +663,8 @@ iterate and measure as you see fit, and deliver three things:
 
 ## Return
 Write the diff of WORK_DIR against TASK_DIR (diff -ruN) plus the kernel and overlay files to
-${work}/final_patch.diff and return JSON {"final_patch": "${work}/final_patch.diff" or "" if nothing correct beat the
-baseline, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner": "[kf-${short}] ENGAGED",
+${work}/final_patch.diff and return JSON {"final_patch": "${work}/final_patch.diff" (deliver your best correct kernel
+whether or not it beats stock -- the next step judges it) or "" if you have no correct kernel, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner": "[kf-${short}] ENGAGED",
 "isolated_speedup": <stock region time / fused time, graph replay, weighted by served share>, "correctness":
 "pass" | "fail", "launches_after": <kernel launches of the fused region>, "ut_command": "<how you ran the test>",
 "notes": "<design and per-case measurements>"}.`
@@ -669,37 +679,59 @@ baseline, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner"
 }
 const authored = await parallel(jobs.map((c, i) => () => authorOne(c, i)));
 const authoredById = new Map(authored.filter(Boolean).map((r) => [String(r.c.id), r]));
-const usable = (r) => r && !r.skip && r.kl && r.kl.authored !== false && r.iso > 1.0 && r.kl.final_patch;
+// A kernel can go on only if it exists, passed its UT and has an overlay: everything else is the selector's call.
+const usable = (r) => r && !r.skip && r.kl && r.kl.authored !== false && r.kl.final_patch && r.kl.overlay_dir;
 for (const r of authored) {
   if (r && !usable(r)) {
-    const why = r.skip || `no isolated win (${r.iso || 0}x, ${r.kl ? r.kl.reason || r.kl.validation_status || '' : 'none'})`;
+    const why = r.skip || `no correct kernel (${r.kl ? r.kl.reason || r.kl.validation_status || '' : 'none'})`;
     log(`[kf] ${r.c.id}: ${why}`);
     result.rejected.push({ id: r.c.id, stage: r.skip ? 'extract' : 'author', reason: why, isolated_speedup: r.iso || 0 });
   }
 }
+const ready = authored.filter(usable);
 
 // ---------------------------------------------------------------------------
-// ApplyBack: every fused kernel that passed its UT with an isolated win goes in at once -- per slot the
-// primary, else its fallback -- as ONE combined overlay, and the GEAK e2e_integrator runs ONE e2e A/B
-// (correctness once, then reference vs the whole fused stack, validation-length legs). Only a measured
-// e2e win is handed to the main workflow.
+// ApplyBack: an agent reads the UT results and decides which fused kernels go on to the accuracy check and
+// the e2e A/B (no gain threshold, its judgement). They go in at once as ONE combined overlay on ONE
+// e2e_integrator A/B (task accuracy on the whole stack first, then reference vs the stack). Only when the
+// stack fails accuracy/engagement is each kernel checked alone, and the A/B re-run without the failing ones.
 // ---------------------------------------------------------------------------
 phase('ApplyBack');
-// Per slot, the usable kernel that saves the most device time goes in: region share x (1 - 1/isolated
-// speedup). The primary is not preferred just for being the primary -- a wider region that barely beats
-// stock loses to a narrower fallback with a real win. The other one stays as the slot's backup.
-const saving = (r) => (Number(r.c.region_pct_device_time) || 1) * (1 - 1 / r.iso);
-const slotPick = slots.map((s) => {
-  const ok = [s.primary, s.fallback].filter(Boolean).map((c) => authoredById.get(String(c.id))).filter(usable)
-    .sort((a, b) => saving(b) - saving(a));
-  return { slot: s, pick: ok[0] || null, backup: ok[1] || null };
-});
-const winners = slotPick.map((x) => x.pick).filter(Boolean);
-for (const x of slotPick) {
-  if (x.backup) {
-    result.rejected.push({ id: x.backup.c.id, stage: 'apply', isolated_speedup: x.backup.iso,
-      reason: `not needed: ${x.pick.c.id} saves more device time in this slot` });
+const utView = (r) => ({ id: r.c.id, level: r.c.level, region: r.c.region, phases: r.c.phases || [],
+  seam: seamOf(r.c), exclusive_with: r.c.exclusive_with || [], region_pct_device_time: r.c.region_pct_device_time || 0,
+  est_gain_pct_expected: r.c.est_gain_pct_expected || 0, ut_correctness: r.kl.validation_status,
+  isolated_speedup: r.iso, launches_before: r.c.launches_before || (r.c.kernels || []).length,
+  final_patch: r.kl.final_patch, author_notes: String(r.kl.reason || '').slice(0, 3000) });
+let winners = [];
+if (ready.length && want('apply') && !DEADLINE_HIT) {
+  const sel = await safeAgent(`You decide which fused kernels go on to the e2e accuracy check and the e2e A/B of a
+live LLM serving stack. Each one below passed its region unit test; the A/B puts all you pick into the server
+together. Judge from the UT results (speedup on the served shapes, per-shape notes, how much of the step the region
+is, which phases it runs in) and anything else you want to read -- no minimum speedup, no limit on how many; say
+why for each one you pick or drop.
+The one hard line: kernels that rebind the same callable or whose regions overlap (exclusive_with) cannot go in
+together -- pick at most one of them.
+
+## UT results
+${JSON.stringify(ready.map(utView))}
+${KF_TASK ? `\n## Operator constraints\n${KF_TASK}\n` : ''}
+Return JSON {"selected": [{"id", "reason"}], "skipped": [{"id", "reason"}]}.`,
+    { phase: 'ApplyBack', label: 'kf:select', schema: PICK_SCHEMA });
+  const readyById = new Map(ready.map((r) => [String(r.c.id), r]));
+  if (sel && sel.selected) {
+    winners = sel.selected.map((x) => x && readyById.get(String(x.id))).filter((r, i, a) => r && a.indexOf(r) === i);
+  } else {
+    winners = ready.filter((r) => r.iso > 1);
   }
+  // the hard line, enforced: one kernel per seam / overlapping region, first pick wins
+  winners = winners.filter((r, i) => !winners.slice(0, i).some((q) => seamOf(q.c) === seamOf(r.c) ||
+    (q.c.exclusive_with || []).map(String).includes(String(r.c.id)) || (r.c.exclusive_with || []).map(String).includes(String(q.c.id))));
+  const why = new Map(((sel && sel.skipped) || []).map((x) => [String(x && x.id), String((x && x.reason) || '')]));
+  for (const r of ready) {
+    if (!winners.includes(r)) result.rejected.push({ id: r.c.id, stage: 'select', isolated_speedup: r.iso,
+      reason: (why.get(String(r.c.id)) || 'not selected').slice(0, 600) });
+  }
+  log(`[kf] select: ${winners.map((r) => `${r.c.id} (${r.iso}x)`).join(', ') || 'none'}`);
 }
 const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
   winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang, authored_kernel_eval_dir: r.kl.eval_dir || '',
@@ -707,16 +739,17 @@ const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir:
   code_patch: r.kl.final_patch, final_patch: r.kl.final_patch, verified_isolated_speedup: r.iso,
   overlay_dir: r.kl.overlay_dir || '', engaged_banner: r.kl.banner || '', pct_gpu_time: r.c.region_pct_device_time || 0,
   parity_note: r.c.bitwise_exact ? 'expected_exact' : 'expected_close' });
-// Each fused kernel alone on the live server first, correctness only (cheap: no throughput legs), so one
-// broken kernel cannot sink the set and the A/B measures only kernels that serve correct output.
+// Only when the whole stack fails accuracy / engagement: each kernel alone on the live server, correctness only.
 async function screen(list, label) {
   const sc = await safeAgent(roleAgent('e2e_integrator', 'integrate',
-    `CORRECTNESS SCREEN ONLY -- no throughput legs. For EACH entry of KERNEL_RESULTS on its own, build a CAND overlay ` +
+    `CORRECTNESS SCREEN ONLY -- no throughput legs. The combined stack of these kernels failed its accuracy or ` +
+    `engagement check; find which. For EACH entry of KERNEL_RESULTS on its own, build a CAND overlay ` +
     `${EVAL_DIR}/overlay/screen_<short_name> = CURRENT_OVERLAY plus that entry's ready overlay_dir (its sitecustomize.py ` +
     'patches one seam lazily), and run your output-correctness check of that CAND against the reference with the same ' +
     'probes, the same correctness gate (the ACCURACY GATE of your role when ACCURACY_GATE is in your inputs) and the ' +
-    'same correctness env (one reference measurement shared by all entries); confirm the entry\'s engaged_banner in ' +
-    'the CAND server log. Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
+    'same correctness env (one reference measurement shared by all entries; reuse the stack A/B\'s reference result ' +
+    'on disk if it has one); confirm the entry\'s engaged_banner in the CAND server log. ' +
+    'Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
     { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
       ...KF_ACCURACY_INPUTS,
       KERNEL_RESULTS: list.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
@@ -726,27 +759,14 @@ async function screen(list, label) {
   const failed = [];
   for (const r of list) {
     const m = verdict.get(String(r.ext.short_name || r.c.id)) || verdict.get(String(r.c.id));
-    if (!m || m.correctness !== 'pass') {
+    if (!m || m.correctness !== 'pass' || m.engaged === false) {
       failed.push(r);
       result.rejected.push({ id: r.c.id, stage: 'screen', isolated_speedup: r.iso,
-        reason: m ? `e2e correctness ${m.correctness}: ${m.reason || ''}`.slice(0, 600) : 'no screen verdict' });
+        reason: m ? `e2e correctness ${m.correctness}${m.engaged === false ? ', not engaged' : ''}: ${m.reason || ''}`.slice(0, 600)
+          : 'no screen verdict' });
     }
   }
   return failed;
-}
-if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
-  const failed = await screen(winners, 'kf:integrate screen');
-  if (failed) {
-    for (const r of failed) winners.splice(winners.indexOf(r), 1);
-    // a slot whose pick failed the screen falls back to its backup, screened the same way
-    const fbs = slotPick.filter((x) => failed.includes(x.pick) && x.backup).map((x) => x.backup);
-    if (fbs.length && !DEADLINE_HIT) {
-      result.rejected = result.rejected.filter((x) => !(fbs.some((r) => r.c.id === x.id) && x.stage === 'apply'));
-      const fbFailed = await screen(fbs, 'kf:integrate screen (fallbacks)');
-      if (fbFailed) for (const r of fbs) if (!fbFailed.includes(r)) winners.push(r);
-    }
-    log(`[kf] correctness screen: ${winners.map((r) => r.c.id).join(', ') || 'none'} pass`);
-  }
 }
 if (!want('apply') || !winners.length || DEADLINE_HIT) {
   for (const r of winners) result.rejected.push({ id: r.c.id, stage: 'apply', isolated_speedup: r.iso,
@@ -755,31 +775,48 @@ if (!want('apply') || !winners.length || DEADLINE_HIT) {
   return result;
 }
 const stackName = 'kf_stack';
-const inputs = {
-  EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,
-  MEASUREMENT_MODE: VALIDATION_MODE, MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
-  ...KF_ACCURACY_INPUTS,
-  KERNEL_RESULT: { short_name: stackName, op_kind: 'fusion', winner_kind: 'authored',
-    verified_isolated_speedup: Math.max(...winners.map((r) => r.iso)), parity_note: 'expected_close' },
-  KERNEL_RESULTS: winners.map(kernelResult),
-  CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_THROUGHPUT: baseTput,
-};
-const intro = `Apply ALL ${winners.length} fused kernels in KERNEL_RESULTS at once and gate the whole set on ONE e2e A/B ` +
-  '(KERNEL_RESULT names the set). Each entry\'s overlay_dir is a READY overlay (its sitecustomize.py patches one ' +
-  'seam lazily and falls back to the stock path; the kernel module sits beside it). Build ONE CAND overlay ' +
-  `${EVAL_DIR}/overlay/cand_${stackName} = CURRENT_OVERLAY plus every entry's files -- rename each ` +
-  'sitecustomize.py and write one sitecustomize.py that imports all of them -- do not re-materialize kernels from ' +
-  'patches. Run the correctness checks once on that stack, then ONE reference-vs-CAND throughput A/B, and confirm ' +
-  'EVERY entry\'s engaged_banner in the CAND server log (a kernel that never engages is reported in reason). ' +
-  'Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
-let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
-  { phase: 'ApplyBack', label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
-// finish only an A/B that is genuinely unfinished; a correctness reject is final (it skips the timed legs on purpose)
-for (let t = 1; t <= AB_FINISH_RETRIES && (!integ || integ.gate === 'incomplete'); t++) {
-  integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
-    'FINISH this e2e A/B of the combined fused stack: reuse a reference leg already on disk if usable, run the ' +
-    'missing leg, then return the gate. ' + intro, { ...inputs, RESUME_AB: true }),
-    { phase: 'ApplyBack', label: `kf:integrate ${stackName} (finish ${t})`, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
+const CORRECTNESS_FAIL = /^correctness/i;
+async function stackAB(members, suffix) {
+  const inputs = {
+    EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,
+    MEASUREMENT_MODE: VALIDATION_MODE, MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+    ...KF_ACCURACY_INPUTS,
+    KERNEL_RESULT: { short_name: stackName, op_kind: 'fusion', winner_kind: 'authored',
+      verified_isolated_speedup: Math.max(...members.map((r) => r.iso)), parity_note: 'expected_close' },
+    KERNEL_RESULTS: members.map(kernelResult),
+    CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_THROUGHPUT: baseTput,
+  };
+  const intro = `Apply ALL ${members.length} fused kernels in KERNEL_RESULTS at once and gate the whole set on ONE e2e A/B ` +
+    '(KERNEL_RESULT names the set). Each entry\'s overlay_dir is a READY overlay (its sitecustomize.py patches one ' +
+    'seam lazily and falls back to the stock path; the kernel module sits beside it). Build ONE CAND overlay ' +
+    `${EVAL_DIR}/overlay/cand_${stackName} = CURRENT_OVERLAY plus every entry's files -- rename each ` +
+    'sitecustomize.py and write one sitecustomize.py that imports all of them -- do not re-materialize kernels from ' +
+    'patches. Run the correctness checks once on that stack and confirm EVERY entry\'s engaged_banner in the CAND ' +
+    'server log; if the stack fails either, skip the throughput legs and return gate "rejected" with a reason that ' +
+    'starts with "correctness:" (name the kernels that did not engage). Otherwise ONE reference-vs-CAND throughput ' +
+    'A/B. Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
+  const label = `kf:integrate ${stackName}${suffix}`;
+  let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
+    { phase: 'ApplyBack', label, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
+  // finish only an A/B that is genuinely unfinished; a correctness reject is final (it skips the timed legs on purpose)
+  for (let t = 1; t <= AB_FINISH_RETRIES && (!integ || integ.gate === 'incomplete'); t++) {
+    integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
+      'FINISH this e2e A/B of the combined fused stack: reuse a reference leg already on disk if usable, run the ' +
+      'missing leg, then return the gate. ' + intro, { ...inputs, RESUME_AB: true }),
+      { phase: 'ApplyBack', label: `${label} (finish ${t})`, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
+  }
+  return integ;
+}
+let integ = await stackAB(winners, '');
+const correctnessFail = (x) => x && x.gate === 'rejected' &&
+  (CORRECTNESS_FAIL.test(String(x.reason || '')) || /fail/i.test(String(x.output_parity || '')));
+if (correctnessFail(integ) && winners.length > 1 && !DEADLINE_HIT) {
+  const failed = await screen(winners, 'kf:integrate screen');
+  if (failed && failed.length && failed.length < winners.length) {
+    winners = winners.filter((r) => !failed.includes(r));
+    log(`[kf] correctness screen: ${failed.map((r) => r.c.id).join(', ')} fail; A/B again with ${winners.map((r) => r.c.id).join(', ')}`);
+    integ = await stackAB(winners, ' (screened)');
+  }
 }
 const ab = { members: winners.map((r) => r.c.id), gate: integ ? integ.gate : 'incomplete',
   e2e_delta_pct: integ ? integ.e2e_delta_pct : null, ref_med: integ ? integ.ref_med : null,
