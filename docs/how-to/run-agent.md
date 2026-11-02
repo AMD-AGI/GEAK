@@ -15,7 +15,7 @@ GEAK v4 runs inside Claude Code, orchestrated by deterministic JS Workflows. The
 Before running a workflow, ensure the following are in place.
 
 - **AMD Instinct™ MI GPU**: CDNA (gfx942 / gfx950), auto-detected.
-- **ROCm 6+** with `rocminfo` / `rocm-smi`, and a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`).
+- **ROCm 6+** with `rocminfo` and `rocm-smi`, and a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`).
 - **Python 3.8+**.
 - **Claude Code ≥ 2.1.177** (dynamic Workflow feature). Check `claude --version`.
 - **For E2E:** a running-capable `sglang` or `vllm` and the model weights on disk.
@@ -39,6 +39,8 @@ The path you give Claude Code (for example, `path_to_GEAK/e2e_workflow`) is mapp
 
 ### End-to-end serving throughput (e2e_workflow)
 
+Run the following command to optimize a full model's serving throughput.
+
 ```
 use /absolute/path/to/GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
 ```
@@ -51,6 +53,8 @@ Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `arch
 (overlay + patch + `final_launch.sh`).
 
 ### Single kernel (kernel_workflow)
+
+Run the following commands to optimize a single kernel.
 
 ```
 use /absolute/path/to/GEAK/kernel_workflow to optimize /absolute/path/to/GEAK/examples/tasks/knn
@@ -98,7 +102,7 @@ use /absolute/path/to/GEAK/e2e_workflow, deep mode, to optimize /models/Qwen3.5-
 
 ## Accuracy gate (quantized kernels)
 
-For FP8 / MXFP4, byte-parity is too strict — switch the e2e gate to task accuracy:
+For FP8 and MXFP4, byte-parity is too strict — switch the e2e gate to task accuracy:
 
 ```
 ... use the gsm8k accuracy gate with limit 200 and tolerance 0.01

@@ -19,7 +19,7 @@ GEAK 4.0.0 requires the following software and hardware.
 | Requirement | Detail |
 |---|---|
 | **AMD Instinct™ MI GPU** | CDNA, gfx942 (MI300X) / gfx950 (MI350X/MI355X). Auto-detected. |
-| **ROCm 6+** | `rocminfo` / `rocm-smi` must work. |
+| **ROCm 6+** | `rocminfo` and `rocm-smi` must work. |
 | **A profiler** | One of `rocprof-compute`, `rocprofv3`, `rocprof` (also `omniperf` or `metrix`). Auto-detected. |
 | **Python 3.8+** | Tested on 3.12. |
 | **Claude Code ≥ 2.1.177** | Required for the dynamic Workflow feature. Check `claude --version`. |
