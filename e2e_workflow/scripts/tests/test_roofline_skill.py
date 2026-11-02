@@ -445,13 +445,8 @@ class TestSkillDocConsistency(unittest.TestCase):
         self.assertEqual(rt.TARGET_EFF["gemm"], 0.90)
         self.assertEqual(rt.TARGET_EFF["moe"], 0.90)
         self.assertEqual(rt.TARGET_EFF["attn"], 0.50)
-        self.assertEqual(rt.target_eff_for("moe", product="r9700"), 0.76)
-        self.assertEqual(rt.target_eff_for("elementwise", product="r9700"), 0.76)
-        self.assertEqual(rt.target_eff_for("gemm", product="r9700"), 0.90)
-        self.assertEqual(rt.target_eff_for("moe", product="unknown"), 0.90)
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
-                     "attention decode (paged) | **0.50**",
-                     "R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76**"):
+                     "attention decode (paged) | **0.50**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
 
     def test_workload_contract_is_stated(self):

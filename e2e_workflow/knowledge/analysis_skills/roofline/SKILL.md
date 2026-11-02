@@ -265,15 +265,7 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
-One measured product override is available through
-`roofline_tools.target_eff_for(op_class, product)`:
-
-| product / class | `target_eff` | evidence |
-|---|---:|---|
-| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
-
-This override does not change dense-GEMM compute efficiency or paged-attention
-priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
+They are the same for every product.
 
 ### Routing table (the actual point of this skill)
 
@@ -325,7 +317,7 @@ make the kernel move **fewer bytes for the same work**:
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated
    (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
-   generic op-class priors, not measured R9700 GDDR6 efficiency factors.
+   generic op-class priors, the same for every product.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the
