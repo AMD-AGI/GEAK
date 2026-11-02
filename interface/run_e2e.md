@@ -566,12 +566,15 @@ resilience below), `result.json` reports the failure instead:
 {
   "schema_version": 2,
   "status": "timeout | error",
-  "error_class": "timeout | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
+  "error_class": "timeout | llm_unreachable | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
   "error": "no workflow return within the 32400s budget (furthest phase on disk: search)",
   "phase_reached": "setup | search | finalize | validate"
 }
 ```
 
+* `llm_unreachable` → Claude Code could not reach the model API (connection
+  refused or dropped, DNS, no route, proxy or TLS failure). `error` keeps the
+  original message, which contains Claude Code's `API Error: ...` reply.
 * `phase_reached` → the furthest phase the eval dir shows: `setup` until Setup's
   baseline summary exists, `search` until the final phase fences the GPUs
   (`.final_phase_fence`), then the fenced stage. Absent when the eval dir does

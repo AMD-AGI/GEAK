@@ -1931,6 +1931,49 @@ class TestClassifyError(_RunE2ECase):
         )
         self.assertEqual(rx._classify_error(ValueError("other")), "runner_error")
 
+    # Claude Code's replies, verbatim, to a refused, unresolvable and reset model API
+    # endpoint: 2.1.177 first, then 2.1.309 / 2.1.316.
+    UNREACHABLE_REPLIES = (
+        "API Error: Unable to connect to API (ConnectionRefused)",
+        "API Error: Unable to connect to API (FailedToOpenSocket)",
+        "API Error: Unable to connect to API (ECONNRESET)",
+        "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+        "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+        ("API Error: Connection dropped (ECONNRESET). Check the gateway set in "
+         "ANTHROPIC_BASE_URL, then try again."),
+    )
+
+    def test_an_unreachable_model_api_is_not_a_parse_error(self):
+        """The CLI answers a failed API call with an "API Error: ..." reply, which reaches
+        run_e2e as agent output; an outage must not read as malformed workflow output."""
+        for reply in self.UNREACHABLE_REPLIES:
+            with self.subTest(reply=reply):
+                with self.assertRaises(rx.WorkflowParseError) as ctx:
+                    rx._parse_last_json_line(f"{reply}\n{reply}")
+                self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
+                self.assertIn(reply, str(ctx.exception))
+                cli = RuntimeError(f'claude CLI failed (rc=1): {{"result": "{reply}"}}')
+                self.assertEqual(rx._classify_error(cli), "llm_unreachable")
+        self.assertEqual(
+            rx._classify_error(TimeoutError(self.UNREACHABLE_REPLIES[0])), "timeout")
+
+    def test_connection_errors_outside_the_model_api_keep_their_class(self):
+        """A bench or server connection error in the transcript is the run's own; only
+        Claude Code's API Error reply names the model endpoint."""
+        for text in (
+            ("aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host "
+             "127.0.0.1:8000 ssl:default [Connection refused]"),
+            "curl: (7) Failed to connect to localhost port 8000: Connection refused",
+            "Error: connect ECONNREFUSED 127.0.0.1:8000",
+            ("API Error: 500 Internal server error. This is a server-side issue, usually "
+             "temporary — try again in a moment."),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    rx._classify_error(rx.WorkflowParseError(f"Last 2000 chars:\n{text}")),
+                    "workflow_parse_error",
+                )
+
 
 # =========================================================================== #
 # SDK invocation + completion gate
@@ -2166,6 +2209,19 @@ class TestInvokeViaCli(_RunE2ECase):
         self.assertIn("claude CLI failed (rc=3)", msg)
         self.assertIn("TAIL", msg)
         self.assertEqual(rx._classify_error(ctx.exception), "cli_failed")
+
+    def test_a_failed_api_call_reported_on_stdout_reaches_the_error(self):
+        """claude -p reports a failed API call in its stdout JSON and exits 1 with
+        stderr empty."""
+        self._fake_which("/usr/bin/claude")
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+        self._fake_subprocess(_FakeProc(returncode=1, stdout=json.dumps(
+            {"type": "result", "is_error": True, "result": reply}, ensure_ascii=False)))
+        with self.assertRaises(RuntimeError) as ctx:
+            rx._invoke_via_cli("P", 10)
+        self.assertIn(reply, str(ctx.exception))
+        self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
 
     def test_json_wrapper_variants_are_unwrapped_or_passed_through(self):
         self._fake_which("/usr/bin/claude")
@@ -3240,6 +3296,22 @@ class TestMain(_RunE2ECase):
         self.assertEqual(
             out["error"],
             "no workflow return within the 43200s budget (furthest phase on disk: search)")
+
+    def test_an_unreachable_model_api_is_reported_as_such(self):
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+
+        def outage(prompt, timeout_s, eval_dir, ps_args=None):
+            return rx._parse_last_json_line(f"{reply}\n{reply}")
+
+        self.patch_rx("invoke_workflow", outage)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error_class"], "llm_unreachable")
+        self.assertIn("Could not parse a JSON workflow return", out["error"])
+        self.assertIn(reply, out["error"])
 
     def test_recovery_failure_after_a_crashed_workflow_is_contained(self):
         """Both the post-crash recovery and the one inside _emit raise; the run
