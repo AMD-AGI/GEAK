@@ -19,6 +19,11 @@ EXTEND, VERIFY, DRAFT; the whole window when the trace has no step annotations):
   share, the top kernels per step, the repeating block length (layer period) of the median step, and
   that step's full ordered kernel sequence with gaps and launching frames (``seq_*.tsv``).
 
+Across all traces: the LIVE model code -- every ``nn.Module`` class the eager (non-graph) steps entered and the
+source file of the ``forward`` it ran. A model can ship several implementations of one layer (a generic and a
+platform-specific module); graph-replayed steps (decode / verify) have no launch frames, but they run the same
+module classes, so this table is where a fusion seam must live.
+
 Writes OUT_DIR/digest.json, OUT_DIR/digest.md and OUT_DIR/seq_<group>_<kind>.tsv. Stdlib only.
 """
 from __future__ import annotations
@@ -38,6 +43,8 @@ STEP_RE = re.compile(r"^step\[([A-Za-z_]+)")
 RANK_RE = re.compile(r"(?:TP-|rank|_tp)(\d+)")
 SHORT_US = 5.0
 FRAME_HINT = re.compile(r"(sglang|vllm|aiter|atom|flydsl|triton_kernels)[/.]")
+MODULE_RE = re.compile(r"^nn\.Module: (\w+?)(?:_\d+)?$")
+FORWARD_RE = re.compile(r"^(.+?\.py)\(\d+\): forward$")
 
 
 def short_name(name: str) -> str:
@@ -145,6 +152,26 @@ def layer_period(names: list[str]) -> dict:
     return {"period": p, "repeats": round(n / p, 1) if p else 0, "match": round(frac, 3)}
 
 
+def live_modules(events: list[dict]) -> dict[str, Counter]:
+    """{nn.Module class: Counter(source file of the forward it ran)} from the eager python stacks."""
+    pf = sorted((e for e in events if e.get("ph") == "X" and e.get("cat") == "python_function"),
+                key=lambda e: (e.get("pid"), e.get("tid"), e["ts"], -e.get("dur", 0)))
+    out: dict[str, Counter] = defaultdict(Counter)
+    for i, e in enumerate(pf):
+        m = MODULE_RE.match(e.get("name", ""))
+        if not m:
+            continue
+        end = e["ts"] + e.get("dur", 0)
+        for f in pf[i + 1:i + 6]:                      # the forward is the first frame nested in the module call
+            if (f.get("pid"), f.get("tid")) != (e.get("pid"), e.get("tid")) or f["ts"] > end:
+                break
+            fm = FORWARD_RE.match(f.get("name", ""))
+            if fm:
+                out[m.group(1)][fm.group(1)] += 1
+                break
+    return out
+
+
 def digest_trace(path: str, top: int) -> dict:
     ev = load_events(path)
     kernels = sorted((e for e in ev if e.get("ph") == "X" and e.get("cat") in KERNEL_CATS),
@@ -173,7 +200,8 @@ def digest_trace(path: str, top: int) -> dict:
         if per_step[i]:
             kinds[w[0]].append(i)
 
-    out = {"trace": path, "num_kernels": len(kernels), "num_steps": len(windows), "step_kinds": {}}
+    out = {"trace": path, "num_kernels": len(kernels), "num_steps": len(windows), "step_kinds": {},
+           "_live": live_modules(ev)}
     for kind, idxs in sorted(kinds.items()):
         busy = [sum(k.get("dur", 0) for k in per_step[i]) for i in idxs]
         span = [windows[i][2] - windows[i][1] for i in idxs]
@@ -221,8 +249,19 @@ def digest_trace(path: str, top: int) -> dict:
     return out
 
 
-def to_md(groups: dict[str, dict]) -> str:
+def to_md(groups: dict[str, dict], live: dict | None = None) -> str:
     L = ["# KernelFusion trace digest", ""]
+    if live:
+        files = sorted({f for v in live.values() for f in v})
+        L += ["## Live model code (from the eager steps' Python stacks)",
+              "The server runs THESE classes and files. Graph-replayed steps (no launch frames) run the same module "
+              "classes, so map their kernels to these files -- a model may also ship other implementations of the "
+              "same layers (generic vs platform-specific modules) that this server never loads. A fusion seam must "
+              "be a callable in one of these files.", "",
+              "| nn.Module class | forward in |", "|---|---|"]
+        L += [f"| `{c}` | " + ", ".join(f"`{f}`" for f in sorted(v, key=lambda f: -v[f])) + " |"
+              for c, v in sorted(live.items())]
+        L += ["", "Files: " + ", ".join(f"`{f}`" for f in files), ""]
     for g, d in groups.items():
         L += [f"## `{g}` — {os.path.basename(d['trace'])}",
               f"{d['num_kernels']} kernels, {d['num_steps']} step windows", ""]
@@ -261,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     os.makedirs(a.out, exist_ok=True)
     groups = {}
+    live: dict[str, Counter] = defaultdict(Counter)
     for g, cands in picked.items():
         d = None
         for path in cands:
@@ -284,14 +324,18 @@ def main(argv: list[str] | None = None) -> int:
                 for i, r in enumerate(s.pop("_seq")):
                     f.write(f"{i}\t{r['kernel']}\t{r['dur_us']}\t{r['gap_us']}\t{r['stream']}\t"
                             f"{r['launch']}\t{r['cpu_op']}\t{r['frame']}\n")
+        for c, v in d.pop("_live").items():
+            for f, n in v.items():
+                live[c][f] += n
         groups[g] = d
     if not groups:
         sys.stderr.write("no usable trace (all unreadable or without GPU kernels)\n")
         return 3
     with open(os.path.join(a.out, "digest.json"), "w") as f:
-        json.dump({"schema": "geak.kf_trace_digest/1", "groups": groups}, f, indent=1)
+        json.dump({"schema": "geak.kf_trace_digest/1", "groups": groups,
+                   "live_model_modules": {c: dict(v) for c, v in sorted(live.items())}}, f, indent=1)
     with open(os.path.join(a.out, "digest.md"), "w") as f:
-        f.write(to_md(groups))
+        f.write(to_md(groups, live))
     print(f"KF_DIGEST groups={len(groups)} out={a.out}/digest.md")
     return 0
 

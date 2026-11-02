@@ -445,7 +445,10 @@ your recommended candidates with the GEAK kernel layer and A/B-tests them on the
 ${OUT}/digest/digest.md has, per trace and per step kind: steps, busy/span/idle per step, kernels/step, short-kernel
 share, the per-layer repeating block, the top kernels, and seq_*.tsv (the median step's full ordered kernel
 sequence with gaps and, for eager launches, the launching cpu_op + framework frame). Use these numbers; quote
-them in your report. Graph-replayed steps have no launch frames: map those kernels to source by name.
+them in your report. Its "Live model code" table lists the module classes this server actually runs and the file
+of each forward (from the eager steps' Python stacks). Graph-replayed steps have no launch frames but run those same
+classes: map their kernels to source by name WITHIN those files -- the framework may ship other implementations of the
+same layers that this server never loads, and a seam there is never called.
 
 This environment does not let you write .md report files: return the full report the prompt asks for as markdown
 in report_md, and the model / deployment notes in model_notes_md; the stage writes them to ${OUT}/REPORT.md and
