@@ -16,9 +16,15 @@ before compilation, so recording costs nothing on the launch path and sees start
 and CUDA-graph capture as well as served traffic. Each event holds the variant's identity
 (kernel, argument types, constexprs, specialization attributes, warps/stages), the Python
 stack that launched it and, optionally, the arguments of the first non-Triton frames: shapes,
-dtypes, strides, scalars, None, and the contents of integer and small tensors (sequence
-bookkeeping, page tables, scales). Bulk float payloads are kept as descriptors and redrawn
-from a seed when the call is replayed.
+dtypes, strides, scalars, None, and the contents of STRUCTURAL tensors (sequence
+bookkeeping, page tables, routing ids, scales: index-named, or integer and at most
+COMPILE_WATCH_STRUCT_CAP bytes). Bulk payloads -- float operands and large integer ones such
+as packed MXFP4/int8 weights -- are never stored: they are kept as a descriptor plus a small
+evenly spaced sample of their values (COMPILE_WATCH_SAMPLE elements) and redrawn from a seed
+when the call is replayed (floats from N(mean, std) of the sample, integers by resampling
+the sample, so a packed e8m0 scale never becomes a NaN exponent and fp4 codes keep their
+distribution). A Muse Spark MoE entry once stored its whole uint8 expert weights with every
+recorded call: 0.86 GB a call, 185 GB for one task, copied again by every retain/materialize.
 
   server   probe_server.py puts an overlay holding this file and a sitecustomize on
            PYTHONPATH (COMPILE_WATCH_DIR, COMPILE_WATCH_FRAMES); every process appends
@@ -34,7 +40,9 @@ so the import order of the observed process is unchanged (an early `import aiter
 sitecustomize once made FlyDSL's JIT abort). Stdlib at import time; torch lazily.
 """
 import argparse
+import base64
 import hashlib
+import io
 import importlib.abc
 import importlib.util
 import json
@@ -53,6 +61,12 @@ _SKIP_FILES = re.compile(r"[/\\](triton|_dynamo|_inductor|_library)[/\\]|compile
 INT_DATA_CAP = int(os.environ.get("COMPILE_WATCH_INT_CAP", str(512 << 20)))
 FLOAT_DATA_CAP = int(os.environ.get("COMPILE_WATCH_FLOAT_CAP", "4096"))
 EVENT_DATA_CAP = int(os.environ.get("COMPILE_WATCH_EVENT_CAP", str(1 << 30)))
+# integer tensors above this (and not index-named) are bulk payload, not structure
+STRUCT_CAP = int(os.environ.get("COMPILE_WATCH_STRUCT_CAP", str(4 << 20)))
+SAMPLE_N = int(os.environ.get("COMPILE_WATCH_SAMPLE", "65536"))
+# a call's recorded tensors (structure + samples) travel inline, base64 in the event JSON, up to
+# this many serialized bytes; only a call above it is written to calls/*.pt
+INLINE_CAP = int(os.environ.get("COMPILE_WATCH_INLINE_CAP", str(16 << 20)))
 IDENTITY_FIELDS = ("fn", "signature", "constexprs", "attrs", "num_warps", "num_stages")
 
 
@@ -126,7 +140,21 @@ def _capturing(torch):
         return False
 
 
-def _describe(x, tensors, budget, in_capture, depth=0):
+def _sample(x, n):
+    """<= n evenly spaced values of x's storage span, on CPU (a gather, never a copy of x)."""
+    torch = _torch()
+    span = x.storage_offset() + sum((int(d) - 1) * int(st) for d, st in zip(x.shape, x.stride())) + 1 \
+        if x.numel() else x.storage_offset()
+    flat = torch.empty(0, dtype=x.dtype, device=x.device).set_(x.untyped_storage())
+    lo, hi = int(x.storage_offset()), int(min(span, flat.numel()))
+    if hi <= lo:
+        return None
+    k = min(n, hi - lo)
+    pos = torch.linspace(lo, hi - 1, k, device=x.device).round().to(torch.int64)
+    return flat.index_select(0, pos).detach().to("cpu").clone()
+
+
+def _describe(x, tensors, budget, in_capture, depth=0, name=""):
     torch = _torch()
     if torch is not None and isinstance(x, torch.Tensor):
         d = {"__tensor__": 1, "shape": list(x.shape), "stride": list(x.stride()),
@@ -135,7 +163,9 @@ def _describe(x, tensors, budget, in_capture, depth=0):
              # the storage, not the view, decides AMD's buffer-op specialization (<= 2 GiB)
              "storage_nbytes": int(x.untyped_storage().nbytes())}
         floating = x.is_floating_point() or x.is_complex()
-        cap = FLOAT_DATA_CAP if floating else INT_DATA_CAP
+        structural = not floating and (d["nbytes"] <= STRUCT_CAP
+                                       or bool(INDEX_ARG_RE.search(str(name).split("[")[0])))
+        cap = FLOAT_DATA_CAP if floating else (INT_DATA_CAP if structural else -1)
         if in_capture:
             d["data"] = None
             d["why_no_data"] = "launched inside CUDA graph capture: contents are placeholders"
@@ -152,7 +182,28 @@ def _describe(x, tensors, budget, in_capture, depth=0):
         else:
             d["data"] = None
             d["why_no_data"] = ("bulk float payload: redrawn from a seed on replay" if floating
-                                else "integer tensor over the capture cap (%d bytes)" % cap)
+                                else "integer tensor over the capture cap (%d bytes)" % cap
+                                if structural else
+                                "bulk integer payload (not index-named, over %d bytes): "
+                                "redrawn from its recorded sample on replay" % STRUCT_CAP)
+            if not x.is_complex():
+                try:
+                    smp = _sample(x, SAMPLE_N)
+                except Exception as exc:  # noqa: BLE001 -- describing must never break the server
+                    smp, d["sample_error"] = None, "%s: %s" % (type(exc).__name__, exc)
+                if smp is not None and smp.numel():
+                    if floating:
+                        f = smp.float()
+                        f = f[torch.isfinite(f)]
+                        if f.numel():
+                            d["gen"] = {"kind": "normal", "mean": float(f.mean()),
+                                        "std": float(f.std()) if f.numel() > 1 else 0.0,
+                                        "absmax": float(f.abs().max()), "sample_n": int(smp.numel())}
+                    else:
+                        tensors.append(smp)
+                        d["gen"] = {"kind": "resample", "sample": len(tensors) - 1,
+                                    "sample_n": int(smp.numel()),
+                                    "min": int(smp.min()), "max": int(smp.max())}
         return d
     if torch is not None and isinstance(x, torch.dtype):
         return {"__dtype__": str(x)}
@@ -162,7 +213,8 @@ def _describe(x, tensors, budget, in_capture, depth=0):
         return x if x == x and abs(x) != float("inf") else {"__float__": repr(x)}
     if isinstance(x, (list, tuple)) and depth < 2 and len(x) <= 64:
         return {"__seq__": type(x).__name__,
-                "items": [_describe(v, tensors, budget, in_capture, depth + 1) for v in x]}
+                "items": [_describe(v, tensors, budget, in_capture, depth + 1,
+                                    "%s[%d]" % (name, i)) for i, v in enumerate(x)]}
     return {"__object__": "%s.%s" % (type(x).__module__, type(x).__qualname__),
             "repr": repr(x)[:120]}
 
@@ -215,14 +267,14 @@ def _record_frames(frames, k, tensors, in_capture):
             if name == "self" and name in loc and not (torch and isinstance(loc[name], torch.Tensor)):
                 args[name] = {"__object__": type(loc[name]).__qualname__}
                 continue
-            args[name] = _describe(loc.get(name), tensors, budget, in_capture) \
+            args[name] = _describe(loc.get(name), tensors, budget, in_capture, name=name) \
                 if name in loc else {"__missing__": 1}
         if "*" in extra:
             args["*" + extra["*"]] = _describe(tuple(loc.get(extra["*"]) or ()), tensors, budget,
-                                               in_capture)
+                                               in_capture, name=extra["*"])
         if "**" in extra:
             kw = loc.get(extra["**"]) or {}
-            args["**" + extra["**"]] = {k2: _describe(v, tensors, budget, in_capture)
+            args["**" + extra["**"]] = {k2: _describe(v, tensors, budget, in_capture, name=k2)
                                         for k2, v in kw.items()}
         rows.append({"callable": _frame_name(f), "file": f.f_code.co_filename,
                      "line": f.f_lineno, "positional": names[:npos], "args": args})
@@ -284,6 +336,28 @@ def _claim(vid):
         return True
 
 
+def pack_tensors(tensors):
+    buf = io.BytesIO()
+    _torch().save(tensors, buf)
+    return buf.getvalue()
+
+
+def call_data(call, load_file=None):
+    """The recorded tensors of a call: inline (tensors_b64) first, else the calls/*.pt file
+    through `load_file(path)`, else none. Inline data is loaded weights_only."""
+    torch = __import__("torch")
+    if call.get("tensors_b64"):
+        buf = io.BytesIO(base64.b64decode(call["tensors_b64"]))
+        try:
+            return torch.load(buf, weights_only=True)
+        except TypeError:                       # torch without weights_only
+            buf.seek(0)
+            return torch.load(buf)
+    if call.get("tensors") and load_file is not None:
+        return load_file(call["tensors"])
+    return []
+
+
 def _hook(*_a, **kw):
     s = _STATE
     try:
@@ -309,7 +383,10 @@ def _hook(*_a, **kw):
             if first and s["frames"] > 0 and (not s["dir"] or _claim(vid)):
                 tensors = []
                 ev["frames"] = _record_frames(frames, s["frames"], tensors, in_capture)
-                if tensors and s["dir"]:
+                blob = pack_tensors(tensors) if tensors and s["dir"] else None
+                if blob is not None and len(blob) <= INLINE_CAP:
+                    ev["tensors_b64"] = base64.b64encode(blob).decode("ascii")
+                elif tensors and s["dir"]:
                     os.makedirs(os.path.join(s["dir"], "calls"), exist_ok=True)
                     rel = os.path.join("calls", "%s.pid%d.pt" % (vid, os.getpid()))
                     torch.save(tensors, os.path.join(s["dir"], rel))
@@ -426,8 +503,9 @@ def collect(watch_dir, ready_epoch=None, server_mode=None):
                 rec["in_graph_capture"] = rec["in_graph_capture"] or bool(ev.get("in_graph_capture"))
                 if ev.get("frames") and not rec.get("frames"):
                     rec["frames"] = ev["frames"]
-                    if ev.get("tensors"):
-                        rec["tensors"] = ev["tensors"]
+                    for k in ("tensors", "tensors_b64"):
+                        if ev.get(k):
+                            rec[k] = ev[k]
     for rec in by_id.values():
         if ready_epoch:
             rec["before_ready"] = rec["first_t"] < float(ready_epoch)
@@ -573,11 +651,14 @@ def plan_call(call, data):
     plan = {}
     for name, d in leaves:
         floating = "float" in d["dtype"] or "complex" in d["dtype"]
-        if d.get("data") is None and not floating:
+        gen = d.get("gen") or {}
+        if d.get("data") is None and not floating and gen.get("kind") != "resample":
             raise Unreplayable("integer operand %s has no recorded contents (%s)"
                                % (name, d.get("why_no_data", "")))
         if d.get("data") is not None and d["data"] >= len(data):
             raise Unreplayable("operand %s refers to missing recorded data" % name)
+        if gen.get("kind") == "resample" and gen["sample"] >= len(data):
+            raise Unreplayable("operand %s refers to a missing recorded sample" % name)
         plan[name] = dict(d, rows=int(d["shape"][0]) if d["shape"] else None)
     return plan, notes
 
@@ -666,11 +747,24 @@ def materialize_call(call, data, seed=0, budget=16 << 30):
         buf = torch.empty(n, dtype=dt, device=dev)
         if p.get("data") is None:
             g = torch.Generator(device=dev).manual_seed(int(seed) * 1000003 + i)
+            gen = p.get("gen") or {}
             step = 1 << 26
-            for lo in range(0, n, step):
-                hi = min(n, lo + step)
-                buf[lo:hi].copy_(torch.randn(hi - lo, generator=g, device=dev,
-                                             dtype=torch.float32).to(dt))
+            if gen.get("kind") == "resample":
+                # bulk integer payload (packed quantized weights): values drawn from the
+                # recorded sample, so the value distribution is the server's
+                smp = data[gen["sample"]].reshape(-1).to(dev)
+                for lo in range(0, n, step):
+                    hi = min(n, lo + step)
+                    j = torch.randint(smp.numel(), (hi - lo,), generator=g, device=dev)
+                    buf[lo:hi].copy_(smp.index_select(0, j).to(dt))
+                notes.append("%s: bulk integer payload resampled from %d recorded values"
+                             % (name, smp.numel()))
+            else:
+                mean, std = float(gen.get("mean", 0.0)), float(gen.get("std", 1.0))
+                for lo in range(0, n, step):
+                    hi = min(n, lo + step)
+                    r = torch.randn(hi - lo, generator=g, device=dev, dtype=torch.float32)
+                    buf[lo:hi].copy_((r * std + mean).to(dt) if gen else r.to(dt))
             built[name] = buf.as_strided(p["shape"], p["stride"], p["offset"])
         else:
             src = data[p["data"]].to(dev)

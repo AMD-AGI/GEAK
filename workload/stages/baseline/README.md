@@ -10,6 +10,7 @@
 | `adopt-measured-receipt/` | script | **default**. Reuse an already-measured serving receipt. No GPUs, no tokens, replayable |
 | `agentx-trace-replay/` | script | re-measure with a fresh AgentX trace replay. Occupies the whole machine; gate on `agentx_smoke.sh` first |
 | `ci-run-replay/` | script | reproduce a *named CI run* from a fresh digest-pinned container and accept the number only if it aligns. Pins image digest / data+seed / `benchmark_id` / cache-bust prefix, binds one rank per physical core, and proves each pin afterwards from the run's own records |
+| `adopt-ci-artifacts/` | script | take an official InferenceX CI run as the baseline, **every config of it**: one baseline per search-space point straight from the run's `bmk_agentic_*` and `server_logs_*` artifacts, grouped (default by EP) with each group's lowest/highest concurrency marked representative. Nothing is re-measured; the reference is the CI's own number. Needs a GitHub token to download artifacts, or pre-downloaded copies |
 
 Choose by what the baseline has to withstand. `adopt-measured-receipt` is right when the
 number is already trusted and the question is only "what was it". `ci-run-replay` is right

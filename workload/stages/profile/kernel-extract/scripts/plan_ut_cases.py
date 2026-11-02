@@ -47,6 +47,41 @@ def context_of(p):
 
 
 def plan(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
+    """Single-config: as below. Multi-config (`points_final["configs"]`, written by the profile
+    slot's multi_config.py merge): each config is planned on its own points and its own
+    phase_summary, and every case carries that config's `config_id` -- the UT normalizes call
+    mass per config before pooling (harness_lib._config_weights), so the configs never need a
+    common instance scale here."""
+    configs = points_final.get("configs")
+    if not configs:
+        return _plan_one(points_final, shapes_dir, tasks, min_band_share, max_buckets)
+    out = {"contract": "kernel_extract/ut_case_plan/v1",
+           "shape_tolerance": points_final.get("shape_tolerance"),
+           "rules": {"min_band_share_pct": min_band_share, "max_buckets_per_phase": max_buckets,
+                     "per_config": True},
+           "configs": sorted(configs), "tasks": {}}
+    for cid in sorted(configs):
+        sub = {"points": [p for p in points_final["points"] if p.get("config_id") == cid],
+               "phase_summary": configs[cid].get("phase_summary") or {},
+               "shape_tolerance": points_final.get("shape_tolerance")}
+        one = _plan_one(sub, shapes_dir, tasks, min_band_share, max_buckets)
+        for label, t in one["tasks"].items():
+            dest = out["tasks"].setdefault(label, {"cases": [], "proxy_mass_outside_every_case_pct": {}})
+            for c in t["cases"]:
+                if c["kind"] == "envelope":
+                    # declared by the task, not measured: test it once, never weight it
+                    if cid == sorted(configs)[0]:
+                        dest["cases"].append(c)
+                    continue
+                c["config_id"] = cid
+                if c["kind"] != "point":   # point ids are already config-prefixed by the merge
+                    c["case_id"] = c["case_id"].replace(label + "__", "%s__%s__" % (label, cid), 1)
+                dest["cases"].append(c)
+            dest["proxy_mass_outside_every_case_pct"][cid] = t["proxy_mass_outside_every_case_pct"]
+    return out
+
+
+def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
     pts = {p["point_id"]: p for p in points_final["points"] if p.get("counted")}
     shapes = {}
     for pid in pts:

@@ -145,7 +145,7 @@ def _server_calls(a, task, meta):
         with open(a.out + ".progress", "w") as fh:
             fh.write(call["id"])
         row = {"id": call["id"], "kernel": call.get("kernel")}
-        data = torch.load(os.path.join(task, call["tensors"])) if call.get("tensors") else []
+        data = cw.call_data(call, lambda rel: torch.load(os.path.join(task, rel)))
         try:
             args, kwargs, named, notes = cw.materialize_call(call, data, seed=int(a.seed) + k,
                                                              budget=budget)

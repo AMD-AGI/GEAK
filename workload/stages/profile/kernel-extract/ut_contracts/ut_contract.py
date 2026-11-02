@@ -398,9 +398,11 @@ def lint_task(task_dir):
                           "the observed workload evidence (evidence/observed_workload.json)")
     # harness_lib.serving_weighted_speedup reads meta.workload.cases; they must be the manifest's
     # timed cases, or the weighting and the timed set silently disagree.
-    want = {c["sig"]: (str(c.get("regime", "")).lower(), c.get("effective_calls"), c.get("m"))
+    want = {c["sig"]: (str(c.get("regime", "")).lower(), c.get("effective_calls"), c.get("m"),
+                       c.get("config_id"))
             for c in cases if c.get("timed") and c.get("sig")}
-    have = {c.get("sig"): (str(c.get("regime", "")).lower(), c.get("effective_calls"), c.get("m"))
+    have = {c.get("sig"): (str(c.get("regime", "")).lower(), c.get("effective_calls"), c.get("m"),
+                           c.get("config_id"))
             for c in (wl.get("cases") or []) if isinstance(c, dict)}
     if want != have:
         diff = sorted(set(want) ^ set(have)) or sorted(s for s in want if want[s] != have.get(s))

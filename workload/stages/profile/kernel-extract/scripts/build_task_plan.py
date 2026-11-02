@@ -177,10 +177,16 @@ def manifest(task, cases):
         axes = {ax: int(round(eval(e, {"__builtins__": {}}, names)))  # noqa: S307
                 for ax, e in expr.items()}
         sig = "%s_%s%s" % (c["phase"], c["shape"], "" if c["kind"] == "point" else "_" + c["kind"])
-        out.append({"sig": sig, "regime": c["phase"], "axes": axes,
-                    "effective_calls": c["effective_calls"], "timed": c["kind"] != "envelope",
-                    "random": True, "kind": c["kind"],
-                    "evidence": c.get("shape_manifest") or "ut_case_plan.json#" + c["case_id"]})
+        if c.get("config_id"):
+            # one UT pools several configs; the same shape can occur in more than one
+            sig = "%s/%s" % (c["config_id"], sig)
+        row = {"sig": sig, "regime": c["phase"], "axes": axes,
+               "effective_calls": c["effective_calls"], "timed": c["kind"] != "envelope",
+               "random": True, "kind": c["kind"],
+               "evidence": c.get("shape_manifest") or "ut_case_plan.json#" + c["case_id"]}
+        if c.get("config_id"):
+            row["config_id"] = c["config_id"]
+        out.append(row)
         by_phase.setdefault(c["phase"], []).append((c["shape"], sig))
     replay = []
     for ph, rows in by_phase.items():
@@ -255,6 +261,10 @@ def frameworks(task, cv):
     return sorted({m for m in mods if m in SERVER_PREIMPORTS})
 
 
+# a recorded call larger than this is referenced where it is, never copied into the task
+SERVER_CALL_COPY_MAX = int(os.environ.get("SERVER_CALL_COPY_MAX", str(256 << 20)))
+
+
 def server_evidence(eval_dir, task, tdir):
     """The task's slice of evidence/compile_variants.json -> run/server_variants.json and
     run/server_calls.json (+ run/server_calls/<variant>.pt). Returns the meta block."""
@@ -268,7 +278,7 @@ def server_evidence(eval_dir, task, tdir):
     names = set(task.get("kernels") or []) | {c.get("kernel") for c in task.get("companions") or []}
     target = task.get("target_callable")
     recs = [r for r in cv["variants"] if compile_watch.belongs(r, names, target)]
-    slim = [{k: v for k, v in r.items() if k not in ("frames", "tensors")} for r in recs]
+    slim = [{k: v for k, v in r.items() if k not in ("frames", "tensors", "tensors_b64")} for r in recs]
     run = os.path.join(tdir, "run")
     shutil.copy2(compile_watch.__file__, os.path.join(tdir, "compile_watch.py"))
     dump({"contract": "kernel_extract/server_variants/v1",
@@ -276,7 +286,7 @@ def server_evidence(eval_dir, task, tdir):
                "server_mode": cv.get("server_mode"), "env": cv.get("env") or {},
                "kernels": sorted(names), "target_callable": target, "variants": slim},
          os.path.join(run, "server_variants.json"))
-    calls, unmatched, seen = [], [], set()
+    calls, unmatched, seen, referenced = [], [], set(), []
     shutil.rmtree(os.path.join(run, "server_calls"), ignore_errors=True)
     for r in recs:
         fr = compile_watch.frame_for(r, target) if target else None
@@ -293,15 +303,25 @@ def server_evidence(eval_dir, task, tdir):
             continue
         seen.add(key)
         rel = None
-        if r.get("tensors"):
+        if r.get("tensors_b64"):
+            pass        # travels inline in server_calls.json: nothing to copy, no .pt in the task
+        elif r.get("tensors"):
             src = os.path.join(cv["watch_dir"], r["tensors"])
-            if os.path.exists(src):
+            if os.path.exists(src) and os.path.getsize(src) > SERVER_CALL_COPY_MAX:
+                # Evidence recorded before bulk payloads were sampled can hold whole weight
+                # tensors (0.86 GB a call, 185 GB for one task). A task directory is copied by
+                # every retain/materialize, so a large call stays in the read-only store and
+                # is referenced by absolute path (leg_runner joins it onto the task dir).
+                rel = os.path.abspath(src)
+                referenced.append(os.path.getsize(src))
+            elif os.path.exists(src):
                 os.makedirs(os.path.join(run, "server_calls"), exist_ok=True)
                 rel = os.path.join("run", "server_calls", r["id"] + ".pt")
                 shutil.copy2(src, os.path.join(tdir, rel))
         calls.append({"_key": key, "id": r["id"], "variants": [r["id"]], "kernel": r["name"],
                       "callable": fr["callable"], "file": fr.get("file"), "line": fr.get("line"),
                       "positional": fr["positional"], "args": fr["args"], "tensors": rel,
+                      **({"tensors_b64": r["tensors_b64"]} if r.get("tensors_b64") else {}),
                       "in_graph_capture": bool(r.get("in_graph_capture") and not r.get("eager")),
                       "before_ready": r.get("before_ready")})
     for c in calls:
@@ -313,7 +333,9 @@ def server_evidence(eval_dir, task, tdir):
                                 "server_calls": "run/server_calls.json",
                                 "server_mode": cv.get("server_mode"),
                                 "variants": len(slim), "calls": len(calls),
-                                "variants_without_entry_frame": len(unmatched)}}
+                                "variants_without_entry_frame": len(unmatched),
+                                "calls_referenced_in_place": len(referenced),
+                                "bytes_referenced_in_place": sum(referenced)}}
 
 
 def expected_launches(task, launched, phase_of):

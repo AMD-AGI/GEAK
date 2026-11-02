@@ -94,9 +94,16 @@ def _hook_stubs(doc):
 
 
 def workload_cases(manifest):
-    return [{"sig": c["sig"], "regime": c["regime"], "m": c.get("m"),
-             "effective_calls": c.get("effective_calls")}
-            for c in manifest.get("cases", []) if c.get("timed")]
+    out = []
+    for c in manifest.get("cases", []):
+        if not c.get("timed"):
+            continue
+        row = {"sig": c["sig"], "regime": c["regime"], "m": c.get("m"),
+               "effective_calls": c.get("effective_calls")}
+        if c.get("config_id"):
+            row["config_id"] = c["config_id"]   # harness_lib normalizes per config before pooling
+        out.append(row)
+    return out
 
 
 def cmd_list(a):

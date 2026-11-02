@@ -1111,6 +1111,58 @@ def _observed_workload_cases(meta):
         if not regime:
             raise HarnessIncompleteError(f"Observed case {sig}: regime must be a nonempty workload phase")
         out[sig] = {**case, "regime": regime, "effective_calls": mass}
+    tagged = [sig for sig, case in out.items() if case.get("config_id") not in (None, "")]
+    if tagged and len(tagged) != len(out):
+        raise HarnessIncompleteError("Observed workload cases must all carry config_id, or none: "
+                                     f"untagged {sorted(set(out) - set(tagged))}")
+    return out
+
+
+CONFIG_WEIGHTING = ("calls", "time")
+
+
+def _config_weighting(meta):
+    """How configs are pooled (serving_weight_model.config_weighting):
+
+    calls (default)  w(case) = alpha_c * calls(case) / sum(calls of config c), then x baseline_ms.
+                     Each config's call distribution is normalized to 1 and the configs'
+                     distributions are averaged: w(M) = sum_c alpha_c * freq_c(M), metric
+                     sum_M w(M) * t(M). A kernel only sees M, never the concurrency, so this
+                     pools "a launch at M" across concurrencies; a config whose launches cost
+                     more (larger M) counts for more GPU time. This is how the 2026-11-02 Muse
+                     Spark c8+c32 merge weighted its union UTs (weights.json).
+    time             each config's baseline-time mass is normalized to alpha_c: the pooled
+                     metric is the alpha-weighted harmonic mean of the per-config speedups, so
+                     every config's speedup counts the same regardless of its kernel time."""
+    model = (((meta or {}).get("workload") or {}).get("serving_weight_model") or {})
+    mode = model.get("config_weighting", "calls")
+    if mode not in CONFIG_WEIGHTING:
+        raise HarnessIncompleteError(f"serving_weight_model.config_weighting must be one of {CONFIG_WEIGHTING}")
+    return mode
+
+
+def _config_weights(meta, observed):
+    """Per-config share alpha_c of the merged metric, or None when the cases carry no config_id.
+
+    A multi-config task merges several deployments (InferenceX search-space points) into
+    one UT. Each config's call mass is on its own scale (a c64 point launches far more
+    than a c1 point), so the cases are normalized per config before they are pooled (see
+    _config_weighting for how). Shares come from serving_weight_model.config_weights when
+    given, else equal."""
+    if not observed or not any(c.get("config_id") not in (None, "") for c in observed.values()):
+        return None
+    ids = sorted({str(c["config_id"]) for c in observed.values()})
+    model = (((meta or {}).get("workload") or {}).get("serving_weight_model") or {})
+    given = model.get("config_weights")
+    if given is None:
+        return {cid: 1.0 for cid in ids}
+    if not isinstance(given, dict) or set(map(str, given)) != set(ids):
+        raise HarnessIncompleteError(f"serving_weight_model.config_weights must name exactly the configs {ids}")
+    out = {}
+    for cid, w in given.items():
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0:
+            raise HarnessIncompleteError(f"config_weights[{cid!r}] must be finite and nonnegative")
+        out[str(cid)] = float(w)
     return out
 
 
@@ -1267,6 +1319,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             if mass > 0 and any(v is None or not math.isfinite(v) or v <= 0 for v in (b, o)):
                 raise HarnessIncompleteError(f"Observed timed case {sig}: positive call mass requires both measured latencies")
             rows[-1]["calls"] = mass
+            if case.get("config_id") not in (None, ""):
+                rows[-1]["config_id"] = str(case["config_id"])
             seen.add(sig)
 
     if observed is not None:
@@ -1315,6 +1369,44 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
                 "reason": ("no measurable non-identity bucket survived (all identity/zero-weight or "
                            "dropped by served-regimes) — weighted speedup is UNTRUSTED; re-measure "
                            "per-bucket ms in a fresh subprocess under the deployment graph/compile.")}
+
+    # Multi-config: rescale each config's baseline-time mass to its share, so a config's
+    # weight in the pooled metric does not depend on how many launches its load produced.
+    # A config where this task carries no time (its kernels do not run there) is left out.
+    shares = _config_weights(meta, observed)
+    per_config = None
+    if shares is not None:
+        mode = _config_weighting(meta)
+        mass = {}
+        for r in included:
+            mass[r["config_id"]] = mass.get(r["config_id"], 0.0) + r["weight"]
+        # the config's whole served call distribution, timed or not, is the denominator of freq_c
+        calls_total = {}
+        for case in observed.values():
+            if case["effective_calls"] > 0 and (not served or case["regime"] in served):
+                cid = str(case["config_id"])
+                calls_total[cid] = calls_total.get(cid, 0.0) + case["effective_calls"]
+        live = {cid: shares[cid] for cid, m in mass.items() if m > 0 and shares.get(cid, 0) > 0}
+        total = sum(live.values())
+        if not total:
+            raise HarnessIncompleteError("multi-config UT: no config carries both time and a positive share")
+        per_config = {}
+        for cid in sorted(mass):
+            members = [r for r in included if r["config_id"] == cid]
+            Wc = sum(r["weight"] for r in members)
+            Dc = sum(r["weight"] / r["speedup"] for r in members)
+            per_config[cid] = {"weighted": (Wc / Dc) if Dc else None,
+                               "share": (live.get(cid, 0.0) / total), "cases": len(members),
+                               "time_per_call_ms": Wc / calls_total[cid] if calls_total.get(cid) else None}
+        for r in included:
+            r["weight_raw"] = r["weight"]
+            alpha = live.get(r["config_id"], 0.0) / total
+            if mode == "calls":
+                r["weight"] = r["weight"] / calls_total[r["config_id"]] * alpha
+            else:
+                r["weight"] = r["weight"] / mass[r["config_id"]] * alpha
+        included = [r for r in included if r["weight"] > 0]
+
     W = sum(r["weight"] for r in included)
     D = sum(r["weight"] / r["speedup"] for r in included)
     weighted = (W / D) if D else None
@@ -1322,9 +1414,13 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     if geomean:
         spds = [r["speedup"] for r in included]
         gm = math.exp(sum(math.log(s) for s in spds) / len(spds)) if spds else None
-    return {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
-            "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
-            "reason": ""}
+    out = {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
+           "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
+           "reason": ""}
+    if per_config is not None:
+        out["per_config"] = per_config
+        out["config_weighting"] = mode
+    return out
 
 
 class HarnessIncompleteError(Exception):

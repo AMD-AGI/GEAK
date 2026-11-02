@@ -131,7 +131,9 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   bucket cases for the bands no point covers, without double-weighting), and scaffolds
   the UT from its family. An existing `unittest.py` is never overwritten without `--force`.
   It also slices the compile evidence per task into `run/server_variants.json` and
-  `run/server_calls.json` (+ `run/server_calls/*.pt`) and sets `meta.server_preimports`
+  `run/server_calls.json` (structural operands inline; bulk operands as seeded descriptors, so
+  no tensor file -- `run/server_calls/*.pt` only for a call recorded before this, or above
+  COMPILE_WATCH_INLINE_CAP) and sets `meta.server_preimports`
   (decls `server_preimports`; sglang defaults to `sglang.srt.utils.common`).
 
 The source map's frames prove a call reached a file on this deployment; they do not prove

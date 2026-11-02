@@ -65,18 +65,62 @@ fi
 # --- 3. Re-measure e2e with the overlay.
 # REUSE_SERVER=0: the overlay has to be loaded by a **freshly started server**; reusing an
 # already-running one measures an unpatched stack.
-E2E_OUT="$OUT/e2e"
-mkdir -p "$E2E_OUT"
-export BENCH_CLIENT=agentx REUSE_SERVER=0 OUT_DIR="$E2E_OUT" REPEATS="$REPEATS"
+export BENCH_CLIENT=agentx REUSE_SERVER=0 REPEATS="$REPEATS"
 export OVERLAY_PYTHONPATH="$OVERLAY"
 [ -n "$DURATION" ] && export GEAK_AGENTX_DURATION_S="$DURATION"
 SERVING_ENV="$(p serving_env '')"
-[ -n "$SERVING_ENV" ] && [ -f "$SERVING_ENV" ] && { set -a; . "$SERVING_ENV"; set +a; }
 
-echo "[applyback] re-measuring e2e with the overlay: repeats=$REPEATS overlay=$OVERLAY"
-bash "$GEAK_ROOT/e2e_workflow/scripts/bench_e2e.sh" 2>&1 | tee "$OUT/bench.log"
-ERC=${PIPESTATUS[0]}
-echo "[applyback] bench_e2e exited $ERC"
+# A multi-config baseline (adopt-ci-artifacts) names representative points; each is
+# measured against its own CI number. Otherwise: the single A/B, unchanged.
+REP="$(python3 -c "
+import json
+b=json.load(open('$BASELINE'))
+print(' '.join(b.get('representative') or []) if b.get('multi_config') else '')")"
 
-# --- 4. Slot adapter: A/B + result.json.
-python3 "$SLOT/finalize.py" --bench-rc "$ERC" --e2e-dir "$E2E_OUT" --baseline "$BASELINE"
+if [ -z "$REP" ]; then
+  E2E_OUT="$OUT/e2e"
+  mkdir -p "$E2E_OUT"
+  export OUT_DIR="$E2E_OUT"
+  [ -n "$SERVING_ENV" ] && [ -f "$SERVING_ENV" ] && { set -a; . "$SERVING_ENV"; set +a; }
+  echo "[applyback] re-measuring e2e with the overlay: repeats=$REPEATS overlay=$OVERLAY"
+  bash "$GEAK_ROOT/e2e_workflow/scripts/bench_e2e.sh" 2>&1 | tee "$OUT/bench.log"
+  ERC=${PIPESTATUS[0]}
+  echo "[applyback] bench_e2e exited $ERC"
+  # --- 4. Slot adapter: A/B + result.json.
+  python3 "$SLOT/finalize.py" --bench-rc "$ERC" --e2e-dir "$E2E_OUT" --baseline "$BASELINE"
+  exit $?
+fi
+
+BASE_DIR="$(dirname "$BASELINE")"
+for PID in $REP; do
+  PDIR="$OUT/points/$PID"
+  mkdir -p "$PDIR/e2e"
+  cp "$OUT/applied.json" "$PDIR/applied.json"
+  ln -sfn "$OVERLAY" "$PDIR/overlay"   # finalize names the overlay among its artifacts
+  PB="$BASE_DIR/points/$PID/baseline.json"
+  # Each point is its own deployment: CONC/TP from its CI config, and the launch
+  # settings that differ between points (KV offload, speculative decoding, ...) from
+  # params.point_serving_env.<pid>, else the serving_env.sh the baseline generated from the
+  # point's CI recipe, else the shared serving_env. CONC/TP are exported
+  # after the env file so the point's own values win.
+  PENV="$(p "point_serving_env.$PID" "")"
+  # default: the env adopt-ci-artifacts generated from this point's CI recipe
+  [ -z "$PENV" ] && [ -f "$BASE_DIR/points/$PID/serving_env.sh" ] && PENV="$BASE_DIR/points/$PID/serving_env.sh"
+  [ -z "$PENV" ] && PENV="$SERVING_ENV"
+  (
+    [ -n "$PENV" ] && [ -f "$PENV" ] && { set -a; . "$PENV"; set +a; }
+    eval "$(python3 -c "
+import json,shlex
+c=json.load(open('$PB'))['config']
+print('export CONC=%s TP=%s' % (shlex.quote(str(c['concurrency'])), shlex.quote(str(c['tp']))))")"
+    export OUT_DIR="$PDIR/e2e" OUT="$PDIR"
+    echo "[applyback] $PID: CONC=$CONC TP=$TP env=${PENV:-<none>} repeats=$REPEATS"
+    bash "$GEAK_ROOT/e2e_workflow/scripts/bench_e2e.sh" > "$PDIR/bench.log" 2>&1
+    ERC=$?
+    echo "[applyback] $PID: bench_e2e exited $ERC"
+    python3 "$SLOT/finalize.py" --bench-rc "$ERC" --e2e-dir "$PDIR/e2e" --baseline "$PB"
+  )
+done
+
+# --- 4. Fold the per-point A/Bs.
+python3 "$SLOT/aggregate_points.py" $REP

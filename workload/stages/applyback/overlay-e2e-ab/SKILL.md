@@ -54,6 +54,23 @@ This skill does only two things:
 The end-to-end serving stack occupies all 8 GPUs, so this stage takes the **node
 exclusively** and cannot run alongside optimize.
 
+## Several configs
+
+With a multi-config baseline (`adopt-ci-artifacts`: `multi_config: true`), the overlay is
+built and smoke-tested once, then **each representative point** (`baseline.json`
+`representative`, by default each group's lowest and highest concurrency) is measured on a
+fresh server in `$OUT/points/<pid>/` against **its own CI number**
+(`baseline/out/points/<pid>/baseline.json`). CONC and TP come from the point's CI config;
+the launch settings that differ between points (KV offload, speculative decoding) come from
+`params.point_serving_env.<pid>`, else `serving_env`. `aggregate_points.py` folds the
+per-point A/Bs: any regression makes the verdict `regression`, a gain needs a gain somewhere
+and no regression, and a point without an A/B makes it `incomplete`. The top-level
+`e2e_delta_pct` is the geometric mean over points and is labelled so; the per-point deltas
+are the result.
+
+The reference is the CI runner, not this node, so node and session differences are inside
+every delta; the noise band has to cover them.
+
 ## Preconditions
 
 Run `e2e_workflow/scripts/agentx_smoke.sh` first. `aiperf` and InferenceX are on neither

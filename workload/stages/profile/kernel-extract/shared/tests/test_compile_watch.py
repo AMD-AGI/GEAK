@@ -166,6 +166,41 @@ class TaskSliceTest(unittest.TestCase):
         self.assertEqual(meta["server_evidence"]["server_calls"], "run/server_calls.json")
         self.assertEqual(meta["ut_contract"]["compile_variant_waivers"], [{"id": "x", "why": "y"}])
 
+    def test_large_recorded_call_is_referenced_not_copied(self):
+        import build_task_plan as B
+        path = os.path.join(self.eval, "evidence", "compile_variants.json")
+        with open(path) as f:
+            doc = json.load(f)
+        os.makedirs(os.path.join(self.tmp, "calls"))
+        for size, name in ((4096, "big.pt"), (16, "small.pt")):
+            with open(os.path.join(self.tmp, "calls", name), "wb") as f:
+                f.write(b"\0" * size)
+        doc["variants"][0]["tensors"] = "calls/big.pt"
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        tdir = os.path.join(self.eval, "tasks", "attn")
+        old, B.SERVER_CALL_COPY_MAX = B.SERVER_CALL_COPY_MAX, 1024
+        try:
+            se = B.server_evidence(self.eval, {"kernels": ["_attn_kernel"],
+                                               "target_callable": "sglang.attn:attention"}, tdir)
+        finally:
+            B.SERVER_CALL_COPY_MAX = old
+        with open(os.path.join(tdir, "run", "server_calls.json")) as f:
+            call = json.load(f)["calls"][0]
+        self.assertEqual(call["tensors"], os.path.join(self.tmp, "calls", "big.pt"))
+        self.assertFalse(os.path.exists(os.path.join(tdir, "run", "server_calls")))
+        self.assertEqual(se["server_evidence"]["calls_referenced_in_place"], 1)
+        # leg_runner resolves it with os.path.join(task, tensors): absolute wins
+        self.assertEqual(os.path.join(tdir, call["tensors"]), call["tensors"])
+        doc["variants"][0]["tensors"] = "calls/small.pt"
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        B.server_evidence(self.eval, {"kernels": ["_attn_kernel"],
+                                      "target_callable": "sglang.attn:attention"}, tdir)
+        with open(os.path.join(tdir, "run", "server_calls.json")) as f:
+            call = json.load(f)["calls"][0]
+        self.assertEqual(call["tensors"], os.path.join("run", "server_calls", call["id"] + ".pt"))
+
     def test_explicit_preimports_win_and_no_evidence_is_reported(self):
         import build_task_plan as B
         tdir = os.path.join(self.eval, "tasks", "attn")
