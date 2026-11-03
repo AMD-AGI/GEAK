@@ -335,3 +335,10 @@ def test_a_gain_inside_the_noise_band_is_not_handed_on():
     assert r["status"] == "no_gain" and r["final_overlay"] == "" and not r["accepted"]
     assert r["validation"]["noise_band_pct"] == 0.5 and "within the noise band 0.5%" in r["validation"]["reason"]
     assert run("accept")["result"]["status"] == "accepted"                          # +2.5% clears it
+
+
+def test_a_hand_assembled_prepare_delivery_still_counts():
+    # c28 E10: node was not on PATH, the skill could not run its packer and put the passing UT on the entry itself
+    out = run("agentx_flat")
+    assert "kf:kernel-extract prepare c1 (retry)" not in labels(out)
+    assert f"{KF}/tasks/c1" in [w["kernel_path"] for w in out["workflows"]]
