@@ -338,8 +338,13 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
                 raise               # run_e2e's SIGTERM handler: flush and exit, do not start the main run
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
-            summary["error"] = f"{type(e).__name__}: {e}"[:2000]
             wf = _unwrap(_read_json(kf_dir / "workflow_return.json"))
+            if type(e).__name__ == "WorkflowParseError" and isinstance(wf, dict) and wf.get("status"):
+                # The driver wrote the full return to disk and its session ended before the pointer line reached
+                # stdout: the stage finished, nothing failed. Keep a note, not an error.
+                summary["note"] = "return read from workflow_return.json (no pointer line on stdout)"
+            else:
+                summary["error"] = f"{type(e).__name__}: {e}"[:2000]
         finally:
             summary["leftovers"] = stop_leftovers(G, kf_dir)
     elapsed = int(time.time() - t0)
