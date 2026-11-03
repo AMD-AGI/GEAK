@@ -325,3 +325,23 @@ def test_the_driver_prints_a_pointer_and_the_return_is_read_from_disk(tmp_path):
     assert "never print it" in seen["prompt"] and '"workflow_return_json"' in seen["prompt"]
     assert kf["status"] == "accepted" and kf["throughput_speedup"] == 1.03 and "error" not in kf
     assert kf["accepted"] == [{"id": "c1"}] and pa["initial_overlay_pythonpath"] == "/kf/overlay/cand"
+
+
+def test_a_parse_error_with_a_complete_return_on_disk_is_a_note_not_an_error(tmp_path):
+    class WorkflowParseError(RuntimeError):
+        pass
+    for i, (on_disk, is_error) in enumerate(((True, False), (False, True))):
+        pa = ps_args(tmp_path / str(i))
+        kf_dir = Path(kf_stage.kf_dir_for({}, pa))
+
+        def invoke(prompt, timeout_s, eval_dir, ps_args=None, on_disk=on_disk):
+            Path(eval_dir).mkdir(parents=True, exist_ok=True)
+            if on_disk:
+                (Path(eval_dir) / "workflow_return.json").write_text(json.dumps(
+                    {"summary": "x", "result": {"status": "no_gain", "eval_dir": eval_dir}}))
+            raise WorkflowParseError("Could not parse a JSON workflow return")
+        G = {"E2E_SCRIPT": "/main.js", "PROCESS_SAFETY": "SAFE\n", "invoke_workflow": invoke}
+        kf = kf_stage.run_stage({"kernel_fusion": {"budget_s": 600}}, pa, 36000, G)
+        assert ("error" in kf) is is_error and (("note" in kf) is (not is_error))
+        if on_disk:
+            assert kf["status"] == "no_gain" and str(kf_dir) in kf["kf_dir"]
