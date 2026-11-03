@@ -807,7 +807,7 @@ def test_win_gate_lets_a_declared_win_through():
 
 
 @pytest.mark.parametrize("status", ["validated_no_win", "recovered_no_gain",
-                                    "flagged_parity", "flagged_"])
+                                    "flagged_parity", "flagged_", "flagged_no_number_used_carried_ab"])
 def test_win_gate_refuses_a_declared_no_win_however_good_the_ratio(status):
     """The 20260822 gemma-4-26B shape: 1.0215x same-session while measuring 0.9453x against its
     provided baseline. Keying on the ratio alone minted that below-baseline number as champion."""
