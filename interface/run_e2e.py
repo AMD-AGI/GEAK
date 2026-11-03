@@ -123,6 +123,9 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+# Products with a `product:` section in roofline/peaks.md; keep in sync with it
+# and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
+RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
@@ -271,6 +274,26 @@ def _note_session_id(msg: object) -> None:
         _LAST_SDK_SESSION["session_id"] = sid.strip()
 
 
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def _foreground_wait_env() -> dict[str, str]:
+    """Turn Claude Code background tasks off unless the operator chose a value.
+
+    Role agents wait out hour-long serving legs in foreground Bash calls. With
+    background tasks on, Claude Code 2.1.310+ refuses a call that starts with
+    ``sleep N`` (N >= 25) and steers the agent to Monitor/``run_in_background``,
+    whose notification arrives after a workflow agent's turn has ended, and a
+    turn ending is that agent's return.
+
+    Returns:
+        ``{BACKGROUND_TASKS_ENV: "1"}``, or ``{}`` when it is already set.
+    """
+    if BACKGROUND_TASKS_ENV in os.environ:
+        return {}
+    return {BACKGROUND_TASKS_ENV: "1"}
+
+
 def _sdk_child_env() -> dict[str, str]:
     """Build the environment overlay for the Claude Code child process.
 
@@ -296,6 +319,7 @@ def _sdk_child_env() -> dict[str, str]:
     run_mark = os.environ.get(RUN_MARK_ENV, "")
     if run_mark:
         env[RUN_MARK_ENV] = run_mark
+    env.update(_foreground_wait_env())
     return env
 
 
@@ -512,7 +536,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. A bare gfx1201 remains product
-    `unknown`; only exact R9700 detection produces target `r9700`.
+    `unknown`; exact R9700 and R9600D detection produces the corresponding
+    product target without establishing serving-policy qualification.
     """
     explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
     explicit_target = str(h.get("expected_target") or "").strip().lower()
@@ -523,12 +548,12 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in {"r9700", "unknown"}:
+        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
             )
-        if explicit_target == "r9700" and explicit_gfx != "gfx1201":
-            raise ValueError("expected_target=r9700 requires expected_gfx=gfx1201")
+        if explicit_target in RDNA4_SERVING_PRODUCTS and explicit_gfx != "gfx1201":
+            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
         return {
             "gfx": explicit_gfx,
             "target": explicit_target,
@@ -565,10 +590,10 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in {"r9700", "unknown"}:
+    if target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target == "r9700" and gfx != "gfx1201":
-        raise RuntimeError("GPU identity probe returned r9700 on a non-gfx1201 ISA")
+    if target in RDNA4_SERVING_PRODUCTS and gfx != "gfx1201":
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
     return {
         "gfx": gfx,
         "target": target,
@@ -695,7 +720,7 @@ def map_args(
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
+            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
@@ -2547,8 +2572,8 @@ def _invoke_via_runtime(
     # the wrapper a margin so a graceful finalize is never killed prematurely.
     wrap_timeout = (timeout_s + 900) if timeout_s else None
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
-        text=True, timeout=wrap_timeout,
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ, **_foreground_wait_env()),
+        capture_output=True, text=True, timeout=wrap_timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(

@@ -121,16 +121,18 @@ const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
-const R9700_E2E = EXPECTED_TARGET === 'r9700';
+// Products with a `product:` section in roofline/peaks.md; keep in sync with it.
+const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
+const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
 // ISA isolation and product policy are intentionally separate. Any gfx1201
-// target must avoid CDNA priors, but only exact R9700 identity selects its
+// target must avoid CDNA priors, but only an exact product identity selects its
 // calibrated peaks, serving backend, and image policy.
 const RDNA4_ISOLATE = RDNA4_ISA;
 const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
@@ -265,17 +267,18 @@ if (MODEL_PATH && (!EXPECTED_GFX || !EXPECTED_TARGET)) {
     'E2E serving requires structured GPU identity before policy selection: pass expected_gfx and ' +
     'expected_target (run interface/run_e2e.py for auto-detection).');
 }
-if (MODEL_PATH && RDNA4_ISA && !R9700_E2E) {
+if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
   throw new Error(
-    'gfx1201 architecture detected but the product is not confirmed as r9700; refusing R9700-only ' +
-    'serving policy for an unknown gfx1201 product.');
+    'gfx1201 architecture detected but the product is not confirmed as one of ' +
+    `${RDNA4_SERVING_PRODUCTS.join('/')}; refusing the product-scoped serving ` +
+    'policy for an unknown gfx1201 product.');
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : (R9700_E2E ? 'vllm' : 'sglang')).trim()
-  || (R9700_E2E ? 'vllm' : 'sglang');  // serving adapter
-if (R9700_E2E && BACKEND !== 'vllm') {
-  throw new Error(`R9700 E2E is vLLM-only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm`);
+const BACKEND = String(A.backend != null ? A.backend : (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang')).trim()
+  || (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang');  // serving adapter
+if (RDNA4_PRODUCT_E2E && BACKEND !== 'vllm') {
+  throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
 }
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
@@ -2079,6 +2082,9 @@ const AGENT_TIMEOUT_RETRY = String(A.agent_timeout_retry != null ? A.agent_timeo
 // serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
 // one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
 // mid-measurement — an hour of budget and a booted server lost per role that learns it.
+// The wait rule never starts a command with `sleep`: with background tasks on, Claude Code 2.1.310+
+// refuses a leading `sleep` of 25s or more and offers Monitor, whose notification a role agent never
+// sees — its turn ending is its return. run_e2e.py also turns background tasks off for the same reason.
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -2099,12 +2105,17 @@ Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mod
 tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
 server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
 was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
-Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then wait on its log:
     cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
     # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
-Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
-you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
-the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
+Then wait in SEPARATE foreground calls, each a bounded loop that checks BEFORE it sleeps and ends inside
+the timeout you give that Bash call (the tool caps it at BASH_MAX_TIMEOUT_MS, 10 min by default):
+    timeout 540 bash -c 'until [ -s <leg_dir>/bench_summary.json ]; do sleep 30; done'; tail -5 run_bench.out
+Never START a command with a \`sleep\` (Claude Code refuses one of 25s or more), and never wait by ending
+your turn: your turn ending IS your return, so a Monitor, background-watcher or \`run_in_background\`
+notification lands after you are gone. Keep waiting until the summary lands or the leg is provably dead.
+Before you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and
+whether the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 
 ## ONCE THE FINAL PHASE STARTS, IT OWNS THE GPUS
 When \$EVAL_DIR/.final_phase_fence exists the search is over: the workflow stopped every leg, tuner and
