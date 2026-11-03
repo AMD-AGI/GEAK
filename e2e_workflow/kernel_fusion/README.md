@@ -48,6 +48,7 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `baseline_mode` | `GEAK_KF_BASELINE_MODE` | `isolated_server` | lifecycle of the stage's baseline: one fresh server, one timed round, no discarded warmup round |
 | `implementable_levels` | `GEAK_KF_IMPLEMENTABLE_LEVELS` | `L1,L2,L3` | fusion levels the analysis may recommend and the triage may author (all levels are still ranked) |
 | `unsupported_patterns` | `GEAK_KF_UNSUPPORTED_PATTERNS` | L3 MegaKernel (e.g. MegaMoE), L4 MonoKernel | patterns inside those levels that are ranked but not recommended or authored |
+| `accuracy_confirm_limit` | `GEAK_KF_ACCURACY_CONFIRM_LIMIT` | 1319 (full gsm8k test set) | when the fused stack misses the gsm8k gate on the 200-question sample, both sides are re-scored on this many questions and that result decides; the per-kernel screen (only if it still fails) uses it too |
 | `min_gain_pct` | `GEAK_KF_MIN_GAIN_PCT` | 0.5 | the combined A/B hands the overlay on only when its gain exceeds max(measured noise band, this) |
 | `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 1 | measurement mode / replicas of the combined A/B (one A/B) |
 | `task` | `GEAK_KF_TASK` | — | operator constraints appended to every agent prompt (e.g. directories it must not read) |
