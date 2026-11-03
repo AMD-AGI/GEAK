@@ -143,6 +143,16 @@ if err="$(detect_from_rocminfo gfx1200 2>&1)"; then
 fi
 [[ "$err" == *"E_ARCH_UNVALIDATED"* ]] || fail "rocminfo gfx1200 stderr missing E_ARCH_UNVALIDATED (got: $err)"
 
+# An identified ISA without a GEAK image policy is refused, not sent to MI355.
+for spec in 'gfx1151|AMD Radeon 8060S Graphics|40' 'gfx1101|AMD Radeon Pro W7700|48' 'gfx1030|AMD Radeon PRO W6800|60'; do
+  IFS='|' read -r gfx product cu <<<"$spec"
+  err=""
+  if err="$(detect_from_rocminfo "$gfx" '' "$product" "$cu" 2>&1)"; then
+    fail "$gfx must not resolve to an image bucket (got $err)"
+  fi
+  [[ "$err" == *"E_ARCH_UNSUPPORTED"* ]] || fail "$gfx stderr missing E_ARCH_UNSUPPORTED (got: $err)"
+done
+
 got="$(detect_from_rocminfo gfx942)" || fail "rocminfo gfx942"
 [ "$got" = "MI300" ] || fail "rocminfo gfx942 -> MI300 (got $got)"
 

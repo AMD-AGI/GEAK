@@ -225,6 +225,7 @@ pick_account() {
 # Returns MI355 (gfx950 / MI35x), MI300 (gfx942/gfx90a / MI30x), R9700 only
 # for the exact validated Radeon AI PRO R9700 product, or gfx1201 when only the
 # ISA is known. A bare gfx1201/RDNA4 override never proves the product.
+# Any other identified ISA has no image policy and is refused.
 # Missing identity keeps the historical MI355 SPUR default unless R9700 was
 # explicitly requested, in which case detection fails closed.
 # resolve_image runs on the compute-node host, before the container starts.
@@ -314,8 +315,12 @@ detect_gpu_arch() {
       echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
       return 1
       ;;
+    "")
+      echo "$GEAK_GPU_ARCH_DEFAULT"   # no identity probe on this host: config.sh default (this cluster = gfx950)
+      ;;
     *)
-      echo "$GEAK_GPU_ARCH_DEFAULT"   # config.sh default (this cluster = gfx950)
+      echo "E_ARCH_UNSUPPORTED: structured rocminfo identity reported '$gfx', which has no GEAK image policy; refusing the $GEAK_GPU_ARCH_DEFAULT default" >&2
+      return 1
       ;;
   esac
 }
