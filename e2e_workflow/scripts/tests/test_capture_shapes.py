@@ -100,6 +100,7 @@ def _reset_state(mod):
         share_min_bytes=16 << 20, shared_tensors={}, shared_bytes_est=0,
         oracle_bytes_est=0, budget_exceeded=False,
         budget_skip_count=0, oracle_save_count=0, meta_flush_count=0,
+        compiled_passthrough_calls=0,
     )
 
 
@@ -418,6 +419,7 @@ class TestWrapperRecording(_RecorderTestCase):
             self.assertIs(cs._wrapper(argument, option=option), result)
             original.assert_called_once_with(argument, option=option)
             is_compiling.assert_called_once_with()
+            self.assertEqual(cs._STATE["compiled_passthrough_calls"], 1)
             self.assertEqual(cs._STATE["calls"], 0)
             self.assertEqual(cs._STATE["records"], [])
             self.assertEqual(cs._STATE["shape_counts"], {})
@@ -713,6 +715,21 @@ class TestFlush(_RecorderTestCase):
             cs._flush()
         self.assertIn("nothing to flush", err.getvalue())
         self.assertEqual(os.listdir(self.out_dir), [])
+
+    def test_a_capture_that_only_passed_compiled_calls_through_still_writes_meta(self):
+        mod, _ = self._hook()
+        with patch.dict(cs._STATE, is_compiling=lambda: True), _stderr():
+            mod.op(FakeTensor((4, 8)))
+            mod.op(FakeTensor((4, 8)))
+            cs._flush()
+        meta = self._meta()
+        self.assertEqual(meta["total_calls_observed"], 0)
+        self.assertEqual(meta["compiled_passthrough_calls"], 2)
+        self.assertEqual(meta["num_cases"], 0)
+        self.assertEqual(meta["module"], "fake_serving_layer")
+        self.assertEqual(meta["attr"], "op")
+        self.assertFalse(os.path.exists(os.path.join(self.out_dir, "reference_io.pt")))
+        self.assertEqual(self.torch.saved, [])
 
     def test_periodic_flush_lands_a_usable_capture_before_atexit(self):
         # An OOM/SIGKILL never fires atexit, so a small workload must already be on disk.
