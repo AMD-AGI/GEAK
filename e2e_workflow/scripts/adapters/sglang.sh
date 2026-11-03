@@ -97,7 +97,20 @@ adapter_profile_window() {
   local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    if [ "$after" -gt "$before" ]; then
+      # The file appears before the async save finishes; wait until it parses.
+      local f done_by=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+      f=$(ls -t "$PROFILE_DIR"/*.trace.json* 2>/dev/null | head -1)
+      while [ "$(date +%s)" -lt "$done_by" ]; do
+        case "$f" in
+          *.gz) gzip -t "$f" 2>/dev/null && return 0 ;;
+          *) python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null && return 0 ;;
+        esac
+        sleep 3
+      done
+      echo "!!! trace $f still incomplete after ${PROFILE_WINDOW_TIMEOUT:-180}s" >&2
+      return 1
+    fi
     sleep 3
   done
   # num_steps may not be honored on some builds — force a stop and re-check

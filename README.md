@@ -46,7 +46,7 @@ optimize a single kernel.
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or a **Radeon AI PRO R9700** (validated RDNA4/gfx1201 product), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`; RDNA4 PMCs may be sparse — kernel-trace still counts), Python 3.8+.
-- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 is vLLM-only) and the model weights on disk.
+- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 runs `vllm` or `sglang`, other RDNA4 products are vLLM-only) and the model weights on disk.
 
 > **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
 > need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
