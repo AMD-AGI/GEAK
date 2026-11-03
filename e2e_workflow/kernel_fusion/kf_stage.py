@@ -232,9 +232,10 @@ def build_prompt(G: dict, args: dict) -> str:
         "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a JSON-encoded string, and copy it EXACTLY: "
         "every key and every element, nothing shortened or omitted (kf_topk / kf_reuse are data the stage consumes).\n"
         "This is the GEAK KernelFusion stage (Setup -> Trace -> TopK -> Author -> ApplyBack). When the tool "
-        f'returns, write its full return value to "{ret}" with the Write tool if that file does not exist, '
-        "then print EXACTLY ONE final line of compact JSON that is the Workflow tool's full return value. "
-        "Print nothing after the JSON line. If the Workflow tool fails, do NOT edit any file, fix the script or "
+        f'returns, write its full return value to "{ret}" with the Write tool (it is large: never print it), '
+        "then print EXACTLY ONE final line of compact JSON, this pointer and nothing else: "
+        + json.dumps({"eval_dir": args["kf_dir"], "workflow_return_json": ret, "status": "<the return's status>"})
+        + "\nPrint nothing after that line. If the Workflow tool fails, do NOT edit any file, fix the script or "
         "launch it again: print the error and stop (the caller records it and continues)."
     )
 
@@ -326,6 +327,10 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
         kf_dir.mkdir(parents=True, exist_ok=True)
         try:
             wf = _invoke(G, args, budget)
+            if not isinstance(wf, dict) or "workflow_return_json" in wf or "status" not in wf:
+                # The driver prints a pointer line; the return itself lives in the file it wrote. (Echoing a
+                # 40 KB return as one stdout line was the step that failed: WorkflowParseError.)
+                wf = _unwrap(_read_json(kf_dir / "workflow_return.json")) or wf
         except BaseException as e:  # the stage must never take the main run down
             if isinstance(e, TimeoutError) and str(e).startswith("signal "):
                 raise               # run_e2e's SIGTERM handler: flush and exit, do not start the main run
