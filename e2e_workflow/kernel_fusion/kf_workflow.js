@@ -295,7 +295,8 @@ const PICK_SCHEMA = obj({ selected: { type: 'array', items: obj({ id: { type: 's
 const AUTHOR_SCHEMA = obj({ final_patch: { type: 'string' }, work_dir: { type: 'string' },
   overlay_dir: { type: 'string' }, banner: { type: 'string' },
   isolated_speedup: { type: 'number' }, correctness: { type: 'string' }, launches_after: { type: 'number' },
-  ut_command: { type: 'string' }, notes: { type: 'string' } }, ['final_patch', 'isolated_speedup', 'correctness']);
+  ut_command: { type: 'string' }, engaged_envelope: { type: 'string' }, notes: { type: 'string' } },
+  ['final_patch', 'isolated_speedup', 'correctness']);
 const VALIDATE_SCHEMA = obj({ validation_status: { type: 'string' }, throughput_speedup: { type: 'number' },
   director_verified_throughput_tok_s: { type: 'number' }, output_parity: { type: 'string' }, notes: { type: 'string' } },
   ['validation_status']);
@@ -600,7 +601,11 @@ const FUSION_UT_CONTRACT = 'FUSION UT CONTRACT -- this task exists so that the n
   '(4) The negative control mutates the OUTPUT of the kernel_src seam implementation (e.g. perturb what the host ' +
   'function returns or writes), so it still triggers after the members are fused away. ' +
   '(5) Time one call of the whole seam per case (launch overhead included) -- the win of a fusion is fewer ' +
-  'launches and fewer HBM round-trips. Record "fusion_contract": true in meta.json. ';
+  'launches and fewer HBM round-trips. ' +
+  '(6) The cases cover EVERY phase in which the live server calls the seam (prefill / extend chunks of every served ' +
+  'width, decode, target verify, draft), each with its served shapes and weight -- not only the phase the region was ' +
+  'found in: a fused kernel that wins at verify rows can lose badly at prefill widths. Record "fusion_contract": true ' +
+  'in meta.json. ';
 const PREPARE_INTRO = 'Explicit user scope (overrides the default selection): build exactly ONE task for the single ' +
   'entry of FUSION_SCOPE, named by its `task`. The entry is a FUSION REGION: declare its device_kernels as one joint ' +
   'boundary (joint_ut.phases) owned by that task, reached through the entry\'s seam (or the narrowest enclosing live ' +
@@ -708,13 +713,17 @@ iterate and measure as you see fit, and deliver three things:
    Time it on the shapes the server actually runs: the prepared UT's cases and weights may not match serving, so
    check them against the served distribution (WORKLOAD_SUMMARY=${workloadJson || '(none: derive it from the baseline server log)'}
    and the region's phases / m_range), add every served shape with real weight that the UT lacks, and weight the
-   speedup by each shape's served share. Report the per-shape times.
+   speedup by each shape's served share. Report the per-shape times. Cover EVERY phase in which the server calls
+   the seam (prefill / extend chunks of every served width, decode, target verify, draft): find them from the trace
+   digest's step kinds and the source, not only from the region's listed phases.
 3. The overlay that puts it in the server: ${work}/overlay/sitecustomize.py (the dir goes first on the server's
    PYTHONPATH). sitecustomize runs in EVERY Python process the server spawns (each rank, tokenizer, detokenizer,
    tools): at its top level import only the standard library -- torch / triton / the op libraries and your kernel
    module are imported inside the hook, when it fires. Patch the seam lazily -- after its module is first imported,
-   never by importing it eagerly -- fall
-   back to the stock path whenever the inputs do not match what the kernel supports, and print
+   never by importing it eagerly -- and GUARD it: call the fused kernel only inside the envelope your unit test
+   measured it correct AND faster in (phase, row count / M range, dtypes, shapes); every other call -- another
+   phase, a larger M such as a prefill chunk, a batch size you did not time, inputs it does not support -- goes to
+   the stock path. State that envelope in the return as engaged_envelope. Print
    "[kf-${short}] ENGAGED" to stderr once, the first time the patched path actually runs. It must survive graph
    capture.${GRAPH_REQ}
 
@@ -724,11 +733,12 @@ ${work}/final_patch.diff and return JSON {"final_patch": "${work}/final_patch.di
 whether or not it beats stock -- the next step judges it) or "" if you have no correct kernel, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner": "[kf-${short}] ENGAGED",
 "isolated_speedup": <stock region time / fused time, graph replay, weighted by served share>, "correctness":
 "pass" | "fail", "launches_after": <kernel launches of the fused region>, "ut_command": "<how you ran the test>",
+"engaged_envelope": "<phases and M / shape ranges the overlay sends to the fused kernel; all else stock>",
 "notes": "<design and per-case measurements>"}.`
     + (KF_TASK ? `\n\n## Operator constraints\n${KF_TASK}` : ''),
     { phase: 'Author', label: `kf:author ${short}`, schema: AUTHOR_SCHEMA });
   const kl = au ? { eval_dir: work, final_patch: au.correctness === 'pass' ? au.final_patch || '' : '',
-    overlay_dir: au.overlay_dir || '', banner: au.banner || '',
+    overlay_dir: au.overlay_dir || '', banner: au.banner || '', envelope: au.engaged_envelope || '',
     final_geomean: au.isolated_speedup || 0, validation_status: au.correctness, reason: au.notes || '' }
     : { validation_status: 'error', reason: 'author agent returned nothing' };
   const iso = kl ? (kl.final_weighted != null ? kl.final_weighted : kl.final_geomean) : 0;
@@ -757,7 +767,8 @@ phase('ApplyBack');
 const utView = (r) => ({ id: r.c.id, level: r.c.level, region: r.c.region, phases: r.c.phases || [],
   seam: seamOf(r.c), exclusive_with: r.c.exclusive_with || [], region_pct_device_time: r.c.region_pct_device_time || 0,
   est_gain_pct_expected: r.c.est_gain_pct_expected || 0, ut_correctness: r.kl.validation_status,
-  isolated_speedup: r.iso, launches_before: r.c.launches_before || (r.c.kernels || []).length,
+  isolated_speedup: r.iso, engaged_envelope: r.kl.envelope || '(not stated)',
+  launches_before: r.c.launches_before || (r.c.kernels || []).length,
   final_patch: r.kl.final_patch, author_notes: String(r.kl.reason || '').slice(0, 3000) });
 let winners = [];
 if (ready.length && want('apply') && !DEADLINE_HIT) {

@@ -354,3 +354,15 @@ def test_a_stack_that_misses_the_sampled_gsm8k_is_confirmed_on_the_full_set_befo
     assert "decide the accuracy gate on that result alone" in integ
     # only a miss on the full set reaches the per-kernel screen, which is judged on the full set too
     assert "ACCURACY_LIMIT: 1319" in by["kf:integrate screen"]
+
+
+def test_fused_kernels_are_guarded_to_their_measured_envelope_and_uts_cover_every_live_phase():
+    # c28 C1: 1.54x in a verify-only UT, -8% P90 / -15% throughput live (it also took the prefill chunks)
+    out = run("agentx")
+    au = next(c["prompt"] for c in out["calls"] if c["label"].startswith("kf:author "))
+    assert "GUARD it: call the fused kernel only inside the envelope" in au and "engaged_envelope" in au
+    assert "a larger M such as a prefill chunk" in au and "Cover EVERY phase in which the server calls" in au
+    preps = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:kernel-extract prepare")]
+    assert preps and all("(6) The cases cover EVERY phase" in p for p in preps)
+    sel = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:select")
+    assert "engaged_envelope" in sel

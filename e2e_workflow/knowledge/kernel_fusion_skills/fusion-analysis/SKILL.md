@@ -150,7 +150,9 @@ Record for each candidate:
 - producer-consumer and communication overlap opportunities;
 - why this scope beats a smaller one, and why it should not be larger;
 - occurrences (per layer, per step, which layers);
-- applicable shapes and M range;
+- applicable shapes and M range, and every phase in which the live server calls the seam (prefill / extend
+  chunks, decode, verify, draft) -- not only the phase the region was found in, since the fused kernel either
+  serves those calls too or must be guarded off them;
 - launch count before and after;
 - the source location as `module.function`, and the seam: the entry point where the original call is
   replaced by the fused kernel, specific enough to write a monkeypatch overlay against;
