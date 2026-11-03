@@ -228,8 +228,8 @@ denominator.
    directly with the task's numeric reference. Candidate-vs-floor,
    drain-vs-floor, a triangle-bound estimate, or accuracy inherited from another HEAD is not
    evidence. When `GRAPH_CONTRACT_TOOL` is non-empty, run it from the candidate environment in one
-   EP8 lease:
-   `torchrun --standalone --nproc_per_node=8 GRAPH_CONTRACT_TOOL --candidate-tree "$WS"
+   lease of the operator's rank count (the `--nproc_per_node` of the COMMANDMENT correctness entry):
+   `torchrun --standalone --nproc_per_node=<that rank count> GRAPH_CONTRACT_TOOL --candidate-tree "$WS"
    --runtime-file EXPERT_SKILL_RUNTIME_FILE
    --accuracy-cases <REQUIRED_ACCURACY_CASES> --liveness-cases <REQUIRED_ACCURACY_CASES>
    --routes uniform,rank-mixed-skew --replays <GRAPH_CONTRACT_REPLAYS>
