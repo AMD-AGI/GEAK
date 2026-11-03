@@ -140,6 +140,11 @@ def task_rows(eval_dir, only=None):
         rows.append({"label": t["label"], "task_dir": t["task_dir"], "family": t.get("ut_family"),
                      "need": int(req.get("required_gpu_count") or 1), "cost": round(cost, 1)})
     rows.sort(key=lambda r: -r["cost"])
+    # UT_WAVE_ORDER: an explicit priority (comma list of labels, e.g. by workload share) that
+    # replaces the cost order for the labels it names; unnamed tasks keep cost order after them
+    order = [x for x in os.environ.get("UT_WAVE_ORDER", "").split(",") if x]
+    if order:
+        rows.sort(key=lambda r: order.index(r["label"]) if r["label"] in order else len(order))
     return rows
 
 
@@ -223,7 +228,8 @@ class Docker(object):
         self.base, self.step = render_base, render_step
 
     def cname(self, name):
-        return ("ut_lane_%s" % name)[:120]
+        # UT_WAVE_CONTAINER_PREFIX: a campaign's own container naming rule (default ut_lane_)
+        return (os.environ.get("UT_WAVE_CONTAINER_PREFIX", "ut_lane_") + name)[:120]
 
     def start(self, name, gpus, argv, env):
         c = self.cname(name)
@@ -232,6 +238,10 @@ class Docker(object):
                "--device", "/dev/kfd", "--group-add", "video", "--cap-add", "SYS_PTRACE",
                "--security-opt", "seccomp=unconfined", "--shm-size", "32g",
                "-v", "/shared_nfs:/shared_nfs"]
+        # UT_WAVE_DOCKER_EXTRA: extra docker args (mounts the runner needs, e.g. its binary and
+        # credential file outside /shared_nfs, model caches); never device or GPU options
+        import shlex
+        cmd += shlex.split(os.environ.get("UT_WAVE_DOCKER_EXTRA", ""))
         for g in gpus:
             node = "/dev/dri/renderD%d" % (self.base + self.step * g)
             if not os.path.exists(node):

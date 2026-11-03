@@ -1,7 +1,7 @@
 {
   "file_count": 97,
   "files": {
-    "PROVENANCE.json": "18fe0d7175b3d152db1098ca9d9127079f4b81db72e7a094da8f79366ae1e7f5",
+    "PROVENANCE.json": "35c227baaae7947c3172f7a2ede5f3ebec5cc2d9a89a9cf4438534b3ef8bd83e",
     "SKILL.md": "074f65e1c795547e167ef118944b62645404d4c5e1dba07ef28e532ff2b4ed60",
     "references/capture.md": "f0dabdade2fbcf889ab714716fbb6514d516de554e046e68dab144c36d06da07",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -36,11 +36,11 @@
     "scripts/select_targets.py": "dea019a7796eb30d461a246840dc9b168d9f35050e83a51ac8ef3e41cc269658",
     "scripts/selftest_structure_only.py": "60beb4001167c11957a44bc19e61f9b34e1e22bcfe68a8285f5b6afb56eb5d9e",
     "scripts/serving_probe.py": "a85e07006722e429b4b01a632789343f618d67f76b05d5a68ee2e46042b0f2e8",
-    "scripts/source_map.py": "a368e3a33fc8737b6e4a4a55d14e7c8ff012871ddd15f06d6fc70512eee1be37",
+    "scripts/source_map.py": "daa119b7b8c4a680e0d064cfa51727791ae07c810d305a81b35a7fc36bb05b64",
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
-    "scripts/ut_wave.py": "a93dfb5fdfdcca90abb3a433a95e17c7e4025de35bdadeb40ea0746ab68b6c40",
+    "scripts/ut_wave.py": "e0a020f8c050b8b8b29994cba8b55ad280956fc3cc9dc6dd8ee8b37af777448c",
     "shared/capture_shapes.py": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
-    "shared/compile_watch.py": "9940c848e14a0ad8f0d83c364393f3c5cbccfb6347e29d58beecacbbf3069a61",
+    "shared/compile_watch.py": "b64337b099635180adcf31edf4942edf44c3d844e15d238b1713411896eb5c38",
     "shared/delivery_contract.mjs": "3068cfb994196f61ce15a00272ba6c244673c1d98d4a16374383c74cc563f412",
     "shared/gpu_lock.sh": "b51f99375c738ba9ebbcfb6d249c4149e27ef5dd1e75dcdcf344a205703ab0bd",
     "shared/gpu_lock_set.py": "a58da03c3a91ff566a6d83531b61a657985c3cd5d3bb0bfea87c48d4b97821ac",
@@ -56,7 +56,7 @@
     "shared/tests/kernel_symbols.json": "c26f21dcc31f5e668461ee8423b225c8d61236b7f15a2adf816dc6968a400a10",
     "shared/tests/test_capture_shapes.py": "0ba60e2e25fc965806a967b42c498edab29021f7fb842b53ec9f8ae290a9a0ed",
     "shared/tests/test_compile_watch.py": "8dc4c7d9f6d5a383277f466ca03931395e772521027d078903e166b6fa841898",
-    "shared/tests/test_compile_watch_bulk.py": "50c0365dcea8025fa5c8cb62e9f6d7bd6f253d9b9bcadd9f3d0fc6b3e9be1134",
+    "shared/tests/test_compile_watch_bulk.py": "91c14e6f7939a9200100806e900d431e4ed1891f8b3f0b02abc09f9bbb1a85e9",
     "shared/tests/test_harness_lib.py": "2c1f9a8fe35c4c90afb793d90ecce52d44a3f7dc9f0d511419179324eb9fa799",
     "shared/tests/test_kernel_extract_gpu_isolation.py": "9a938c549de76ea4f000372cda8c0ee30684e346424aa4d6331f40ee34da58b4",
     "shared/tests/test_kernel_extract_targets.py": "b46835fb909b2d7bbff5ec5274da1fe64b98a96d8a07a0c482c913d919b0516a",
@@ -100,9 +100,9 @@
     "ut_contracts/ut_driver.py": "f8fa5adc957e77fb8350c9e09f9a5e5715127f6af174b595ae86dae6484afe3d"
   },
   "modified_from_origin": false,
-  "note": "geak-x-multicfg: multi-config UT (per-config planning, config_id, config_weighting calls|time) and server calls without bulk payload or tensor files (structural tensors inline in server_calls.json, bulk sampled and redrawn from a seed; large legacy calls referenced, not copied). Single-config tasks unchanged. Differences recorded in PROVENANCE.json.",
+  "note": "geak-x-multiconfig: multi-config UT (per-config planning, config_id, config_weighting calls|time), server calls without bulk payload or tensor files, and the reviewed live-run fixes of the 2026-11-02 Muse Spark campaign (source_map editable paths, ut_wave order/naming/mount knobs, compile_watch sample bounds). Single-config tasks unchanged. Differences recorded in PROVENANCE.json.",
   "origin": "AMD-AGI/GEAK geak-x@b68537d:workload/stages/profile/kernel-extract",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "8fb5e089a1477f4a1eff07c08973ae5343d74d013867a1fcaffaae816ac575d8"
+  "tree_sha256": "86385a0856e2cfab2caf82311ae400486ae9a87563cd1c8aaaf1e32c343cfdb3"
 }
