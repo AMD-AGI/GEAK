@@ -355,13 +355,44 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
 // waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
 // the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
-// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%): a trace
-// replay's paired validation is two ~70min legs plus their boots, which 20% of most budgets cannot hold.
+// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%).
 const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
   parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
+// A trace replay's final phase (Finalize's search leg, Validate's canonical legs, 40min for the rest)
+// outranks a smaller reserve and the cap. Read from raw args: it must resolve AgentX as IS_AGENTX does.
+const RESERVE_WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
+  ? A.workload_spec
+  : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
+      A.state?.workload_spec?.kind === 'agentx_trace_replay'
+    ? A.state.workload_spec : {});
+const RESERVE_IS_AGENTX =
+  String(A.workload_kind || RESERVE_WORKLOAD_SPEC.kind || 'synthetic') === 'agentx_trace_replay';
+const AGENTX_LEG_OVERHEAD_S = Math.max(0,
+  parseInt(A.agentx_leg_overhead_s != null ? A.agentx_leg_overhead_s : 1200, 10) || 0);
+const agentxLegS = (windowS) => windowS + AGENTX_LEG_OVERHEAD_S;
+const _declaredWindowS = (v, dflt) => (Number(v) > 0 ? Number(v) : dflt);
+const RESERVE_DURATION_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600);
+const RESERVE_LOOP_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900);
+const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'warm_server') === 'warm_server'
+  ? 1 : Math.max(1, parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10) || 1));
+const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (2400 + agentxLegS(RESERVE_LOOP_S) + AGENTX_VALIDATION_LEGS * agentxLegS(RESERVE_DURATION_S));
+// Validate's timed windows alone: the least time in which it can return a number.
+const AGENTX_VALIDATE_WINDOWS_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * AGENTX_VALIDATION_LEGS * RESERVE_DURATION_S;
+// The run's minimum: Setup's leg (+10min), the KB warm start's A/B, then the final phase.
+const AGENTX_AB_OVERHEAD_S = 600;   // the integrator's work around an A/B's legs
+const AGENTX_PRE_FINAL_MIN_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (600 + agentxLegS(RESERVE_DURATION_S) + 2 * agentxLegS(RESERVE_LOOP_S) + AGENTX_AB_OVERHEAD_S);
+const AGENTX_MIN_BUDGET_MS = AGENTX_PRE_FINAL_MIN_MS + AGENTX_FINAL_PHASE_MS;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
-  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
-             Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
+  ? (() => {
+    const configured = Math.min(
+      parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
+      Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC));
+    return RESERVE_IS_AGENTX
+      ? Math.max(configured, Math.min(AGENTX_FINAL_PHASE_MS, TIME_BUDGET_MS - AGENTX_PRE_FINAL_MIN_MS))
+      : configured;
+  })()
   : null;
 // Effective budget = budget minus the reserve: one definition of time available to optimize.
 const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
@@ -375,6 +406,14 @@ const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s 
 // because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
 const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
+if (RESERVE_IS_AGENTX && TIME_BUDGET_MS != null) {
+  log(`[time-budget] trace replay: final phase ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min, reserving ` +
+    `${Math.round(FINAL_RESERVE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min; the run's minimum ` +
+    `is ~${Math.round(AGENTX_MIN_BUDGET_MS / 60000)}min.` +
+    (TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS
+      ? ' WARNING: the budget is under it, so this run may not return a validated gain — raise time_budget_s.'
+      : ''));
+}
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -1199,7 +1238,8 @@ const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
 // One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), because
 // a cache-cold search number and a cache-warm validation number are not comparable and the gains
 // carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
-// leg, round 1 a full warmup that is discarded, round 2 IS the number.
+// leg, round 1 a full warmup that is discarded, round 2 IS the number. A trace replay has no outer
+// round: the replay warms each lane itself.
 // isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
 // what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
 const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
@@ -1901,6 +1941,38 @@ measurement duration. Consequences you must respect:
   A/B comparison — both legs deviate identically. It does mean a search-leg number may never be
   reported as a submittable result.
 `;
+}
+
+// The reserve holds ONE search leg for Finalize, and a search-leg claim is no yardstick for Validate's
+// legs (a claim equal to the baseline is canonical). Both are '' off a trace replay.
+function agentxFinalizeNote() {
+  if (!IS_AGENTX) return '';
+  return ` On this trace replay the final bench of step 2 is ONE leg on the ${AGENTX.geak_loop_duration_s}s ` +
+    `search window. Do NOT also bench the bundle on the ${AGENTX.duration_s}s canonical window: Validate ` +
+    'measures the stock and the final stack there right after this phase, and the final reserve holds time ' +
+    "for those legs only. Return the search leg's median as final_throughput_tok_s and say in note that it " +
+    'is a search-window number. Omit throughput_speedup: BASELINE_THROUGHPUT was measured on the canonical ' +
+    'window, so the ratio of the two is not a speedup.';
+}
+function agentxClaimNote(claimed, baseline) {
+  if (!IS_AGENTX || !(claimed > 0) || claimed === baseline) return '';
+  return ` On this trace replay CLAIMED_THROUGHPUT comes from ${AGENTX.geak_loop_duration_s}s search legs, ` +
+    `which replay a different, shorter slice of the corpus than your ${AGENTX.duration_s}s legs, so it is ` +
+    'not comparable with your numbers. In step 4 drop both claim conditions (validated_win\'s "within the ' +
+    'noise band of the claim" and flagged\'s "lower than the claim by more than the band") and arbitrate on ' +
+    'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
+    'arbitration_note that it is a search-window number.';
+}
+// Every signal must agree, so no single adoption path can pass a changed bundle off as Setup's.
+function agentxAdoptedNothing(s) {
+  return IS_AGENTX && !!s.setup && s.baseline > 0 && !s.accepted && s.tput === s.baseline
+    && s.flags === s.setup.flags && s.env === s.setup.env && s.overlay === s.setup.overlay;
+}
+// Why a trace replay skips Validate, or '': nothing to compare, or less time than its timed windows.
+function agentxValidateSkip(adoptedNothing, leftMs) {
+  if (!IS_AGENTX) return '';
+  if (adoptedNothing) return 'final_is_baseline';
+  return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
 }
 
 function correctnessEnvBlock(role) {
@@ -2914,7 +2986,8 @@ async function adoptAbandonedVerdict(integ, label) {
   const run = ABANDONED_RUNS.get(label);
   ABANDONED_RUNS.delete(label);
   if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
-  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  const waitMs = remainingMs() - Math.max(Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC)),
+    AGENTX_FINAL_PHASE_MS);
   if (!(waitMs > 0)) return integ;
   log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
     'for its own verdict instead of starting a FINISH retry.');
@@ -2970,6 +3043,11 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
     SPEEDUP_REVIEW: { original_measurement: original, estimate },
   };
   delete reviewInputs.SHARED_REF_MED;
+  // A confirmation abandoned at the boundary confirms nothing.
+  if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {
+    pending.reason = 'speedup_review_inconclusive: deferred, the confirmation A/B cannot finish before the final reserve';
+    return pending;
+  }
   const fresh = await safeAgent(roleAgent('e2e_integrator', 'integrate',
     'Confirm this surprising speedup with ONE independent A/B. Follow FORCE_FRESH_AB in your role: ' +
     'use separate ref/cand artifact directories, preserve the exact candidate and current reference, ' +
@@ -2992,6 +3070,11 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
   return result;
 }
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
+  // Incomplete, so callers keep it PENDING, not rejected.
+  if (abWindowShort(abLegs(inputs), label)) {
+    return { gate: 'incomplete', ab_complete: false,
+      reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
+  }
   // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
   // off / when no tuning was banked).
   const withTuning = {
@@ -3005,6 +3088,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
     if (searchClosed(`${label}: FINISH retry`)) break;
+    if (abWindowShort(1, `${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
@@ -3225,32 +3309,49 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
-// workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
-// existing null-guards treat it as "no kernel" and continue.
+// A nested kernel workflow under the fast-mode cap and a trace replay's reserve bound, else the raw
+// workflow() result. On expiry it resolves null, which callers' null-guards treat as "no kernel".
 // GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
 // before each nested author. A budget the parent cannot enforce on in-flight work is not
 // a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
 // no ablation cap, and then this function behaves exactly as it did pre-patch.
 let ABL_NESTED_CAP_MS = null;
-function fastBoundedWorkflow(ref, wfArgs, label) {
+async function fastBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
   const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
-  const capMs = ablCap != null && fastCap != null ? Math.min(ablCap, fastCap) : (ablCap != null ? ablCap : fastCap);
+  const resCap = laneReserveCapMs();
+  const capMs = [ablCap, fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => {
+    if (capMs === resCap) return logLaneAtReserve(label);
+    log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
+    if (ablCap != null && capMs === ablCap) {
+      ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
+    }
+  });
+}
+// Milestone lanes: the trace-replay reserve bound alone.
+async function reserveBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
+  const capMs = laneReserveCapMs();
+  if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => logLaneAtReserve(label));
+}
+function raceLaneCap(p, capMs, onCap) {
   let to;
   const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-      if (ablCap != null && capMs === ablCap) {
-        ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
-      }
-      resolve(null);
-    }, capMs);
+    to = setTimeout(() => { onCap(); resolve(null); }, capMs);
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
+}
+function logLaneAtReserve(label) {
+  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning (null).`);
 }
 
 // --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) -------------------------------------------
@@ -3326,6 +3427,73 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+// --- TRACE-REPLAY SEARCH vs THE RESERVE ---------------------------------------------------------------
+// Trace-replay lanes and A/Bs start only if they fit before the boundary (inert off AgentX/time_budget_s).
+const AGENTX_LANE_ROUND_S = 3600;    // a lane round in flight at its stop, plus the lane's report
+const AGENTX_EXTRACT_S = 4200;       // kernel extraction (1h10m on GLM-5.2)
+const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
+const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
+// A reused or resumed reference leg is not run again.
+const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
+// A leg timed over several passes costs that many legs (an upper bound under warm_server).
+const agentxAbMs = (legs, passes = 1) =>
+  1000 * (legs * passes * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
+const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
+// need() reads AGENTX, so it runs only once the guard holds.
+function windowShort(need, what, verdict, cost) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = need();
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} ${verdict} — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min ${cost}.`);
+  return true;
+}
+// An A/B that cannot finish is deferred (incomplete, pending), not abandoned mid-leg at the boundary.
+function abWindowShort(legs, what, passes = 1) {
+  return windowShort(() => agentxAbMs(legs, passes), what, 'DEFERRED',
+    `a ${legs}-leg trace-replay A/B${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes`);
+}
+// A lane needs one round before its stop plus the A/B for what it found.
+function laneWindowShort(what) {
+  return windowShort(agentxLaneStartMs, what, 'NOT STARTED', 'a kernel lane and its A/B need');
+}
+// Every search candidate needs kernel extraction and a lane; without both the run ends early.
+function searchWindowShort(what) {
+  return windowShort(() => AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs(), what, 'SKIPPED',
+    'kernel extraction plus one kernel lane and its A/B need. Going straight to Finalize and Validate');
+}
+// kernel_lane.js starts no round after deadline_epoch, so the stop is a lane tail ahead of the boundary;
+// no_stop_s past the window leaves the TechLead free to end it early. No clock (Date.now() breaks
+// resume): ONE `date +%s` read, anchored to ELAPSED_MS; unreadable, only the backstop bounds the lane.
+const CLOCK_SCHEMA = obj({ epoch: { type: 'number' } }, ['epoch']);
+let EPOCH_AT_T0 = null;
+async function epochNow(phaseName) {
+  if (EPOCH_AT_T0 == null) {
+    EPOCH_AT_T0 = safeAgent('Run EXACTLY this command and nothing else:\n```bash\ndate +%s\n```\n' +
+      'Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.',
+      { phase: phaseName, label: 'clock', effort: 'low', schema: CLOCK_SCHEMA }, 1, () => 5 * 60000)
+      .then((r) => (r && Number.isFinite(r.epoch) ? Math.floor(r.epoch) - Math.floor(ELAPSED_MS / 1000) : null));
+  }
+  const t0 = await EPOCH_AT_T0;
+  if (t0 == null) EPOCH_AT_T0 = null;
+  return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
+}
+async function laneDeadlineArgs(label, phaseName) {
+  if (!agentxGuardsOn()) return {};
+  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  if (!(stopInS > 0)) return {};
+  const now = await epochNow(phaseName);
+  if (now == null) {
+    log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
+    return {};
+  }
+  log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
+    `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
+  return { deadline_epoch: now + stopInS, no_stop_s: stopInS + 86400 };
+}
+// Backstop: never wait for a lane past the boundary.
+const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
 
 // GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
 // physical card ids from a pool so two concurrent isolated jobs never share a GPU -> their op-bench /
@@ -3572,6 +3740,7 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
 // The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
 // while packing (and refused the packing if any completed task had invalid evidence), and this
@@ -3717,6 +3886,7 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
+  SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
   if (IS_AGENTX) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
@@ -4664,7 +4834,7 @@ print(json.dumps(res))
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  if (searchClosed('Profile and Strategize')) {
+  if (searchClosed('Profile and Strategize') || searchWindowShort('Profile, kernel extraction and the kernel search')) {
     kernelQueue = [];
     headQueue = [];
   } else {
@@ -6004,6 +6174,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
       }
       const lang = ap.language || 'triton';
+      if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
+        history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
+          lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
+        break;
+      }
       let al;
       // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
       // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
@@ -6286,7 +6461,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
+      const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
@@ -6294,8 +6469,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      }));
-      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'));
+      if (r == null && IS_AGENTX) {
+        return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
+      }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean,
         isolated_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0) : r.final_geomean,
@@ -6314,7 +6491,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const c = o.c;
     if (o.skip) {
       log(`  ${c.short_name}: ${o.reason}; skipping.`);
-      history.ledger.push({ direction: c.short_name, verdict: 'dead_end', lesson: o.reason });
+      history.ledger.push({ direction: c.short_name, verdict: o.paused ? 'paused' : 'dead_end', lesson: o.reason });
       continue;
     }
     const { ext, kl } = o;
@@ -6423,6 +6600,7 @@ let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
+let validateSkip = '', finalFromAb = false;
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
@@ -6532,6 +6710,12 @@ if (want('final')) {
         `Finalize/Report/Validate must run. Deferred, not discarded: they are surfaced in pending_integrations.`);
       break;
     }
+    if (abWindowShort(abLegs(pendingIntegrations[0].inputs), `Finalize-gate: ${pendingIntegrations[0].short_name}`)) {
+      log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}): the next cannot finish before the final ` +
+        'reserve. Deferred to pending_integrations.');
+      break;
+    }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
@@ -6633,13 +6817,17 @@ if (want('final')) {
   phase('Finalize');
   await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
-    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
+    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
+  // The stock bundle's number is Setup's canonical one, not Finalize's search leg.
+  const adoptedNothing = agentxAdoptedNothing({ setup: SETUP_CONFIG, accepted: allAccepted.length, tput: curTput,
+    baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay });
+  if (adoptedNothing) finalTput = BASELINE_TPUT;
   if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
     await requireE2EValidationCheckpoint('final/e2e_validation.json', {
       phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
@@ -6690,10 +6878,19 @@ if (want('final')) {
   // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
+  // A trace replay skips it only per agentxValidateSkip.
   phase('Validate');
-  await finalPhaseFence('validate', 'Validate');
-  validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
+  validateSkip = agentxValidateSkip(adoptedNothing, remainingMs());
+  if (validateSkip === 'final_is_baseline') {
+    log(`Validate SKIPPED: nothing adopted, so the final bundle is the stock one (Setup's ${BASELINE_TPUT} tok/s).`);
+  } else if (validateSkip === 'no_time') {
+    log(`Validate SKIPPED: ~${remainingMin()}min left, under its ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min of timed windows.`);
+  } else {
+    await finalPhaseFence('validate', 'Validate');
+  }
+  validation = validateSkip ? null : await safeAgent(
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
+      agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
@@ -6718,9 +6915,14 @@ if (want('final')) {
   // reported as 0 / no_gain downstream.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  // A search leg over a canonical baseline is no speedup: run_e2e.py reports the accepted A/B's own pair.
+  finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validationStatusOf()}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+  if (finalFromAb) {
+    log("Validate gave no number: returning no final or speedup, so run_e2e.py reports the accepted A/B's own pair.");
+  }
 
   // --- FINAL experience reconciliation (post-gate) -----------------------
   // The per-milestone update_experience (in the Milestone loop above) is the ONLY
@@ -6859,6 +7061,15 @@ function tuningReturn() {
   };
 }
 
+// A Validate that returned nothing is flagged, so no KB writer records the carried number.
+function validationStatusOf() {
+  return validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+      : (!want('final') ? 'phase_partial'
+        : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
+          : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown')));
+}
+
 const wfReturn = {
   // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
   // breaking change to the keys below; run_e2e.py keys its canonical-artifact
@@ -6880,12 +7091,10 @@ const wfReturn = {
   // Trust the Director's independent number ONLY when it is a real positive
   // measurement (validatedOk). A crashed/degenerate Validate falls back to the
   // carried accepted same-session A/B win — never 0 — so a real, parity-checked
-  // gain is not silently demoted to no_gain by run_e2e.py.
-  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
-  throughput_speedup: finalSpeedup,
-  validation_status: validatedOk ? validation.validation_status
-    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
-       : (want('final') ? 'unknown' : 'phase_partial')),
+  // gain is not silently demoted to no_gain by run_e2e.py, except finalFromAb's empty pair, filled from disk.
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
+  throughput_speedup: finalFromAb ? 0 : finalSpeedup,
+  validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
