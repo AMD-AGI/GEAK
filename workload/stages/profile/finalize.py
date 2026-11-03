@@ -370,6 +370,16 @@ def main():
     broken = [e for e in evidence if e["lack"]]
     ut_green = [e for e in evidence if not e["lack"] and not e["ut"]]
     gate_green = [e for e in evidence if not e["lack"] and not e["gate"]]
+    qualified = [e for e in evidence if not e["lack"] and not e["ut"] and not e["gate"]]
+    minimum = params.get("minimum_qualified_tasks", 0)
+    if type(minimum) is not int or minimum < 0:
+        return emit(status="fail", artifacts={},
+                    notes="minimum_qualified_tasks must be a nonnegative integer")
+    if len(qualified) < minimum:
+        status = worse(status, "blocked")
+        notes.append("configured minimum_qualified_tasks=%d, observed fully qualified tasks=%d; "
+                     "complete the supported nonoverlapping delivery before optimization"
+                     % (minimum, len(qualified)))
 
     if broken:
         status = worse(status, "blocked")
@@ -478,6 +488,8 @@ def main():
         "tasks_capacity_deferred": deferred,
         "tasks_ut_passed_all_gates": len(ut_green),
         "tasks_delivery_gate_passed": len(gate_green),
+        "minimum_qualified_tasks": minimum,
+        "tasks_fully_qualified": len(qualified),
         # SKILL.md §5: four outcomes, reported separately. A subset of passing tasks is
         # not full acceptance, and none of these four may stand in for another.
         "acceptance_inventory_completion": not unaccounted and not lacking,

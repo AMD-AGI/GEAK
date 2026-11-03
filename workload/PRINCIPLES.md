@@ -30,10 +30,21 @@ file, never a new branch in code.
 Add the general rule, not the special case. A fix that needs a chain of conditions is a
 design mistake; fix the design instead. Prefer deleting over adding.
 
+**R5a — An accident is written into a `SKILL.md` first, not into code.**
+Only when the *same* accident happens a second time may it become a check, and the commit
+must name both occurrences. `build_overlay.py` took seven commits, each adding one more
+defence and none ever removing one, until 545 lines of fossil stood between an agent and
+four shell commands. Prose carries the lesson at no runtime cost and can be read by the
+one party able to act on it.
+
 **R6 — The slot owns the criterion; the skill owns the work.**
 What counts as passing belongs to the stage, not to the implementation plugged into it.
 Swapping an implementation must not require rewriting the criterion — and the criterion
-includes whether the configuration actually took effect.
+includes whether the configuration actually took effect. Every slot carries it in
+`stages/<stage>/finalize.py`, one name across all five, run after every stage of either
+shape. **The criterion is written once**: prose that describes it points at that file
+instead of restating its numbers, because a second copy of a rule is a rule that will
+drift. *Enforced by:* `stage.py --dry-run`.
 
 **R7 — Vendored skills stay byte-identical.**
 Fix their defects in the slot around them, or upstream. *Enforced by:*

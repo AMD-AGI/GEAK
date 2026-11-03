@@ -69,9 +69,9 @@ Never report `ok` for work that was not done, and never report a number that was
 measured. A stage that reports a plausible figure nobody computed is the one outcome this
 pipeline cannot recover from: everything downstream inherits it and nothing says so.
 
-Write result.json even so -- but know that where the slot has a `finalize.py`, it runs
-after this session, reads $OUT itself and has the last word. It is not a second opinion to
-argue with: it is the stage's acceptance criterion, and it is in
+Write result.json even so -- but know that the slot's `finalize.py` runs after this
+session, reads $OUT itself and has the last word. Every slot has one. It is not a second
+opinion to argue with: it is the stage's acceptance criterion, and it is in
 $WORKLOAD_ROOT/stages/<stage>/finalize.py and README.md where you can read exactly what it
 will require before you decide you are finished.
 """
@@ -174,7 +174,7 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
 
 
 def finalize(env, log_cb=print):
-    """Let the slot judge the session. Returns True when slot finalization is required.
+    """Let the slot judge the session.
 
     The skill is an external archive that knows nothing about `result.json`, so the
     mapping -- and the acceptance criterion with it -- lives in the slot (PRINCIPLES R6).
@@ -182,14 +182,15 @@ def finalize(env, log_cb=print):
     profile session once reported `ok` for a delivery of four tasks out of six declared,
     with single-task fields in `metrics`, and nothing downstream could tell.
 
-    `stages/<stage>/finalize.py` reads `$OUT` and overwrites `result.json` last. A stage
-    whose slot has no finalize keeps the agent's own result, unchanged -- this is the
-    contract's "is the file there", not a plugin system.
+    `stages/<stage>/finalize.py` reads `$OUT` and overwrites `result.json` last. Every
+    slot has one and it runs unconditionally: calling it only where the file happened to
+    exist is how three of the five slots ended up grading their own work, two of them
+    under a different filename. `stages/CONTRACT.md` section 3.1 is the rule; a missing
+    one is a defect in the slot, reported here and caught before the run by
+    `stage.py --dry-run`.
     """
     script = os.path.join(env.get("WORKLOAD_ROOT", ""), "stages", env.get("STAGE", ""),
                           "finalize.py")
-    if not os.path.exists(script):
-        return False
     from emit_result import emit, read_json
 
     result_path = os.path.join(env["OUT"], "result.json")
@@ -204,11 +205,16 @@ def finalize(env, log_cb=print):
     archive("before-finalize")
     log_cb("[agent] the slot's finalize has the last word: %s" % script)
     status, problem = "fail", None
-    try:
-        rc = subprocess.call([sys.executable, script], env=env)
-    except OSError as exc:
-        status, problem = "blocked", "the slot finalizer could not run: %s" % exc
+    rc = None
+    if not os.path.exists(script):
+        status, problem = "blocked", ("the slot has no finalize.py, so nothing but the "
+                                      "agent judged this stage (stages/CONTRACT.md 3.1)")
     else:
+        try:
+            rc = subprocess.call([sys.executable, script], env=env)
+        except OSError as exc:
+            status, problem = "blocked", "the slot finalizer could not run: %s" % exc
+    if rc is not None:
         log_cb("[agent] finalize exited %d" % rc)
         receipt = read_json(result_path)
         if rc == 2:
@@ -226,7 +232,6 @@ def finalize(env, log_cb=print):
                 "Earlier session receipts are preserved.", out=env["OUT"],
                 stage=env.get("STAGE"), skill=env.get("STAGE_SKILL")) == 2:
             raise RuntimeError(problem + "; no valid stage environment to record it")
-    return True
 
 
 def dispatch(cfg, lay, env, log_cb=print):
@@ -291,7 +296,7 @@ def dispatch(cfg, lay, env, log_cb=print):
 
         # Whether the agent itself reported, before the slot overwrites the file.
         reported = os.path.exists(result_path)
-        judged = finalize(env, log_cb)
+        finalize(env, log_cb)
 
         res, errs = stage_mod.validate_result(lay)
         if not errs:
@@ -299,7 +304,7 @@ def dispatch(cfg, lay, env, log_cb=print):
             if (status == "ok" or repairs <= 0 or local_attempt == attempts
                     or int(deadline - time.time()) <= 300):
                 return 0, None
-            if judged and not reported:
+            if not reported:
                 # The session died mid-work and the slot graded what it left behind. That
                 # is an interrupted stage, not one that was weighed and found wanting, so
                 # it resumes on the normal attempt budget instead of spending the single

@@ -142,22 +142,51 @@ label downstream is wrong with it. A stage that observes nothing is reported as
 `unverified`, which is a statement rather than a pass. See `scripts/target.py` for the
 whole gate, and `README.md` for the naming half of it.
 
-### 3.1 Slot-level adapters
+### 3.1 The slot's verdict: `finalize.py`
 
-A third-party skill vendored as-is (such as `kernel-roofline`) knows
-nothing about `result.json`, and **should not** be modified by a single byte in order to
-fit this pipeline. That mapping lives in the **slot directory**, not in the skill:
+**Every slot has `stages/<stage>/finalize.py`.** It reads `$IN`, `$OUT` and `$PARAMS`,
+writes `$OUT/result.json`, and is the stage's conclusion. Whatever the implementation
+wrote there — agent session or `run.sh` — is archived and overwritten. The driver runs it
+after every stage of either shape; `stage.py --dry-run` refuses a slot that does not have
+one, so this is enforced before a campaign starts rather than discovered at the end of it.
 
 ```
-stages/profile/finalize.py      scan $OUT's artifacts -> result.json
-stages/roofline/rank.py         fold + compute the ranking key -> roofline.json + result.json
+stages/<stage>/finalize.py      judge $OUT -> result.json      (required, one per slot)
 ```
 
-Because it belongs to the slot, swapping in another implementation of the same stage
-**does not require changing it** — the new implementation only has to produce the files
-named in that slot's `README.md` table. Shared slot-level logic (how expected e2e gain is
-computed, for instance) lives here too, so that replacing the roofline implementation
-does not silently replace the ranking criterion along with it.
+Two reasons it is the slot's file and not the skill's:
+
+- **Nobody grades their own work.** A profile session once reported `ok` for four tasks
+  delivered against six declared, with single-task fields in `metrics`, and nothing
+  downstream could tell. Three of the five slots used to leave the verdict to whatever
+  was plugged into them.
+- **Swapping an implementation must not swap the criterion.** A third-party skill
+  vendored as-is (such as `kernel-roofline`) knows nothing about `result.json` and must
+  not be modified by a single byte to fit this pipeline (PRINCIPLES R7). The mapping, and
+  the acceptance rule with it, live in the slot; a new implementation only has to produce
+  the files named in that slot's `README.md` table.
+
+What belongs in it, and what does not:
+
+- **Yes:** did the delivery arrive, is every claim carried by a file somebody can open,
+  and **did the configuration actually take effect** — `$PARAMS` is executable policy, and
+  a skill's own documented default never overrides it. A run that quietly used the
+  skill's default scope instead of the configured one is a `fail`, not a footnote.
+- **No:** re-deriving a result the implementation already produced. A previous optimize
+  `verify.py` re-judged kernel correctness, grew three output dialects of its own, and
+  recorded a task that crashed before comparing any output as a correctness failure. The
+  task's own unit test is the authority on the kernel. Check the evidence; do not
+  recompute the finding.
+
+Shared slot-level logic lives here too (how expected e2e gain is computed, for instance),
+so that replacing the roofline implementation does not silently replace the ranking
+criterion along with it. Where the folding or scoring algorithm ships with the skill, call
+it — `stages/roofline/finalize.py` runs the implementation's own `scripts/fold.py` as a
+subprocess rather than reimplementing the sum.
+
+**The criterion is written once.** Prose that describes it — a slot `README.md`, a
+`SKILL.md` — points at `finalize.py` instead of restating its numbers, because a second
+copy of a rule is a rule that will drift.
 
 ## 4. Per-stage artifact contracts
 
@@ -165,10 +194,16 @@ The `result.json` envelope is generic, but the specific files downstream reads a
 Each stage's `README.md` documents its own mapping; the summary is below. A new
 implementation must produce files of the same names and structure to plug in.
 
+This table says **what downstream opens**. It does not say what counts as enough of it —
+that is the slot's `finalize.py` and is written only there (section 3.1). The two had
+already drifted once: this table named `kernel_workload.json` while the profile slot's
+verdict required `kernel_ranking.json`, and each was the authority depending on which one
+you happened to read.
+
 | Stage | Required artifacts | Key fields |
 | --- | --- | --- |
 | `baseline` | `baseline.json` | `throughput`, `unit`, `metric`, `noise_band`, `provenance` |
-| `profile` | `kernel_workload.json`, `selection_targets.json`, `tasks/<name>/` | per-kernel `pct_gpu_time`, `phase`, plus independently runnable unit-test task directories |
+| `profile` | `kernel_ranking.json`, `selection_targets.json`, `tasks/<name>/` | per-kernel `pct_gpu_time`, `phase`, plus independently runnable unit-test task directories. The census denominator resolves from `kernel_workload.json` or from `kernel_ranking.json.denominators` |
 | `roofline` | `roofline.json` | per-kernel `roofline_pct`, `attainable_speedup`, `bound_type`, `expected_e2e_gain_pct` |
 | `optimize` | `optimized.json` | cold-verified kernels with `verified_speedup`, selected `kernel_src` directory, `kernel_src_hashes` and frozen `task_meta_sha256`; task-local binding adapters also carry `binding_file_sha256` |
 | `applyback` | `ab.json` | `baseline`, `candidate`, `e2e_delta_pct`, `verdict` |

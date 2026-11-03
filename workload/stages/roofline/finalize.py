@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The roofline slot's finalize adapter: fold, compute expected_e2e_gain_pct, order the work.
+"""The roofline slot's verdict: fold, compute expected_e2e_gain_pct, order the work.
 
 It belongs to the slot, not to any one implementation. It deliberately does **not** write
 its own folding sum — there is exactly one correct way to fold many shapes into a single
@@ -8,7 +8,7 @@ it. Swapping in a different roofline implementation only requires that it also p
 `scripts/fold.py` and `rows.json`; this file does not change.
 
 Usage (inside the environment prepared by stage.py prepare):
-    python3 stages/roofline/rank.py [--roof-key roofline_us] [--rows rows.json]
+    python3 stages/roofline/finalize.py [--roof-key roofline_us] [--rows rows.json]
 """
 
 import argparse
