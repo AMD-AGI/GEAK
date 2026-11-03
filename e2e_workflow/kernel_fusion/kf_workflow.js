@@ -622,10 +622,13 @@ async function prepareOne(c, i, previous) {
   const p = (prep && prep.prepared) || {};
   const all = [...(p.head_candidates || []), ...(p.kernel_candidates || [])];
   for (const k of all) {
-    const r = k && k.prepared_ut && k.prepared_ut.result;
+    // The packer (agentx_kernel_preparation.mjs --emit-prepared) nests the UT under prepared_ut; a delivery
+    // assembled by hand when the packer cannot run puts the same result (and phase) on the entry itself.
+    const ut = (k && k.prepared_ut) || (k && k.result ? { phase: k.phase, result: k.result } : null);
+    const r = ut && ut.result;
     if (!r || typeof r.task_dir !== 'string' || !r.task_dir.trim()) continue;
     const ok = r.editable !== false && r.baseline_frozen === true &&
-      (k.prepared_ut.phase === 'extract' ? r.unittest_smoke : r.smoke) === 'pass';
+      (ut.phase === 'extract' ? r.unittest_smoke : r.smoke || r.unittest_smoke) === 'pass';
     if (ok || all.length === 1) return { ...r, ok };
   }
   const why = [...(p.failed_tasks || []), ...(p.deferred_tasks || [])].map((f) => f && (f.reason || f.notes || f.status))

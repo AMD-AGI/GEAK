@@ -36,7 +36,11 @@ const answers = {
         ranking_json: `${KF}/kernel_ranking.json`, points: [{ point_id: 'de_1', phase: 'DECODE', verified: true }] }),
   'kf:kernel-extract trace (retry)': () => ({ trace_dir: '', workload_json: '', points: [] }),
   // one prepare per region: c1 / c1s pass; c2 fails twice (the retry is told why)
-  'kf:kernel-extract prepare c1': () => ({ delivery_path: `${KF}/d_c1.json`, prepared: { head_candidates: [], kernel_candidates: [prepared('c1')] } }),
+  // agentx_flat: a hand-assembled delivery (packer unavailable) carries the UT result on the entry itself
+  'kf:kernel-extract prepare c1': () => ({ delivery_path: `${KF}/d_c1.json`, prepared: scenario === 'agentx_flat'
+    ? { head_candidates: [{ short_name: 'c1', phase: 'extract_op', result: { task_dir: `${KF}/tasks/c1`, editable: true,
+        smoke: 'pass', baseline_frozen: true, target_callable: 'pkg.c1:f' } }], kernel_candidates: [] }
+    : { head_candidates: [], kernel_candidates: [prepared('c1')] } }),
   'kf:kernel-extract prepare c1s': () => ({ delivery_path: `${KF}/d_c1s.json`, prepared: { head_candidates: [], kernel_candidates: [] } }),
   'kf:kernel-extract prepare c1s (retry)': () => ({ delivery_path: `${KF}/d_c1s.json`, prepared: { head_candidates: [], kernel_candidates: [prepared('c1s')] } }),
   'kf:kernel-extract prepare c2': () => ({ delivery_path: `${KF}/d_c2.json`,
