@@ -36,11 +36,11 @@ files on disk.
 
 | Step | Artifact | Default skill | Swap it for |
 | --- | --- | --- | --- |
-| `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch), `ci-run-replay` (reproduce a named CI run and prove every pin) |
+| `baseline` | `baseline.json` | `adopt` | `measure` (re-measure from scratch; with `pins`, reproduce a named CI run and prove every one) |
 | `profile` | `tasks/<kernel>/` | `kernel-extract` | any skill that emits `tasks/` + a ranking |
 | `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
-| `optimize` | `optimized.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |
-| `applyback` | `ab.json` | `overlay-e2e-ab` | any skill that applies and re-measures |
+| `optimize` | `optimized.json` | `geak-kernel-workflow` | `native-frozen` (a task's own collective harness), `subagent-raw` (an agent, no GEAK workflow) |
+| `applyback` | `ab.json` | `overlay-ab` | any skill that applies and re-measures |
 
 ## Design
 
@@ -61,9 +61,9 @@ change — no code edit, nothing to register. `runners/stub.sh`, which calls no 
 all, exists as executable proof that the scheduler is genuinely agent-agnostic.
 
 **The slot owns the criterion; the skill owns the work.** How artifacts map to
-`result.json`, and what counts as ranked or passing, live in the slot — in a `finalize.py`
-or a `rank.py` where that is mechanism, and in `stages/<stage>/README.md` where it is
-judgement. Replacing an implementation therefore never rewrites the mapping — which is
+`result.json`, and what counts as ranked or passing, live in the slot — in its
+`finalize.py`, which every slot has and which runs after every stage, and in
+`stages/<stage>/README.md` where that criterion is explained rather than restated. Replacing an implementation therefore never rewrites the mapping — which is
 why the upstream roofline skill is vendored byte-identical, hash-enforced by
 `skill_manifest.py`, and the profile skill — GEAK main's `kernel-extract`, carried here
 with the shared tools it copies into tasks — lists in its `PROVENANCE.json` the origin
@@ -158,3 +158,10 @@ Self-check, CPU-only — no GPUs, no tokens:
 Thresholds — the keep threshold, the attempt cap, the re-verification repeat count — are
 calibrated against measurement rather than assumed, and every one of them is a knob in
 `config/default.json` with the reasoning recorded next to it.
+
+A knob that is renamed or removed is otherwise silent: the key stays in the scenario
+config, the code that read it is gone, and the run proceeds as though nobody had asked.
+`config/RETIRED.json` is the one place that records them, and `--dry-run` reports every
+match before any GPU time — refusing to start when the lost knob was a *check*, and only
+warning when it is merely inert, so a live campaign config is not blocked over a dead
+word. Add the entry in the same change that removes the knob.

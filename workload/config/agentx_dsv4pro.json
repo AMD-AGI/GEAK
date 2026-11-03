@@ -22,20 +22,20 @@
   },
   "stages": {
     "baseline": {
-      "skill": "adopt-measured-receipt",
+      "skill": "adopt",
       "params": {
         "receipt": "/shared_nfs/zihao/inferencex_repro_112750669255_20261013/results/baseline_03/baseline_03.json",
         "throughput_key": "request_metrics.throughput.output.tokens_per_second",
         "reference_receipt": "/shared_nfs/zihao/inferencex_repro_112750669255_20261013/results/baseline_03/COMPARISON.json",
         "reference_key": "comparison.0.ci",
-        "max_reference_drift": 0.05,
+        "max_drift_pct": 5.0,
         "require_valid": true,
         "node": "crsuse2-m2m-053",
         "metric": "output_token_throughput",
         "unit": "tok/s",
         "noise_band": 1.045,
         "runtime_image": "sha256:9692a15cb5257aa524bc0ccc26e2bab2cc361a51f80c95ae33e7b25c44cbb44d",
-        "_note_skill": "adopt, not ci-run-replay. Two reasons, both specific to this CI run. (1) There is no historical digest to pin: the recipe tag was overwritten after the job finished, so ci-run-replay's first gate -- an image addressed by digest, present locally -- could only be satisfied by a digest of a locally derived image, which proves repeatability but not identity with CI. (2) This site's harness splits host side (run_host.py, which creates its own container) from container side (in_container.py); ci-run-replay creates the container itself, so driving run_host.py through it would nest containers. The receipt adopted here is a full reproduction of exactly this job measured on 2026-10-13 -- 2935.11997 tok/s against CI 2982.36554, -1.584%, 10986 successful requests, 0 errors, submission_valid, the original CI result processor re-run on the original raw records. The guarantee ci-run-replay exists to give -- both arms measured on one machine -- is supplied here by applyback instead, which measures its own reference leg rather than differencing against this number.",
+        "_note_skill": "adopt, not measure-with-pins. Two reasons, both specific to this CI run. (1) There is no historical digest to pin: the recipe tag was overwritten after the job finished, so `measure`'s first pin -- an image addressed by digest, present locally -- could only be satisfied by a digest of a locally derived image, which proves repeatability but not identity with CI. (2) This site's harness splits host side (run_host.py, which creates its own container) from container side (in_container.py); `measure` creates the container itself, so driving run_host.py through it would nest containers. The receipt adopted here is a full reproduction of exactly this job measured on 2026-10-13 -- 2935.11997 tok/s against CI 2982.36554, -1.584%, 10986 successful requests, 0 errors, submission_valid, the original CI result processor re-run on the original raw records. The guarantee a pinned `measure` exists to give -- both arms measured on one machine -- is supplied here by applyback instead, which measures its own reference leg rather than differencing against this number.",
         "_note_drift": "-1.584% against CI is inside max_reference_drift but is not noise: 118 physical cores locally against 128 in CI, plus a derived image. It is the floor this campaign's gain is measured from, not a number to be improved by re-running."
       }
     },
@@ -99,7 +99,7 @@
       }
     },
     "applyback": {
-      "skill": "reference-replay-ab",
+      "skill": "overlay-ab",
       "params": {
         "exclusive_node": true,
         "harness_dir": "/shared_nfs/zihao/inferencex_repro_112750669255_20261013",
@@ -116,7 +116,8 @@
         "_note_node": "This stage runs wherever the pipeline runs, which for this campaign is crsuse2-m2m-318. It takes the whole node: a TP8/EP8 server owns all 8 GPUs, and run.sh refuses rather than measure against someone else's load.",
         "_note_harness": "harness_cmd/case_file are null because this harness has no case table and no python_overlay hook: run_host.py launches the container and in_container.py launches the frozen server CLI. Wiring applyback means giving it that hook, and that is a stage-skill change, not a config value. Until it exists this stage reports blocked rather than measuring the candidate through a different client than the reference.",
         "_note_reference": "reference_run is null so both arms are measured here, on one node, by one harness. The adopted baseline was measured on node053 under a job that has since ended; differencing a candidate on another node against it would attribute the node difference to the kernels."
-      }
+      },
+      "mode": "agent"
     }
   }
 }

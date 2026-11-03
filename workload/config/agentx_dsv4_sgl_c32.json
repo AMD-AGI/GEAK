@@ -1,10 +1,8 @@
 {
   "_comment": "CI run 39258204219 / job 118079462018: DeepSeek-V4-Pro-0813 FP4 on 8x MI355X, SGLang, recipe override_tp8_c32_hicache, concurrency 32, agentic-coding corpus. Deliberately a different stack from agentx_dsv4pro, which targeted the same model: this one is TP8/EP1 with DP attention, MegaMoE and EPLB all OFF, so the MoE path is the plain fused FP4 MoE rather than MegaMoE's peer-to-peer dispatch/combine. What replaces that collective is on the attention side -- attn_cp_size=8 with enable_prefill_cp, cp_strategy=interleave and enable_cp_decode_attn_tp -- plus DSPARK speculative decoding (block 6, 7 draft tokens, 1 step, topk 1) and a hierarchical cache offloading KV to 1290 GB of host DRAM. Concurrency is 32 against the other campaign's 128. Kernel selection should be expected to land somewhere else entirely.",
-
   "run_root": "/mnt/m2m_nobackup/zihao_ix118079462018_20261021/wl_dsv4_sgl_c32",
   "runner": "claude",
   "_note_run_root": "Absolute and node-local, not the usual workload/runs/<name> inside the repo. Two reasons, both hard: the GEAK checkout on this machine is root-owned and the pipeline has no write access to it, and the profile stage writes traces -- which truncate on NFS, and have done so before. The repo is read-only input here; everything this campaign produces lands on /mnt/m2m_nobackup beside the reproduction harness it drives.",
-
   "target": {
     "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
     "image": "lmsysorg/sglang-rocm:v0.5.22-rocm720-mi35x-20261019",
@@ -22,14 +20,12 @@
     "enforce": true,
     "_note_image": "Unlike agentx_dsv4pro, the CI recipe tag here still resolves to the image the CI job ran, and this campaign pins it by digest rather than by tag. The identity is not taken on faith from the tag: the image on dev318 was audited against the CI run's own fingerprint_agg_w0.json -- all 223 pinned pip packages match with zero differences, sglang and amd-mori both report 0.5.22.dev20261019+g5d9c956f8e, sglang-router 0.3.2, and /sgl-workspace/sglang is at commit e45cbce5. That is why this campaign can measure its own baseline against CI's number instead of only against itself."
   },
-
   "runner_env": {
     "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
   },
-
   "stages": {
     "baseline": {
-      "skill": "adopt-measured-receipt",
+      "skill": "adopt",
       "params": {
         "receipt": "/mnt/m2m_nobackup/zihao_ix118079462018_20261021/runs/baseline_01/baseline_01.json",
         "throughput_key": "request_metrics.throughput.output.tokens_per_second",
@@ -41,13 +37,12 @@
         "runtime_image": "sha256:8cb29fc407c2e46bdb1866c5edb91f109ac1acbbcb6905089beaa6c79b0813a2",
         "ci_reference_tps": 1138.70319,
         "ci_reference_tps_per_gpu": 142.3379,
-        "max_reference_drift": 0.05,
-        "_note_skill": "adopt, not ci-run-replay, for the same structural reason as agentx_dsv4pro: this site's harness splits host side (tools_run_host_318.py, which creates its own container) from container side (tools/in_container.py), so driving it through ci-run-replay -- which creates the container itself -- would nest containers. The six pins ci-run-replay exists to enforce are enforced by the harness directly and recorded per run: image by digest, the CI random_seed 848944705 and max_total_num_tokens 19676672 both pinned on the server command line, the CI benchmark_id and dataset, cpuset 0-127, and a cold TRITON_CACHE_DIR/XDG_CACHE_HOME per run.",
+        "max_drift_pct": 5.0,
+        "_note_skill": "adopt, not measure-with-pins, for the same structural reason as agentx_dsv4pro: this site's harness splits host side (tools_run_host_318.py, which creates its own container) from container side (tools/in_container.py), so driving it through `measure` -- which creates the container itself -- would nest containers. The six pins `measure` exists to enforce are enforced by the harness directly and recorded per run: image by digest, the CI random_seed 848944705 and max_total_num_tokens 19676672 both pinned on the server command line, the CI benchmark_id and dataset, cpuset 0-127, and a cold TRITON_CACHE_DIR/XDG_CACHE_HOME per run.",
         "_note_gates": "Before any number is produced, in_container.py compares the server's own resolved server_args field by field against the CI run's -- 43 fields including ep_size, enable_prefill_cp, cp_strategy, enable_cp_decode_attn_tp and the five hicache knobs -- and asserts every rank's max_total_num_tokens equals CI's 19676672. The smoke run passed all 43 with zero mismatches. A run that reaches the benchmark has already proved it is the same experiment.",
         "_note_hicache": "The host cache was the one real confound and it is closed by measurement, not by argument: CI and dev318 allocate the same six V4 paged pools at the same six sizes (113.34 + 28.33 + 14.17 + 3.66 + 0.91 + 0.89 = 161.30 GB per rank, 1290.4 GB over eight ranks). The result file's allocated_cpu_dram_gb: 2399 is the CI node's DRAM capacity and is not an allocation; sizing it that way is what made the first launch attempt refuse to start."
       }
     },
-
     "profile": {
       "skill": "kernel-extract",
       "params": {
@@ -63,7 +58,6 @@
         "_note_prior": "prior_extraction is null: no extraction exists for this recipe. The sibling campaign's targets are for TP8/EP8 with MegaMoE and must not be imported."
       }
     },
-
     "roofline": {
       "skill": "kernel-roofline",
       "params": {
@@ -76,7 +70,6 @@
         "agent_brief": "MACHINE: crsuse2-m2m-318, 8 MI355X, the machine you are on.\n\nNO PRIOR ROOFLINE EXISTS for this recipe. The sibling campaign's numbers are for TP8/EP8 with MegaMoE and EPLB and do not transfer: that stack spent 19.2% of device time in peer-to-peer dispatch/combine, which does not exist here. Start from the profile stage's own evidence.\n\nCHECK THE TOOL BEFORE TRUSTING IT. rocprof-compute must be >= 3.6.0 for gfx95x; the sibling campaign found 3.4.0 on a node and its rocprof leg silently never ran. --roof-only also needs a runnable --cmd, which only a built unit test provides. If the version is below the gate, say so and fall back to the corrections workflow (build_cases -> roofline_report -> fold) rather than reporting a roofline nobody measured.\n\nRANKING IS BY EXPECTED END-TO-END GAIN, not operator speedup. pct_gpu_time x (1 - 1/attainable). The reason is the whole point of this campaign: on this machine a 1.80x MoE-sorting win moved the node +0.2356%, and a 1.342x win moved it -0.0872%.\n\nREPORT THE BOUND BOTH WAYS. TP8 with attn_cp_size=8 synchronises all eight ranks every step, so a step shortens only by the MINIMUM per-rank saving. Give the aggregate-share upper bound and the weakest-rank lower bound as two numbers. EPLB is off, so expert load is even -- but cp_strategy=interleave splits attention work unevenly across ranks, so check attention kernels for the same skew rather than assuming it is absent.\n\nFold multi-shape kernels with the skill's own fold.py. Do not sum by hand."
       }
     },
-
     "optimize": {
       "skill": "geak-kernel-workflow",
       "params": {
@@ -100,9 +93,8 @@
         "_note_keep_threshold": "1.045 is the band calibrated by measurement, not the 1.02 in the documentation: four kernels whose code md5 was identical to the original re-measured at up to 1.0453. Any seam that barriers across all 8 ranks needs its own higher threshold -- on the sibling campaign a collective seam's byte-identical null legs spread 0.799-1.330 -- so once extraction declares the boundaries, set keep_threshold_overrides from each seam's measured null control rather than from this global."
       }
     },
-
     "applyback": {
-      "skill": "overlay-e2e-ab",
+      "skill": "overlay-ab",
       "params": {
         "exclusive_node": true,
         "harness_dir": "/shared_nfs/zihao/inferencex_repro_118079462018_20261021",
@@ -116,7 +108,8 @@
         "_note_hook": "Unlike the sibling campaign, this stage is wired rather than blocked. The harness exposes exactly the hook overlay-e2e-ab needs: EXTRA_MOUNTS mounts the overlay directory into the container at the same path, and EXTRA_SERVER_ENV carries OVERLAY_PYTHONPATH/PYTHONPATH into the server process. Build ONE overlay for all kept kernels, chain-seeded with --from -- mounting two overlay directories on PYTHONPATH at once does not work, because only the first sitecustomize is imported and the second silently has no effect.",
         "_note_proof": "The overlay must prove it loaded. Two independent records exist here and both must be checked: overlay_setup.py check (each target resolves into the overlay, not its original location) and the harness's own $OUT/sglang_runtime.patch plus server_environment.json, which record what the container actually ran. An overlay that fails to inject fails OPEN -- the candidate leg silently runs the baseline and the A/B reports 1.00x, which reads as 'the kernels did not help' rather than 'the kernels were never loaded'.",
         "_note_reference": "Both arms are measured here, on this node, by this harness. The adopted baseline is a full-duration run of the same harness on the same machine, so the A/B differences kernels and nothing else. The CI number 1138.70319 tok/s is context, never the denominator."
-      }
+      },
+      "mode": "agent"
     }
   }
 }

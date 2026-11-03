@@ -39,6 +39,7 @@ import target  # noqa: E402  -- the naming/identity gate; see target.py for why 
 WORKLOAD_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEAK_ROOT = os.path.dirname(WORKLOAD_ROOT)
 DEFAULT_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "default.json")
+RETIRED_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "RETIRED.json")
 VALID_STATUS = ("ok", "blocked", "fail")
 
 
@@ -91,10 +92,51 @@ def load_config(args):
     return cfg
 
 
+def at(cfg, dotted):
+    """The value at a dotted path, and whether the path was actually present."""
+    node = cfg
+    for key in dotted.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return None, False
+        node = node[key]
+    return node, True
+
+
+def retired_problems(cfg):
+    """Knobs the config still sets that nothing reads any more.
+
+    A renamed parameter is silent: the key stays in the JSON, the code that consulted it is
+    gone, and the run proceeds as if nobody had asked. `config/RETIRED.json` is the one
+    place that records them, so this is a list to maintain rather than a check to write
+    again per knob. Returns (errors, warnings); a lost *check* is an error, an inert
+    leftover is a warning, because blocking a live campaign config over a dead word helps
+    nobody.
+    """
+    try:
+        with open(RETIRED_CONFIG) as f:
+            entries = json.load(f).get("retired") or []
+    except (OSError, ValueError):
+        return [], []
+    errors, warnings = [], []
+    for entry in entries:
+        key = entry.get("key") or ""
+        _, present = at(cfg, key)
+        if not present:
+            continue
+        msg = "%s is retired; use %s instead. %s" % (key, entry.get("replacement") or
+                                                     "nothing", entry.get("note") or "")
+        (errors if entry.get("severity") == "error" else warnings).append(msg.strip())
+    return errors, warnings
+
+
 def target_problems(cfg):
-    """The naming half of the target gate (target.py). Runs before any GPU time."""
-    return target.naming_problems(cfg, resolve_path(cfg["run_root"]),
-                                  cfg.get("_config_files") or [])
+    """The naming half of the target gate (target.py), plus retired knobs. Runs before any
+    GPU time. Warnings are printed here rather than returned: they do not stop a run."""
+    errors, warnings = retired_problems(cfg)
+    for warning in warnings:
+        print("WARNING %s" % warning, file=sys.stderr)
+    return list(target.naming_problems(cfg, resolve_path(cfg["run_root"]),
+                                       cfg.get("_config_files") or [])) + errors
 
 
 def resolve_path(path):
@@ -136,6 +178,8 @@ def stage_layout(cfg, stage):
         "skill": skill,
         "mode": spec.get("mode", "agent"),
         "params": spec.get("params", {}),
+        "slot_root": os.path.join(WORKLOAD_ROOT, "stages", stage),
+        "finalize": os.path.join(WORKLOAD_ROOT, "stages", stage, "finalize.py"),
         "skill_root": skill_root,
         "skill_md": os.path.join(skill_root, "SKILL.md"),
         "run_sh": os.path.join(skill_root, "run.sh"),
@@ -200,6 +244,13 @@ def save_state(cfg, state):
 # ---------------------------------------------------------------- checks
 
 def check_skill(lay, problems):
+    # Every slot owns its acceptance criterion and the driver runs it after every stage,
+    # whichever implementation is plugged in (stages/CONTRACT.md 3.1). Checked here so a
+    # slot that cannot judge its own output is found by --dry-run rather than 48 hours in.
+    if not os.path.exists(lay["finalize"]):
+        problems.append("%s: the slot has no finalize.py, so nothing but the skill itself "
+                        "would judge this stage (contract 3.1) %s"
+                        % (lay["stage"], lay["finalize"]))
     if not os.path.isdir(lay["skill_root"]):
         problems.append("%s: no such skill directory %s" % (lay["stage"], lay["skill_root"]))
         return
@@ -449,6 +500,12 @@ def cmd_run(cfg, args):
             lf.flush()
         proc.wait()
     print("[stage] run.sh exited %d after %.1fs" % (proc.returncode, time.time() - started))
+    # The slot judges a script exactly as it judges an agent session. Both shapes write
+    # their own result.json and both are equally able to be generous about it, so the
+    # acceptance criterion has the last word in both (stages/CONTRACT.md 3.1). A script
+    # that exited nonzero still cannot publish `ok` -- cmd_validate holds that line.
+    import agent_stage
+    agent_stage.finalize(env)
     return cmd_validate(cfg, args, exec_rc=proc.returncode)
 
 

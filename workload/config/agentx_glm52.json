@@ -2,7 +2,6 @@
   "_comment": "Scenario config: AgentX / GLM-5.2-MXFP4 / TP8 / global conc=10, aligned with CI run 34783501425. Layered on top of default.json. Every site-local absolute path appears here and nowhere in the code. The file was called agentx_dsv4.json until 2026-10-15: `dsv4` was a planning-phase label, and `dsa` in the kernel names is DeepSeek Sparse Attention -- the attention mechanism GLM-5.2 uses -- not DeepSeek-V4. The target block below is what now keeps the name and the stack in agreement.",
   "run_root": "workload/runs/agentx_glm52",
   "runner": "claude",
-
   "target": {
     "model": "amd/GLM-5.2-MXFP4",
     "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
@@ -20,13 +19,15 @@
   },
   "stages": {
     "baseline": {
-      "skill": "adopt-measured-receipt",
+      "skill": "adopt",
       "params": {
         "receipt": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/baseline/tp8_conc10/measured_baseline.json",
         "metric": "output_token_throughput",
         "unit": "tok/s",
         "noise_band": 1.045,
-        "max_reference_drift": 0.05,
+        "max_drift_pct": 5.0,
+        "throughput_key": "output_tokens_per_second",
+        "reference_key": "ci_output_tokens_per_second",
         "_note_receipt": "A full reproduction of CI run 34783501425: 446.87889 tok/s against a CI reference of 446.56324 (0.07% apart), 1455 successes / 0 errors, TP8/EP1, 8 GPUs, global conc=10, MTP 5-6-1.",
         "_note_node": "The receipt does not record a node name. Fill in `node` if you know which machine it was, otherwise applyback will warn about cross-node risk.",
         "node": null
@@ -39,7 +40,7 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
-        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 — ranking on raw window percentages would have routed the entire kernel budget at prefill."
+        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 \u2014 ranking on raw window percentages would have routed the entire kernel budget at prefill."
       }
     },
     "roofline": {
@@ -74,7 +75,7 @@
       }
     },
     "applyback": {
-      "skill": "reference-replay-ab",
+      "skill": "overlay-ab",
       "params": {
         "exclusive_node": true,
         "harness_dir": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916",
@@ -93,7 +94,8 @@
         "_note_exclusive": "End-to-end re-measurement needs the full 8-GPU serving stack (TP8/conc10). Once it starts it owns the whole machine and cannot run alongside optimize.",
         "_note_gap": "An operator win with no end-to-end movement has already happened twice in this scenario: FlyDSL MoE sorting measured 1.80x on the microbenchmark and +0.2356% whole-machine; MoE split4 measured 1.342x on local replay and -0.0872% whole-machine. Operator speedup and end-to-end delta must be reported as two separate numbers.",
         "stop_cmd": "tools/stop_owned_server.py"
-      }
+      },
+      "mode": "agent"
     }
   }
 }

@@ -92,11 +92,11 @@ one stage it stops acting and says so. Knobs, with reasons, under `report` in
 
 | Stage | Default skill | What it does | Key artifact |
 | --- | --- | --- | --- |
-| `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead; `ci-run-replay` reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, and refuses a number that does not align | `baseline.json` |
+| `baseline` | `adopt` | reuse an already-measured receipt (no GPUs); `measure` measures instead — and, where the config declares `pins`, reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, refusing a number whose pins it cannot prove | `baseline.json` |
 | `profile` | `kernel-extract` | profile, then extract frozen-harness unit tests | `tasks/<k>/`, `kernel_ranking.json` |
 | `roofline` | `kernel-roofline` | per-kernel roofline; rank by **expected e2e gain** | `roofline.json` |
-| `optimize` | `geak-kernel-workflow` | optimize every extracted task, one per GPU slot in parallel, 48 h by default; plan at most 8 tasks by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
-| `applyback` | `overlay-e2e-ab` | reversible overlay, fresh server, A/B against the baseline | `ab.json` |
+| `optimize` | `geak-kernel-workflow` | optimize every extracted task, one per GPU slot in parallel, 48 h by default; plan at most 8 tasks by default; `native-frozen` drives a task's own collective harness at its declared `required_gpus`, `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
+| `applyback` | `overlay-ab` | reversible overlay, fresh server, A/B against the baseline | `ab.json` |
 
 Each slot's I/O, artifact mapping and known pitfalls are in
 `stages/<stage>/README.md`; the procedure itself is in `stages/<stage>/<skill>/SKILL.md`.
@@ -122,8 +122,8 @@ A new implementation is a new directory under `stages/<stage>/` containing a `SK
 update** — follow `stages/CONTRACT.md`.
 
 Agents work the same way; see `runners/CONTRACT.md`. The repository ships `claude.sh`
-(validated), `codex.sh` (written to the contract, not yet validated) and `stub.sh`
-(calls no agent — it exists to prove the scheduler does not depend on one).
+(validated), `codex.sh` and `codex-oob.sh` (written to the contract, not yet validated)
+and `stub.sh` (calls no agent — it exists to prove the scheduler does not depend on one).
 
 ## The two contracts
 
