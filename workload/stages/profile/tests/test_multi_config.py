@@ -137,6 +137,37 @@ class MultiConfigProfile(unittest.TestCase):
         res = hl.serving_weighted_speedup(rows, meta)
         self.assertAlmostEqual(res["weighted"], 1 / (0.5 / 2.0 + 0.5 / 1.0))
 
+    def test_select_is_per_config_then_union(self):
+        # c1: moe 2% (under 5); c64: moe 9%. Mean 5.5% would also pass, so add an op that only
+        # c64 carries: 6% there, 0 at c1 -> mean 3%, must still be selected.
+        d64 = os.path.join(self.group, "configs", "c64")
+        with open(os.path.join(d64, "kernel_ranking.json")) as fh:
+            rk = json.load(fh)
+        rk["ranking"].append({"id": "big_m_gemm", "name": "big_m_gemm", "kind": "compute",
+                              "mass_us": 1, "selection_pct_gpu_time": 6.0,
+                              "share_of_phase_pct": {"DECODE": 6.0, "PREFILL": 0.0}})
+        rk["ranking"][1]["selection_pct_gpu_time"] = 85.0
+        with open(os.path.join(d64, "kernel_ranking.json"), "w") as fh:
+            json.dump(rk, fh)
+        params = os.path.join(self.tmp.name, "params.json")
+        with open(params, "w") as fh:
+            json.dump({"selection_top_k": 1000, "selection_overall_pct_gt": 5,
+                       "selection_phases": ["PREFILL", "DECODE"]}, fh)
+        out = os.path.join(self.tmp.name, "sel.json")
+        r = subprocess.run([sys.executable, "-I", str(SLOT / "multi_config.py"), "select",
+                            "--group-dir", self.group, "--output", out, "--params", params,
+                            "--skill-root", str(SKILL)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out) as fh:
+            sel = json.load(fh)
+        got = {t["id"]: t for t in sel["targets"]}
+        self.assertIn("big_m_gemm", got)                       # 6% of c64's own workload
+        self.assertEqual(got["big_m_gemm"]["selected_in_configs"], ["c64"])
+        self.assertEqual(got[K]["selected_in_configs"], ["c64"])  # 2% at c1 is under 5
+        self.assertEqual(got["small"]["selected_in_configs"], ["c1", "c64"])  # the toy's bulk
+        self.assertEqual(sel["policy"]["combination"], "per_config_then_union")
+        self.assertEqual(sel["policy"]["overall_pct_gt"], 5)
+
     def test_single_config_plan_is_unchanged(self):
         d = os.path.join(self.group, "configs", "c1")
         with open(os.path.join(d, "sampling_points_final.json")) as fh:

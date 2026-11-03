@@ -100,12 +100,24 @@ scenario whose baseline `select` names that EP.
    This writes `$OUT/sampling_points_final.json` (all points, ids `<pid>__<point>`, per-config
    `phase_summary`), the per-point shape and census files, merged `source_map` /
    `adjacency` / `compile_variants`, and `kernel_ranking.json` in which every row's share is
-   the **equal-weight mean of its share in each config** (absent = a measured 0).
-3. **Select** on that ranking by operator (`select_candidates.py --source-map
-   "$OUT/evidence/source_map.json"`; see below for why not by kernel name) with the
-   configured scope (the multi-config scenario sets `selection_overall_pct_gt` to the group threshold and
-   `selection_top_k` high enough that only the threshold binds), then continue with §3-§5
-   on `$OUT` unchanged: `draft_task_decls.py`, review, `build_task_plan.py`, the UT wave.
+   the equal-weight mean of its share in each config (absent = a measured 0) -- the common
+   denominator shares are reported on, not the selection rule (step 3).
+3. **Select per config, then take the union**:
+
+   ```bash
+   python3 "$WORKLOAD_ROOT/stages/profile/multi_config.py" select --group-dir "$OUT"
+   ```
+
+   An operator is a candidate as soon as its share of **any single config's own
+   workload** is above `selection_overall_pct_gt` -- not its share averaged over the
+   configs, which would bury an operator that dominates some concurrencies and is absent at
+   others (Muse Spark: the large-M dense GEMM path is 5.7% of c64, 0.2% of c1, 1.8% on
+   average). Each config is selected by the unchanged `select_targets.py` on its own
+   `kernel_ranking.json`, by operator (against the merged source map, so operator keys
+   agree across configs), with the configured scope; the union is written to
+   `$OUT/selection_targets.json` with each target's `selected_in_configs` and
+   `config_pct`. Then continue with §3-§5 on `$OUT` unchanged: `draft_task_decls.py`,
+   review, `build_task_plan.py`, the UT wave.
 4. Every planned case now carries its `config_id` (sig `<pid>/<PHASE>_<shape>`), each config
    planned on its own bands. The UT pools the configs with
    `serving_weight_model.config_weighting` (`harness_lib.serving_weighted_speedup`, which
@@ -131,9 +143,9 @@ From the 2026-11-02 Muse Spark merge of a c8 and a c32 optimization campaign
   path selection**, never one Triton kernel: put `target_callable` above the M-dependent
   dispatch, so every config's cases enter the same seam, reach their own path, and the
   switch threshold itself is something the optimizer can move.
-- **Select by operator.** Pass `--source-map` to `select_candidates.py`: by kernel name, a
-  kernel that runs only in some configs is averaged with zeros and can fall under the
-  threshold although its operator is above it in every config.
+- **Select by operator, per config.** `multi_config.py select` selects each config by
+  operator on its own workload and unions the results, so an operator that matters at some
+  concurrencies only is not averaged away with zeros from the others.
 - **M-dependent paths merge; launch-dependent paths do not.** A UT runs in one environment.
   Paths chosen by M are reached by the cases themselves (the `launches` gate sees all of
   them across the phase's cases). Paths chosen by a launch setting (attention backend, MoE
