@@ -6918,7 +6918,7 @@ if (want('final')) {
   // A search leg over a canonical baseline is no speedup: run_e2e.py reports the accepted A/B's own pair.
   finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validationStatusOf()}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
   if (finalFromAb) {
     log("Validate gave no number: returning no final or speedup, so run_e2e.py reports the accepted A/B's own pair.");
@@ -7061,6 +7061,15 @@ function tuningReturn() {
   };
 }
 
+// A Validate that returned nothing is flagged, so no KB writer records the carried number.
+function validationStatusOf() {
+  return validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+      : (!want('final') ? 'phase_partial'
+        : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
+          : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown')));
+}
+
 const wfReturn = {
   // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
   // breaking change to the keys below; run_e2e.py keys its canonical-artifact
@@ -7085,12 +7094,7 @@ const wfReturn = {
   // gain is not silently demoted to no_gain by run_e2e.py, except finalFromAb's empty pair, filled from disk.
   final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
   throughput_speedup: finalFromAb ? 0 : finalSpeedup,
-  // A Validate that returned nothing is flagged, so no KB writer records the carried number.
-  validation_status: validatedOk ? validation.validation_status
-    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
-       : (!want('final') ? 'phase_partial'
-         : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
-           : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown'))),
+  validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,

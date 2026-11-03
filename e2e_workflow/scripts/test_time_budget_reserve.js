@@ -300,12 +300,14 @@ console.log('\n# a trace replay skips only a Validate that has nothing to measur
   // its status keeps both KB writers from recording it.
   const rs = src.indexOf('  final_throughput_tok_s: validatedOk');
   const re = src.indexOf('  output_parity: validation ? validation.output_parity', rs);
+  const vs = src.indexOf('function validationStatusOf() {');
+  const ve = src.indexOf('\n}\n', vs) + 2;
   const ret = (b) => new Function('validatedOk', 'validation', 'finalFromAb', 'finalTput', 'finalSpeedup',
-    'want', 'validateSkip', 'IS_AGENTX', `return {\n${src.slice(rs, re)}};`)(
+    'want', 'validateSkip', 'IS_AGENTX', `${src.slice(vs, ve)}\nreturn {\n${src.slice(rs, re)}};`)(
     !!b.validatedOk, b.validation || null, !!b.finalFromAb, b.finalTput, b.finalSpeedup,
     (p) => p !== 'final' || b.final !== false, b.validateSkip || '', !!b.agentx);
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  ok(rs !== -1 && re > rs, "the return's final and status fields are located");
+  ok(rs !== -1 && re > rs && vs !== -1, "the return's final and status fields are located");
   ok(same(ret({ agentx: true, validateSkip: 'final_is_baseline', finalTput: 113.325, finalSpeedup: 1.0 }),
     { final_throughput_tok_s: 113.325, throughput_speedup: 1.0, validation_status: 'skipped_final_is_baseline' }),
   "the stock bundle returns Setup's number at 1.0x, so run_e2e.py reports no_gain");
@@ -337,6 +339,8 @@ console.log('\n# a trace replay skips only a Validate that has nothing to measur
     { validatedOk: true, validation: { validation_status: 'validated_win', director_verified_throughput_tok_s: 950 },
       finalTput: 900, finalSpeedup: 1.15 }];
   ok(FIXED.every((b) => same(ret(b), before(b))), 'a fixed-ISL/OSL run returns exactly what it returned before');
+  ok(/log\(`COMPLETE\.[^;]*, status \$\{validationStatusOf\(\)\}/.test(src),
+    'the COMPLETE line prints the status the run returns, so a skipped Validate no longer reads "status ?"');
 }
 
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
