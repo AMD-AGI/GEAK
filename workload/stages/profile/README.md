@@ -115,64 +115,61 @@ evidence disagrees.
 (`acceptance_inventory_completion`, `acceptance_task_completion`,
 `acceptance_gpu_ut_status`, `acceptance_delivery_consistency`).
 
-## Acceptance rules
+## What is judged, and where
 
-- **What was configured is what must have run.** `selection_targets.json.policy` must
-  match `$PARAMS`' `selection_top_k` / `selection_overall_pct_gt` / `selection_phases`;
-  `kernel_ranking.json.selection_scope.selector.args` and, when present, the
-  `selection_invocation` receipt must agree with it. A disagreement is `fail`, with both
-  sets of numbers named. The skill's SKILL.md default never overrides `$PARAMS`: a run
-  configured for Top 10 / >0.5% that quietly selected at the documented Top 5 / >3%
-  delivered a quarter of the candidate space and reported success.
+`finalize.py` is the verdict (`stages/CONTRACT.md` 3.1) and the rules are written only
+there. It rereads the delivery and judges it against `$PARAMS`: that the scope actually
+selected is the scope that was configured, that the census denominator is nameable, that
+every selected identity has a task or a stated blocker, that each task carries both
+receipts, that declared and achieved coverage are both present and consistent, and that
+the four acceptance claims stay separate. Read that file — or run it early with the
+command above — rather than looking for a second copy of its numbers here.
+
+Two rules worth stating in prose because they shape what you build, not just what passes:
+
+- **The skill's own `SKILL.md` default never overrides `$PARAMS`.** A run configured for
+  Top 10 / >0.5% that quietly selected at the documented Top 5 / >3% delivered a quarter
+  of the candidate space and reported success. That is why the slot compares the two.
 - **Capacity is not an extraction cap.** `stages.optimize.params.task_limit` is the
   optimize stage's in-flight GPU capacity. Extract as far as the evidence goes; the
   surplus is recorded as `tasks_capacity_deferred` and scheduled in a later wave. A
   delivery is never truncated, and an existing extraction is never deleted, to fit it.
-- Every selected identity has a task or a stated blocker. Record the exact mapping in
-  `results.json` (`task_plan.json` until §5 exists): a real dispatch boundary or fused
-  chain can cover multiple identities, so `targets_selected` and `tasks_built` need not be
-  equal. Group by the mathematical and serving boundary, never merely to reduce the task
-  count. An identity named to a task directory that does not exist is unaccounted for, not
-  covered. Missing coverage must not be papered over by renormalizing the remainder
-  to 100%.
-- **Each task carries both receipts.** `run/ut_result.json` green, and `run/RETURN.json`
-  present and naming this task. Missing or failing either is `blocked` and the task is
-  named: "the gates were never run" and "every gate is green" must not produce the same
-  `result.json`. The delivery gate is a Node script — on a host without a `node` binary,
-  run it in the container that has one and say so rather than skipping it.
-  The bundled skill's standalone pipeline note says no external workflow consumes
-  `RETURN.json`; this slot still requires the local delivery-gate receipt. Run the
-  skill's documented delivery preflight with `--out` before finalizing. Its CPU
-  preflight and the full GPU UT remain separate evidence; neither replaces the other.
-- **Declared coverage and achieved coverage are both reported.** Owning a boundary is not
-  timing it: one delivery declared 42.92% of GPU time and timed 22.54%, because a task's
-  captured decode operands launched neither kernel it owned. A missing achieved number, or
-  one exceeding declared, is `blocked`.
-- **The four acceptance claims stay separate** (SKILL.md §5): inventory completion, task
-  completion, GPU UT status, delivery consistency. None may stand in for another.
-- A task directory without `unittest.py` cannot be run by the optimize stage and is
-  rejected outright.
-- Declare `meta.json.required_gpus` before freezing and qualifying a task, or supply an
-  explicit per-task GPU map through the optimize configuration. The serving model's TP
-  size does not imply that a per-rank compute UT needs that many devices; a collective
-  must retain its actual full rank set.
+
+## What the delivery must contain
+
+None of this is checked by code; all of it decides whether the evidence means anything.
+
+- A real dispatch boundary or fused chain can cover multiple identities, so
+  `targets_selected` and `tasks_built` need not be equal. Group by the mathematical and
+  serving boundary, never merely to reduce the task count, and never duplicate
+  parent/child work to fill a count. Missing coverage must not be papered over by
+  renormalizing the remainder to 100%.
+- The delivery gate is a Node script. On a host without a `node` binary, run it in the
+  container that has one and say so rather than skipping it. The bundled skill's
+  standalone note says no external workflow consumes `RETURN.json`; this slot still
+  requires the local receipt. Run the skill's documented delivery preflight with `--out`
+  before finalizing: its CPU preflight and the full GPU UT are separate evidence and
+  neither replaces the other.
+- Declare `meta.json.required_gpus` before freezing and qualifying a task. The serving
+  model's TP size does not imply that a per-rank compute UT needs that many devices; a
+  collective must retain its actual full rank set. The optimize scheduler reads this
+  number per task.
 - Place each task in its final directory and finish its selection evidence, observed
-  weights, callable binding and metadata before freezing the first full GPU test.
-  Keep later progress and resource updates outside that frozen snapshot. Moving a task
-  or rewriting metadata after a pass can invalidate its evidence and require another
-  full qualification; complete those changes before paying for the test.
+  weights, callable binding and metadata **before** the first full GPU test. Moving a task
+  or rewriting metadata after a pass can invalidate its evidence and require another full
+  qualification; complete those changes before paying for the test.
 - Tasks are built from the skill's UT contract families (`kernel-extract/ut_contracts/`):
   the family fixes operand distributions, layout facts and per-output error bounds, and
   `ut_driver.py` runs every gate. A task-authored contract (`--family-file`) is the route
   for an operator no family covers.
+- Qualify the editable-source contract as well as the original implementation: a
+  semantics-preserving change to a declared candidate leaf must remain runnable, while the
+  existing numerical negative controls must still be detected. A pristine guard that
+  requires every candidate byte to equal the original makes optimization impossible.
+  Freeze the oracle, inputs, harness and undeclared sources; declare every leaf needed by a
+  joint operator in metadata before dispatch.
 - When GPUs are unavailable it is acceptable to complete the CPU-only portion and report
   `blocked`, but a CPU-only check must never be presented as a complete extraction.
-- Qualify the editable-source contract as well as the original implementation: a
-  semantics-preserving change to a declared candidate leaf must remain runnable, while
-  the existing numerical negative controls must still be detected. A pristine guard
-  that requires every candidate byte to equal the original makes optimization impossible.
-  Freeze the oracle, inputs, harness and undeclared sources; declare every leaf needed
-  by a joint operator in metadata before dispatch.
 
 ## Pitfalls
 

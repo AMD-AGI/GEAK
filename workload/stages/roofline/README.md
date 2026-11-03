@@ -37,12 +37,17 @@ roughly half a percent. The kernel with a third of its share had 2.8× of headro
 
 ## Artifacts → `result.json`
 
-The slot's `rank.py` performs this mapping (it belongs to the slot, not to any
-implementation):
+The slot's `finalize.py` performs this mapping and is the stage's verdict (it belongs to
+the slot, not to any implementation, and the driver runs it after every session —
+`stages/CONTRACT.md` section 3.1):
 
 ```bash
-python3 "$WORKLOAD_ROOT/stages/roofline/rank.py"
+python3 "$WORKLOAD_ROOT/stages/roofline/finalize.py"
 ```
+
+What it accepts is written only there: read the file, or run it early with the command
+above, rather than looking for a second copy of its thresholds in this document. What
+follows is its interface and the reasoning behind it, not a restatement of its rules.
 
 It requires the skill to leave **`rows.json`** in `$OUT` — the raw per-case table, with
 fields `kernel`, `regime`, `case`, `measured_us`, `roofline_us` (or whichever column
@@ -50,7 +55,7 @@ fields `kernel`, `regime`, `case`, `measured_us`, `roofline_us` (or whichever co
 own `fold.py` input format; any other roofline implementation plugs in by emitting the
 same `rows.json`.
 
-What `rank.py` does:
+What `finalize.py` does:
 
 1. **Folding calls the skill's own `fold.py`** rather than reimplementing a sum. Folding
    multiple shapes into one number has exactly one correct algorithm — stay in the time
@@ -78,7 +83,7 @@ predicted performance ranking. A partial ranked subset cannot imply a known tota
 
 - **An efficiency above 1 falsifies the denominator; it does not mean 100% saturation.**
   Such rows are marked `suspect`, must **not** be clamped to 100%, and no speedup may be
-  derived from them. `rank.py` sets their `attainable_speedup` and
+  derived from them. `finalize.py` sets their `attainable_speedup` and
   `expected_e2e_gain_pct` to null — listed, but excluded from the ranking.
 - **`bound_type` is a model classification, not proof of a measured bottleneck.** Low
   efficiency on its own does not establish a bandwidth, occupancy or issue limit.
