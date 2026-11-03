@@ -120,6 +120,17 @@ scenario whose baseline `select` names that EP.
    `$OUT/selection_targets.json` with each target's `selected_in_configs` and
    `config_pct`. Then continue with §3-§5 on `$OUT` unchanged: `draft_task_decls.py`,
    review, `build_task_plan.py`, the UT wave.
+
+   **Communication kernels are listed, not extracted.** Operators whose kernels are all of
+   a kind in `selection_list_only_kinds` (default `["collective"]`: all-reduce, all-gather,
+   NCCL/RCCL) are taken out of the targets and recorded under `listed_only` with their
+   per-config share; they stay in the denominator and the report and get no task and no UT.
+   A standalone collective UT reproduces neither the interconnect state, the rank skew nor
+   the overlap with compute that decide its serving time; its real levers (fusing the
+   all-reduce with the following norm, quantized or fewer collectives) lie outside one
+   kernel's seam; and its multi-rank UT costs the whole node -- on Muse Spark it was the
+   flakiest gate of the run (TCPStore timeouts, a capture abort, ~4 h of timing reruns).
+   Set the list to `[]` to extract them anyway.
 4. Every planned case now carries its `config_id` (sig `<pid>/<PHASE>_<shape>`), each config
    planned on its own bands. The UT pools the configs with
    `serving_weight_model.config_weighting` (`harness_lib.serving_weighted_speedup`, which

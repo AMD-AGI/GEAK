@@ -168,6 +168,38 @@ class MultiConfigProfile(unittest.TestCase):
         self.assertEqual(sel["policy"]["combination"], "per_config_then_union")
         self.assertEqual(sel["policy"]["overall_pct_gt"], 5)
 
+    def test_collectives_are_listed_not_selected(self):
+        d64 = os.path.join(self.group, "configs", "c64")
+        with open(os.path.join(d64, "kernel_ranking.json")) as fh:
+            rk = json.load(fh)
+        rk["ranking"].append({"id": "cross_device_reduce_2stage", "name": "cross_device_reduce_2stage",
+                              "kind": "collective", "mass_us": 1, "selection_pct_gpu_time": 7.0,
+                              "share_of_phase_pct": {"DECODE": 7.0, "PREFILL": 0.0}})
+        with open(os.path.join(d64, "kernel_ranking.json"), "w") as fh:
+            json.dump(rk, fh)
+        c1 = os.path.join(self.group, "configs", "c1")
+        r = subprocess.run([sys.executable, "-I", str(SLOT / "multi_config.py"), "merge",
+                            "--group-dir", self.group, "--config", "c1=" + c1,
+                            "--config", "c64=" + d64], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        params = os.path.join(self.tmp.name, "params.json")
+        out = os.path.join(self.tmp.name, "sel.json")
+        for extra, listed in (({}, True), ({"selection_list_only_kinds": []}, False)):
+            with open(params, "w") as fh:
+                json.dump(dict({"selection_top_k": 10, "selection_overall_pct_gt": 1,
+                                "selection_phases": ["PREFILL", "DECODE"]}, **extra), fh)
+            r = subprocess.run([sys.executable, "-I", str(SLOT / "multi_config.py"), "select",
+                                "--group-dir", self.group, "--output", out, "--params", params,
+                                "--skill-root", str(SKILL)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(out) as fh:
+                sel = json.load(fh)
+            ids = {t["id"] for t in sel["targets"]}
+            self.assertEqual("cross_device_reduce_2stage" not in ids, listed)
+            self.assertEqual([x["id"] for x in sel["listed_only"]],
+                             ["cross_device_reduce_2stage"] if listed else [])
+        self.assertIn(K, ids)
+
     def test_single_config_plan_is_unchanged(self):
         d = os.path.join(self.group, "configs", "c1")
         with open(os.path.join(d, "sampling_points_final.json")) as fh:

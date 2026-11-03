@@ -326,6 +326,28 @@ def cmd_select(a):
             u = union.setdefault(t["id"], dict(t, selected_in_configs=[], config_pct={}))
             u["selected_in_configs"].append(cid)
             u["config_pct"][cid] = t.get("overall_pct")
+    # Kinds that are listed, not extracted (default: collectives). A communication kernel's
+    # time depends on the interconnect, rank skew and overlap with compute, none of which a
+    # standalone UT reproduces, and its real levers (fusing the all-reduce with the following
+    # norm, quantized or fewer collectives) lie outside one kernel's seam. Its multi-rank UT
+    # also costs the whole node and was the flakiest gate of the Muse Spark run. So it stays in
+    # the denominator and the report, with its per-config share, and gets no task.
+    list_only = set(params.get("selection_list_only_kinds", ["collective"]) or [])
+    kind = {r["id"]: r.get("kind") for r in merged.values()}
+    by_op = {}
+    for tid, t in union.items():
+        by_op.setdefault(t.get("op") or tid, []).append(tid)
+    listed = {}
+    for opk, ids in by_op.items():
+        if ids and all(kind.get(i) in list_only for i in ids):
+            for i in ids:
+                t = union.pop(i)
+                listed[i] = {"id": i, "op": opk, "kind": kind.get(i),
+                             "selected_in_configs": t["selected_in_configs"],
+                             "config_pct": t["config_pct"],
+                             "per_config_pct": (merged.get(i) or {}).get("per_config_pct"),
+                             "why": "kind %r is listed, not extracted (selection_list_only_kinds)"
+                                    % kind.get(i)}
     targets = []
     for tid, t in union.items():
         t["max_config_pct"] = max(v for v in t["config_pct"].values() if v is not None)
@@ -340,6 +362,8 @@ def cmd_select(a):
                                "own workload exceeds overall_pct_gt"),
            "denominators": {"basis": "per config (each config's own workload)", "per_config": denoms},
            "per_config": per_config, "targets": targets, "target_count": len(targets),
+           "listed_only": sorted(listed.values(), key=lambda r: r["id"]),
+           "list_only_kinds": sorted(list_only),
            "selection_invocation": {
                "arguments": arguments, "per_config": True,
                "selector_sha256": hashlib.sha256(open(selector, "rb").read()).hexdigest(),
@@ -347,6 +371,8 @@ def cmd_select(a):
                if os.path.exists(smap) else None}}
     dump(doc, out)
     print("selected %d targets (union over %d configs) -> %s" % (len(targets), len(per_config), out))
+    for r in sorted(listed.values(), key=lambda r: r["id"]):
+        print("  listed only (%s): %s in %s" % (r["kind"], r["id"][:60], ",".join(r["selected_in_configs"])))
     for t in targets:
         print("  %6.2f%% max  %-40s in %s" % (t["max_config_pct"], t.get("op") or t["name"][:40],
                                              ",".join(t["selected_in_configs"])))
