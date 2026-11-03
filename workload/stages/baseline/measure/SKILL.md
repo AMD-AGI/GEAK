@@ -71,6 +71,18 @@ cgroup then denies — which is how a prior run on this cluster had to set it to
 arms. Either grant the whole node or set it to 0, and then set it to 0 in **every** arm it
 is compared against.
 
+**A KV-offload point must be handed every `KV_OFFLOAD*` variable the client reads**, and
+checked for all of them before the run starts. The AgentX client reads `KV_OFFLOADING`,
+`KV_OFFLOAD_BACKEND`, `KV_OFFLOAD_BACKEND_METADATA` and `TOTAL_CPU_DRAM_GB`, but it checks
+the backend when it *starts* and the metadata only when it *aggregates* — after the whole
+measurement window. A hicache baseline (c64, 2026-10-28) hit both halves: one attempt
+stopped at client start having already paid the server's startup, the next ran the full
+hour and left no throughput at all. Apply the stricter rule up front, reading the
+environment the client will actually be given: `params.env` first, then each
+`harness.env_files` entry (the harness sources them with `set -a`, so they win), defaulting
+to the harness's `pins.env` where it exists. Copy the values from the CI job's benchmark
+env rather than inventing them.
+
 A run under 900 s is a screening diagnostic on this workload, not a baseline.
 
 ## 3. Run it
