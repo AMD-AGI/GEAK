@@ -26,7 +26,7 @@ it is not fused (Requirement 5).
 | Rank | Level | Fusion region | Kernels (trace names) | Launches before → after | Expected gain (weighted e2e %, upper / expected) | Main risk | Conflicts | Confidence |
 |---|---|---|---|---|---|---|---|---|
 
-## Recommended fusion patterns (implementable levels)
+## Recommended fusion patterns (implementable scope)
 
 For each recommended pattern state the fusion boundary, the level, the reason for the choice, the
 bottleneck it addresses and its seam. The recommended patterns are mutually compatible.
