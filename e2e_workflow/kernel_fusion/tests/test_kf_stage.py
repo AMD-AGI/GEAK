@@ -304,3 +304,24 @@ def test_the_stage_stops_what_it_left_running_whatever_happened(tmp_path):
     R, _ = fake_R({"status": "no_gain", "eval_dir": "/kf"})
     kf = kf_stage.run_stage({"kernel_fusion": {"budget_s": 600}}, ps_args(tmp_path / "b"), 36000, R)
     assert "nothing stopped" in kf["leftovers"]["note"]
+
+
+def test_the_driver_prints_a_pointer_and_the_return_is_read_from_disk(tmp_path):
+    # the driver no longer echoes the (40 KB) return on stdout -- echoing it is what failed to parse
+    pa = ps_args(tmp_path)
+    kf_dir = Path(kf_stage.kf_dir_for({}, pa))
+    R, seen = fake_R({"eval_dir": str(kf_dir), "workflow_return_json": str(kf_dir / "workflow_return.json"),
+                      "status": "accepted"})
+    orig = R["invoke_workflow"]
+
+    def invoke(prompt, timeout_s, eval_dir, ps_args=None):
+        Path(eval_dir).mkdir(parents=True, exist_ok=True)
+        (Path(eval_dir) / "workflow_return.json").write_text(json.dumps({"summary": "x", "result": {
+            "status": "accepted", "eval_dir": eval_dir, "final_overlay": "/kf/overlay/cand", "throughput_speedup": 1.03,
+            "accepted": [{"id": "c1"}]}}))
+        return orig(prompt, timeout_s, eval_dir, ps_args)
+    R["invoke_workflow"] = invoke
+    kf = kf_stage.run_stage({"kernel_fusion": {"budget_s": 600}}, pa, 36000, R)
+    assert "never print it" in seen["prompt"] and '"workflow_return_json"' in seen["prompt"]
+    assert kf["status"] == "accepted" and kf["throughput_speedup"] == 1.03 and "error" not in kf
+    assert kf["accepted"] == [{"id": "c1"}] and pa["initial_overlay_pythonpath"] == "/kf/overlay/cand"
