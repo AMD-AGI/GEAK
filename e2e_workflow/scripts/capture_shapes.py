@@ -22,10 +22,21 @@ Usage pattern (Extractor writes an overlay sitecustomize.py like):
 Then launch the server with PYTHONPATH=<overlay>:$PYTHONPATH and run a short bench. On process exit
 (atexit) the records are flushed to <out_dir>/reference_io.pt + meta.json.
 
+Scope: only EAGER calls are recorded. A call made while torch.compile traces a region (vLLM compiles the
+model forward with fullgraph=True) is passed through untouched, because the recording below cannot be
+traced, and the compiled graph never re-enters this wrapper at run time. Such a call is only counted, in
+``compiled_passthrough_calls``; it adds nothing to the call count, the shape histogram, the oracle or the
+GEAK_TARGET marker. A target reached only through compiled regions therefore writes a meta.json with
+total_calls_observed 0 and compiled_passthrough_calls above 0, which kernel_selection.verify() reports as
+capture_compiled_unobservable; a target reached through both has a histogram that covers its eager calls
+only, and meta.json says so in ``capture_scope``.
+
 Anti-cheating: the oracle is captured from the UNMODIFIED baseline kernel. The optimizer later must
 match it. The unittest + this file's outputs must not be edited during optimization.
 """
 import atexit, functools, importlib, json, os, re, shutil, sys, threading
+
+CAPTURE_SCOPE = "eager_calls_only: calls inside a torch.compile region are traced, not run, so they are not recorded"
 
 # Issue #429: process-local MXFP4 MoE oracles can retain multi-GiB tensors per rank/retry until the
 # workspace is evicted. Defaults bound heavy oracle persistence; set CAPTURE_BYTE_BUDGET=0 for unlimited.
@@ -86,6 +97,8 @@ _STATE = {
     "synth_leaves": 0, "synth_bytes_saved": 0,
     "oracle_bytes_est": 0, "budget_exceeded": False,
     "budget_skip_count": 0, "oracle_save_count": 0, "meta_flush_count": 0,
+    # Resolved by install(), so the wrapper never imports torch on its hot path.
+    "is_compiling": lambda: False, "compiled_passthrough_calls": 0,
 }
 
 
@@ -471,6 +484,14 @@ def _torch():
     return torch
 
 
+def _compile_probe():
+    """``torch.compiler.is_compiling``, or a constant False where torch (or that query) is absent."""
+    try:
+        return _torch().compiler.is_compiling
+    except (ImportError, AttributeError):
+        return lambda: False
+
+
 def _snapshot(x):
     """Detach+clone tensors to CPU so later in-place ops can't corrupt the oracle. Pass scalars/None
     through; summarize unsupported objects by repr so the record stays loadable."""
@@ -687,6 +708,10 @@ def _sig(args, kwargs):
 
 def _wrapper(*args, **kwargs):
     s = _STATE
+    # Dynamo folds this to True while tracing a compiled region (vLLM's fullgraph forward), which it cannot trace.
+    if s["is_compiling"]():
+        s["compiled_passthrough_calls"] += 1
+        return s["orig"](*args, **kwargs)
     # This marker is consumed by kernel_selection.py from the capture run's torch trace.  It turns
     # "the hook saw calls" into stronger evidence: the GPU kernel selected from the baseline profile
     # must actually execute while THIS callable is active.  record_function is effectively a no-op
@@ -858,7 +883,7 @@ def _maybe_flush(in_graph=False):
 
 def _flush(write_oracle=True):
     s = _STATE
-    if not s["records"] and not s["shape_counts"]:
+    if not s["records"] and not s["shape_counts"] and not s["compiled_passthrough_calls"]:
         sys.stderr.write("[capture_shapes] no records captured; nothing to flush\n")
         return
     torch = _torch()
@@ -938,6 +963,8 @@ def _flush(write_oracle=True):
         "attr": s["attr"],
         "num_cases": len(records),
         "total_calls_observed": s["calls"],
+        "capture_scope": CAPTURE_SCOPE,
+        "compiled_passthrough_calls": s["compiled_passthrough_calls"],
         "regimes_covered": sorted(s["regime_seen"]),
         "cases": cases,
         "shape_counts": shape_hist,
@@ -1078,6 +1105,7 @@ def install(target, out_dir, max_cases=5):
                                  _DEFAULT_STRUCTURAL_OPERANDS).split(",") if k.strip()}
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
              orig=orig, mod=mod, attr=attr, installed=True,
+             is_compiling=_compile_probe(),
              byte_budget=byte_budget, case_byte_limit=case_byte_limit,
              persist_policy=persist_policy, share_min_bytes=share_min_bytes or (16 << 20),
              structural_keys=structural, synth_min_bytes=synth_min_bytes or (64 << 10),

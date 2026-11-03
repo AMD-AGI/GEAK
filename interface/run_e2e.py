@@ -3224,6 +3224,49 @@ def _open_server_log(log_path: Path):
     return log_path.open(encoding="utf-8", errors="ignore")
 
 
+_VLLM_NON_DEFAULT_ARGS_MARKER = "non-default args: {"
+# Logged on every launch yet never part of the configuration: transport, the positional echo of ``model``, and
+# GEAK's own torch profiler wrapper (only its profile servers carry it).
+_VLLM_NON_IDENTITY_KEYS = frozenset({"host", "port", "model_tag", "profiler_config"})
+
+
+def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
+    """Extract launch fields from vLLM's ``non-default args: {...}`` line.
+
+    vLLM logs once, at startup, every CLI argument that differs from its default as a dict repr, so the key set is
+    open: every field except the run-scoped ``_VLLM_NON_IDENTITY_KEYS`` is part of the identity and is compared,
+    including one this parser has never seen. Each top-level item is evaluated on its own. A field whose value is
+    not a literal is listed under ``unparsed``, so a version-drifted log reads as unverified instead of as a value;
+    so is an item that is not a ``key: value`` pair.
+    """
+    start = text.find(_VLLM_NON_DEFAULT_ARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_VLLM_NON_DEFAULT_ARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        try:
+            key = ast.literal_eval(raw_key.strip()) if sep else None
+        except (ValueError, SyntaxError):
+            key = None
+        if not isinstance(key, str):
+            unparsed.append("<malformed item>")
+            continue
+        if key in _VLLM_NON_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value.strip())
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
@@ -3255,6 +3298,18 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
                 server_args = _parse_atom_engine_kwargs(line)
                 if server_args:
                     return {"backend": "atom", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
+    # vLLM logs the arguments that differ from its defaults once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _VLLM_NON_DEFAULT_ARGS_MARKER not in line:
+                    continue
+                server_args = _parse_vllm_non_default_args(line)
+                if server_args:
+                    return {"backend": "vllm", "server_args": server_args}, ""
     except OSError:
         return {}, ""
 
@@ -3474,6 +3529,11 @@ def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
     }
     if equal is False:
         out["mismatches"] = _identity_mismatches(expected, observed)
+    if any(path.is_file() for path in candidates) and not observed:
+        out["observed_problem"] = (
+            "no launch record this parser recognises (SGLang ServerArgs, ATOM Engine kwargs, vLLM non-default "
+            "args, identity=) in the Setup server log"
+        )
     if launched:
         out["geak_launched"] = launched
         out["geak_launched_reference"] = "orchestrator_server_log" if reference else expected_source
