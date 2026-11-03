@@ -69,7 +69,10 @@ const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_ret
 // KernelFusion knobs.
 const PROMPT = String(A.kf_prompt || `${WORKFLOW_DIR}/knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md`);
 // The fusion levels the author/apply steps implement; the analysis may recommend only these (the skill ranks all).
-const IMPLEMENTABLE_LEVELS = String(A.kf_implementable_levels || 'L1,L2');
+const IMPLEMENTABLE_LEVELS = String(A.kf_implementable_levels || 'L1,L2,L3');
+// Patterns inside those levels the author/apply steps do not implement yet; the analysis ranks them but does not
+// recommend them, and the triage does not author them.
+const UNSUPPORTED_PATTERNS = String(A.kf_unsupported_patterns || 'L3 MegaKernel (one persistent kernel that absorbs a heavy expert/GEMM or attention stage together with its dispatch, combine or communication, e.g. MegaMoE); L4 (whole-layer MonoKernel)');
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them
@@ -502,7 +505,7 @@ cannot be reached through one Python seam can still be ranked, but must not be r
 ## Inputs
 ${cfg({ EVAL_DIR, TRACE_DIR, WORKLOAD_SUMMARY: workloadJson || '(none)', PROFILE_TOPN: profileTopN || '(none)',
     MODEL_PATH, BACKEND, SERVING_TP, SERVER_FLAGS: INIT_FLAGS, SERVER_ENV: INIT_ENV, LAUNCH_SCRIPT: LAUNCH_SCRIPT || '(none)',
-    WORKLOAD, OVERLAY: INIT_OVERLAY || '(none)', IMPLEMENTABLE_LEVELS })}
+    WORKLOAD, OVERLAY: INIT_OVERLAY || '(none)', IMPLEMENTABLE_LEVELS, UNSUPPORTED_PATTERNS })}
 
 ${KF_TASK ? `## Operator constraints\n${KF_TASK}\n\n` : ''}Return JSON: {"topk_json": "${OUT}/topk.json", "report_path": "${OUT}/REPORT.md", "report_md": "<full report>",
 "model_notes_md": "<model notes>", "digest_md": "${OUT}/digest/digest.md", "candidates": <topk.json candidates>,
@@ -542,7 +545,9 @@ report's reasoning, the trace digest, the source) -- there is no limit on how ma
 pick what you judge worth the effort and say why, and say why for each one you leave out.
 The one hard line: a candidate is authored by rebinding ONE Python callable that covers its whole region
 (seam.target_callable) and is the one the live server actually runs (check the trace's launch frames: a model can
-have several implementations of the same layer); one without such a seam cannot be authored. Mutually exclusive candidates (exclusive_with)
+have several implementations of the same layer); one without such a seam cannot be authored. Implementable scope:
+levels ${IMPLEMENTABLE_LEVELS}, except ${UNSUPPORTED_PATTERNS}; a candidate outside it is not authored (a level alone
+is no reason to skip a candidate inside it). Mutually exclusive candidates (exclusive_with)
 may both be picked: which of them goes into the server is decided after their unit tests.
 Read ${topk.topk_json || '(the candidates below)'}${topk.report_md ? ' and the report below' : ''}; read anything else you need.
 

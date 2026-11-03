@@ -46,6 +46,7 @@ _KNOBS = {
     "validation_replicas": ("GEAK_KF_VALIDATION_REPLICAS", "kf_validation_replicas"),
     "baseline_mode": ("GEAK_KF_BASELINE_MODE", "kf_baseline_mode"),
     "implementable_levels": ("GEAK_KF_IMPLEMENTABLE_LEVELS", "kf_implementable_levels"),
+    "unsupported_patterns": ("GEAK_KF_UNSUPPORTED_PATTERNS", "kf_unsupported_patterns"),
     "min_gain_pct": ("GEAK_KF_MIN_GAIN_PCT", "kf_min_gain_pct"),
     "task": ("GEAK_KF_TASK", "kf_task"),
     "budget_s": ("GEAK_KF_BUDGET_S", None),

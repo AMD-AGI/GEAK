@@ -317,7 +317,9 @@ def test_the_workflow_owns_the_output_format_and_the_schema_types_the_seam():
     skill = E2E_DIR / "knowledge" / "kernel_fusion_skills" / "fusion-analysis"
     text = "".join(p.read_text() for p in [skill / "SKILL.md", *sorted((skill / "references").glob("*.md"))])
     assert "out/" not in text and "fusion_candidates" not in text and "recommended=true" not in text
-    assert "IMPLEMENTABLE_LEVELS: L1,L2" in p                                     # capability injected, not prose
+    assert "IMPLEMENTABLE_LEVELS: L1,L2,L3" in p and "UNSUPPORTED_PATTERNS: L3 MegaKernel" in p   # injected, not prose
+    tri = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:triage")
+    assert "levels L1,L2,L3, except L3 MegaKernel" in tri and "a level alone" in tri
     assert "knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md" in (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
     assert "reference files a SKILL.md among them links" in p
 

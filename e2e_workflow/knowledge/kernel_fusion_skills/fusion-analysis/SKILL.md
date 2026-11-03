@@ -37,7 +37,7 @@ The caller supplies these; the file names and paths are given in its instruction
 | Server flags and environment | Parallelism, speculative decoding, graph mode, operator-library switches |
 | Framework and operator-library source | Kernel ownership and seams |
 | Target metric | The metric the ranking optimizes |
-| Implementable levels | The fusion levels the implementation step supports |
+| Implementable levels, unsupported patterns | The fusion levels the implementation step supports, and the patterns inside them it does not support yet |
 
 ## Requirements
 
@@ -53,8 +53,10 @@ A candidate that does not meet all of the following must not be recommended.
    the same layer; only the implementation listed in the Live model code table is live.
 3. **The target metric decides.** Rank by expected gain on the target metric. Candidates that do not
    affect it rank last.
-4. **Implementation scope.** Rank every level as found. Only levels listed as implementable may be
-   recommended; mark the others "not implementable in this stage". The recommended set must be
+4. **Implementation scope.** Rank every level as found. Only candidates at an implementable level and not
+   matching an unsupported pattern may be recommended; mark the others "not implementable in this stage" and
+   name the reason (level or pattern). An L3 stage-wise fusion that is not a MegaKernel (see
+   [fusion levels](references/fusion-levels.md)) is in scope when L3 is implementable. The recommended set must be
    mutually compatible: its candidates take effect together.
 5. **Complete coverage (boundary ledger).** For each phase that drives the target metric, use that
    phase's own trace sequence (never another phase's; list every path when layers differ). List the
@@ -170,7 +172,7 @@ and stacking, then state the total expected gain of the recommended set without 
 
 Deliver:
 
-1. the recommended fusion patterns (mutually compatible, implementable levels only, each with a seam);
+1. the recommended fusion patterns (mutually compatible, implementable scope only, each with a seam);
 2. fallback patterns;
 3. regions where fusion is not advised, with reasons;
 4. information still missing for a final decision.

@@ -45,16 +45,27 @@ Consider L2 first when:
 Goals: keep the dominant operator at full performance while removing the surrounding small kernels and
 their intermediate memory traffic.
 
-## L3 — Stage-wise fusion (MegaKernel)
+## L3 — Stage-wise fusion
 
-Fuses several operators of one functional stage.
+Fuses several operators of one functional stage. Two forms are distinguished, because they differ in cost and
+in what the implementation step supports:
+
+- **Stage fusion**: several kernels of one stage become one kernel, and no heavy expert/GEMM or attention
+  kernel is rewritten. Examples: router GEMV + split-K reduce + top-k routing + pooler + norm in one epilogue;
+  extending an existing fused kernel to the shapes actually served; router + metadata preparation + dispatch
+  preparation.
+- **MegaKernel**: one persistent kernel absorbs a heavy expert/GEMM or attention stage together with its
+  dispatch, combine or communication. Examples: MegaMoE (dispatch + expert GEMM + combine), a stage kernel
+  that overlaps the TP all-reduce with the GEMM producing it.
+
+Whether each form is implementable is given by the caller (implementable levels, unsupported patterns).
 
 Typical cases:
 
-- dispatch + expert GEMM + combine;
-- router + metadata preparation + dispatch;
-- several consecutive stages inside attention;
-- communication overlapped with computation.
+- router + metadata preparation + dispatch (stage fusion);
+- several consecutive light stages inside attention (stage fusion);
+- dispatch + expert GEMM + combine (MegaKernel);
+- communication overlapped with computation (MegaKernel).
 
 Consider L3 first when:
 
