@@ -509,7 +509,8 @@ accepted configuration in both harnesses. It is the numeric compatibility
 metric for the cross-handoff comparison; `handoff_alignment` is the
 authoritative verdict and is `unverified` until actual Setup launch evidence
 matches an upstream observed identity. GEAK reads that evidence from
-`baseline/server.log` (parsed SGLang `ServerArgs` or ATOM `Engine kwargs`) or
+`baseline/server.log` (parsed SGLang `ServerArgs`, ATOM `Engine kwargs` or vLLM
+`non-default args`) or
 `baseline/magpie_launch.log` (an emitted launch identity). When the handoff names
 the orchestrator's own baseline server log
 (`baseline_env_spec.measurement_evidence.actual_server_log_path`), GEAK parses it
@@ -521,7 +522,13 @@ itself (`geak_launched`: profile round 0, validation base and final), because a
 matching Setup says nothing about a later launch. `server_identity.status` is the
 worst of all checks (mismatched > unverified > matched); a launch field logged in a
 form the parser does not know is recorded under `unparsed` and makes that check
-unverified. Every evidence path actually read is recorded in
+unverified. For vLLM, whose `non-default args` line lists every argument that
+differs from its default, every field is compared, including one the parser has
+never seen, except the run-scoped `host`, `port`, `model_tag` and the
+`profiler_config` of GEAK's own profile servers. Two servers that differ in a
+field are `mismatched`; a field logged by only one side is `unverified`; an item
+that is not a `key: value` pair is recorded under `unparsed`. Every evidence path
+actually read is recorded in
 `server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both

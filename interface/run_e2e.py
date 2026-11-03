@@ -3191,38 +3191,19 @@ def _open_server_log(log_path: Path):
 
 
 _VLLM_NON_DEFAULT_ARGS_MARKER = "non-default args: {"
-_VLLM_IDENTITY_KEYS = (
-    "model",
-    "tokenizer",
-    "served_model_name",
-    "tensor_parallel_size",
-    "data_parallel_size",
-    "pipeline_parallel_size",
-    "gpu_memory_utilization",
-    "max_model_len",
-    "max_num_seqs",
-    "max_num_batched_tokens",
-    "enable_chunked_prefill",
-    "enable_prefix_caching",
-    "quantization",
-    "dtype",
-    "kv_cache_dtype",
-    "attention_backend",
-    "block_size",
-    "enforce_eager",
-    "speculative_config",
-    "compilation_config",
-    "trust_remote_code",
-)
+# Logged on every launch yet never part of the configuration: transport, the positional echo of ``model``, and
+# GEAK's own torch profiler wrapper (only its profile servers carry it).
+_VLLM_NON_IDENTITY_KEYS = frozenset({"host", "port", "model_tag", "profiler_config"})
 
 
 def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
-    """Extract stable launch fields from vLLM's ``non-default args: {...}`` line.
+    """Extract launch fields from vLLM's ``non-default args: {...}`` line.
 
-    vLLM logs once, at startup, the CLI arguments that differ from its defaults as a dict repr. Each top-level
-    item is evaluated on its own; an identity field whose value is not a literal is listed under ``unparsed``,
-    so a version-drifted log reads as unverified instead of as a value. Transport fields (host, port) are left
-    out: two servers of one configuration differ there by design.
+    vLLM logs once, at startup, every CLI argument that differs from its default as a dict repr, so the key set is
+    open: every field except the run-scoped ``_VLLM_NON_IDENTITY_KEYS`` is part of the identity and is compared,
+    including one this parser has never seen. Each top-level item is evaluated on its own. A field whose value is
+    not a literal is listed under ``unparsed``, so a version-drifted log reads as unverified instead of as a value;
+    so is an item that is not a ``key: value`` pair.
     """
     start = text.find(_VLLM_NON_DEFAULT_ARGS_MARKER)
     if start < 0:
@@ -3234,13 +3215,14 @@ def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
     unparsed: list[str] = []
     for item in _split_top_level_items(body):
         raw_key, sep, raw_value = item.partition(":")
-        if not sep:
-            continue
         try:
-            key = ast.literal_eval(raw_key.strip())
+            key = ast.literal_eval(raw_key.strip()) if sep else None
         except (ValueError, SyntaxError):
+            key = None
+        if not isinstance(key, str):
+            unparsed.append("<malformed item>")
             continue
-        if key not in _VLLM_IDENTITY_KEYS:
+        if key in _VLLM_NON_IDENTITY_KEYS:
             continue
         try:
             observed[key] = ast.literal_eval(raw_value.strip())

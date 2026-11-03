@@ -984,17 +984,78 @@ def test_vllm_parser_without_non_default_args_returns_no_fields() -> None:
     assert rx._parse_vllm_non_default_args("INFO server ready\n") == {}
 
 
-def test_vllm_parser_skips_an_item_without_a_colon() -> None:
+def test_vllm_parser_lists_an_item_without_a_colon_as_unparsed() -> None:
     assert rx._parse_vllm_non_default_args(
         "non-default args: {'model': '/models/Qwen3.5-9B', malformed, 'max_num_seqs': 32}"
-    ) == {"model": "/models/Qwen3.5-9B", "max_num_seqs": 32}
+    ) == {"model": "/models/Qwen3.5-9B", "max_num_seqs": 32, "unparsed": ["<malformed item>"]}
 
 
-@pytest.mark.parametrize("raw_key", ["model", "'model' +"])
-def test_vllm_parser_skips_a_key_that_is_not_a_literal(raw_key: str) -> None:
+@pytest.mark.parametrize("raw_key", ["model", "'model' +", "1", "['model']"])
+def test_vllm_parser_lists_a_key_that_is_not_a_string_literal_as_unparsed(raw_key: str) -> None:
     assert rx._parse_vllm_non_default_args(
         f"non-default args: {{{raw_key}: '/models/invalid', 'max_num_seqs': 32}}"
+    ) == {"max_num_seqs": 32, "unparsed": ["<malformed item>"]}
+
+
+def test_vllm_parser_drops_run_scoped_fields() -> None:
+    assert rx._parse_vllm_non_default_args(
+        "non-default args: {'model_tag': '/m', 'host': '0.0.0.0', 'port': 8000, "
+        "'profiler_config': ProfilerConfig(profiler='torch'), 'max_num_seqs': 32}"
     ) == {"max_num_seqs": 32}
+
+
+def test_vllm_parser_keeps_a_field_it_has_never_seen() -> None:
+    assert rx._parse_vllm_non_default_args(
+        "non-default args: {'max_num_seqs': 32, 'new_scheduler_flag': True}"
+    ) == {"max_num_seqs": 32, "new_scheduler_flag": True}
+
+
+def _vllm_identity(tmp_path: Path, name: str, args: str) -> dict:
+    path = tmp_path / name
+    path.write_text(f"INFO non-default args: {{{args}}}\n", encoding="utf-8")
+    evidence, _ = rx._read_server_identity_evidence(path)
+    return evidence
+
+
+# The launch lines of one configuration as a real Qwen3.5 session logged them: a baseline server and a GEAK profile
+# server, which differ only in the port and in the profiler wrapper GEAK adds.
+_VLLM_BASELINE = (
+    "'model_tag': '/m', 'port': 8888, 'model': '/m', 'trust_remote_code': True, 'dtype': 'bfloat16', "
+    "'max_model_len': 4096, 'language_model_only': True, 'max_num_seqs': 15, "
+    "'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 1}"
+)
+_VLLM_PROFILE = _VLLM_BASELINE.replace("8888", "46495") + ", 'profiler_config': ProfilerConfig(profiler='torch')"
+
+
+def test_a_profile_server_and_the_baseline_server_of_one_configuration_match(tmp_path: Path) -> None:
+    baseline = _vllm_identity(tmp_path, "baseline.log", _VLLM_BASELINE)
+    profile = _vllm_identity(tmp_path, "profile.log", _VLLM_PROFILE)
+
+    assert "profiler_config" not in profile["server_args"]
+    assert rx._identity_value_equal(baseline, profile) is True
+
+
+def test_servers_that_differ_in_a_field_the_parser_has_never_seen_are_mismatched(tmp_path: Path) -> None:
+    first = _vllm_identity(tmp_path, "a.log", "'model': '/m', 'new_scheduler_flag': True")
+    second = _vllm_identity(tmp_path, "b.log", "'model': '/m', 'new_scheduler_flag': False")
+
+    assert rx._identity_value_equal(first, second) is False
+
+
+def test_a_field_logged_by_only_one_server_leaves_the_identity_unverified(tmp_path: Path) -> None:
+    with_flag = _vllm_identity(tmp_path, "a.log", "'model': '/m', 'new_scheduler_flag': True")
+    without_flag = _vllm_identity(tmp_path, "b.log", "'model': '/m'")
+
+    assert rx._identity_value_equal(with_flag, without_flag) is None
+
+
+def test_language_model_only_changes_the_verdict(tmp_path: Path) -> None:
+    text_only = _vllm_identity(tmp_path, "a.log", _VLLM_BASELINE)
+    full_model = _vllm_identity(tmp_path, "b.log", _VLLM_BASELINE.replace("'language_model_only': True, ", ""))
+    flipped = _vllm_identity(tmp_path, "c.log", _VLLM_BASELINE.replace("True, 'max_num", "False, 'max_num"))
+
+    assert rx._identity_value_equal(text_only, full_model) is None
+    assert rx._identity_value_equal(text_only, flipped) is False
 
 
 def test_vllm_log_read_error_returns_no_identity(tmp_path: Path) -> None:
