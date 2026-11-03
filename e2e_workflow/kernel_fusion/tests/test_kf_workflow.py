@@ -344,3 +344,13 @@ def test_a_hand_assembled_prepare_delivery_still_counts():
     out = run("agentx_flat")
     assert "kf:kernel-extract prepare c1 (retry)" not in labels(out)
     assert f"{KF}/tasks/c1" in [w["kernel_path"] for w in out["workflows"]]
+
+
+def test_a_stack_that_misses_the_sampled_gsm8k_is_confirmed_on_the_full_set_before_any_screen():
+    out = run("stack_fail")
+    by = {c["label"]: c["prompt"] for c in out["calls"]}
+    integ = by["kf:integrate kf_stack"]
+    assert "ACCURACY_LIMIT: 200" in integ and "--limit 1319 (the full test set)" in integ
+    assert "decide the accuracy gate on that result alone" in integ
+    # only a miss on the full set reaches the per-kernel screen, which is judged on the full set too
+    assert "ACCURACY_LIMIT: 1319" in by["kf:integrate screen"]

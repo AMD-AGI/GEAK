@@ -47,6 +47,7 @@ _KNOBS = {
     "baseline_mode": ("GEAK_KF_BASELINE_MODE", "kf_baseline_mode"),
     "implementable_levels": ("GEAK_KF_IMPLEMENTABLE_LEVELS", "kf_implementable_levels"),
     "unsupported_patterns": ("GEAK_KF_UNSUPPORTED_PATTERNS", "kf_unsupported_patterns"),
+    "accuracy_confirm_limit": ("GEAK_KF_ACCURACY_CONFIRM_LIMIT", "kf_accuracy_confirm_limit"),
     "min_gain_pct": ("GEAK_KF_MIN_GAIN_PCT", "kf_min_gain_pct"),
     "task": ("GEAK_KF_TASK", "kf_task"),
     "budget_s": ("GEAK_KF_BUDGET_S", None),

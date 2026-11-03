@@ -92,6 +92,9 @@ const KF_ACCURACY_INPUTS = KF_ACCURACY_GATE !== 'none'
       ACCURACY_TOL: parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01),
       GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
+// A 200-question gsm8k draw moves by ~1 point run to run, as much as the tolerance. When the stack misses the gate on
+// the sampled subset, the full test set (1319 questions) decides before any per-kernel screen; the screen uses it too.
+const ACCURACY_CONFIRM_LIMIT = parseInt(A.kf_accuracy_confirm_limit != null ? A.kf_accuracy_confirm_limit : 1319, 10);
 const VALIDATION_MODE = String(A.kf_validation_mode || 'isolated_server');   // fresh servers: boot-to-boot noise
 const VALIDATION_REPLICAS = parseInt(A.kf_validation_replicas != null ? A.kf_validation_replicas : 1, 10);   // ONE A/B
 // The stage's own baseline: one fresh server, one timed round -- no discarded full warmup round.
@@ -806,6 +809,8 @@ async function screen(list, label) {
     'Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
     { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
       ...KF_ACCURACY_INPUTS,
+      // the stack already missed on the sampled subset: each kernel is judged on the full test set
+      ...(KF_ACCURACY_GATE === 'gsm8k' ? { ACCURACY_LIMIT: ACCURACY_CONFIRM_LIMIT } : {}),
       KERNEL_RESULTS: list.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
     { phase: 'ApplyBack', label, schema: SCREEN_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
   if (!sc) return null;
@@ -847,9 +852,15 @@ async function stackAB(members, suffix) {
     `${EVAL_DIR}/overlay/cand_${stackName} = CURRENT_OVERLAY plus every entry's files -- rename each ` +
     'sitecustomize.py and write one sitecustomize.py that imports all of them -- do not re-materialize kernels from ' +
     'patches. Run the correctness checks once on that stack and confirm EVERY entry\'s engaged_banner in the CAND ' +
-    'server log; if the stack fails either, skip the throughput legs and return gate "rejected" with a reason that ' +
-    'starts with "correctness:" (name the kernels that did not engage). Otherwise ONE reference-vs-CAND throughput ' +
-    'A/B. Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
+    'server log.' + (KF_ACCURACY_GATE === 'gsm8k'
+      ? ` ACCURACY: score gsm8k with --limit ACCURACY_LIMIT on the reference and the CAND. If the CAND misses the gate ` +
+        `there, do not reject yet: on the same two correctness servers score BOTH again with --limit ` +
+        `${ACCURACY_CONFIRM_LIMIT} (the full test set), and decide the accuracy gate on that result alone; report all ` +
+        'scores.' : '') +
+    ' If the stack fails the accuracy gate or an engagement check, skip the throughput legs and return gate ' +
+    '"rejected" with a reason that starts with "correctness:" (name the kernels that did not engage). Otherwise ONE ' +
+    'reference-vs-CAND throughput A/B. Return the gate for the whole set; accepted_overlay = the CAND overlay when it ' +
+    'is accepted or stack.';
   const label = `kf:integrate ${stackName}${suffix}`;
   let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
     { phase: 'ApplyBack', label, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
