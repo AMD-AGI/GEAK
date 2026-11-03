@@ -15,11 +15,14 @@ does not).
 
 | Skill | Notes |
 | --- | --- |
-| `geak-kernel-workflow/` | **default**. Drives GEAK's `kernel_workflow/kernel_workflow.js`. |
+| `geak-kernel-workflow/` | **default**. Drives GEAK's `kernel_workflow/kernel_workflow.js`. Requires a runner that exposes the Workflow tool. |
+| `native-frozen/` | the same worker and frozen harness, optimized with the runner's own coding tools. Use it when the runner is a plain coding CLI, and for collectives: `kernel_workflow.js` takes a pool lock on one GPU. |
 | `subagent-raw/` | the "bare agent" option required by `instruct.md`; also the control group for the GEAK path. |
-| `geak-kernel-gpu-groups/` | partitions tasks by GPU requirement, running disjoint groups concurrently and whole-node collectives in separate batches when needed. |
 
 Switch with `stages.optimize.skill`, or `--set stages.optimize.skill=subagent-raw`.
+
+They differ only in `prompt.sh`. Dispatch, timing, credit, cold verification and the
+verdict are the slot's and are identical for all three.
 
 ## This is an agent-shape stage (contract §2B)
 
@@ -41,26 +44,23 @@ orders that set and never removes a task because its predicted gain is small or 
 independent tasks the campaign can hold at once, one per GPU — and not a cap on what
 profile may extract. Extraction stops where the evidence stops: the same skill run by
 hand delivered ten complete tasks, and a limit applied upstream would have made that
-delivery a defect. Submit the complete task set to the existing scheduler queues in
-roofline order. Each scheduler fills released slots from its queue; the total simultaneous
-slots must respect both `task_limit` and the available physical GPUs. For mixed GPU
-requirements, `geak-kernel-gpu-groups` records all tasks in its groups and expresses later
-work through `slots`, `waves` and disjoint batches. Resume the same group work roots so
-completed tasks retain their credit and later tasks enter the available slots.
+delivery a defect. Submit the complete task set to the scheduler in roofline order; it
+fills released slots from that queue. Resume the same work root so completed tasks retain
+their credit and later tasks enter the slots they free.
 
 Queue admission is not an optimization attempt. Record actual attempts and remaining
 credit for every task, including tasks that have not started when a deadline forces a
-checkpoint. A task already admitted to a scheduler queue is not also
+checkpoint. A task already admitted to the scheduler queue is not also
 `capacity_deferred`. If a partial dispatch has not admitted a task, preserve its name,
 roofline rank and continuation reason in `capacity_deferred`; it is unattempted and
 prevents a claim that the full delivery is complete. Do not use `max_tasks` or
 `exclude_tasks` to silently optimize only a convenient subset, and do not leave runnable
-queued tasks waiting while their scheduler has an unused slot.
+queued tasks waiting while the scheduler has an unused slot.
 
-Before dispatch, run the slot's name/count check:
+Before dispatch, ask the slot's verdict what it will require:
 
 ```
-python3 $WORKLOAD_ROOT/stages/optimize/check_scope.py \
+python3 $WORKLOAD_ROOT/stages/optimize/finalize.py \
     --tasks-dir $RUN_ROOT/profile/out/tasks
 ```
 
@@ -68,13 +68,19 @@ An extracted task that cannot run still needs an explicit entry and blocker in t
 report. Repair a missing precondition when possible and resume that task; it must not
 vanish from the input set or be counted as attempted merely because another task won.
 
-**Parallel is the default.** Submit all ready tasks to the scheduler together, with one
-task per physically isolated GPU slot. When there are fewer slots than tasks, retain the
-roofline ordering. A collective owns its full required GPU set; use
-`geak-kernel-gpu-groups` for mixed requirements. Do not serialize independent kernels
-through a shell loop or put two optimization workers on the same GPU to simulate
-parallelism. Record the assigned GPUs and start/end times so progress reports describe
-actual overlap.
+**Parallel is the default.** Submit all ready tasks together, one task per physically
+isolated GPU slot, retaining roofline order when there are fewer slots than tasks. Do not
+serialize independent kernels through a shell loop or put two optimization workers on the
+same GPU to simulate parallelism. Record the assigned GPUs and start/end times so progress
+reports describe actual overlap.
+
+**Width is the task's own declaration.** Each task's `meta.json` says how many GPUs it
+needs in `required_gpus`, and the scheduler gives it that many consecutive devices.
+Single-rank kernels and a TP8/EP8 collective therefore run in one campaign with no
+grouping step: narrow tasks keep the machine busy while a wide one waits for its ranks to
+come free. A task that declares nothing gets `--gpus-per-task`. There is no campaign-wide
+GPU width and no second scheduler — there used to be both, and partitioning tasks into
+same-width batches was the only thing that made them necessary.
 
 Before spending the search budget, read the profile qualification receipts: the frozen
 harness must represent serving inputs and be able to distinguish a useful change from
@@ -82,8 +88,8 @@ measurement noise. In particular, routed workloads need observed local expert oc
 and short collectives need device timing that is not dominated by host launch overhead.
 Use the already-qualified evidence; repeat qualification only when it is missing or a
 specific defect is found. An unchanged-source control establishes noise, not a kernel win.
-Check that the selected method's tools are available through `$RUNNER`; the bare-agent
-method remains available when the GEAK Workflow tool is absent.
+Check that the selected method's tools are available through `$RUNNER`; `native-frozen`
+and `subagent-raw` remain available when the GEAK Workflow tool is absent.
 
 If a task's harness needs repair, preserve its old receipts and source snapshots, send
 the defect to the profile slot, and requalify that task before restarting its search.
@@ -96,15 +102,34 @@ the matching harness version.
 python3 $WORKLOAD_ROOT/scripts/scheduler.py run \
     --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
     --skill-root $SKILL_ROOT --runner $RUNNER \
-    --gpus <list> --gpus-per-task <n> --target <sec> --backend docker --image <img> \
+    --gpus <list> [--gpus-per-task <n>] --target <sec> --backend docker --image <img> \
     [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
     [--keep-threshold 1.045] [--keep-threshold-override task=1.35]
 ```
 
 Every flag has a counterpart in `$PARAMS`; read them from there rather than inventing
 values. The scheduler owns one container per slot, dedup, credit, heartbeat, stale
-reclamation and bad-node blacklisting — see its module docstring. `scheduler.py
+reclamation and bad-GPU blacklisting — see its module docstring. `scheduler.py
 --work-root <dir> status` prints per-task credit and attempts.
+
+A worker container sees the task tree, the skill and the run root at the same absolute
+paths the scheduler was given, so those filesystems are bind-mounted into it. Which ones
+is **derived**, not named: the mount point of each configured path. It used to be a
+literal `-v /shared_nfs:/shared_nfs` — one site's NFS export written into the tool,
+correct here and wrong on the next machine, and invisible until a container started and
+found an empty directory. `--mount <host path>` (repeatable) replaces the derived set for
+anything outside the configured tree; `/` is never mounted wholesale. The scheduler logs
+what it mounted at startup.
+
+Two optional preservation parameters are worth knowing about. `retain_containers: true`
+(`--retain-containers`, docker backend only) stops owned workers but keeps them, and an
+existing retained name blocks another dispatch until its evidence has been preserved and
+the name explicitly retired; the default is ordinary cleanup. `evidence_root`
+(`--evidence-root`, absolute) selects storage for new measurement and recovery archives,
+and that storage must be mounted at the same path in every worker; existing archives,
+pending evidence and task ownership are untouched. Omit it to keep the default
+placement. When the storage is node-local, record it and its retention limits in the
+scenario config.
 
 ### Step 2 — run each task's unit test again, from cold
 
@@ -135,7 +160,7 @@ A whole-node collective waits for other GPU work to finish, and E2E waits for al
 Derive the reserved wall time from measured full-test durations and the planned parallel
 slots. A coding-attempt cap does not bound the worker's subsequent full measurement.
 Preserve the entire cold-test and E2E reservation until those phases actually execute;
-finishing a search group does not spend its verification allowance.
+finishing a search does not spend its verification allowance.
 
 Never `cd <task> && python3 unittest.py`: the task directory lands on `sys.path[0]` and
 shadows the stdlib `unittest` package, and the failure surfaces far away as
@@ -154,18 +179,13 @@ aggregate is `gates.timing.aggregate.primary`; where the harness reports the
 Take the **minimum** speedup across the two runs. A mean is pulled up by one lucky run,
 and only what survives every cold start counts.
 
-### Step 3 — write `optimized.json` and `result.json`
+### Step 3 — write `optimized.json`
 
-One `kernels` row per task admitted to a scheduler, including no-gain, failed and
+One `kernels` row per task admitted to the scheduler, including no-gain, failed and
 blocked tasks. A queued task that has not started records `attempts: 0` and its
 continuation in `notes`. Only tasks not admitted in a partial dispatch appear in
 `capacity_deferred`, with their rank and reason; neither form counts as attempted.
-Then write `result.json` per the stage contract. `tasks_total` counts every extracted
-task, so `len(kernels) + len(capacity_deferred) == tasks_total`. The accumulated report
-may exceed `task_limit`: that limit applies to simultaneous workers, not completed
-history. `kept` is only the subset whose patches survived; it is never the list of tasks
-attempted. A requested full budget is complete only when every extracted task has
-finished that budget. Keep this shape — applyback reads it:
+Keep this shape — applyback reads it:
 
 ```json
 {"tasks_total": 5, "gpu_hours": 10.7, "verdict_counts": {"pass": 1, "noise": 3},
@@ -200,25 +220,16 @@ snapshot. Prior scores remain attached to their prior source. Compatible extract
 unchanged kernels' evidence can be reused; do not restart the entire search or rewrite
 frozen tests merely to get past applyback.
 
-`result.json`: `metrics.kept` counts `verdict == "pass"`, `metrics.best_speedup` is the
-highest among them, `metrics.gpu_hours` sums credited seconds. `status` is `blocked` when
-every task was blocked (runner exit 78, an unmet precondition), `fail` when the scheduler
-never dispatched anything, otherwise `ok`. **Keeping zero kernels is not a failure** — the
-stage ran, the numbers are real, and the conclusion is "no win". Calling that `fail` sends
-someone to fix something that is not broken.
+**You do not write `result.json`.** `stages/optimize/finalize.py` does, after the session,
+and it is the stage's conclusion (`stages/CONTRACT.md` 3.1). What it accepts is written
+only there — read the file, or run it early with the command in step 1, rather than
+looking for a second copy of its rules in this document. It checks names, counts and
+budget; it never re-judges a unit test.
 
-Check the completed report against the original task directories:
-
-```
-python3 $WORKLOAD_ROOT/stages/optimize/check_scope.py \
-    --tasks-dir $RUN_ROOT/profile/out/tasks --optimized $OUT/optimized.json
-```
-
-This checks names and counts only; it does not re-judge a unit test. Report extracted,
-attempted and kept counts separately. `all_tasks_attempted=false` means the work is
-partial; explain every unattempted task and its continuation. Distinguish device kernel
-identities from task boundaries: two attention dispatch branches or a real fused chain
-can belong to one optimization task, with their mapping recorded in `task_plan.json`.
+Report extracted, attempted and kept counts separately, and explain every unattempted
+task and its continuation. Distinguish device kernel identities from task boundaries: two
+attention dispatch branches or a real fused chain can belong to one optimization task,
+with their mapping recorded in `task_plan.json`.
 
 Report three distinct time quantities: elapsed wall time (with concurrent intervals
 counted once), summed worker credited seconds, and GPU-slot hours (worker duration times
@@ -268,6 +279,8 @@ passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 | `K` | kernel name |
 | `TASK_DIR` | task directory (frozen harness) |
 | `KERNEL_SRC` | the editable file under `kernel_src/` |
+| `KERNEL_SRC_ALL` | every editable file, when the task declares more than one |
+| `GPU_IDS` | the logical GPUs assigned to this task, as wide as its `required_gpus` |
 | `ATTEMPT` | attempt number |
 | `BEST_SPEEDUP` | this kernel's best result so far |
 | `KEEP_THRESHOLD` | the noise band |
@@ -295,6 +308,9 @@ Confusing these two tests can discard useful directions before they are measured
 * **One kernel is never dispatched to two slots.** Both would edit the same `kernel_src/`
   and trample each other's KEEP/revert. The scheduler dedups with the node as the source
   of truth.
+* **A collective gets its whole device set.** `kernel_workflow.js` holds a pool lock that
+  selects one GPU; run it on an eight-rank task and seven ranks are missing while the
+  numbers still look like measurements. That is what `native-frozen/` is for.
 * **Multi-GPU parallelism requires the docker backend.** The local backend pins only
   through the environment, and an agent resets `ROCR_VISIBLE_DEVICES` in its own
   subprocesses, putting two workers on one physical GPU. Use local only for single-GPU
@@ -303,11 +319,11 @@ Confusing these two tests can discard useful directions before they are measured
 ## Resuming
 
 When the user requires a full compute budget, set `require_full_budget=true` and pass
-`--require-full-budget` to the scheduler. The group planner preserves the
-per-task target across allocation windows. A short window contributes real worker time,
-then checkpoints with `checkpoint_reserve_sec` left for owned-worker cleanup. It reports
-remaining credit as `blocked`; cold/E2E wait until all targets are complete and enough
-time is available for validation. No allocation is changed or implicitly renewed.
+`--require-full-budget` to the scheduler, which preserves the per-task target across
+allocation windows. A short window contributes real worker time, then checkpoints with
+`checkpoint_reserve_sec` left for owned-worker cleanup. It reports remaining credit as
+`blocked`; cold/E2E wait until all targets are complete and enough time is available for
+validation. No allocation is changed or implicitly renewed.
 Workers finish one last bounded attempt and its scoring
 sweep even if that slightly exceeds the target; an early `.done` marker or time spent
 idle is not completion. The outer allocation deadline still applies, so interruption

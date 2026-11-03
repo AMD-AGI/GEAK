@@ -2,7 +2,7 @@
 # Called by the standard worker for a qualified frozen task using native CLI tools.
 set -euo pipefail
 : "${PROMPT_OUT:?}" "${TASK_DIR:?}" "${KERNEL_SRC_ALL:?}" "${GPU_IDS:?}"
-GEAK_ROOT="${GEAK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)}"
+GEAK_ROOT="${GEAK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 SCRIPTS="$GEAK_ROOT/workload/scripts"
 EDITABLE="$(for file in $KERNEL_SRC_ALL; do printf '  %s/kernel_src/%s\n' "$TASK_DIR" "$file"; done)"
 UT_WALL="$(python3 - "$TASK_DIR/run/ut_result.json" <<'PY2'

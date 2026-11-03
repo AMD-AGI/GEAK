@@ -9,9 +9,10 @@ decides is who runs on which GPU, what happens when they die, and how time is ac
 Every design constraint below was learned the hard way in a previous 200 GPU-hour
 campaign:
 
-* **One container per slot.** A slot is `gpus_per_task` consecutive GPUs; mount
-  exactly that group's /dev/dri/renderD<128+8*i> nodes into the
-  container. An env-only ROCR_VISIBLE_DEVICES does not hold — the agent resets it in its
+* **One container per slot.** A slot is as many consecutive GPUs as the task declared in
+  its `meta.json` (`required_gpus`, defaulting to `--gpus-per-task`); mount exactly that
+  group's /dev/dri/renderD<128+8*i> nodes into the container. Widths are per task, not
+  per campaign: a single-rank elementwise kernel and a TP8/EP8 collective share one run. An env-only ROCR_VISIBLE_DEVICES does not hold — the agent resets it in its
   own subprocesses, two workers land on the same physical GPU, and both sets of numbers
   are worthless. Physical isolation is the only isolation.
 * **The node is the source of truth, not memory.** The supervisor may restart, so each
@@ -34,6 +35,8 @@ import argparse, fcntl, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(HERE, "worker.sh")
+sys.path.insert(0, HERE)
+from durable_write import read_credit_pair
 
 
 def parse_overrides(spec):
@@ -53,13 +56,96 @@ def slot_label(gpus):
     return ("gpu%d" % gpus[0]) if len(gpus) == 1 else ("gpus%d-%d" % (gpus[0], gpus[-1]))
 
 
-def make_slots(gpus, per_task):
-    """Chunk the GPU list into slots of `per_task`. A tail too short to form a whole
-    slot is dropped rather than handed out short: a collective task given 5 of the 8
-    ranks it needs does not run slowly, it fails on every attempt."""
-    per_task = max(1, int(per_task))
-    slots = [gpus[i:i + per_task] for i in range(0, len(gpus), per_task)]
-    return [g for g in slots if len(g) == per_task], [g for g in slots if len(g) != per_task]
+def task_gpus(tasks_dir, task, default=1):
+    """How many GPUs this task needs, as the task itself declares in `meta.json`.
+
+    A campaign is not one size. A single-rank elementwise kernel needs one GPU; a
+    collective that launches its own torchrun across TP8/EP8 needs all eight or it fails
+    on every attempt. When the scheduler took one `--gpus-per-task` for the whole run,
+    mixing the two was impossible, and a second 666-line scheduler grew beside this one
+    to group tasks by requirement before calling it once per group. The requirement was
+    already in `meta.json`; reading it here is the general rule, and the second scheduler
+    is gone.
+
+    `--gpus-per-task` remains the default for a task that declares nothing.
+    """
+    try:
+        with open(os.path.join(tasks_dir, task, "meta.json")) as f:
+            declared = json.load(f).get("required_gpus")
+    except (OSError, ValueError, AttributeError):
+        declared = None
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        return max(1, int(default))
+    return declared
+
+
+def allocate(free, n):
+    """Take `n` consecutive GPUs out of `free`, aligned to a multiple of n.
+
+    Consecutive and aligned because the container mounts /dev/dri/renderD<128+8*i> for
+    exactly this group, and a collective's rank numbering follows the group order. A task
+    is never handed fewer ranks than it asked for: that does not run slowly, it fails
+    every attempt.
+    """
+    for i in range(0, len(free) - n + 1):
+        block = free[i:i + n]
+        if block[0] % n == 0 and block[-1] - block[0] == n - 1:
+            return block
+    return None
+
+
+def mount_point(path):
+    """The filesystem `path` lives on."""
+    p = os.path.abspath(path)
+    while p != "/" and not os.path.ismount(p):
+        p = os.path.dirname(p)
+    return p
+
+
+def default_mounts(*paths):
+    """Which host filesystems the worker container has to see, derived, not named.
+
+    The worker reads the task tree, the skill and the run root from inside the container
+    at the same absolute paths the scheduler was given, so those filesystems must be
+    mounted. This used to be one literal `-v /shared_nfs:/shared_nfs`, which is the name
+    of one site's NFS export written into the tool (PRINCIPLES R4): correct here, wrong
+    on the next machine, and invisible until a container started and found an empty
+    directory. Mounting the mount point of each path the run was actually configured with
+    computes `/shared_nfs` on this node and the right answer elsewhere. `/` is never
+    mounted wholesale; pass `--mount` for anything outside the configured tree.
+    """
+    found = []
+    for path in paths:
+        if not path:
+            continue
+        point = mount_point(path)
+        if point != "/" and point not in found:
+            found.append(point)
+    return found
+
+
+def recorded_slot(work_root, kernel):
+    """The GPU group a task was last dispatched to, from its own state file.
+
+    The node is the source of truth, not the supervisor's memory -- and with per-task
+    widths there is no fixed slot table to sweep after a restart, so the task says where
+    it was and the backend says whether it is still there."""
+    try:
+        with open(os.path.join(work_root, "state", kernel + ".status.json")) as f:
+            label = json.load(f).get("slot")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(label, str):
+        return None
+    try:
+        if label.startswith("gpus"):
+            lo, hi = label[4:].split("-")
+            return list(range(int(lo), int(hi) + 1))
+        if label.startswith("gpu"):
+            return [int(label[3:])]
+    except ValueError:
+        return None
+    return None
 
 
 def log(work_root, msg):
@@ -160,17 +246,8 @@ def state_path(work_root, kernel, suffix):
 
 
 def read_credit(work_root, kernel):
-    values = [0]
-    try:
-        values.append(int(open(state_path(work_root, kernel, "credit")).read().strip() or 0))
-    except (OSError, ValueError):
-        pass
-    try:
-        with open(state_path(work_root, kernel, "status.json")) as f:
-            values.append(int(json.load(f).get("credited_seconds", 0)))
-    except (OSError, ValueError, TypeError):
-        pass
-    return max(values)
+    return read_credit_pair(state_path(work_root, kernel, "credit"),
+                            state_path(work_root, kernel, "status.json"))
 
 
 def read_hb(work_root, kernel):
@@ -213,9 +290,11 @@ class Backend(object):
     safe concurrent isolation, and says so at startup.
     """
 
-    def __init__(self, work_root, image=None):
+    def __init__(self, work_root, image=None, retain_containers=False, mounts=()):
         self.work_root = work_root
         self.image = image
+        self.retain_containers = retain_containers
+        self.mounts = list(mounts)
 
     def name_of(self, kernel, gpus):
         return ("wl_opt_%s_%s" % (slot_label(gpus), kernel))[:200]
@@ -301,12 +380,23 @@ class DockerBackend(Backend):
 
     def start(self, kernel, gpus, env):
         name = self.name_of(kernel, gpus)
-        sh(["docker", "rm", "-f", name])
+        if self.retain_containers:
+            rc, observed = sh(["docker", "inspect", "-f", "{{.Id}}", name])
+            if rc == 0:
+                log(self.work_root, "retained container %s requires preservation and explicit cleanup before dispatch" % name)
+                return False
+            if not any(message in observed.lower() for message in ("no such object:", "no such container:")):
+                log(self.work_root, "cannot prove retained name %s absent; refusing dispatch" % name)
+                return False
+        else:
+            sh(["docker", "rm", "-f", name])
         cmd = ["docker", "run", "-d", "--name", name,
                "--device", "/dev/kfd",
                "--group-add", "video", "--ipc", "host",
                "--security-opt", "seccomp=unconfined",
-               "--shm-size", "16g", "-v", "/shared_nfs:/shared_nfs"]
+               "--shm-size", "16g"]
+        for host in self.mounts:
+            cmd += ["-v", "%s:%s" % (host, host)]
         from container_runtime import runtime_options
         runtime_args, entry_prefix = runtime_options(name)
         cmd += runtime_args
@@ -337,7 +427,10 @@ class DockerBackend(Backend):
         return True
 
     def stop(self, kernel, gpus):
-        sh(["docker", "rm", "-f", self.name_of(kernel, gpus)])
+        if self.retain_containers:
+            sh(["docker", "stop", "--timeout", "20", self.name_of(kernel, gpus)])
+        else:
+            sh(["docker", "rm", "-f", self.name_of(kernel, gpus)])
 
 
 def measuring_since(work_root, kernel):
@@ -359,14 +452,18 @@ def tick(args, backend, tasks, assign, bad):
     # Recover live workers after a supervisor restart before considering new work.
     # A heartbeat alone is not a worker: confirm the container/process still exists.
     if not getattr(args, "reconciled_workers", False):
-        for gpus in args.slots:
-            label = slot_label(gpus)
-            if label not in assign:
-                for kernel in tasks:
-                    if backend.alive(kernel, gpus):
-                        assign[label] = kernel
-                        args.started_at[(label, kernel)] = now
-                        break
+        # Slots are allocated per task now, so there is no fixed list to sweep. Each
+        # task's own state file records the slot it was last dispatched to; confirm the
+        # container is still up before believing it.
+        for kernel in tasks:
+            gpus = recorded_slot(args.work_root, kernel)
+            if not gpus or kernel in assign.values():
+                continue
+            if backend.alive(kernel, gpus):
+                label = slot_label(gpus)
+                assign[label] = kernel
+                args.slot_of[label] = gpus
+                args.started_at[(label, kernel)] = now
         args.reconciled_workers = True
 
     # 1) Check reality: which slots still carry a live worker.
@@ -423,30 +520,45 @@ def tick(args, backend, tasks, assign, bad):
                and not is_done(args.work_root, t, target, full)
                and not is_blocked(args.work_root, t)]
 
-    for gpus in args.slots:
-        label = slot_label(gpus)
-        if label in assign or bad.get(label, 0) >= args.bad_node_limit:
-            continue
-        if not pending:
+    # Each task takes the width it declared. Blacklisting is per GPU rather than per
+    # slot, because a GPU that cannot start a container is bad in every grouping it
+    # appears in.
+    held = {g for label in assign for g in args.slot_of[label]}
+    free = [g for g in args.gpus
+            if g not in held and bad.get(g, 0) < args.bad_node_limit]
+
+    for kernel in list(pending):
+        if not free:
             break
-        kernel = pending.pop(0)
+        width = args.width[kernel]
+        gpus = allocate(free, width)
+        if gpus is None:
+            # Not a failure: a wider task waits for its ranks to come free while
+            # narrower ones keep the machine busy.
+            continue
+        label = slot_label(gpus)
         env = dict(args.worker_env)
         env["TASK_DIR"] = os.path.join(args.tasks_dir, kernel)
         if kernel in args.keep_overrides:
             env["KEEP_THRESHOLD"] = str(args.keep_overrides[kernel])
         ok = backend.start(kernel, gpus, env)
+        pending.remove(kernel)
         if ok:
             assign[label] = kernel
+            args.slot_of[label] = gpus
             args.started_at[(label, kernel)] = now
-            bad[label] = 0
-            log(args.work_root, "dispatch %s <- %s (credited %ds / %ds)"
-                % (label, kernel, read_credit(args.work_root, kernel), target))
+            for g in gpus:
+                bad[g] = 0
+            free = [g for g in free if g not in gpus]
+            log(args.work_root, "dispatch %s <- %s (%d GPU(s), credited %ds / %ds)"
+                % (label, kernel, width, read_credit(args.work_root, kernel), target))
         else:
-            bad[label] = bad.get(label, 0) + 1
-            pending.insert(0, kernel)
-            if bad[label] >= args.bad_node_limit:
-                log(args.work_root, "%s failed to start %d times in a row; blacklisted"
-                    % (label, bad[label]))
+            for g in gpus:
+                bad[g] = bad.get(g, 0) + 1
+                if bad[g] >= args.bad_node_limit:
+                    log(args.work_root, "gpu%d failed to start %d times in a row; "
+                        "blacklisted" % (g, bad[g]))
+            free = [g for g in free if bad.get(g, 0) < args.bad_node_limit]
 
     remaining = [t for t in tasks if not is_done(args.work_root, t, target, full)
                  and not is_blocked(args.work_root, t)]
@@ -488,8 +600,10 @@ def main():
     ap.add_argument("--order-file", help="roofline.json, ranked by expected e2e gain")
     ap.add_argument("--gpus", default="")
     ap.add_argument("--gpus-per-task", type=int, default=1,
-                    help="GPUs per slot. A collective harness (TP8/EP8 launches its own "
-                         "torchrun) needs the whole group or it cannot run at all.")
+                    help="default width for a task whose meta.json does not declare "
+                         "required_gpus. Each task's own declaration wins: a campaign "
+                         "mixes single-rank kernels with collectives that need the whole "
+                         "group, and one number for the whole run cannot express that.")
     ap.add_argument("--exclude", default="",
                     help="comma-separated task directory names to leave out of this run")
     ap.add_argument("--target", type=int, default=172800)
@@ -512,6 +626,15 @@ def main():
     ap.add_argument("--max-tasks", type=int)
     ap.add_argument("--backend", choices=["local", "docker"], default="local")
     ap.add_argument("--image")
+    ap.add_argument("--evidence-root", help="absolute optional destination root for newly begun evidence archives")
+    ap.add_argument("--mount", action="append", default=[],
+                    help="host path to bind-mount into each worker container at the same "
+                         "absolute path, repeatable. Without it the scheduler mounts the "
+                         "filesystem each configured path (work root, tasks, skill, "
+                         "evidence root, GEAK root) lives on, so no site path is written "
+                         "into this tool.")
+    ap.add_argument("--retain-containers", action="store_true",
+                    help="stop owned containers without removal; existing retained names require explicit cleanup")
     ap.add_argument("--stale-sec", type=int, default=900)
     ap.add_argument("--startup-grace", type=int, default=300)
     ap.add_argument("--bad-node-limit", type=int, default=2)
@@ -519,6 +642,9 @@ def main():
     ap.add_argument("--max-wall-sec", type=int, default=0,
                     help="wall-clock ceiling for the scheduler itself; 0 = unlimited")
     args = ap.parse_args()
+    if args.evidence_root is not None and not os.path.isabs(args.evidence_root):
+        print("--evidence-root must be resolved against the repository before dispatch", file=sys.stderr)
+        return 78
 
     args.work_root = os.path.abspath(args.work_root)
     if args.command == "status":
@@ -551,15 +677,9 @@ def main():
         print("another scheduler owns this work root", file=sys.stderr)
         return 78
 
-    args.slots, short = make_slots(args.gpus, args.gpus_per_task)
-    args.slot_of = {slot_label(g): g for g in args.slots}
-    if short:
-        log(args.work_root, "%d GPU(s) left over by --gpus-per-task %d and not used: %s"
-            % (sum(len(g) for g in short), args.gpus_per_task,
-               ",".join(str(g) for grp in short for g in grp)))
-    if not args.slots:
-        print("--gpus-per-task %d but only %d GPU(s) given"
-              % (args.gpus_per_task, len(args.gpus)), file=sys.stderr)
+    args.slot_of = {}
+    if not args.gpus:
+        print("no GPUs were given", file=sys.stderr)
         return 2
 
     args.keep_overrides = parse_overrides(args.keep_threshold_override)
@@ -576,12 +696,19 @@ def main():
               file=sys.stderr)
         return 2
 
-    backend = (DockerBackend(args.work_root, args.image) if args.backend == "docker"
-               else LocalBackend(args.work_root))
+    if args.retain_containers and args.backend != "docker":
+        print("--retain-containers requires the docker backend", file=sys.stderr)
+        return 78
     if args.backend == "docker" and not args.image:
         print("--backend docker requires --image", file=sys.stderr)
         return 2
-    if args.backend == "local" and len(args.slots) > 1:
+    mounts = args.mount or default_mounts(args.work_root, args.tasks_dir, args.skill_root,
+                                          args.evidence_root, os.environ.get("GEAK_ROOT"))
+    backend = (DockerBackend(args.work_root, args.image, args.retain_containers, mounts)
+               if args.backend == "docker" else LocalBackend(args.work_root))
+    if args.backend == "docker":
+        log(args.work_root, "worker containers mount: %s" % (", ".join(mounts) or "(none)"))
+    if args.backend == "local" and len(args.gpus) > 1:
         log(args.work_root, "note: the local backend can only pin GPUs via env, which the "
                             "agent can override. For multi-GPU parallelism use "
                             "--backend docker (one container per GPU).")
@@ -605,22 +732,38 @@ def main():
               "WORKLOAD_AGENT_MODEL", "EXTRA_STEER"):
         if os.environ.get(k):
             args.worker_env[k] = os.environ[k]
+    if args.evidence_root is not None:
+        args.worker_env['WORKLOAD_EVIDENCE_ROOT'] = args.evidence_root
 
     args.started_at = {}
     assign, bad = {}, {}
 
+    # Each task declares how many GPUs it needs; the default covers tasks that do not.
+    args.width = {t: task_gpus(args.tasks_dir, t, args.gpus_per_task) for t in tasks}
+    too_wide = sorted(t for t in tasks if args.width[t] > len(args.gpus))
+    if too_wide:
+        print("%s need(s) more GPUs than the %d given: %s"
+              % (", ".join(too_wide), len(args.gpus),
+                 ", ".join("%s=%d" % (t, args.width[t]) for t in too_wide)),
+              file=sys.stderr)
+        return 2
+
     if args.command == "stop":
-        for gpus in args.slots:
-            for t in tasks:
+        for t in tasks:
+            gpus = recorded_slot(args.work_root, t)
+            if gpus:
                 backend.stop(t, gpus)
         log(args.work_root, "all workers stopped")
         return 0
 
-    log(args.work_root, "starting: %d tasks / %d slot(s) of %d GPU(s) / %ds per task / "
+    widths = sorted({args.width[t] for t in tasks})
+    log(args.work_root, "starting: %d tasks over %d GPU(s), widths %s / %ds per task / "
         "backend=%s / skill=%s / runner=%s"
-        % (len(tasks), len(args.slots), args.gpus_per_task, args.target, args.backend,
-           os.path.basename(args.skill_root), os.path.basename(args.runner)))
-    log(args.work_root, "task order: %s" % ", ".join(tasks))
+        % (len(tasks), len(args.gpus), ",".join("%dx" % w for w in widths), args.target,
+           args.backend, os.path.basename(args.skill_root),
+           os.path.basename(args.runner)))
+    log(args.work_root, "task order: %s"
+        % ", ".join("%s(%dx)" % (t, args.width[t]) for t in tasks))
 
     t0 = time.time()
     try:
@@ -629,8 +772,8 @@ def main():
             if not remaining:
                 log(args.work_root, "every task is finished or blocked — scheduling ends")
                 break
-            if all(bad.get(slot_label(g), 0) >= args.bad_node_limit for g in args.slots):
-                log(args.work_root, "every slot is blacklisted; stopping for a human to look")
+            if all(bad.get(g, 0) >= args.bad_node_limit for g in args.gpus):
+                log(args.work_root, "every GPU is blacklisted; stopping for a human to look")
                 return 3
             if args.max_wall_sec and time.time() - t0 > args.max_wall_sec:
                 log(args.work_root, "reached the scheduler wall-clock ceiling; exiting "
