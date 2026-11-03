@@ -100,6 +100,20 @@ class BulkPayloads(unittest.TestCase):
         g = call["args"]["w"]["gen"]
         self.assertLessEqual(g["max"], 15)
 
+    def test_sample_indices_stay_in_range_past_float32_precision(self):
+        # A float32 linspace over a > 2**24-element storage rounds its last positions past
+        # hi - 1, and the out-of-range index_select faulted every rank of the Muse Spark probe
+        # server on the vocab embedding (2026-11-02). Indices must stay inside the span.
+        n = (1 << 24) + 12346          # hi - 1 odd: float32 rounds it up to hi
+        x = torch.arange(n, dtype=torch.int64) % 251
+        smp = cw._sample(x.to(torch.uint8), 65536)
+        self.assertEqual(int(smp.numel()), 65536)
+        flat = torch.arange(n, dtype=torch.int64)
+        pos = cw._sample(flat, 65536)
+        self.assertLessEqual(int(pos.max()), n - 1)
+        self.assertEqual(int(pos.max()), n - 1)        # the last element is reachable
+        self.assertEqual(int(pos.min()), 0)
+
     def test_old_records_without_gen_replay_as_before(self):
         call, tensors = _record({"x": self.x})
         del call["args"]["x"]["gen"]

@@ -150,7 +150,10 @@ def _sample(x, n):
     if hi <= lo:
         return None
     k = min(n, hi - lo)
-    pos = torch.linspace(lo, hi - 1, k, device=x.device).round().to(torch.int64)
+    # float64 + clamp: a float32 linspace over a >2^24-element storage rounds past hi-1, and the
+    # out-of-range index_select faults the GPU (2026-11-02: Muse Spark vocab embedding, every rank)
+    pos = torch.linspace(lo, hi - 1, k, dtype=torch.float64, device=x.device).round() \
+        .to(torch.int64).clamp_(lo, hi - 1)
     return flat.index_select(0, pos).detach().to("cpu").clone()
 
 
@@ -186,7 +189,7 @@ def _describe(x, tensors, budget, in_capture, depth=0, name=""):
                                 if structural else
                                 "bulk integer payload (not index-named, over %d bytes): "
                                 "redrawn from its recorded sample on replay" % STRUCT_CAP)
-            if not x.is_complex():
+            if not x.is_complex() and not in_capture:  # a D2H gather inside graph capture aborts the HIP queue (2026-11-02, Muse Spark probe)
                 try:
                     smp = _sample(x, SAMPLE_N)
                 except Exception as exc:  # noqa: BLE001 -- describing must never break the server
