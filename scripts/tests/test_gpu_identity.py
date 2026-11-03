@@ -39,6 +39,28 @@ Agent {index + 2}
     return "".join(agents)
 
 
+def test_exact_r9600d_product_is_structured() -> None:
+    identity = gpu_identity.parse_rocminfo(
+        _rocminfo("gfx1201", gpu_identity.R9600D_MARKETING_NAME, cu=48)
+    )
+    assert identity == {
+        "gfx": "gfx1201",
+        "marketing_name": "AMD Radeon AI PRO R9600D",
+        "target": "r9600d",
+        "physical_cu_count": 48,
+        "visible_gpu_agents": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "product",
+    [gpu_identity.R9700_MARKETING_NAME, gpu_identity.R9600D_MARKETING_NAME],
+)
+def test_exact_rdna4_product_rejects_wrong_isa(product: str) -> None:
+    with pytest.raises(gpu_identity.IdentityError, match="requires gfx1201"):
+        gpu_identity.parse_rocminfo(_rocminfo("gfx950", product, cu=48))
+
+
 def test_exact_r9700_product_is_structured() -> None:
     identity = gpu_identity.parse_rocminfo(
         _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
@@ -57,6 +79,8 @@ def test_exact_r9700_product_is_structured() -> None:
     [
         "AMD Radeon PRO gfx1201",
         "AMD Radeon AI PRO R9700 Engineering Sample",
+        "AMD Radeon AI PRO R9600D Engineering Sample",
+        "R9600D",
         "R9700",
         "",
     ],

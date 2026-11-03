@@ -43,8 +43,8 @@ const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
@@ -847,7 +847,7 @@ if (!GFX) {
   throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
 }
 if (!DEVICE_TARGET) {
-  throw new Error('Setup failed: director did not return device_target (r9700 | unknown)');
+  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | unknown)');
 }
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
@@ -875,8 +875,10 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
-const ROOFLINE_STATUS = (DEVICE_TARGET === 'r9700' && GFX === 'gfx1201')
-  ? 'calibrated-r9700'
+// Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
+const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
+  ? `calibrated-${DEVICE_TARGET}`
   : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
 const RDNA4_ISOLATE = GFX === 'gfx1201';
 if (RDNA4_ISOLATE) {
