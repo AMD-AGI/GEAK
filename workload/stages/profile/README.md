@@ -108,8 +108,10 @@ scenario whose baseline `select` names that EP.
    python3 "$WORKLOAD_ROOT/stages/profile/multi_config.py" select --group-dir "$OUT"
    ```
 
-   An operator is a candidate as soon as its share of **any single config's own
-   workload** is above `selection_overall_pct_gt` -- not its share averaged over the
+   An operator is a candidate as soon as it passes the configured rule -- phase Top
+   `selection_top_k` AND a share of **that single config's own workload** above
+   `selection_overall_pct_gt` (the multi-config scenario: Top 10 and 5%) -- in any one
+   config; not on its share averaged over the
    configs, which would bury an operator that dominates some concurrencies and is absent at
    others (Muse Spark: the large-M dense GEMM path is 5.7% of c64, 0.2% of c1, 1.8% on
    average). Each config is selected by the unchanged `select_targets.py` on its own

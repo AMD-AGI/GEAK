@@ -4,7 +4,9 @@
   "target": {
     "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
     "image": "lmsysorg/sglang-rocm:muse-spark-open-1020@sha256:7343002d0dc2c1e525c0563f0c5c0377b471f966b3d604343b93a6366c2f7935",
-    "name_tokens": ["musespark"],
+    "name_tokens": [
+      "musespark"
+    ],
     "enforce": true
   },
   "stages": {
@@ -12,10 +14,24 @@
       "skill": "adopt-ci-artifacts",
       "mode": "script",
       "params": {
-        "ci": {"repo": "SemiAnalysisAI/InferenceX", "run_id": "39659301076",
-               "token_env": "GITHUB_TOKEN", "artifacts_dirs": []},
-        "select": {"model_prefix": "musespark", "tp": [8], "ep": [8]},
-        "group_by": ["ep"],
+        "ci": {
+          "repo": "SemiAnalysisAI/InferenceX",
+          "run_id": "39659301076",
+          "token_env": "GITHUB_TOKEN",
+          "artifacts_dirs": []
+        },
+        "select": {
+          "model_prefix": "musespark",
+          "tp": [
+            8
+          ],
+          "ep": [
+            8
+          ]
+        },
+        "group_by": [
+          "ep"
+        ],
         "representative": null,
         "noise_band": 1.045,
         "require_power_valid": true,
@@ -27,10 +43,13 @@
       "skill": "kernel-extract",
       "mode": "agent",
       "params": {
-        "selection": "Multi-config: an operator is selected when its share of THIS EP group's workload (the equal-weight mean over the group's configs of its whole-workload share in each) is above 5%. No per-phase rank cut. Select by operator (select_candidates.py --source-map), with each task's seam above the M-dependent path selection. Every config is extracted from its own CI serving log; the UT pools configs with config_weighting=calls (w(M) = mean over configs of freq_c(M)). See stages/profile/README.md, 'Several configs'.",
-        "selection_top_k": 1000,
+        "selection": "Multi-config, per config then union. In each config (its own workload), by operator: phase Top 10 AND whole-workload share > 5% (rank first, then filter; no backfill); an operator selected in any config is a candidate (multi_config.py select --group-dir $OUT). Each task's seam above the M-dependent path selection; the UT pools only the configs the operator runs in. See stages/profile/README.md 'Several configs'.",
+        "selection_top_k": 10,
         "selection_overall_pct_gt": 5,
-        "selection_phases": ["PREFILL", "DECODE"],
+        "selection_phases": [
+          "PREFILL",
+          "DECODE"
+        ],
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
