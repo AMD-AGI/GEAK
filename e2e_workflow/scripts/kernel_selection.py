@@ -137,6 +137,14 @@ def _truncated_prefix(needle, haystack):
     return len(needle) >= SHORT_NAME_LIMIT and haystack.startswith(needle)
 
 
+def _specialized_from(base, name):
+    """True when ``name`` is Triton's specialization of ``base``: ``base`` + ``_`` + its constexpr
+    suffix (``_GROUP_K_128_..._GRID_MN_348_cache_modifier_CG``, which varies with M). A digit-only
+    segment marks that suffix; ``base_v2`` is another kernel."""
+    rest = name[len(base) + 1:] if name.startswith(base + "_") else ""
+    return any(segment.isdigit() for segment in rest.split("_"))
+
+
 def _template_arguments(value):
     """``(arguments, closed)`` for the symbol's first ``<...>``.
 
@@ -166,7 +174,8 @@ def kernel_matches(expected, observed):
     got = canonical_kernel_name(observed)
     if not want or not got:
         return False
-    if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
+    if (want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want)
+            and not _specialized_from(want, got) and not _specialized_from(got, want)):
         return False
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring

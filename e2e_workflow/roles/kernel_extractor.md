@@ -902,6 +902,25 @@ force real compact-operand compute:
    forwards; `engagement_hits==0` means the seam is dead on this arch/dtype — switch seam or skip the head,
    do NOT spend authoring budget. Only return `target_callable=""` if no Python seam genuinely exists (then
    an authored kernel can't be wired and a direct_light env winner still applies).
+7. **Declare how an authored kernel becomes the candidate** (whenever `target_callable` is non-empty).
+   The bake-off may hand this task to the kernel layer's author mode, which writes into an empty
+   `kernel_src/`. Without a bind there is no candidate leg, and the kernel layer falls back to editing
+   the installed library in place — which the measurement does not see under multinode (each machine
+   has its own install; only the shared disk is common) and which both legs load on a single node.
+   Add to `meta.json`:
+   ```json
+   "candidate_bind": {"kind": "rebind", "target": "<target_callable>", "impl_module": "candidate",
+                      "impl_attr": "<attr of target_callable>", "file": "kernel_src/candidate.py"}
+   ```
+   and keep the live implementation as read-only text for a re-tune to start from, resolved as the
+   current stack sees it (PHASE=extract step 3):
+   ```bash
+   SRC="$(PYTHONPATH="$TASK/baseline_overlay:$PYTHONPATH" \
+          python3 "$TASK/overlay_setup.py" check --module "<module of target_callable>" --path-only)"
+   mkdir -p "$TASK/baseline_ref" && cp "$SRC" "$TASK/baseline_ref/$(basename "$SRC").orig"
+   ```
+   Do not create `kernel_src/` (the kernel layer seeds it) and do not change `unittest.py`: the
+   bake-off still times backends through `baseline_callable`.
 
 > **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
 > serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,

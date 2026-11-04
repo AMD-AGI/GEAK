@@ -2064,6 +2064,10 @@ function canonicalDeviceKernel(s) {
 // side may be the shortened one (heads carry short_name, traces the full symbol).
 const truncatedPrefix = (needle, haystack) =>
   needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
+// Triton specialization: base + '_' + a suffix with a digit-only segment (`base_v2` is another
+// kernel). Same rule as kernel_selection.py _specialized_from.
+const specializedFrom = (base, name) =>
+  name.startsWith(`${base}_`) && name.slice(base.length + 1).split('_').some((s) => /^\d+$/.test(s));
 // [arguments, closed] for the symbol's first `<...>`, independent of return type and namespace.
 // `closed` is false when the name was elided inside the template. Separators fold to `_`, so
 // `<128, 4, ...>` is not a prefix of `<128, 48, ...>`.
@@ -2081,7 +2085,8 @@ function templateArguments(value) {
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)
+    && !specializedFrom(x, y) && !specializedFrom(y, x)) return false;
   // The base token drops template arguments so a bare name matches its decorated spelling; when
   // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
@@ -3312,7 +3317,7 @@ function readAgentXPreparation(reply) {
   return prepared;
 }
 
-async function prepareAgentXKernels(round, throughput) {
+async function prepareAgentXKernels(round, throughput, roundNote = '') {
   phase('KernelExtract');
   const pd = SERVING_TOPOLOGY === 'pd_disagg';
   const mnRules = MN ? ` MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/agentx_multinode.md and follow it.` : '';
@@ -3349,8 +3354,13 @@ async function prepareAgentXKernels(round, throughput) {
     'delivery_path names that file under EVAL_DIR, and prepared is that command\'s stdout envelope ' +
     'VERBATIM — the workflow cannot open the file, so an envelope you summarise or rebuild by hand ' +
     'is a corrupted handoff. Return it after all scheduled UT work is finished. Do not optimize or ' +
-    'integrate.', inputs),
+    'integrate.' + roundNote + mnRules, inputs),
     { phase: 'KernelExtract', label: `kernel_extractor:prepare ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
+  // An attempt can return with deferred tasks while the run budget still has room; resume it from the
+  // saved evidence, keeping the last readable delivery.
+  const KX_RESUMES = parseInt(A.kernel_extract_resumes ?? 2, 10);
+  const roomForResume = () => TIME_BUDGET_MS == null || remainingMs() - FINAL_RESERVE_MS > agentTimeoutFor();
+  let lastGood = null, resumes = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
@@ -3372,7 +3382,28 @@ async function prepareAgentXKernels(round, throughput) {
         `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
       if (pd && weights?.weights) log(`Engine GPU-time mass: ` +
         `prefill ${(weights.weights.prefill * 100).toFixed(1)}% / decode ${(weights.weights.decode * 100).toFixed(1)}%.`);
+      lastGood = prepared;
+      if (!prepared.deferred_tasks.length || resumes >= KX_RESUMES || TIME_DEADLINE_HIT || !roomForResume())
+        return prepared;
+      resumes++;
+      attempt = -1;
+      log(`KernelExtract resume ${resumes}: ${prepared.deferred_tasks.length} deferred.`);
+      reply = await safeAgent(roleAgent('kernel_extractor', 'resume',
+        'Resume the kernel-extract skill from the saved evidence of PREVIOUS_DELIVERY_PATH. Do not repeat ' +
+        'profiling, selection, captures or passing UTs. Author and validate UTs for DEFERRED_TASKS in ' +
+        'selection order; a target whose delivered UT covers only a minor regime of its mass (for example ' +
+        'eager prefill shapes of a kernel whose mass runs in decode graph replay) still owes cases for the ' +
+        'dominant regime. Merge with the previous ' +
+        `delivery, re-pack with \`agentx_kernel_preparation.mjs --emit-prepared${packEngines}\` and return ` +
+        '{delivery_path, prepared}, prepared being that stdout verbatim. Do not optimize or integrate.' + mnRules,
+        { ...inputs, REMAINING_MIN: remainingMin(), PREVIOUS_DELIVERY_PATH: reply.delivery_path,
+          DEFERRED_TASKS: prepared.deferred_tasks }),
+        { phase: 'KernelExtract', label: `kernel_extractor:resume ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
     } catch (error) {
+      if (attempt >= 1 && lastGood) {
+        log(`KernelExtract resume delivery unreadable (${error.message}); keeping the previous delivery.`);
+        return lastGood;
+      }
       if (attempt >= 1) throw new Error(`AgentX UT delivery unreadable: ${error.message}`);
       reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
         'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
@@ -4415,6 +4446,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
 let dispatched = 0;                        // counts ONLY kernel-optimization tasks (the budget)
 let milestone = 0;
 let noImprove = 0;
+const extractTried = new Set();     // AgentX: kernels already dispatched, never re-delivered
 // kbSeedKernels: stored kernels Module A replayed and this run's own A/B accepted.
 const acceptedKernels = (ST.accepted_kernels || []).slice().concat(kbSeedKernels);
 const acceptedHeads = (ST.accepted_heads || []).slice();
@@ -5706,6 +5738,21 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
   }
+  // AgentX selects once from the baseline ranking; the kernels it cut are the next Amdahl mass.
+  if (KERNEL_EXTRACT_ON && acceptedHeads.length && want('kernel') && !TIME_DEADLINE_HIT && !searchClosed('post-head re-extraction')) {
+    const tried = heads.map(h => h.short_name);
+    for (const n of tried) extractTried.add(n);
+    try {
+      const again = await prepareAgentXKernels('post_head', curTput,
+        ' POST-HEAD ROUND: accepted head wins in the CURRENT stack (incl. GEAK_MN_PD_* engine layers) changed the ' +
+        'kernel mix. Re-profile that stack and re-rank before selecting; PREVIOUS_* evidence may supply workload, ' +
+        `sampling plan and passing UTs, not the ranking. Do not re-deliver: ${tried.join(', ')}.`);
+      kernelQueue = [...again.head_candidates, ...again.kernel_candidates].filter(c => !tried.includes(c.short_name));
+      log(`Post-head re-extraction: ${kernelQueue.length} new candidate(s).`);
+    } catch (e) {
+      log(`Post-head re-extraction failed (${e.message}); finalizing the accepted stack.`);
+    }
+  }
   log(`Head-kernel track done. ${acceptedHeads.length} accepted, throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x).`);
   if (flaggedHeads.length) {
     log(`⚠️ ${flaggedHeads.length} DOMINANT head(s) FLAGGED (not optimized, NOT silently skipped): ` +
@@ -5768,6 +5815,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // AgentX selection inventories more work than this execution budget can run.
   // Preserve undispatched eligible candidates in carried state for resume.
   if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
+  for (const c of planCands.slice(0, cands.length)) if (c.short_name) extractTried.add(c.short_name);
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
@@ -5892,6 +5940,22 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           ...ANALYSIS_SKILL_INPUTS,
         }),
         { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    } else if (dispatched < BUDGET && !TIME_DEADLINE_HIT && !searchClosed('milestone re-extraction')) {
+      // AgentX counterpart of the re-profile: the prepared queue only knows the pre-win kernel mix.
+      const tried = [...extractTried];
+      try {
+        const again = await prepareAgentXKernels(`m${milestone}`, curTput,
+          ` MILESTONE ROUND: accepted kernel wins in the CURRENT stack changed the kernel mix. Re-profile that ` +
+          'stack and re-rank before selecting; PREVIOUS_* evidence may supply workload, sampling plan and ' +
+          `passing UTs, not the ranking. Do not re-deliver: ${tried.join(', ')}.`);
+        const queued = new Set(kernelQueue.map(c => c.short_name));
+        const fresh = [...again.head_candidates, ...again.kernel_candidates]
+          .filter(c => !extractTried.has(c.short_name) && !queued.has(c.short_name));
+        kernelQueue = [...kernelQueue, ...fresh];
+        log(`Milestone ${milestone} re-extraction: ${fresh.length} new candidate(s).`);
+      } catch (e) {
+        log(`Milestone ${milestone} re-extraction failed (${e.message}); continuing with the prepared queue.`);
+      }
     }
   } else {
     noImprove++;

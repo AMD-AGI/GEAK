@@ -54,6 +54,26 @@ class ExtractionTargetsTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in select_targets({"ranking": rows})["targets"]],
                          ["a", "b", "c", "d", "e"])
 
+    def test_triton_specializations_share_one_slot(self):
+        gemm = "_gemm_a8w8_blockscale_kernel_GROUP_K_128_SPLITK_BLOCK_SIZE_{}_GRID_MN_{}"
+        triton = {"classification": "triton"}
+        rows = [{**row(gemm.format(4096, 12), 9.9, decode=19.7), **triton},
+                {**row(gemm.format(4096, 8), 9.8, decode=19.6), **triton},
+                {**row(gemm.format(2048, 32), 5.1, decode=10.2), **triton},
+                {**row("_gemm_a8w8_blockscale_kernel_v2_GROUP_K_128", 4.5, decode=9), **triton},
+                {**row("Cijk_Alik_MT32x16_GRVW_8_1", 4.4, decode=8.8), "classification": "library_gemm"},
+                row("quant", 3.6, decode=7.2), row("moe", 3.5, decode=7.0), row("attn", 3.2, decode=6.4)]
+        result = select_targets({"ranking": rows})
+        top = result["per_phase"]["DECODE"]["top_k"]
+        self.assertEqual([r["id"] for r in top], [
+            gemm.format(4096, 12), "_gemm_a8w8_blockscale_kernel_v2_GROUP_K_128",
+            "Cijk_Alik_MT32x16_GRVW_8_1", "quant", "moe"])
+        self.assertEqual(top[0]["specializations"],
+                         [gemm.format(4096, 12), gemm.format(4096, 8), gemm.format(2048, 32)])
+        self.assertAlmostEqual(top[0]["phase_pct"], 49.5)
+        self.assertAlmostEqual(top[0]["overall_pct"], 24.8)
+        self.assertNotIn("specializations", top[1])
+
     def test_invalid_or_missing_costs_and_duplicate_identity_fail(self):
         valid = row("a", 4, decode=10)
         for bad in [None, "4", True, float("nan"), float("inf"), -1, 101]:

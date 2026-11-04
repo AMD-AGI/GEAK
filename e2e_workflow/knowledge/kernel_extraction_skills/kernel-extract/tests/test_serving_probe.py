@@ -395,3 +395,36 @@ class LogOccupancyTest(unittest.TestCase):
             fh.write(SWA_DECODE + '\n')
         self.assertEqual(occupancy()[:2], (3, 11.54))
 
+
+class RandIdsTest(unittest.TestCase):
+    def test_ids_stay_inside_the_model_vocab(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'config.json').write_text(json.dumps({'vocab_size': 129280}))
+            vocab = serving_probe.vocab_size(d)
+        self.assertEqual(vocab, 129280)
+        self.assertLess(max(serving_probe.rand_ids(20000, 0, vocab)), 129280)
+
+    def test_a_nested_text_config_is_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'config.json').write_text(json.dumps({'text_config': {'vocab_size': 32000}}))
+            self.assertEqual(serving_probe.vocab_size(d), 32000)
+
+    def test_no_readable_model_keeps_the_original_bound(self):
+        for model in (None, '', '/no/such/model'):
+            self.assertIsNone(serving_probe.vocab_size(model))
+        ids = serving_probe.rand_ids(20000, 0, None)
+        self.assertGreaterEqual(min(ids), 1000)
+        self.assertGreater(max(ids), 129280)
+        self.assertLessEqual(max(ids), 150000)
+
+    def test_each_run_gets_its_own_prompts_unless_a_seed_is_given(self):
+        a, b = serving_probe.fresh_seed(), serving_probe.fresh_seed()
+        self.assertNotEqual(a, b)
+        self.assertNotEqual(serving_probe.rand_ids(64, a), serving_probe.rand_ids(64, b)[:64])
+        self.assertEqual(serving_probe.fresh_seed(1234), 1234)
+        self.assertIsNone(serving_probe.build_parser().parse_args(
+            ['--points', 'p', '--point-id', 'x', '--trace-dir', 't', '--out', 'o']).seed)
+
+
+if __name__ == '__main__':
+    unittest.main()

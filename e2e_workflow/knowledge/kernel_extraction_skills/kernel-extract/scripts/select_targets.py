@@ -18,6 +18,40 @@ def _percent(value, field):
     return value
 
 
+def _triton_base(row):
+    """Jit base of a Triton specialization name (``base`` + ``_`` + constexpr suffix), else None.
+
+    Same rule as kernel_selection._specialized_from: the suffix starts at the first all-caps
+    segment and carries a digit-only segment, so ``base_v2`` stays its own kernel."""
+    if "triton" not in (row.get("classification"), row.get("backend_guess")):
+        return None
+    segments = row["name"].split("_")
+    for i in range(1, len(segments)):
+        if segments[i].isupper():
+            base = "_".join(segments[:i])
+            rest = segments[i:]
+            return base if base.strip("_") and any(s.isdigit() for s in rest) else None
+    return None
+
+
+def _merge_specializations(rows):
+    """One row per Triton jit kernel: autotune variants are one source, so they share one Top-K slot."""
+    merged, by_base = [], {}
+    for row in rows:
+        base = row.pop("base")
+        if base is None or base not in by_base:
+            merged.append(row)
+            if base is not None:
+                by_base[base] = row
+            continue
+        into = by_base[base]
+        into["overall_pct"] = min(100, into["overall_pct"] + row["overall_pct"])
+        for phase, share in row["phase_shares"].items():
+            into["phase_shares"][phase] = min(100, into["phase_shares"].get(phase, 0) + share)
+        into.setdefault("specializations", [into["id"]]).append(row["id"])
+    return merged
+
+
 def select_targets(document, phases=("PREFILL", "DECODE"), top_k=5, overall_pct_gt=3):
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
         raise ValueError("top_k must be a positive integer")
@@ -41,7 +75,10 @@ def select_targets(document, phases=("PREFILL", "DECODE"), top_k=5, overall_pct_
         for phase, share in shares.items():
             _percent(share, f"{identity}.share_of_phase_pct.{phase}")
         rows.append({"id": identity, "name": row.get("name", identity),
-                     "overall_pct": total, "phase_shares": shares})
+                     "overall_pct": total, "phase_shares": dict(shares),
+                     "base": _triton_base({**row, "name": row.get("name", identity)})})
+    rows.sort(key=lambda r: -r["overall_pct"])
+    rows = _merge_specializations(rows)
 
     selected, per_phase = {}, {}
     for phase in phases:
@@ -51,15 +88,16 @@ def select_targets(document, phases=("PREFILL", "DECODE"), top_k=5, overall_pct_
         # Rank first, then filter. Filtering before [:top_k] would promote rank 6.
         for rank, row in enumerate(ordered[:top_k], 1):
             keep = row["overall_pct"] > overall_pct_gt
+            variants = {"specializations": row["specializations"]} if "specializations" in row else {}
             top_rows.append({"id": row["id"], "name": row["name"], "phase_rank": rank,
                              "phase_pct": row["phase_shares"][phase],
                              "overall_pct": row["overall_pct"], "selected": keep,
                              "reason": "phase_top_k_and_overall_threshold" if keep
-                             else "overall_share_not_above_threshold"})
+                             else "overall_share_not_above_threshold", **variants})
             if keep:
                 target = selected.setdefault(row["id"], {
                     "id": row["id"], "name": row["name"], "overall_pct": row["overall_pct"],
-                    "selected_phases": [], "phase_ranks": {},
+                    "selected_phases": [], "phase_ranks": {}, **variants,
                 })
                 target["selected_phases"].append(phase)
                 target["phase_ranks"][phase] = rank
