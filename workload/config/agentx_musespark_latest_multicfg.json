@@ -1,5 +1,5 @@
 {
-  "_comment": "Muse Spark on the chip's currently published InferenceX curve, as one campaign. No run id is pinned: the baseline adopts the newest AgentX date the site publishes for this hardware/framework/precision, and the EP group that owns that curve's Optimal-Only peak tok/s/chip (a campaign covers one EP group). What was resolved is written to baseline/out/resolution.json and into baseline.json, so the campaign stays reproducible; pin ci.run_id (and select.ep) to freeze it instead. target.image is deliberately not declared — it is a consequence of the resolved run, and is recorded rather than asserted; the model stays a hard guard. Profile extracts each config from its own CI serving log and merges them so each task gets ONE UT in which every config weighs the same; applyback measures the group's lowest- and highest-concurrency configs against their own CI numbers.",
+  "_comment": "Muse Spark on the chip's currently published InferenceX curve, as one campaign. No run id is pinned: the baseline adopts the newest AgentX date the site publishes for this hardware/framework/precision, and the EP group that owns that curve's Optimal-Only peak tok/s/chip (a campaign covers one EP group). What was resolved is written to baseline/out/resolution.json and into baseline.json, so the campaign stays reproducible; pin ci.run_id (and select.ep) to freeze it instead. target.image is deliberately not declared \u2014 it is a consequence of the resolved run, and is recorded rather than asserted; the model stays a hard guard. Profile extracts each config from its own CI serving log and merges them so each task gets ONE UT in which every config weighs the same; applyback measures the group's lowest- and highest-concurrency configs against their own CI numbers.",
   "run_root": "workload/runs/agentx_musespark_latest_multicfg",
   "target": {
     "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
@@ -55,7 +55,11 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
-        "multi_config": true
+        "multi_config": true,
+        "agent_budget_sec": 28800,
+        "_note_agent_budget_sec": "Default 14400 (4 h) is the budget for the WHOLE stage -- agent_attempts share it, they do not each get it. This EP4 group needs 6 separate server starts (every config has a distinct launch), measured at ~30-45 min each, so 4 h cannot cover the captures plus merge/select/UT wave.",
+        "agent_attempts": 12,
+        "_note_agent_attempts": "Follow the other musespark/dsv4 scenarios: make the BUDGET the binding constraint, not the session counter. Attempts are consumed by ordinary interruptions (a session that outlives its window, or dies and is graded by finalize), and the loop returns fail once local_attempt == attempts even with budget left. 6 server starts of 30-45 min each give many interruption points, so 3 sessions over 8 h is too few. agent_repair_attempts stays at the default 1: a second reported `blocked` should remain the stage's answer."
       }
     },
     "applyback": {
@@ -67,6 +71,26 @@
         "serving_env": null,
         "point_serving_env": {},
         "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file."
+      }
+    },
+    "roofline": {
+      "skill": "kernel-roofline",
+      "mode": "agent",
+      "params": {
+        "agent_budget_sec": 10800,
+        "agent_attempts": 6,
+        "_note_budget": "3 h: per-kernel rocprof over the merged ranking. dsv4pro/dsv4_sgl_c32 use 3 h here."
+      }
+    },
+    "optimize": {
+      "skill": "geak-kernel-workflow",
+      "mode": "agent",
+      "params": {
+        "time_budget_sec": 72000,
+        "agent_budget_sec": 100800,
+        "agent_attempts": 60,
+        "_note_two_budgets": "agent_budget_sec and time_budget_sec are DIFFERENT limits and both must be set. time_budget_sec is the optimisation search; agent_budget_sec is how long agent_stage.py lets the session(s) run at all, enforced from outside with timeout(1). Leaving it unset takes the 14400 (4 h) default, which would kill a 20 h search one fifth of the way in. The other musespark scenarios keep the agent budget ~1.5x the search budget (_289: 48 h / 12 h, _044: 72 h / 48 h); so does this. attempts are high on purpose so the budget binds, not the session counter.",
+        "_note_whole_campaign": "Whole-campaign budget 48 h. Measured/allocated: profile 8 h (cfg1 measured ~48 min of work per config x 6 configs, graph+eager), roofline 3 h, optimize 20 h search, applyback ~10 h (2 representative points x repeats 3, ~80 min per leg). ~7 h slack."
       }
     }
   }
