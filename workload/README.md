@@ -166,6 +166,14 @@ match before any GPU time — refusing to start when the lost knob was a *check*
 warning when it is merely inert, so a live campaign config is not blocked over a dead
 word. Add the entry in the same change that removes the knob.
 
+A skill rename is the same kind of silent breakage one level up, and it is the committed
+configs that pay for it: `--dry-run` is what catches it, so every config in `config/` has
+to stay in the sweep. Which means `config/` holds only the scenarios we are prepared to
+keep working — one per target, plus the two smoke configs. The variants a campaign throws
+off while it runs (one per epoch, per resume, per contention experiment) are evidence of
+that campaign, not configuration of this skill; they belong beside it under
+`campaigns/<name>/`, which is gitignored for the same reason `runs/` is.
+
 ## Where the code lives
 
 `run.py` is the only entry point. Everything behind it sits in a directory named after

@@ -107,6 +107,33 @@ cd "$WORKDIR" || blocked "cannot enter workdir $WORKDIR"
   echo "[runner:claude] model=${WORKLOAD_AGENT_MODEL:-<CLI default>}"
 } >> "$LOG"
 
+# Log files may be reused across attempts. Only this invocation's output can prove a
+# startup failure; a historical auth error or a tool's 401 is not that evidence.
+#
+# The match below is the CLI's exact startup-rejection line, and it is deliberately
+# whole-line and sole-line: this invocation must have produced that message and nothing
+# else. If the CLI ever rewords it, this check stops firing and the runner falls back to
+# reporting the raw exit code -- the behaviour before it existed. That is the safe way
+# round. A looser pattern would eventually call a real session failure a credential
+# problem and stop a campaign that was only going to need a retry.
+LOG_START="$(stat -Lc '%d:%i:%s' -- "$LOG" 2>/dev/null || :)"
+claude_auth_rejected() {
+  local current
+  [ "$RC" -eq 1 ] || return 1
+  [[ "$LOG_START" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+  current="$(stat -Lc '%d:%i:%s' -- "$LOG" 2>/dev/null)" || return 1
+  [[ "$current" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || return 1
+  [[ "${current%:*}" == "${LOG_START%:*}" ]] || return 1
+  (( ${current##*:} >= ${LOG_START##*:} )) || return 1
+  tail -c "+$(( ${LOG_START##*:} + 1 ))" -- "$LOG" | LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    /^[[:space:]]*$/ { next }
+    $0 == "Failed to authenticate. API Error: 401 Access denied due to invalid subscription key. Make sure to provide a valid key for an active subscription." { matched++; next }
+    { other = 1; exit }
+    END { exit !(matched == 1 && !other) }
+  '
+}
+
 # No internal timeout: the time budget is enforced from the outside by the scheduler
 # with timeout(1).
 "$BIN" -p \
@@ -116,7 +143,13 @@ cd "$WORKDIR" || blocked "cannot enter workdir $WORKDIR"
   ${WORKLOAD_AGENT_EXTRA_ARGS:-} \
   < "$PROMPT" >> "$LOG" 2>&1
 RC=$?
+AUTH_REJECTED=0
+if claude_auth_rejected; then AUTH_REJECTED=1; fi
 
+# Preserve the CLI's raw exit and output even when the runner contract maps it to 78.
 echo "[runner:claude] $(date -Is) exit=$RC" >> "$LOG"
 rm -rf "$STATE_DIR" 2>/dev/null
+if [ "$AUTH_REJECTED" -eq 1 ]; then
+  blocked "CLI startup authentication was rejected (original CLI exit=$RC; runner exit=78). Fix the configured credentials before retrying."
+fi
 exit $RC
