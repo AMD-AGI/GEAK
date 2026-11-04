@@ -20,41 +20,22 @@ export const meta = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// RUNTIME SANDBOX CONTRACT -- read this before adding any Node API to this file.
-//
-// This script runs on two runtimes and they do NOT offer the same globals:
-//
+// RUNTIME SANDBOX CONTRACT -- read before adding any Node API to this file.
+// The script runs on two runtimes with different globals:
 //                                             process   require   import()
 //   Claude Code's native Workflow tool          no        no      REFUSED AT LAUNCH
 //   interface/runtime/engine/run_workflow.mjs   yes       no      yes
-//
-// The native sandbox is a sealed V8 realm. Its entire global surface is the JS built-ins plus
-// agent/parallel/pipeline/phase/log/workflow/args/budget/console/setTimeout. There is NO
-// filesystem, NO child_process, and a literal `import(` anywhere in this file is a STATIC
-// rejection of the WHOLE script -- "SyntaxError: import() is not available in workflow scripts"
-// -- so not one line runs, on any phase, AgentX or not. That is exactly how PR #520 took the
-// e2e workflow down: the four readers it added worked on the standalone Node runtime it was
-// validated against, and refused the script everywhere else.
-//
-// So: no `import(`, and never make a `require(` site load-bearing. Work that needs a file
-// belongs in a vendored CLI under scripts/ that an AGENT runs -- the same way every other
-// datum in this workflow (the profile, the strategy, every A/B number) already arrives.
-// e2e_workflow/scripts/tests/test_llm_ledger.py enforces the `import(` half of this in CI.
-// ---------------------------------------------------------------------------
+// The native sandbox has only the JS built-ins plus agent/parallel/pipeline/phase/log/workflow/
+// args/budget/console/setTimeout: no filesystem, no child_process, and one `import(` in code
+// rejects the whole script at launch. So: no `import(` and no load-bearing `require(`; file work
+// goes in a scripts/ CLI that an agent runs. test_llm_ledger.py enforces the `import(` rule.
 
-// ---------------------------------------------------------------------------
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
-// ---------------------------------------------------------------------------
 let _rawArgs = args;
 let _parseErr = '';
-// The driver agent sometimes passes `args` as a JSON STRING rather than an object. The
-// string is COMPLETE -- measured 2026-09-15: a valid 32-key object with `state` intact --
-// but carries a stray trailing character (one spurious '}'), so a plain JSON.parse throws
-// 'Extra data', the coercion fails, workflow_dir is undefined and the run aborts in 28ms.
-// This is NOT truncation and NOT a payload-size problem; trimming the state does not fix
-// it. Parse tolerantly: retry while dropping trailing junk, bounded so a genuinely
-// malformed payload still fails loudly instead of looping.
+// The driver agent may pass `args` as a complete JSON string with stray trailing characters
+// (e.g. an extra '}'). Parse tolerantly: retry while trimming the tail, bounded so a truly
+// malformed payload still fails loudly.
 if (typeof _rawArgs === 'string') {
   let _s = _rawArgs.trim();
   for (let _i = 0; _i < 8 && _s.length > 1; _i++) {
@@ -63,22 +44,18 @@ if (typeof _rawArgs === 'string') {
   }
 }
 const A = _rawArgs || {};
-// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
-// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
-// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
-// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+// LLM accounting (args.llm_stats="false" disables): records each agent call's role/phase/attempt.
+// No timestamps (no Date.now() here); scripts/llm_ledger.py takes durations from the transcripts.
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
-// order. Two same-key agents that finish out of order no longer swap identities under the parser's
-// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
-// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
+// Called at dispatch (before the await): events stay in dispatch order, which the ledger's
+// positional join relies on, and hung or throwing attempts are still recorded. Returns the event
+// (null when off); the caller sets `ok` once the attempt resolves.
 function tlAgent(prompt, o, attempt) {
   if (!LLM_STATS) return null;
-  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
-  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
-  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
+  // Identity comes from the prompt's `You are the <role>. PHASE=<sub_phase>.` line (also in the
+  // transcript), not from opts.label, which is free-form display text.
   const m = TL_ROLE_RE.exec(String(prompt || ''));
   const e = {
     seq: LLM_TL.events.length,
@@ -111,49 +88,39 @@ if (!WORKFLOW_DIR) {
 // The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
-// The single-language WORKER lane. kernel_workflow.js is now a dispatcher (mode=optimize/author ->
-// this worker; mode=bakeoff -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
-// (kernel_lane.js) — routing through the dispatcher would add a nesting level (e2e -> dispatcher ->
-// worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
+// Call the single-language worker lane directly: going through the kernel_workflow.js dispatcher
+// would nest e2e -> dispatcher -> worker (3 levels), which the runtime forbids.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
-const R9700_E2E = EXPECTED_TARGET === 'r9700';
-// ISA isolation and product policy are intentionally separate. Any gfx1201
-// target must avoid CDNA priors, but only exact R9700 identity selects its
-// calibrated peaks, serving backend, and image policy.
+// Products with a `product:` section in roofline/peaks.md; keep in sync with it.
+const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
+const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
+// ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
+// an exact product identity selects calibrated peaks, serving backend and image policy.
 const RDNA4_ISOLATE = RDNA4_ISA;
 const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
 const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 
-// The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
-// when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
-// re-optimizes a fixed benchmark set, where a card distilled from a past run of the same kernel is
-// the point; e2e extracts whatever the profiler happens to surface from a live server, and a card
-// carrying another run's conclusions about a superficially similar op is a prior nobody asked for.
-// Off is also the conservative default for the layer that has never been measured with it on.
-// Override per run with args.use_learned_kb=true.
+// Lanes launched from here default the learned KB OFF (kernel_workflow alone defaults it ON): e2e
+// extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
+// unwanted prior. Override with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
 
-// EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
-// be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
-// silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
-// fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-// GEAK-ABLATION-ARMS-v2: ablLaneArgs() forwards the arm to the nested kernel lane.
-// Without it B6 was staged in the parent and silently never activated in the child.
-// llm_stats is forwarded ONLY when the parent was given one explicitly, so an unset parent keeps the
-// original argument shape (child defaults on) and a parent opt-out (`llm_stats:"false"`) reaches the
-// lane instead of silently reverting to the lane's default. wfArgs spreads last so a per-call override wins.
+// Every nested lane call builds its args here, so none silently takes the lane's own defaults;
+// test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
+// ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
+// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
@@ -181,15 +148,9 @@ const laneArgs = (wfArgs) => {
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 // ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
-// Started HERE, at the earliest point the run has a durable identity, so the
-// delegation graph/timeline is being recorded from the first agent rather than
-// reconstructed only at the end. It resolves its own workflow run from EXP_ROOT
-// via the runtime's workflow record (no eval-dir substring matching), polls the
-// journal + transcripts, and republishes a snapshot atomically.
-//
-// It is detached, read-only, and strictly non-fatal: it never influences model
-// choice, prompts, budgets or optimization decisions, and any failure to start
-// is logged and ignored. Set GEAK_LIVE_TRACE=0 to disable.
+// Started as soon as the run has a durable identity, so the timeline covers the first agent.
+// Detached and non-fatal (a failed start is logged and ignored); it never influences the run.
+// GEAK_LIVE_TRACE=0 disables it.
 startLiveTracker(EXP_ROOT, WORKFLOW_DIR);
 function startLiveTracker(expRoot, wfDir) {
   try {
@@ -199,9 +160,7 @@ function startLiveTracker(expRoot, wfDir) {
     const child = spawn('python3', [
       '-B', `${wfDir}/../interface/geak_trace_collector.py`,
       '--exp-root', expRoot,
-      // Runtime-supplied invocation identity: the wf_*.json record carries this
-      // same args object, so matching it identifies THIS launch deterministically
-      // instead of guessing from timing or from being the only run around.
+      // The runtime's wf_*.json record carries these same args, so they identify this launch.
       '--identity-args', JSON.stringify(A),
       '--script-dir', wfDir,
       // Per-run filename: two runs under one exp_root must not overwrite each other.
@@ -210,8 +169,7 @@ function startLiveTracker(expRoot, wfDir) {
       '--resolve-timeout', '600',
       '--max-seconds', String(process.env.GEAK_LIVE_TRACE_MAX_S || '172800'),
     ], { detached: true, stdio: 'ignore' });
-    // spawn reports a missing executable ASYNCHRONOUSLY: try/catch cannot see it,
-    // and without this listener the ENOENT is an unhandled error event.
+    // spawn reports a missing executable (ENOENT) asynchronously; try/catch can't see it.
     child.on('error', (err) => {
       try { log(`Live execution tracker failed to start (non-fatal): ${err && err.message}`); }
       catch (_) {}
@@ -224,13 +182,9 @@ function startLiveTracker(expRoot, wfDir) {
 }
 
 // ---- Profile-analysis skill (OPTIONAL, pluggable; see knowledge/analysis_skills/INDEX.md) ----
-// After parse_profile.py emits the standardized Top-N, the Profiler may run ONE analysis skill to
-// enrich it with a headroom estimate the Architect can route on. Default `roofline`: per-kernel % of
-// the hardware ceiling -> attainable speedup -> expected e2e gain, so budget goes to the kernel with
-// HEADROOM rather than merely the biggest one. STRICTLY ADVISORY: it annotates and suggests an
-// ordering, never prunes a candidate and never overrides the measured pct_gpu_time.
-// `analysis_skill=none` (or a missing/unreadable skill dir) disables the step and the run behaves
-// exactly as it did before the feature existed -> ANALYSIS_SKILL_* are '' and nothing is injected.
+// The Profiler may run ONE analysis skill on parse_profile.py's Top-N to add a headroom estimate
+// (default `roofline`: % of hardware ceiling -> attainable e2e gain), so budget goes to headroom, not
+// just size. Advisory only: never prunes or overrides pct_gpu_time. `none`/`false` disables it.
 const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
 const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
 const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
@@ -240,11 +194,9 @@ const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
 if (ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (advisory; annotates + reorders, never prunes).`);
 
 // ---- Upstream TraceLens / kernel-agent prior (OPTIONAL; forwarded by run_e2e.py as args.tracelens) ----
-// run_e2e.py resolves these paths beside the geak handoff and forwards ONLY the non-null ones.
-// They are a PRIOR for the Profile/Strategize/Extract phases: if analysis_md exists the Profiler skips
-// its own trace collection and builds the Top-N from TraceLens (and runs an EXTRA parse_profile pass on
-// trace_file when present); the Architect uses kernel_candidates as a routing prior. ENTIRELY ADDITIVE:
-// when args.tracelens is absent every TRACELENS_* input is '' and the run is byte-identical.
+// Only non-null paths are sent. With analysis_md the Profiler builds the Top-N from TraceLens instead
+// of its own trace (plus a parse_profile pass on trace_file if present); the Architect uses
+// kernel_candidates as a routing prior. Absent => every TRACELENS_* input is ''.
 const TL = (A.tracelens && typeof A.tracelens === 'object') ? A.tracelens : {};
 const TRACELENS_INPUTS = {
   TRACELENS_ANALYSIS_MD: String(TL.analysis_md || ''),
@@ -265,41 +217,31 @@ if (MODEL_PATH && (!EXPECTED_GFX || !EXPECTED_TARGET)) {
     'E2E serving requires structured GPU identity before policy selection: pass expected_gfx and ' +
     'expected_target (run interface/run_e2e.py for auto-detection).');
 }
-if (MODEL_PATH && RDNA4_ISA && !R9700_E2E) {
+if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
   throw new Error(
-    'gfx1201 architecture detected but the product is not confirmed as r9700; refusing R9700-only ' +
-    'serving policy for an unknown gfx1201 product.');
+    'gfx1201 architecture detected but the product is not confirmed as one of ' +
+    `${RDNA4_SERVING_PRODUCTS.join('/')}; refusing the product-scoped serving ` +
+    'policy for an unknown gfx1201 product.');
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : (R9700_E2E ? 'vllm' : 'sglang')).trim()
-  || (R9700_E2E ? 'vllm' : 'sglang');  // serving adapter
-if (R9700_E2E && BACKEND !== 'vllm') {
-  throw new Error(`R9700 E2E is vLLM-only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm`);
+const BACKEND = String(A.backend != null ? A.backend : (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang')).trim()
+  || (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang');  // serving adapter
+if (RDNA4_PRODUCT_E2E && BACKEND !== 'vllm') {
+  throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
 }
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
-// Serving tensor-parallel: TP size + the GPU set used for EVERY e2e SERVING launch (baseline, config
-// sweep, integrate ref/cand, validation, profiler). This is DISTINCT from GPU_LIST (the
-// optimization-parallelism pool used for isolated op benchmarks + the recursive kernel layer). For TP>1
-// the SAME (TP, GPU set) must be used for every e2e measurement or deltas are incomparable. Default
-// TP=1 on GPU_LIST[0] (backward compatible). args.tp (or args.serving_tp) sets TP; args.serving_gpu
-// overrides the GPU set (default = first TP ids of GPU_LIST, comma-joined).
+// Serving TP + GPU set, used for EVERY e2e serving launch (baseline, sweep, integrate, validate,
+// profile) and kept fixed so deltas stay comparable. Distinct from GPU_LIST, the pool for isolated
+// benchmarks and kernel lanes. Default TP=1; SERVING_GPU defaults to the first TP ids of GPU_LIST.
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
-// Expert-parallel degree AS THE BASELINE WAS LAUNCHED, resolved upstream (run_e2e._resolve_ep) and
-// passed down rather than re-derived from flags here. It is a KB addressing dimension beside TP:
-// the same model on the same stack with the experts sharded differently is a different deployment.
-// Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
-// so this constant states the baseline's value and the accepted one lives in accepted_config.
-// interface/run_e2e.py ALWAYS sends args.ep (it calls _resolve_ep when it builds these args), so
-// every dispatched run takes the first branch. A hand-rolled invocation that supplies launch
-// details but no ep used to shell out to that same parser -- which cannot work on either runtime,
-// because neither gives this script `require` (see RUNTIME SANDBOX CONTRACT); it died with
-// "require is not defined" at module scope, before anything else ran. Guessing 1 instead would be
-// worse than failing: ep is a KB addressing dimension, so a wrong value files the run's results on
-// another deployment's page. Say precisely what to pass.
+// Expert-parallel degree of the BASELINE launch; run_e2e.py always sends it (_resolve_ep). It is a
+// KB addressing dimension beside TP; the Config Tuner may change it mid-run, and the accepted value
+// lives in accepted_config. With launch details but no args.ep, fail rather than guess: a wrong ep
+// files the results under another deployment.
 function resolveServingEp() {
   if (A.ep != null) {
     const ep = Number(A.ep);
@@ -313,22 +255,15 @@ function resolveServingEp() {
     'Launch through interface/run_e2e.py, which resolves it with _resolve_ep, or pass args.ep.');
 }
 const SERVING_EP = resolveServingEp();
-// ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
-// time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
-// forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
-// the SIGKILL — instead of being torn down mid-flight (the deep 24h-budget-vs-12h-kill failure). This is
-// the SINGLE place the orchestrator budget is interpreted. When the arg is ABSENT (GEAK invoked directly,
-// not via the interface) TIME_BUDGET_MS is null and EVERY budget branch below short-circuits, so the run
-// is byte-identical to a build without this feature. No model/run specifics; pure time arithmetic.
+// ---- WALL-CLOCK BUDGET (opt-in) ----
+// time_budget_s is the orchestrator's hard kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S), so GEAK can
+// pace itself and finish Finalize/Report/Validate before the SIGKILL. Interpreted only here; absent
+// => TIME_BUDGET_MS is null and every budget branch short-circuits.
 const TIME_BUDGET_MS = A.time_budget_s != null ? parseInt(A.time_budget_s, 10) * 1000 : null;
 // ---- ELAPSED CLOCK ----
-// Date.now() is unavailable in Workflow scripts (breaks resume), so elapsed time is derived from timers.
-// No time_budget_s => remainingMs() is Infinity and every guard short-circuits.
-//
-// Rungs are armed all at once at ABSOLUTE offsets from t0, not as a self-rearming chain: a chain re-arms
-// inside its own callback, so scheduler lateness compounds and ELAPSED_MS drifts behind real time. That
-// under-count is what spent the reserve in the 20260823 sessions (#1202). A late rung here delays only
-// itself.
+// Date.now() is unavailable (breaks resume), so elapsed time comes from timers armed all at once at
+// absolute offsets: a self-rearming chain compounds scheduler lateness and drifts behind real time.
+// No time_budget_s => remainingMs() is Infinity.
 let ELAPSED_MS = 0;
 const CLOCK_TICK_MS = 60000;
 const CLOCK_MAX_RUNGS = 2048;   // an absurd budget widens the step instead of flooding the event loop
@@ -346,285 +281,287 @@ if (TIME_BUDGET_MS != null && typeof setTimeout === 'function') {
 const remainingMs = () => (TIME_BUDGET_MS == null ? Infinity : Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
 const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remainingMs() / 60000));
 // ---- FINAL-PHASE RESERVE ----
-// Hard floor of wall-clock held back for the WHOLE final phase (Finalize + Report + Validate + the
-// workflow_return write); no mode starts new work inside it. Without it, three sessions shipped no final
-// report (Hyperloom #1202). 60min covers all but the tail of 85 historical final phases (p50 40 / p75 50
-// / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
-// waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
-// the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
-// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%): a trace
-// replay's paired validation is two ~70min legs plus their boots, which 20% of most budgets cannot hold.
+// Wall-clock held back for the whole final phase (Finalize + Report + Validate + workflow_return);
+// no mode starts new work inside it. Default 60min, capped at 20% of the budget (binds below 5h).
+// An overrun only risks Validate's re-measure (Report already wrote the reports; run_e2e falls back).
+// run_e2e.py env overrides: GEAK_FINAL_RESERVE_S, GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%).
 const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
   parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
+// A trace replay's final phase (Finalize's search leg, Validate's canonical legs, 40min for the rest)
+// outranks a smaller reserve and the cap. Read from raw args: it must resolve AgentX as IS_AGENTX does.
+const RESERVE_WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
+  ? A.workload_spec
+  : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
+      A.state?.workload_spec?.kind === 'agentx_trace_replay'
+    ? A.state.workload_spec : {});
+const RESERVE_IS_AGENTX =
+  String(A.workload_kind || RESERVE_WORKLOAD_SPEC.kind || 'synthetic') === 'agentx_trace_replay';
+const AGENTX_LEG_OVERHEAD_S = Math.max(0,
+  parseInt(A.agentx_leg_overhead_s != null ? A.agentx_leg_overhead_s : 1200, 10) || 0);
+const agentxLegS = (windowS) => windowS + AGENTX_LEG_OVERHEAD_S;
+const _declaredWindowS = (v, dflt) => (Number(v) > 0 ? Number(v) : dflt);
+const RESERVE_DURATION_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600);
+const RESERVE_LOOP_S = _declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900);
+const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'warm_server') === 'warm_server'
+  ? 1 : Math.max(1, parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10) || 1));
+const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (2400 + agentxLegS(RESERVE_LOOP_S) + AGENTX_VALIDATION_LEGS * agentxLegS(RESERVE_DURATION_S));
+// Validate's timed windows alone: the least time in which it can return a number.
+const AGENTX_VALIDATE_WINDOWS_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * AGENTX_VALIDATION_LEGS * RESERVE_DURATION_S;
+// The run's minimum: Setup's leg (+10min), the KB warm start's A/B, then the final phase.
+const AGENTX_AB_OVERHEAD_S = 600;   // the integrator's work around an A/B's legs
+const AGENTX_PRE_FINAL_MIN_MS = !RESERVE_IS_AGENTX ? 0
+  : 1000 * (600 + agentxLegS(RESERVE_DURATION_S) + 2 * agentxLegS(RESERVE_LOOP_S) + AGENTX_AB_OVERHEAD_S);
+const AGENTX_MIN_BUDGET_MS = AGENTX_PRE_FINAL_MIN_MS + AGENTX_FINAL_PHASE_MS;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
-  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
-             Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
+  ? (() => {
+    const configured = Math.min(
+      parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
+      Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC));
+    return RESERVE_IS_AGENTX
+      ? Math.max(configured, Math.min(AGENTX_FINAL_PHASE_MS, TIME_BUDGET_MS - AGENTX_PRE_FINAL_MIN_MS))
+      : configured;
+  })()
   : null;
 // Effective budget = budget minus the reserve: one definition of time available to optimize.
 const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
   ? Math.max(60000, TIME_BUDGET_MS - FINAL_RESERVE_MS)
   : null;
-// Cap on the dispatch-deadline TAIL (budget − deadline). A flat 60% deadline reserves 40%, which is wasteful
-// on large budgets (24h → ~9h reserved though a few hours suffice). Deadlines below are max(60%, budget − this
-// cap): the 60% floor keeps small budgets unchanged; the cap bounds the reserve on large ones. Default 3h.
+// Cap on the dispatch-deadline tail (budget − deadline). Deadlines are max(60% of budget,
+// budget − cap): small budgets keep the 60% rule, large ones don't idle ~40%. Default 3h.
 const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s : 10800, 10) * 1000; // 3h
 // Point after which no mode starts new head/milestone/wave work. Defined here (not at the deadline timer)
 // because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
 const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
-// ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
-// A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
-// the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
-// for "give me the best head-kernel wins you can in 5 hours" runs.
-// CRITICAL: when fast_mode is OFF (the default) NOTHING below changes the full pipeline — every fast-mode
-// knob is selected by a `FAST_MODE ? fast : original` ternary that resolves to the ORIGINAL value, and
-// the phase skips / deadline timers are gated on FAST_MODE — so a non-fast run is byte-identical (same
-// prompts, same budgets, same control flow) to a build without this feature. No default-mode regression.
+if (RESERVE_IS_AGENTX && TIME_BUDGET_MS != null) {
+  log(`[time-budget] trace replay: final phase ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min, reserving ` +
+    `${Math.round(FINAL_RESERVE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min; the run's minimum ` +
+    `is ~${Math.round(AGENTX_MIN_BUDGET_MS / 60000)}min.` +
+    (TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS
+      ? ' WARNING: the budget is under it, so this run may not return a validated gain — raise time_budget_s.'
+      : ''));
+}
+// ---- FAST MODE (opt-in, default OFF) ----
+// Time-boxed run (default 5h) that optimizes only through the HeadKernel track: it skips ConfigSweep,
+// TuningSkillset and Milestone. Every fast knob is a `FAST_MODE ? fast : default` ternary, so with
+// fast_mode off nothing below changes.
 const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false') === 'true';
-// Total wall-clock budget for a fast run (default 5h). Enforced with setTimeout (Date.now() is NOT
-// available in workflow scripts): a global deadline flag stops dispatching NEW head ops, and each nested
-// head author-workflow is independently time-bounded so no single op can overrun the budget.
+// Fast-run wall-clock budget (default 5h), enforced by timers: a deadline flag stops new head ops,
+// and each nested head workflow has its own time bound.
 let FAST_BUDGET_MS = parseInt(A.fast_budget_ms != null ? A.fast_budget_ms : 18000000, 10); // 5h
-// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
-// 5h default) so a fast run fills the granted time and still finalizes before the external SIGKILL. The 5h
-// default (and any explicit fast_budget_ms) applies only when time_budget_s is absent (direct invocation).
+// An orchestrator budget (time_budget_s minus the final reserve) replaces the default and fast_budget_ms.
 if (TIME_BUDGET_EFFECTIVE_MS != null) FAST_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
-// Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
-// inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
-// the deliverable/validation tail.
+// No new head ops after this point, so in-flight heads and the final phase fit in FAST_BUDGET_MS.
+// Default max(60% of the budget, budget − TIME_TAIL_CAP_MS).
 const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
   : Math.max(Math.floor(FAST_BUDGET_MS * 0.6), FAST_BUDGET_MS - TIME_TAIL_CAP_MS), 10);
-// Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
-// eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
-// per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
-// FAST_BUDGET_MS. 35min was too short: a non-trivial MXFP8 FlyDSL fused-fp8 author needs ~80min and was
-// being abandoned mid-flight — the head track got a null/empty patch even though the author later finished.)
+// Per-head nested workflow time cap (fast mode only; per parallel GPU lane) so one recursive kernel
+// run can't eat the budget. Default 90min: a non-trivial DSL author can need ~80min.
 const FAST_HEAD_WF_MS = parseInt(A.fast_head_workflow_ms != null ? A.fast_head_workflow_ms : 5400000, 10);
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);       // max kernel-optimization tasks
-// MIN floor: dispatch at LEAST this many editable-kernel tasks before the loop may stop on no-improve /
-// empty queue (prompt-tunable). Prevents the milestone track from never firing. Capped by BUDGET.
+// Dispatch at least this many editable-kernel tasks before the loop may stop on no-improve or an
+// empty queue. Capped by BUDGET.
 const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_kernel_tasks : 4, 10), BUDGET);
-// Milestone only optimizes editable kernels whose profiled share is worth it: skip any candidate with
-// pct_gpu_time below this threshold (Amdahl — a kernel a few % of GPU can't move e2e past the noise band).
-// Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
-// candidate clears the bar, the milestone stops rather than grinding low-value kernels.
+// Milestone skips editable kernels below this pct_gpu_time (Amdahl: a few % can't beat the e2e noise
+// band). Overrides MIN_KERNEL_TASKS: if no candidate clears it, Milestone stops.
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
 const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
-// ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
-// The tuning skillset is vendored WHOLE into this repo (default
-// <repo>/perf_knowledge/expert_skills/tuning, hash-pinned as ONE unit by
-// e2e_workflow/scripts/tuning_skillset_sync.py) and is run by ONE role (tuning_specialist) as ONE phase
-// that sits AFTER ConfigSweep and BEFORE HeadKernel. It is deliberately a standalone phase rather than a
-// prompt fragment sprinkled into the head bake-off: (a) the skillset is a complete six-step loop
-// (scope -> baseline -> search -> correctness -> deploy -> engagement verify) and only runs to completion
-// when it owns a phase; (b) taking its own pre/post e2e A/B is what makes "how much did tuning buy us"
-// an attributable number in the final report instead of an unsplittable blob of total gain. Whatever it
-// accepts is folded into curFlags/curEnv, so HeadKernel optimizes ON TOP of a tuned stack and its own
-// A/B reference leg already contains the tuning.
-// tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
-// keys -> the run is byte-identical to a build without this feature.
+// ---- TUNING SKILLSET phase (default ON) ----
+// The vendored tuning skillset (hash-pinned whole by scripts/tuning_skillset_sync.py) is run by one
+// role (tuning_specialist) as one phase between ConfigSweep and HeadKernel (that phase says why).
+// tuning_skillset="false" disables it entirely.
 const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
-// Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
-// the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
-// the index entries that describe it are outside it, which is what lets both things be true at once.
+// Under expert_skills/ so its skills are selected through the same index.yaml as every other expert
+// skill; the index entries live outside the pinned tree.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
-// tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
-// production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
-// tuning_kb="false" for eval runs and the role is told not to read it.
+// tuning-kb/ is the skillset's per-model answer key (verified wins + artifacts): fine in production,
+// contaminating in a blind eval. tuning_kb="false" tells the role not to read it.
 const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
-// NOTE: there is deliberately NO op budget here. The head track caps its ops because each one spends a
-// recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
-// a cap would just leave measurable wins on the table. The role decides where the returns stop.
+// No tuning op budget on purpose: tuning ops are cheap and cumulative; the role decides when to stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
-// max head-op bake-offs. FAST MODE: the head track is parallelized across the GPU pool (one exclusive
-// lane per card), so scale the default up to the lane count (>=3) to keep every card busy in opt-A.
-// Default mode is UNCHANGED (3).
+// Max head-op bake-offs (default 3; fast mode: max(3, GPU count) to keep every parallel lane busy).
 const HEAD_BUDGET = parseInt(A.head_budget != null ? A.head_budget : (FAST_MODE ? Math.max(3, GPU_LIST.length) : 3), 10);
-// Author route: how many languages to author per head op. The Op Benchmarker orders author_plan by ROI
-// (for a GEMM head: flydsl first — SOTA GEMM DSL — then triton). Default 2 covers flydsl+triton per head
-// while keeping the kernel-layer cost bounded; bump to try hip/ck too when the headroom justifies it.
-// FAST MODE used to drop this to 1 to bound the (serial) wall-clock. Now the head track runs author
-// directions in PARALLEL across the GPU pool, so a 2nd direction (e.g. flydsl + triton per op) is nearly
-// free in wall-clock — keep 2 in both modes so different optimization directions actually fan out.
+// Languages to author per head op, in the Op Benchmarker's ROI order (GEMM: flydsl, then triton).
+// Default 2 in every mode; raise it to try hip/ck when the headroom justifies the cost.
 const HEAD_AUTHOR_MAX = parseInt(A.head_author_max != null ? A.head_author_max : 2, 10);
-// Dominant-head protection: an op whose pct_gpu_time >= this is NEVER silently skipped. If its bake-off
-// hits a harness fault / no-win / extraction failure, the orchestrator LOUDLY flags it (and still tries
-// the author route when a plan exists) instead of dropping the biggest lever on the floor. Default 30%.
+// An op at or above this pct_gpu_time is never silently skipped: a bake-off fault, no-win or failed
+// extraction is flagged loudly, and the author route still runs when a plan exists.
 const HEAD_PROTECT_PCT = parseFloat(A.head_protect_pct != null ? A.head_protect_pct : 30);
-// Corrective re-author: when a verified-isolated head winner is REJECTED at the e2e gate for a FIXABLE
-// integration reason (it ENGAGED live + beat the isolated oracle, only the integration POSTURE is wrong —
-// e.g. a JIT/DSL kernel lazily compiling in the TP>1 warmup -> NO_BINARY_FOR_GPU / cuda_graph_capture_unsafe,
-// or a host-sync that breaks capture), spend ONE cheap targeted fix-and-retry: optimize the EXISTING kernel
-// (keep the algorithm/iso win, fix only the integration), then re-run the e2e A/B once. This is NOT a new
-// head discovery, so it does NOT consume HEAD_BUDGET; it is bounded per head by HEAD_CORRECTIVE_MAX and is
-// skipped once the kernel-phase wall-clock deadline has fired. head_corrective_max=0 disables it.
+// Corrective re-author: a head winner rejected at the e2e gate for a fixable integration posture
+// (e.g. lazy JIT compile in TP>1 warmup, a host sync that breaks graph capture) gets a targeted fix of
+// the existing kernel and one more A/B. Not charged to HEAD_BUDGET; skipped after the kernel deadline.
+// Per-head cap; 0 disables.
 const HEAD_CORRECTIVE_MAX = parseInt(A.head_corrective_max != null ? A.head_corrective_max : 2, 10);
-// SURGICAL-FIX tier (default ON): before escalating a corrective to the HEAVYWEIGHT kernel_workflow
-// re-author (multi-round, multi-engineer, ~hours), first try a LIGHTWEIGHT single-agent targeted patch
-// (the kernel_surgeon role): read the reject diagnosis + the failing kernel + the live call seam, make
-// the SMALLEST edit that fixes the defect, self-verify on the immutable unittest (correctness + isolated
-// win preserved), re-gate. Most integration/correctness rejects are a tiny seam bug (write into y=
-// instead of returning; stop caching a per-call tensor by data_ptr) — minutes, not hours. Escalates to
-// the heavy re-author only when the surgical patch fails. surgical_fix=false => old heavy-only behavior.
+// SURGICAL-FIX tier (default ON): before the hours-long kernel_workflow re-author, one kernel_surgeon
+// agent makes the smallest fix for the reject diagnosis, self-verifies on the immutable unittest and
+// re-gates (most rejects are tiny seam bugs). Escalates only if that fails; surgical_fix=false skips it.
 const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') === 'true';
 const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture|no[_ ]?rebind[_ ]?seam|no[_ ]?engagement|not[_ ]?engaged|signature[_ ]?mismatch|wrong[_ ]?seam/i;
-// ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
-// A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
-// WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
-// only because it computes degenerate/less work). Distinct from the integration-POSTURE class above: the
-// kernel over-fit the single captured snapshot, assuming input-buffer identity / contents / routing are
-// stable across calls (e.g. a cache keyed by data_ptr(), a stale reused index/mask, a persistent-state
-// assumption). A single-snapshot isolated unittest can NEVER catch this (fixed tensors → any such cache
-// is always "correct"), so a blind re-run reproduces the bug; the corrective loop below feeds this
-// diagnosis back so the re-author actually removes the over-fit. GENERIC — no kernel/model specifics.
-const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\bnan\b|\binf\b|accuracy[_ ]?regress|wrong[_ ]?output|incorrect|implausible/i;
-// Amdahl ceiling: the MOST e2e speedup an op that is `pct`% of GPU time can yield at isolated speedup S is
-// 1/(1 - (pct/100)(1 - 1/S)). A measured e2e delta far above this ceiling can be the fingerprint of a
-// kernel doing degenerate/less work (corruption). Uses ONLY the profile pct + isolated speedup.
-const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0); // headroom over the theoretical ceiling before flagging (1.0 = must exceed 2x the ceiling)
+// ---- CORRECTNESS-class reject (auto-correct) ----
+// The candidate engaged and beat the isolated oracle but gives wrong output on the live path
+// (parity/accuracy failure), typically by over-fitting the captured snapshot (e.g. a data_ptr()-keyed
+// cache, a stale index/mask), which a single-snapshot unittest can't catch. The corrective loop feeds
+// this diagnosis to the re-author. A surprising speedup is a measurement review, not wrong output.
+const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\bnan\b|\binf\b|accuracy[_ ]?regress|wrong[_ ]?output|incorrect/i;
+// Amdahl is only an estimate (GPU time is not wall time; an overlay can touch several profile rows),
+// so exceeding it by this margin requests a measurement review, not a reject.
+const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0);
 function amdahlCeilingPct(pct_gpu_time, isolated) {
   const p = Math.max(0, Math.min(1, (pct_gpu_time || 0) / 100));
   const s = (isolated && isolated > 1) ? isolated : 1;
   if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
   return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
 }
-// PARITY-AWARE guard (fixes the false-positive that would DROP real wins). The Amdahl ceiling is derived
-// from an imperfect profile `pct_gpu_time`; a genuine win can legitimately exceed it when the profile
-// under-counts the op, or when the change has system-wide effects (memory pressure / batching / a config
-// swap). So the implausible-speedup verdict is applied ONLY when the acceptance rests on the SOFT gate —
-// a sampled task-accuracy probe (quant / `accuracy_gate=gsm8k`), where a degenerate output could squeak
-// past a small sample. A BYTE-EXACT parity pass is a HARD correctness guarantee → its speedup is real
-// even above the ceiling → never flagged. This removes the false-positive on byte-exact (incl. config
-// env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
-// integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
+// Only accuracy-gated accepts can need an independent A/B confirmation; exceeding the estimate alone
+// never triggers a kernel correctness rewrite.
 function parityIsSoft(integ) {
   const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
   if (pk === 'accuracy') return true;
   if (pk === 'byte_exact' || pk === 'none') return false;
   return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
 }
-function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
-  if (!parityIsSoft(integ)) return false;              // hard byte-exact correctness -> trust the speedup
-  const ceilPct = amdahlCeilingPct(pct_gpu_time, isolated);
+function speedupEstimate(pct_gpu_time, isolated, integ) {
+  const fallback = { pct_gpu_time, estimate_pct: amdahlCeilingPct(pct_gpu_time, isolated), source: 'head_estimate' };
+  const coverage = integ && integ.affected_gpu_time;
+  const m = integ && integ.measurement_evidence;
+  if (!coverage || !m || !coverage.profile_path || !m.candidate_digest || !m.reference_digest || !m.workload_digest
+      || coverage.candidate_digest !== m.candidate_digest
+      || coverage.reference_digest !== m.reference_digest || coverage.workload_digest !== m.workload_digest
+      || !Array.isArray(coverage.kernels) || !coverage.kernels.length) return fallback;
+  // IDs identify disjoint rows in ONE profile/denominator (kernel + shape + phase). Do not count a
+  // module total together with its children, or duplicate a split-K reduction already in a group.
+  const seen = new Map();
+  let pct = 0, saved = 0, uniform = false;
+  for (const row of coverage.kernels) {
+    if (!row || typeof row.id !== 'string' || !row.id || typeof row.pct_gpu_time !== 'number'
+        || !Number.isFinite(row.pct_gpu_time) || row.pct_gpu_time < 0 || row.pct_gpu_time > 100) return fallback;
+    const signature = JSON.stringify([row.pct_gpu_time, row.isolated_speedup, row.removed === true]);
+    if (seen.has(row.id)) {
+      if (seen.get(row.id) !== signature) return fallback;
+      continue;
+    }
+    seen.set(row.id, signature);
+    pct += row.pct_gpu_time;
+    if (row.removed === true) saved += row.pct_gpu_time / 100;
+    else {
+      let s = row.isolated_speedup;
+      if (!(typeof s === 'number' && Number.isFinite(s) && s > 0)) { s = isolated; uniform = true; }
+      if (!(typeof s === 'number' && Number.isFinite(s) && s > 0)) return fallback;
+      saved += row.pct_gpu_time / 100 * (1 - 1 / s);
+    }
+  }
+  if (!(pct > 0) || pct > 100 + 1e-9) return fallback;
+  return { pct_gpu_time: pct, estimate_pct: saved >= 1 ? Infinity : (1 / (1 - saved) - 1) * 100,
+    source: uniform ? 'coverage_uniform_estimate' : 'coverage_per_path' };
+}
+function speedupNeedsReview(pct_gpu_time, isolated, integ) {
+  if (!parityIsSoft(integ)) return false;
+  const ceilPct = speedupEstimate(pct_gpu_time, isolated, integ).estimate_pct;
   if (!Number.isFinite(ceilPct)) return false;
   return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
 }
+function confirmationEvidenceMatches(integ) {
+  const review = integ && integ.speedup_review;
+  const before = review && review.original_measurement;
+  const after = integ && integ.measurement_evidence;
+  if (!review || review.status !== 'confirmed' || !before || !after) return false;
+  // Equal numbers are allowed; re-reading the same artifacts is not independent evidence.
+  if (!before.measurement_id || !after.measurement_id || before.measurement_id === after.measurement_id
+      || !before.ref_summary || !before.cand_summary || !after.ref_summary || !after.cand_summary
+      || new Set([before.ref_summary, before.cand_summary, after.ref_summary, after.cand_summary]).size !== 4
+      || after.fresh_pair !== true || after.configs_matched !== true || after.workload_matched !== true
+      || !Number.isInteger(after.ref_replicas) || !Number.isInteger(after.cand_replicas)
+      || after.ref_replicas < 2 || after.cand_replicas < 2) return false;
+  // Older evidence may lack protocol_digest on both sides; if either side has it, they must match.
+  if ((before.protocol_digest || after.protocol_digest) && before.protocol_digest !== after.protocol_digest) return false;
+  return ['candidate_digest', 'reference_digest', 'workload_digest'].every(
+    (key) => typeof before[key] === 'string' && before[key].length > 0 && before[key] === after[key]);
+}
+function confirmedSpeedup(integ) {
+  return !!(integ && integ.gate === 'accepted' && integ.ab_complete === true
+    && integ.output_parity === 'pass' && ['accuracy', 'byte_exact'].includes(integ.parity_kind)
+    && confirmationEvidenceMatches(integ));
+}
 // Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
-// POSTURE IS TESTED FIRST. CORRECTNESS_REJECT_RX contains a bare `mismatch`, which used to swallow
-// the `signature_mismatch` that FIXABLE_REJECT_RX names explicitly: a seam whose signature does not
-// match the live call site was routed to the correctness corrective ("your kernel computes the wrong
-// thing on the live path, look for a data_ptr over-fit") when what it needs is the integration one
-// ("find the method the live server actually dispatches and match its call signature"). The posture
-// tokens are specific (signature/seam/engagement/capture), so testing them first cannot capture a
-// genuine output-correctness reject; and until the candidate is installed at the right seam, any
-// statement about its output is meaningless anyway.
+// Posture is tested first: CORRECTNESS_REJECT_RX's bare `mismatch` would otherwise claim
+// `signature_mismatch`, which needs the integration fix. The posture tokens are specific enough not to
+// capture a genuine output-correctness reject.
 function rejectClass(reason) {
   const r = reason || '';
+  // Review diagnostics (and implausible_speedup rejects) may mention accuracy or a config mismatch;
+  // they never warrant a kernel re-author.
+  if (/^(speedup_review_|implausible_speedup)/i.test(r)) return '';
   if (FIXABLE_REJECT_RX.test(r)) return 'integration';
   if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
-// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
-// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
-// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
+// runIntegrateBothLegs resolves the review before any caller can bank the candidate. A confirmed
+// measurement can exceed the estimate by any amount; actual parity failures still reject.
 function integAccepted(integ, pct_gpu_time, isolated) {
   return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-    && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
+    && integ.ab_complete !== false && integ.output_parity !== 'fail'
+    && !(integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status))
+    && (!speedupNeedsReview(pct_gpu_time, isolated, integ) || confirmedSpeedup(integ)));
 }
-// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
-// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
 function gateRejectReason(integ, pct_gpu_time, isolated) {
+  if (integ && integ.output_parity === 'fail') return 'parity_regression';
   if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-      && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
-    return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
+      && !integAccepted(integ, pct_gpu_time, isolated))
+    return 'speedup_review_pending: independent A/B confirmation required';
   return integ ? (integ.reason || integ.gate || '') : '';
 }
-// ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
-// A long, thorough HeadKernel mode that pursues SOTA per head op via CROSS-BACKEND CO-OPTIMIZATION:
-// N backends optimize the SAME head op in parallel (one exclusive GPU lane each), continuously
-// CONTINUING across waves (kernel_workflow STATE_DIR persistence — no lost experience / no re-explored
-// directions), sharing a live blackboard KB (a curator distills each wave's findings + assigns directed
-// cross-backend borrows), anchored to a roofline SOTA target. Between waves an ADAPTIVE, BATCHED e2e
-// gate validates the best candidate(s) end-to-end and feeds the result + a refined harness addendum back
-// so the isolated target stays aligned with e2e. GPU scheduling: a single semaphore over GPU_LIST gives
-// co-opt lanes exclusive cards; the e2e gate leases ALL cards (TP serving) so it never overlaps co-opt.
-// EVERY knob is `DEEP_MODE ? deep : original`-gated; with deep_mode off the whole block is dead code and
-// normal/fast are byte-identical. deep_mode is mutually exclusive with the fast parallel track.
+// ---- DEEP MODE (opt-in, default OFF) ----
+// Long HeadKernel mode: backends co-optimize each head op across waves (kernel_workflow STATE_DIR keeps
+// progress), sharing a curated blackboard KB, toward a roofline target; an adaptive, batched e2e gate
+// validates the best candidates between waves. Every knob is gated on DEEP_MODE; excludes fast mode.
 const DEEP_MODE = String(A.deep_mode != null ? A.deep_mode : 'false') === 'true';
-let DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module (deep mode does deep exploration)
-// When the orchestrator passes a wall-clock budget it is the SOURCE OF TRUTH — use it directly (replace the
-// 24h default) so deep fills the granted time and self-finalizes before the external SIGKILL (fixing the
-// deep 24h-budget-vs-real-kill failure where it was torn down mid-wave). The 24h default applies only when
-// time_budget_s is absent (direct invocation) => byte-identical to today.
-// Use the SHARED dispatch deadline, not the raw effective budget: deep used to start waves until 92% of
-// the hard kill, then couldn't fit its burst drain + final e2e gate + Finalize/Report/Validate, so it
-// shipped no final report (Hyperloom #1202). Fast/default modes have always carved this same tail.
+let DEEP_HEAD_BUDGET_MS = parseInt(A.deep_head_budget_ms != null ? A.deep_head_budget_ms : 86400000, 10); // 24h for the whole HeadKernel module
+// An orchestrator budget replaces the 24h default. Deep uses the shared dispatch deadline so its burst
+// drain, final e2e gate and the final phase still fit before the kill.
 if (TIME_HEAD_DEADLINE_MS != null) DEEP_HEAD_BUDGET_MS = TIME_HEAD_DEADLINE_MS;
-const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min) — bounds the per-wave barrier. Harvest+gate run at the TOP of each wave on disk truth, so gate latency is decoupled from this; the cap only bounds how long a burst runs.
+const DEEP_HEAD_WF_MS = parseInt(A.deep_head_workflow_ms != null ? A.deep_head_workflow_ms : 4500000, 10); // per-burst nested kernel_workflow time cap (75min); bounds the burst, not the gate
 const DEEP_E2E_GAIN_TRIGGER = parseFloat(A.deep_e2e_gain_trigger != null ? A.deep_e2e_gain_trigger : 0.08); // isolated-best improvement since last e2e gate that triggers a new (batched) gate
 const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A.deep_e2e_max_interval_ms : 7200000, 10); // force an e2e gate at least this often when a new candidate exists (default 2h)
 const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plateau_streak : 2, 10); // consecutive non-improving waves before a backend lane is parked (frees its GPU)
 const DEEP_BACKENDS_OVERRIDE = String(A.deep_backends || '').trim(); // optional CSV "triton:optimize,hip:author,..."; default = derive from the bake-off
-// ---- DEEP MODE (the canonical deep orchestrator; runs when deep_mode=true) --------------------------
-// Deep is a DISCIPLINED DELTA on the normal HeadKernel paradigm (same extract→bakeoff→author→gate→overlay
-// role agents), made DEEPER (more kernel_workflow rounds per lane via STATE_DIR + reseed), BROADER (a lane
-// per viable backend), and FASTER (lanes run in parallel on dedicated cards; only timing is serialized).
-// It is a GLOBAL, GPU-elastic, budget-driven orchestrator:
-//   • GLOBAL lane pool — every (head op × backend) lane competes in ONE pool, so multiple KERNELS and
-//     multiple BACKENDS optimize concurrently (no more "head A fully done before head B starts").
-//   • GPU-elastic & N-adaptive — co-opt runs on cards NOT needed by the serving slot; the serial e2e
-//     gate runs on the fixed serving slot CONCURRENTLY (overlap, no idle cards). With exactly TP cards
-//     (no spare) it degrades gracefully to time-slice (gate pauses co-opt). Derived from gpu_ids+TP;
-//     nothing about card count is hard-coded.
-//   • Full-backend roster + ceiling-aware patience + revive — every bake-off backend gets a lane; a
-//     high-ceiling-but-slow-start backend is NOT parked early (patience scales with remaining ceiling
-//     gap); a parked lane can be REVIVED when the curator hands it a fresh cross-backend borrow.
-//   • Budget controller — picks the highest-EV lane next (EV = Amdahl mass × remaining-ceiling gap ×
-//     recent improvement rate); re-profiles to chase the moving bottleneck; kills dead directions fast.
-//   • Cross-pollination — per-op SHARED_KB (cross-backend) PLUS a run-global GLOBAL_KB (cross-KERNEL,
-//     same-backend technique transfer).
-// Everything here is gated by DEEP (≡ DEEP_MODE). DEEP_MODE off → default/fast are byte-identical
-// (this whole block is dead code). No model/kernel/backend specifics are hard-coded.
-const DEEP = DEEP_MODE;   // deep_mode=true runs the global cross-kernel×backend orchestrator (the canonical deep mode)
-const DEEP_E2E_TARGET = parseFloat(A.deep_e2e_target != null ? A.deep_e2e_target : 1.5); // stretch goal: +50% e2e vs the TRUE baseline (keep pushing toward it within budget)
-const DEEP_PLATEAU_STREAK_HIGH = parseInt(A.deep_plateau_streak_high != null ? A.deep_plateau_streak_high : 4, 10); // patience for HIGH-ceiling lanes (still far from their potential) before parking
+// ---- DEEP MODE (the canonical deep orchestrator; runs when deep_mode=true) ----
+// The HeadKernel roles run deeper (more rounds per lane), broader (a lane per viable backend) and in
+// parallel. All (head op, backend) lanes share one pool, picked by Amdahl mass x ceiling gap x recent
+// gain; the controller re-profiles as the bottleneck moves. Co-opt uses the cards serving doesn't need
+// (time-slices with exactly TP cards). High-ceiling lanes get more patience; a parked lane revives on
+// a fresh cross-backend borrow. SHARED_KB is per op, GLOBAL_KB run-wide.
+const DEEP = DEEP_MODE;
+const DEEP_E2E_TARGET = parseFloat(A.deep_e2e_target != null ? A.deep_e2e_target : 1.5); // stretch goal: +50% e2e vs the true baseline
+const DEEP_PLATEAU_STREAK_HIGH = parseInt(A.deep_plateau_streak_high != null ? A.deep_plateau_streak_high : 4, 10); // plateau patience for high-ceiling lanes
 const DEEP_REPROFILE_GAIN = parseFloat(A.deep_reprofile_gain != null ? A.deep_reprofile_gain : 0.10); // cumulative e2e gain since last profile that triggers a re-profile (bottleneck moved)
-// DEPTH knobs (v2): the first runs were too SHALLOW — 10 parallel lanes split the budget so each lane
-// got only ~2 bursts, and the wave loop EXITED as soon as all lanes plateau-parked (abandoning most of
-// the 24h). v1 reached +31.5% by going DEEP: ~15h, stacking 4 generations on the winning kernel. Fix:
-//   (a) deeper bursts (more kernel_workflow rounds per burst);
-//   (b) RUN UNTIL THE BUDGET — when all lanes plateau, RE-SEED them with FRESH authoring directions
-//       (concentrated on the dominant-Amdahl head) instead of exiting, so depth keeps compounding.
-const DEEP_WAVE_BUDGET = parseInt(A.deep_wave_budget != null ? A.deep_wave_budget : 3, 10); // kernel_workflow rounds per burst. Was 6 but deeper-per-burst SLOWED exploration and underperformed; 3 = faster bursts + more waves (depth now comes from run-until-budget + reseed, not bigger bursts).
-const DEEP_MAX_RESEEDS = parseInt(A.deep_max_reseeds != null ? A.deep_max_reseeds : 12, 10); // max fresh-direction re-seeds per lane before it is truly exhausted (budget usually stops first)
-// P1: convergence-stop + agent-budget backstop. The wave loop re-seeds for depth, but once optimization
-// has demonstrably CONVERGED (K consecutive waves with no new isolated OR e2e gain) it STOPS and finalizes
-// rather than burning cheap zero-winner waves into the runtime's hard agent cap (which throws and skips
-// finalize). DEEP_AGENT_BUDGET keeps projected nested-agent spend safely below that cap so finalize runs.
+// When all lanes plateau they are re-seeded with fresh authoring directions (weighted to the
+// dominant-Amdahl head) instead of exiting, so the run uses its whole budget.
+const DEEP_WAVE_BUDGET = parseInt(A.deep_wave_budget != null ? A.deep_wave_budget : 3, 10); // kernel_workflow rounds per burst (short bursts, more waves)
+const DEEP_MAX_RESEEDS = parseInt(A.deep_max_reseeds != null ? A.deep_max_reseeds : 12, 10); // max fresh-direction re-seeds per lane
+// Convergence stop + agent-budget backstop: after K waves with no new isolated or e2e gain the loop
+// finalizes, and DEEP_AGENT_BUDGET keeps nested-agent spend under the runtime's hard agent cap (which
+// throws and skips finalize).
 const DEEP_CONVERGE_STREAK = parseInt(A.deep_converge_streak != null ? A.deep_converge_streak : 3, 10); // consecutive zero-gain waves before declaring convergence and finalizing
-const DEEP_AGENT_BUDGET = parseInt(A.deep_agent_budget != null ? A.deep_agent_budget : 820, 10); // stop STARTING new waves once projected nested-agent spend reaches this (~180 margin under the 1000 runtime cap for finalize)
-const DEEP_AGENTS_PER_BURST = parseInt(A.deep_agents_per_burst != null ? A.deep_agents_per_burst : 20, 10); // realistic nested-agents-per-burst (setup+bench[+analyze+profile if cold] + ~3 rounds*~7) for the budget projection
-const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ? A.deep_final_accuracy_limit : 500, 10); // larger gsm8k sample at the FINALIZE gate so a boundary candidate (e.g. ~tol-1pt) is decided on signal, not n=200 noise
-// ---- ACCURACY GATE (opt-in switch) ------------------------------------------------------------------
-// For QUANTIZED kernels (MXFP8/fp8) byte-exact e2e parity is the WRONG bar — a kernel within the unittest
-// tolerance rounds differently and flips borderline greedy argmaxes, so byte-parity over-rejects valid
-// kernels. The RIGHT bar is TASK ACCURACY. When accuracy_gate=gsm8k, the e2e_integrator scores the
-// candidate vs the true baseline on a sampled gsm8k subset (scripts/gsm8k_eval.py, 5-shot greedy
-// exact_match, InferenceX-style) and accepts iff cand_score >= baseline_score - accuracy_tol — instead of
-// (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
+const DEEP_AGENT_BUDGET = parseInt(A.deep_agent_budget != null ? A.deep_agent_budget : 820, 10); // no new waves once projected nested-agent spend reaches this (runtime cap: 1000)
+const DEEP_AGENTS_PER_BURST = parseInt(A.deep_agents_per_burst != null ? A.deep_agents_per_burst : 20, 10); // nested agents per burst, for the budget projection
+const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ? A.deep_final_accuracy_limit : 500, 10); // larger gsm8k sample at the Finalize gate so a boundary candidate is decided on signal
+// ---- ACCURACY GATE (opt-in switch) ----
+// Byte-exact parity over-rejects quantized kernels (in-tolerance rounding flips borderline argmaxes).
+// accuracy_gate=gsm8k instead accepts iff cand_score >= baseline_score - accuracy_tol on a sampled
+// gsm8k subset (scripts/gsm8k_eval.py, 5-shot greedy exact_match). Default 'none' = byte/greedy parity.
 const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
 const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
   ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
-// Simulated speculative acceptance (run_e2e forwards the switch names it finds, e.g. SGLANG_SIMULATE_ACC_*)
-// keeps throughput comparable but serves neither deterministic nor model-faithful output, so a parity or
-// accuracy probe under it measures the simulator. The roles that run such probes are told to serve them
-// with these names unset; nothing else changes, and a run without the switches never sees the block.
+// Simulated speculative acceptance (run_e2e forwards the switch names it finds, e.g.
+// SGLANG_SIMULATE_ACC_*) serves output that is neither deterministic nor model-faithful, so roles
+// that run parity/accuracy probes are told to serve those probes with these names unset.
 const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
   .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
 const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
@@ -634,12 +571,9 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
 if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
-// Warm start = the kernel layer's LOCAL experience reuse: before round 1 a lane resolves this kernel's
-// own history in kb_artifacts/ and re-validates the top stored patches through the same verify gate as
-// a fresh candidate. The knobs live in the kernel layer; e2e only forwards them, so that (a) one store
-// is shared by every recursive lane in a run and (b) an orchestrator-supplied store reaches them at all
-// (a lane's own default resolves next to its workflow dir and would ignore the e2e arg). The forwarded
-// values equal the lane defaults when nothing is passed, so an unparameterized run is unchanged.
+// Kernel-layer warm start: before round 1 a lane re-validates its kernel's top stored patches from
+// kb_artifacts/ through the normal verify gate. e2e only forwards the knobs, so every lane shares one
+// store and an orchestrator-supplied store reaches them; unset values equal the lane defaults.
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
@@ -647,9 +581,8 @@ const KB_ARGS = {
   warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
-  // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
-  // when unset, which leaves each lane on its own default — `store`, the canonical-id plane, since
-  // the kernel read converged on the same addressing the service uses (kernel_lane.js:KB_MODE).
+  // The KB plane lanes read and write (one per run); unset leaves the lane default `store`
+  // (kernel_lane.js:KB_MODE).
   ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
   ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
   ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
@@ -657,79 +590,53 @@ const KB_ARGS = {
 // Same off-spelling set the kernel layer accepts; an off run must stay off everywhere.
 const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim().toLowerCase());
 
-// ---------------------------------------------------------------------------
-// E2E-LEVEL WARM START — the DEPLOYMENT knowledge base.
-//
-// KB_ARGS above forwards the KERNEL layer's warm start (per-kernel patches, resolved by the nested
-// lane). This block is the layer above it: "has anyone already tuned THIS deployment — this (model,
-// gfx, framework, framework_version, precision, tp, isl/osl/conc)?" That question was rediscovered
-// from scratch on every run, at a cost of hours of server launches, because nothing here ever asked
-// it. Two new modules answer it: Module A reads the store and VALIDATES what it gets on this box
-// before believing any of it, and Module B records this run at the end. Everything between them —
-// the entire original optimization flow — is untouched.
-//
-// One knob governs both layers (A.warm_start, already defaulted to 'on' by KB_ARGS), with the same
-// vocabulary the kernel lane accepts, so an `off` run is off everywhere:
+// E2E-LEVEL WARM START — the DEPLOYMENT knowledge base: was this deployment (model, gfx, framework
+// + version, precision, tp, isl/osl/conc) tuned before? Module A reads the store and validates on
+// this box before believing it; Module B records this run at the end. A.warm_start governs both
+// this and the kernel layer:
 //   on (default)      | read the ladder, validate the top candidate on this box, ADOPT if it wins.
 //   reference         | read only; never bench, never adopt — the offer is prose for later agents.
 //   return_after_read | resolve + validate, then return before the optimization flow runs.
-//   off/false/none    | nothing: no phase, no agent, no log, and every role prompt byte-identical.
+//   off/false/none    | nothing: no phase, no agent, no log.
 const E2E_WARM_START = KB_ARGS.warm_start.trim().toLowerCase() || 'on';
 const E2E_WARM_START_ON = !WARM_START_OFF;
-// Fast mode's premise is that all optimization comes from the head track within a wall-clock budget
-// (FAST_SKIP already drops 'config'), so a warm-start config bench — a 20-40min server launch that
-// this mode has explicitly declined to spend anywhere else — is forced down to reference-only.
+// Fast mode forces reference-only: it skips config work, so it won't spend a 20-40min server launch
+// benching a stored config.
 const E2E_WARM_START_REF_ONLY = E2E_WARM_START === 'reference' || FAST_MODE;
 const E2E_WARM_START_RETURN_AFTER = E2E_WARM_START === 'return_after_read';
-// Which plane the DEPLOYMENT store is read from and written to. Translated from the kernel layer's
-// kb_mode vocabulary ONCE, here, so the reader and the writer can never disagree about it.
+// Deployment-store plane, derived from kb_mode once here so reader and writer agree:
 //   local   on-disk store only (offline rehearsal; no network, nothing permanent).
 //   remote  the KB Store service only.
 //   both    local first, remote as well — a network failure is reported, not fatal.
-// Default `both`: the local plane costs nothing and gives the run a durable copy even when the
-// service is unreachable, which on this box it intermittently is.
+// Default `both`: the local copy is free and survives an unreachable service.
 const E2E_KB_PLANE = ['local', 'remote', 'both'].includes(String(A.e2e_kb_plane || '').trim())
   ? String(A.e2e_kb_plane).trim()
   : (String(A.kb_mode || '').trim().toLowerCase() === 'local' ? 'local' : 'both');
 const E2E_KB_STORE_DIR = String(A.kb_store_dir ||
   KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local').replace(/\/+$/, '');
 const E2E_STORE_SCRIPT = `${WORKFLOW_DIR}/scripts/e2e_store.py`;
-// The file the warm-start read drops this run's KB address into, and the one run_e2e.py looks for
-// when it has to write the record this process never got to. Named in both programs; spelled once
-// here and once in interface/run_e2e.py (KB_IDENTITY_FILE), which is the same arrangement
-// workflow_return.json already has.
+// Where the warm-start read writes this run's KB address; run_e2e.py reads it to write the record
+// if this process never does. Must match interface/run_e2e.py KB_IDENTITY_FILE.
 const KB_IDENTITY_BASENAME = 'kb_identity.json';
-// TWO questions, TWO floors: "worth KNOWING about" and "worth a 20-40min server launch". A single
-// floor dropped a small stored win from the offer entirely, losing the tuning table and env var it
-// carried, not just the launch. Reading is free, so the read floor only drops records that LOST.
-// `e2e_`-prefixed because the kernel lane's `warm_start_min_speedup` means its own thing; the bare
-// name stays honoured for callers raising this floor.
+// Two floors: this read floor ("worth knowing about"; drops only records that lost) and the bench
+// floor below ("worth a 20-40min launch"). `e2e_`-prefixed because the kernel lane's
+// warm_start_min_speedup means its own thing; the bare name is still honoured.
 const E2E_WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.e2e_warm_start_min_speedup))
   ? parseFloat(A.e2e_warm_start_min_speedup)
   : Number.isFinite(parseFloat(A.warm_start_min_speedup))
     ? parseFloat(A.warm_start_min_speedup) : 1.0;
-// The floor that spends money. Session-to-session drift on one box is the size of a near-tie
-// claim, so benching a 1.01x is a coin flip against its own noise; below this the offer stays a
-// reference. Not applied to the kernel replay below — an accepted-kernel entry carries an ISOLATED
-// speedup measured on a different harness, budgeted by E2E_WARM_START_KERNELS_N instead.
+// Bench floor: below it the offer stays a reference (a ~1.01x claim is within session drift). Not
+// applied to kernel replay, whose stored speedup is isolated; E2E_WARM_START_KERNELS_N budgets that.
 const E2E_WARM_START_BENCH_MIN_SPEEDUP =
   Number.isFinite(parseFloat(A.e2e_warm_start_bench_min_speedup))
     ? parseFloat(A.e2e_warm_start_bench_min_speedup) : 1.02;
 
-// How a local verdict is filed AGAINST THE RECORD. The local bench decides what THIS run adopts
-// and nothing else — a different box means a different baseline, image, driver and neighbours — so
-// each outcome goes to the bucket that describes it, and none retires anything by itself:
-//
-//   rejected        applied, took effect, lost here -> `failed`. The only bucket that can
-//                   accumulate toward a retire decision, which is why it must not be discarded.
-//   not_reproduced  never ran, or ran without taking effect (a flag renamed upstream) -> the
-//                   record is missing something.
-//   inapplicable    collided with a baseline this run did not choose -> a verdict on the PAIRING,
-//                   which kb/attest.py keeps out of the arithmetic.
-//
-// Mapping all three to `inapplicable` protected records too well: `tried = recalls - inapplicable`
-// is then identically zero and nothing can ever accumulate a retire signal. The judgement stays a
-// separate act (kb/attest.py:should_retire, run by `e2e_store.py curate`, dry-run by default).
+// How a local verdict is filed against the record. The local bench only decides what THIS run
+// adopts; no single outcome retires a record:
+//   rejected        applied, took effect, lost here -> `failed`; the only bucket that accumulates
+//                   toward a retire (kb/attest.py:should_retire, run by `e2e_store.py curate`).
+//   not_reproduced  never ran, or ran without taking effect -> the record is missing something.
+//   inapplicable    collided with a baseline this run did not choose; kept out of the arithmetic.
 // Every value must be one of kb/attest.py:OUTCOMES.
 const KB_ATTEST_OUTCOME = {
   adopted: 'validated',
@@ -737,57 +644,33 @@ const KB_ATTEST_OUTCOME = {
   not_reproduced: 'not_reproduced',
   inapplicable: 'inapplicable',
 };
-// Read broadly, bench narrowly. Reading is free and breadth is exactly what makes the demoted
-// reference path useful to the Architect; benching is the expensive half. So the default is
-// "offer 3, measure 1".
+// Read broadly, bench narrowly: offer 3, measure 1 (reading is free; benching costs a launch).
 const E2E_WARM_START_TOP_N = parseInt(A.e2e_warm_start_top_n != null ? A.e2e_warm_start_top_n : 3, 10);
 const E2E_WARM_START_VALIDATE_N = parseInt(
   A.e2e_warm_start_validate_n != null ? A.e2e_warm_start_validate_n : 1, 10);
-// The same budget for a COARSE rung (`tp_any`/`workload_any`), where the record was measured at a
-// different tp or workload point. It was hard zero, on the argument that a non-comparable stored
-// number is not worth a launch — which confuses the PRIOR with the MEASUREMENT: the bench runs the
-// config on THIS box against THIS baseline, so the stored number only decides what is tried first.
-// Zero meant every `tp_any` hit was filed as a lead nobody followed (the 20260826 gpt-oss-120b and
-// Qwen3.5-122B runs). Budgeted, not unbounded, because the launch cost is real; 0 restores the old
-// reference-only behaviour.
+// The same budget for a COARSE rung (`tp_any`/`workload_any`: measured at another tp or workload).
+// The bench measures the config on this box, so the stored number only orders the tries. 0 makes
+// coarse hits reference-only.
 const E2E_WARM_START_VALIDATE_N_COARSE = parseInt(
   A.e2e_warm_start_validate_n_coarse != null ? A.e2e_warm_start_validate_n_coarse : 1, 10);
 // How many stored KERNELS get replayed through a fresh integrate A/B. Each one is another two server
 // launches, so this is a budget, not a completeness target — the rest stay references.
 const E2E_WARM_START_KERNELS_N = parseInt(
   A.e2e_warm_start_kernels_n != null ? A.e2e_warm_start_kernels_n : 2, 10);
-// Which recorded win-kinds can be REBUILT from a record alone. `patch` re-applies a diff through the
-// overlay; `env`/`flag` re-route the op to an implementation that already exists in this install.
-// `authored` cannot be rebuilt: its recipe git-applies the diff inside
-// `authored_kernel_eval_dir/workspace/`, and that workspace dies with the run that made it.
-//
-// Not-rebuildable is NOT not-replayable, and reading it that way kept every authored kernel in the
-// store permanently unverified. The OUTPUT of that build travels in the record as `overlay.tar.gz`
-// (e2e_store._pack_overlay) and is the complete, reversible mechanism, so a kind outside this set
-// falls through to the prebuilt-overlay path below when the bundle has one, and is demoted to a
-// reference only when it has neither. A demotion is never reported as a failure — it is still a
-// real datum about what worked on this deployment.
+// Win-kinds rebuildable from a record alone: `patch` re-applies a diff through the overlay;
+// `env`/`flag` re-route to an implementation already installed. Other kinds (e.g. `authored`, whose
+// build workspace dies with its run) replay via the record's prebuilt overlay.tar.gz when present,
+// else are demoted to a reference (never reported as a failure).
 const E2E_REPLAYABLE_KINDS = new Set(['patch', 'env', 'flag']);
-// Which roles are TOLD about the warm start. Deliberately excludes e2e_integrator and
-// director:validate — those two produce the run's authoritative numbers, and a stored prior in their
-// context is contamination with no upside.
-// tuning_specialist is a consumer for the same reason, plus one: a tuned artifact deploys outside
-// the git tree and takes hours of search to rediscover, so re-deriving one the store already holds
-// is the most expensive avoidable thing this workflow does.
+// Roles told about the warm start. Excludes e2e_integrator and director:validate, which produce the
+// authoritative numbers. tuning_specialist is included: a stored tuned artifact saves hours of search.
 const WARM_START_ROLES = new Set(['system_architect', 'config_tuner', 'tuning_specialist']);
-// Credentials and trust for every emitted KB command. The six lines that do the work live in
-// scripts/kb_env.sh (which explains them), not here, because run_e2e.py runs KB commands too — the
-// salvage write for a run whose workflow died before Module B — and a Python copy of the token path
-// and CA fallback list is exactly the kind of duplicate that drifts without ever raising. Sourced,
-// so both programs get the same answer from the same file.
-// (shq is declared further down, so the quoting is written out here rather than called.)
+// Credentials and trust for every emitted KB command come from scripts/kb_env.sh, which run_e2e.py
+// sources too, so both programs share one definition. (shq is declared later, so quoting is inline.)
 const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
-// Expert skills = human-authored, validated optimization recipes (perf_knowledge/expert_skills/). They
-// are ADVISORY priors: a matched `validated` skill is a HIGH-PRIOR candidate that routing/integration
-// roles reproduce, then gate by the usual on-box A/B — it NEVER overrides measurement and NEVER reduces
-// a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
-// When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
-// is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
+// Expert skills: human-authored, validated recipes (perf_knowledge/expert_skills/) used as advisory
+// high priors that roles reproduce and gate by the usual on-box A/B; never override measurement.
+// Default off (use_expert_skills="true" enables); flag and dir are passed to the kernel layer.
 const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
@@ -796,31 +679,16 @@ const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_i
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
-// What the CALLER declared, kept apart from the shape roles finally optimize
-// against. On a trace replay those two are not the same thing, and telling them
-// apart needs the workload kind, which is parsed further down -- so the resolved
-// ISL/OSL/CONC/WORKLOAD are defined after it (CONC beside the declaration, the
-// shape by resolveTargetShape()).
+// The caller's declared ISL/OSL, kept apart from the resolved target shape (they differ on a trace
+// replay); the resolved ISL/OSL/CONC are defined after the workload kind is parsed.
 const ISL_DECLARED = A.isl != null ? parseInt(A.isl, 10) : null;
 const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
 
-// ---------------------------------------------------------------------------
-// Workload IDENTITY — the synthetic sweep, or a trace replay that owns its load
-// ---------------------------------------------------------------------------
-// GEAK runs both under an orchestrator and standalone. Under Hyperloom,
-// interface/run_e2e.py reads handoff.workload_spec and EXPORTS the resulting
-// BENCH_CLIENT / E2E_METRIC / AGENTX_* into the environment GEAK inherits, so
-// this script never had to know what it was measuring. Standalone there is no
-// such parent: the args land here directly, and without the block below an
-// AgentX request would benchmark a synthetic ISL/OSL sweep on the output-token
-// axis and call it an AgentX number.
-//
-// So the workload is declared HERE, in either of two spellings:
-//   * args.workload_spec — the SAME object Hyperloom puts on its handoff, for
-//     callers that want every field explicit; or
-//   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
-//     the canonical AgentX setup below and lets workload_spec override any part.
-// AgentX extraction resumes its saved declaration when no new workload is supplied.
+// Workload IDENTITY — the synthetic sweep, or a trace replay that owns its load. Under Hyperloom,
+// run_e2e.py exports BENCH_CLIENT / E2E_METRIC / AGENTX_* from the handoff. Standalone, declare it
+// as args.workload_spec (the handoff's object) or args.workload_kind="agentx_trace_replay" (the
+// canonical setup below; workload_spec overrides any part). AgentX extraction resumes its saved
+// declaration when no new workload is supplied.
 const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
   ? A.workload_spec
   : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
@@ -828,15 +696,12 @@ const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
     ? A.state.workload_spec : {});
 const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
 const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
-// The canonical AgentX submission setup. These are the leaderboard's numbers,
-// not tuning knobs: the 393-entry weka corpus at 3600s IS the graded workload,
-// and a run that deviates is stamped non-canonical by the client adapter and
-// can never be KEPT. The 900s loop duration is the scenario's own floor and is
-// what the inner search legs run, which is why they are always non-canonical.
+// The canonical AgentX submission setup: leaderboard values, not tuning knobs. A deviating run is
+// stamped non-canonical and never KEPT; the inner search legs run the scenario's 900s floor, so
+// they are always non-canonical.
 const AGENTX_DEFAULTS = {
   scenario: 'inferencex-agentx-mvp',
-  // The full-context parent, not the _256k sibling: the latter drops every
-  // request over 256k tokens (98.8k -> 68.3k) for ~256k-context servers, and
+  // The full-context corpus, not the _256k sibling (which drops requests over 256k tokens);
   // the campaign serves at --max-model-len 1048576.
   corpus: 'semianalysis_cc_traces_weka_062126',
   num_entries: 393,
@@ -844,37 +709,23 @@ const AGENTX_DEFAULTS = {
   geak_loop_duration_s: 900,  // inner search legs (scenario floor)
   warmup_requests_per_lane: 10,
   warmup_grace_period_s: 1800,
-  // Failed-request tolerance is deliberately NOT defaulted here. Pinning one number for the whole
-  // run flattens the distinction between a leg that is exploring and a leg whose number will be
-  // compared, and the client is the only place that knows which one it is running
-  // (MEASUREMENT_PURPOSE). Declaring a value still overrides the client, for a run that needs a
-  // specific tolerance end to end.
+  // Not defaulted: the client picks the tolerance per leg (MEASUREMENT_PURPOSE: exploring vs
+  // compared). A declared value overrides it for the whole run.
   failed_request_threshold: null,
-  // InferenceX's P90 interactivity, 1000 / P90(ITL) in tok/s/user: the x-axis of the public
-  // InferenceX pareto, decode-only (TTFT and queue wait are outside it). bench_summarize.py
-  // reports total tok/s beside it as a guard. Hyperloom declares its own basis on the handoff
-  // and exports the matching E2E_METRIC, so this default only decides a run nobody configured.
+  // InferenceX P90 interactivity, 1000 / P90(ITL) tok/s/user (decode-only; bench_summarize.py
+  // also reports total tok/s as a guard). Hyperloom declares its own basis; this is the default.
   metric_basis: 'p90_intvty_inferencex',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
-// ONE concurrency for the run. Roles put WORKLOAD.conc on every bench line as CONC=<conc>, and a
-// command-line value outranks bench_env.sh, so a workload_spec.concurrency that reached only the
-// declaration would be replaced by args.conc (or the synthetic 64) on every bench.
+// ONE concurrency for the run: roles pass CONC=<WORKLOAD.conc> on every bench line, which outranks
+// bench_env.sh, so workload_spec.concurrency must win here.
 const CONC = parseInt(AGENTX && AGENTX.concurrency != null ? AGENTX.concurrency
   : (A.conc != null ? A.conc : 64), 10);
 
-// ---------------------------------------------------------------------------
-// Kernel-targeting shape — the shape roles synthesize kernel inputs against
-// ---------------------------------------------------------------------------
-// Nothing is MEASURED at isl/osl on a trace replay: aiperf owns the sequence
-// lengths and the bench client ignores these. But roles still read them as the
-// analytic serving call model when they pick tile sizes and synthesize GEMM
-// shapes, so leaving them at the synthetic 1024/1024 default would aim the whole
-// kernel search orders of magnitude below the real load. This mirrors
-// interface/run_e2e.py::_targeting_shape so the standalone and Hyperloom entries
-// resolve the shape identically, and so the provenance printed into every role
-// prompt is never a claim we cannot back -- the old default asserted
-// 'handoff_workload' even when no handoff existed.
+// Kernel-targeting shape — the shape roles synthesize kernel inputs against. On a trace replay
+// isl/osl aren't measured (aiperf owns lengths), but roles size tiles and GEMM shapes from them, so a
+// 1024/1024 placeholder would aim the search far below the real load. Mirrors
+// interface/run_e2e.py::_targeting_shape so both entries resolve the same shape and provenance.
 function resolveTargetShape() {
   const haveDeclared = ISL_DECLARED > 0 && OSL_DECLARED > 0;
   const declaredOr = (v) => (v != null ? v : 1024);
@@ -884,37 +735,29 @@ function resolveTargetShape() {
             String(A.workload_shape_provenance)];
   }
   if (!IS_AGENTX) {
-    // Unchanged behaviour for the fixed ISL/OSL path, minus the borrowed label.
+    // Fixed ISL/OSL path: declared args, else the synthetic default.
     return [declaredOr(ISL_DECLARED), declaredOr(OSL_DECLARED),
             haveDeclared ? 'declared_args' : 'synthetic_default'];
   }
-  // An explicit shape is the caller stating what they measured on this stack.
-  // Absent that, we do NOT guess and we do not compile a corpus average into this
-  // file: the corpus is declarable, AgentX keeps publishing new ones, the numbers
-  // move with the tokenizer and the window, and a stale constant would be read as
-  // fact by every role. The run measures its own shape instead -- the baseline
-  // bench reports it and adoptMeasuredShape() below installs it, which is also
-  // why no kernel work is scheduled before the baseline lands.
+  // Use an explicit observed shape if given; never guess or hard-code a corpus average (it moves
+  // with corpus, tokenizer and window). Otherwise the baseline bench measures it and
+  // adoptMeasuredShape() installs it, which is why no kernel work starts before the baseline.
   const obsIsl = parseInt(AGENTX.observed_isl, 10);
   const obsOsl = parseInt(AGENTX.observed_osl, 10);
   if (obsIsl > 0 && obsOsl > 0) return [obsIsl, obsOsl, 'agentx_observed'];
   if (haveDeclared) return [ISL_DECLARED, OSL_DECLARED, 'agentx_declared_args'];
   return [1024, 1024, 'agentx_pending_baseline'];
 }
-// Mutable: on a trace replay the real shape is not knowable until something has
-// been measured, so the baseline installs it and every later phase reads it.
+// Mutable: on a trace replay the baseline installs the measured shape.
 let [ISL, OSL, WORKLOAD_SHAPE_PROVENANCE] = resolveTargetShape();
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC, shape_provenance: WORKLOAD_SHAPE_PROVENANCE };
-// Whether ISL/OSL describe the served load or are still a placeholder. A
-// placeholder never corrupts the MEASUREMENT, but it would misdirect every
-// kernel choice, so the prompt says which one a role is holding.
+// Whether ISL/OSL describe the served load or a placeholder; prompts tell roles which, since a
+// placeholder would misdirect kernel choices.
 let SHAPE_IS_MEASURED = !/^(agentx_pending_baseline|synthetic_fallback_on_agentx)$/
   .test(WORKLOAD_SHAPE_PROVENANCE);
 
-// Install the shape the baseline actually served. bench_e2e.sh reports it as
-// observed_isl/observed_osl (averaged per request, medianed across replicas), so
-// this is measured on THIS corpus, tokenizer, model and window rather than
-// asserted. Called right after Setup, before any kernel work is scheduled.
+// Install the shape the baseline served (bench_e2e.sh observed_isl/observed_osl: per-request mean,
+// median across replicas). Called right after Setup, before any kernel work.
 function adoptMeasuredShape(isl, osl, where) {
   if (!(isl > 0 && osl > 0)) return false;
   ISL = Math.round(isl);
@@ -928,25 +771,12 @@ function adoptMeasuredShape(isl, osl, where) {
     + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Roles size kernels against this.`);
   return true;
 }
-// The Setup probe reads the baseline summary ONCE, at the instant Setup returns,
-// and that instant is not guaranteed to contain one. An agent whose leg dies to a
-// hardware fault moves the wreckage aside and relaunches, so `baseline/` is
-// legitimately EMPTY while a replacement leg runs, and the summary lands minutes
-// after Setup reports done. A single read then loses the shape for the whole run
-// rather than for a moment: on the 20260909 standalone run Setup returned at
-// 10:40:49 with the directory just renamed away, the good summary was written at
-// 11:57, and every later phase kept the 1024/1024 placeholder. "Not written yet"
-// is a retryable state, not a verdict, so adoption is ALSO attempted lazily from
-// the prompt builder every role passes through: the first prompt built after the
-// summary appears installs the real shape. A no-op once measured, so a run that
-// adopted at Setup pays nothing and its prompts are unchanged.
+// The baseline summary can land after Setup returns (a leg relaunched after a hardware fault), so
+// the prompt builder also retries adoption lazily: the first prompt built after the summary
+// appears installs the real shape. A no-op once measured.
 function ensureMeasuredShape() {
   if (SHAPE_IS_MEASURED || !IS_AGENTX) return SHAPE_IS_MEASURED;
-  // EVAL_DIR is a `let` declared further down and only assigned by Setup, so it
-  // is read through typeof: a prompt built before that declaration is evaluated
-  // would otherwise die in the temporal dead zone, turning a missing shape into
-  // a crashed run. Nothing to read before Setup anyway — the baseline is what
-  // Setup produces.
+  // EVAL_DIR is assigned by Setup; before that there is no baseline to read.
   const evalDir = typeof EVAL_DIR === 'undefined' ? '' : (EVAL_DIR || '');
   if (!evalDir) return SHAPE_IS_MEASURED;
   let shape = null;
@@ -975,12 +805,9 @@ except Exception:
   }
   return SHAPE_IS_MEASURED;
 }
-// Which axis bench_e2e.sh medians. It defaults E2E_METRIC to output, and on a ~140:1
-// prefill:output trace output-only tok/s moves almost not at all for a large change in total
-// work, so the axis has to be SELECTED here.
-//
-// bench_summarize.py's _BASES, flattened: each E2E_METRIC it accepts -> the metric_basis its
-// summary records. test_bench_env_channel.py holds this table to that one.
+// The axis bench_e2e.sh medians must be selected here: its default (output tok/s) barely moves on a
+// prefill-heavy trace. This is bench_summarize.py's _BASES flattened (E2E_METRIC -> metric_basis);
+// test_bench_env_channel.py keeps the two in sync.
 const METRIC_BASIS_OF_AXIS = {
   output: 'aggregate_output_tok_s',
   total: 'aggregate_total_token_tok_s',
@@ -1007,10 +834,8 @@ const AXIS_LABEL = {
   p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
   e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
 };
-// Precedence: the basis the caller declared; else an E2E_METRIC already exported, because an
-// exported value outranks bench_env.sh and is what the bench will measure; else the standalone
-// default. Anything bench_summarize.py cannot measure fails HERE: it would refuse the axis too,
-// but only once the baseline replay had been paid for.
+// Precedence: the declared basis; else an exported E2E_METRIC (it outranks bench_env.sh); else
+// the standalone default. An axis bench_summarize.py can't measure fails here, before the baseline.
 function resolveAgentxMetric() {
   if (!AGENTX) return { basis: '', source: '' };
   const unknown = (what, v) => new Error(`AgentX: ${what} '${v}' is not an axis ` +
@@ -1036,8 +861,8 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
-// Recall has its own policy. In particular, older orchestrators may grade output/total while
-// the operator wants only p50 candidates. This never changes the bench axis or the writer's basis.
+// KB recall can use its own basis (e.g. only p50 candidates while the bench grades output/total);
+// it never changes the bench axis or the writer's basis.
 function resolveKbMetric() {
   let env = '';
   try { env = String(process.env.GEAK_E2E_KB_METRIC_BASIS || '').trim(); } catch (_) { /* no env */ }
@@ -1061,17 +886,10 @@ function kbCanAttestMetric(candidate) {
   // A fresh output/total A/B is not evidence for or against the stored p50 claim.
   return candidate.metric_basis ? candidate.metric_basis === measured : !E2E_KB_METRIC.strict;
 }
-// Body of the per-run bench_env.sh the Director drops beside the copied bench
-// script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
-// name is unset or empty, so a real exported value -- an orchestrator's, or an
-// operator's one-off override on the command line -- always outranks the
-// declaration. Empty string when synthetic.
-//
-// The guard is spelled `[ -n "${K:-}" ] || K='v'` rather than the shorter
-// `: "${K:='v'}"` on purpose: inside a `${K:=word}` expansion the quotes are
-// NOT shell quoting, they are literal characters of `word`, so that spelling
-// assigns the value WITH its quotes attached. This form puts the value in real
-// single quotes, which is also what makes _shq's escaping mean anything.
+// Body of the per-run bench_env.sh the Director drops beside the bench script (roles/director.md
+// PHASE=setup); empty when synthetic. Each line assigns only if the name is unset or empty, so an
+// exported value always wins. Spelled `[ -n "${K:-}" ] || K='v'`, not `: "${K:='v'}"`, whose quotes
+// would become part of the value.
 const _shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 const _agentxEnvPairs = () => {
   if (!AGENTX) return [];
@@ -1081,15 +899,13 @@ const _agentxEnvPairs = () => {
     ['BENCH_CLIENT', 'agentx'],
     ['E2E_METRIC', AGENTX_E2E_METRIC],
     ['GEAK_METRIC_BASIS', AGENTX_METRIC_BASIS],
-    // No REPEATS: an explicit one outranks REPLICAS in bench_e2e.sh, so pinning it here turned
-    // isolated validation's three replicas into one. bench_e2e.sh defaults a trace-replay
-    // client's legacy rounds to one itself, after the replica count is resolved.
+    // No REPEATS: an explicit one outranks REPLICAS in bench_e2e.sh, which sets trace-replay rounds
+    // itself after resolving the replica count.
     ['CONC', String(CONC)],
     ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
     ['AGENTX_DATASET', AGENTX.corpus],
-    // What the run is compared AGAINST, so an override of the corpus or the window never
-    // carries it along: a replay of anything else is then stamped non-canonical, which is
-    // the point. Declare canonical_corpus / canonical_duration_s to move the reference itself.
+    // The reference the run is compared against; overriding the corpus or window doesn't move it
+    // (so such a replay is non-canonical). Declare canonical_corpus / canonical_duration_s to move it.
     ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
     ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
     ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
@@ -1098,9 +914,8 @@ const _agentxEnvPairs = () => {
     ['AGENTX_WARMUP_REQUESTS_PER_LANE', AGENTX.warmup_requests_per_lane],
     ['AGENTX_WARMUP_GRACE_PERIOD', AGENTX.warmup_grace_period_s],
   ];
-  // Optional, only when the caller supplied them: the aiperf binary, the
-  // InferenceX checkout that may hold map_aiperf.py (GEAK vendors a fallback),
-  // and the profile-window placement.
+  // Optional, only when supplied: aiperf binary, InferenceX checkout (may hold map_aiperf.py; GEAK
+  // vendors a fallback), and the profile-window placement.
   const opt = [
     ['AGENTX_FAILED_REQUEST_THRESHOLD', AGENTX.failed_request_threshold],
     ['AIPERF_BIN', AGENTX.aiperf_bin],
@@ -1121,8 +936,8 @@ const AGENTX_ENV = !AGENTX ? '' : [
   `export ${_agentxEnvPairs().map(([k]) => k).join(' ')}`,
   '',
 ].join('\n');
-// Only AgentX enables this method. Model/backend features select the method's
-// branches, never its activation. Fixed ISL/OSL keeps the original prompts/state.
+// Kernel extraction is enabled only by an AgentX workload; model/backend features select its
+// branches, never its activation.
 const KERNEL_EXTRACT_ON = !!MODEL_PATH && WORKLOAD_KIND === 'agentx_trace_replay';
 const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-extract`;
 if (KERNEL_EXTRACT_ON) {
@@ -1130,46 +945,33 @@ if (KERNEL_EXTRACT_ON) {
   WORKLOAD.spec = WORKLOAD_SPEC;
 }
 if (KERNEL_EXTRACT_ON) log(`Kernel extraction skill enabled (workload=${WORKLOAD_KIND}; verify features from current evidence).`);
-// Seed config: when an external orchestrator (e.g. Hyperloom) already did
-// config/param search, it passes its accepted best flags/env so the GEAK
-// baseline is measured ON that config (fair engagement start), not the stack
-// default. Serving TP/GPU are handled by SERVING_TP / SERVING_GPU above.
+// Seed config: an orchestrator that already searched config passes its best flags/env, so the
+// baseline is measured on that config, not the stack default (TP/GPU: SERVING_TP / SERVING_GPU).
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
-// Schema-v2 handoffs may carry the exact Python overlay/source snapshot stack
-// that produced Hyperloom's current best.  This is part of the baseline
-// configuration, not a GEAK-authored candidate, so it must remain underneath
-// every later candidate overlay instead of being dropped at Setup.
+// Schema-v2 handoffs may carry the overlay stack behind Hyperloom's current best. It is part of the
+// baseline configuration, so it stays underneath every later candidate overlay.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
 const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
-// One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), because
-// a cache-cold search number and a cache-warm validation number are not comparable and the gains
-// carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
-// leg, round 1 a full warmup that is discarded, round 2 IS the number.
-// isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
-// what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
+// One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), since cold
+// and warm numbers aren't comparable. warm_server = Hyperloom's protocol: one server per leg, round
+// 1 is a discarded warmup, round 2 IS the number (a trace replay warms each lane itself).
+// isolated_server (REPLICAS fresh servers per leg) gates on boot-to-boot variance. The bench
+// dispatcher owns retry/degraded aggregation in both modes.
 const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
 const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);
-// Validation keeps its OWN knob so an operator can make the final re-measure stricter than the
-// search that fed it (isolated_server + validation_replicas=3 buys the boot-to-boot dispersion
-// test). Default is warm_server like everything else, which is what the orchestrator rebenches
-// against — and the cheap one: isolated validation is 6-12 cold boots serialized behind the
-// serving-GPU flock, enough to overrun FINAL_RESERVE_MS and ship no validated number at all.
+// Validation has its own mode so the final re-measure can be stricter (isolated_server +
+// validation_replicas=3 adds the boot-to-boot dispersion test). Default warm_server: isolated
+// validation is 6-12 serialized cold boots and can overrun FINAL_RESERVE_MS.
 const VALIDATION_MEASUREMENT_MODE = String(A.validation_measurement_mode || 'warm_server');
-// Sample count follows the mode rather than a knob of its own: warm_server IS one timed round per
-// leg, and a second knob could only disagree with the lifecycle it belongs to. Going isolated is
-// what buys extra samples, and it already has `validation_replicas` to size them.
+// Samples follow the mode: warm_server is one timed round per leg; isolated uses validation_replicas.
 const VALIDATION_SAMPLES = VALIDATION_MEASUREMENT_MODE === 'warm_server' ? 1 : VALIDATION_REPLICAS;
-// CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
-// vllm/sglang/atom capture the steady-state decode path into a FULL CUDA/HIP graph UNLESS --enforce-eager
-// is set (ATOM exposes both --enforce-eager and --cudagraph-capture-sizes, so it belongs in this set).
-// A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
-// server's graph, so the isolated win evaporates e2e (observed on M3: MoE 1.22x isolated -> 0% e2e). When
-// graphs are on we inject an EXPLICIT requirement into every kernel-optimize task: the win must be intrinsic
-// and graph-capture-safe. Detection is config-driven (enforce-eager absent + graph-capable backend), so it
-// auto-disables for an enforce-eager run and applies to any future graph-capturing backend.
+// CUDA/HIP-graph deployment requirement (derived from the serving config). vllm/sglang/atom capture
+// the steady-state decode path into a full graph unless --enforce-eager is set, and a win that relies
+// on its own per-call graph wrapper falls back to eager inside it and vanishes e2e. So when graphs are
+// on, every kernel-optimize task is told the win must be intrinsic and graph-capture-safe.
 const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND === 'atom') && !/enforce[-_]eager/i.test(INIT_FLAGS);
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
@@ -1183,51 +985,31 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
-// proof (see e2e_integrator) make a 0.5% default trustworthy for a fixed-shape workload, where a
-// replica is a fixed amount of identical work. Prompt-tunable.
-//
-// A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
-// (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
-// whole number of trajectories and the throughput it reports quantises on which ones it got
-// through. The 20260912 validation measured that directly: two surviving replicas of the
-// BASELINE, same config, same box, spread 3.43% on total tok/s (24054.0 / 23255.9) and 3.86% on
-// InferenceX P90 interactivity (29.52 / 28.40 tok/s/user), the default axis. A 0.5% band against
-// that is 7-8x too permissive -- it would call a pure-noise difference a win -- so this workload
-// carries its own floor. The TTFT-inclusive axis moved 17% on the same pair; a run graded on it
-// needs an explicit noise_band_pct. Hardcoding the floor is a placeholder for deriving it from
-// the replica spread Setup already measures; until then it is at least the measured one.
+// Acceptance noise band (%): 0.5 for a fixed-shape workload (identical work per replica, isolated
+// measurements, non-overlap and engagement proof). A trace replay varies with which trajectories a
+// replica completes, so it gets a 4% floor; a TTFT-inclusive axis needs an explicit noise_band_pct.
 const NOISE_BAND_AGENTX = 4.0;
 const NOISE_BAND_DEFAULT = parseFloat(
   A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
-// The band the run gates on, from the one the Director returned. Its role file starts every run
-// at 0.5 and only ever widens it, so on a trace replay that 0.5 would replace the workload floor
-// (and an explicit noise_band_pct) outright; there the Director may only raise the band. A
-// fixed-shape run keeps the Director's value, as it always has.
+// The gate band from the Director's value. The Director starts at 0.5, so on a trace replay it may
+// only raise the band above the workload floor; a fixed-shape run uses the Director's value.
 function gateNoiseBand(reported) {
   const r = parseFloat(reported);
   const director = Number.isFinite(r) && r > 0 ? r : 0;
   if (!IS_AGENTX) return director || NOISE_BAND_DEFAULT;
   return Math.max(director, NOISE_BAND_DEFAULT);
 }
-// No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
-// it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
-// Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
-// integrator returns gate:'incomplete'/ab_complete:false (it only ran ref, hung,
-// or degraded), the orchestrator RE-INVOKES it to finish the missing leg up to
-// this many times before falling back to carrying it as a pending integration.
-// This is what guarantees "every A/B runs ref AND cand to completion regardless
-// of pass/fail" — general, not per-kernel. Bump via args.ab_finish_retries.
+// No timed-repeat knob: bench_e2e.sh derives rounds from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE.
+// Every integrate A/B must measure both legs: on gate:'incomplete' / ab_complete:false the
+// integrator is re-invoked up to this many times to finish the missing leg, then the candidate is
+// carried as a pending integration.
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 3, 10);
-// A resolvable FROZEN baseline (a seeded baseline_overlay/ + a declared meta.candidate_bind, or an
-// importable meta.baseline_callable on the op track) is the speedup DENOMINATOR and is MANDATORY.
-// If an extraction smoke-passes but froze no baseline, the
-// unittest would silently time the candidate against its own naive same-language scaffold (the
-// "optimized-HIP vs naive-HIP = fake 15.7× isolated, ~0% e2e" bug). When that happens we RE-EXTRACT
-// up to this many times; if still missing, the extraction is treated as a FAILURE (flag dominant /
-// skip others) — never a fake speedup. Bump via args.baseline_extract_retries.
+// A resolvable FROZEN baseline (seeded baseline_overlay/ + meta.candidate_bind, or an importable
+// meta.baseline_callable on the op track) is the mandatory speedup denominator; without it the
+// unittest would time the candidate against its own naive scaffold. Re-extract up to this many
+// times, then treat the extraction as failed (flag if dominant, else skip).
 const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A.baseline_extract_retries : 3, 10);
-// Issue #429: force capture storage bounds into every extraction EXTRA_ENV (override via args).
+// Capture storage bounds forced into every extraction EXTRA_ENV (override via args).
 const CAPTURE_BYTE_BUDGET = String(A.capture_byte_budget != null ? A.capture_byte_budget : '8GiB');
 const CAPTURE_CASE_BYTE_LIMIT = String(A.capture_case_byte_limit != null ? A.capture_case_byte_limit : '2GiB');
 const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : (KERNEL_EXTRACT_ON ? 'structure_only' : 'share_large'));
@@ -1245,39 +1027,27 @@ function evalDirDivergence(override, returned) {
 }
 const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/').pop();
 
-// ---------------------------------------------------------------------------
-// Phase-scoped driving (robustness): a long single background run can be orphaned if the host session
-// context compacts mid-run. To avoid that, the orchestration can be driven phase-by-phase: invoke with
-// args.phases = subset of {setup,config,tune,head,kernel,final} (default 'all' = run everything in one go).
-// Cross-phase state flows through the RETURN value (the script has no fs); pass the prior return back as
-// args.state for the next phase. Each phase only RUNS if requested; otherwise it loads carried state.
-// ---------------------------------------------------------------------------
+// Phase-scoped driving (so a long run survives host-session compaction): args.phases = subset of
+// {setup,config,tune,head,kernel,final}, default 'all'. State crosses phases via the return value (no
+// fs): pass the prior return back as args.state. Unrequested phases load carried state.
 const PHASES = String(A.phases || 'all').split(',').map(s => s.trim()).filter(Boolean);
 const RUN_ALL = PHASES.includes('all');
-// Fast mode SKIPS ConfigSweep ('config'), the tuning skillset ('tune') and the editable-kernel Milestone
-// ('kernel') so all optimization comes from HeadKernel within the wall-clock budget. ('tune' joins the
-// skip set for the same reason 'config' does: fast mode's contract is "best head-kernel wins in N hours",
-// and the tuning loop's tuner sweeps + its own pre/post A/B do not fit that budget.) Default mode:
-// FAST_SKIP is null → want() is the original `RUN_ALL || PHASES.includes(p)`, unchanged.
+// Fast mode skips ConfigSweep, TuningSkillset and Milestone: everything comes from HeadKernel within
+// the wall-clock budget.
 const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
-// Deep mode concentrates its (20h) HeadKernel budget on cross-backend co-opt: skip the editable-kernel
-// Milestone ('kernel') but KEEP ConfigSweep ('config' — cheap and it stabilizes the baseline) and KEEP
-// the tuning skillset ('tune' — same rationale, and a tuned stack is a strictly better starting point
-// for the co-opt lanes). Null in every other mode, so normal + fast are unchanged.
+// Deep mode skips only Milestone; ConfigSweep and TuningSkillset are cheap and give co-opt a better
+// starting stack.
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 // AgentX prepares UTs once, then optimizes them against the same serving baseline.
 const AGENTX_SKIP = KERNEL_EXTRACT_ON ? new Set(['profile', 'config', 'tune']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p)) && !(AGENTX_SKIP && AGENTX_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
-// Hoisted: tuningIntegrateInputs() is reachable from runIntegrateBothLegs, which WarmStart drives
-// long before the TuningSkillset phase body — declaring `tuning` there left it in the temporal dead
-// zone on the first integrate leg. The tuning phase later reassigns it.
+// Hoisted: WarmStart's integrate legs reach tuningIntegrateInputs() before the TuningSkillset phase
+// runs, so `tuning` must already be declared; that phase reassigns it.
 let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
-// ---------------------------------------------------------------------------
 // Schema fragments.
-// ---------------------------------------------------------------------------
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
@@ -1289,11 +1059,9 @@ const SETUP_SCHEMA = obj({
   server_flags: { type: 'object', additionalProperties: true }, server_env: { type: 'string' },
   tp: { type: 'number' }, workload: { type: 'object', additionalProperties: true },
   bench_script: { type: 'string' }, notes: { type: 'string' },
-  // The four deployment dimensions the KB addresses a page by, beyond model/framework/workload which
-  // this script already knows. The Director establishes all four during its existing preflight (it
-  // has to, to launch the server at all) and previously just discarded them. gfx, product target,
-  // and physical CU count are required; device_name remains optional telemetry. A GUESS is not
-  // acceptable: the service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
+  // Deployment dimensions the KB addresses a page by, from the Director's preflight. gfx, product
+  // target and physical CU count are required (device_name is optional telemetry). Never guess: the
+  // service has no DELETE, so a wrong page is permanent.
   gfx: { type: 'string' }, device_target: { type: 'string' },
   device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
   precision: { type: 'string' },
@@ -1324,13 +1092,10 @@ const STRATEGY_SCHEMA = obj({
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
-// The skill returns only after source extraction and GPU UT validation. Its selection/ranking
-// metadata stays in files rather than an intermediate schema -- EXCEPT the finished envelope, which
-// has to travel in the reply: this script cannot open the delivery file (see RUNTIME SANDBOX
-// CONTRACT). `prepared` is the verbatim stdout of
-// `agentx_kernel_preparation.mjs --emit-prepared`, which is also what gates the packing, so the
-// validation is not weakened by moving the bytes this way. Same shape as STRATEGY_SCHEMA's queues,
-// because the queues are what it becomes.
+// Returned after source extraction and GPU UT validation. Ranking metadata stays in files, but the
+// finished envelope travels in the reply (this script can't read files; see RUNTIME SANDBOX
+// CONTRACT): `prepared` is the verbatim, gated stdout of `agentx_kernel_preparation.mjs
+// --emit-prepared`, shaped like STRATEGY_SCHEMA's queues.
 const AGENTX_PREPARATION_SCHEMA = obj({
   delivery_path: { type: 'string' },
   prepared: obj({
@@ -1352,9 +1117,8 @@ const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
-  // Only the warm-start repair pass fills this, and it stays OUT of `required` so every ordinary
-  // sweep keeps validating unchanged. It is the structured half of "why did this not run here" —
-  // read in place of guessing at the free-text notes with a regex.
+  // Filled only by the warm-start repair pass (so not `required`): the structured "why did this not
+  // run here", read instead of regexing the notes.
   repair: obj({
     attempted: { type: 'boolean' },
     classification: { type: 'string' },   // upstream_gone | conflicts_with_baseline | env_unsupported | mixed | unknown
@@ -1364,53 +1128,37 @@ const SWEEP_SCHEMA = obj({
   }, []),
 }, ['accepted_flags', 'best_throughput_tok_s']);
 
-// `e2e_store.py resolve` output, passed through VERBATIM. Nothing is `required` and no field is
-// typed as a number: a page that was never written answers with empty candidates and a
-// `read_reason`, and a recorded run legitimately has `speedup: null` when it only ever measured
-// absolute throughput. Typing either would turn a truthful answer into a schema failure and a
-// cold start.
+// `e2e_store.py resolve` output, passed through verbatim. Nothing is required or typed as a number:
+// an unwritten page answers with empty candidates + `read_reason`, and `speedup` can be null.
 const KB_RESOLVE_SCHEMA = obj({
   tried: arrStr, canonical_id: { type: 'string' }, match_tier: { type: 'string' },
   ranked_by: { type: 'string' }, candidates: arrObj, read_reason: { type: 'string' },
-  // `plane` is what was ASKED for; `read_plane` is which one answered. Under `both` they differ,
-  // and only the second one explains where the offer came from.
+  // `plane` is what was asked for; `read_plane` is which one answered (they differ under `both`).
   plane: { type: 'string' }, read_plane: { type: 'string' },
-  // How the offer was ORDERED (throughput, high to low, on every rung) versus which metric that
-  // rung crowns its champion on. Two different things that used to share one word: a coarse rung
-  // is ranked by absolute throughput here but still promotes on speedup, and a reader told only
-  // 'speedup' would mis-explain the order it is looking at.
+  // How the offer is ordered (throughput, high to low) vs the metric the rung crowns its champion
+  // on; a coarse rung is ordered by throughput but still promotes on speedup.
   sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
-  // Why a rung came back empty, in counts — the only thing separating "nobody recorded this
-  // deployment" from "the floor ate the records". Named explicitly so the resolver agent cannot
-  // summarise it away. Its `read_plane` is the FIRST rung that saw anything, not necessarily the
-  // one that answered.
+  // Why a rung came back empty, in counts ("never recorded" vs "filtered by the floor"). Its
+  // `read_plane` is the first rung that saw anything, not necessarily the one that answered.
   curation: { type: 'object', additionalProperties: true },
 }, []);
-// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session isolated-server A/B
-// legs (NOT the run baseline), which makes tuning_delta_pct an attributable share of the total gain.
-// engagement_verified is load-bearing: the skillset's own thesis is that an unproven artifact is not a
-// win, so the orchestrator refuses to bank an accept without it.
+// Result of the tuning-skillset phase. pre/post are its own isolated-server A/B legs (not the run
+// baseline), so tuning_delta_pct is an attributable share. No accept is banked without
+// engagement_verified.
 const TUNING_SCHEMA = obj({
   ran: { type: 'boolean' }, mode: { type: 'string' }, skills_used: arrStr,
   preflight: { type: 'object', additionalProperties: true },
   ops_tuned: arrObj, artifacts: arrStr,
-  // Deploy bundle: how a tuned DATA artifact reaches production. GEAK's overlay is a PYTHONPATH
-  // mechanism for code, but tuned config tables are data a library reads from its own package dir, and
-  // some need a derived cache dropped before they take effect. Neither travels in the overlay — so the
-  // role writes EVAL_DIR/tuning/deploy/{MANIFEST.json,tuning_patch.diff,files/,deploy.sh} and Finalize
-  // folds it into EVAL_DIR/final/ (diff concatenated, deploy.sh invoked from final_launch.sh).
+  // Deploy bundle for tuned DATA (config tables a library reads from its package dir, caches to
+  // drop), which the PYTHONPATH overlay can't carry: EVAL_DIR/tuning/deploy/{MANIFEST.json,
+  // tuning_patch.diff,files/,deploy.sh}, folded into EVAL_DIR/final/ by Finalize.
   deploy_bundle: { type: 'string' }, deploy_verified: { type: 'boolean' },
   cache_invalidation: arrStr,
-  // DATA paths the deploy writes INSIDE an installed package tree (e.g. aiter/configs/*.csv). The
-  // Integrator forbids live-tree edits and asserts `git status --porcelain` is empty before/after every
-  // A/B leg; this list is the carve-out that keeps a banked tuning from being cleaned away. Data only —
-  // a source change belongs in apply_overlay, see below.
+  // DATA paths the deploy writes inside an installed package tree (e.g. aiter/configs/*.csv): the
+  // carve-out from the Integrator's clean-live-tree check. Data only; code goes in apply_overlay.
   live_tree_files: arrStr,
-  // A tuned artifact binds only if the live seam dispatches the backend that consumes it, so tuning
-  // sometimes needs a CODE change to land (a routing switch, or a wrapper that drops the kernel
-  // selection — tuning-aiter/SKILL.md §2b measures a correctly-tuned row going 85.7% SLOWER on a wrapper
-  // that ignores kernelName). That is in scope, and it travels as a reversible overlay, exactly like a
-  // head env-winner's routing patch: never as a live-tree .py edit, which cannot be varied per A/B leg.
+  // Code a tuned artifact needs in order to bind (e.g. a routing switch), shipped as a reversible
+  // overlay like a head env-winner's routing patch, never as a live-tree .py edit.
   apply_overlay: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
@@ -1428,10 +1176,8 @@ const PLAN_SCHEMA = obj({
   config_directions: arrObj, head_candidates: arrObj, kernel_candidates: arrObj,
 }, ['stop']);
 
-// Extraction smoke gate: EXACTLY lowercase "pass" or "fail". Every gate below tests `=== 'pass'`, and a
-// free string let agents answer "PASS (exit 0) on GPU 1 ..." — a passing unittest then read as a failed
-// extraction and the head was silently dropped. The enum makes StructuredOutput reject anything else so
-// the agent must re-answer; the prose belongs in smoke_detail / notes.
+// Extraction smoke gate: exactly lowercase "pass" or "fail" (every gate tests `=== 'pass'`); the
+// enum makes StructuredOutput reject free text, which belongs in smoke_detail / notes.
 const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
 // Large machine verdicts travel as immutable task-local files, not LLM summaries.
 const SELECTION_VERDICT_REF_SCHEMA = obj({
@@ -1467,8 +1213,7 @@ const EXTRACT_OP_SCHEMA = obj({
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
-  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
+  // null when nothing was timed (0.0 would read as "not faster"); gate on `measured`, not the number.
   isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
   winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
@@ -1502,20 +1247,38 @@ const KERNEL_LAYER_SCHEMA = obj({
   validation_status: { type: 'string' }, note: { type: 'string' },
 }, ['ran', 'final_patch', 'final_geomean']);
 
+const MEASUREMENT_EVIDENCE_SCHEMA = obj({
+  measurement_id: { type: 'string' }, candidate_digest: { type: 'string' },
+  reference_digest: { type: 'string' }, workload_digest: { type: 'string' }, protocol_digest: { type: 'string' },
+  ref_summary: { type: 'string' }, cand_summary: { type: 'string' },
+  ref_replicas: { type: 'number' }, cand_replicas: { type: 'number' },
+  fresh_pair: { type: 'boolean' }, configs_matched: { type: 'boolean' }, workload_matched: { type: 'boolean' },
+}, []);
 const INTEGRATE_SCHEMA = obj({
   short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
+  affected_gpu_time: obj({
+    candidate_digest: { type: 'string' },
+    profile_path: { type: 'string' }, reference_digest: { type: 'string' }, workload_digest: { type: 'string' },
+    kernels: { type: 'array', items: obj({
+      id: { type: 'string' }, pct_gpu_time: { type: 'number' }, isolated_speedup: { type: 'number' },
+      removed: { type: 'boolean' },
+    }, ['id', 'pct_gpu_time']) },
+  }, ['profile_path', 'candidate_digest', 'reference_digest', 'workload_digest', 'kernels']),
+  measurement_evidence: MEASUREMENT_EVIDENCE_SCHEMA,
+  speedup_review: obj({
+    status: { type: 'string', enum: ['pending', 'confirmed', 'inconclusive', 'rejected'] },
+    original_measurement: MEASUREMENT_EVIDENCE_SCHEMA,
+    estimate: { type: 'object', additionalProperties: true },
+  }, ['status']),
   e2e_throughput_tok_s: { type: 'number' }, e2e_delta_pct: { type: 'number' },
-  // A/B completion signals: the integrator MUST set ab_complete=true ONLY when
-  // BOTH the reference and candidate serving legs were measured. When it ran out
-  // of time / hung mid-gate it returns gate:'incomplete' (ab_complete=false) with
-  // whatever partial legs it has (ref_med / cand_med) — that is NOT a rejection.
+  // ab_complete=true only when both serving legs were measured; a timed-out or hung gate returns
+  // gate:'incomplete' (ab_complete=false) with any partial ref_med / cand_med — not a rejection.
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
-  // How the correctness of an ACCEPT was established: 'byte_exact' (hard greedy byte-parity vs the true
-  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
-  // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
+  // How an accept's correctness was established: 'byte_exact' (greedy byte parity vs the true
+  // baseline), 'accuracy' (sampled task-accuracy probe) or 'none'.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
@@ -1525,9 +1288,8 @@ const FINALIZE_SCHEMA = obj({
   final_overlay: { type: 'string' }, final_patch: { type: 'string' }, final_launch_script: { type: 'string' },
   final_throughput_tok_s: { type: 'number' }, throughput_speedup: { type: 'number' },
   accepted_kernels: arrStr, accepted_config: { type: 'object', additionalProperties: true }, note: { type: 'string' },
-  // Did the tuning deploy bundle make it into final/ AND still engage on the assembled bundle? Reported
-  // rather than assumed: a data artifact that silently fails to install would leave a bundle that looks
-  // complete and reproduces none of the tuning gain.
+  // Whether the tuning deploy bundle reached final/ and still engages there (reported, not assumed:
+  // a silently failed data install reproduces none of the tuning gain).
   tuning_in_bundle: { type: 'boolean' }, tuning_engagement_recheck: { type: 'string' },
 }, ['final_throughput_tok_s']);
 
@@ -1555,16 +1317,12 @@ const CHECKPOINT_WRITE_SCHEMA = obj({
   written: { type: 'boolean' }, path: { type: 'string' }, checkpoint_sha256: { type: 'string' },
 }, ['written', 'path', 'checkpoint_sha256']);
 
-// ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
-// ---------------------------------------------------------------------------
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
-// Workflow scripts have no filesystem API. The writer agent is therefore the
-// one component that can atomically snapshot mutable replay assets while the
-// measured stack still exists. The intent remains structured so every phase
-// feeds the same schema-v2 contract rather than inventing a private summary.
+// No filesystem here, so a writer agent snapshots mutable replay assets atomically while the
+// measured stack still exists, from a structured schema-v2 intent shared by every phase.
 let lastCommittedCheckpoint = null;
 async function persistE2EValidationCheckpoint(relativePath, intent, timeoutFor = agentTimeoutFor) {
   if (!EVAL_DIR) return null;
@@ -1603,9 +1361,8 @@ async function persistE2EValidationCheckpoint(relativePath, intent, timeoutFor =
   return written;
 }
 
-// Candidate-local incomplete A/B records stay best-effort diagnostics, but an
-// accepted config/tuning/overlay/final result must never silently continue
-// without the checkpoint that makes it replayable after an interrupted run.
+// Candidate-local A/B records are best-effort, but an accepted config/tuning/overlay/final result
+// must not continue without the checkpoint that makes it replayable.
 async function requireE2EValidationCheckpoint(relativePath, intent) {
   const written = await persistE2EValidationCheckpoint(relativePath, intent, checkpointTimeoutFor);
   if (!written || written.written !== true || !written.checkpoint_sha256) {
@@ -1616,10 +1373,8 @@ async function requireE2EValidationCheckpoint(relativePath, intent) {
   return written;
 }
 
-// Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
-// is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
-// cases. When ON, it appends a short advisory pointer that tells the agent to Read the fragment file
-// and query the skills index. (Workflow scripts have no fs access; the agent does the reading.)
+// Expert-skills prompt injection. '' when the feature is off or the role is not a skills consumer;
+// otherwise an advisory pointer telling the agent to Read the fragment and query the skills index.
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role)) return '';
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
@@ -1629,38 +1384,23 @@ function expertSkillsBlock(role) {
     `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
 }
 
-// ---------------------------------------------------------------------------
-// e2e warm start: identity formatting + the prompt hook.
-//
-// These three `let`s are the ONLY state the feature adds above Module A, and all three stay at their
-// off-value (null / '') for the whole run unless Module A actually executes. Every consumer below
-// keys off them, which is what makes `warm_start=off` produce a byte-identical run rather than one
-// that merely behaves the same.
-// ---------------------------------------------------------------------------
+// e2e warm start: identity formatting + the prompt hook. These `let`s stay at their off-value
+// (null / '') unless Module A runs, and every consumer keys off them.
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
 let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
 let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
-let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
-// Everything this run RECALLED, in one report-ready object: which address was asked, what came back,
-// what re-measuring it HERE produced, and whether it was accepted. Threaded into the Report role's
-// Inputs because final_report.md was previously silent about recall altogether — a run that recalled
-// nothing and a run that recalled a 1.12x record and then rejected it wrote the same report, and the
-// second is the one a reader most needs to see.
-//
-// `asked` is filled in even when zero candidates come back. On an exact-lookup scheme a miss and a
-// never-recorded page are the SAME 404, so the ladder that was asked IS the finding: it is the only
-// artifact that distinguishes "no prior art" from "prior art exists one segment away".
+let KB_READ_PLANE = '';    // which plane answered the read (not implied by `both`)
+// Everything this run recalled, report-ready: the address asked, what came back, what re-measuring
+// it here produced, and whether it was accepted (fed to the Report role). `asked` is filled even
+// with zero candidates: a miss and a never-recorded page are the same 404, so the ladder asked is
+// the finding.
 let KB_RECALL = { e2e: null, kernel: [] };
 
-// One collection point for the KERNEL plane's recall. Every nested kernel_workflow returns its own
-// `warm_start` block (kernel_lane.js), and until now all of it died inside the lane: the e2e report
-// could say a kernel was authored from scratch while the lane had in fact adopted a stored patch.
-// Called from the two bounded wrappers and the two direct workflow() sites, i.e. every lane call.
+// One collection point for the KERNEL plane's recall: every lane return (its `warm_start` block,
+// kernel_lane.js) passes through here, so the report shows stored patches a lane adopted.
 function noteKernelKB(r, label) {
-  // Absorb a nested kernel run's own agent timeline (kernel_workflow/kernel_lane return it on
-  // llm_timeline). This is the one funnel every lane return passes through, so it captures every
-  // nested run's attempts for the ledger's "plus N nested kernel run(s)" accounting.
+  // Absorb the nested run's agent timeline (llm_timeline) for the ledger's nested-run accounting.
   if (r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
   const w = r && r.warm_start;
   if (w && typeof w === 'object') {
@@ -1672,8 +1412,7 @@ function noteKernelKB(r, label) {
       candidates: Array.isArray(w.candidates) ? w.candidates.length : 0,
       adopted: !!w.adopted,
       adopted_speedup: w.adopted ? (w.adopted_speedup != null ? w.adopted_speedup : null) : null,
-      // A lane that adopted a stored patch and then committed nothing of its own is where the kernel
-      // plane most often flatters itself, so carry the split rather than just the headline geomean.
+      // Carry the split, not just the geomean: an adopted patch with no own rounds flatters the lane.
       incremental_speedup: w.incremental_speedup != null ? w.incremental_speedup : null,
       rounds_committed: w.rounds_committed != null ? w.rounds_committed : null,
       no_rounds_after_adopt: !!w.no_rounds_after_adopt,
@@ -1686,20 +1425,16 @@ function noteKernelKB(r, label) {
 
 const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
 
-// The ONE place e2e KB identity argv is formatted — called by both the reader (Module A) and the
-// writer (Module B). kb/identity.py's own header names the failure this prevents: a reader and a
-// writer that disagree by a single segment do not raise, they address two different pages, and the
-// only symptom is that history quietly stops existing. Two call sites formatting the same flags
-// independently is exactly how that drift starts.
+// The ONE place e2e KB identity argv is formatted, for both reader (Module A) and writer (Module B):
+// a one-segment disagreement silently addresses a different page (see kb/identity.py).
 function kbIdentityFlags() {
   if (!KB_DIMS) return '';
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
     `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
-    // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
-    // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
-    // would mis-file precisely the degraded AgentX runs that most need a stable address.
+    // The declared kind, never the shape provenance (whose fallback values would mis-file
+    // degraded AgentX runs).
     `--workload-kind ${shq(WORKLOAD_KIND)}`,
     `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
 }
@@ -1726,16 +1461,11 @@ function kbPlaneFlags(plane) {
   return `--plane ${plane}` + (plane === 'remote' ? '' : ` --store ${shq(E2E_KB_STORE_DIR)}`);
 }
 
-// A READ takes exactly one plane. `cmd_resolve` now picks it via kb.plane:read_planes (service
-// first, local mirror only when the service has no answer) and reports which one spoke as
-// `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
-// is the copy a human gets from the CLI too.
-// The graded axis is NOT part of the address (bench_summarize's bases are five and growing, and a
-// reader wants them side by side with a label rather than scattered over five sparse pages), so the
-// reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
-// tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
-// An explicit recall policy requires an exact basis, including on synthetic runs. Without one,
-// preserve the historical measurement-derived filter and its compatibility with unlabelled records.
+// A READ takes one plane: `cmd_resolve` picks it (kb.plane:read_planes; service first, local mirror
+// as fallback) and reports it as `read_plane`. The graded axis is not part of the address (one page
+// holds several bases), so the reader states it, or mixed units would be ranked together. An
+// explicit recall policy requires an exact basis; otherwise the measured basis filters (unlabelled
+// records still match).
 function kbMetricBasisFlag() {
   return E2E_KB_METRIC.basis ? `--metric-basis ${shq(E2E_KB_METRIC.basis)} ` +
     (E2E_KB_METRIC.strict ? '--require-metric-basis ' : '') : '';
@@ -1747,17 +1477,12 @@ function kbResolveScript(args) {
     `  ${kbMetricBasisFlag()}${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
-// Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
-// is off or the role is not a consumer, so roleAgent's output is byte-identical to the pre-feature
-// build in those cases. KB_REF_DIR is assigned by Module A and nowhere else, so an off run — or one
-// whose read found nothing — never reaches the template at all.
+// Warm-start prompt injection, like expertSkillsBlock: '' when the feature is off, the role is not a
+// consumer, or Module A found nothing (KB_REF_DIR is set only by Module A).
 function warmStartBlock(role) {
   if (!KB_REF_DIR || !WARM_START_ROLES.has(role)) return '';
-  // `tuning_kb=false` is the blind-evaluation switch: it exists so a run can measure what the tuning
-  // track finds with NO prior knowledge in its context. Now that the tuning track's prior knowledge
-  // lives in the shared KB rather than in a private store, the switch has to reach here too — one
-  // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
-  // have quietly stopped being blind the moment the two stores merged.
+  // `tuning_kb=false` is the blind-eval switch; the tuning track's prior lives in the shared KB, so
+  // the switch also withholds this block.
   if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
   return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
@@ -1765,9 +1490,8 @@ function warmStartBlock(role) {
     `${KB_REF_DIR}/measured_on_this_box.md records what happened when THIS run benched them — that ` +
     `file OVERRIDES the stored claims in its siblings wherever the two disagree. A stored number is ` +
     `a hypothesis; only the measured column is evidence.` +
-    // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
-    // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
-    // whether the search it is about to spend hours on has already been run to completion once.
+    // The tuning track reads the same pages to check whether its search was already run once, so it
+    // gets an extra paragraph rather than a second block.
     (role === 'tuning_specialist' && KB_CACHE_DIR
       ? `\n\nFor YOUR track specifically: an accepted-kernel entry marked \`from tuning skillset\` is a ` +
         `tuned artifact a prior run produced and proved engaged. Its file was downloaded with the ` +
@@ -1779,15 +1503,11 @@ function warmStartBlock(role) {
       : '');
 }
 
-// Run-wide workload-identity invariant, injected into EVERY role prompt exactly
-// like the serving-config invariant above it — a trace replay changes what a
-// benchmark MEANS, so no role may be left assuming the synthetic sweep.
-// Returns '' unless the caller declared a trace replay, so a fixed-ISL/OSL run
-// gets byte-identical prompts.
+// Run-wide workload-identity invariant for EVERY role prompt (a trace replay changes what a
+// benchmark means); '' unless the caller declared a trace replay.
 function workloadIdentityBlock() {
   if (!IS_AGENTX) return '';
-  // Late-adopt here rather than only at Setup: this block is the one path every
-  // role prompt takes, so the shape can never be stale by more than one agent.
+  // Late-adopt here too: every role prompt passes through this block.
   ensureMeasuredShape();
   return `
 ## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
@@ -1828,6 +1548,38 @@ measurement duration. Consequences you must respect:
 `;
 }
 
+// The reserve holds ONE search leg for Finalize, and a search-leg claim is no yardstick for Validate's
+// legs (a claim equal to the baseline is canonical). Both are '' off a trace replay.
+function agentxFinalizeNote() {
+  if (!IS_AGENTX) return '';
+  return ` On this trace replay the final bench of step 2 is ONE leg on the ${AGENTX.geak_loop_duration_s}s ` +
+    `search window. Do NOT also bench the bundle on the ${AGENTX.duration_s}s canonical window: Validate ` +
+    'measures the stock and the final stack there right after this phase, and the final reserve holds time ' +
+    "for those legs only. Return the search leg's median as final_throughput_tok_s and say in note that it " +
+    'is a search-window number. Omit throughput_speedup: BASELINE_THROUGHPUT was measured on the canonical ' +
+    'window, so the ratio of the two is not a speedup.';
+}
+function agentxClaimNote(claimed, baseline) {
+  if (!IS_AGENTX || !(claimed > 0) || claimed === baseline) return '';
+  return ` On this trace replay CLAIMED_THROUGHPUT comes from ${AGENTX.geak_loop_duration_s}s search legs, ` +
+    `which replay a different, shorter slice of the corpus than your ${AGENTX.duration_s}s legs, so it is ` +
+    'not comparable with your numbers. In step 4 drop both claim conditions (validated_win\'s "within the ' +
+    'noise band of the claim" and flagged\'s "lower than the claim by more than the band") and arbitrate on ' +
+    'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
+    'arbitration_note that it is a search-window number.';
+}
+// Every signal must agree, so no single adoption path can pass a changed bundle off as Setup's.
+function agentxAdoptedNothing(s) {
+  return IS_AGENTX && !!s.setup && s.baseline > 0 && !s.accepted && s.tput === s.baseline
+    && s.flags === s.setup.flags && s.env === s.setup.env && s.overlay === s.setup.overlay;
+}
+// Why a trace replay skips Validate, or '': nothing to compare, or less time than its timed windows.
+function agentxValidateSkip(adoptedNothing, leftMs) {
+  if (!IS_AGENTX) return '';
+  if (adoptedNothing) return 'final_is_baseline';
+  return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
+}
+
 function correctnessEnvBlock(role) {
   if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
@@ -1863,7 +1615,7 @@ function roleAgent(role, phase, intro, inputs) {
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
-    // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
+    // Only surfaced on a trace replay.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
@@ -1905,36 +1657,18 @@ Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff r
   return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + correctnessEnvBlock(role);
 }
 
-// Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
-// must NOT kill a multi-hour run. Retry a few times, then DEGRADE to null so the caller's existing
-// null-guards skip/continue gracefully (critical phases like setup re-throw on null themselves).
-// Bound each attempt: an agent LLM call that HANGS (no response, no terminal error) would block this
-// await forever — the harness resolves terminal errors to null but not an indefinite hang. Race the
-// call against a VERY generous timeout that resolves null, which the loop below treats as a failed
-// attempt (retry, then degrade). A true hang never returns, so a generous bound still catches it while
-// NEVER killing a legitimately-long agent. The OUTER e2e agents orchestrate the serving stack (Director
-// launches sglang + runs the baseline bench ~30min; ConfigTuner does multiple server-launch+bench
-// cycles; the head e2e gate overlays + launches + A/B benches) — these run far longer than a kernel
-// agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
-// agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
-// falls back to raw agent() if setTimeout is unavailable.
-// Default 120min (generous — outer e2e agents launch servers + run ~30min benches). Fast mode tightens
-// it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
-// baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
+// Resilient agent wrapper: retry a failed agent a few times, then degrade to null for the callers'
+// null-guards (setup re-throws). Each attempt races a timeout that resolves null (the harness turns
+// errors into null, not hangs): 120min (45min fast), since agents launch servers and run ~30min
+// benches. args.agent_timeout_ms=0 disables it; without setTimeout it is a raw agent().
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
 // The guard abandons the PROMISE, not the agent: a timed-out attempt keeps running its servers and legs,
 // so a retry runs beside it on the same GPUs and files. agent_timeout_retry=false degrades to null instead.
 const AGENT_TIMEOUT_RETRY = String(A.agent_timeout_retry != null ? A.agent_timeout_retry : 'true') !== 'false';
-// Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
-// (the one place `agent()` is ever called) rather than in roleAgent(), because several
-// prompts are built inline and would otherwise never see it — and any future call site
-// inherits it automatically instead of having to remember it. Bash-capable agents own
-// server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
-// until it TERMs the caller's orchestrator and fails the whole task.
-// The detachment rule rides along for the same reason: EVERY bash-capable role runs a long
-// serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
-// one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
-// mid-measurement — an hour of budget and a booted server lost per role that learns it.
+// Process-safety rules prepended to EVERY agent prompt at the one `agent()` funnel: no
+// pattern-matched kills (they can TERM the caller's orchestrator), detach long legs from the tool's
+// shell manager (it group-reaps them), and never start a command with `sleep` (Claude Code 2.1.310+
+// refuses one of 25s+ with background tasks on; run_e2e.py turns those off too).
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -1955,12 +1689,17 @@ Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mod
 tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
 server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
 was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
-Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then wait on its log:
     cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
     # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
-Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
-you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
-the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
+Then wait in SEPARATE foreground calls, each a bounded loop that checks BEFORE it sleeps and ends inside
+the timeout you give that Bash call (the tool caps it at BASH_MAX_TIMEOUT_MS, 10 min by default):
+    timeout 540 bash -c 'until [ -s <leg_dir>/bench_summary.json ]; do sleep 30; done'; tail -5 run_bench.out
+Never START a command with a \`sleep\` (Claude Code refuses one of 25s or more), and never wait by ending
+your turn: your turn ending IS your return, so a Monitor, background-watcher or \`run_in_background\`
+notification lands after you are gone. Keep waiting until the summary lands or the leg is provably dead.
+Before you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and
+whether the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 
 ## ONCE THE FINAL PHASE STARTS, IT OWNS THE GPUS
 When \$EVAL_DIR/.final_phase_fence exists the search is over: the workflow stopped every leg, tuner and
@@ -1972,19 +1711,10 @@ function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
 }
 
-// Option A (Hyperloom #1202): near the deadline, tighten each OPTIMIZATION agent's hung-guard so no
-// in-flight step finishes later than (budget − reserve). The loop-tops stop STARTING new work at
-// TIME_HEAD_DEADLINE_MS, but one iteration is a SEQUENCE of agents (extract → bakeoff → author → verify)
-// each armed with the full AGENT_TIMEOUT_MS, and that sequence could overrun the reserve and starve
-// Finalize/Report/Validate (the #1202 stall was a 62min extract_op running into the SIGKILL). Final-phase
-// agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
-// retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
-//
-// Exemption is by POSITION, not by a caller-supplied label. Keying it on opts.phase ∈ ['Finalize',
-// 'Report','Validate'] failed OPEN: the Finalize-GATE runs before phase('Finalize') yet tagged its
-// integrator agents 'Finalize', so optimization work claimed unlimited time. FINAL_PHASE_STARTED is set
-// once, at the phase('Finalize') call site. Agents in flight when it flips keep the cap they were armed
-// with — work started before the final phase stays bounded.
+// Near the deadline, cap each OPTIMIZATION agent's hung-guard at (remaining − reserve), so a chain
+// of agents in one loop iteration can't overrun the reserve. Final-phase agents are exempt by
+// position (FINAL_PHASE_STARTED, set at the phase('Finalize') call site), not label: the
+// Finalize-gate tags its agents 'Finalize'. 2min floor; inert without time_budget_s.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
 const AGENT_TIMEOUT_FLOOR_MS = 120000;
@@ -1992,73 +1722,50 @@ function agentTimeoutFor() {
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(AGENT_TIMEOUT_FLOOR_MS, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
-// An agent started now would only get the floor above: the reserve has begun, or is under one floor
-// away, and the final phase has not started. Nothing measured fits in two minutes, and the guard that
-// fires then abandons the promise, not the agent -- so whatever starts here runs on, unwatched, on the
-// GPUs Finalize and Validate are about to need.
+// True when a new agent would only get the floor (reserve begun or under one floor away, final phase
+// not started): nothing measured fits, and the abandoned agent would keep using the GPUs.
 function atReserveFloor() {
   return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
     remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
 }
-// A required checkpoint commits a result that was already measured. Its writer copies and hashes the
-// replay assets, holds no GPU and starts nothing new, so the reserve cap does not bound it: that cap
-// gives a commit dispatched at the boundary the 2min floor, and the write takes 4-8min. The bound is
-// passed at one call site, requireE2EValidationCheckpoint, never keyed on a label. A writer that hangs
-// past it is still not retried beside itself: two writers leave the checkpoint's digests disagreeing
-// with its assets, and recovery rejects it.
+// A required checkpoint write (copy + hash, no GPU, 4-8min) is not bounded by the reserve cap: up to
+// 30min, passed only at requireE2EValidationCheckpoint. A hung writer is not retried beside itself
+// (two writers would leave digests disagreeing with assets).
 const CHECKPOINT_COMMIT_TIMEOUT_MS = 30 * 60000;
 function checkpointTimeoutFor() {
   return Math.max(agentTimeoutFor(), Math.min(AGENT_TIMEOUT_MS, CHECKPOINT_COMMIT_TIMEOUT_MS));
 }
 
-// ===========================================================================
-// GEAK-ABLATION-ARMS-v1 — phase-resumed cost ablations (research/ablations/README.md)
-// ===========================================================================
-// Inert unless args.ablation_arm names an arm. `''` and `A1` are the control:
-// every helper below returns its off-value, so the dispatched prompts and the
-// head loop are byte-identical to the pre-patch build.
-//
-// Math.random() and Date.now() throw in workflow scripts, so the audit draw is a
-// SEEDED hash of (seed, head) — which is also what the protocol requires: a
-// recorded seed that makes the continuation set reproducible across arms.
-// GEAK-ABLATION-ARMS-v2 canonical names. The wall-clock arm is B4-TIME because this
-// runtime is never told a price, so "$10 or 20 minutes" can only be the 20 minutes.
-// The routing arm is B5-EFFORT because a lower effort tier is the SAME model, not a
-// cheaper one: it is not evidence about a cheap/strong model cascade. B4/B5 remain
-// aliases so a v1 handoff still runs, and the resolved name goes in the return.
+// ABLATION ARMS — phase-resumed cost ablations (research/ablations/README.md).
+// Inert unless args.ablation_arm names an arm; `''` and `A1` are the control (every helper returns
+// its off-value). The audit draw is a seeded hash of (seed, head), reproducible across arms
+// (Math.random()/Date.now() throw here). B4-TIME caps wall-clock (the runtime never sees prices);
+// B5-EFFORT routes to a lower effort tier of the same model. B4/B5/B45 are accepted aliases.
 const ABL_RAW_ARM = String(A.ablation_arm || '').trim().toUpperCase();
 const ABL_ALIASES = { B4: 'B4-TIME', B5: 'B5-EFFORT', B45: 'B45-TIME-EFFORT' };
 const ABLATION_ARM = ABL_ALIASES[ABL_RAW_ARM] || ABL_RAW_ARM;
 const ABL_ACTIVE = ABLATION_ARM !== '' && ABLATION_ARM !== 'A1';
 const ABL = (arm) => ABLATION_ARM === arm || ABLATION_ARM === ABL_ALIASES[arm] ||
   (ABLATION_ARM === 'B45-TIME-EFFORT' && (arm === 'B4' || arm === 'B5'));
-// The kernel lane is a separate workflow script with its own args. laneArgs() used to
-// forward only use_learned_kb, so B6 -- which lives in the lane -- never switched on.
+// The kernel lane is a separate workflow with its own args; B6 lives there, so forward the arm.
 function ablLaneArgs() {
-  // A1 and the unset case forward NOTHING: the control's lane args must be byte-identical
-  // to the pre-patch build, not merely behaviourally inert.
+  // The control (A1 / unset) forwards nothing.
   if (!ABL_ACTIVE) return {};
   return { ablation_arm: ABL_RAW_ARM, ablation_seed: String(A.ablation_seed || '') };
 }
 const ABL_SEED = String(A.ablation_seed || 'geak-ablation-2026');
-// Pilot limits, NOT calibrated thresholds (study.json says so explicitly). The
-// dollar half of "$10 or 20 minutes" is unenforceable here: the workflow runtime
-// is never told what a call cost. Wall-clock is the half this layer owns.
-// v1 charged extraction, bake-off and authoring to ONE clock, so a head could be
-// killed for slow PREPARATION, or be admitted at 19 minutes and then author for hours.
-// v2 separates them: preparation, the implementation trial, and an audited
-// continuation each have their own cap. Validation is NOT cut by any of them -- it is
-// the run's own FINAL_RESERVE, and the arm must pay it in full.
+// Pilot wall-clock limits, not calibrated thresholds (see study.json): preparation, the
+// implementation trial and an audited continuation each have their own cap. Validation is never
+// cut; it is the run's FINAL_RESERVE.
 const ABL_IMPL_MS = parseInt(A.ablation_head_trial_ms != null ? A.ablation_head_trial_ms : 1200000, 10);
 const ABL_PREP_MS = parseInt(A.ablation_prep_ms != null ? A.ablation_prep_ms : 1200000, 10);
 const ABL_AUDIT_MS = parseInt(A.ablation_audit_ms != null ? A.ablation_audit_ms : ABL_IMPL_MS, 10);
-const ABL_HEAD_TRIAL_MS = ABL_IMPL_MS;                 // v1 name kept for the event log
+const ABL_HEAD_TRIAL_MS = ABL_IMPL_MS;                 // alias used by the event log
 const ABL_AUDIT_P = Number(A.ablation_audit_probability != null ? A.ablation_audit_probability : 0.1);
 const ABL_EVENTS = [];
 function ablEvent(o) { if (ABLATION_ARM) ABL_EVENTS.push(o); }
-// The elapsed clock is only armed when time_budget_s is supplied, so B4 without one
-// would silently never fire and report itself as "identical to A1" -- the one failure
-// mode that would quietly invalidate the whole comparison. Refuse to run instead.
+// B4 needs the elapsed clock, which only time_budget_s arms; without it B4 would silently
+// match A1, so refuse to run.
 if (ABL('B4') && TIME_BUDGET_MS == null) {
   throw new Error('ablation_arm=' + ABLATION_ARM + ' requires time_budget_s: without it the ' +
     'elapsed clock is never armed and the head trial gate can never fire.');
@@ -2068,15 +1775,9 @@ function ablDraw(key) {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return ((h >>> 0) % 1000000) / 1000000;
 }
-// B4 readiness: promote to measurement ONLY for an exact non-incumbent candidate
-// that compiled, was correct, and actually integrated on the frozen workload.
-// Readiness is not a gain claim -- adoption still needs the unchanged A/B harness.
-// v1 accepted "isolated > 1 and some patch-like field", which is a SPEEDUP claim wearing
-// readiness' clothes. v2 returns the evidence itself: an exact candidate identity hash,
-// whether that identity differs from the frozen incumbent, and the compile/correctness
-// records the authoring layer actually produced. Integration is reported, never inferred
-// -- at the pre-author gate nothing has been integrated yet, and saying otherwise is how
-// a gate starts promoting unmeasured candidates.
+// B4 readiness (not a gain claim; adoption still needs the A/B): an exact candidate identity hash
+// that differs from the frozen incumbent, plus the compile/correctness records the authoring layer
+// produced. Integration is reported, never inferred.
 function ablCandId(c) {
   const body = [c && c.final_patch, c && c.code_patch, c && c.apply_env, c && c.apply_flags,
     c && c.tuning_artifact, c && c.kernel_eval_dir].map((x) => String(x || '')).join('\u0000');
@@ -2093,9 +1794,8 @@ function ablCandEvidence(c, incumbentId) {
     candidate_id: id,
     has_identity: !!id,
     non_incumbent: !!id && id !== incumbentId,
-    // The kernel layer only emits final_patch after its immutable oracle passed, and the
-    // bake-off only reports a winner after it ran. Those are the compile/correctness
-    // records available here; nothing else is claimed.
+    // final_patch exists only after the kernel layer's oracle passed, and a bake-off winner only
+    // after it ran: the only compile/correctness records available here.
     compile_ok: !!(c && (c.final_patch || c.code_patch || c.tuning_artifact || c.apply_env || c.apply_flags)),
     correctness_ok: !!(c && (c.kind === 'authored' ? c.final_patch : c.isolated > 0)),
     integration_ok: !!(c && c.integration_ok),      // only the e2e A/B can set this
@@ -2109,9 +1809,8 @@ function ablHeadReady(cands, ext, incumbentId) {
     return e.has_identity && e.non_incumbent && e.compile_ok && e.correctness_ok;
   });
 }
-// B5 router: cheap tier ONLY for bounded tasks with an objective validator, never
-// for authoring, oracles, or adjudication, and never on a retry (attempt > 0
-// escalates with the failure attached, charging both attempts to the task).
+// B5 router: low effort only for bounded tasks with an objective validator (never authoring,
+// oracles or adjudication) and never on a retry, which escalates with the failure attached.
 const ABL_CHEAP_LABELS = /^(storage:reclaim|bakeoff |extract_op |roofline )/;
 function ablEffortFor(opts, attempt) {
   if (!ABL('B5') || attempt > 0) return null;
@@ -2143,19 +1842,16 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTim
   ]);
 }
 
-// Attempts the hung-agent guard gave up on inside the reserve, by label. Each is still running, and
-// for an integrator its eventual return is the verdict of the A/B it was measuring
-// (adoptAbandonedVerdict).
+// Attempts the hung-agent guard abandoned inside the reserve, by label. Each is still running; an
+// integrator's eventual return is its A/B verdict (adoptAbandonedVerdict).
 const ABANDONED_RUNS = new Map();
 
 async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      // B5-EFFORT is a CASCADE, not a coin flip: the escalated attempt must see what the
-      // cheap attempt actually produced, or it is just an independent retry at a higher
-      // tier. Both attempts are charged to the task. Inert for every other arm, so A1's
-      // retry prompt stays byte-identical.
+      // B5-EFFORT is a cascade: the escalated retry sees the cheap attempt's failure (both are
+      // charged to the task). Inert for every other arm.
       const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
@@ -2182,13 +1878,10 @@ async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) 
   return null;
 }
 
-// --- FlyDSL provisioning gate -------------------------------------------------
-// Design intent (roles/system_architect.md §0a): the MOMENT strategize routes a flydsl backend onto
-// any head/kernel candidate, FlyDSL must be provisioned via the ensure_flydsl expert skill BEFORE any
-// consumer can select it. We enforce it in the ORCHESTRATOR — not by trusting the architect LLM to have
-// run it — so "decide to use flydsl" and "ensure_flydsl" are one inseparable step. The detect->reuse-or-build
-// decision lives ENTIRELY inside ensure_flydsl.sh (its own version gate: import flydsl + kernels.moe_gemm_2stage
-// AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2). is_flydsl_available() is NOT used to decide anything.
+// --- FlyDSL provisioning gate ----
+// Once strategize routes a flydsl backend onto any candidate, the orchestrator (not the architect
+// LLM) runs the ensure_flydsl skill before any consumer can select it (roles/system_architect.md
+// §0a). Reuse-or-build is decided only by ensure_flydsl.sh's own version gate.
 let flydslProvisioned = false;   // guard so the two call sites (strategize / re-strategize) provision at most once
 const _wantsFlydsl = (c) => ((c && c.candidate_backends) || []).some((b) => String(b).toLowerCase() === 'flydsl');
 const flydslRouted = (...queues) => queues.some((q) => (q || []).some(_wantsFlydsl));
@@ -2229,9 +1922,8 @@ const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
 // parse_profile.short_name truncates display names at 60 chars; a declared name that hit the limit
 // is our own doing, so a prefix match at it is accepted rather than read as a mismatch.
 const SHORT_NAME_LIMIT = 60;
-// Balanced groups are removed innermost-first until the symbol stops changing. One greedy pass
-// spans from the FIRST opener to the LAST closer, so `k<a>(t<b>)` loses the '(' that marks the end
-// of the name, and a nested `k<pair<a,b>>` leaves the leftover delimiter behind.
+// Removes balanced groups innermost-first until the symbol stops changing (a single greedy pass
+// would span `k<a>(t<b>)` from the first opener to the last closer).
 const stripBalanced = (symbol, opener, closer) => {
   const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const rx = new RegExp(`${esc(opener)}[^${esc(opener)}${esc(closer)}]*${esc(closer)}`, 'g');
@@ -2242,42 +1934,27 @@ const stripBalanced = (symbol, opener, closer) => {
   }
   return text;
 };
-// Must stay identical to canonical_kernel_name in kernel_selection.py -- the JS gate and the Python
-// verdict compare the same two symbols, so any drift lets a kernel pass one side and fail the other.
-// Parentheses are stripped as balanced groups rather than by cutting at the first '(': ROCm spells
-// the unnamed namespace `(anonymous namespace)`, which puts a parenthesis BEFORE the kernel, so
-// cutting there collapsed every such symbol to the return type `void`, and two unrelated kernels
-// that both collapsed to `void` then certified each other. Brackets go the same way, which subsumes
-// the `[clone .1]` rule: this pipeline appends its own annotations to a kernel name
-// (`_fwd_grouped_kernel_stage1 [sliding_attention]`, `main_kernel[prefill]`), and rocprof spells
-// memory ops `Memcpy DtoD (Device -> Device)`. The return type is then dropped by name and the FIRST
-// identifier taken, as parse_profile.short_name does; taking the last whitespace token also drops
-// `void`, but on any of those annotated spellings it answers with the annotation.
+// Must stay identical to canonical_kernel_name in kernel_selection.py (the JS gate and the Python
+// verdict compare the same symbols). Brackets, templates and parentheses are stripped as balanced
+// groups, not cut at the first '(' (ROCm's `(anonymous namespace)` precedes the kernel name, and
+// annotations like `[clone .1]`, `[prefill]` or `(Device -> Device)` follow it); then the return type
+// is dropped and the FIRST identifier taken, as parse_profile.short_name does.
 function canonicalDeviceKernel(s) {
   const stripped = stripBalanced(stripBalanced(
     stripBalanced(String(s || ''), '[', ']'), '<', '>'), '(', ')');
-  // Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
-  // store kernel names elided mid-template. The name is what precedes that opener; reading on
-  // instead lifts a fragment out of the template arguments and states it with the same confidence
-  // as a real name, which then matches the wrong kernel rather than refusing.
-  // Removing a group also leaves a gap where it stood, and an unnamed namespace sits mid-
-  // qualification: `at::native::(anonymous namespace)::CatArrayBatchedCopy` becomes
-  // `at::native:: ::CatArray...`, where the identifier probe stops at the space.
+  // A leftover opener never closes (the name was elided mid-template), so the name is what precedes
+  // it. Gaps left by removed groups are closed around `::` (`at::native:: ::CatArray...`).
   const cut = stripped.split(/[<([]/)[0].trim().replace(/\s*::\s*/g, '::');
   const match = /^[\w:]+/.exec(cut.replace(/^void\s+/, ''));
   return match ? match[0].split('::').pop().toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
 }
-// A name that hit the display limit ends mid-token, so no word boundary can follow it. Tested both
-// ways because either side may be the shortened one: heads carry a short_name while traces carry
-// the full symbol, and which is which is not fixed.
+// A name at the display limit ends mid-token (no word boundary follows). Called both ways: either
+// side may be the shortened one (heads carry short_name, traces the full symbol).
 const truncatedPrefix = (needle, haystack) =>
   needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
-// [arguments, closed] for the symbol's first `<...>`. Reading only what follows the `<` keeps this
-// independent of the return type and namespace, which one side routinely spells and the other does
-// not. `closed` is false when the symbol was cut off inside the template -- profile artifacts elide
-// long names, and only the visible part of an elided argument list can be held against anything.
-// Separators become `_` rather than vanishing, so `<128, 4, ...>` cannot read as a prefix of
-// `<128, 48, ...>`.
+// [arguments, closed] for the symbol's first `<...>`, independent of return type and namespace.
+// `closed` is false when the name was elided inside the template. Separators fold to `_`, so
+// `<128, 4, ...>` is not a prefix of `<128, 48, ...>`.
 function templateArguments(value) {
   const text = String(value || ''), start = text.indexOf('<');
   const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_');
@@ -2293,10 +1970,8 @@ function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
   if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
-  // The base token deliberately drops template arguments so a bare declared name can match its
-  // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
-  // it certifies the wrong kernel: one capture here held 20 distinct kernels named
-  // at::native::vectorized_elementwise_kernel, separated only by their functor.
+  // The base token drops template arguments so a bare name matches its decorated spelling; when
+  // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
   if (!xa || !ya) return true;
   if (xc && yc) return xa === ya;
@@ -2313,10 +1988,8 @@ function requiredDeviceKernel(h) {
 }
 const candidateSpec = (c) =>
   String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
-// A declared depth is a STRUCTURAL claim about the call chain. It orders candidates before any
-// runtime evidence exists, so a value that is absent or not a finite number is unusable: `Number()`
-// turns it into NaN, every comparison against it is silently false, and a genuinely deeper candidate
-// stops being able to outrank anything. Refuse the candidate instead of ranking it as depth 0.
+// A declared depth orders candidates before any runtime evidence; a missing or non-finite one
+// returns null so the candidate is refused (NaN would silently break every comparison).
 const candidateDepth = (c) => {
   const depth = Number(c && c.depth);
   return Number.isFinite(depth) ? depth : null;
@@ -2486,11 +2159,8 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       why: fused
         ? `fused head must select the whole-operation op_seam, got '${selectedRole || 'unknown'}'`
         : `selected target role '${selectedRole || 'unknown'}' is not a deployable inner/op seam` };
-  // "Deepest" is settled by the profiler's OBSERVED host-span nesting (kernel_selection.py computes
-  // deeper_live_candidates from it), not by the declared `depth`. The declared integer is a claim by
-  // the same agent whose choice is under review, and an appended candidate carrying a large depth
-  // would otherwise outrank a genuinely deeper one. The structural claim is still checked, but only
-  // as an ADDITIONAL way to fail: it can never buy a pass that the observed nesting did not grant.
+  // "Deepest" is settled by the profiler's OBSERVED nesting (kernel_selection.py's
+  // deeper_live_candidates), not the agent-declared `depth`, which can only add a failure.
   const observedDeeper = (verdict.deeper_live_candidates || [])
     .map((value) => String(value || '').trim()).filter(Boolean);
   if (observedDeeper.length)
@@ -2509,15 +2179,10 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
 }
 
-// The Architect restates each head and has emitted the row's classification (library_gemm,
-// triton_kernel) as entity_kind. The profiled row is the authority: a head whose device_kernel
-// matches a profiled gpu_kernel row takes that row's entity_kind.
-// Every row kind is evidence, not only gpu_kernel rows: canonicalization drops the namespace, so
-// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as parse_profile.py guards.
-// Exact names decide first; a canonical match that reaches rows of different kinds is ambiguous.
-// A row is identified by its most specific name only: a display short_name is shared across
-// distinct kernels (every vectorized_elementwise_kernel instantiation), so it must not stand in for
-// a concrete symbol the row already carries.
+// The profiled row, not the Architect's restated entity_kind, is the authority: a head adopts
+// gpu_kernel only if every row its device_kernel matches is a named gpu_kernel row (exact names
+// first; a canonical match folds `aten::mul` with `mul`). Rows are identified by their most
+// specific name, since one short_name is shared across instantiations.
 function adoptProfiledEntityKind(head, rows) {
   if (!head || head.entity_kind === 'gpu_kernel' || !head.device_kernel) return false;
   const want = String(head.device_kernel).trim();
@@ -2531,21 +2196,13 @@ function adoptProfiledEntityKind(head, rows) {
   return true;
 }
 
-// A selection verdict may travel as `selection_validation_ref` (a task-local path + SHA-256)
-// instead of inline JSON. RESOLVING that ref means reading and hashing a file, which this script
-// cannot do (see RUNTIME SANDBOX CONTRACT). The resolver therefore lives in
-// scripts/kernel_extraction_delivery.mjs::hydrateExtractionVerdicts, which the extractor runs as
-// its own preflight -- so by the time a return reaches the workflow the ref is already resolved.
-//
-// This is the backstop for the case that is NOT supposed to happen: a return that still carries an
-// unresolved ref. It is recorded as an explicit evidence error, never passed through as an inline
-// claim of PASS -- kernelSelectionVerified then has no verdict to read and the head is re-extracted
-// or flagged. The ref transport is offered only inside the kernel-extract skill, and AgentX returns
-// from extractWithBaseline before this runs, so no shipped path reaches the error branch today.
+// A selection verdict may arrive as `selection_validation_ref` (path + SHA-256). This script cannot
+// read or hash files (see RUNTIME SANDBOX CONTRACT), so the extractor's preflight
+// (scripts/kernel_extraction_delivery.mjs::hydrateExtractionVerdicts) resolves it. Backstop: a ref
+// still unresolved here becomes an explicit evidence error, never an inline PASS.
 function guardUnhydratedVerdicts(ext) {
   if (!ext || typeof ext !== 'object') return ext;
-  // A hydration that RAN and failed already said why (bad path, hash mismatch, wrong contract).
-  // That is the more specific diagnosis, so it wins; this guard is only for a ref nothing tried.
+  // A hydration that ran and failed already gave the more specific diagnosis, so it wins.
   if (ext.selection_evidence_error) return ext;
   const phases = Array.isArray(ext.phase_selection_validations) ? ext.phase_selection_validations : [];
   const unresolved = (row) => !!(row && row.selection_validation_ref && !row.selection_validation);
@@ -2578,9 +2235,8 @@ function admitHeads(queue, stage) {
         reason: `entity_kind=${head.entity_kind || 'missing'}; gpu_kernel required` });
       continue;
     }
-    // A gpu_kernel head with NO device identity at all makes requiredDeviceKernel return '', and
-    // kernelSelectionVerified then passes it as "not a profiled GPU-head extraction". That vacuous
-    // pass is the whole contract switched off for this head, so refuse it at admission instead.
+    // A gpu_kernel head with no device identity would pass kernelSelectionVerified vacuously
+    // ("not a profiled GPU-head extraction"), so refuse it at admission.
     if (!requiredDeviceKernel(head)) {
       log(`  ⚠️ FLAG ${label}: entity_kind=gpu_kernel but no device_kernel/short_name/name; ` +
         `there is no profiled symbol to verify a seam against (${stage}).`);
@@ -2607,20 +2263,10 @@ const hasFrozenBaseline = (ext) =>
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
 
-// What the SHIPPED envelope must still prove, re-asserted in pure JS on this side of the handoff.
-//
-// scripts/agentx_kernel_preparation.mjs ran the full gate (schema, frozen baseline, UT status,
-// source delivery, declared-kernel boundary) against the on-disk RETURN.json while packing, and
-// refused the packing outright if any completed task failed. But that gate ran in a different
-// process and its output reaches us THROUGH AN AGENT (see RUNTIME SANDBOX CONTRACT: this script
-// cannot open the delivery file to compare). A reply that was truncated, paraphrased, or assembled
-// by hand would otherwise be taken at face value, and a UT that never passed would be A/B'd as a
-// win. These are exactly the per-candidate invariants the old reader re-derived; they are cheap,
-// they need no filesystem, and they are checked both at intake (readAgentXPreparation) and again
-// at dispatch (reusePreparedUT), because carried state round-trips through args in between.
-//
-// What genuinely cannot be re-checked here is anything requiring bytes on disk: the RETURN.json
-// hash and the kernel_src snapshot. Those remain preparation's alone.
+// Re-asserts in pure JS what the shipped envelope must still prove. agentx_kernel_preparation.mjs
+// gated the on-disk RETURN.json while packing, but its output reaches us through an agent (see
+// RUNTIME SANDBOX CONTRACT), so a truncated or hand-built reply must not pass. Checked at intake
+// (readAgentXPreparation) and at dispatch (reusePreparedUT); on-disk hashes stay preparation's job.
 function preparedUtDefect(kernel, result, phase) {
   if (!result || typeof result !== 'object')
     return 'prepared UT carries no validated result; re-pack the delivery with --emit-prepared';
@@ -2644,10 +2290,8 @@ function preparedUtDefect(kernel, result, phase) {
   return '';
 }
 
-// Hand an optimization lane the UT preparation validated, after re-asserting the invariants above.
-// A candidate with no prepared_ut.result never came through that gate at all, so it fails closed.
-// KNOWN LIMIT (accepted): a task dir mutated between packing and dispatch is not detected, because
-// detecting it means re-hashing kernel_src and this script has no filesystem.
+// Hand an optimization lane the UT preparation validated, after re-asserting the invariants above;
+// no prepared_ut.result fails closed. Known limit: a task dir mutated after packing is not detected.
 function reusePreparedUT(kernel) {
   const fail = (why) => ({ smoke: 'fail', unittest_smoke: 'fail',
     smoke_detail: `prepared UT is no longer valid: ${why}` });
@@ -2660,18 +2304,11 @@ function reusePreparedUT(kernel) {
     smoke: 'pass', unittest_smoke: 'pass' };
 }
 
-// AgentX consumes a prepared UT and fails locally if its evidence is missing or stale.
-// Fixed-load runs invoke kernel_extractor and GUARANTEE it froze a real baseline. safeAgent already retries
-// transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
-// task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
-// to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
-// existing extract-failure path (smoke/unittest_smoke -> 'fail' + a reason) so the head is flagged
-// (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
-// are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
-// site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
-// Authoring may overlap. GPU commands use the skill's per-device lock contract:
-// disjoint devices can validate concurrently; shared devices wait at execution.
-// Keep failures local so each caller can flag/skip its UT without cancelling peers.
+// AgentX reuses its prepared UT. Otherwise run kernel_extractor and, while smoke passes but the
+// baseline is not frozen or the kernel selection is unverified, re-invoke it with a corrective (up to
+// BASELINE_EXTRACT_RETRIES); if still incomplete, return an extract failure so the head is flagged
+// or skipped, never timed against its own scaffold. Failures stay local to the caller; GPU work
+// uses the skill's per-device locks.
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   const head = (inputs && inputs.KERNEL) || {};
@@ -2718,7 +2355,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       `(${selection.ok ? 'kernel selected' : selection.why}; ` +
       `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
       `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
-    // Best-effort reclaim before the agent retries (issue #429 storage amplification).
+    // Best-effort capture reclaim before the agent retries.
     if (ext && ext.task_dir) {
       try {
         const { execFileSync } = require('child_process');
@@ -2762,12 +2399,9 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
-  // source_delivery_required is set ONLY by the AgentX preparation reader, and that mode returns at
-  // the reusePreparedUT branch above -- where the requirement was already discharged, by
-  // scripts/kernel_source_delivery.mjs::verifySourceDelivery running inside checkPreparedUT at
-  // packing time. So reaching here means a head demanded source evidence down a path that cannot
-  // produce it: the check needs to read and hash kernel_src, and this script has no filesystem
-  // (see RUNTIME SANDBOX CONTRACT). Fail closed rather than let the requirement silently lapse.
+  // source_delivery_required is set only by the AgentX preparation reader, whose mode returned at
+  // reusePreparedUT (verifySourceDelivery ran at packing). Reaching here means source evidence is
+  // required on a path that cannot hash kernel_src (no filesystem), so fail closed.
   if (smokeOk(ext) && head.source_delivery_required === true) {
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail', source_delivery_failed: true,
       smoke_detail: 'source delivery incomplete: this head requires source evidence, but it was ' +
@@ -2780,31 +2414,21 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
 // verdict. gate:'incomplete' or ab_complete:false means a leg is still missing.
 const abDone = (integ) => !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
 
-// An e2e delta is a RATIO. These are the two numbers it is a ratio of, taken
-// off the same A/B that produced it: ref_med is where the workload stood
-// before this win, cand_med is where it stood after. Published together, a
-// consumer can restate the win in points of one fixed baseline. Published
-// alone, the only thing a consumer can do is add percentages that were each
-// measured against a different denominator, and those do not compose.
+// Publish an e2e delta with its two medians from the same A/B (ref_med before the win, cand_med
+// after), so consumers can restate wins against one fixed baseline; bare percentages don't compose.
 const e2eFrom = (integ) => ({
   e2e_delta_pct: integ.e2e_delta_pct,
   base_tput: integ.ref_med,
   new_tput: integ.cand_med,
 });
-// The KERNEL_RESULT that a given integrate A/B actually gated. Both patch spellings are read at the
-// call sites because the two tracks fill different ones (head=code_patch, milestone=final_patch) and
-// tryCorrectiveReauthor deliberately sets BOTH to the corrected patch.
+// The KERNEL_RESULT a given integrate A/B gated. Call sites read both patch spellings
+// (head=code_patch, milestone=final_patch; tryCorrectiveReauthor sets both).
 const krOf = (inputs) => (inputs && inputs.KERNEL_RESULT) || {};
 
-// Bank an accepted win, carrying the fields a KB reader needs to REPLAY it on another box.
-// e2e_store.py:_accepted_kernels starts from dict(item) so anything here survives verbatim into the
-// record — but it LOOKS UP `name`, `language`, `isolated_speedup` and `patch`, while this workflow
-// only ever pushed `short_name`, `backend` and `isolated`. Every accepted kernel was therefore
-// matched by nothing and silently dropped on the way into the store, which is why both e2e records
-// already in the remote KB were written with accepted_kernels:[] and no patch at all. The old
-// spellings stay (the report, the resume state and run_e2e.py all read them); the aliases are added
-// alongside. `e.patch` wins over the KERNEL_RESULT's because a corrective re-author supplies the
-// FIXED patch and the gated one is the broken kernel.
+// Bank an accepted win with the fields a KB reader needs to replay it elsewhere. e2e_store.py's
+// _accepted_kernels keeps every field but looks up `name`, `language`, `isolated_speedup` and
+// `patch`, so those aliases sit beside short_name/backend/isolated (read by the report, resume state
+// and run_e2e.py). `e.patch` wins: a corrective re-author supplies the fixed patch.
 const bankAccepted = (list, e, kr) => {
   const k = kr || {};
   list.push({
@@ -2822,16 +2446,16 @@ const bankAccepted = (list, e, kr) => {
   });
 };
 
-// An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
-// verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
-// can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
-// Finalize/Report/Validate keep the rest.
+// An integrator abandoned at the reserve boundary is still measuring; with no FINISH retry allowed
+// inside the reserve, its late return is this A/B's only verdict. Wait for it through at most the
+// first LATE_VERDICT_RESERVE_FRAC of the reserve, never into AGENTX_FINAL_PHASE_MS.
 const LATE_VERDICT_RESERVE_FRAC = 0.25;
 async function adoptAbandonedVerdict(integ, label) {
   const run = ABANDONED_RUNS.get(label);
   ABANDONED_RUNS.delete(label);
   if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
-  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  const waitMs = remainingMs() - Math.max(Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC)),
+    AGENTX_FINAL_PHASE_MS);
   if (!(waitMs > 0)) return integ;
   log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
     'for its own verdict instead of starting a FINISH retry.');
@@ -2850,17 +2474,77 @@ async function adoptAbandonedVerdict(integ, label) {
   return late;
 }
 
-// Run ONE integrate A/B and GUARANTEE both legs complete. The first call does a
-// normal apply+gate; if the integrator returns incomplete (ran only ref, hung,
-// or degraded mid-A/B) we RE-INVOKE it in resume mode to run the MISSING leg,
-// up to AB_FINISH_RETRIES times. General contract used by every integrate site
-// (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
-// reference leg alone — it is driven to a complete ref+cand measurement.
+// Run ONE integrate A/B and GUARANTEE both legs complete: if the integrator returns incomplete,
+// re-invoke it in resume mode for the missing leg (up to AB_FINISH_RETRIES). Every integrate site
+// uses this, so an A/B never ends after the reference leg alone.
+const SPEEDUP_REVIEW_RESULTS = new Map();
+async function reviewSpeedup(integ, inputs, label, phaseName) {
+  const kr = inputs.KERNEL_RESULT || {};
+  const pct = kr.pct_gpu_time || 0, isolated = kr.verified_isolated_speedup || 0;
+  if (!abDone(integ) || !['accepted', 'stack'].includes(integ.gate) || integ.output_parity === 'fail'
+      || !speedupNeedsReview(pct, isolated, integ) || confirmedSpeedup(integ)) return integ;
+  if (integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
+  const original = integ.measurement_evidence || {};
+  const estimate = speedupEstimate(pct, isolated, integ);
+  // Cache by measurement AND candidate/reference inputs. Returning the same cached A/B cannot
+  // restart a review, including when Finalize revisits a pending integration.
+  const key = JSON.stringify([original, kr, inputs.CURRENT_OVERLAY, inputs.CURRENT_FLAGS,
+    inputs.CURRENT_ENV, inputs.WORKLOAD, integ.ref_med, integ.cand_med]);
+  if (SPEEDUP_REVIEW_RESULTS.has(key)) return SPEEDUP_REVIEW_RESULTS.get(key);
+  const pending = { ...integ, speedup_review: { status: 'inconclusive', original_measurement: original, estimate },
+    reason: 'speedup_review_inconclusive: independent A/B confirmation unavailable' };
+  SPEEDUP_REVIEW_RESULTS.set(key, pending);
+  log(`  ${label}: speedup review (+${integ.e2e_delta_pct}% vs estimate +${estimate.estimate_pct.toFixed(2)}%, ` +
+    `${estimate.pct_gpu_time}% GPU, ${estimate.source}); one independent A/B, no kernel rewrite.`);
+  if (!['measurement_id', 'candidate_digest', 'reference_digest', 'workload_digest', 'ref_summary', 'cand_summary']
+      .every((field) => typeof original[field] === 'string' && original[field].length > 0)) {
+    pending.reason = 'speedup_review_inconclusive: original A/B provenance missing; cannot bind a confirmation';
+    return pending;
+  }
+  if (searchClosed(`${label}: speedup review`)) return pending;
+  const reviewInputs = { ...inputs, FORCE_FRESH_AB: true, RESUME_AB: false, REUSE_REF: false,
+    REPLICAS: Math.max(2, Number(inputs.REPLICAS) || 1),
+    CAND_OVERLAY_DIR: integ.accepted_overlay || '',
+    SPEEDUP_REVIEW: { original_measurement: original, estimate },
+  };
+  delete reviewInputs.SHARED_REF_MED;
+  // A confirmation abandoned at the boundary confirms nothing.
+  if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {
+    pending.reason = 'speedup_review_inconclusive: deferred, the confirmation A/B cannot finish before the final reserve';
+    return pending;
+  }
+  const fresh = await safeAgent(roleAgent('e2e_integrator', 'integrate',
+    'Confirm this surprising speedup with ONE independent A/B. Follow FORCE_FRESH_AB in your role: ' +
+    'use separate ref/cand artifact directories, preserve the exact candidate and current reference, ' +
+    'measure at least two replicas per leg and repeat the configured correctness and engagement gates. ' +
+    'Do not reuse old benchmark legs or rewrite the kernel. Amdahl is an estimate, never a correctness verdict. ' +
+    'Return the fresh measurements and their provenance; if the gain reproduces, accept even above the estimate.',
+    reviewInputs), { phase: phaseName, label: `${label} speedup review`, schema: INTEGRATE_SCHEMA }, 1);
+  let result = pending;
+  if (fresh && fresh.ab_complete === true && fresh.gate !== 'incomplete') {
+    const checked = { ...fresh, speedup_review: { status: 'confirmed', original_measurement: original, estimate } };
+    if (confirmationEvidenceMatches(checked)) {
+      if (fresh.gate === 'accepted' && fresh.output_parity === 'pass'
+          && ['accuracy', 'byte_exact'].includes(fresh.parity_kind)) result = checked;
+      else if (fresh.gate === 'rejected' || fresh.output_parity === 'fail') {
+        result = { ...checked, gate: 'rejected', speedup_review: { ...checked.speedup_review, status: 'rejected' } };
+      }
+    }
+  }
+  SPEEDUP_REVIEW_RESULTS.set(key, result);
+  return result;
+}
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
+  // Incomplete, so callers keep it PENDING, not rejected.
+  if (abWindowShort(abLegs(inputs), label)) {
+    return { gate: 'incomplete', ab_complete: false,
+      reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
+  }
   // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
   // off / when no tuning was banked).
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+    PROFILE_TOPN_JSON: (profile && profile.profile_topN_json) || '',
     ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
   };
   let integ = await adoptAbandonedVerdict(await safeAgent(
@@ -2869,6 +2553,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
     if (searchClosed(`${label}: FINISH retry`)) break;
+    if (abWindowShort(1, `${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
@@ -2883,12 +2568,18 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
+  integ = await reviewSpeedup(integ, withTuning, label, phaseName);
   if (integ && integ.short_name) {
-    const candidateId = String(integ.short_name).replace(/[^A-Za-z0-9_.-]+/g, '_');
-    const accepted = integ.gate === 'accepted' || integ.gate === 'stack';
+    // Preserve every candidate's review when several backends share one head short_name.
+    const measurementId = (integ.measurement_evidence && integ.measurement_evidence.measurement_id) || withTuning.CAND_TAG || '';
+    const candidateId = [integ.short_name, measurementId].filter(Boolean).join('_').replace(/[^A-Za-z0-9_.-]+/g, '_');
+    const kr = withTuning.KERNEL_RESULT || {};
+    const accepted = integAccepted(integ, kr.pct_gpu_time, kr.verified_isolated_speedup);
+    const reviewPending = integ.speedup_review && ['pending', 'inconclusive'].includes(integ.speedup_review.status);
     await persistE2EValidationCheckpoint(`overlay/candidate_${candidateId}/e2e_validation.json`, {
-      phase: 'Overlay', validation_level: 'integrator', gate: integ.gate || 'incomplete',
-      committed: accepted, validation_status: accepted ? 'accepted_intermediate' : 'incomplete',
+      phase: 'Overlay', validation_level: 'integrator', gate: reviewPending ? 'incomplete' : (integ.gate || 'incomplete'),
+      committed: accepted, validation_status: accepted ? 'accepted_intermediate' : (reviewPending ? 'speedup_review_pending' : 'incomplete'),
+      integration_result: integ,
       baseline_throughput_tok_s: integ.ref_med || 0,
       final_throughput_tok_s: integ.cand_med || integ.e2e_throughput_tok_s || 0,
       throughput_speedup: (integ.ref_med && integ.cand_med) ? integ.cand_med / integ.ref_med : 0,
@@ -2911,12 +2602,9 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   return integ;
 }
 
-// Lightweight SURGICAL FIX (Tier 1 of the corrective). One focused kernel_surgeon agent reads the reject
-// diagnosis + the failing kernel + the live call seam (from the task's meta.json), makes the SMALLEST
-// edit that fixes the defect WITHOUT giving up the isolated win, self-verifies on the IMMUTABLE unittest
-// (correctness PASS + geomean preserved), and emits a final_patch. Returns a fix object shaped like the
-// kernel_workflow result ({final_patch, final_geomean, eval_dir, authored}) so the corrective re-gate path
-// is identical, or null if it could not produce a verified patch (=> escalate to the heavy re-author).
+// Lightweight SURGICAL FIX (Tier 1 of the corrective): one kernel_surgeon agent makes the smallest
+// fix that keeps the isolated win, self-verifies on the immutable unittest, and returns a
+// kernel_workflow-shaped result, or null to escalate to the heavy re-author.
 const SURGEON_SCHEMA = obj({
   fixed: { type: 'boolean' }, final_patch: { type: 'string' }, final_geomean: { type: 'number' },
   eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
@@ -2945,17 +2633,11 @@ async function trySurgicalFix(spec, reason, fixClass, attempt) {
   return null;
 }
 
-// Reusable CORRECTIVE RE-AUTHOR (general; used by every head-integration site, any mode). A head
-// candidate that PASSED the isolated oracle and ENGAGED live but was REJECTED at the e2e gate for a
-// FIXABLE integration reason (JIT/DSL kernel lazily compiling in TP>1 warmup -> NO_BINARY_FOR_GPU /
-// cuda_graph_capture_unsafe / capture hang / host-sync) earns up to HEAD_CORRECTIVE_MAX cheap fix-and-
-// retries: re-OPTIMIZE the EXISTING kernel (keep the algorithm + isolated win; fix only the integration
-// posture), then re-run the both-legs e2e A/B. This is NOT a new head discovery, so it does NOT consume
-// HEAD_BUDGET; it is bounded per head and skipped once the kernel-phase wall-clock deadline has fired.
-// spec: { short_name, op_kind, shapes, dtype, regime, gpu_id, kernel_eval_dir, task_dir, language,
-//         isolated, base_inputs (the integrate inputs template, carries KERNEL_RESULT), reason,
-//         cur:{overlay,flags,env,tput} }.  Returns { banked, integ, isolated } (banked=false if
-// ineligible or still rejected). See knowledge/learned/method-cudagraph-safe-integration.
+// CORRECTIVE RE-AUTHOR, used by every head-integration site. A candidate that passed the isolated
+// oracle and engaged live but was rejected at the e2e gate for a fixable class (rejectClass) gets up
+// to HEAD_CORRECTIVE_MAX fix-and-retries of the EXISTING kernel, each re-gated by a both-legs A/B.
+// Not charged to HEAD_BUDGET; skipped once the deadline fired. spec.base_inputs is the integrate
+// inputs template; spec.cur = {overlay,flags,env,tput}. Returns { banked, integ, isolated, ... }.
 async function tryCorrectiveReauthor(spec) {
   let reason = spec.reason || '';
   // Which fix-and-retry class is this reject? '' = terminal (not auto-correctable).
@@ -2964,11 +2646,8 @@ async function tryCorrectiveReauthor(spec) {
     && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
   if (!eligible) return { banked: false };
   const curTput = (spec.cur && spec.cur.tput) || 0;
-  // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
-  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy fail or an
-  // implausible speedup), i.e. the kernel over-fit the single captured snapshot. Both KEEP the
-  // algorithm + isolated win and fix only the defect. GENERIC — the text describes the failure CLASS,
-  // never this specific kernel/model.
+  // Class-specific, generic instructions: `integration` = wrong posture (JIT/capture/host-sync);
+  // `correctness` = wrong live output. Both keep the algorithm and isolated win.
   const INTEGRATION_FIX_TASK =
     `Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
     `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
@@ -2993,14 +2672,13 @@ async function tryCorrectiveReauthor(spec) {
     `state across calls or assume the previous call's indices/mask still apply. (3) If you use atomics/scatter-add ` +
     `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
     `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
-    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
-    `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
+    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
     log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
-    // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
+    // TIER 1: lightweight surgical patch (one agent, minutes).
     let fix = await trySurgicalFix(spec, reason, fixClass, cAttempt);
     const viaSurgical = !!(fix && fix.final_patch && (fix.final_geomean || 0) > 1.0);
-    // TIER 2 — escalate to the HEAVYWEIGHT kernel_workflow re-author ONLY if the surgical patch failed.
+    // TIER 2: the heavyweight kernel_workflow re-author, only if the surgical patch failed.
     if (!viaSurgical) {
       try {
         fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
@@ -3009,8 +2687,7 @@ async function tryCorrectiveReauthor(spec) {
           op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
           use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-          // A corrective must KEEP the isolated win; adopting a stored patch over it would be exactly the
-          // re-discovery the task forbids. History is still readable, just never auto-applied.
+          // Keep the isolated win: KB history is readable but never auto-applied here.
           ...KB_ARGS, warm_start: WARM_START_OFF ? KB_ARGS.warm_start : 'reference',
           budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
@@ -3026,16 +2703,15 @@ async function tryCorrectiveReauthor(spec) {
       return { banked: false };
     }
     log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; iso geomean ${(fix.final_geomean || 0).toFixed(2)}. Re-gating e2e.`);
-    // Re-gate the FIXED kernel. Preserve the caller's KERNEL_RESULT SHAPE (head=authored/code_patch,
-    // milestone=editable/final_patch) and only swap in the corrected patch + eval_dir + iso speedup, so the
-    // helper is track-agnostic. Set BOTH patch fields to the new patch — the integrator reads whichever
-    // matches its apply mode; leaving the other stale would re-apply the broken kernel.
+    // Re-gate the fixed kernel in the caller's KERNEL_RESULT shape, swapping in the corrected patch,
+    // eval_dir and speedup. Both patch fields get the new patch; a stale one would re-apply the bug.
     const base = spec.base_inputs || {};
     const fixInputs = { ...base,
       KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
         code_patch: fix.final_patch, final_patch: fix.final_patch,
         authored_kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || (base.KERNEL_RESULT && base.KERNEL_RESULT.authored_kernel_eval_dir) || '',
         verified_isolated_speedup: fix.final_geomean,
+        pct_gpu_time: spec.pct_gpu_time || (base.KERNEL_RESULT && base.KERNEL_RESULT.pct_gpu_time) || 0,
         corrective_fix_of: reason } };
     if (spec.cur) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
@@ -3046,31 +2722,21 @@ async function tryCorrectiveReauthor(spec) {
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
-    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
-    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
-    const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
-      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
-    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
-      // Carry the CORRECTED patch out to the caller's bankAccepted. The gated KERNEL_RESULT at the
-      // call site still holds the broken kernel, and recording that into the KB would publish a
-      // patch that was rejected on this very box as if it were the win.
+    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && integ2.e2e_throughput_tok_s > curTput) {
+      // Carry the corrected patch out to bankAccepted: the call site's KERNEL_RESULT still holds the
+      // rejected one.
       return { banked: true, integ: integ2, isolated: fix.final_geomean, patch: fix.final_patch,
         kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || '' };
     }
-    reason = implausible2
-      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
-      : ((integ2 && (integ2.reason || integ2.gate)) || reason);
-    // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
-    // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
-    // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
-    // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
-    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
-      log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
+    reason = gateRejectReason(integ2, pctForGuard, fix.final_geomean) || reason;
+    // Structured stop, not a re-classification of the prose reason: once parity no longer fails, a
+    // throughput or review issue cannot justify another correctness rewrite.
+    if (ab2 && integ2.output_parity !== 'fail') {
+      log(`  ${spec.short_name}: corrective has no bankable e2e win (${reason}) — stopping kernel rewrites.`);
       break;
     }
     log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
-    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
+    fixClass = rejectClass(reason);
     if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
@@ -3078,11 +2744,9 @@ async function tryCorrectiveReauthor(spec) {
   return { banked: false };
 }
 
-// --- FAST-MODE wall-clock control (no-op unless FAST_MODE) -------------------------------------------
-// Date.now()/new Date() are unavailable in workflow scripts (they would break resume), so the budget is
-// enforced with setTimeout: (1) a one-shot deadline flag that stops the head loop from STARTING new ops,
-// and (2) fastBoundedWorkflow() which races each nested kernel workflow against a per-head cap so the
-// in-flight op can't overrun. Both are inert when FAST_MODE is off → default path is byte-identical.
+// --- FAST-MODE wall-clock control (no-op unless FAST_MODE) ----
+// Date.now() is unavailable here (it would break resume), so budgets use setTimeout: a one-shot flag
+// stops the head loop STARTING new ops, and fastBoundedWorkflow() caps each nested kernel workflow.
 let FAST_DEADLINE_HIT = false;
 if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) {
   setTimeout(() => {
@@ -3090,39 +2754,51 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
-// workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
-// existing null-guards treat it as "no kernel" and continue.
-// GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
-// before each nested author. A budget the parent cannot enforce on in-flight work is not
-// a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
-// no ablation cap, and then this function behaves exactly as it did pre-patch.
+// A nested kernel workflow raced against the tightest of the fast-mode cap, B4's remaining
+// implementation cap (ABL_NESTED_CAP_MS, set by the head loop; null = none) and the trace-replay
+// reserve bound. On expiry it resolves null, which callers treat as "no kernel".
 let ABL_NESTED_CAP_MS = null;
-function fastBoundedWorkflow(ref, wfArgs, label) {
+async function fastBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
   const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
-  const capMs = ablCap != null && fastCap != null ? Math.min(ablCap, fastCap) : (ablCap != null ? ablCap : fastCap);
+  const resCap = laneReserveCapMs();
+  const capMs = [ablCap, fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => {
+    if (capMs === resCap) return logLaneAtReserve(label);
+    log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
+    if (ablCap != null && capMs === ablCap) {
+      ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
+    }
+  });
+}
+// Milestone lanes: the trace-replay reserve bound alone.
+async function reserveBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
+  const capMs = laneReserveCapMs();
+  if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => logLaneAtReserve(label));
+}
+function raceLaneCap(p, capMs, onCap) {
   let to;
   const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-      if (ablCap != null && capMs === ablCap) {
-        ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
-      }
-      resolve(null);
-    }, capMs);
+    to = setTimeout(() => { onCap(); resolve(null); }, capMs);
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+function logLaneAtReserve(label) {
+  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning (null).`);
+}
 
-// --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) -------------------------------------------
-// Same mechanism as fast mode: a one-shot deadline flag stops the deep head scheduler from starting NEW
-// co-opt waves once the 20h HeadKernel budget is spent (the in-flight wave + Finalize/Validate still run),
-// and deepBoundedWorkflow() caps each nested kernel_workflow BURST so a slow backend can't stall the
-// per-wave barrier. Both inert when DEEP_MODE is off → default/fast paths byte-identical.
+// --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) ----
+// Same mechanism: a one-shot flag stops NEW co-opt waves once the HeadKernel budget is spent, and
+// deepBoundedWorkflow() caps each nested kernel_workflow burst so one backend can't stall a wave.
 let DEEP_DEADLINE_HIT = false;
 if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
   setTimeout(() => {
@@ -3130,13 +2806,9 @@ if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
     log(`[deep-mode] HeadKernel budget (${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h) reached — no NEW co-opt waves will start; finishing the in-flight wave then proceeding to Finalize/Validate.`);
   }, DEEP_HEAD_BUDGET_MS);
 }
-// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) -----------------------------
-// fast/deep have their own deadline flags (capped above); the DEFAULT pipeline had NO time awareness at
-// all — its Milestone editable-kernel loop and head bake-off track could run past the orchestrator's kill.
-// Mirror the fast/deep mechanism with ONE general flag: stop STARTING new head/milestone work after 60% of
-// the effective budget (same 60/40 carve as fast — leaves the tail for the in-flight task + Finalize/
-// Report/Validate). Active in ALL modes when time_budget_s is set (harmless for fast/deep, which stop even
-// earlier on their own flags); fully inert (never registered) when time_budget_s is absent => byte-identical.
+// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) ----
+// One flag for every mode: stop STARTING new head/milestone work at TIME_HEAD_DEADLINE_MS, leaving
+// the tail for in-flight work and Finalize/Report/Validate.
 let TIME_DEADLINE_HIT = false;
 if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HEAD_DEADLINE_MS > 0) {
   setTimeout(() => {
@@ -3144,10 +2816,8 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
     log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
   }, TIME_HEAD_DEADLINE_MS);
 }
-// --- RESERVE BOUNDARY ---------------------------------------------------------------------------
-// TIME_DEADLINE_HIT above only stops STARTING new head/milestone work; it does not bound the
-// Finalize-gate that sits between it and phase('Finalize'), whose unbounded drain loop ate the whole
-// reserve in the 20260823 sessions. This is the one flag saying "the reserve has begun": a single
+// --- RESERVE BOUNDARY ----
+// The one flag saying "the reserve has begun" (it also bounds the Finalize-gate drain): a single
 // absolute setTimeout, so unlike remainingMs() it cannot drift. Inert without time_budget_s.
 let TIME_FINAL_DEADLINE_HIT = false;
 if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME_BUDGET_EFFECTIVE_MS > 0) {
@@ -3163,10 +2833,8 @@ function searchClosed(what) {
   log(`[time-budget] ${what} SKIPPED — the final reserve has begun.`);
   return true;
 }
-// The tuning loop is hours of GPU work (a tuner sweep over every GPU, then a pre/post A/B of two serving
-// legs) under ONE agent, which the reserve boundary can abandon but not stop: started too close to the
-// reserve, it runs on into Finalize and Validate and takes their GPUs. On a large model the whole loop
-// took ~5h, so it starts only with this much left before the reserve. tuning_min_window_s=0 disables.
+// The tuning loop is hours of GPU work under ONE agent, which the reserve can abandon but not stop,
+// so it starts only with this much left before the reserve. tuning_min_window_s=0 disables.
 const _tuningMinWindowS = parseInt(A.tuning_min_window_s, 10);
 const TUNING_MIN_WINDOW_MS = (Number.isFinite(_tuningMinWindowS) && _tuningMinWindowS >= 0
   ? _tuningMinWindowS : 21600) * 1000;   // 6h
@@ -3191,12 +2859,77 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+// --- TRACE-REPLAY SEARCH vs THE RESERVE ----
+// Trace-replay lanes and A/Bs start only if they fit before the boundary (inert off AgentX/time_budget_s).
+const AGENTX_LANE_ROUND_S = 3600;    // a lane round in flight at its stop, plus the lane's report
+const AGENTX_EXTRACT_S = 4200;       // kernel extraction
+const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
+const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
+// A reused or resumed reference leg is not run again.
+const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
+// A leg timed over several passes costs that many legs (an upper bound under warm_server).
+const agentxAbMs = (legs, passes = 1) =>
+  1000 * (legs * passes * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
+const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
+// need() reads AGENTX, so it runs only once the guard holds.
+function windowShort(need, what, verdict, cost) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = need();
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} ${verdict} — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min ${cost}.`);
+  return true;
+}
+// An A/B that cannot finish is deferred (incomplete, pending), not abandoned mid-leg at the boundary.
+function abWindowShort(legs, what, passes = 1) {
+  return windowShort(() => agentxAbMs(legs, passes), what, 'DEFERRED',
+    `a ${legs}-leg trace-replay A/B${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes`);
+}
+// A lane needs one round before its stop plus the A/B for what it found.
+function laneWindowShort(what) {
+  return windowShort(agentxLaneStartMs, what, 'NOT STARTED', 'a kernel lane and its A/B need');
+}
+// Every search candidate needs kernel extraction and a lane; without both the run ends early.
+function searchWindowShort(what) {
+  return windowShort(() => AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs(), what, 'SKIPPED',
+    'kernel extraction plus one kernel lane and its A/B need. Going straight to Finalize and Validate');
+}
+// kernel_lane.js starts no round after deadline_epoch, so the stop is a lane tail ahead of the boundary;
+// no_stop_s past the window leaves the TechLead free to end it early. No clock (Date.now() breaks
+// resume): ONE `date +%s` read, anchored to ELAPSED_MS; unreadable, only the backstop bounds the lane.
+const CLOCK_SCHEMA = obj({ epoch: { type: 'number' } }, ['epoch']);
+let EPOCH_AT_T0 = null;
+async function epochNow(phaseName) {
+  if (EPOCH_AT_T0 == null) {
+    EPOCH_AT_T0 = safeAgent('Run EXACTLY this command and nothing else:\n```bash\ndate +%s\n```\n' +
+      'Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.',
+      { phase: phaseName, label: 'clock', effort: 'low', schema: CLOCK_SCHEMA }, 1, () => 5 * 60000)
+      .then((r) => (r && Number.isFinite(r.epoch) ? Math.floor(r.epoch) - Math.floor(ELAPSED_MS / 1000) : null));
+  }
+  const t0 = await EPOCH_AT_T0;
+  if (t0 == null) EPOCH_AT_T0 = null;
+  return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
+}
+async function laneDeadlineArgs(label, phaseName) {
+  if (!agentxGuardsOn()) return {};
+  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  if (!(stopInS > 0)) return {};
+  const now = await epochNow(phaseName);
+  if (now == null) {
+    log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
+    return {};
+  }
+  log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
+    `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
+  return { deadline_epoch: now + stopInS, no_stop_s: stopInS + 86400 };
+}
+// Backstop: never wait for a lane past the boundary.
+const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
 
-// GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
-// physical card ids from a pool so two concurrent isolated jobs never share a GPU -> their op-bench /
-// kernel-layer speed measurements never contend. Deadlock-free: a waiter holds 0 cards while queued and
-// acquires its full count atomically (no hold-and-wait). Uses only Promises/arrays (no Date.now/Math.random,
-// which the Workflow runtime forbids).
+// GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
+// leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
+// a waiter holds no cards and acquires its full count atomically.
 function makeSem(ids) {
   const free = ids.slice(); const waiters = [];
   const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
@@ -3210,14 +2943,12 @@ function makeSem(ids) {
   };
 }
 
-// ===========================================================================
-// SINGLE-KERNEL PASS-THROUGH: delegate straight to the unchanged kernel layer.
-// ===========================================================================
+// ---- SINGLE-KERNEL PASS-THROUGH: delegate straight to the kernel layer ----
 if (!MODEL_PATH && KERNEL_PATH) {
   phase('Setup');
   log(`Single-kernel pass-through -> ${KERNEL_WF_SCRIPT} on ${KERNEL_PATH}`);
-  // Recurse into the UNCHANGED kernel layer via the native workflow() primitive (one allowed level of
-  // nesting). kernel_workflow.js returns {eval_dir, final_geomean, final_patch, validation_status, ...}.
+  // Recurse into the kernel layer via workflow() (one allowed level of nesting); it returns
+  // {eval_dir, final_geomean, final_patch, validation_status, ...}.
   let passthru;
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
@@ -3243,15 +2974,10 @@ if (!MODEL_PATH && KERNEL_PATH) {
   return { mode: 'single_kernel', kernel_path: KERNEL_PATH, ...(passthru || {}) };
 }
 
-// OP-IDENTITY GUARD — a fused-MoE / grouped-expert GEMM must be optimized AS the fused op at its live
-// dispatcher seam, never decomposed into standalone dense GEMMs (a dense candidate has no live call site
-// → no_rebind_seam). So force op_kind='moe' (the grouped-GEMM branch; gemmSynthFor keys on this to keep
-// dense synth OFF). The head is never SKIPPED — editability is irrelevant, since a non-editable fused
-// kernel is still backend-swapped at its (editable) dispatcher. GENERIC: detects via the Architect's
-// is_fused_kernel OR the profile class/name; never keys on a backend name.
-// Module-scoped so EVERY strategize/re-strategize call site applies it identically — the initial
-// Strategize, the post-config re-strategize, and the post-tuning one — instead of only the first.
-// Admission runs here too, so a call site cannot tag identity and then forget to admit.
+// OP-IDENTITY GUARD: a fused-MoE / grouped-expert GEMM is optimized AS the fused op at its live
+// dispatcher seam (a dense GEMM candidate has no live call site), so tag it op_kind='moe' (keeps
+// gemmSynthFor's dense synth off); it is never skipped. Detected from is_fused_kernel or the
+// profile class/name. Shared by every strategize call site, and it also admits the queue.
 const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
   /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
     .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
@@ -3259,7 +2985,7 @@ function applyOpIdentityGuard(queue, stage) {
   let tagged = 0;
   for (const c of (queue || [])) {
     if (!_isFusedOp(c)) continue;
-    c.op_kind = 'moe';                                                                // grouped-GEMM branch (gemmSynthFor → no dense synth)
+    c.op_kind = 'moe';
     tagged++;
   }
   const admitted = admitHeads(queue, stage);
@@ -3267,30 +2993,13 @@ function applyOpIdentityGuard(queue, stage) {
   return admitted;
 }
 
-// ===========================================================================
-// MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
-// ===========================================================================
-// A stored e2e record holds a WHOLE launch configuration, not a delta — the only form replayable on
-// a box whose baseline nobody recorded. Replaying it means combining it with the baseline THIS run
-// was handed, which under Hyperloom it does not own (interface/run_e2e.py seeds
-// `initial_extra_server_args` from EXPLORE and sets `config_tune: "false"`, so no later sweep
-// corrects anything either).
-//
-// That combination used to be a string concatenation performed by an agent, and it was wrong in a
-// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS`/`$EXTRA_ENV` straight
-// into argparse and `env`, both last-wins. So when the baseline and the record each pin
-// `--context-length`, which one applies is decided by the order the agent happened to write them
-// in. Lose that coin flip and the server runs the baseline twice: ~0% delta, no complaint in any
-// log — the flag WAS honoured, just not with the recorded value — and a record that wins is filed
-// as `rejected`, the one outcome the whole warm start exists to avoid.
-//
-// So the merge is arithmetic, done here, and it reports what it did — the same rule the launcher
-// already applies to one flag by hand (`adapters/sglang.sh` and `--watchdog-timeout`), generalized
-// and moved to where the string is built. The output names every key once, so last-wins never votes.
+// ---- MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED ----
+// A stored e2e record holds a WHOLE launch configuration. The launcher's flag/env expansion is
+// last-wins, so a key both sides pin would apply in join order; merge here instead, naming every key
+// once and reporting what changed.
 
-// Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
-// deduping it would silently drop adapters, while everything else in these configs is a scalar
-// where a second occurrence is a mistake we are here to remove. Grow it only with evidence.
+// Flags that may legitimately repeat (deduping `--lora-path` would drop adapters); every other flag
+// here is a scalar. Grow it only with evidence.
 const REPEATABLE_FLAGS = new Set(['--lora-path', '--lora-paths']);
 
 const _looksLikeFlag = (t) => /^--?[A-Za-z]/.test(t);
@@ -3330,15 +3039,10 @@ const renderEnvItems = (items) => items.map(
   (it) => (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
 
 /**
- * Key-by-key merge of a recovered configuration onto this run's baseline.
- *
- * The recovered value WINS on a collision — it is the thing being tested, and applying the
- * baseline's value instead would test nothing. It wins IN PLACE, so the baseline's ordering
- * survives and the output contains each key once.
- *
- * Returns `{ merged, overrides, added, unchanged }`. `overrides` is the part that has to reach a
- * human and the tuner: it is the list of knobs where this box disagreed with the record, and it is
- * the first thing to look at when a replay comes back neutral.
+ * Key-by-key merge of a recovered configuration onto this run's baseline. The recovered value wins
+ * a collision IN PLACE (it is what is being tested), so baseline order survives and each key appears
+ * once. Returns `{ merged, overrides, added, unchanged }`; `overrides` lists the knobs where this box
+ * disagreed with the record.
  */
 function mergeConfig(baseline, recovered, { parse, render, repeatable }) {
   const out = parse(baseline).map((it) => ({ ...it }));
@@ -3371,17 +3075,9 @@ const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
   { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
 
 /**
- * Which trial actually ran, and what it measured. Once a repair pass exists, `trials[0]` and
- * `best_throughput_tok_s` are both the wrong place to read it from:
- *   * after a repair `trials[0]` is the corpse of the verbatim replay and the LAST trial is the one
- *     that came up. Taking `kept`/`parity`/notes from the corpse makes a repaired config unadoptable
- *     by construction and feeds its launch error to the `inert` regex, which then reads a successful
- *     repair as "the config never took effect".
- *   * the role returns THE BASELINE in `best_throughput_tok_s` when nothing was kept. Filing that as
- *     `measured_tok_s` writes a perfect 0.00% delta onto a record that was never measured.
- *
- * So: the last trial carrying a positive throughput, and `best` only when it is a number the
- * baseline cannot be mistaken for.
+ * Which trial actually ran, and what it measured: the LAST trial with a positive throughput (after a
+ * repair, trials[0] is the failed verbatim replay), and `best_throughput_tok_s` only when it differs
+ * from the baseline (the role returns the baseline there when nothing was kept).
  */
 function measuredTrialOf(sweep, baselineTput) {
   const trials = (sweep && Array.isArray(sweep.trials)) ? sweep.trials : [];
@@ -3394,12 +3090,8 @@ function measuredTrialOf(sweep, baselineTput) {
 }
 
 /**
- * Knobs the merged configuration asked for that the thing which actually ran does not carry.
- *
- * `repair.dropped_flags` is optional and the role often expresses the repair as a second trial and
- * leaves it empty. The string it benched is on the trial either way, so the drop list is recoverable
- * by subtraction — and without it `applied_partial` reads false on a run that dropped something,
- * which is the difference between "the record lost" and "most of the record lost".
+ * Knobs the merged configuration asked for that the trial that ran does not carry, recovered by
+ * subtraction (`repair.dropped_flags` is optional and often empty), so `applied_partial` is right.
  */
 function droppedByDiff(mergedFlags, mergedEnv, applied) {
   const app = String(applied || '').trim();
@@ -3423,27 +3115,21 @@ const describeOverrides = (overrides) => (overrides || []).map(
   (o) => `${o.flag} ${o.baseline_value == null ? '(unset)' : o.baseline_value} -> ` +
     `${o.recalled_value == null ? '(set)' : o.recalled_value}`).join('; ');
 
-// ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
-// ===========================================================================
-// Module A's outputs. They are folded into the ORDINARY state variables at those variables' real
-// declaration sites further down. Module A must run BEFORE Profile so the Top-N is taken on the
-// adopted config. Their off-values are 0 / '' / [], which makes each fold a no-op when the feature is off.
+// Module A's outputs, folded into the ordinary state variables at their declarations below (Module A
+// runs BEFORE Profile so the Top-N is taken on the adopted config). Off-values make each fold a no-op.
 let kbSeedTput = 0;
 let kbSeedOverlay = '';
 const kbSeedKernels = [];
-// Spread into the Strategize and ConfigSweep inputs. Stays `{}` unless Module A measured something:
-// `{...{}}` contributes no own-properties and preserves key order, so those two prompts are
-// byte-identical to the pre-feature build on an off run.
+// Spread into the Strategize and ConfigSweep inputs; stays {} unless Module A measured something.
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
-// The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
-// while packing (and refused the packing if any completed task had invalid evidence), and this
-// script cannot read EVAL_DIR itself -- see RUNTIME SANDBOX CONTRACT. Throwing here is how the
-// caller's repair_delivery retry is armed, so every malformed reply must throw rather than degrade
-// to an empty queue that would read as "nothing to optimize".
+// The envelope arrives in the reply: this script cannot read EVAL_DIR (RUNTIME SANDBOX CONTRACT).
+// Every malformed reply THROWS, which arms the caller's repair_delivery retry; an empty queue would
+// read as "nothing to optimize".
 function readAgentXPreparation(reply) {
   const prepared = reply && reply.prepared;
   if (!prepared || typeof prepared !== 'object')
@@ -3451,11 +3137,8 @@ function readAgentXPreparation(reply) {
       '--emit-prepared and return its stdout verbatim');
   for (const key of ['head_candidates', 'kernel_candidates'])
     if (!Array.isArray(prepared[key])) throw new Error(`prepared.${key} must be an array`);
-  // Re-assert the per-candidate invariants the old on-disk reader re-derived. The envelope came
-  // through an agent, so "the packer said it was fine" is a claim about a file we cannot open --
-  // see preparedUtDefect. A bad candidate THROWS rather than being dropped: the caller's
-  // repair_delivery retry is the recovery, and a silently shortened queue would read as
-  // "nothing left to optimize" and end the run looking successful.
+  // Re-assert each candidate's invariants (preparedUtDefect); a bad one THROWS rather than being
+  // silently dropped.
   const defects = [];
   for (const c of [...prepared.head_candidates, ...prepared.kernel_candidates]) {
     const why = !c || !c.prepared_ut ? 'carries no prepared_ut'
@@ -3536,10 +3219,8 @@ if (want('setup')) {
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
       EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
-      // Non-empty ONLY on a declared trace replay. The Director writes it to
-      // $EVAL_DIR/bench_env.sh in step 3, BEFORE the baseline bench in step 5,
-      // so the baseline is measured on the real client and the real metric axis
-      // rather than a synthetic sweep. Empty => the Director writes nothing.
+      // Only on a declared trace replay: the Director writes it to $EVAL_DIR/bench_env.sh before
+      // the baseline bench, so the baseline uses the real client and metric axis.
       ...(AGENTX_ENV ? { BENCH_ENV_CONTENT: AGENTX_ENV } : {}),
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -3583,6 +3264,7 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
+  SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
   if (IS_AGENTX) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
@@ -3592,16 +3274,9 @@ if (want('setup')) {
   }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
-  // BASELINE_TPUT is the denominator of every gain this run will report, so a
-  // baseline accidentally measured with the synthetic client on the output axis
-  // does not just mis-state one number -- it silently rebases the entire run,
-  // and the mismatch is invisible in the result afterwards. The declaration
-  // travels through an AGENT (the Director writes bench_env.sh), so confirm the
-  // effect rather than trusting the instruction: the file has to exist and the
-  // baseline summary has to carry the metric basis we asked for.
-  // Positive mismatch => abort now, while one bench has been spent instead of
-  // a full budget. Unreadable summary => say so loudly and continue, since the
-  // measurement itself may still be fine and a false abort is its own failure.
+  // BASELINE_TPUT is the denominator of every reported gain, and the declaration travels through an
+  // agent, so confirm bench_env.sh exists and the baseline summary carries the requested metric
+  // basis. A mismatch aborts now; an unreadable summary warns and continues.
   if (IS_AGENTX) {
     let verdict = null;
     try {
@@ -3657,11 +3332,8 @@ print(json.dumps(res))
         log(`Setup: trace-replay declaration verified (bench_env.sh present, ` +
           `baseline metric_basis=${verdict.basis}).`);
       }
-      // Now that something has actually been served, take the kernel-targeting
-      // shape from the measurement instead of from a declaration or a constant.
-      // A caller who declared a shape explicitly keeps it: they may be targeting
-      // a regime deliberately, and overriding that silently would be its own
-      // surprise.
+      // Take the kernel-targeting shape from what the baseline served, unless the caller declared
+      // one explicitly.
       if (SHAPE_IS_MEASURED) {
         log(`Setup: keeping the declared kernel-targeting shape isl=${ISL} osl=${OSL} ` +
           `(provenance ${WORKLOAD_SHAPE_PROVENANCE}); the baseline served ` +
@@ -3681,20 +3353,9 @@ print(json.dumps(res))
 
   // =========================================================================
   // MODULE A — read the deployment KB, then VALIDATE what it says on this box.
-  //
-  // Placed HERE, and not earlier, for three reasons that are each load-bearing:
-  //   * EVAL_DIR, bench_e2e.sh, BASELINE_TPUT and NOISE_BAND do not exist until Setup returns, and a
-  //     candidate cannot be judged without a baseline to judge it against.
-  //   * it is before Profile, so the Top-N is captured on the ADOPTED config. This is the same
-  //     discipline the flow already asserts by re-profiling after ConfigSweep: a config change moves
-  //     which kernels dominate, and routing off a stale profile optimizes the wrong ops.
-  //   * it is INSIDE want('setup'), so a phase-partial resume cold-starts automatically rather than
-  //     re-reading and re-benching a store on every phase invocation.
-  //
-  // Nothing below is trusted on the store's word. A stored speedup was measured on another box, on
-  // another day, against another baseline; the only thing that makes it actionable here is that this
-  // run re-measured it through the same gate a fresh idea would face.
-  // =========================================================================
+  // After Setup (needs EVAL_DIR, bench_e2e.sh, BASELINE_TPUT, NOISE_BAND), before Profile (Top-N on
+  // the adopted config), inside want('setup') (a phase-partial resume cold-starts). A stored speedup
+  // counts only once this run re-measures it through the same gate.
   if (E2E_WARM_START_ON) {
     phase('WarmStart');
     KB_DIMS = {
@@ -3705,14 +3366,11 @@ print(json.dumps(res))
       rocm_version: String(setup.rocm_version || '').trim(),
     };
     if (!KB_DIMS.gfx) {
-      // Refuse to read rather than read the wrong page. An arch-less identity resolves to the
-      // `gfx=unknown` rung, whose records were measured on hardware we cannot establish — and the
-      // cost of believing one is a 20-40min server launch, not a wasted lookup.
+      // Refuse to read rather than read the wrong page: an arch-less identity resolves to the
+      // `gfx=unknown` rung, measured on unknown hardware.
       log('[kb] warm start skipped: read_reason=missing_arch (the Director reported no gfx; a ' +
         'cross-arch config is not a candidate, it is a guess).');
-      // Still a recall FACT worth reporting: "we did not look, and here is why" is not the same
-      // report as "we looked and the store was empty", and the reader cannot tell them apart from
-      // an absent section.
+      // Still reported: "did not look, and why" differs from "looked and found nothing".
       KB_RECALL.e2e = { read_reason: 'missing_arch', tried: [], answered: '', match_tier: '',
         plane: E2E_KB_PLANE, mode: E2E_WARM_START, candidates: 0, configs: [], kernels: [] };
     } else {
@@ -3732,24 +3390,16 @@ print(json.dumps(res))
           `--top-n ${E2E_WARM_START_TOP_N} \\\n` +
           `  --min-speedup ${E2E_WARM_START_MIN_SPEEDUP} \\\n` +
           `  --refs-dir ${shq(refsDir)} --cache-dir ${shq(cacheDir)} \\\n` +
-          // The read leaves this run's KB ADDRESS on disk as a side effect, at the one moment the
-          // dimensions are known and the process is still healthy. Module B below is the happy
-          // path; when this process dies before reaching it (6 of the 9 measured runs on
-          // 20260821-22), run_e2e.py salvages the numbers from disk and needs this file to know
-          // which pages they belong on. Free: no extra agent, no second formatting of the dims.
-          // --store/--identity-plane are recorded, not used, by the read: a `both` run reads
-          // remote-first, so without them the file would tell the salvage writer "remote" and lose
-          // the local mirror this run was configured to keep.
+          // The read also leaves this run's KB address on disk, so run_e2e.py can salvage results
+          // onto the right pages if this process dies before Module B. --store/--identity-plane are
+          // only recorded (so a `both` run's salvage keeps its local mirror).
           `  --identity-out ${shq(KB_IDENTITY_FILE)} \\\n` +
           `  --store ${shq(E2E_KB_STORE_DIR)} --identity-plane ${E2E_KB_PLANE}`) + '\n' +
         '```',
         { phase: 'WarmStart', label: 'warm_start:resolve', schema: KB_RESOLVE_SCHEMA }) || {};
       const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
-      // Log the ladder VERBATIM. On a scheme with no search, "never recorded" and "recorded under an
-      // address one segment different" are the same 404, and this line is the only record of which
-      // question was actually asked — without it a silent identity drift looks like an empty store.
-      // `read_plane` is which plane ANSWERED, `plane` only which was asked for. Falls back for a
-      // resolve emitted by an older build, whose JSON has no `read_plane`.
+      // Log the ladder VERBATIM: it is the only record of which address was asked, so identity drift
+      // isn't mistaken for an empty store. `read_plane` is the plane that ANSWERED (`plane` if absent).
       KB_READ_PLANE = String(resolved.read_plane || resolved.plane || '');
       log(`[kb] e2e read: plane=${KB_READ_PLANE || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
         `answered=${resolved.canonical_id || '?'} tier=${resolved.match_tier || '-'} ` +
@@ -3771,9 +3421,8 @@ print(json.dumps(res))
           `below_min_speedup=${curation.below_min_speedup || 0} (floor ${curation.min_speedup}). ` +
           'This is a FLOOR result, not a cold deployment.');
       }
-      // Record the ASK before anything is benched. If this process dies mid-warm-start the report
-      // still knows which ladder was queried, and on a zero-candidate read this is the entire
-      // finding — see KB_RECALL's declaration for why the address matters more than the count.
+      // Record the ask before anything is benched, so a mid-warm-start death still reports which
+      // ladder was queried.
       KB_RECALL.e2e = {
         read_reason: String(resolved.read_reason || ''),
         tried: Array.isArray(resolved.tried) ? resolved.tried : [],
@@ -3784,39 +3433,29 @@ print(json.dumps(res))
         recall_metric_strict: E2E_KB_METRIC.strict, recall_metric_source: E2E_KB_METRIC.source,
         measurement_metric_basis: kbMeasurementBasis(),
         candidates: cands.length, configs: [], kernels: [],
-        // Both floors, always: "what did this run decline to see, and at what threshold" is not
-        // answerable after the fact from a candidate list.
+        // Both floors, always: what this run declined to see, and at what threshold.
         read_min_speedup: E2E_WARM_START_MIN_SPEEDUP,
         bench_min_speedup: E2E_WARM_START_BENCH_MIN_SPEEDUP,
         curation,
       };
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
-      // Armed on the same condition and never separately: the cache holds nothing until a candidate
-      // is materialized, and a path to an empty directory reads to an agent as "the file is missing"
-      // rather than "there was no record", which are very different things to act on.
+      // Armed on the same condition: a path to an empty cache reads to an agent as "the file is
+      // missing" rather than "there was no record".
       if (cands.length) KB_CACHE_DIR = cacheDir;
 
-      // How many of the offers are worth a server launch. A coarse rung gets its own (smaller)
-      // budget rather than zero — see E2E_WARM_START_VALIDATE_N_COARSE for why the stored number's
-      // incomparability bounds how much we spend guessing, not whether the guess can be measured.
+      // How many offers are worth a server launch; a coarse rung gets its own smaller budget
+      // (E2E_WARM_START_VALIDATE_N_COARSE), not zero.
       const exactTier = (resolved.match_tier || '') === 'exact';
       const benchN = E2E_WARM_START_REF_ONLY ? 0
         : exactTier ? E2E_WARM_START_VALIDATE_N
         : A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N
         : E2E_WARM_START_VALIDATE_N_COARSE;
-      // WHICH offers, once we know how many. The page came back ordered by absolute throughput (the
-      // resolve default), and on a coarse rung that throughput was measured at some other tp or
-      // workload point, so it ranks the offers by the one quantity that did not survive the move.
-      // Re-order by the rung's own metric — speedup — so the launch is spent on the record that
-      // claims the biggest RATIO, which is what the store promotes its coarse champions on. Note the
-      // page was still FETCHED by throughput, so this reorders a throughput-biased top-N; making the
-      // fetch itself follow the rung metric belongs in e2e_store.resolve, not here.
+      // WHICH offers: on a coarse rung the stored throughput was measured elsewhere, so re-order by
+      // speedup (the rung's own metric). The top-N itself was still fetched by throughput.
       const benchOrder = exactTier ? cands : [...cands].sort(
         (x, y) => (Number(y.speedup) || 0) - (Number(x.speedup) || 0));
-      // The floor that spends money, applied HERE and not in the read. A record under it keeps its
-      // place in the offer, its bundle in the cache and its paragraph in the roles' context, and
-      // loses only the launch. No speedup recorded stays benchable: an unanswerable test is not a
-      // failed one.
+      // The bench floor: a record under it stays an offered reference and loses only the launch.
+      // A record with no stored speedup stays benchable.
       const aboveBenchFloor = (c) =>
         c.speedup == null || Number(c.speedup) >= E2E_WARM_START_BENCH_MIN_SPEEDUP;
       const benchable = benchOrder.filter(aboveBenchFloor);
@@ -3839,8 +3478,7 @@ print(json.dumps(res))
           `comparable to this baseline; the A/B below is measured on this box and is what counts.`);
       }
 
-      // Seeded with the records the bench floor declined. `skipped` is outside the attestable set
-      // on purpose: the ledger counts what was TRIED on hardware, and this was not.
+      // Seeded with the records the bench floor declined; `skipped` is never attested (not tried).
       const verdicts = belowBenchFloor.map(c => ({
         ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a', outcome: 'skipped',
         why: `stored speedup ${c.speedup}x is below the bench floor of ` +
@@ -3852,11 +3490,8 @@ print(json.dumps(res))
             outcome: 'skipped', why: 'the final reserve began before its turn' });
           continue;
         }
-        // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
-        // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
-        // same parity check and the same swap-took-effect log grep the flow already trusts for a
-        // fresh idea. Reusing it rather than writing a warm-start harness is the whole reason a
-        // stored config and a proposed config are judged by identical evidence.
+        // VALIDATE THROUGH THE ORIGINAL GATE (config_tuner:sweep), so a stored config and a fresh
+        // one are judged by identical evidence.
         const stored = (c.accepted_config && typeof c.accepted_config === 'object') ? c.accepted_config : {};
         const storedFlags = String(stored.flags || '');
         const storedEnv = String(stored.env || '');
@@ -3865,8 +3500,7 @@ print(json.dumps(res))
             outcome: 'skipped', why: 'the record carries no config to apply' });
           continue;
         }
-        // Key-by-key, not string-concatenated — see mergeConfig. The recorded value wins every
-        // collision; `overrides` is the list of knobs where this box and the record disagreed.
+        // Key-by-key merge (mergeConfig): the recorded value wins every collision.
         const mf = mergeFlags(curFlags, storedFlags);
         const me = mergeEnv(curEnv, storedEnv);
         const overrides = mf.overrides.concat(me.overrides);
@@ -3875,10 +3509,8 @@ print(json.dumps(res))
             `knob(s) this run's baseline already pins — ${describeOverrides(overrides)}. ` +
             'The recorded value is the one under test, so it wins.');
         }
-        // Nothing left to test. Not a verdict on the record and not worth a server launch: this
-        // run's baseline already IS the recorded configuration, so a bench would compare the
-        // baseline with itself and file the ~0% result as a loss. Left un-attested on purpose —
-        // `recalls` counts attempts on hardware, and this one never reached any.
+        // Nothing to test: the baseline already IS the recorded configuration (a bench would file a
+        // ~0% self-comparison as a loss). Left un-attested.
         if (mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
             me.merged === renderEnvItems(parseEnvString(curEnv))) {
           verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
@@ -3939,17 +3571,9 @@ print(json.dumps(res))
           'the log first.',
           `warm_start:validate:${c.session_id || 'cand'}`);
 
-        // ONE repair attempt, and only when the server produced no number at all.
-        //
-        // The first launch is where a box the config has never met shows up: a flag deleted upstream
-        // makes argparse exit before the model loads, and a knob this run's baseline pins can be
-        // incompatible with the recorded value. Both used to end as measured 0, one shot spent,
-        // `not_reproduced` filed against the record — but only the first is the record's fault, and
-        // a record that keeps meeting incompatible baselines was being retired for it.
-        //
-        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it adapt
-        // the minimum needed, and bench once more. Exactly once — a repair loop against a config
-        // that cannot run here learns nothing new — and through the SAME accept gate.
+        // ONE repair attempt, only when the server produced no number: the tuner classifies the
+        // launch failure (a stale record vs a conflict with this baseline), adapts the minimum, and
+        // benches once more through the same accept gate.
         let repair = null;
         if (!measuredTrialOf(sweep, BASELINE_TPUT).measured &&
             !searchClosed(`[kb] repair of config ${c.session_id || '?'}`)) {
@@ -3987,17 +3611,15 @@ print(json.dumps(res))
             : 'the repair attempt itself produced nothing'));
         }
         const { trial, measured } = measuredTrialOf(sweep, BASELINE_TPUT);
-        // The role's own list when it filled one in; otherwise subtract what ran from what was
-        // asked for. Either way the verdict names the knobs that did not make it onto the box.
+        // The role's own drop list, else what was asked for minus what ran.
         const dropped = (repair && Array.isArray(repair.dropped_flags) && repair.dropped_flags.length)
           ? repair.dropped_flags
           : (repair ? droppedByDiff(mf.merged, me.merged,
             String(trial.change || [trial.flags, trial.env].filter(Boolean).join(' | '))) : []);
         const parity = String(trial.parity || trial.output_parity || '');
         const deltaPct = BASELINE_TPUT ? ((measured - BASELINE_TPUT) / BASELINE_TPUT) * 100 : 0;
-        // Both the tuner's own judgement AND our arithmetic. A warm-start candidate is precisely
-        // where an agent is most tempted to ratify a stored claim it did not establish, so the
-        // orchestrator re-derives the ratio from the raw number rather than accepting `kept: true`.
+        // Both the tuner's judgement AND our arithmetic: the ratio is re-derived from the raw number
+        // rather than trusting `kept: true`.
         const accept = trial.kept === true && measured > BASELINE_TPUT &&
           deltaPct > NOISE_BAND && parity !== 'fail';
         if (accept) {
@@ -4027,16 +3649,12 @@ print(json.dumps(res))
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // FOUR outcomes, three different things — see KB_ATTEST_OUTCOME. All counted apart
-        // (kb/attest.py); only a loss and a no-effect count against the record, and then only as
-        // evidence toward a threshold.
-        //
-        // `note` and `notes` are both read: the role file's return schema spells it `note`, and
-        // reading only `notes` meant the per-trial text never reached this regex at all.
+        // FOUR outcomes (see KB_ATTEST_OUTCOME), counted apart by kb/attest.py; only a loss and a
+        // no-effect count against the record, as evidence toward a threshold. The role file spells
+        // the per-trial text `note`.
         const notes = String(trial.notes || trial.note || (sweep && sweep.summary) || '');
         const inert = /\b(?:not (?:honou?red|recognized|recognised|applied|supported)|unrecognized|unrecognised|ignored|no such option|unknown (?:option|argument|flag)|renamed|removed upstream|did not take effect)\b/i.test(notes);
-        // The repair's structured verdict outranks the regex: it was reached by reading the launch
-        // error, while the regex is guessing at free text written for a human.
+        // The repair's structured classification outranks the free-text regex.
         const conflicted = String((repair && repair.classification) || '') === 'conflicts_with_baseline';
         const outcome = accept ? 'adopted'
           : !measured ? (conflicted ? 'inapplicable' : 'not_reproduced')
@@ -4053,34 +3671,21 @@ print(json.dumps(res))
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
           parity: parity || 'unknown', outcome, why: notes,
-          // What was actually put on the box, as opposed to what the record asked for. A reader
-          // comparing this run's number with the stored one needs both, and `applied_partial`
-          // is the difference between "the record lost" and "most of the record lost".
+          // What was actually put on the box vs what the record asked for.
           overrides, applied_partial: dropped.length > 0, dropped_flags: dropped,
           repair_classification: String((repair && repair.classification) || '') });
         if (accept) break;   // adopt the first that passes; the rest stay references
       }
-      // ---------------------------------------------------------------------
-      // Replay the stored KERNELS through the ordinary integrate gate.
-      //
-      // Same machinery as the Milestone track, verbatim: runIntegrateBothLegs, the same
-      // INTEGRATE_SCHEMA, the same isolated ref/candidate A/B with the parity probe, the same integAccepted
-      // predicate. The only thing that differs is where the patch came from, and that is exactly the
-      // thing the A/B is there to make irrelevant.
-      //
-      // Reverting is structural rather than an operation: a candidate lives in its own overlay
-      // directory and is activated only by being on PYTHONPATH, so rejecting one means not adopting
-      // it. Nothing is ever mutated in the install.
-      // ---------------------------------------------------------------------
+      // ---- Replay the stored KERNELS through the ordinary integrate gate ----
+      // Same machinery as the Milestone track (runIntegrateBothLegs, INTEGRATE_SCHEMA, the isolated
+      // A/B with parity probe, integAccepted). A candidate lives in its own overlay directory, active
+      // only on PYTHONPATH, so rejecting one is simply not adopting it.
       const kbKernels = [];
       const seenKernel = new Set();
       for (const c of cands) {
         const bundlePath = (c.bundle && c.bundle.path) || '';
-        // The record's PREBUILT overlay directory, packed by e2e_store._pack_overlay as
-        // `overlay.tar.gz` (manifest + sitecustomize + `_patched/` + every overlay-root module the
-        // rebinds transitively import). Named from the manifest rather than probed, because this
-        // script has no filesystem: a bundle whose upload never carried the tarball simply does not
-        // list it, and the entry stays a reference instead of costing two server launches to find out.
+        // The record's prebuilt overlay (`overlay.tar.gz` from e2e_store._pack_overlay), found via
+        // the bundle manifest (no filesystem here); without it the entry stays a reference.
         const bundleFiles = Array.isArray(c.bundle && c.bundle.files) ? c.bundle.files : [];
         const overlayTar = (bundlePath && bundleFiles.includes('overlay.tar.gz'))
           ? `${bundlePath}/files/overlay.tar.gz` : '';
@@ -4093,35 +3698,22 @@ print(json.dumps(res))
         }
       }
       let replayed = 0;
-      // One overlay tarball is the whole RECORD's final overlay, not one kernel's. If a record banked
-      // three authored kernels, restoring it restores all three at once, so it is benched ONCE and the
-      // remaining kernels of that record are marked as covered by it rather than each buying their own
-      // pair of server launches to measure the identical directory.
+      // One overlay tarball is the whole RECORD's final overlay, so it is benched ONCE and the
+      // record's other kernels are marked as covered by it.
       const overlayReplayed = new Set();
       const kernelVerdicts = [];
       for (const k of kbKernels) {
         const kind = String(k.winner_kind || k.kind || '').trim().toLowerCase();
-        // `patch` is stored inside the record's own bundle as `kernels/<name>.patch`, so the path only
-        // resolves if the artifacts actually came down. A record whose manifest was never committed
-        // downloads a knowledge document and no files, and handing the integrator a path that opens
-        // nothing would burn two server launches to discover it.
+        // `patch` lives in the record's bundle (`kernels/<name>.patch`); with no bundle there is no
+        // file to hand the integrator.
         const patchPath = (kind === 'patch' && k.patch && k.bundle)
           ? `${k.bundle}/files/${k.patch}` : '';
-        // An env/flag win is only replayable if the record actually says WHICH env or flag routed the
-        // op. Several records in the store name the kind but carry empty apply_env/apply_flags — they
-        // were written before those fields were banked. Sending one to the integrator produces an A/B
-        // between two identical configurations: two full server launches to measure nothing, and a
-        // 'rejected' verdict that then libels a win which may well have been real.
+        // An env/flag win is replayable only if the record names the env or flag that routed the op;
+        // otherwise the A/B would compare two identical configurations.
         const hasRouting = !!(String(k.apply_env || '').trim() || String(k.apply_flags || '').trim());
-        // A kind this lane cannot BUILD from a record can still be REPLAYED when the record ships the
-        // built artifact. `authored` is the case that matters: the integrator's authored path needs
-        // `authored_kernel_eval_dir/workspace/` to git-apply the diff and assemble the module, and that
-        // workspace is gone the moment the run ends — which is what the old blanket exclusion was
-        // about. But the OUTPUT of that build, the overlay directory, is in the record: manifest,
-        // sitecustomize, and the authored source (e.g. `geak_hip_extend/extend_attention_hip.hip`,
-        // rebuilt by the reader's own torch load()). The rebind seam is named in the manifest
-        // (`sglang...extend_attention:extend_attention_fwd` -> `geak_hip_extend:extend_attention_fwd`),
-        // so it is checkable rather than unprovable, and if it does not bind here the A/B says so.
+        // A kind this lane cannot rebuild from a record (e.g. `authored`, whose workspace is gone) can
+        // still be replayed from the record's built overlay; its manifest names the rebind seams, so
+        // the A/B shows whether they bind here.
         const viaOverlay = !E2E_REPLAYABLE_KINDS.has(kind) && !!k.overlay_tar;
         const unreplayable =
           E2E_WARM_START_REF_ONLY ? 'read-only mode'
@@ -4146,8 +3738,7 @@ print(json.dumps(res))
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
           KERNEL_RESULT: {
             short_name: k.name, winner_kind: kind,
-            // Both spellings, because the two tracks read different ones and this synthetic result
-            // has to satisfy whichever the integrator reaches for.
+            // Both patch spellings: the two tracks read different ones.
             code_patch: patchPath, final_patch: patchPath,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
             target_callable: String(k.target_callable || ''),
@@ -4156,8 +3747,7 @@ print(json.dumps(res))
             // task_dir is deliberately EMPTY and the provenance is declared foreign — see the intro.
             task_dir: '', provenance: 'knowledge_base_replay',
           },
-          // Set only on the prebuilt-overlay path, so the integrator can tell "assemble the candidate
-          // from this patch" from "the candidate already exists, unpack it and bench it".
+          // Only on the prebuilt-overlay path: unpack the candidate rather than assemble it.
           ...(viaOverlay ? { KB_OVERLAY_TARBALL: k.overlay_tar } : {}),
           CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
@@ -4211,15 +3801,13 @@ print(json.dumps(res))
           kbSeedTput = integ.e2e_throughput_tok_s;
           bankAccepted(kbSeedKernels, {
             short_name: k.name, backend: String(k.language || k.backend || ''), kind,
-            // On the prebuilt-overlay path there is no patch to point at; what reproduces this win is
-            // the accepted overlay the integrator just built from the tarball, and Module B packs that
-            // directory the same way the record we replayed was packed.
+            // On the prebuilt-overlay path there is no patch: the accepted overlay (packed by
+            // Module B) is what reproduces the win.
             e2e_delta_pct: integ.e2e_delta_pct, isolated, patch: patchPath,
             replayed_from_overlay: viaOverlay ? k.overlay_tar : '',
             pct_gpu_time: Number(k.pct_gpu_time) || 0,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
-            // Provenance stays ON the banked entry: this kernel is a recovered win re-verified here,
-            // not something this run discovered, and Module B must not later claim otherwise.
+            // Provenance stays on the entry: a recovered win re-verified here, not a discovery.
             from_knowledge_base: true, kb_session_id: k.kb_session_id,
           }, krOf(kbIntegrateInputs));
           kernelVerdicts.push({ ...k, kind, outcome: 'adopted',
@@ -4230,44 +3818,20 @@ print(json.dumps(res))
           kernelVerdicts.push({ ...k, kind, outcome: abDone(integ) ? 'rejected' : 'incomplete',
             measured_delta_pct: integ ? integ.e2e_delta_pct : null,
             why: reason || 'A/B did not complete' });
-          // No corrective re-author here. That path re-optimizes a kernel this run authored and owns;
-          // a stored patch that fails its fresh gate is simply not this box's win, and the honest
-          // outcome is to hand it to the Architect as a lead rather than to repair someone else's diff.
+          // No corrective re-author: a stored patch that fails its fresh gate is handed to the
+          // Architect as a lead, not repaired.
           log(`[kb] kernel ${k.name} (${kind}) not adopted: ${reason || 'A/B did not complete'} — kept as a reference.`);
         }
       }
-      // ---------------------------------------------------------------------
-      // Demote what did not survive into a REFERENCE for the roles that come next.
-      //
-      // The resolver's own `e2e_reference_<sha7>.md` is deliberately left alone. It is the pristine
-      // record of what the STORE claimed, and the disagreement between that and what this box
-      // measured is the interesting datum — editing the claim to match the measurement destroys the
-      // only evidence that the two differ. So the measurements go in a sibling file that says, in as
-      // many words, that it overrides its neighbours.
-      //
-      // Three channels, because the first two can each be missed. The reference DIRECTORY is only
-      // read if an agent chooses to; the prompt BLOCK only reaches roles in WARM_START_ROLES; the
-      // INPUTS entry lands in `## Inputs` unconditionally and is the one that always fires.
-      // ---------------------------------------------------------------------
-      // ---------------------------------------------------------------------
-      // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
-      // box to resolve this identity saw the same optimistic record, benched it, and failed the
-      // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
-      // every rung, so a later reader can see how often it has been tried here and how it went.
-      // It moves no score and no champion: one box's failure is evidence, never a verdict. What it
-      // adds up to is decided elsewhere — KB_ATTEST_OUTCOME for the buckets, and
-      // kb/attest.py:should_retire for the threshold a separate `curate` pass acts on.
-      //
-      // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
-      // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
-      // counting it would put an attempt that never happened into the ledger.
-      //
-      // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
-      // record, not against the e2e run that once used it, and the two have separate ledgers —
-      // `experience_store.py attest` is where that verdict belongs.
-      //
-      // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
-      // benched only the config half, so every place printing both has to say which half ran.
+      // ---- Demote what did not survive into a REFERENCE for the roles that come next ----
+      // The store's `e2e_reference_<sha7>.md` stays as its claim; this box's measurements go in a
+      // sibling file that overrides it, surfaced three ways: the reference dir, the prompt block
+      // (WARM_START_ROLES) and the `## Inputs` entry, which always lands.
+      // ---- Tell the STORE what happened ----
+      // `e2e_store.py attest` counts each attempt onto the record (no score or champion moves;
+      // KB_ATTEST_OUTCOME sets the buckets, kb/attest.py:should_retire the curate threshold). Only
+      // config verdicts benched on this box count; a record whose bundle also claims kernels is
+      // reported as config-half-only.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
@@ -4281,12 +3845,9 @@ print(json.dumps(res))
           `--outcome ${KB_ATTEST_OUTCOME[v.outcome] || 'inapplicable'} ` +
           (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
           `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
-          // The note carries what was actually run, not just why it ended: a bare "no win" against
-          // a partially-dropped config would read, three months later, as a verdict on the whole
-          // record. Overrides first — they are what a reader has to know to interpret the number.
+          // The note says what actually ran (overrides, drops), not just why it ended.
           `--note ${shq([
-            // The local verdict leads the note. It is filed as `inapplicable` so it cannot retire
-            // the record; a reader still has to be able to see what actually happened here.
+            // The local verdict leads the note: the filed bucket (KB_ATTEST_OUTCOME) may not show it.
             `local verdict: ${v.outcome}` +
               (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
             configHalfOnly(v)
@@ -4314,18 +3875,14 @@ print(json.dumps(res))
           log(`[kb] attested ${attestable.length} benched record(s): ` +
             attestable.map(v => `${v.session_id.slice(-12)}=${v.outcome}`).join(' '));
         } catch (e) {
-          // Non-fatal, like every other KB write. The measurements are already on disk and already
-          // in the reference file; losing the counter costs a future reader context, not this run.
+          // Non-fatal, like every other KB write.
           log(`[kb] attest failed (NON-FATAL): ${String(e).slice(0, 200)}`);
         }
       }
 
       const allVerdicts = verdicts.concat(kernelVerdicts);
-      // Same rows the measured_on_this_box.md tables carry, in machine form, so the Report role
-      // states the recall outcome from the orchestrator's own record rather than from whether an
-      // agent happened to open a reference file. Set OUTSIDE the `if (allVerdicts.length)` guard:
-      // an empty verdict list against a non-empty offer means "offered but not benched", which is
-      // itself a reportable outcome.
+      // The measured_on_this_box.md rows in machine form, for the Report role. Set outside the
+      // `if (allVerdicts.length)` guard: "offered but not benched" is itself reportable.
       if (KB_RECALL.e2e) {
         KB_RECALL.e2e.configs = verdicts.map(v => ({
           direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
@@ -4338,10 +3895,7 @@ print(json.dumps(res))
           measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
           delta_pct: v.delta_pct != null ? v.delta_pct : null,
           parity: String(v.parity || ''), outcome: String(v.outcome || ''),
-          // What the merge and the repair did, in the same row as the number they produced. A
-          // reader who sees a neutral `delta_pct` needs to know whether the recorded value was the
-          // one that ran (`overrides`) and whether all of it ran (`applied_partial`); without them
-          // the row reads as a verdict on the record when it may be a verdict on the pairing.
+          // What the merge and repair did, beside the number they produced.
           overrides: Array.isArray(v.overrides) ? v.overrides : [],
           applied_partial: v.applied_partial === true,
           dropped_flags: Array.isArray(v.dropped_flags) ? v.dropped_flags : [],
@@ -4359,9 +3913,7 @@ print(json.dumps(res))
         const adoptedCfg = verdicts.filter(v => v.outcome === 'adopted');
         const adoptedKer = kernelVerdicts.filter(v => v.outcome === 'adopted');
         const rejected = allVerdicts.filter(v => v.outcome !== 'adopted');
-        // Split out of `rejected` for the reference section below, but deliberately still counted
-        // inside it: for the roles that come next, "lost the A/B" and "never ran" are both "do not
-        // re-propose this verbatim". The distinction matters to the STORE, not to the Architect.
+        // Also counted inside `rejected`: to the next roles both mean "do not re-propose verbatim".
         const notReproduced = verdicts.filter(
           v => v.outcome === 'not_reproduced' || v.outcome === 'inapplicable');
         const md = [
@@ -4374,9 +3926,8 @@ print(json.dumps(res))
           `- baseline: **${BASELINE_TPUT} tok/s** (noise band ${NOISE_BAND}%)`,
           `- serving: BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}, workload isl=${ISL} osl=${OSL} conc=${CONC}`,
           `- identity read: \`${resolved.canonical_id || '?'}\` (match tier \`${resolved.match_tier || '-'}\`)`,
-          // `exact` is exact on the IDENTITY, which encodes no server flags, env or kv-cache
-          // dtype — a record measured against a slower baseline reproduces smaller here for that
-          // reason alone.
+          // `exact` covers the identity only (no flags, env or kv-cache dtype), so a record measured
+          // against another baseline can reproduce smaller here for that reason alone.
           ...(verdicts.some(v => v.baseline_throughput_tok_s != null && BASELINE_TPUT &&
               Math.abs(v.baseline_throughput_tok_s - BASELINE_TPUT) / BASELINE_TPUT > NOISE_BAND / 100)
             ? ['- CAUTION: the match tier covers the identity only — not server flags, env or ' +
@@ -4409,10 +3960,8 @@ print(json.dumps(res))
             `**${v.outcome}** | ${String(v.why || '').slice(0, 160).replace(/[\\|]/g, '\\$&')} |`)
             : ['| _(none recorded)_ | | | | | |']),
           '',
-          // The plan's fourth requirement, made concrete: a top-N entry that could not be
-          // reproduced is not discarded, it is handed forward WITH its reproduction material. A
-          // lead the next role cannot open is a lead it will not use, so the launch script and the
-          // patch paths are spelled out here rather than left to be rediscovered in the bundle.
+          // A top-N entry that could not be reproduced is handed forward WITH its reproduction
+          // material (launch script, patch paths).
           ...(notReproduced.length ? [
             '## REFERENCE ONLY — recalled but NOT reproduced here',
             '',
@@ -4492,8 +4041,7 @@ print(json.dumps(res))
           2);
         KB_REF_DIR = refsDir;   // the measurements exist even if the offer list was thin
 
-        // The channel that always fires. Terse on purpose — it goes into `## Inputs` of two roles,
-        // and a verdict that has to be waded through is a verdict that gets skimmed.
+        // The channel that always fires (`## Inputs` of two roles); terse on purpose.
         KB_REF_INPUTS = {
           KB_REFERENCE_DIR: refsDir,
           KB_REFERENCE_VERDICT:
@@ -4530,7 +4078,7 @@ print(json.dumps(res))
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  if (searchClosed('Profile and Strategize')) {
+  if (searchClosed('Profile and Strategize') || searchWindowShort('Profile, kernel extraction and the kernel search')) {
     kernelQueue = [];
     headQueue = [];
   } else {
@@ -4584,9 +4132,8 @@ print(json.dumps(res))
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = admitHeads(ST.headQueue || [], 'resume');
-  // Dispatch replays prepared_ut.result and cannot read it off disk, so a candidate carrying only
-  // the reference is unusable -- re-run preparation, which re-packs the saved evidence rather than
-  // redoing GPU work. For a normally carried queue this is the same test as `!k.prepared_ut`.
+  // Dispatch replays prepared_ut.result (it cannot read disk), so a candidate without it re-runs
+  // preparation, which re-packs the saved evidence rather than redoing GPU work.
   const unusable = (k) => !k || !k.prepared_ut || !k.prepared_ut.result;
   if (KERNEL_EXTRACT_ON &&
       (PHASES.includes('extract') ||
@@ -4605,8 +4152,7 @@ print(json.dumps(res))
 // ===========================================================================
 // PHASE: Config sweep (Config Tuner) — FIRST, reshapes the profile
 // ===========================================================================
-// A carried phase-partial state still wins: it is a measurement this run already made. kbSeedTput is
-// 0 when Module A did not run or adopted nothing, so `0 || BASELINE_TPUT === BASELINE_TPUT`.
+// A carried phase-partial state wins (already measured); kbSeedTput is 0 unless Module A adopted.
 let curTput = ST.throughput || kbSeedTput || BASELINE_TPUT;
 if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length &&
     !searchClosed('ConfigSweep')) {
@@ -4670,21 +4216,16 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
   }
 }
 
-// ---------------------------------------------------------------------------
-// Shared state carried across the head + kernel tracks (and across phase invocations via args.state).
-// MUST be declared BEFORE the HeadKernel block that uses them (else temporal-dead-zone ReferenceError).
-// ---------------------------------------------------------------------------
+// Shared state for the head + kernel tracks (carried across phase invocations via args.state);
+// declared before the HeadKernel block that uses it (temporal dead zone).
 let dispatched = 0;                        // counts ONLY kernel-optimization tasks (the budget)
 let milestone = 0;
 let noImprove = 0;
-// kbSeedKernels is empty unless Module A REPLAYED a stored kernel and its fresh A/B accepted it —
-// these are this run's own measurements of a recovered patch, not the store's claims about it.
+// kbSeedKernels: stored kernels Module A replayed and this run's own A/B accepted.
 const acceptedKernels = (ST.accepted_kernels || []).slice().concat(kbSeedKernels);
 const acceptedHeads = (ST.accepted_heads || []).slice();
-// Verified-isolated wins whose e2e A/B did NOT complete (integrate agent timed
-// out / hung / degraded to null mid-gate). These are NOT rejections — keep them
-// so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
-// is surfaced (return.pending_integrations) instead of being silently dropped.
+// Verified-isolated wins whose e2e A/B did not complete. Not rejections: Finalize finishes them
+// (Fix C) and the return surfaces them as pending_integrations.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).concat(PRE_FLAGGED_HEADS);   // heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;
@@ -4696,22 +4237,9 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
-//
-// The skillset lives at TUNING_SKILLSET_DIR as one intact, hash-pinned tree (it is validated standalone,
-// so GEAK must run the copy that was validated — see e2e_workflow/scripts/tuning_skillset_sync.py). It is
-// NOT decomposed into knowledge/ files and NOT injected as an advisory fragment into other roles: ONE role
-// (tuning_specialist) runs its complete six-step loop as ONE phase.
-//
-// Position is deliberate — after ConfigSweep, before HeadKernel:
-//   * BEFORE HeadKernel, because tuning is the cheap lever that reshapes which kernels dominate. Running
-//     it first means the head track spends its (expensive) budget on the ops that are still hot AFTER
-//     tuning, and every head A/B measures against a reference leg that already contains the tuning.
-//   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
-//     collapses into "one more candidate config") and its contribution becomes unattributable. With its
-//     own in-session pre/post isolated-server A/B, the final report can state tuning's share of the gain.
-//
-// An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
-// the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
+// TUNING_SKILLSET_DIR is one hash-pinned tree (scripts/tuning_skillset_sync.py). tuning_specialist
+// runs its full loop with its own pre/post A/B, so the head track then works on what is still hot,
+// against a tuned reference. An accept folds into curFlags/curEnv and the profile is re-taken.
 // ===========================================================================
 if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') && !tuningWindowShort()) {
   phase('TuningSkillset');
@@ -4729,33 +4257,19 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
-      // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
-      // role learns the store exists at all. Gated by TUNING_KB_ENABLED for the same reason
-      // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
+      // The always-fires channel (as for the Architect and config_tuner), gated like warmStartBlock()
+      // so a blind eval stays blind through both channels.
       ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
       ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
-      // The other half of the write below: the kernel store is where THIS phase files its tuned
-      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — even when
-      // the run that produced them ended below its own e2e baseline and wrote no deployment record
-      // at all. Handing over the root and the arch rather than a candidate list is deliberate: the
-      // role knows which ops it is about to work on and can ask per op, which no read done up here
-      // before the profile could do. Same TUNING_KB_ENABLED switch as everything else.
-      //
-      // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
-      // configured, so the record lands behind a key on the shared store; a directory read against
-      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run, and
-      // would report `kernel_page_not_found` — indistinguishable from a page that has nothing. Read
-      // and write must name the same plane. A read takes exactly ONE (see kbResolveScript), so
-      // `both` resolves to `remote` and the local mirror is the named fallback.
+      // The read side of the tuned-table write below (kernel store, keyed per op/backend/gfx); the
+      // role queries per op itself. Read and write must name the same PLANE; a read takes exactly
+      // one (kbResolveScript), so `both` reads `remote` with the local mirror as fallback.
       ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
         TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
         TUNED_KB_STORE: E2E_KB_STORE_DIR,
         TUNED_KB_GFX: KB_DIMS.gfx,
-        // The page is keyed on arch and op, NOT on dtype — one `fused_moe` page holds the bf16 and
-        // the fp8_w8a8 tables side by side, ranked against each other on speedup. Passing this makes
-        // the read drop the other dtype's rows instead of ranking them; leaving it empty is the old
-        // behaviour (everything offered), which is why an unstated precision is never an error.
+        // Pages are keyed on arch and op, not dtype; this filters the read to one dtype's rows
+        // (empty offers every dtype).
         TUNED_KB_PRECISION: KB_DIMS.precision || '',
         TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
         TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
@@ -4763,32 +4277,22 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
 
-  // An accept must clear EVERY bar the skillset itself sets. Engagement is the load-bearing one: its
-  // stated thesis is that a speedup whose artifact was never proven live has proven nothing, and that
-  // failure mode is silent (the artifact lands where nothing reads it and the timing still moves). A
-  // completed BOTH-leg A/B is required for the same reason it is on the head track — a post-only number
-  // is not a measurement.
+  // An accept must clear every bar the skillset sets: proven engagement (an artifact never proven
+  // live proves nothing) and a completed both-leg A/B (a post-only number is not a measurement).
   const tuned = tuning && tuning.gate === 'accepted';
   const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
     tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
     tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
 
-  // Every op the skillset named, read twice below: by the accepted-kernel banking (gated on
-  // `tuneOk`) and by the attestation under it (deliberately not). `tuning &&`, not just
-  // `.ops_tuned ||`: `safeAgent` returns null by DESIGN, and this read sits outside the `tuneOk`
-  // short-circuit that used to screen the null off.
+  // Every op the skillset named: read by the banking (gated on `tuneOk`) and by the attestation
+  // (not gated). `tuning &&` because safeAgent can return null.
   const tunedOps = ((tuning && tuning.ops_tuned) || [])
     .filter((o) => String(o.op || o.short_name || '').trim());
 
-  // The other half of the recall loop: the write below only files wins, so without this the ledger
-  // grows in one direction. OUTSIDE `tuneOk` on purpose — a verdict on a stored record is a per-op
-  // fact, while the PHASE gate is an aggregate with different inputs; one op can reproduce
-  // perfectly inside a run that banks nothing. Before the write, since `write-remote` carries the
-  // ledger across its rewrite (experience_store.py `_carry_remote`).
-  //
-  // Searched ops are excluded — no prior record to be evidence about. So are recalled ops that
-  // never reached the GPU: `recalls` counts ATTEMPTS ON HARDWARE (kb/attest.py), proven by an
-  // installed `artifact`, engagement, or a measurement.
+  // Attest recalled tuned ops (the write below files only wins). Outside `tuneOk`: a per-op verdict
+  // stands even when the phase banks nothing. Before the write, which carries the ledger across its
+  // rewrite (experience_store.py `_carry_remote`). Only recalled ops that reached the GPU (artifact,
+  // engagement or a measurement) count: `recalls` counts attempts on hardware (kb/attest.py).
   const tuningAttestable = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
     String(o.session_id || '').trim() &&
     /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))) : [];
@@ -4801,9 +4305,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
   }
   if (tuningRecalls.length) {
     const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
-    // One plane per verdict — `both` would count one attempt twice on two ledgers a curation pass
-    // then compares. The plane that ANSWERED is not the one ASKED FOR (the tuning role retries a
-    // remote miss locally), so the op names its own plane; the requested one is the fallback.
+    // One plane per verdict (`both` would count one attempt twice): the plane that answered, as the
+    // op reports it (the role retries a remote miss locally), else the requested one.
     const askedRemote = E2E_KB_PLANE !== 'local';
     const planeOf = (o) => {
       const said = String(o.read_plane || o.recall_plane || o.plane || '').trim().toLowerCase();
@@ -4820,16 +4323,14 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         `--language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} ` +
         (KB_DIMS.framework_version ? `--framework-version ${shq(KB_DIMS.framework_version)} ` : '') +
         `--outcome ${outcome} --measured-speedup ${sp} ` +
-        // `claimed_gate`, not `gate`: the orchestrator's downgrade of an unproven accept happens
-        // below this, so what is readable here is the skillset's claim. `banked` sits beside the
-        // outcome rather than gating it — an auditor wants both facts, not one instead of the other.
+        // `claimed_gate`: the skillset's own claim (an unproven accept is downgraded below this);
+        // `banked` is recorded beside the outcome, not as a gate on it.
         `--note ${shq(`e2e tuning recall: engaged=${o.engaged === true}; banked=${!!tuneOk}` +
           `; claimed_gate=${tuning.gate}` +
           `${o.note ? '; ' + String(o.note) : ''}`.slice(0, 300))} ` +
         `--measured-by ${shq('e2e_workflow:tuning:' + BACKEND)} --apply || true`;
     });
-    // The prelude authenticates the service, needed when ANY op attests remotely — the set is
-    // mixed by construction.
+    // The prelude authenticates the service; needed if ANY op attests remotely.
     const anyRemote = tuningRecalls.some((o) => planeOf(o) === 'remote');
     try {
       await safeAgent(
@@ -4855,20 +4356,16 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
     const tuningBaselineConfig = { flags: curFlags, env: curEnv };
     if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
     if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
-    // Carry the routing/enabling overlay forward exactly as an accepted head patch does. Without this
-    // the code half of a tuning win is silently dropped at the phase boundary and the data half is left
-    // bound to nothing — the failure the skillset spends its longest section on.
+    // Carry the routing/enabling overlay forward as an accepted head patch does; otherwise the code
+    // half of a tuning win is dropped and its tuned data binds to nothing.
     if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
     curTput = tuning.post_tune_throughput_tok_s;
     log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
       `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
       `${(tuning.ops_tuned || []).length} op(s), engagement proven` +
       `${tuning.apply_overlay ? `, carrying routing overlay ${tuning.apply_overlay}` : ''}). Re-profiling.`);
-    // A missing/unverified deploy bundle does NOT withhold the accept: the gain was measured and proven
-    // live, and the artifacts are already installed in this container, so every in-run number stays
-    // valid. What breaks is DELIVERY — final_launch.sh would reproduce less than the headline. Finalize
-    // re-checks and reports it, but warn here too, because this is the point at which it is still cheap
-    // to fix and the easiest failure in this phase to not notice.
+    // An unverified deploy bundle does not withhold the accept (the in-run numbers stay valid); it
+    // risks DELIVERY (final_launch.sh reproducing less). Finalize re-checks; warn early here too.
     if (tuning.deploy_verified !== true) {
       log(`WARNING: tuning accepted WITHOUT a verified deploy bundle (deploy_bundle=` +
         `${tuning.deploy_bundle || '<none>'}). The in-run measurements stand, but this win may not ` +
@@ -4880,27 +4377,17 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       lesson: `tuning skillset (standalone, pre-head): ${tuning.summary || 'accepted'}`,
     });
 
-    // Bank each tuned op as an accepted kernel, so the KB record carries the LEVER and not just the
-    // launch script that happens to reference it. This is deliberately done HERE, deterministically,
-    // rather than left to Finalize's own accepted_kernels: the DeepSeek-V4-Pro 20260823 run banked a
-    // 3.29x tuned a8w8 blockscale table, returned accepted_kernels:[], and wrote a KB record whose
-    // files were [final.patch, launch.sh, report.md] — the lever itself was never recorded, and the
-    // next run at that canonical id recalls a configuration it cannot reproduce. Gated on tuneOk, so
-    // an unproven tuning claim banks nothing, exactly as it folds nothing into curEnv/curFlags.
-    // (`tunedOps` is computed above the branch: the attestation needs it on every path, banking only
-    // on this one.)
+    // Bank each tuned op as an accepted kernel, deterministically here rather than via Finalize's
+    // accepted_kernels, so the KB record carries the lever itself and not just the launch script.
     for (const o of tunedOps) {
       bankAccepted(acceptedKernels, {
         short_name: String(o.op || o.short_name).trim(),
         backend: o.backend || '',
-        // A tuned table is applied through env (the deploy's env var IS the engagement mechanism),
-        // which is already a first-class winner_kind in the store alongside patch/authored.
+        // A tuned table is applied through env, a first-class winner_kind in the store.
         kind: 'env',
         isolated: Number(o.isolated_speedup) || 0,
-        // The phase measured ONE pre/post A/B covering all of its ops, so its delta is attributable
-        // to a single op and only to a single op. With several, the per-op number is left at 0 and
-        // the phase-level figure stands alone in tuning_skillset.tuning_delta_pct — stamping the
-        // whole delta onto each op would double-count it in any consumer that sums the list.
+        // One A/B covers all ops: the delta is per-op only when there is one op; otherwise 0 (the
+        // phase figure is tuning_skillset.tuning_delta_pct) so consumers that sum do not double-count.
         e2e_delta_pct: tunedOps.length === 1 ? (tuning.tuning_delta_pct || 0) : 0,
         apply_env: tuning.apply_env || '',
         apply_flags: tuning.apply_flags || '',
@@ -4908,10 +4395,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         engaged: o.engaged === true,
         from_tuning_skillset: true,
         tuning_artifact: o.artifact || '',
-        // Whether this op was SEARCHED here or RECALLED from a prior record. Now that the tuning
-        // track reads the store it also writes, the two are indistinguishable downstream without
-        // this field — and a recall re-banked as a discovery would make one original search look
-        // like N independent confirmations to anyone counting records.
+        // SEARCHED here or RECALLED: a recall re-banked as a discovery would look like an
+        // independent confirmation to anyone counting records.
         tuning_source: String(o.source || o.origin || '').trim() || 'search',
       }, {});
     }
@@ -4922,33 +4407,20 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
     }
 
-    // ---------------------------------------------------------------------------------------
-    // Write each tuned op into the KERNEL lane's experience store, one entry per op.
-    //
-    // Not a duplicate of the e2e KB write at the end of the run: that record is keyed on the whole
-    // deployment and gated on the run's FINAL throughput_speedup, so a tuning win a later phase
-    // erases — or a run that ends below its own baseline for unrelated reasons — takes the tuned
-    // table down with it, and the next run at the same identity searches it again from scratch. The
-    // kernel store has no such coupling: it ranks on ISOLATED per-op speedup and is addressed per
-    // (kernel, language, gfx), which is the granularity at which a tuned table is reusable.
-    //
-    // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
-    // because an op the phase could not prove live is not knowledge about that op whatever the
-    // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
+    // ---- Write each tuned op into the KERNEL lane's experience store, one entry per op ----
+    // Unlike the end-of-run e2e record (whole deployment, gated on final throughput), this ranks on
+    // isolated per-op speedup per (kernel, language, gfx), so the tuned table survives the run's
+    // verdict. Filed only if tuneOk, and per op only if `isolated_speedup > 1.0` and `engaged`.
+    // Best-effort: a failure loses a record, never a measurement.
     const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
       Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
     if (kernelKbOps.length) {
       const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
-      // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
-      // so it degrades to the plain directory write rather than erroring. Same selection the kernel
-      // lane makes at its own write site.
+      // `both` mirrors to the shared service; without a store dir it degrades to the plain write
+      // (as at the kernel lane's own write site).
       const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
-      // `--precision` and the two `--serving-*` flags are RECORDED, not keyed — they land in
-      // `value.upstream` and never move the entry's address. A tuned table's destination filename
-      // encodes its dtype (`...dtype=fp8_w8a8.json`), so a table measured under one precision offered
-      // to a run on another installs under a name that runtime never looks up: wasted, not wrong. What
-      // it does corrupt is RANKING, by putting an unusable table above a usable one on the same page.
-      // Stating precision here is what lets the reader's `--precision` filter drop it first.
+      // `--precision` and `--serving-*` are recorded in `value.upstream`, not keyed; precision lets
+      // the reader's `--precision` filter drop another dtype's table before it skews the ranking.
       const cmds = kernelKbOps.map((o) => {
         const op = String(o.op || o.short_name).trim();
         return `python3 ${shq(storeScript)} ${remoteOn
@@ -5036,15 +4508,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       tuning_skillset: tuning,
     });
 
-    // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
-    // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
+    // Tuning changed which kernels dominate: re-profile + re-strategize, as after ConfigSweep.
     if (!searchClosed('post-tuning re-profile and re-strategize')) {
       profile = await safeAgent(
         roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-          // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
-          // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
-          // for the wrong landscape.
+          // curOverlay, not '': without a banked routing overlay the tuned artifact binds to nothing.
           OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
@@ -5062,8 +4531,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       if (retune) await ensureFlydslGate();
     }
   } else if (tuned) {
-    // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
-    // every downstream A/B, which is the exact failure the skillset exists to prevent.
+    // Claimed accepted but failed a hard bar: not banked (an unproven artifact poisons later A/Bs).
     log(`Tuning skillset claimed ACCEPTED but did not clear the bar ` +
       `(engagement_verified=${tuning.engagement_verified}, ab_complete=${tuning.ab_complete}, ` +
       `correctness=${tuning.correctness_gate}, pre=${tuning.pre_tune_throughput_tok_s}, ` +
@@ -5080,14 +4548,10 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
 } else if (want('tune') && !TUNING_SKILLSET_ENABLED) {
   log('Tuning skillset DISABLED (tuning_skillset=false) — skipping the phase entirely.');
 }
-// Report inputs for the tuning phase. Empty object when the phase is off/absent, so the Report prompt is
-// byte-identical to a build without this feature.
+// Report inputs for the tuning phase; {} when off/absent, so the Report prompt is unchanged.
 const TUNING_REPORT_INPUTS = (TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESULT: tuning } : {};
-// Finalize inputs. A tuned DATA artifact cannot ride the PYTHONPATH overlay, so the ONLY way it reaches
-// production is for Finalize to fold this bundle into EVAL_DIR/final/ (concatenate its diff into
-// final_patch.diff, copy its files, and invoke its deploy.sh from final_launch.sh before the server
-// starts). Passed only when the tuning phase actually banked a win, so an unaccepted/absent tuning
-// leaves the Finalize prompt byte-identical.
+// Finalize inputs: a tuned DATA artifact cannot ride the PYTHONPATH overlay, so Finalize folds this
+// bundle into EVAL_DIR/final/ (diff, files, deploy.sh before server start). {} unless tuning banked.
 const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
   ? {
     TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
@@ -5099,15 +4563,10 @@ const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate
   }
   : {};
 
-// The live-tree carve-out, handed to EVERY integrate leg (see roles/e2e_integrator.md, "never mutate
-// site-packages"). That rule asserts `git status --porcelain` is EMPTY in the installed tree before and
-// after every gate leg — but an accepted tuning deploy legitimately writes into that tree, because a
-// config table only takes effect from inside the package that reads it. Without this list the head track
-// sees a dirty tree and either fails the assertion or "restores" it, silently deleting the banked tuning
-// out from under the reference leg of every later A/B. The rule's rationale does not apply to these
-// paths: they are recorded, reproducible from the deploy bundle, and INTENDED to be in both legs, exactly
-// like accepted env. A function, not a const, so it reflects a downgrade-to-no_win and so a resumed run
-// picks the carve-out up from carried state. Returns {} otherwise => prompt byte-identical without tuning.
+// The live-tree carve-out for EVERY integrate leg (roles/e2e_integrator.md, "never mutate
+// site-packages"): an accepted tuning deploy legitimately writes into the installed tree, so these
+// paths are exempt from the clean-tree check (otherwise a leg "restores" them and drops the tuning).
+// A function, so it reflects a downgrade to no_win and a resumed run's carried state; {} otherwise.
 function tuningIntegrateInputs() {
   if (!(TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')) return {};
   return {
@@ -5117,12 +4576,10 @@ function tuningIntegrateInputs() {
 }
 
 // ===========================================================================
-// PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
-// regardless of edit flag, via the bake-off ladder. This is the lever the old
-// design missed for GEMM (~78% of GPU time). Runs BEFORE the editable-kernel loop.
-// The op-identity guard (see Strategize) has already forced fused/monolithic heads to op_kind=moe with
-// dense-GEMM synth OFF + the live seam preserved, so each head is optimized AS the op the live kernel
-// dispatches (backend-swap / tune / author-fused) — never decomposed into an un-integrable dense GEMM.
+// PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized regardless of the
+// edit flag, via the bake-off ladder. Runs BEFORE the editable-kernel loop. The op-identity guard has
+// already forced fused/monolithic heads to op_kind=moe (dense-GEMM synth off, live seam kept), so
+// each head is optimized AS the op the live kernel dispatches, never as an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
@@ -5133,19 +4590,18 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
   }));
   if (DEEP) {
-    // ============ DEEP-MODE v2: GLOBAL cross-kernel × cross-backend co-optimization ====================
-    // One global lane pool over ALL (head op × backend) lanes (kernels + backends optimize concurrently);
-    // GPU-elastic serial e2e gate overlapping co-opt; full-backend roster with ceiling-aware patience +
-    // revive; per-op SHARED_KB + run-global GLOBAL_KB; budget-driven EV scheduling toward a +50% e2e goal.
+    // ==== DEEP-MODE: global cross-kernel × cross-backend co-optimization ====
+    // One lane pool over ALL (head op × backend) lanes; a serial e2e gate overlapping co-opt; full
+    // backend roster with ceiling-aware patience + revive; per-op SHARED_KB + run-global GLOBAL_KB;
+    // budget-driven EV scheduling toward DEEP_E2E_TARGET.
     const ROOFLINE_SCHEMA = { type: 'object', additionalProperties: true, properties: { roofline_note: { type: 'string' }, target_geomean: { type: 'number' } }, required: ['roofline_note'] };
     const OKV = { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, summary: { type: 'string' }, feedback_path: { type: 'string' }, addendum_path: { type: 'string' } }, required: ['ok'] };
     const HARVEST_SCHEMA = { type: 'object', additionalProperties: true, properties: { lanes: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { uid: { type: 'string' }, has_state: { type: 'boolean' }, cumulative: { type: 'number' }, best_ms: { type: 'number' }, vs_live: { type: 'number' }, eval_dir: { type: 'string' }, patch: { type: 'string' } }, required: ['uid'] } } }, required: ['lanes'] };
 
-    // ---- GPU partition (N-adaptive, elastic; serial gate) -------------------------------------------
-    // Co-opt runs on cards NOT needed by the serving slot ('main', never paused). The serving cards form
-    // a second co-opt pool ('serve') used only in waves with NO due gate; a gate wave runs the e2e A/B on
-    // the serving slot CONCURRENTLY with co-opt on the dedicated cards (overlap, no idle). With exactly TP
-    // cards (no dedicated), 'main' is empty and a gate wave runs the gate alone (graceful time-slice).
+    // ---- GPU partition (N-adaptive, elastic; serial gate) ----
+    // 'main' = cards outside the serving slot (never paused); 'serve' = the serving cards, used for
+    // co-opt only in waves with no due gate. A gate wave runs the e2e A/B on the serving slot while
+    // 'main' keeps co-optimizing; with exactly TP cards 'main' is empty and the gate runs alone.
     const servingCards = SERVING_GPU.split(',').map(s => s.trim()).filter(Boolean);
     const servingSet = new Set(servingCards);
     const dedicatedCoopt = GPU_LIST.filter(g => !servingSet.has(g));
@@ -5156,7 +4612,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const serveSlots = haveSpare ? servingCards.length : GPU_LIST.length;
     log(`[deep] partition: serving {${servingCards.join(',')}} TP=${SERVING_TP}; dedicated co-opt {${dedicatedCoopt.join(',') || '(none)'}}; mode=${haveSpare ? 'OVERLAP gate||co-opt' : 'TIME-SLICE (N==TP)'}; budget ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h; e2e target ×${DEEP_E2E_TARGET} (${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s).`);
 
-    // ---- ceiling prior: GENERAL (by lane ROLE, not model/shape) -------------------------------------
+    // ---- ceiling prior: by lane ROLE, not model/shape ----
     const ceilingPrior = (lang, mode) => (mode === 'author' ? 2.2 : (lang === 'triton' && mode === 'optimize' ? 1.6 : 1.8));
 
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
@@ -5187,9 +4643,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
-      // Lane roster: ALWAYS tune the live editable kernel + author EVERY backend the bake-off proposes
-      // (no backend dropped a priori — unbiased), then fill remaining diversity with distinct authoring
-      // directions. Steers are DIRECTIONS (generic), never hard-coded magic numbers.
+      // Lane roster: always tune the live kernel, author EVERY backend the bake-off proposes, then add
+      // distinct authoring directions (generic steers, no magic numbers).
       let lanesSpec = [];
       if (DEEP_BACKENDS_OVERRIDE) {
         lanesSpec = DEEP_BACKENDS_OVERRIDE.split(',').map(s => s.trim()).filter(Boolean).map(s => {
@@ -5247,7 +4702,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     for (const p of preps) for (const l of p.lanes) allLanes.push(l);
     if (!allLanes.length) { log('[deep] no viable head lanes; nothing to optimize.'); }
 
-    // ---- EV: Amdahl mass × remaining ceiling gap × recent improvement (with exploration floor) -------
+    // ---- EV: Amdahl mass × remaining ceiling gap × recent improvement (exploration floor) ----
     const evOf = (l) => {
       const amdahl = Math.max(0.01, (l.head.pct_gpu_time || 1) / 100);
       const gap = Math.max(0.02, (l.ceiling || 1.5) - l.best);
@@ -5255,7 +4710,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return amdahl * gap * rate;
     };
 
-    // ---- batched HARVEST of a set of lanes from DISK truth (immune to a nulled burst) ----------------
+    // ---- batched HARVEST of lanes from DISK truth (immune to a nulled burst) ----
     const harvestLanes = async (set, tag) => {
       if (!set.length) return;
       const byHead = {}; for (const l of set) (byHead[l.head.short_name] = byHead[l.head.short_name] || []).push(l);
@@ -5278,15 +4733,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           else if (l.ran > 0) { l.lastGain = 0; l.noImprove++; }
           if (e.eval_dir) l.lastEval = e.eval_dir;
           if (e.patch) l.patch = e.patch;
-          if (e.has_state) l.noStateStreak = 0;   // P3: produced a result -> not infeasible
+          if (e.has_state) l.noStateStreak = 0;   // produced a result -> not infeasible
           // ceiling-aware patience: lanes still far from their ceiling get MORE waves before parking.
           const farFromCeiling = (l.ceiling - l.best) > 0.3 * Math.max(l.ceiling, 1e-9);
           const streakCap = farFromCeiling ? DEEP_PLATEAU_STREAK_HIGH : DEEP_PLATEAU_STREAK;
           if (e.has_state === false && anyState && l.ran > 0) {
             l.active = false; l.noStateStreak = (l.noStateStreak || 0) + 1;
-            // P3: 2 consecutive bursts with NO persisted result while peers produced => structurally
-            // infeasible backend\u00d7op (the backend has no primitive for this op, e.g. flydsl on grouped-MoE).
-            // Mark dead so reseed/revive never waste budget re-trying it.
+            // 2 consecutive bursts with no persisted result while peers produced => infeasible
+            // backend×op (no primitive for it); dead lanes are never reseeded or revived.
             if (l.noStateStreak >= 2) { l.dead = true; log(`  [deep] DEAD ${l.uid} \u2014 infeasible (no result ${l.noStateStreak}x while peers produced); won't reseed/revive.`); }
             else log(`  [deep] park ${l.uid} \u2014 no persisted result while peers produced.`);
           }
@@ -5295,7 +4749,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     };
 
-    // ---- CURATE per-op SHARED_KB + run-global GLOBAL_KB, and REVIVE high-ceiling parked lanes ---------
+    // ---- CURATE per-op SHARED_KB + run-global GLOBAL_KB; REVIVE high-ceiling parked lanes ----
     const curateAndRevive = async (tag) => {
       for (const p of preps) {
         const ls = allLanes.filter(l => l.head.short_name === p.h.short_name && (l.lastEval || l.ran > 0));
@@ -5307,8 +4761,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           `ALSO append cross-KERNEL transferable techniques to ${GLOBAL_KB} (techniques that should generalize to OTHER head ops/backends in this run; one line each, with the source uid). Keep both concise/high-signal. Return {ok,summary}.`,
           { phase: 'HeadKernel', label: `curate ${p.h.short_name} ${tag}`, schema: OKV });
       }
-      // revive: a parked lane that is still HIGH-ceiling (big remaining gap) gets one more shot with the
-      // freshly-curated cross-backend borrows — so an initially-poor high-ceiling backend is not abandoned.
+      // Revive: a parked lane with a big remaining ceiling gap gets another shot (at most 2) with the
+      // freshly curated borrows.
       let revived = 0;
       for (const l of allLanes) {
         if (l.active || l.dead || (l.revives || 0) >= 2) continue;
@@ -5317,16 +4771,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (revived) log(`  [deep] revived ${revived} high-ceiling parked lane(s) with fresh borrows.`);
     };
 
-    // ---- BATCHED serial e2e GATE on the serving slot (runs concurrently with co-opt on dedicated cards)
+    // ---- BATCHED serial e2e GATE on the serving slot (concurrent with co-opt on dedicated cards) ----
     const runGate = async (opts = {}) => {
-      // P4: at FINALIZE, sweep ALL patched lanes (incl. isolated~1.0) onto the CUMULATIVE overlay \u2014 the
-      // e2e gate is the true arbiter, so a host-level / oracle-invisible win (isolated~1.0 but real e2e
-      // gain, e.g. fused_moe big-M coarsen) still gets banked. Per-wave gates keep the cheap top-2-by-iso.
+      // At FINALIZE, sweep ALL patched lanes (incl. isolated ~1.0) onto the cumulative overlay: the e2e
+      // gate is the arbiter, so an oracle-invisible e2e win still banks. Per-wave gates take the top 2.
       const cands = opts.final
         ? allLanes.filter(l => (l.lastEval || l.patch)).sort((a, b) => b.best - a.best)
         : allLanes.filter(l => (l.lastEval || l.patch) && l.best > 1.0).sort((a, b) => b.best - a.best).slice(0, 2);
       if (!cands.length) return;
-      const bankedHeads = new Set();   // P4: one kernel per head in the combined overlay (same-head lanes edit the SAME module -> cannot stack; keep the first lane that converts e2e)
+      const bankedHeads = new Set();   // one kernel per head: same-head lanes edit the SAME module
       if (opts.final) log(`[deep] FINALIZE gate: sweeping ${cands.length} patched lane(s) onto the cumulative overlay (combined cross-kernel deliverable).`);
       e2eGateCount++;
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
@@ -5349,9 +4802,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
           ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
         };
-        const integ = await safeAgent(
-          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', deepInputs),
-          { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
+        const integ = await runIntegrateBothLegs(
+          'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.',
+          deepInputs, `integrate ${c.uid} g${e2eGateCount}`, 'HeadKernel');
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
@@ -5361,8 +4814,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
-          // correctness corrective (the deep site already calls the corrective helper for every reject).
+          // Only actual correctness/integration failures enter the corrective helper.
+          // An inconclusive speedup review stops without re-authoring the candidate.
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
@@ -5419,9 +4872,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     };
 
-    // ---- DEPTH: fresh authoring directions to RE-SEED a plateaued lane (so it keeps going DEEPER) ----
-    // When a lane plateaus we don't abandon it (and its share of the budget) — we hand it a NEW direction
-    // it hasn't tried, biased to the dominant-Amdahl head, so the search compounds depth instead of exiting.
+    // ---- DEPTH: fresh authoring directions to RE-SEED plateaued lanes ----
     const DEEP_STEERS = {
       triton: [
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
@@ -5442,8 +4893,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       ],
     };
     const nextSteer = (l) => { const lib = DEEP_STEERS[l.lang] || DEEP_STEERS._default; const s = lib[(l.steerIdx || 0) % lib.length]; l.steerIdx = (l.steerIdx || 0) + 1; return s; };
-    // RE-SEED when all lanes parked but budget remains: revive lanes (dominant head first) with a FRESH
-    // direction so deep optimization uses the FULL budget instead of exiting at the first global plateau.
+    // When all lanes are parked but budget remains, revive them (dominant head first) with a fresh
+    // direction instead of exiting at the first global plateau.
     const reseedForDepth = () => {
       let n = 0;
       const order = allLanes.slice().sort((a, b) => (b.head.pct_gpu_time || 0) - (a.head.pct_gpu_time || 0) || b.best - a.best);
@@ -5455,14 +4906,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return n > 0;
     };
 
-    // ---- GLOBAL WAVE LOOP (runs until the budget; re-seeds on plateau for depth) ---------------------
+    // ---- GLOBAL WAVE LOOP (runs until the budget; re-seeds on plateau) ----
     let wave = 0, e2eGateCount = 0, lastE2eIsoBest = 1.0, lastReprofileTput = curTput, gateFeedbackPath = '', gateHarnessPath = '', e2eIntervalHit = false;
     const armInterval = () => { if (typeof setTimeout === 'function' && DEEP_E2E_MAX_INTERVAL_MS > 0) setTimeout(() => { e2eIntervalHit = true; }, DEEP_E2E_MAX_INTERVAL_MS); };
     armInterval();
     let convergeStreak = 0, deepBurstsSpent = 0;
     try {
-    // Honour TIME_DEADLINE_HIT as well as DEEP_DEADLINE_HIT (both armed off the same deadline) so the deep
-    // wave loop can never become the one dispatcher that runs past the reserve.
+    // TIME_DEADLINE_HIT too (same deadline), so the wave loop never runs past the reserve.
     while (!DEEP_DEADLINE_HIT && !TIME_DEADLINE_HIT) {
       if (convergeStreak >= DEEP_CONVERGE_STREAK) { log(`[deep] CONVERGED \u2014 ${convergeStreak} consecutive zero-gain waves; stopping to finalize.`); break; }
       const projAgents = (deepBurstsSpent + mainSlots + serveSlots) * DEEP_AGENTS_PER_BURST + wave * 6;   // project a FULL next wave of bursts + per-wave overhead (harvest/curate/gate)
@@ -5488,7 +4938,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ...KB_ARGS,
           budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
-          incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
+          incremental_analyze: l.ran > 1 ? 'true' : 'false',   // 2nd+ burst = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
           exp_root: `${l.deepDir}/runs/${l.key}`, apply_to_original: 'false',
@@ -5505,31 +4955,22 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       deepBurstsSpent += ready.length;
       await harvestLanes(ready, `w${wave}`);
       await curateAndRevive(`w${wave}`);
-      const newIsoBest = Math.max(1.0, ...allLanes.map(l => l.best));   // P1 convergence: did this wave move e2e OR any lane's isolated best?
+      const newIsoBest = Math.max(1.0, ...allLanes.map(l => l.best));   // convergence: did e2e OR any isolated best move?
       convergeStreak = (curTput > prevTput * 1.001 || newIsoBest > globalIsoBest * 1.001) ? 0 : convergeStreak + 1;
     }
     } catch (e) { log(`[deep] wave loop aborted (${(e && e.message) || e}); proceeding to finalize so progress is still banked + reported.`); }
-    // FINALIZE \u2014 always runs (convergence / agent-budget / deadline / throw all land here). Wrapped so
-    // that even if it hits the runtime cap mid-sweep, the overlay banked so far (curOverlay/curTput) holds.
+    // FINALIZE always runs (convergence, agent budget, deadline or a throw); if it is cut off mid-sweep,
+    // what is banked so far (curOverlay/curTput) holds.
     try {
       await harvestLanes(allLanes.filter(l => l.lastEval || l.ran > 0), 'final');
-      await runGate({ final: true });   // P4 FINALIZE: every patched lane -> cumulative overlay (the combined cross-kernel deliverable; banks oracle-invisible host/e2e wins like the manual +21.8%)
+      await runGate({ final: true });   // every patched lane -> cumulative overlay
     } catch (e) { log(`[deep] finalize partial (${(e && e.message) || e}); best banked overlay so far: e2e ${curTput} tok/s.`); }
     log(`[deep] done after ${wave} wave(s), ${e2eGateCount} gate(s). e2e ${curTput} tok/s (${(curTput / Math.max(BASELINE_TPUT, 1e-9)).toFixed(3)}× baseline; target ×${DEEP_E2E_TARGET}). per-lane vs-live: ${allLanes.map(l => l.uid + '=' + l.best.toFixed(2) + 'x').join(', ')}.`);
   } else if (FAST_MODE && GPU_LIST.length > 1) {
-    // ========================= FAST-MODE PARALLEL HEAD TRACK (fast-mode only) =========================
-    // The default behavior is the byte-identical serial `else` branch below — this whole block only runs
-    // when FAST_MODE is on AND there is more than one card. Design (FAST_PLAN §4, STRICT timing):
-    //   opt-A  parallel: per-head extract + bake-off, each leasing ONE card exclusively
-    //   opt-B  parallel: ALL (operator × direction) author jobs in one pool, each leasing ONE card
-    //   BARRIER: every isolated job has released its card -> ISO pool fully idle
-    //   integrate SERIAL on the fixed serving slot {SERVING_GPU} (TP=SERVING_TP), one op at a time
-    // Why this satisfies the three requirements:
-    //   (1) operators AND optimization directions both fan out (flattened (head,language) job pool);
-    //   (2) the GPU semaphore gives every op-bench / kernel-layer job an EXCLUSIVE card, so no two
-    //       speed measurements ever share a GPU -> no timing contention while optimizing;
-    //   (3) integration happens only AFTER the barrier and SERIALLY on the serving slot (which itself
-    //       spans all TP cards), so no isolated work can preempt the e2e A/B -> the gate number is clean.
+    // ==== FAST-MODE PARALLEL HEAD TRACK (FAST_MODE, >1 card; else the serial branch below) ====
+    // Per-head extract + bake-off, then every (operator, direction) author job in parallel, each on ONE
+    // exclusively leased card. After a BARRIER (all cards released), integration runs SERIALLY on the
+    // serving slot {SERVING_GPU} (TP=SERVING_TP), one op at a time, so nothing disturbs the e2e A/B.
     const ISO = makeSem(GPU_LIST);
     log(`[fast-mode] PARALLEL head track: ISO lanes={${GPU_LIST.join(',')}} (${GPU_LIST.length}); ` +
       `serving slot={${SERVING_GPU}} TP=${SERVING_TP} reserved for the serial e2e gate (hard barrier between).`);
@@ -5561,7 +5002,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       });
     }));
 
-    // ---- process opt-A: dominant-head flagging (never silently skip), seed direct_light + author jobs ----
+    // ---- process opt-A: flag dominant heads (never silently skip); seed direct_light + author jobs ----
     const headState = new Map();   // short_name -> { h, ext, cands: [] }
     const authorJobs = [];         // flattened (operator × direction) author directions
     for (const p of prepared) {
@@ -5637,10 +5078,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      // Rank candidates on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, = the env/
-      // direct_light candidate's bake.isolated_speedup), NOT the unweighted geomean. In a decode-bound
-      // serving regime the geomean is dominated by zero/low-weight prefill buckets and buries the decode
-      // bucket that governs throughput — ranking by geomean can drop the truly-best authored kernel.
+      // Rank on the WORKLOAD-WEIGHTED speedup (the kernel layer's primary metric, comparable with
+      // bake.isolated_speedup), not the geomean, which low-weight prefill buckets dominate.
       const alIso = KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
         : (al.final_weighted != null ? al.final_weighted : al.final_geomean);
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
@@ -5653,7 +5092,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
 
-    // ---- integrate SERIAL on the fixed serving slot, in head order, ISO quiesced (no GPU preemption) ----
+    // ---- integrate SERIALLY on the serving slot, in head order, ISO quiesced ----
     for (const h of heads) {
       const st = headState.get(h.short_name); if (!st) continue;
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
@@ -5676,9 +5115,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
           code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
           verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
-          // Pass the Architect's live seam + a concrete engagement assertion so the Integrator can
-          // VERIFY the overlay actually binds on the live path BEFORE spending a full e2e A/B — an
-          // unreachable lever is then rejected in minutes (no_engagement), not hours.
+          // Live seam + engagement check: an overlay that does not bind on the live path is rejected
+          // (no_engagement) before a full e2e A/B is spent.
           live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
           parity_note: cand.parity_note || 'expected_close' },
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
@@ -5697,8 +5135,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
+        // A measurement review never routes to the correctness corrective.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
@@ -5732,9 +5169,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   } else {
   for (const h of heads) {
-    // Budget guard: stop STARTING new head ops once a dispatch deadline has fired, so the in-flight work +
-    // Finalize/Validate still land inside the wall-clock budget. FAST_DEADLINE_HIT covers fast mode;
-    // TIME_DEADLINE_HIT covers ALL modes when time_budget_s was passed (inert otherwise => no-op default).
+    // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
+    // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
     if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
       log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
       break;
@@ -5743,18 +5179,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
     // B4 measures THIS head's trial against its own start, not the run clock.
     const ablHeadStart = ELAPSED_MS;
-    // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
-    // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
-    // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
+    // (h1) Extract the op into a standalone immutable unittest (fused heads stay fused: gemmSynthFor).
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
-        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
-        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
-        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+        // The unittest MUST span BOTH regimes (kernel_extractor.md "Shapes must span BOTH regimes"):
+        // decode M (running batch ≈ conc) and M=1 are passed explicitly so they are never dropped.
         REQUIRE_DECODE_BUCKET: true,
         DECODE_M_BUCKETS: [1, CONC],
         PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -5785,9 +5217,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const gate = bake ? bake.gate : 'null';
       const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
       const hasPlan = !!(bake && Array.isArray(bake.author_plan) && bake.author_plan.length);
-      // A DOMINANT head, or a HARNESS fault (not a real no-win), must NEVER be silently skipped.
-      // Flag it loudly; and if there is an author_plan, STILL try the author route (it is judged by the
-      // immutable unittest, independent of the broken bake-off probe) — so fall through instead of skip.
+      // A DOMINANT head or a HARNESS fault is flagged, never silently skipped; with an author_plan it
+      // still falls through to the author route (judged by the immutable unittest).
       if (isDominant || harness) {
         log(`  ⚠️ FLAG ${h.short_name}: ${isDominant ? `DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU)` : 'head'} bake-off gate=${gate}${harness ? ' (HARNESS ERROR — bake-off could not measure; NOT a real no-win)' : ''}. ${hasPlan ? 'Proceeding to author route anyway.' : 'No author_plan to fall back on.'}`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate, harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || gate : 'bakeoff returned null' });
@@ -5809,17 +5240,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup,
         parity_note: bake.parity_note || 'expected_close' });
     }
-    // Author/rewrite route: write (+optimize) a fresh impl per planned language via the recursive kernel
-    // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
-    // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
+    // Author/rewrite route per planned language via the kernel layer: mode=author writes from scratch
+    // then optimizes, mode=optimize rewrites an existing impl; the oracle in ext.task_dir judges both.
     let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
-    // --- B4 gate -----------------------------------------------------------
-    // The author route is the expensive part of a head. Give it one bounded trial;
-    // at the deadline continue only if this head already holds an integrated
-    // non-incumbent candidate, else pause -- with a seeded 10% audit continuation
-    // so late winners inside that horizon remain estimable.
-    // Identity of the incumbent this head is measured against: a candidate equal to it is
-    // not a candidate. Taken from the frozen config the checkpoint was resumed on.
+    // ---- B4 gate ----
+    // One bounded trial for the author route (the expensive part of a head): at the deadline it
+    // continues only if the head already holds a non-incumbent candidate, else it pauses, with a
+    // seeded audit continuation (ABL_AUDIT_P, default 10%) so late winners stay estimable.
+    // The incumbent's identity: a candidate equal to it is not a candidate.
     const ablIncumbentId = ablCandId({ apply_env: curEnv, apply_flags: curFlags, code_patch: curOverlay });
     let ablImplStart = ELAPSED_MS;      // the implementation clock starts AFTER preparation
     let ablImplCap = ABL_IMPL_MS;
@@ -5827,9 +5255,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     if (ABL('B4')) {
       const prepMs = ELAPSED_MS - ablHeadStart;
       const ready = ablHeadReady(headCands, ext, ablIncumbentId);
-      // GATE 1 -- preparation. Extraction + bake-off had their own budget; blowing it is a
-      // reason to stop spending on this head, and it is charged to preparation, not to the
-      // implementation trial that has not started yet.
+      // GATE 1 -- preparation: extraction + bake-off past ABL_PREP_MS with no candidate stops the
+      // head (charged to preparation, not to the implementation trial).
       if (!ready && prepMs >= ABL_PREP_MS) {
         const draw = ablDraw(h.short_name);
         ablAudited = draw < ABL_AUDIT_P;
@@ -5853,10 +5280,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
     for (const ap of plan) {
-      // GATE 2 -- implementation. v1 admitted the author route and then never looked at the
-      // clock again, so a head admitted at 19 minutes could author for hours. The cap is
-      // checked before every language AND handed down to the nested workflow, which is the
-      // only boundary that can actually contain work already in flight.
+      // GATE 2 -- implementation: the cap is checked before every language AND handed to the
+      // nested workflow, the only boundary that can contain work already in flight.
       if (ABL('B4')) {
         const implMs = ELAPSED_MS - ablImplStart;
         if (implMs >= ablImplCap) {
@@ -5871,11 +5296,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
       }
       const lang = ap.language || 'triton';
+      if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
+        history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
+          lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
+        break;
+      }
       let al;
-      // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
-      // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
-      // language (it dropped FlyDSL in the 2026-06-12 run). Do NOT retry a COMPLETED no-speedup
-      // (final_geomean present but <=1.0) — that's a real result, retrying just wastes budget.
+      // Retry a TRANSIENT failure (threw, or no final_geomean) so a language is not silently dropped;
+      // never retry a completed no-speedup (final_geomean <= 1.0), which is a real result.
       const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : (FAST_MODE ? 1 : 2), 10);
       for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
         try {
@@ -5905,10 +5333,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
-      // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
-      // decode-bound regime is dragged down by low/zero-weight prefill buckets and can bury the decode
-      // bucket that actually governs serving throughput. Only fixed-load runs fall back to geomean.
+      // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
+      // geomean; only fixed-load runs fall back to the geomean.
       const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
         : (al.final_weighted != null ? al.final_weighted : al.final_geomean));
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
@@ -5935,15 +5361,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     headCands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
     log(`  ${h.short_name}: ${headCands.length} candidate(s) [${headCands.map(c => `${c.source} ${(c.isolated || 0).toFixed(2)}x`).join(', ')}] — e2e-testing EACH; reference leg measured ONCE and reused.`);
 
-    // (h3) e2e gate. Test EVERY candidate, not just the top-iso one: isolated speedup is a weak predictor
-    // of e2e (a decode-bound run had an iso-1.055 env tune deliver +14.5% e2e), so the truly-best candidate
-    // can only be found by measuring each on the live server. All of a head's candidates A/B against the
-    // SAME current config, so the REFERENCE leg is identical for all of them — measure it ONCE (first
-    // candidate) and reuse it for the rest via REUSE_REF/SHARED_REF_MED (the integrator then skips the
-    // reference server launch and only benches the candidate leg). CAND_TAG keeps each candidate's cand
-    // bench/overlay in its own dir so they don't clobber each other. Pick the candidate with the highest
-    // MEASURED e2e that clears the gate; only if NONE clears do we fall back to corrective/pending/reject on
-    // the top candidate. Inputs are built per-candidate so Fix C can re-issue the SAME A/B at Finalize.
+    // (h3) e2e gate on EVERY candidate (isolated speedup is a weak predictor of e2e). All A/B against
+    // the same config, so the reference leg is measured once and reused (REUSE_REF/SHARED_REF_MED);
+    // CAND_TAG keeps each candidate's bench/overlay apart. The best MEASURED e2e that clears the gate
+    // wins; if none clears, the top candidate goes to corrective/pending/reject. Inputs are built per
+    // candidate so Fix C can re-issue the same A/B at Finalize.
     const mkIntegrateInputs = (cand, ci, sharedRefMed) => ({
       EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
@@ -5974,8 +5396,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
       const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
-      // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
-      // report + experience library keep the full per-backend picture — not just the winning backend.
+      // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
         e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
         verdict: passed ? 'candidate_passed' : (abc ? 'candidate_rejected' : 'candidate_incomplete'),
@@ -5989,8 +5410,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
 
     if (bestPick) {
-      // Best MEASURED e2e among all candidates that cleared the gate. A head winner may be carried as an
-      // overlay (authored/patch) AND/OR config (env/flag) — capture both.
+      // A head winner may carry an overlay (authored/patch) and/or config (env/flag): capture both.
       const cand = bestPick.cand, integ = bestPick.integ;
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -6000,14 +5420,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       log(`  ${h.short_name}: ACCEPTED best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x iso). e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
-      // No candidate cleared the gate. Operate on the TOP (highest-weighted) candidate: corrective re-author
-      // for a fixable reject/crash, else keep an incomplete A/B as PENDING, else a plain reject. Same
-      // three-state handling as before, now applied to the best candidate after testing them all.
+      // None cleared: on the TOP candidate, corrective re-author for a fixable reject/crash, else an
+      // incomplete A/B stays PENDING, else a plain reject.
       const cand = top.cand, integ = top.integ, headIntegrateInputs = top.inputs;
       if (!top.abc) {
-        // A FIXABLE crash-during-warmup (cand server died -> ZERO A/B samples) is the most common corrective
-        // case (cuda_graph_capture_unsafe / host-sync / NO_BINARY_FOR_GPU). Try the corrective re-author
-        // first; only keep PENDING if it is not fixable (a real transient timeout/hang) or the fix didn't land.
+        // A FIXABLE warmup crash (zero A/B samples: graph-capture-unsafe, host sync, NO_BINARY_FOR_GPU)
+        // tries the corrective re-author first; PENDING only if not fixable or the fix did not land.
         const reason = integ ? (integ.reason || integ.gate || '') : '';
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
@@ -6032,9 +5450,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
         }
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
-        // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
+        // Route actual parity/accuracy failures to correctness fixes and JIT/capture failures
+        // to integration fixes; an inconclusive speedup review is not a kernel defect.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
@@ -6057,7 +5474,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
-  // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
+  // Head wins reshape the profile: re-profile before the kernel loop.
   if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
@@ -6078,19 +5495,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
 // ===========================================================================
 // PHASE: Milestone loop — extract -> recursive kernel optimize -> overlay -> e2e gate
 // ===========================================================================
-// Floor: keep dispatching until >= MIN_KERNEL_TASKS editable-kernel tasks have run, THEN allow the
-// noImprove early-stop. While below the floor the loop never stops on no-improve / empty plan.
-// Budget: when time_budget_s was passed, TIME_DEADLINE_HIT stops STARTING new milestones (even below the
-// floor) so the in-flight work + Finalize/Validate finish before the orchestrator's hard kill. The guard
-// is inert when time_budget_s is absent (TIME_DEADLINE_HIT never set) => byte-identical default behavior.
+// Floor: below MIN_KERNEL_TASKS dispatched tasks the noImprove early-stop is off (an empty plan still
+// stops). TIME_DEADLINE_HIT (set only with time_budget_s) stops new milestones, even below the floor.
 while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
   milestone++;
   const remaining = BUDGET - dispatched;
   const belowFloor = dispatched < MIN_KERNEL_TASKS;
 
-  // --- (a) Plan this milestone (Architect): nominate next kernels. While BELOW the floor the Architect
-  // MUST nominate (it may not stop); it draws fresh editable candidates from the re-profile + the broad
-  // candidate pool, never re-using a confirmed e2e-null direction verbatim. ---
+  // --- (a) Plan this milestone (Architect): below the floor it MUST nominate, never re-using a
+  // confirmed e2e-null direction verbatim.
   phase('Milestone');
   let plan;
   if (KERNEL_EXTRACT_ON) {
@@ -6113,8 +5526,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
   const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
   // AgentX keeps the skill-selected inventory; only execution budgets apply here.
-  // Fixed-load pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (missing pct is kept,
-  // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
+  // Fixed-load pct_gpu_time gate (overrides the floor): only kernels at or above MILESTONE_MIN_PCT;
+  // a missing pct is kept.
   const planCands = KERNEL_EXTRACT_ON ? planCandsRaw : planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
   const skipped = KERNEL_EXTRACT_ON ? [] : planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
   if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
@@ -6136,10 +5549,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
-  // --- (b) PARALLEL optimize (extract + recursive kernel layer per candidate, on distinct GPUs), then
-  // SERIAL integrate. The optimize stage is independent per kernel -> run concurrently. The e2e integrate
-  // stage MEASURES throughput and COMPOUNDS the overlay, so it must be serial: no two servers benched at
-  // once (no timing conflict) and accepted overlays carry forward in order.
+  // --- (b) PARALLEL optimize (extract + kernel layer per candidate, on distinct GPUs), then SERIAL
+  // integrate: e2e A/Bs must not overlap, and accepted overlays compound in order.
   const optimized = await parallel(cands.map((c) => async () => {
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
@@ -6154,7 +5565,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
+      const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
@@ -6162,8 +5573,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      }));
-      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'));
+      if (r == null && IS_AGENTX) {
+        return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
+      }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean,
         isolated_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0) : r.final_geomean,
@@ -6182,7 +5595,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const c = o.c;
     if (o.skip) {
       log(`  ${c.short_name}: ${o.reason}; skipping.`);
-      history.ledger.push({ direction: c.short_name, verdict: 'dead_end', lesson: o.reason });
+      history.ledger.push({ direction: c.short_name, verdict: o.paused ? 'paused' : 'dead_end', lesson: o.reason });
       continue;
     }
     const { ext, kl } = o;
@@ -6205,9 +5618,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
       `integrate ${c.short_name}`, 'Milestone');
 
-    // Three-state gate (see head track): incomplete A/B => PENDING, not rejected.
-    // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
-    // flag => not done; a legacy return without ab_complete behaves as before.
+    // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
     if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
@@ -6217,10 +5628,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
-      // Unified reject/incomplete handling (same as the head track): a FIXABLE reject OR fixable
-      // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
-      // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
-      // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
+      // As in the head track: a fixable reject or warmup crash earns a corrective re-author (not
+      // charged to HEAD_BUDGET); a non-fixable incomplete A/B stays PENDING.
       const reason = gateRejectReason(integ, c.pct_gpu_time, kl.isolated_speedup);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
@@ -6249,7 +5658,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     }
   }
 
-  // --- (c) If improved: re-profile + grow the experience library ----------
+  // --- (c) If improved: re-profile
   if (milestoneImproved) {
     noImprove = 0;
     if (!KERNEL_EXTRACT_ON) {
@@ -6265,7 +5674,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     noImprove++;
   }
 
-  // --- (d) Update the persistent experience library + in-run memory -------
+  // --- (d) Update the persistent experience library + in-run memory
   const exp = E2E_LEARNED_KB_ENABLED ? await safeAgent(
     roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
@@ -6291,26 +5700,16 @@ let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
+let validateSkip = '', finalFromAb = false;
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
-// Completeness guarantee (general, not per-kernel): an A/B that measured only the
-// reference leg (gate:'incomplete' / ab_complete:false) is NOT a result. Before
-// finalizing we
-//   (1) RECONSTRUCT from disk every overlay whose integrate_result shows the A/B
-//       never completed both legs — so incompletes from ANY integrate branch, or
-//       from a prior crashed/killed/resumed run (the JS has no fs and no carried
-//       state across a process restart), are recovered, then
-//   (2) drive EVERY pending integration to a complete ref+cand measurement
-//       (runIntegrateBothLegs re-invokes the integrator to run the missing leg).
-// This replaces the old "finish only the single best, and only when nothing else
-// was accepted" gate, which stranded sibling incompletes (e.g. an env-config
-// head) at ref-only whenever any other head/kernel had been accepted. Keys ONLY
-// off the stable overlay/cand_*/integrate_result.json layout. Bounded by
-// AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget
-// + TIME_FINAL_DEADLINE_HIT (this gate must NEVER spend the final reserve; see below).
+// A reference-only A/B is not a result. (1) Reconstruct from disk (overlay/cand_*/
+// integrate_result.json) every A/B that never completed, including from a killed or resumed run;
+// (2) finish each pending one (runIntegrateBothLegs runs the missing leg). Bounded by
+// AB_FINISH_RETRIES, agentBounded and TIME_FINAL_DEADLINE_HIT: never spends the final reserve.
 if (want('final')) {
-  // Issue #429: reclaim leftover process-local capture dirs before Finalize burns more disk.
-  // Run even when TIME_FINAL_DEADLINE_HIT — reclaim is cheap local FS work, not a bench.
+  // Reclaim leftover process-local capture dirs before Finalize uses more disk; runs even past
+  // TIME_FINAL_DEADLINE_HIT (cheap local FS work, not a bench).
   try {
     const { execFileSync } = require('child_process');
     const out = execFileSync('python3', [
@@ -6329,15 +5728,13 @@ if (want('final')) {
   } catch (reclaimErr) {
     log(`Finalize: capture workspace reclaim skipped (${reclaimErr && reclaimErr.message ? reclaimErr.message : reclaimErr})`);
   }
-  // (0) The reserve is not ours. Each iteration below boots a server and runs two benches, so past
-  // the boundary there is no time to finish even one: skip the whole gate, scan agent included.
-  // Pending entries stay in pendingIntegrations and reach the caller — deferred, not discarded.
+  // (0) Past the final-reserve boundary skip the whole gate (scan included); pending entries reach
+  // the caller via pendingIntegrations: deferred, not discarded.
   if (TIME_FINAL_DEADLINE_HIT) {
     log(`Finalize-gate: SKIPPED entirely — the final reserve has already begun. ` +
       `${pendingIntegrations.length} pending A/B(s) deferred to the caller (surfaced in pending_integrations).`);
   } else {
-  // (1) Disk-reconstruct incomplete A/Bs. The JS has no fs, so a read-only Bash
-  // agent enumerates the overlay layout and reports which A/Bs never completed.
+  // (1) Disk-reconstruct incomplete A/Bs via a read-only agent (the JS has no fs).
   const RECON_SCHEMA = obj({ incomplete: { type: 'array', items: obj({
     short_name: { type: 'string' }, overlay_dir: { type: 'string' },
     winner_kind: { type: 'string' }, apply_env: { type: 'string' }, apply_flags: { type: 'string' },
@@ -6378,8 +5775,7 @@ if (want('final')) {
           verified_isolated_speedup: it.isolated || 0, pct_gpu_time: it.pct_gpu_time,
           parity_note: 'expected_close',
         },
-        // The candidate overlay is already built on disk; the integrator benches
-        // it directly on resume (RESUME_AB) — it does NOT rebuild it.
+        // The overlay is already built: the integrator benches it directly (RESUME_AB), no rebuild.
         CAND_OVERLAY_DIR: it.overlay_dir, RESUME_AB: true, SKILL_DIR: WORKFLOW_DIR,
       },
     });
@@ -6387,9 +5783,7 @@ if (want('final')) {
       `(winner_kind=${it.winner_kind || '?'}, ref=${!!it.ref_present}, cand=${!!it.cand_present}); queued to finish.`);
   }
 
-  // (2) Drive EVERY pending integration to a complete ref+cand measurement — but never
-  // past the reserve boundary. Highest isolated speedup first, so if the clock cuts the
-  // queue short the most valuable A/B is the one that got finished.
+  // (2) Finish every pending A/B, never past the reserve boundary; highest isolated speedup first.
   pendingIntegrations.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
   const stillIncomplete = [];
   while (pendingIntegrations.length) {
@@ -6400,14 +5794,19 @@ if (want('final')) {
         `Finalize/Report/Validate must run. Deferred, not discarded: they are surfaced in pending_integrations.`);
       break;
     }
+    if (abWindowShort(abLegs(pendingIntegrations[0].inputs), `Finalize-gate: ${pendingIntegrations[0].short_name}`)) {
+      log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}): the next cannot finish before the final ` +
+        'reserve. Deferred to pending_integrations.');
+      break;
+    }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
     const integ = await runIntegrateBothLegs(
       'Finish the e2e A/B for this verified-isolated win. Run BOTH legs (reference + candidate) to ' +
       'completion, then return accepted/stack/rejected with ab_complete:true.',
-      // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
-      // measured against the latest accepted baseline.
+      // Measured against the latest accepted baseline (current overlay/flags/env/throughput).
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
@@ -6460,12 +5859,9 @@ if (allAccepted.length) {
     integrity: { checkpoint_assets: [] },
   });
 }
-// The final phase starts on GPUs the search may still hold: the reserve boundary abandons a search agent's
-// promise, not the agent, and whatever it launched detached keeps running (a tuner sweep, an A/B leg, a
-// script waiting to start the next one). Finalize and Validate each begin by stopping that work through
-// run_reaper.py, which selects by what belongs to this run rather than by name. Bounded on its own clock:
-// inside the final phase agentTimeoutFor() is the full agent timeout. A fence that fails costs nothing the
-// stage would not have lost anyway.
+// The reserve boundary abandons a search agent's promise, not the agent, so detached search work may
+// still hold GPUs. Finalize and Validate each start with run_reaper.py (selects by this run's marker,
+// not by name), bounded on its own clock; a failed fence is non-fatal.
 const RUN_REAPER = `${WORKFLOW_DIR}/scripts/run_reaper.py`;
 const FENCE_TIMEOUT_MS = 10 * 60000;
 const FENCE_SCHEMA = obj({ ok: { type: 'boolean' }, stage: { type: 'string' }, stopped: arrObj,
@@ -6501,13 +5897,17 @@ if (want('final')) {
   phase('Finalize');
   await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
-    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
+    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
+  // The stock bundle's number is Setup's canonical one, not Finalize's search leg.
+  const adoptedNothing = agentxAdoptedNothing({ setup: SETUP_CONFIG, accepted: allAccepted.length, tput: curTput,
+    baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay });
+  if (adoptedNothing) finalTput = BASELINE_TPUT;
   if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
     await requireE2EValidationCheckpoint('final/e2e_validation.json', {
       phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
@@ -6554,14 +5954,21 @@ if (want('final')) {
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
-  // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
-  // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
-  // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
-  // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
+  // Validate is sized into FINAL_RESERVE_MS and not time-gated (skips only per agentxValidateSkip);
+  // if a hard kill lands mid-bench, Report's files and run_e2e.py's fallback
+  // (director_e2e_validation.json, then the best overlay's integrate_result.json) still carry a win.
   phase('Validate');
-  await finalPhaseFence('validate', 'Validate');
-  validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
+  validateSkip = agentxValidateSkip(adoptedNothing, remainingMs());
+  if (validateSkip === 'final_is_baseline') {
+    log(`Validate SKIPPED: nothing adopted, so the final bundle is the stock one (Setup's ${BASELINE_TPUT} tok/s).`);
+  } else if (validateSkip === 'no_time') {
+    log(`Validate SKIPPED: ~${remainingMin()}min left, under its ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min of timed windows.`);
+  } else {
+    await finalPhaseFence('validate', 'Validate');
+  }
+  validation = validateSkip ? null : await safeAgent(
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
+      agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
@@ -6570,36 +5977,28 @@ if (want('final')) {
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
       SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
-      // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
-      // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
-      // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
-      // can never disagree. Paths default to the standard EVAL_DIR names if the report result is absent.
+      // Report wrote these before Validate ran: the Director rewrites their headline numbers (and
+      // status/parity) to its own, so they never disagree. Defaults are the standard EVAL_DIR names.
       ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
-  // A Validate that did NOT produce a usable number (e.g. its server crashed in
-  // engine-core init) must NEVER erase the accepted same-session A/B win we
-  // already carry in finalTput/curTput. Trust the Director's independent number
-  // ONLY when it is a real positive measurement; otherwise fall back to the
-  // carried best-accepted throughput so a real, parity-checked win is never
-  // reported as 0 / no_gain downstream.
+  // Trust the Director's number only when it is a real positive measurement; a Validate with no
+  // usable number never erases the accepted A/B win carried in finalTput.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  // A search leg over a canonical baseline is no speedup: run_e2e.py reports the accepted A/B's own pair.
+  finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validationStatusOf()}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+  if (finalFromAb) {
+    log("Validate gave no number: returning no final or speedup, so run_e2e.py reports the accepted A/B's own pair.");
+  }
 
-  // --- FINAL experience reconciliation (post-gate) -----------------------
-  // The per-milestone update_experience (in the Milestone loop above) is the ONLY
-  // curate step, and it runs on that milestone's ledger. But a head/kernel whose
-  // e2e A/B was still INCOMPLETE at milestone time is recorded as "Integrator
-  // pending", and the Finalize-gate (Fix C) that actually CONFIRMS its e2e win runs
-  // AFTER the last milestone curate — as does the Director's Validate. Without a
-  // pass here, those cards stay frozen at "pending" and never receive the verified
-  // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
-  // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
-  // post-Validate numbers, so finalize-gate confirmations are written back.
+  // --- FINAL experience reconciliation (post-gate) ----
+  // Cards written as "pending" before the Finalize-gate (Fix C) and Validate confirmed them get the
+  // verified post-Validate numbers here, in one re-curate.
   if (allAccepted.length && E2E_LEARNED_KB_ENABLED) {
     const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
     await safeAgent(
@@ -6643,42 +6042,30 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
-  // AgentX candidates carry prepared_ut.result (the validated RETURN.json) through state as well:
-  // dispatch needs it and cannot re-read it from disk, and an undispatched task surviving a resume
-  // without re-running preparation is the contract in references/workflow-handoff.md. Bounded by
-  // the selection policy (per-phase top 5 + >3% share) and no larger than `tuning` or
-  // `pending_integrations`, which are carried whole for the same reason.
+  // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
+  // undispatched task survives a resume (references/workflow-handoff.md).
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
-  // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
-  // phase still has the attribution numbers when it runs in a later invocation.
+  // Full tuning result: a phase-by-phase resume neither re-runs tuning nor loses its attribution.
   ...(tuning ? { tuning } : {}),
-  // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
-  // resumed phase run can finish their A/B instead of re-discovering them.
+  // Pending wins WITH their inputs, so a resumed run can finish their A/B.
   pending_integrations: pendingIntegrations,
   history,
 };
 
-// What this run got from the KB, and — separately — what it added on its own. The split is the
-// point: a warm-started run's headline speedup is partly inherited, and reporting the whole of it as
-// this run's work is how a knowledge base starts flattering itself. BASELINE_TPUT stays the true
-// cold baseline throughout, so `throughput_speedup` above is still measured against the real floor.
+// What this run got from the KB, and separately what it added (a warm start's headline speedup is
+// partly inherited). BASELINE_TPUT stays the true cold baseline throughout.
 const kbWarmStart = (E2E_WARM_START_ON && KB_DIMS) ? {
   identity: KB_DIMS, plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
   reference_dir: KB_REF_DIR,
   adopted_throughput_tok_s: kbSeedTput || null,
   adopted_kernels: kbSeedKernels.map(k => k.name).filter(Boolean),
-  // The gain that is genuinely THIS run's: everything after the warm start's own contribution. Null
-  // when nothing was adopted, because then the ordinary speedup already answers the question.
+  // This run's own gain past the warm start; null when nothing was adopted.
   incremental_speedup: kbSeedTput ? Number((finalTput / kbSeedTput).toFixed(6)) : null,
-  // The full recall ledger, both planes. Same object the Report role was handed, so the prose in
-  // final_report.md and whatever a downstream consumer reads cannot disagree about what was
-  // recalled or how it fared.
+  // The full recall ledger (both planes), the same object the Report role was handed.
   recall: KB_RECALL,
 } : null;
-// Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
-// pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
-// total gain — which is the number "how much did the tuning actually help?" is asking for. share is null
-// (not 0) when the run had no net gain to apportion, so a caller never divides by a meaningless total.
+// Attribution for the standalone tuning phase (its own pre/post legs): delta% and its SHARE of the
+// run's total gain (null, not 0, when there is no net gain to apportion).
 function tuningReturn() {
   if (!TUNING_SKILLSET_ENABLED) return { enabled: false };
   const base = {
@@ -6699,13 +6086,11 @@ function tuningReturn() {
       isolated_speedup: o.isolated_speedup || 0, engaged: o.engaged === true, artifact: o.artifact || '',
     })),
     artifacts: tuning.artifacts || [],
-    // How the win reaches production. Consumers that need to reproduce the tuning outside this run read
-    // deploy_bundle (its deploy.sh is idempotent); final_launch.sh already invokes it.
+    // To reproduce the tuning elsewhere: deploy_bundle (idempotent deploy.sh, run by final_launch.sh).
     deploy_bundle: tuning.deploy_bundle || '', deploy_verified: tuning.deploy_verified === true,
     cache_invalidation: tuning.cache_invalidation || [], live_tree_files: tuning.live_tree_files || [],
     apply_overlay: tuning.apply_overlay || '',
-    // Finalize's independent answer to "did the tuning actually make it into the shipped bundle, and
-    // does it still engage there?". null when Finalize did not run (a phase-scoped invocation).
+    // Finalize's check that the tuning is in the shipped bundle and engages; null if it did not run.
     in_final_bundle: finalize ? (finalize.tuning_in_bundle === true) : null,
     final_bundle_engagement_recheck: (finalize && finalize.tuning_engagement_recheck) || '',
     apply_env: tuning.apply_env || '', apply_flags: tuning.apply_flags || '',
@@ -6727,14 +6112,21 @@ function tuningReturn() {
   };
 }
 
+// A Validate that returned nothing is flagged, so no KB writer records the carried number.
+function validationStatusOf() {
+  return validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+      : (!want('final') ? 'phase_partial'
+        : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
+          : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown')));
+}
+
 const wfReturn = {
-  // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
-  // breaking change to the keys below; run_e2e.py keys its canonical-artifact
-  // read off this so it never silently mis-parses a future shape.
+  // The contract shape run_e2e.py reads; bump only on a breaking change to the keys below.
   schema_version: 1,
   mode: 'e2e',
-  fast_mode: FAST_MODE,   // true => ConfigSweep + Milestone skipped; HeadKernel-only within the time budget
-  deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler (20h)
+  fast_mode: FAST_MODE,   // true => ConfigSweep, TuningSkillset and Milestone skipped (HeadKernel-only)
+  deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler
   backend: BACKEND,
   phases_run: PHASES,
   ablation: { arm: ABLATION_ARM || 'A1', requested_arm: ABL_RAW_ARM || 'A1',
@@ -6745,36 +6137,28 @@ const wfReturn = {
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
-  // Trust the Director's independent number ONLY when it is a real positive
-  // measurement (validatedOk). A crashed/degenerate Validate falls back to the
-  // carried accepted same-session A/B win — never 0 — so a real, parity-checked
-  // gain is not silently demoted to no_gain by run_e2e.py.
-  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
-  throughput_speedup: finalSpeedup,
-  validation_status: validatedOk ? validation.validation_status
-    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
-       : (want('final') ? 'unknown' : 'phase_partial')),
+  // The Director's number only when validatedOk; else the carried accepted A/B win, never 0 (except
+  // finalFromAb's empty pair, which run_e2e.py fills from disk).
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
+  throughput_speedup: finalFromAb ? 0 : finalSpeedup,
+  validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
-  // Standalone tuning-skillset phase: its own measured pre/post legs plus the share of the run's TOTAL
-  // gain those legs account for. Reported separately from accepted_heads/accepted_kernels precisely
-  // because the phase is standalone — "how much did tuning buy" is answerable, not folded into the total.
+  // Tuning phase attribution, reported apart from accepted_heads/accepted_kernels.
   tuning_skillset: tuningReturn(),
   ...(KERNEL_EXTRACT_ON ? { kernel_extraction: {
     delivery_path: profile?.kernel_extraction_delivery_json || '',
     failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],
     coverage_summary: profile?.coverage_summary || {},
   } } : {}),
-  // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).
-  // A REAL isolated speedup that simply ran out of A/B time — surfaced (slim) so
-  // the caller can resume/finish it, never silently discarded as a rejection.
+  // Verified-isolated wins whose e2e A/B never completed, surfaced (slim) for the caller to finish.
   pending_integrations: pendingIntegrations.map(p => ({
     short_name: p.short_name, track: p.track, isolated: p.isolated,
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
-  flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
+  flagged_heads: flaggedHeads,   // dominant heads not optimized (harness/extract/no-candidate)
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,
@@ -6782,45 +6166,24 @@ const wfReturn = {
   budget_used: dispatched,
   budget_total: BUDGET,
   final_overlay: (validation && validation.final_overlay) || (finalize && finalize.final_overlay) || curOverlay,
-  // FINALIZE_SCHEMA has always defined final_patch and the Finalizer has always returned it, but it
-  // was never surfaced here — so the single diff carrying the whole run's win reached neither the
-  // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
-  // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
-  // drops it, so a run with no final_patch uploads no reproducible code at all.
+  // final_patch is the KB's reproducible code (e2e_store.py _ARTIFACT_KEYS reads
+  // result["final_patch"]); final_overlay, a directory, cannot stand in for it.
   ...kbResultMetadata(),
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,
-  // Conditional spread, never an unconditional key: with the feature off this contributes no own
-  // property and both the returned object and the persisted file are byte-identical to before.
+  // Conditional spread: with the feature off the key is absent.
   ...(kbWarmStart ? { kb_warm_start: kbWarmStart } : {}),
-  // Emitted independently of kb_warm_start. kbWarmStart is null whenever KB_DIMS was never
-  // established (a preflight that produced no gfx), but the KERNEL lanes can still have recalled by
-  // then — folding recall only into kbWarmStart would drop exactly the runs where knowing what was
-  // recalled matters most. Absent entirely when nothing was recalled on either plane.
+  // Independent of kb_warm_start (null without KB_DIMS, while kernel lanes may still have recalled);
+  // absent when nothing was recalled on either plane.
   ...((KB_RECALL.e2e || KB_RECALL.kernel.length) ? { kb_recall: KB_RECALL } : {}),
   state: carryState,
 };
 
-// ---------------------------------------------------------------------------
-// Canonical handoff to run_e2e.py — write the SCHEMA-VALIDATED return to a FIXED
-// on-disk path from INSIDE the workflow.
-//
-// WHY (the perfect-cooperation contract): run_e2e.py must produce a TRUTHFUL
-// result.json regardless of HOW the agent ran this Workflow. Newer Claude CLIs
-// run a Workflow invocation as a NON-BLOCKING background task: the orchestrating
-// turn ends before completion, so this return value is NEVER echoed to the
-// transcript for run_e2e.py to scrape. The script itself has no fs, so we have an
-// agent (the only thing with Write) persist `wfReturn` to
-// <eval_dir>/workflow_return.json as the workflow's FINAL act. run_e2e.py reads
-// THAT one contracted file first (deterministic, no transcript scrape, no parsing
-// of free-form per-candidate files).
-//
-// Best-effort by design: if this persist fails (agent variance), the returned
-// value is UNCHANGED and run_e2e.py still falls back to its layered, schema-robust
-// disk recovery (director_e2e_validation.json -> accepted intermediate win ->
-// measured-baseline no_gain). So correctness never DEPENDS on this single write —
-// it is the preferred fast path, not the only path.
+// ---- Canonical handoff to run_e2e.py ----
+// The return value may never reach the transcript (the Workflow can run as a background task) and
+// the script has no fs, so an agent persists `wfReturn` to <eval_dir>/workflow_return.json, which
+// run_e2e.py reads first. Best-effort: on failure run_e2e.py recovers from disk.
 if (EVAL_DIR) {
   try {
     const json = JSON.stringify(wfReturn, null, 2);
@@ -6841,37 +6204,19 @@ if (EVAL_DIR) {
 
 // ===========================================================================
 // MODULE B — record this run in the deployment knowledge base.
-//
-// STRICTLY AFTER the workflow_return.json persist above, and that ordering is not stylistic.
-// workflow_return.json is the pinned contract run_e2e.py depends on, documented as the workflow's
-// final act precisely because this process gets SIGKILLed. Module B is the one operation in the
-// whole workflow that waits on a NETWORK rather than a GPU, and putting it in front of the persist
-// would trade the run's canonical artifact for a knowledge-base entry. Feeding the KB that same file
-// as --result has a second benefit: the record cannot drift from the report, because they are the
-// same bytes.
-//
-// EVERY --apply IS PERMANENT. The service exposes no DELETE for /v1/kb/*, so a wrong record cannot
-// be cleaned up, only outranked. Hence the gates below are conservative by design.
+// Strictly after the workflow_return.json persist (Module B can be SIGKILLed while on the network);
+// that same file is the --result, so record and report match. EVERY --apply IS PERMANENT (no
+// DELETE for /v1/kb/*), hence the conservative gates.
 // ===========================================================================
-// The Director's verdict, not the raw ratio, decides whether a same-session A/B is a real win: a
-// declared no-win can still carry a ratio ABOVE 1.0 when a low outlier in the base leg depresses its
-// median, so the two mechanically-identical legs' ratio squeaks over 1.0 while the run bought
-// nothing (see the 20260822 gemma-4-26B-A4B run: 1.0215x raw same-session, but 0.9453x vs the
-// provided baseline, validation_status=validated_no_win, empty overlay + empty patch). Keying the
-// write on the ratio alone wrote that BELOW-baseline number in as the exact-id champion and buried
-// the real framework-layer win beneath it. A KB write is PERMANENT (no delete), so a verdict the
-// Director already computed to mean "no win" must never mint a champion record, whatever the ratio
-// rounded to. `startsWith` also catches the `..._no_number_used_carried_ab` fallback spelling.
+// The Director's verdict, not the raw ratio, decides a real win (a low base-leg outlier can lift a
+// no-win above 1.0); `startsWith` also catches the `..._no_number_used_carried_ab` spelling.
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     !A.kb_defer_to_interface &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
-  // Computed HERE, deterministically, from facts this script already holds — never asked of an
-  // agent. `direction` is inside _content_digest, so a label that varies between two runs of the
-  // same configuration mints a second session instead of replacing the first, and the page fills
-  // with near-identical entries that outrank each other by noise. '' (unlabeled) is the honest
-  // answer when nothing distinct happened; the store collapses unlabeled records with nothing.
+  // Computed deterministically here, never by an agent: `direction` is in _content_digest, so an
+  // unstable label would mint duplicate sessions. '' (unlabeled) when nothing distinct happened.
   const kbDirection = [
     (curFlags !== INIT_FLAGS || curEnv !== INIT_ENV) ? 'config' : '',
     (acceptedKernels.length || acceptedHeads.length) ? 'kernels' : '',
@@ -6881,10 +6226,8 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     KB_ENV_PRELUDE +
     `python3 ${shq(E2E_STORE_SCRIPT)} write ${kbIdentityFlags()} ` +
     `${kbPlaneFlags()} --result ${shq(EVAL_DIR + '/workflow_return.json')} ` +
-    // --require-win re-asks, inside the writer, the same question the `if` above already answered.
-    // Not redundancy for its own sake: run_e2e.py's salvage path is a SECOND writer, and the two
-    // must refuse the same results. One gate implementation (e2e_store.win_gate), two callers —
-    // the arrangement that stops the next gate fix from reaching only half the write paths.
+    // --require-win repeats the `if` above inside the writer: run_e2e.py's salvage path is a second
+    // writer, and both must refuse the same results via one gate (e2e_store.win_gate).
     `--require-win --direction ${shq(kbDirection)} ` +
     `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply`;
   try {
@@ -6907,8 +6250,7 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
       `promoted=${rungs.filter(r => r.promoted).length}` +
       `${rungs.filter(r => r.error).map(r => ` [${r.tier}: ${r.error}]`).join('')}`);
   } catch (e) {
-    // Non-fatal, exactly like the persist above. The run's result is already on disk and already
-    // returned; failing to record it is a lost opportunity, not a lost measurement.
+    // Non-fatal, like the persist above: the result is already on disk and returned.
     wfReturn.kb_written = { ok: false, error: String(e).slice(0, 200) };
     log(`[kb] write failed (NON-FATAL — the run's own artifacts are unaffected): ${String(e)}`);
   }
@@ -6921,15 +6263,12 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
   log(`[kb] not recording this run: ${why}.`);
 }
 
-// Persist the agent timeline so the ledger can attribute tokens/time to the right role, then render
-// the run report (ledger -> clickable role-execution-tree HTML + MD twin) as the very last step. The
-// script has no filesystem access, so a tiny agent writes the file and runs the report driver.
-// Entirely best-effort: accounting must never fail a run that produced a real speedup.
+// Last step, best-effort: an agent persists the agent timeline (per-role token/time attribution) and
+// renders the run report (role-execution-tree HTML + MD).
 if (EVAL_DIR && LLM_STATS) {
   try {
-    // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
-    // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
-    // that happen to share a shape. Unique per run, and available with no Date/random.
+    // `instance` (this run's eval dir) lets the parser dedupe a nested timeline reached twice
+    // without collapsing distinct lanes of the same shape; needs no Date/random.
     const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
     const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
     await safeAgent(

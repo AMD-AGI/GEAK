@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -257,10 +258,9 @@ def test_a_stack_only_salvage_is_reported_as_provisional(tmp_path):
     assert out["validation_evidence"]["recovery"]["selected"] == "gemm1"
 
 
-def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
-    """The live path refuses to bank a soft-gated candidate whose delta exceeds
-    twice its theoretical ceiling (corruption doing less work looks like a win).
-    Recovery must not be a way around that check."""
+def test_a_surprising_speedup_without_confirmation_stays_pending_on_recovery(tmp_path):
+    """Recovery cannot run the independent review; it must preserve a pending win
+    rather than bypass the live review or classify it as incorrect output."""
     eval_dir = tmp_path / "e2e_implausible"
     # 25.5% GPU time at 1.0338x isolated caps the e2e gain at ~0.84%.
     _candidate(eval_dir, "corrupt", parity_kind="accuracy", pct_gpu_time=25.5,
@@ -268,6 +268,122 @@ def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
                ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
 
     assert rx._recover_best_intermediate_win(eval_dir) is None
+    record = rx._integrate_candidates(eval_dir)[0]
+    assert record["speedup_review_pending"] is True
+    assert record["output_parity"] == "pass"
+
+
+def _measurement(name, **extra):
+    return {
+        "measurement_id": name, "candidate_digest": "candidate-content",
+        "reference_digest": "h0-content", "workload_digest": "workload",
+        "ref_summary": f"/bench/{name}/ref.json", "cand_summary": f"/bench/{name}/cand.json",
+        "ref_replicas": 2, "cand_replicas": 2, "fresh_pair": True,
+        "configs_matched": True, "workload_matched": True, **extra,
+    }
+
+
+def _issue522_candidate(eval_dir, **extra):
+    return _candidate(eval_dir, "h1", **{
+        "parity_kind": "accuracy", "pct_gpu_time": 7.18, "isolated_speedup": 1.4596,
+        "e2e_delta_pct": 7.72, "ref_med": 335.171, "cand_med": 361.051,
+        "e2e_throughput_tok_s": 361.051, "measurement_evidence": _measurement("original"), **extra,
+    })
+
+
+def test_issue522_recovery_uses_full_module_coverage(tmp_path):
+    eval_dir = tmp_path / "e2e_coverage"
+    _issue522_candidate(eval_dir, affected_gpu_time={
+        "candidate_digest": "candidate-content",
+        "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+        "kernels": [{"id": name, "pct_gpu_time": pct} for name, pct in
+                    (("decode_in", 7.18), ("decode_out", 3.47), ("prefill", 1.37))],
+    })
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
+    estimate = wf["recovery_evidence"]["speedup_estimate"]
+    assert estimate["pct_gpu_time"] == pytest.approx(12.02)
+    assert estimate["estimate_pct"] == pytest.approx(3.9337544649)
+    assert estimate["source"] == "coverage_uniform_estimate"
+
+
+def test_profile_and_measurement_share_workload_identity_digest():
+    # #524 feedback: a different bench protocol must not hide coverage of the same workload.
+    ir = {"pct_gpu_time": 6.49, "isolated_speedup": 1.7746,
+          "measurement_evidence": _measurement("original", protocol_digest="inferencex-warm-40x8"),
+          "affected_gpu_time": {
+              "candidate_digest": "candidate-content",
+              "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+              "kernels": [{"id": name, "pct_gpu_time": pct} for name, pct in
+                          (("e01", 6.49), ("router_gemv", 2.84), ("sort", 2.84))],
+          }}
+    estimate = rx._speedup_estimate(ir)
+    assert estimate["source"] == "coverage_uniform_estimate"
+    assert estimate["pct_gpu_time"] == pytest.approx(12.17)
+    assert estimate["estimate_pct"] == pytest.approx(5.61, abs=0.01)
+    assert not rx._speedup_needs_review(ir, 6.2, estimate["estimate_pct"])
+
+
+def test_per_path_coverage_counts_removed_reduce_once(tmp_path):
+    rows = [{"id": "gemm", "pct_gpu_time": 7.18, "isolated_speedup": 1.28},
+            {"id": "reduce", "pct_gpu_time": 2.65, "removed": True},
+            {"id": "prefill", "pct_gpu_time": 1.37, "isolated_speedup": 1.94}]
+    ir = {"pct_gpu_time": 7.18, "isolated_speedup": 1.4596,
+          "measurement_evidence": _measurement("original"), "affected_gpu_time": {
+              "candidate_digest": "candidate-content",
+              "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+              "kernels": rows + [dict(rows[1])],
+          }}
+    estimate = rx._speedup_estimate(ir)
+    saved = .0718 * (1 - 1 / 1.28) + .0265 + .0137 * (1 - 1 / 1.94)
+    assert estimate["estimate_pct"] == pytest.approx((1 / (1 - saved) - 1) * 100)
+    assert estimate["source"] == "coverage_per_path"
+    ir["affected_gpu_time"]["reference_digest"] = "pre-h0"
+    assert rx._speedup_estimate(ir)["source"] == "head_estimate"
+    ir["affected_gpu_time"]["reference_digest"] = "h0-content"
+    ir["affected_gpu_time"]["kernels"][-1]["pct_gpu_time"] = 3
+    assert rx._speedup_estimate(ir)["source"] == "head_estimate"
+
+
+def test_confirmed_speedup_is_recovered_above_the_head_estimate(tmp_path):
+    eval_dir = tmp_path / "e2e_confirmed"
+    _issue522_candidate(eval_dir, measurement_evidence=_measurement("confirmation"),
+                        speedup_review={"status": "confirmed", "original_measurement": _measurement("original")})
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
+    assert wf["recovery_evidence"]["awaiting_speedup_review"] is None
+
+
+@pytest.mark.parametrize("changed", [
+    {"candidate_digest": "new-patch"}, {"reference_digest": "new-stack"}, {"workload_digest": "new-workload"},
+    {"protocol_digest": "different-bench-protocol"}, {"measurement_id": "original"}, {"ref_summary": "/bench/original/ref.json"},
+    {"ref_replicas": 1}, {"cand_replicas": 1}, {"ref_replicas": "2"}, {"cand_replicas": 2.5},
+    {"fresh_pair": False}, {"configs_matched": False}, {"workload_matched": False},
+])
+def test_recovery_cannot_confirm_changed_or_cached_evidence(tmp_path, changed):
+    eval_dir = tmp_path / "e2e_unconfirmed"
+    _issue522_candidate(eval_dir, measurement_evidence=_measurement("confirmation", **changed),
+                        speedup_review={"status": "confirmed", "original_measurement": _measurement("original")})
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+
+
+@pytest.mark.parametrize("status,measurement_id,recover", [
+    ("confirmed", "original", True), ("inconclusive", "original", False),
+    ("rejected", "original", False), ("confirmed", "other-candidate", False),
+])
+def test_recovery_reads_workflow_review_checkpoint_only_for_the_same_measurement(tmp_path, status, measurement_id, recover):
+    eval_dir = tmp_path / "e2e_review_checkpoint"
+    cand = _issue522_candidate(eval_dir)
+    raw = json.loads((cand / "integrate_result.json").read_text())
+    reviewed = {**raw, "measurement_evidence": _measurement("confirmation"),
+                "speedup_review": {"status": status, "original_measurement": _measurement(measurement_id)}}
+    checkpoint = eval_dir / "overlay" / "candidate_h1" / "e2e_validation.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text(json.dumps({"integration_result": reviewed}))
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert (wf is not None) is recover
+    if recover:
+        assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
 
 
 def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
@@ -464,6 +580,73 @@ def test_no_baseline_still_errors(tmp_path):
     eval_dir = tmp_path / "e2e_bare"
     (eval_dir / "overlay").mkdir(parents=True)
     assert rx._recover_completed_no_gain(eval_dir) is None
+
+
+def _make_agentx_no_gain_eval_dir(tmp_path: Path, basis: str) -> Path:
+    """An AgentX run that finished without a win, as the workflow leaves it: Setup's
+    summary is off the output axis, where bench_summarize.py leaves the output
+    throughput alias null, and nothing writes baseline_official.json."""
+    eval_dir = tmp_path / "e2e_agentx_nogain"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "final").mkdir(parents=True)
+    (eval_dir / "bench_e2e.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (eval_dir / "final" / "final_launch.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (eval_dir / "baseline" / "bench_summary.json").write_text(json.dumps({
+        "metric_basis": basis,
+        "throughput_tok_s_median": 113.325,
+        "output_throughput_tok_s_median": None,
+    }), encoding="utf-8")
+    return eval_dir
+
+
+@pytest.mark.parametrize("basis", ["p90_intvty_inferencex", "aggregate_total_token_tok_s"])
+def test_no_gain_recovery_reads_the_selected_metric_basis(tmp_path, basis):
+    """Off the output axis only throughput_tok_s_median carries the baseline; a
+    finished no-win run must still recover as no_gain, not fall through to an error."""
+    eval_dir = _make_agentx_no_gain_eval_dir(tmp_path, basis)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf is not None and wf.get("recovered_no_gain") is True
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(113.325)
+    assert wf["final_throughput_tok_s"] == pytest.approx(113.325)
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "no_gain"
+    assert out["metric_basis"] == basis
+    assert out["baseline_throughput_tok_s"] == pytest.approx(113.325)
+
+
+def test_no_gain_recovery_still_reads_a_summary_with_only_the_output_alias(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    (eval_dir / "baseline" / "baseline_official.json").unlink()
+    wf = rx._recover_completed_no_gain(eval_dir)
+    assert wf is not None
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(601.786)
+
+
+def test_phase_reached_follows_what_each_phase_leaves_on_disk(tmp_path):
+    assert rx._phase_reached("") == ""
+    assert rx._phase_reached(tmp_path / "absent") == ""
+    eval_dir = tmp_path / "e2e_phase"
+    eval_dir.mkdir()
+    assert rx._phase_reached(eval_dir) == "setup"
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text("{}", encoding="utf-8")
+    assert rx._phase_reached(eval_dir) == "search"
+    fence = eval_dir / rx.FINAL_PHASE_FENCE_FILE
+    for stage in ("finalize", "validate"):
+        fence.write_text(json.dumps({"stage": stage, "at": "t", "stopped": 0}), encoding="utf-8")
+        assert rx._phase_reached(str(eval_dir)) == stage
+    fence.write_text("[]", encoding="utf-8")
+    assert rx._phase_reached(eval_dir) == "search"
+
+
+def test_phase_fence_matches_the_reaper_and_the_workflow():
+    spec = importlib.util.spec_from_file_location(
+        "run_reaper", rx.E2E_DIR / "scripts" / "run_reaper.py")
+    reaper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reaper)
+    assert reaper.FENCE_FILE == rx.FINAL_PHASE_FENCE_FILE
+    workflow = rx.E2E_SCRIPT.read_text(encoding="utf-8")
+    assert set(re.findall(r"finalPhaseFence\('(\w+)'", workflow)) == set(rx.FINAL_PHASE_STAGES)
 
 
 def test_workflow_done_marker_ignores_final_launch(tmp_path):

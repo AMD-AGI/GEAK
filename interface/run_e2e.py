@@ -81,8 +81,8 @@ E2E_CHECKPOINT_LEVELS = {
 # ratio was computed against a different pair than the one we report.
 SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
 
-# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
-# is treated as corruption rather than a win. Mirrors
+# Headroom over an Amdahl estimate before an accuracy-gated win needs an
+# independent measurement review. Exceeding it is not a correctness failure. Mirrors
 # IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
 # ceiling); both sides MUST agree or the recovery path banks what the live path
 # refuses, so this is the SINGLE source of truth: map_args() forwards it to the
@@ -123,6 +123,9 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+# Products with a `product:` section in roofline/peaks.md; keep in sync with it
+# and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
+RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
@@ -271,6 +274,26 @@ def _note_session_id(msg: object) -> None:
         _LAST_SDK_SESSION["session_id"] = sid.strip()
 
 
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def _foreground_wait_env() -> dict[str, str]:
+    """Turn Claude Code background tasks off unless the operator chose a value.
+
+    Role agents wait out hour-long serving legs in foreground Bash calls. With
+    background tasks on, Claude Code 2.1.310+ refuses a call that starts with
+    ``sleep N`` (N >= 25) and steers the agent to Monitor/``run_in_background``,
+    whose notification arrives after a workflow agent's turn has ended, and a
+    turn ending is that agent's return.
+
+    Returns:
+        ``{BACKGROUND_TASKS_ENV: "1"}``, or ``{}`` when it is already set.
+    """
+    if BACKGROUND_TASKS_ENV in os.environ:
+        return {}
+    return {BACKGROUND_TASKS_ENV: "1"}
+
+
 def _sdk_child_env() -> dict[str, str]:
     """Build the environment overlay for the Claude Code child process.
 
@@ -296,6 +319,7 @@ def _sdk_child_env() -> dict[str, str]:
     run_mark = os.environ.get(RUN_MARK_ENV, "")
     if run_mark:
         env[RUN_MARK_ENV] = run_mark
+    env.update(_foreground_wait_env())
     return env
 
 
@@ -512,7 +536,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. A bare gfx1201 remains product
-    `unknown`; only exact R9700 detection produces target `r9700`.
+    `unknown`; exact R9700 and R9600D detection produces the corresponding
+    product target without establishing serving-policy qualification.
     """
     explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
     explicit_target = str(h.get("expected_target") or "").strip().lower()
@@ -523,12 +548,12 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in {"r9700", "unknown"}:
+        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
             )
-        if explicit_target == "r9700" and explicit_gfx != "gfx1201":
-            raise ValueError("expected_target=r9700 requires expected_gfx=gfx1201")
+        if explicit_target in RDNA4_SERVING_PRODUCTS and explicit_gfx != "gfx1201":
+            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
         return {
             "gfx": explicit_gfx,
             "target": explicit_target,
@@ -565,10 +590,10 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in {"r9700", "unknown"}:
+    if target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target == "r9700" and gfx != "gfx1201":
-        raise RuntimeError("GPU identity probe returned r9700 on a non-gfx1201 ISA")
+    if target in RDNA4_SERVING_PRODUCTS and gfx != "gfx1201":
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
     return {
         "gfx": gfx,
         "target": target,
@@ -695,7 +720,7 @@ def map_args(
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
+            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
@@ -741,8 +766,9 @@ def map_args(
         "search_replicas": 1,
         "validation_replicas": 3,
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
-        # on one server, report the second.  A 3-round median would be a different statistic from
-        # the one it rebenches against, so the round count is not a knob here.
+        # on one server, report the second (one pass for an AgentX replay, which warms itself per
+        # lane, as Hyperloom's AgentX rebench does).  A 3-round median would be a different
+        # statistic from the one it rebenches against, so the round count is not a knob here.
         "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
@@ -780,19 +806,25 @@ def map_args(
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget; a trace
+    # replay floors it at what its own final phase costs); this lets an operator widen it per
+    # run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
-    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
-    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
-    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
+    # not bound by it. Optional in the same way as the reserve itself.
     reserve_cap = _float_or_none(
         os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
     if reserve_cap is not None:
         ps_args["final_reserve_cap_frac"] = reserve_cap
+    # ...and the boot + replay warmup + drain that floor adds to each trace-replay leg's window
+    # (JS default 1200s). Raise it for a model whose server boots slower.
+    leg_overhead = _int_or_none(
+        os.environ.get("GEAK_AGENTX_LEG_OVERHEAD_S"), "GEAK_AGENTX_LEG_OVERHEAD_S")
+    if leg_overhead is not None:
+        ps_args["agentx_leg_overhead_s"] = leg_overhead
     # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
     # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
     # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
@@ -2125,6 +2157,8 @@ def apply_bench_protocol(h: dict) -> dict:
         # Warm-server parity -- one server per leg, a discarded full warmup round, then the
         # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
         # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
+        # An AgentX replay gets no discarded round: bench_e2e.sh lets the replay warm itself per
+        # lane, which is exactly Hyperloom's AgentX baseline and rebench.
         aligned = {
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
@@ -2463,9 +2497,9 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         timeout=timeout_s,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        # A failed API call exits 1 with stderr empty: the error is in the stdout JSON.
+        detail = (proc.stderr or "")[-2000:] or (proc.stdout or "")[-2000:]
+        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {detail}")
     # claude -p --output-format json wraps the assistant text; try to unwrap.
     out = proc.stdout.strip()
     try:
@@ -2538,8 +2572,8 @@ def _invoke_via_runtime(
     # the wrapper a margin so a graceful finalize is never killed prematurely.
     wrap_timeout = (timeout_s + 900) if timeout_s else None
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
-        text=True, timeout=wrap_timeout,
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ, **_foreground_wait_env()),
+        capture_output=True, text=True, timeout=wrap_timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -2672,6 +2706,15 @@ def _parse_last_json_line(raw: str) -> dict:
     )
 
 
+# Claude Code's reply when it cannot reach the model API. 2.1.177 says "Unable to
+# connect to API (<code>)" for every connection failure; 2.1.309 and 2.1.316 say
+# e.g. "Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)".
+_LLM_UNREACHABLE_RE = re.compile(
+    r"API Error: (?:Unable to connect to API|Connection (?:error|refused|dropped|lost before)"
+    r"|Can't reach the API server|No internet route|Couldn't connect through your proxy)"
+)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
@@ -2682,11 +2725,15 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
+    # arrives as agent output inside a parse error or a failed CLI's message.
+    if _LLM_UNREACHABLE_RE.search(msg):
+        return "llm_unreachable"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -3015,15 +3062,22 @@ _SERVER_ARGS_IDENTITY_KEYS = (
     "disable_radix_cache",
     "trust_remote_code",
 )
+_SERVER_ARGS_RECORD_RE = re.compile(r"\bServerArgs\s*\(|\bserver_args\s*=\s*\{")
+_SERVER_ARGS_RECORD_MAX_CHARS = 65536
 
 
 def _balanced_server_args(text: str) -> str:
-    """Return one complete ``ServerArgs(...)`` expression from log text."""
-    start = text.find("ServerArgs(")
-    if start < 0:
+    """Return one complete SGLang startup argument expression from log text."""
+    match = _SERVER_ARGS_RECORD_RE.search(text)
+    if match is None:
         return ""
-    depth, quote, escaped = 0, "", False
-    for index, char in enumerate(text[start:], start):
+    opener = match.end() - 1
+    start = opener if text[opener] == "{" else match.start()
+    closers: list[str] = []
+    quote, escaped = "", False
+    for index, char in enumerate(text[opener:], opener):
+        if index - start >= _SERVER_ARGS_RECORD_MAX_CHARS:
+            return ""
         if quote:
             if escaped:
                 escaped = False
@@ -3034,11 +3088,12 @@ def _balanced_server_args(text: str) -> str:
             continue
         if char in ("'", '"'):
             quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
+        elif char in "({[":
+            closers.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif char in ")}]":
+            if not closers or closers.pop() != char:
+                return ""
+            if not closers:
                 return text[start : index + 1]
     return ""
 
@@ -3050,20 +3105,29 @@ def _parse_sglang_server_args(text: str) -> dict[str, Any]:
         return {}
     try:
         node = ast.parse(expression, mode="eval").body
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError):
         return {}
-    if not isinstance(node, ast.Call):
+    if isinstance(node, ast.Call):
+        fields = [(keyword.arg, keyword.value) for keyword in node.keywords]
+    elif isinstance(node, ast.Dict):
+        if any(
+            not isinstance(key, ast.Constant) or not isinstance(key.value, str)
+            for key in node.keys
+        ):
+            return {}
+        fields = [(key.value, value) for key, value in zip(node.keys, node.values)]
+    else:
         return {}
     observed: dict[str, Any] = {}
-    for keyword in node.keywords:
-        if keyword.arg not in _SERVER_ARGS_IDENTITY_KEYS:
+    for name, value_node in fields:
+        if name not in _SERVER_ARGS_IDENTITY_KEYS:
             continue
         try:
-            value = ast.literal_eval(keyword.value)
-        except (ValueError, TypeError):
+            value = ast.literal_eval(value_node)
+        except (ValueError, TypeError, RecursionError):
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
-            observed[keyword.arg] = value
+            observed[name] = value
     return observed
 
 
@@ -3190,20 +3254,66 @@ def _open_server_log(log_path: Path):
     return log_path.open(encoding="utf-8", errors="ignore")
 
 
+_VLLM_NON_DEFAULT_ARGS_MARKER = "non-default args: {"
+# Logged on every launch yet never part of the configuration: transport, the positional echo of ``model``, and
+# GEAK's own torch profiler wrapper (only its profile servers carry it).
+_VLLM_NON_IDENTITY_KEYS = frozenset({"host", "port", "model_tag", "profiler_config"})
+
+
+def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
+    """Extract launch fields from vLLM's ``non-default args: {...}`` line.
+
+    vLLM logs once, at startup, every CLI argument that differs from its default as a dict repr, so the key set is
+    open: every field except the run-scoped ``_VLLM_NON_IDENTITY_KEYS`` is part of the identity and is compared,
+    including one this parser has never seen. Each top-level item is evaluated on its own. A field whose value is
+    not a literal is listed under ``unparsed``, so a version-drifted log reads as unverified instead of as a value;
+    so is an item that is not a ``key: value`` pair.
+    """
+    start = text.find(_VLLM_NON_DEFAULT_ARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_VLLM_NON_DEFAULT_ARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        try:
+            key = ast.literal_eval(raw_key.strip()) if sep else None
+        except (ValueError, SyntaxError):
+            key = None
+        if not isinstance(key, str):
+            unparsed.append("<malformed item>")
+            continue
+        if key in _VLLM_NON_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value.strip())
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
         with _open_server_log(log_path) as handle:
             lines = iter(handle)
             for line in lines:
-                if "ServerArgs(" not in line:
+                if not _SERVER_ARGS_RECORD_RE.search(line):
                     continue
-                # SGLang normally emits one line. Permit a wrapped startup
-                # record too, but cap it so a malformed log cannot grow memory.
-                record = line
-                while not _balanced_server_args(record) and len(record) < 65536:
+                # Permit wrapped startup output while capping the accumulated
+                # record passed to the parser.
+                record = line[:_SERVER_ARGS_RECORD_MAX_CHARS]
+                while (
+                    not _balanced_server_args(record)
+                    and len(record) < _SERVER_ARGS_RECORD_MAX_CHARS
+                ):
                     try:
-                        record += next(lines)
+                        record += next(lines)[:_SERVER_ARGS_RECORD_MAX_CHARS - len(record)]
                     except StopIteration:
                         break
                 server_args = _parse_sglang_server_args(record)
@@ -3221,6 +3331,18 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
                 server_args = _parse_atom_engine_kwargs(line)
                 if server_args:
                     return {"backend": "atom", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
+    # vLLM logs the arguments that differ from its defaults once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _VLLM_NON_DEFAULT_ARGS_MARKER not in line:
+                    continue
+                server_args = _parse_vllm_non_default_args(line)
+                if server_args:
+                    return {"backend": "vllm", "server_args": server_args}, ""
     except OSError:
         return {}, ""
 
@@ -3440,6 +3562,11 @@ def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
     }
     if equal is False:
         out["mismatches"] = _identity_mismatches(expected, observed)
+    if any(path.is_file() for path in candidates) and not observed:
+        out["observed_problem"] = (
+            "no launch record this parser recognises (SGLang ServerArgs, ATOM Engine kwargs, vLLM non-default "
+            "args, identity=) in the Setup server log"
+        )
     if launched:
         out["geak_launched"] = launched
         out["geak_launched_reference"] = "orchestrator_server_log" if reference else expected_source
@@ -4859,6 +4986,9 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
 FINAL_REPORT_FILE = "final_report.md"
+# run_reaper.py's FENCE_FILE; its "stage" is the final-phase stage that took the GPUs.
+FINAL_PHASE_FENCE_FILE = ".final_phase_fence"
+FINAL_PHASE_STAGES = ("finalize", "validate")
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -6196,7 +6326,7 @@ def _ir_float(ir: dict, *keys: str) -> float:
 
 
 def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
-    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+    """Advisory e2e estimate from a GPU-time share and isolated speedup.
 
     Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
     missing, so an unknown profile never flags anything (fail-open).
@@ -6209,18 +6339,8 @@ def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
 
 
 def _parity_is_soft(ir: dict) -> bool:
-    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
-
-    Byte-exact parity is a hard correctness guarantee, so a speedup above the
-    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
-    degenerate output, so an impossible speedup there is treated as corruption.
-
-    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
-    back to the run's ``accuracy_gate`` arg when the label is absent or
-    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
-    candidate is therefore treated as soft — the guard still needs the delta to
-    exceed twice the ceiling before it fires, and a missing profile makes the
-    ceiling infinite, so this cannot drop a win on schema grounds alone.
+    """Accuracy-gated results can need review. Legacy unlabelled disk results
+    are treated as soft because the workflow's accuracy_gate arg is unavailable.
     """
     kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
     if kind in ("byte_exact", "none"):
@@ -6228,8 +6348,95 @@ def _parity_is_soft(ir: dict) -> bool:
     return True
 
 
-def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
-    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
+def _speedup_estimate(ir: dict) -> dict:
+    """Mirror speedupEstimate: disjoint current-reference coverage, else head fallback."""
+    isolated = _ir_float(ir, "isolated_speedup")
+    pct = _ir_float(ir, "pct_gpu_time")
+    fallback = {"pct_gpu_time": pct, "estimate_pct": _amdahl_ceiling_pct(pct, isolated),
+                "source": "head_estimate"}
+    coverage = ir.get("affected_gpu_time") or {}
+    measured = ir.get("measurement_evidence") or {}
+    if not isinstance(coverage, dict) or not isinstance(measured, dict):
+        return fallback
+    rows = coverage.get("kernels")
+    if (not coverage.get("profile_path") or not measured.get("candidate_digest")
+            or coverage.get("candidate_digest") != measured["candidate_digest"]
+            or not measured.get("reference_digest")
+            or not measured.get("workload_digest")
+            or coverage.get("reference_digest") != measured["reference_digest"]
+            or coverage.get("workload_digest") != measured["workload_digest"]
+            or not isinstance(rows, list) or not rows):
+        return fallback
+    seen = {}
+    pct, saved, uniform = 0.0, 0.0, False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            return fallback
+        share = row.get("pct_gpu_time")
+        if (type(share) not in (int, float) or not math.isfinite(share)
+                or not 0 <= share <= 100):
+            return fallback
+        signature = (share, row.get("isolated_speedup"), row.get("removed") is True)
+        if row["id"] in seen:
+            if seen[row["id"]] != signature:
+                return fallback
+            continue
+        seen[row["id"]] = signature
+        pct += share
+        if row.get("removed") is True:
+            saved += share / 100
+        else:
+            speedup = row.get("isolated_speedup")
+            if type(speedup) not in (int, float) or not math.isfinite(speedup) or speedup <= 0:
+                speedup, uniform = isolated, True
+            if not math.isfinite(speedup) or speedup <= 0:
+                return fallback
+            saved += share / 100 * (1 - 1 / speedup)
+    if not 0 < pct <= 100 + 1e-9:
+        return fallback
+    return {"pct_gpu_time": pct,
+            "estimate_pct": math.inf if saved >= 1 else (1 / (1 - saved) - 1) * 100,
+            "source": "coverage_uniform_estimate" if uniform else "coverage_per_path"}
+
+
+def _confirmation_evidence_matches(ir: dict) -> bool:
+    """A distinct pair with the same candidate, baseline and workload confirms a win."""
+    review = ir.get("speedup_review") or {}
+    if not isinstance(review, dict) or review.get("status") != "confirmed":
+        return False
+    before = review.get("original_measurement") or {}
+    after = ir.get("measurement_evidence") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    paths = [before.get("ref_summary"), before.get("cand_summary"),
+             after.get("ref_summary"), after.get("cand_summary")]
+    if (not before.get("measurement_id") or not after.get("measurement_id")
+            or before["measurement_id"] == after["measurement_id"]
+            or not all(isinstance(p, str) and p for p in paths) or len(set(paths)) != 4
+            or after.get("fresh_pair") is not True or after.get("configs_matched") is not True
+            or after.get("workload_matched") is not True):
+        return False
+    for key in ("ref_replicas", "cand_replicas"):
+        value = after.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 2 or value != int(value)):
+            return False
+    # protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+    if ((before.get("protocol_digest") or after.get("protocol_digest"))
+            and before.get("protocol_digest") != after.get("protocol_digest")):
+        return False
+    return all(isinstance(before.get(key), str) and before[key] and before[key] == after.get(key)
+               for key in ("candidate_digest", "reference_digest", "workload_digest"))
+
+
+def _confirmed_speedup(ir: dict) -> bool:
+    return (ir.get("gate") == "accepted" and ir.get("ab_complete") is True
+            and ir.get("output_parity") == "pass" and ir.get("parity_kind") in ("accuracy", "byte_exact")
+            and _confirmation_evidence_matches(ir))
+
+
+def _speedup_needs_review(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """Review trigger only; independently confirmed gains can exceed it."""
     if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
         return False
     return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
@@ -6254,19 +6461,43 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
         if not base.is_dir():
             continue
+        # The workflow checkpoint records the final reviewed result, after the agent's raw A/B.
+        # Match the immutable original measurement ID before applying it to a disk candidate.
+        reviewed = {}
+        for checkpoint in sorted(base.glob("candidate_*/e2e_validation.json")):
+            result = (_read_json(checkpoint) or {}).get("integration_result") or {}
+            if not isinstance(result, dict):
+                continue
+            review = result.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                continue
+            original = review.get("original_measurement") or {}
+            if isinstance(original, dict) and isinstance(original.get("measurement_id"), str):
+                reviewed[original["measurement_id"]] = result
         for cand in sorted(base.glob("cand_*")):
             if cand.name in seen:
                 continue
             ir = _read_json(cand / "integrate_result.json")
             if not ir:
                 continue
+            original = ir.get("measurement_evidence") or {}
+            if not isinstance(original, dict):
+                original = {}
+            result = reviewed.get(original.get("measurement_id"))
+            if result and (result["speedup_review"].get("original_measurement") == original):
+                ir = {**ir, **result}
             seen.add(cand.name)
             gate = str(ir.get("gate") or "")
             delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            ceiling_pct = _amdahl_ceiling_pct(
-                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
-            )
-            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            estimate = _speedup_estimate(ir)
+            ceiling_pct = estimate["estimate_pct"]
+            needs_review = _speedup_needs_review(ir, delta_pct, ceiling_pct)
+            review = ir.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                review = {}
+            review_pending = (review.get("status") in
+                              ("pending", "inconclusive", "rejected")
+                              or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
             if separated is None:
@@ -6285,7 +6516,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                 "amdahl_ceiling_pct": (
                     round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
                 ),
-                "implausible": implausible,
+                "speedup_estimate": {**estimate, "estimate_pct": (
+                    ceiling_pct if math.isfinite(ceiling_pct) else None)},
+                "speedup_review_pending": review_pending,
                 "output_parity": parity or None,
                 "separated": separated,
                 # winner_kind in {"env","config","flags"} => config-only.
@@ -6295,7 +6528,7 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     and delta_pct > 0.0
                     and parity != "fail"
                     and ir.get("ab_complete") is not False
-                    and not implausible
+                    and not review_pending
                 ),
             })
     return records
@@ -6586,8 +6819,9 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
-            "excluded_as_implausible": [
-                c["short_name"] for c in candidates if c["implausible"]
+            "speedup_estimate": best["speedup_estimate"],
+            "awaiting_speedup_review": [
+                c["short_name"] for c in candidates if c["speedup_review_pending"]
             ] or None,
         },
     }
@@ -6621,9 +6855,13 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    # bench_summarize.py writes the selected metric basis (output, total or an
+    # interactivity axis) to throughput_tok_s_median; output_throughput_tok_s_median
+    # is an alias it fills only on the output axis, so an AgentX baseline has it null.
     baseline_tput = (
         official.get("baseline_throughput_tok_s")
         or official.get("plateau_median_tok_s")
+        or summary.get("throughput_tok_s_median")
         or summary.get("output_throughput_tok_s_median")
     )
     if not baseline_tput:
@@ -6653,6 +6891,30 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
         "recovered_from_disk": True,
         "recovered_no_gain": True,
     }
+
+
+def _phase_reached(eval_dir: str | Path | None) -> str:
+    """The furthest workflow phase an eval dir shows, for a result with no workflow return.
+
+    ``setup`` until Setup's baseline summary exists, then ``search`` until the final
+    phase fences the GPUs, then the fenced stage (``finalize`` or ``validate``).
+    ``""`` when there is no eval dir to read.
+    """
+    if not eval_dir:
+        return ""
+    root = Path(eval_dir)
+    try:
+        if not root.is_dir():
+            return ""
+        fence = _read_json(root / FINAL_PHASE_FENCE_FILE)
+        stage = fence.get("stage") if isinstance(fence, dict) else None
+        if stage in FINAL_PHASE_STAGES:
+            return stage
+        if (root / "baseline" / "bench_summary.json").is_file():
+            return "search"
+    except OSError:
+        return ""
+    return "setup"
 
 
 def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
@@ -7660,12 +7922,21 @@ def main(argv: list[str]) -> int:
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
+                phase = _phase_reached(eval_dir_hint)
+                message = str(error or "")
+                if not message and error_class == "timeout":
+                    # anyio.fail_after raises a TimeoutError with no message.
+                    message = f"no workflow return within the {timeout_s}s budget"
+                    if phase:
+                        message += f" (furthest phase on disk: {phase})"
                 out = {
                     "schema_version": SCHEMA_VERSION,
                     "status": "timeout" if error_class == "timeout" else "error",
                     "error_class": error_class or "runner_error",
-                    "error": str(error or ""),
+                    "error": message,
                 }
+                if phase:
+                    out["phase_reached"] = phase
         except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,

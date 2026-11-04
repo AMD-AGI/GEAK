@@ -124,7 +124,7 @@ Workflow({
     model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
-    expected_target: "unknown",                      // REQUIRED: r9700|unknown; gfx1201 never implies r9700
+    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|unknown; gfx1201 never implies a product
     backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
@@ -468,6 +468,27 @@ args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01
   boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
 - The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
+
+An accuracy-gated speedup above the Amdahl estimate triggers **one independent A/B review**, not a
+correctness rewrite. The existing `implausible_speedup_margin` option remains supported (default
+`1.0`, review above twice the estimate; the runner forwards `GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN`). A
+confirmation uses fresh reference/candidate servers, at least two timed replicas per leg, and the
+same correctness and engagement gates. If the gain reproduces, it is accepted even above the estimate.
+Already confirmed evidence is reused only for the same candidate, reference, workload and measurement
+protocol identities. The workload identity covers only what decides the served requests, so a profile
+and an A/B of the same workload share it; bench/protocol details go in the separate protocol digest.
+Missing provenance, a timeout or repeated old A/B artifacts leaves the candidate unconfirmed without
+starting another kernel rewrite. On a timed AgentX trace replay, a confirmation that would not finish
+before the final reserve (every timed replica counted as a leg) is not started, with the same result.
+Final Validate still performs the normal combined-stack check.
+
+The estimate uses the candidate's `affected_gpu_time` coverage when its profile matches the current
+reference and workload: all affected shapes/phases and removed auxiliary kernels, counted once.
+Per-path timings are used when available; applying the head speedup to unmeasured paths is explicitly
+labelled an approximation. Stale/missing coverage falls back to the head estimate. The head's original
+`pct_gpu_time` is preserved for ranking. Candidate checkpoints include the reviewed integration result,
+so timeout recovery respects the same acceptance decision. See [the integrator contract](roles/e2e_integrator.md)
+for coverage and measurement-evidence fields.
 
 ## Output
 Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:

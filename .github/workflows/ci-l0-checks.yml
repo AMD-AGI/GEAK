@@ -160,8 +160,11 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
+            e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
+            tools/tests/test_ep_task_runner.py \
+            tools/tests/test_gen_ep_task.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -303,6 +306,11 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
+      - name: workflow script size limit
+        run: node e2e_workflow/scripts/test_workflow_script_size.js
+      - name: Candidate coverage and independent speedup review regression
+        run: node --test e2e_workflow/scripts/test_speedup_review.js
       - name: AgentX-only kernel extraction and fixed-load compatibility
         run: |
           set -e   # without this only the LAST line's exit code is the step's verdict
