@@ -2074,6 +2074,10 @@ function canonicalDeviceKernel(s) {
 // side may be the shortened one (heads carry short_name, traces the full symbol).
 const truncatedPrefix = (needle, haystack) =>
   needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
+// Triton specialization: base + '_' + a suffix with a digit-only segment (`base_v2` is another
+// kernel). Same rule as kernel_selection.py _specialized_from.
+const specializedFrom = (base, name) =>
+  name.startsWith(`${base}_`) && name.slice(base.length + 1).split('_').some((s) => /^\d+$/.test(s));
 // [arguments, closed] for the symbol's first `<...>`, independent of return type and namespace.
 // `closed` is false when the name was elided inside the template. Separators fold to `_`, so
 // `<128, 4, ...>` is not a prefix of `<128, 48, ...>`.
@@ -2091,7 +2095,8 @@ function templateArguments(value) {
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)
+    && !specializedFrom(x, y) && !specializedFrom(y, x)) return false;
   // The base token drops template arguments so a bare name matches its decorated spelling; when
   // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
