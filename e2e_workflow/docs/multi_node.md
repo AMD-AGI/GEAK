@@ -456,6 +456,47 @@ runtime avoids both: pass `EXTRA_ENV="LD_LIBRARY_PATH=<dir>:..."` with `<dir>` a
 the same path on every pinned node. A baseline and a candidate must run on the
 same runtime to be comparable.
 
+## ATOM engines and the atomesh router
+
+ATOM is served from the caller's own commands (provided mode, Hyperloom's per-pod `launch_command`).
+`adapters/atom.sh` defines no `adapter_dist_args` / `adapter_pd_args`, so a generated launch for it is
+refused, and ATOM's server takes no `--nnodes` / `--node-rank`, so a TP group spanning nodes is not
+offered either. A node's engine is one TP world on its own cards.
+
+What check reads from an ATOM command:
+
+| fact | where |
+| --- | --- |
+| model, TP | `--model`, `-tp` / `--tensor-parallel-size` |
+| PD role | `kv_role` in `--kv-transfer-config` (`kv_producer` is prefill, `kv_consumer` is decode). The Mooncake handshake needs no bootstrap port after the router's `--prefill <url>` |
+| HTTP port | `--server-port`, 8000 when absent. `--port` is the engine's internal port and is never the HTTP port |
+
+`--server-port`, `--port`, `-tp`, `--kv-transfer-config`, `--host` and the DP / PP width are the command's
+own: a swept copy is dropped, as for sglang. Replicas of one role may differ in `--server-port` only.
+
+The router is `atomesh launch --pd-disaggregation --prefill <url> --decode <url> --port <serve_port>`. It
+is checked like sglang's: its `--port` is the service port and its `--prefill` / `--decode` URLs are
+exactly the engines'. Teardown finds it by its recorded pid and by `atomesh launch`.
+
+Teardown and the health probe know `atom.entrypoints.openai_server` and the `ATOM::<name>` titles ATOM
+gives its engine children; a defunct `ATOM::` child counts as a dead engine, like a defunct `sglang::` one.
+Ranks must agree on the `atom` version.
+
+Profiling differs from sglang's in three ways:
+
+- ATOM fixes its trace directory when it starts (`ATOM_TORCH_PROFILER_DIR`, which `launchers/magpie.sh`
+  sets from `PROFILE_DIR`), and `/start_profile` takes no body. Under PD each role is launched with
+  `<profile>/<role>/`; with one directory both engines would write `rank_0/` into it.
+  `PROFILE=1` adds `ATOM_PROFILER_MORE=1` (the command's own env still wins).
+- A rank's trace is `<dir>/rank_<N>/<name>.pt.trace.json.gz` (`dp<D>_tp<N>/` under DP). The file name
+  carries no rank, so the gate reads it from the directory, and the wait for the traces looks one
+  directory deeper.
+- The window is closed by `/stop_profile`, not by a step count. ATOM answers it only after its export,
+  so both engines are closed at once, and the window is capped at `ATOM_PROFILE_WINDOW_MAX_SEC`
+  (default 6 s, the cap `adapters/atom.sh` applies on one node): with `ATOM_PROFILER_MORE` every rank
+  holds its whole window in host memory until the export, and a long decode window has run a node out
+  of memory.
+
 ## When comparing two legs
 
 - Same machines. A different pair measured ~13% apart under an identical

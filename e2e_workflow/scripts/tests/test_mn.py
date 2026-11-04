@@ -2,6 +2,7 @@
 import contextlib
 import glob
 import gzip
+import http.server
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -109,6 +111,34 @@ def provided_block(prefill=("p",), decode=("d",), router="r", **over):
             "nodes": [{"host": h, "role": "prefill", "launch_command": sg_cmd("prefill")} for h in prefill]
             + [{"host": h, "role": "decode", "launch_command": sg_cmd("decode")} for h in decode],
             "router": {"host": router, "launch_command": router_cmd(prefill, decode)}, **over}
+
+
+def atom_cmd(role, port=8010, env="ATOM_HOST_IP=10.0.0.1 "):
+    """An ATOM P/D engine launch_command as the Atomesh recipe writes it: --server-port is the
+    HTTP port, --port the engine's own."""
+    kv = json.dumps({"kv_role": "kv_producer" if role == "prefill" else "kv_consumer",
+                     "kv_connector": "mooncake", "handshake_port": 6301})
+    return (f"{env}python3 -m atom.entrypoints.openai_server --model /m --host 0.0.0.0 "
+            f"--server-port {port} -tp 1 --kv-transfer-config '{kv}' --max-num-seqs 32")
+
+
+def atomesh_router_cmd(prefill, decode, port=8000):
+    """atomesh's router: --prefill takes no bootstrap port after the URL."""
+    return ("atomesh launch --host 0.0.0.0 --pd-disaggregation "
+            + " ".join(f"--prefill http://{h}:{pp}" for h, pp in prefill) + " "
+            + " ".join(f"--decode http://{h}:{dp}" for h, dp in decode) + f" --port {port}")
+
+
+def atom_block(prefill=(("p", 8010),), decode=(("d", 8020),), router="r", **over):
+    """provided_block for backend atom: TP1 engines, ports from the commands."""
+    return {"topology": "pd_disagg", "shared_fs": "/w", "backend": "atom", "model": "/m",
+            "serve_port": 8000, "tp_by_role": {"prefill": 1, "decode": 1},
+            "replicas_by_role": {"prefill": len(prefill), "decode": len(decode)},
+            "nodes": [{"host": h, "role": "prefill", "launch_command": atom_cmd("prefill", port)}
+                      for h, port in prefill]
+            + [{"host": h, "role": "decode", "launch_command": atom_cmd("decode", port)}
+               for h, port in decode],
+            "router": {"host": router, "launch_command": atomesh_router_cmd(prefill, decode)}, **over}
 
 
 class LocateTest(unittest.TestCase):
@@ -303,6 +333,124 @@ class ProvidedSpecTest(unittest.TestCase):
         self.assertEqual(mn.strip_flags("--chunked-prefill-size 4096 --port 1 --tp-size=4 --host x", flags),
                          ("--chunked-prefill-size 4096", ["--port 1", "--tp-size=4", "--host x"]))
         self.assertEqual(mn.strip_flags(" --a '1 2' ", flags), ("--a '1 2'", []))
+
+
+class AtomProvidedSpecTest(unittest.TestCase):
+    """The ATOM backend and the atomesh router, through Hyperloom's per-pod launch_command."""
+
+    def test_an_atom_pair_behind_an_atomesh_router_is_accepted_with_the_commands_ports(self):
+        spec = mn.normalize_spec(atom_block(), 1)
+        self.assertEqual([(n["host"], n["port"], n.get("bootstrap_port")) for n in spec["nodes"]],
+                         [("p", 8010, None), ("d", 8020, None)])
+        self.assertEqual([x["role"] for x in spec["layout"]], ["prefill", "decode"])
+        self.assertEqual((spec["router"]["host"], spec["router"]["port"]), ("r", 8000))
+        self.assertEqual(mn.normalize_spec(spec, spec["tp"]), spec)
+
+    def test_the_http_port_is_server_port_and_the_engine_port_is_not_mistaken_for_it(self):
+        facts = mn.engine_facts("atom", atom_cmd("prefill") + " --port 8011")
+        self.assertEqual((facts["port"], facts["model"], facts["tp"], facts["role"], facts["bootstrap_port"]),
+                         (8010, "/m", 1, "prefill", None))
+
+    def test_a_command_without_server_port_serves_on_atoms_default_8000(self):
+        bare = atom_cmd("prefill").replace("--server-port 8010 ", "")
+        self.assertEqual(mn.engine_facts("atom", bare)["port"], 8000)
+        # --port is the engine's internal port; it never becomes the HTTP port
+        self.assertEqual(mn.engine_facts("atom", bare + " --port 8011")["port"], 8000)
+
+    def test_an_atom_command_says_its_role_through_kv_transfer_config(self):
+        self.assertEqual(mn.engine_facts("atom", atom_cmd("decode"))["role"], "decode")
+        self.assertEqual(mn.engine_facts("atom", atom_cmd("prefill"))["env"], ["ATOM_HOST_IP=10.0.0.1"])
+        plain = atom_cmd("prefill").split("--kv-transfer-config")[0]
+        self.assertEqual(mn.engine_facts("atom", plain)["role"], "")
+
+    def test_atom_commands_that_disagree_with_the_handoff_are_refused_by_name(self):
+        def node(i, cmd):
+            block = atom_block()
+            block["nodes"][i]["launch_command"] = cmd
+            return block
+        wrong_url = atom_block()
+        wrong_url["router"]["launch_command"] = atomesh_router_cmd([("p", 8011)], [("d", 8020)])
+        cases = (
+            (node(0, atom_cmd("prefill").replace("/m", "/other")), "serves '/other'"),
+            (node(0, atom_cmd("prefill").replace("-tp 1", "-tp 4")), "TP 4 is not the engine TP 1"),
+            (node(1, atom_cmd("prefill")), "decode node but its command serves 'prefill'"),
+            (wrong_url, r"the router names .*http://p:8011"),
+            (atom_block(serve_port=9000), "the router listens on --port 8000"),
+        )
+        for block, why in cases:
+            with self.subTest(why=why), self.assertRaisesRegex(ValueError, why):
+                mn.normalize_spec(block, 1)
+
+    def test_replicas_of_one_role_may_differ_by_their_http_port_only(self):
+        block = atom_block(prefill=(("p", 8010), ("p", 8012)))
+        self.assertEqual([n["port"] for n in mn.normalize_spec(block, 1)["nodes"][:2]], [8010, 8012])
+        block["nodes"][1]["launch_command"] += " --max-num-batched-tokens 4096"
+        with self.assertRaisesRegex(ValueError, "every prefill replica must run one command"):
+            mn.normalize_spec(block, 1)
+
+    def test_flags_the_atom_command_owns_are_stripped_from_geaks(self):
+        flags = mn.structural_flags("atom")
+        swept = ("--max-num-seqs 64 --server-port 1 --port 2 -tp 4 --host x "
+                 "--kv-transfer-config '{\"kv_role\": \"kv_consumer\"}'")
+        kept, dropped = mn.strip_flags(swept, flags)
+        self.assertEqual(kept, "--max-num-seqs 64")
+        self.assertEqual(len(dropped), 5)
+
+    def test_an_unknown_backend_names_the_ones_it_knows(self):
+        with self.assertRaisesRegex(ValueError, "sglang, vllm, atom"):
+            mn.engine_facts("trtllm", "trtllm-serve /m")
+
+    def test_teardown_and_health_know_atom_and_the_atomesh_router(self):
+        self.assertRegex("python3 -m atom.entrypoints.openai_server --model /m --server-port 8010",
+                         mn.SERVE_PATTERN)
+        self.assertRegex("ATOM::ModelRunner_0", mn.ENGINE_PATTERN)
+        self.assertRegex("atomesh launch --pd-disaggregation --prefill http://p:8010", mn.LB_PATTERN)
+        self.assertNotRegex("python3 -m sglang.launch_server --model-path /m", mn.LB_PATTERN)
+        self.assertIn("atom", mn.SW_PACKAGES)
+
+
+class AtomDeepseekR1CaseTest(unittest.TestCase):
+    """The 1P1D case ATOM's own pd_disaggregation_guide.md documents on two MI300X nodes:
+    DeepSeek-R1 (FP8), TP8 / TP8, prefill and decode on a machine each, atomesh in front."""
+
+    MODEL = "/data/models/DeepSeek-R1"
+
+    @classmethod
+    def command(cls, role, port):
+        kv = {"kv_role": "kv_producer" if role == "prefill" else "kv_consumer",
+              "kv_connector": "mooncake", "handshake_port": 6301}
+        return ("AITER_LOG_LEVEL=WARNING MC_ENABLE_DEST_DEVICE_AFFINITY=1 "
+                f"python -m atom.entrypoints.openai_server --model {cls.MODEL}/ --kv_cache_dtype fp8 -tp 8 "
+                f"--server-port {port} --kv-transfer-config '{json.dumps(kv)}'")
+
+    @classmethod
+    def block(cls, **over):
+        router = ("atomesh launch --host 0.0.0.0 --port 8000 --pd-disaggregation "
+                  "--prefill http://10.0.1.11:8010 --decode http://10.0.2.21:8020 --policy random "
+                  "--backend atom --log-level info --disable-health-check --disable-circuit-breaker")
+        return {"topology": "pd_disagg", "shared_fs": "/w", "backend": "atom", "model": cls.MODEL,
+                "serve_port": 8000, "tp_by_role": {"prefill": 8, "decode": 8},
+                "replicas_by_role": {"prefill": 1, "decode": 1},
+                "nodes": [{"host": "10.0.1.11", "role": "prefill", "launch_command": cls.command("prefill", 8010)},
+                          {"host": "10.0.2.21", "role": "decode", "launch_command": cls.command("decode", 8020)}],
+                "router": {"host": "10.0.0.10", "launch_command": router}, **over}
+
+    def test_the_guides_commands_are_accepted_as_written(self):
+        spec = mn.normalize_spec(self.block(), 8)
+        self.assertEqual([(n["host"], n["port"], n.get("bootstrap_port")) for n in spec["nodes"]],
+                         [("10.0.1.11", 8010, None), ("10.0.2.21", 8020, None)])
+        self.assertEqual([(x["role"], x["tp"]) for x in spec["layout"]], [("prefill", 8), ("decode", 8)])
+        self.assertEqual((spec["router"]["host"], spec["router"]["port"]), ("10.0.0.10", 8000))
+
+    def test_the_guides_env_is_the_commands_own_not_the_launchers(self):
+        env = mn.engine_facts("atom", self.command("prefill", 8010))["env"]
+        self.assertEqual(env, ["AITER_LOG_LEVEL=WARNING", "MC_ENABLE_DEST_DEVICE_AFFINITY=1"])
+
+    def test_a_decode_command_on_the_prefill_node_is_refused(self):
+        block = self.block()
+        block["nodes"][0]["launch_command"] = self.command("decode", 8010)
+        with self.assertRaisesRegex(ValueError, "prefill node but its command serves 'decode'"):
+            mn.normalize_spec(block, 8)
 
 
 class CheckTest(unittest.TestCase):
@@ -1798,6 +1946,23 @@ class PdLoadWaitTest(unittest.TestCase):
         self.assertIn("rc=0", proc.stdout)
         self.assertLess(took, 5)
         self.assertEqual(proc.stderr, "")
+
+    def test_atoms_gauges_are_read(self):
+        # ATOM names its gauges atom:requests_running / atom:prompt_tokens_total; unread, both
+        # engines looked metric-less and the window opened before the load reached them.
+        proc, took = self.run_wait(
+            wait_s=30,
+            prefill='atom:requests_running 0.0\natom:prompt_tokens_total @N@00.0\n',
+            decode='atom:requests_running 7.0\n')
+        self.assertIn("rc=0", proc.stdout)
+        self.assertLess(took, 5)
+        self.assertEqual(proc.stderr, "")
+
+    def test_an_idle_atom_engine_is_waited_for(self):
+        proc, took = self.run_wait(wait_s=2, prefill='atom:requests_running 0.0\natom:prompt_tokens_total 10.0\n',
+                                   decode='atom:requests_running 3.0\n')
+        self.assertGreaterEqual(took, 2)
+        self.assertIn("no request running on prefill after 2s", proc.stderr)
 
     def test_an_engine_without_metrics_is_not_waited_for(self):
         proc, took = self.run_wait(wait_s=30, decode='vllm:num_requests_running{engine="0"} 2.0\n')
@@ -4167,6 +4332,15 @@ class ClientPreflightTest(unittest.TestCase):
         self.assertIn("no native client known for backend 'trt'", problems[0])
 
 
+    def test_atoms_native_client_is_imported_on_rank0(self):
+        seen = []
+        def run(state, node, script, timeout):
+            seen.append(script)
+            return {"rc": 0, "out": "", "err": "", "hostname": "n0"}
+        with mock.patch.object(mn, "ssh_run", run):
+            self.assertEqual(mn.client_problems({"bench_client": "native", "nodes": [{}]}, {"backend": "atom"}), [])
+        self.assertIn("import atom.benchmarks.benchmark_serving", seen[0])
+
 class ReachTest(unittest.TestCase):
     def test_a_port_that_cannot_be_opened_is_a_problem(self):
         node = {"rank": 0, "hostname": "node0", "ip": "10.0.0.1"}
@@ -4303,6 +4477,293 @@ class TraceEdgeTest(unittest.TestCase):
                        "--engine", f"decode={topn('d.json', 'decode', 90.0, 9, 10)}"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("| 1 | decode | `gemm_d` |", proc.stdout)
+
+
+def write_atom_trace(profile, tp_rank, dp_rank=None, *, collectives=2, kernels=5):
+    """What ATOM leaves behind: one directory per rank under the profile dir (`rank_<N>`, or
+    `dp<D>_tp<N>`), a torch trace in it whose name says nothing about the rank."""
+    sub = f"rank_{tp_rank}" if dp_rank is None else f"dp{dp_rank}_tp{tp_rank}"
+    directory = os.path.join(profile, sub)
+    os.makedirs(directory, exist_ok=True)
+    events = [{"cat": "kernel", "name": COMPUTE, "ts": 1000 + i, "dur": 42, "pid": tp_rank, "tid": 1}
+              for i in range(kernels)]
+    events += [{"cat": "kernel", "name": COLLECTIVE, "ts": 2000 + i, "dur": 137, "pid": tp_rank, "tid": 2}
+               for i in range(collectives)]
+    path = os.path.join(directory, "9a283b4a_ts_20261102_101500_123.pt.trace.json.gz")
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"schemaVersion": 1, "traceEvents": events}))
+    return path
+
+
+class AtomTraceLayoutTest(unittest.TestCase):
+    """ATOM writes `<profile>/rank_<N>/<name>.pt.trace.json.gz`; sglang writes the file flat with
+    the rank in its name. The gate has to read both."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_atom_trace_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_a_rank_is_read_from_the_file_name_or_from_atoms_directory(self):
+        flat = os.path.join(self.tmp, "prof-2026-09-15-TP-3-DP-1.trace.json.gz")
+        self.assertEqual(mn_traces.rank_of(flat), 3)
+        self.assertEqual(mn_traces.rank_of("/p/rank_5/x.pt.trace.json.gz"), 5)
+        self.assertEqual(mn_traces.rank_of("/p/dp1_tp3/x.pt.trace.json.gz"), 3)
+        self.assertIsNone(mn_traces.rank_of("/p/other/x.pt.trace.json.gz"))
+
+    def test_discover_finds_the_per_rank_directories_and_not_the_manifest(self):
+        for rank in range(4):
+            write_atom_trace(self.tmp, rank)
+        with open(os.path.join(self.tmp, "atom_profile_manifest.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        found = mn_traces.discover(self.tmp)
+        self.assertEqual(len(found), 4)
+        self.assertTrue(all("rank_" in os.path.dirname(f) for f in found))
+
+    def test_a_directory_that_is_not_a_rank_is_not_searched(self):
+        write_atom_trace(self.tmp, 0)
+        os.makedirs(os.path.join(self.tmp, "ranks"))   # the gate's own report directory
+        with open(os.path.join(self.tmp, "ranks", "mn_trace_report.json.gz"), "wb") as f:
+            f.write(b"x")
+        self.assertEqual(len(mn_traces.discover(self.tmp)), 1)
+
+    def test_a_pd_pair_in_atoms_layout_passes_the_gate_and_names_each_engines_rank0(self):
+        for role in ("prefill", "decode"):
+            for rank in range(8):
+                write_atom_trace(os.path.join(self.tmp, role), rank)
+        proc, report = run_gate(self.tmp, "--launch-json", pd_launch_json(self.tmp))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["verdict"], "pass", report["problems"])
+        by_role = {r["role"]: r for r in report["per_role"]}
+        self.assertEqual(by_role["prefill"]["found_ranks"], list(range(8)))
+        self.assertEqual(by_role["decode"]["found_ranks"], list(range(8)))
+        for role in ("prefill", "decode"):
+            self.assertTrue(report["parsed_trace_by_role"][role].endswith(
+                f"{os.sep}{role}{os.sep}rank_0{os.sep}9a283b4a_ts_20261102_101500_123.pt.trace.json.gz"))
+
+    def test_a_missing_atom_rank_is_named(self):
+        for rank in range(8):
+            write_atom_trace(os.path.join(self.tmp, "prefill"), rank)
+        for rank in range(7):
+            write_atom_trace(os.path.join(self.tmp, "decode"), rank)
+        proc, report = run_gate(self.tmp, "--launch-json", pd_launch_json(self.tmp))
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(any("decode:7" in p for p in report["problems"]), report["problems"])
+
+
+class AtomProfileDirTest(unittest.TestCase):
+    def test_atom_under_pd_gets_a_profile_dir_per_role(self):
+        self.assertEqual(mn.atom_profile_dir("atom", "/p", "prefill"), "/p/prefill")
+        self.assertEqual(mn.atom_profile_dir("atom", "/p", "decode"), "/p/decode")
+
+    def test_sglang_and_non_pd_keep_the_shared_dir(self):
+        self.assertEqual(mn.atom_profile_dir("sglang", "/p", "prefill"), "/p")
+        # vllm also fixes its trace dir at launch, so under PD it is split by role like ATOM
+        self.assertEqual(mn.atom_profile_dir("vllm", "/p", "decode"), "/p/decode")
+        self.assertEqual(mn.atom_profile_dir("atom", "/p", None), "/p")
+        self.assertEqual(mn.atom_profile_dir("atom", "", "prefill"), "")
+
+
+@unittest.skipUnless(HAVE_SH, "needs bash")
+class AtomProfileLaunchTest(_PinnedEnv):
+    """The rendered per-rank scripts of a provided ATOM pair."""
+
+    def setUp(self):
+        super().setUp()
+        cmd = AtomDeepseekR1CaseTest.command
+        self.pin(dict(PROVIDED_PD, backend="atom", serve_port=8000, nodes=[
+            dict(PD_STATE["nodes"][0], role="prefill", tp=8, gpus=8, port=8010, launch_command=cmd("prefill", 8010)),
+            dict(PD_STATE["nodes"][1], role="decode", tp=8, gpus=8, port=8020, launch_command=cmd("decode", 8020))],
+            router=dict(PROVIDED_ROUTER, launch_command=AtomDeepseekR1CaseTest.block()["router"]["launch_command"])))
+        os.environ.update(GEAK_MN_DRY_RUN="1", BACKEND="atom", MAX_MODEL_LEN="8192", PROFILE="1",
+                          GEAK_MN_ADAPTERS=os.path.join(self.tmp, "adapters"))
+        self.addCleanup(os.environ.pop, "PROFILE", None)
+
+    def test_each_engine_writes_its_traces_under_its_own_role(self):
+        self.assertEqual(self.launch(), 0)
+        prof = os.environ["PROFILE_DIR"]
+        self.assertIn(f"export PROFILE_DIR={prof}/prefill\n", self.rendered("rank0"))
+        self.assertIn(f"export PROFILE_DIR={prof}/decode\n", self.rendered("rank1"))
+        self.assertIn(f"mkdir -p {os.path.dirname(os.environ['LOG'])} {prof}/prefill", self.rendered("rank0"))
+
+    def test_the_full_trace_flag_is_on_only_when_profiling(self):
+        self.assertEqual(self.launch(), 0)
+        for kv in ("ATOM_PROFILER_MORE=1", "ATOM_PROFILER_RECORD_SHAPES=1",
+                   "ATOM_PROFILER_WITH_STACK=0", "ATOM_PROFILER_PROFILE_MEMORY=0"):
+            self.assertIn(f"export {kv}\n", self.rendered("rank0"))
+        os.environ["PROFILE"] = "0"
+        self.assertEqual(self.launch(), 0)
+        self.assertNotIn("ATOM_PROFILER_MORE", self.rendered("rank0"))
+
+    def test_sglang_keeps_one_shared_profile_dir(self):
+        self.pin(PROVIDED_PD)
+        os.environ.update(BACKEND="sglang")
+        self.assertEqual(self.launch(), 0)
+        prof = os.environ["PROFILE_DIR"]
+        for rank in ("rank0", "rank1"):
+            self.assertIn(f"export PROFILE_DIR={prof}\n", self.rendered(rank))
+            self.assertNotIn("ATOM_PROFILER_MORE", self.rendered(rank))
+
+
+class _FakeEngine:
+    """One PD engine's HTTP side, for the profile window: it records what /start_profile carried
+    and, on /stop_profile, leaves traces behind the way its backend does (ATOM: `<dir>/rank_<N>/`
+    in the directory it was launched with; sglang: flat files in the directory the request names)."""
+
+    def __init__(self, role, tp, backend, profile_dir, accept=True, stop_delay=0.0):
+        self.role, self.tp, self.backend, self.accept = role, tp, backend, accept
+        self.profile_dir, self.start_bodies, self.stops, self.out_dir = profile_dir, [], 0, None
+        self.stop_delay, self.start_at, self.stop_at = stop_delay, None, None
+        engine = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                code = 200
+                if self.path == "/start_profile":
+                    engine.start_at = time.monotonic()
+                    engine.start_bodies.append(body)
+                    if not engine.accept:
+                        code = 500
+                    elif engine.backend != "atom":
+                        engine.out_dir = json.loads(body)["output_dir"]
+                elif self.path == "/stop_profile":
+                    engine.stop_at = time.monotonic()
+                    engine.stops += 1
+                    threading.Thread(target=engine.write_traces, daemon=True).start()
+                    time.sleep(engine.stop_delay)   # ATOM answers only once its export is done
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def write_traces(self):
+        time.sleep(0.3)   # the gzip finishes after /stop_profile has answered
+        for rank in range(self.tp):
+            if self.backend == "atom":
+                write_atom_trace(os.path.join(self.profile_dir, self.role), rank)
+            elif self.out_dir:
+                write_trace(self.out_dir, rank, 0)
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@unittest.skipUnless(HAVE_SH, "needs bash")
+class PdProfileWindowTest(unittest.TestCase):
+    """multinode.sh's pd_disagg profile window, run for real against two fake engines: what it
+    sends to /start_profile, how long it waits and where it looks for the traces, and the gate
+    it ends with."""
+
+    TP = 2
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_pdwin_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.profile = os.path.join(self.tmp, "profile")
+        os.makedirs(self.profile)
+        self.engines = {}
+
+    def window(self, backend, *, accept=True, stop_delay=0.0, **env_extra):
+        for role in ("prefill", "decode"):
+            self.engines[role] = _FakeEngine(role, self.TP, backend, self.profile, accept, stop_delay)
+            self.addCleanup(self.engines[role].close)
+        pin = {"topology": "pd_disagg", "master_ip": "127.0.0.1", "serve_port": 8000, "dist_init_port": 30531,
+               "shared_fs": self.tmp, "mn_dir": MN,
+               "nodes": [{"rank": i, "node_id": f"n{i}", "ip": "127.0.0.1", "hostname": f"h{i}",
+                          "cluster_if": "lo", "ngpu": self.TP, "role": role, "tp": self.TP, "gpus": self.TP,
+                          "port": self.engines[role].port} for i, role in enumerate(("prefill", "decode"))]}
+        with open(os.path.join(self.tmp, "mn_state.json"), "w", encoding="utf-8") as handle:
+            json.dump(pin, handle)
+        pd_launch_json(self.tmp, tp_by_role={"prefill": self.TP, "decode": self.TP})
+        with open(LAUNCHER, encoding="utf-8") as handle:
+            text = handle.read()
+        for name, value in (("_MN_TRACE_SETTLE_S", 2), ("_MN_TRACE_QUIET_S", 8), ("_MN_TRACE_TIMEOUT_S", 60)):
+            text, n = re.subn(rf"^{name}=\d+$", f"{name}={value}", text, flags=re.MULTILINE)
+            self.assertEqual(n, 1, name)
+        launcher = os.path.join(self.tmp, "multinode.sh")
+        with open(launcher, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        driver = os.path.join(self.tmp, "driver.sh")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"), launcher=launcher.replace("\\", "/"), stub=""))
+        env = dict(os.environ, GEAK_MN_STATE=os.path.join(self.tmp, "mn_state.json"), PROFILE_DIR=self.profile,
+                   PROFILE_NUM_STEPS="40", PROFILE_WINDOW_SEC="1", TP=str(2 * self.TP), OUT_DIR=self.tmp,
+                   BASE_URL="http://127.0.0.1:1", BACKEND=backend)   # the real name: the launcher branches on it
+        env.update(env_extra)
+        proc = subprocess.run([BASH, driver], env=env, cwd=self.tmp, capture_output=True, text=True,
+                              timeout=240, check=False)
+        rc = next((int(line.split("=", 1)[1]) for line in proc.stdout.splitlines() if line.startswith("WINDOW_RC=")), None)
+        self.assertIsNotNone(rc, proc.stdout + proc.stderr)
+        report_path = os.path.join(self.profile, "ranks", "mn_trace_report.json")
+        report = {}
+        if os.path.isfile(report_path):
+            with open(report_path, encoding="utf-8") as handle:
+                report = json.load(handle)
+        return proc, rc, report
+
+    def test_atom_gets_no_request_body_and_its_nested_traces_are_found_and_pass_the_gate(self):
+        proc, rc, report = self.window("atom")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        for role, engine in self.engines.items():
+            self.assertEqual(engine.start_bodies, [b""], f"ATOM's /start_profile takes no body ({role})")
+            self.assertEqual(engine.stops, 1, role)
+        self.assertIn("expecting 4 rank trace(s)", proc.stdout)
+        self.assertIn("4/4 rank trace(s) landed", proc.stdout)
+        self.assertEqual(report.get("verdict"), "pass", report.get("problems"))
+        by_role = {r["role"]: r for r in report["per_role"]}
+        self.assertEqual([by_role[r]["found_ranks"] for r in ("prefill", "decode")], [[0, 1], [0, 1]])
+        for role in ("prefill", "decode"):
+            self.assertIn(f"{os.sep}{role}{os.sep}rank_0{os.sep}", report["parsed_trace_by_role"][role])
+
+    def test_an_atom_window_is_capped_and_both_engines_are_closed_at_once(self):
+        # A 30 s request is cut to ATOM_PROFILE_WINDOW_MAX_SEC, and each engine holds its
+        # /stop_profile answer for 3 s (its export): closing them one after the other would keep
+        # the second window open through the first export.
+        proc, rc, report = self.window("atom", stop_delay=3.0, PROFILE_WINDOW_SEC="30",
+                                       ATOM_PROFILE_WINDOW_MAX_SEC="1")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        self.assertIn("clamping the ATOM profile window 30->1s", proc.stderr)
+        p, d = self.engines["prefill"], self.engines["decode"]
+        self.assertLess(max(p.stop_at, d.stop_at) - max(p.start_at, d.start_at), 10, "window not capped")
+        self.assertLess(abs(p.stop_at - d.stop_at), 1.5, "engines were not closed together")
+        self.assertEqual(report.get("verdict"), "pass", report.get("problems"))
+
+    def test_the_cap_is_atom_only(self):
+        proc, rc, _report = self.window("sglang", PROFILE_WINDOW_SEC="2", ATOM_PROFILE_WINDOW_MAX_SEC="1")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("clamping", proc.stderr)
+        p = self.engines["prefill"]
+        self.assertGreaterEqual(p.stop_at - p.start_at, 1.9)
+
+    def test_sglang_still_gets_its_json_body_and_flat_traces(self):
+        proc, rc, report = self.window("sglang")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        for role, engine in self.engines.items():
+            body = json.loads(engine.start_bodies[0])
+            self.assertEqual(body["output_dir"], os.path.join(self.profile, role), role)
+            self.assertEqual(body["num_steps"], 40)
+        self.assertEqual(report.get("verdict"), "pass", report.get("problems"))
+        self.assertIn("4/4 rank trace(s) landed", proc.stdout)
+
+    def test_an_atom_engine_launched_without_a_profiler_is_named_and_fails_the_window(self):
+        proc, rc, _report = self.window("atom", accept=False)
+        self.assertEqual(rc, 1, proc.stdout + proc.stderr)
+        self.assertIn("/start_profile failed on the prefill engine", proc.stderr)
+        self.assertIn("/start_profile failed on the decode engine", proc.stderr)
+        self.assertIn("no engine accepted a profiler window", proc.stderr)
+
 
 
 if __name__ == "__main__":
