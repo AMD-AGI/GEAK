@@ -196,7 +196,9 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
     gate and the final result use. If the baseline is the flagged naive fallback, say so here.
 - `MODIFIABLE FILES` and the rules (never modify harness/COMMANDMENT/files outside the workspace;
   always run correctness before benchmark; always invoke via gpu_lock from the workspace; benchmark
-  output is the source of truth).
+  output is the source of truth). MODIFIABLE FILES are workspace paths (normally under `kernel_src/`),
+  **never an installed package** (`site-packages`, `/sgl-workspace/...`): another machine measures from
+  its own install under multinode, and both legs load an in-place edit on any machine.
 
 ### 5. Record baseline + check reliability
 Run the FULL benchmark **3 times** via gpu_lock. Confirm per-case results are within ~5% across

@@ -197,6 +197,26 @@ def test_an_unreadable_node_state_names_its_path(tmp_path, monkeypatch) -> None:
         _block(_handoff())
 
 
+def test_multinode_identity_comes_from_the_engine_pods(monkeypatch, node_state) -> None:
+    node_state()
+    sent = _probe_nodes(monkeypatch, {ip: _MI300X for ip in _ENGINES})
+    assert rx._expected_gpu_identity(_handoff()) == _MI300X
+    assert [ip for ip, _ in sent] == _ENGINES, "the router holds no GPU and is not asked"
+    source = rx.GPU_IDENTITY_SCRIPT.read_text(encoding="utf-8")
+    assert all(s.startswith("python3 - <<'GEAK_MN_PY'\n") and source in s for _, s in sent), \
+        "the nodes have no GEAK: the probe goes by content"
+
+
+def test_multinode_identity_refuses_mixed_or_silent_machines(monkeypatch, node_state) -> None:
+    node_state()
+    _probe_nodes(monkeypatch, {**{ip: _MI300X for ip in _ENGINES}, _DECODE[1]: dict(_MI300X, gfx="gfx950")})
+    with pytest.raises(RuntimeError, match="different GPUs"):
+        rx._expected_gpu_identity(_handoff())
+    _probe_nodes(monkeypatch, {**{ip: _MI300X for ip in _ENGINES}, _DECODE[1]: None})
+    with pytest.raises(RuntimeError, match=f"{_DECODE[1]}: no rocminfo"):
+        rx._expected_gpu_identity(_handoff())
+
+
 def test_single_node_handoff_is_untouched() -> None:
     args = rx.map_args(_handoff(), timeout_s=3600)
     assert "multinode" not in args and "nodes" not in args and "gpus_per_node" not in args
@@ -244,6 +264,35 @@ def test_single_node_still_prefers_magpie_when_a_script_exists(monkeypatch) -> N
     monkeypatch.setenv("MAGPIE_LAUNCH_SCRIPT", "/opt/magpie/run.sh")
     assert rx.apply_bench_launcher(_handoff()) == "magpie"
 
+
+def test_a_multinode_driver_masks_its_own_gpus(monkeypatch, node_state) -> None:
+    masks = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+    for mask in masks:
+        monkeypatch.setenv(mask, "0,1")
+    rx.apply_bench_launcher(_handoff())
+    assert [os.environ[m] for m in masks] == ["0,1"] * 3, "one host keeps its cards"
+    node_state()
+    assert rx.apply_bench_launcher(_handoff()) == "multinode"
+    assert [os.environ[m] for m in masks] == [""] * 3
+
+
+def test_no_hook_moves_agent_commands() -> None:
+    src = (_HERE / "run_e2e.py").read_text(encoding="utf-8")
+    assert "PreToolUse" not in src and "GEAK_REMOTE_GPU" not in src
+
+
+def test_a_multinode_run_executes_here_without_ssh_to_the_master(monkeypatch, tmp_path, node_state) -> None:
+    node_state()
+    handoff, result = tmp_path / "handoff.json", tmp_path / "result.json"
+    handoff.write_text(json.dumps(_handoff()), encoding="utf-8")
+    monkeypatch.setattr(rx.subprocess, "Popen", lambda *a, **k: pytest.fail("run_e2e spawned a process"))
+    monkeypatch.setattr(rx, "map_args", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("reached map_args")))
+    with pytest.raises(RuntimeError, match="reached map_args"):
+        rx.main([str(handoff), str(result)])
+    assert not hasattr(rx, "_run_on_master")
+
+
+# ---- the first-round profile Hyperloom already ran (profile_trace) ----
 
 def test_a_node_state_that_is_not_an_object_is_refused(tmp_path, monkeypatch) -> None:
     path = tmp_path / "node_state.json"

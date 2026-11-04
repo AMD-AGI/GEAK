@@ -102,3 +102,63 @@ if [ -z "${SERVING_GPU_LOCK:-}" ]; then
   export SERVING_GPU_LOCK
   echo ">>> multinode launcher: serving lock for this node set at $SERVING_GPU_LOCK"
 fi
+
+# The TERM handler reaches every rank over ssh; a 10s KILL would orphan them.
+SERVER_STOP_GRACE_S="${SERVER_STOP_GRACE_S:-90}"
+export SERVER_STOP_GRACE_S
+
+adapter_launch() {
+  local _out_dir="${OUT_DIR:-$(pwd)}"
+  # Both logs stay OUT of $LOG: bench_e2e.sh greps and size-watches it.
+  local _launchlog="$_out_dir/mn_launch.log"
+  local _suplog="$_out_dir/mn_supervisor.log"
+  # Lease every card of every pinned node (a provided script picks its own cards) through
+  # the files `mn.py exec --gpu` leases, so no GEAK kernel task runs on a card this leg serves
+  # from. The fds stay open in this shell (and the supervisor) until the leg ends.
+  local _lease _fd
+  if [ -z "$_MN_LEASES" ]; then
+    echo "!!! multinode launcher: the pin $_MN_STATE lists no cards; re-run mn.py check." >&2
+    return 2
+  fi
+  while IFS= read -r _lease; do
+    exec {_fd}>"$_lease"
+    flock -n "$_fd" && continue
+    echo ">>> multinode launcher: waiting for $(basename "$_lease" .lock), leased by a GEAK kernel task"
+    flock -w "${SERVING_LOCK_WAIT:-7200}" "$_fd" || {
+      echo "!!! multinode launcher: $(basename "$_lease" .lock) still leased after ${SERVING_LOCK_WAIT:-7200}s" >&2
+      return 2
+    }
+  done <<< "$_MN_LEASES"
+  echo ">>> multinode launcher: starting $(basename "$_MN_STATE") topology; launch log: $_launchlog"
+  ( cd "$_MN_DIR" && EXTRA_SERVER_ARGS="$_extra" python3 mn.py launch ) >> "$_launchlog" 2>&1
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "!!! multinode launcher: launch failed (rc=$rc). Last launch log:" >&2
+    tail -n 60 "$_launchlog" >&2 2>/dev/null || true
+    echo "!!! multinode launcher: last rank0 log:" >&2
+    tail -n 40 "$LOG" >&2 2>/dev/null || true
+    return 2
+  fi
+  grep -E '^>>> multinode (rank|:)' "$_launchlog" 2>/dev/null | tail -n 8 || true
+
+  # The supervisor is the pid bench_e2e.sh owns; its TERM handler reaps the ranks.
+  ${SERVER_LAUNCH_PREFIX:-} env \
+    OUT_DIR="$_out_dir" \
+    PYTHONPATH="$_MN_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONUNBUFFERED=1 \
+    python3 "$_MN_DIR/mn.py" supervise >> "$_suplog" 2>&1 &
+  SERVER_PID=$!
+
+  # A supervisor that died on import must not be handed over as a live server.
+  sleep 2
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "!!! multinode launcher: the supervisor exited immediately; see $_suplog" >&2
+    tail -n 30 "$_suplog" >&2 2>/dev/null || true
+    echo "!!! The ranks may be RUNNING but unsupervised. Reaping them now." >&2
+    python3 "$_MN_DIR/mn.py" stop "$_out_dir" >&2 2>&1 || true
+    SERVER_PID=""
+    return 2
+  fi
+  echo ">>> multinode launcher: ranks spawned, supervisor pid $SERVER_PID," \
+       "endpoint $BASE_URL (cold start is minutes; the health loop decides)."
+}

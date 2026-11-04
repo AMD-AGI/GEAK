@@ -694,6 +694,32 @@ def _rank_layout(h: dict) -> list[dict]:
     return _mn_spec(h).get("layout") or []
 
 
+def _multinode_gpu_identity(h: dict) -> dict:
+    """The pinned machines' GPU identity; they must all agree."""
+    spec = _mn_spec(h)
+    mod = _mn_module()
+    state = {"topology": spec["topology"], "ssh": spec["ssh"], "nodes": []}
+    targets = mod.spec_targets(spec)
+    script = mod.python_by_content(str(GPU_IDENTITY_SCRIPT))
+    replies = mod.ssh_each(state, [(t, script, 120) for t in targets])
+    found = {}
+    for t, r in zip(targets, replies):
+        try:
+            if r["rc"] != 0:
+                raise ValueError((r.get("err") or r["out"] or "identity probe failed").strip()[-500:])
+            found[t["ip"]] = json.loads(r["out"].splitlines()[-1])
+        except (ValueError, IndexError) as error:
+            raise RuntimeError(
+                f"GPU identity must be established before E2E policy selection: {t['ip']}: {error}. "
+                "Pass expected_gfx and expected_target explicitly if the nodes cannot run rocminfo."
+            ) from error
+    keys = ("gfx", "target", "marketing_name", "physical_cu_count")
+    if len({json.dumps([v.get(k) for k in keys]) for v in found.values()}) > 1:
+        raise RuntimeError("the pinned machines have different GPUs: " + "; ".join(
+            f"{ip} {[v.get(k) for k in keys]}" for ip, v in found.items()))
+    return next(iter(found.values()))
+
+
 def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     """Resolve policy identity before the workflow chooses backend or knowledge.
 
@@ -730,6 +756,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             identity = json.loads(env_identity)
         except json.JSONDecodeError as error:
             raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
+    elif _multinode(h):
+        identity = _multinode_gpu_identity(h)
     else:
         proc = subprocess.run(
             [sys.executable, str(GPU_IDENTITY_SCRIPT)],

@@ -182,7 +182,11 @@ freeze an out-of-regime oracle nobody should trust.
    cp -r "$CURRENT_OVERLAY"/. "$TASK/baseline_overlay"/ 2>/dev/null || \
      python3 -c "import sys;sys.path.insert(0,'$SKILL_DIR/scripts');import overlay_setup as o;o._ensure_overlay('$TASK/baseline_overlay')"
 
-   BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
+   # BENCH_LAUNCHER=native is required for a one-card TP=1 capture. When your prompt names an `mn.py exec`
+   # command (a multinode run), run it on a pinned node: prefix with `<that mn.py exec> --target <node> --gpu "$GPU_ID" --`.
+   # (Not when CAPTURE_ON_ENGINE is in your inputs — use the serving-leg block below.)
+   BACKEND="<backend>" BENCH_LAUNCHER=native \
+   OUT_DIR="$TASK/_capture" GPU="$GPU_ID" TP=1 MODEL="$MODEL_PATH" \
    ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
    OVERLAY_PYTHONPATH="$TASK/_capture_overlay" \
    EXTRA_ENV="CAPTURE_TARGET=<selected module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5 GEAK_SELECTION_TRACE=$TASK/selection_trace.json CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET:-8GiB} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT:-2GiB} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY:-share_large}" \

@@ -668,6 +668,89 @@ class CheckTest(unittest.TestCase):
         self.assertNotIn("rank1 node-fc54: its fullest card", err, "decode's cards 4-7 are free")
 
 
+class ActivePinTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pointer = os.path.join(self.tmp, "state_path")
+        self.patch = mock.patch.object(mn, "ACTIVE_PIN", self.pointer)
+        self.patch.start()
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        os.environ.pop("GEAK_MN_STATE", None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.patch.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def claim(self, pid, start):
+        with open(self.pointer, "w", encoding="utf-8") as f:
+            json.dump({"state": "/w/mn_state.json", "pid": pid, "start": start, "mn_py": "/w/mn.py"}, f)
+
+    def test_the_pin_counts_while_its_owner_lives(self):
+        self.claim(4242, "777")
+        with mock.patch.object(mn, "_proc_start", lambda pid: "777" if int(pid) == 4242 else ""):
+            self.assertEqual(mn.active_pin(), "/w/mn_state.json")
+
+    def test_a_dead_or_reused_owner_pid_releases_the_machine(self):
+        self.claim(4242, "777")
+        with mock.patch.object(mn, "_proc_start", lambda pid: ""):
+            self.assertEqual(mn.active_pin(), "")
+        with mock.patch.object(mn, "_proc_start", lambda pid: "999"):
+            self.assertEqual(mn.active_pin(), "", "the pid now belongs to another process")
+
+    def test_geak_mn_state_wins_and_no_pointer_is_none(self):
+        self.assertEqual(mn.active_pin(), "")
+        os.environ["GEAK_MN_STATE"] = "/x/pin.json"
+        self.assertEqual(mn.active_pin(), "/x/pin.json")
+
+    def test_only_the_owner_releases_it(self):
+        self.claim(os.getppid() + 1, "1")
+        mn.cmd_active_pin(["--release"])
+        self.assertTrue(os.path.exists(self.pointer))
+        self.claim(os.getppid(), "1")
+        mn.cmd_active_pin(["--release"])
+        self.assertFalse(os.path.exists(self.pointer))
+
+    def ancestors(self, procs):
+        """claude_ancestor over a fake /proc: {pid: (comm, ppid, argv)}, starting at the parent 300."""
+        def fake_open(path, mode="r", **kw):
+            pid, name = int(path.split("/")[2]), path.split("/")[3]
+            if pid not in procs:
+                raise FileNotFoundError(path)
+            comm, ppid, argv = procs[pid]
+            if name == "stat":
+                return io.StringIO(f"{pid} ({comm}) S {ppid} 1 1")
+            return io.BytesIO("\0".join(argv).encode() + b"\0")
+        with mock.patch.object(mn.os, "getppid", lambda: 300), mock.patch("builtins.open", fake_open):
+            return mn.claude_ancestor()
+
+    def test_claude_ancestor_is_the_nearest_claude_code_process(self):
+        shell = (("bash", 200, ["/bin/bash", "-c", "source snap; mn.py check"]))
+        self.assertEqual(self.ancestors({300: shell, 200: ("claude", 100, ["claude", "-p"]),
+                                         100: ("python3", 1, ["python3", "run_e2e.py"])}), 200)
+        self.assertEqual(self.ancestors({300: shell, 200: ("node", 1, [
+            "node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])}), 200, "an npm install runs as node")
+        self.assertEqual(self.ancestors({300: shell, 200: ("python3", 1, ["python3", "run_e2e.py"])}), 0)
+        self.assertEqual(self.ancestors({300: shell}), 0, "an unreadable ancestor ends the walk")
+
+    def test_the_lease_dir_is_the_one_gpu_lock_and_the_leases_share(self):
+        pin, leases = os.path.join(self.tmp, "mn_state.json"), os.path.join(self.tmp, ".mn_lease")
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump({"shared_fs": self.tmp, "nodes": [], "tools_dir": "/w/run/.mn_tools"}, f)
+        os.environ["GEAK_MN_STATE"] = pin
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            mn.cmd_active_pin(["--lease-dir"])
+        self.assertEqual(out.getvalue().strip(), f"{pin}\t{leases}\t/w/run/.mn_tools")
+        node = {"hostname": "node-fc54.example"}
+        self.assertEqual(mn.lease_file({"shared_fs": self.tmp}, node, 3), os.path.join(leases, "node-fc54.gpu3.lock"))
+        gpu_lock = open(os.path.join(SCRIPTS_DIR, os.pardir, os.pardir, "kernel_workflow", "scripts",
+                                     "gpu_lock.sh"), encoding="utf-8").read()
+        self.assertIn('LOCK_DIR="$_MN_LEASE_DIR"', gpu_lock)
+        self.assertIn('LOCK_PREFIX="${_host%%.*}.gpu"', gpu_lock)
+        self.assertIn('"${LOCK_DIR}/${LOCK_PREFIX}${GPU_ID}.lock"', gpu_lock)
+
+
 class TransportTest(unittest.TestCase):
     NODE = {"rank": 1, "node_id": "node-c489/b1", "hostname": "node-c489", "ip": "10.0.0.2"}
 
@@ -1155,6 +1238,157 @@ adapter_bench 4 2 1; echo "PROF_RC=$?"
 
 
 @unittest.skipIf(BASH is None, "bash is required to exercise the launcher adapter")
+class MultinodeDriverTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_master_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state = os.path.join(self.tmp, "mn_state.json")
+        self.pin(mn.local_identity() or "n0")
+
+    def pin(self, master_id):
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"nodes": [{"rank": 0, "node_id": master_id, "ip": "10.0.0.1", "hostname": "h0", "ngpu": 1},
+                                 {"rank": 1, "node_id": "n1", "ip": "10.0.0.2", "hostname": "h1", "ngpu": 1}],
+                       "master_ip": "10.0.0.1", "serve_port": 30890, "shared_fs": self.tmp, "mn_dir": MN}, f)
+
+    def _source(self, **env_over):
+        driver = os.path.join(self.tmp, "driver.sh")
+        with open(driver, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(MASTER_DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"),
+                                              launcher=LAUNCHER.replace("\\", "/")))
+        env = {k: v for k, v in os.environ.items() if k not in ("TP", "BENCH_CLIENT")}
+        env.update({"GEAK_MN_STATE": self.state, "TP": "1", "BACKEND": "fake", **env_over})
+        return subprocess.run([BASH, driver], env=env, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+
+    def test_a_client_adapter_runs_here_with_the_legs_variables(self):
+        proc = self._source(BENCH_CLIENT="inferencex")
+        self.assertIn("SOURCED_OK", proc.stdout, proc.stderr)
+        self.assertIn("BENCH args=[one two words] port=[30890] isl=[512] token=[t0k] hop=[]", proc.stdout)
+        self.assertIn("BENCH_RC=7", proc.stdout)
+        self.assertNotIn("runs on rank0", proc.stderr)
+
+    def test_a_profile_round_is_a_fresh_load_and_the_launchers_window(self):
+        driver = os.path.join(self.tmp, "prof.sh")
+        with open(driver, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(PROF_DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"),
+                                            launcher=LAUNCHER.replace("\\", "/")))
+        env = {k: v for k, v in os.environ.items() if k not in ("TP", "BENCH_CLIENT")}
+        env.update({"GEAK_MN_STATE": self.state, "TP": "1", "BACKEND": "fake", "BENCH_CLIENT": "inferencex"})
+        proc = subprocess.run([BASH, driver], env=env, cwd=self.tmp, capture_output=True, text=True, timeout=120)
+        self.assertIn("WINDOW\nPROF_RC=5", proc.stdout, proc.stderr)
+        self.assertIn("PROF_RC=1", proc.stdout)
+        self.assertIn("the profiling load ended before the window opened", proc.stderr)
+        with open(os.path.join(self.tmp, "load.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read().split(), ["4", "2", "0", "4", "2", "0"])
+
+    @unittest.skipUnless(mn.local_identity(), "rank0 must be this machine (a Linux boot_id)")
+    def test_the_native_bench_runs_on_rank0_with_the_legs_variables_but_not_its_secrets(self):
+        proc = self._source(BENCH_CLIENT="native")
+        self.assertIn("SOURCED_OK", proc.stdout, proc.stderr)
+        self.assertIn("BENCH_CLIENT=native runs on rank0", proc.stderr)
+        self.assertIn("BENCH args=[one two words] port=[30890] isl=[512] token=[] hop=[1]", proc.stdout)
+        self.assertIn("BENCH_RC=7", proc.stdout)
+        self.assertIn("HEALTH", proc.stdout)
+
+    def test_the_ranks_source_the_adapters_beside_the_launcher(self):
+        driver = os.path.join(self.tmp, "adapters_dir.sh")
+        with open(driver, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(MASTER_DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"),
+                                              launcher=LAUNCHER.replace("\\", "/"))
+                         + 'echo "ADAPTERS=$GEAK_MN_ADAPTERS"\n')
+        env = dict(os.environ, GEAK_MN_STATE=self.state, TP="1", BACKEND="fake")
+        proc = subprocess.run([BASH, driver], env=env, cwd=self.tmp, capture_output=True, text=True, timeout=120)
+        got = re.search(r"^ADAPTERS=(.*)$", proc.stdout, re.M)
+        self.assertTrue(got, proc.stderr)
+        self.assertTrue(os.path.samefile(got.group(1), os.path.join(SCRIPTS_DIR, "adapters")), got.group(1))
+
+    def test_a_pin_without_mn_dir_is_refused_before_anything_runs(self):
+        with open(self.state, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc.pop("mn_dir")
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        proc = self._source()
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("names no mn_dir", proc.stderr)
+
+    def test_a_one_card_leg_is_served_remotely_too(self):
+        proc = self._source(GEAK_MN_STATE=os.path.join(self.tmp, "no_such_pin.json"))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("SOURCED_OK", proc.stdout)
+        self.assertIn("no pinned node set", proc.stderr)
+
+
+class DriverSubprocessTest(unittest.TestCase):
+    """The workflow's own subprocesses (best-effort file/JSON helpers) and the caller's mn.py check."""
+
+    def test_the_workflow_starts_only_host_side_helpers(self):
+        with open(os.path.join(SCRIPTS_DIR, "..", "e2e_workflow.js"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertEqual(src.count("require('child_process')"), 5)
+        firsts = re.findall(r"(?:execFileSync|spawn)\('python3', \[\s*(?:'-B',\s*)?(`[^`]*?`|'[^']*'|MN_PY)", src)
+        self.assertEqual(len(firsts), 5, firsts)
+        for first in firsts:
+            self.assertTrue(first == "'-c'"
+                            or first.endswith(("/geak_trace_collector.py`", "/capture_shapes.py`")), first)
+        self.assertIn("const MN_PY = `${WORKFLOW_DIR}/scripts/multi_node/mn.py`;", src)
+        self.assertNotIn("runMn", src)
+        self.assertIn("let verdict = A.multinode_check || await agentMnCheck();", src)
+        self.assertIn("python3 ${MN_PY} check --owner claude", src)
+
+    def test_run_e2e_checks_the_machines_before_the_workflow(self):
+        # A Workflow script cannot spawn a process, so the check runs in run_e2e.py.
+        with open(os.path.join(SCRIPTS_DIR, "..", "..", "interface", "run_e2e.py"), encoding="utf-8") as f:
+            src = f.read()
+        call = src.index("check = _multinode_check(ps_args)")
+        # A resume that carries the block only in state is checked too, as the workflow serves on it.
+        self.assertIn("if _multinode_block(ps_args):\n        check = _multinode_check(ps_args)", src)
+        self.assertIn('(ps_args.get("state") or {}).get("multinode")', src)
+        self.assertLess(call, src.index("wf = invoke_workflow(prompt"))
+        self.assertIn('ps_args["multinode_check"] = check', src[call:])
+        self.assertIn("prompt = build_prompt(ps_args)", src[call:src.index("wf = invoke_workflow(prompt")])
+
+
+@unittest.skipIf(BASH is None, "bash is required to run bench_e2e.sh")
+class BenchPinGuardTest(unittest.TestCase):
+    def bench(self, **over):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("MODEL", "REUSE_SERVER", "BENCH_LAUNCHER", "TP", "GPU", "GEAK_MN_STATE", "GEAK_MN_HOP")}
+        env.update(GEAK_MN_STATE="/nonexistent/pin.json", **over)
+        return subprocess.run([BASH, os.path.join(SCRIPTS_DIR, "bench_e2e.sh")], env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    def test_the_driver_serves_nothing_itself_while_a_pin_is_active(self):
+        for tp, gpu in (("8", "0,1,2,3,4,5,6,7"), ("1", "3")):
+            proc = self.bench(BENCH_LAUNCHER="native", TP=tp, GPU=gpu)
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("drives its nodes from this machine", proc.stderr)
+            self.assertIn("exec --env --gpu", proc.stderr)
+
+    def test_on_a_node_a_one_card_isolated_server_is_allowed(self):
+        proc = self.bench(BENCH_LAUNCHER="native", TP="1", GPU="3", GEAK_MN_HOP="1")
+        self.assertNotIn("On a pinned node", proc.stderr)
+        self.assertNotIn("drives its nodes", proc.stderr)
+        proc = self.bench(TP="1", GPU="3", GEAK_MN_HOP="1")
+        self.assertNotIn("On a pinned node", proc.stderr, "no launcher on a node is the native one")
+
+    def test_on_a_node_nothing_bigger_starts(self):
+        for over in ({"TP": "8", "GPU": "0,1,2,3,4,5,6,7"}, {"BENCH_LAUNCHER": "multinode", "TP": "1", "GPU": "3"}):
+            proc = self.bench(GEAK_MN_HOP="1", **over)
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("On a pinned node", proc.stderr)
+
+    def test_no_launcher_goes_to_the_pin(self):
+        proc = self.bench()
+        self.assertIn("no pinned node set at '/nonexistent/pin.json'", proc.stderr)
+
+    def test_reusing_a_server_is_allowed(self):
+        proc = self.bench(BENCH_LAUNCHER="native", TP="8", GPU="0,1", REUSE_SERVER="1")
+        self.assertNotIn("drives its nodes", proc.stderr)
+
+
+@unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
 def run_mn(argv):
     """`mn.py <argv>` in this process, so coverage sees it; shaped like subprocess.run's result."""
     out, err = io.StringIO(), io.StringIO()
@@ -1251,6 +1485,62 @@ class LaunchRecordTest(unittest.TestCase):
 
 
 
+class TeardownTest(unittest.TestCase):
+    def test_orphaned_workers_keep_the_node_busy(self):
+        probes = iter([{"hostname": "h", "serve_procs": 0, "worker_procs": 8, "gpu_pids": 0,
+                        "foreign_gpu_pids": 0, "max_use": 0.0},
+                       {"hostname": "h", "serve_procs": 0, "worker_procs": 0, "gpu_pids": 0,
+                        "foreign_gpu_pids": 0, "max_use": 0.0}])
+        seen = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(fake_ssh(
+                lambda task, node, args: next(probes) if task is mn.probe_node else {"rc": 0}))
+            stack.enter_context(mock.patch.object(mn, "resolve", lambda s: s["nodes"][:1]))
+            stack.enter_context(mock.patch.object(mn.time, "sleep", lambda s: None))
+            self.assertTrue(mn.teardown(PD_STATE, wait_idle_s=60, verbose=seen.append))
+        self.assertTrue(any("workers=8" in m for m in seen))
+
+    def test_kills_every_rank_then_reports_clear(self):
+        scripts = []
+        probe = {"hostname": "node-f2c5", "serve_procs": 0, "gpu_pids": 0,
+                 "foreign_gpu_pids": 0, "max_use": 0.0}
+
+        def reply(task, _node, args):
+            if task is mn.probe_node:
+                return dict(probe)
+            scripts.append(args[0])
+            return {"hostname": "node-f2c5", "out": "", "rc": 0}
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(fake_ssh(reply))
+            stack.enter_context(mock.patch.object(mn, "resolve", lambda s: s["nodes"]))
+            cleared = mn.teardown(PD_STATE, wait_idle_s=0, verbose=lambda *_: None)
+        self.assertEqual(cleared, [probe, probe], "the clear probes come back for launch's stack check")
+        self.assertEqual(scripts, [mn.kill_script(n) for n in PD_STATE["nodes"]])
+        for rank, script in enumerate(scripts):
+            pgroup, by_name, pid_file = (script.index('kill -TERM -- "-$pg"'), script.index(mn.KILL_OURS),
+                                         script.index(f"rm -f /tmp/geak_mn/rank{rank}.pid"))
+            self.assertLess(pgroup, by_name)
+            self.assertLess(by_name, pid_file)
+
+    def test_a_provided_router_is_reaped_by_its_recorded_pid(self):
+        # No name pattern knows a vllm router; its recorded process group is what kills it.
+        script = mn.kill_script({"rank": "lb"})
+        self.assertLess(script.index("/tmp/geak_mn/ranklb.pid"), script.index('kill -TERM -- "-$pg"'))
+        self.assertIn("rm -f /tmp/geak_mn/ranklb.pid", script)
+        router = {"rank": "lb", "node_id": "r", "ip": "10.10.0.32", "hostname": "node-c489"}
+        self.assertEqual(mn.state_targets(dict(PD_STATE, router=router))[-1], router)
+        self.assertEqual(mn.state_targets(PD_STATE), PD_STATE["nodes"])
+
+    def test_the_supervisor_reaps_the_router_its_launch_recorded(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        router = {k: "r" for k in mn.LAUNCH_NODE_KEYS} | {"rank": "lb"}
+        with open(os.path.join(tmp, "mn_launch.json"), "w", encoding="utf-8") as f:
+            json.dump({"nodes": PD_STATE["nodes"], "router": router}, f)
+        self.assertEqual(mn.supervised_state(dict(PD_STATE, router={}), tmp)["router"], router)
+
+
 class SpanSyncEnvTest(unittest.TestCase):
     def test_tp_span_injects_the_var_when_a_sweep_dropped_it(self):
         self.assertEqual(
@@ -1305,6 +1595,64 @@ class _PinnedEnv(unittest.TestCase):
             return mn.cmd_launch([])
 
 
+class LegEnvTest(unittest.TestCase):
+    def test_leg_env_is_the_pins_facts_on_the_driver(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pin = os.path.join(tmp, "pin.json")
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump(dict(PD_STATE, shared_fs=tmp), f)
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}):
+            with on_machine("sandbox/b"), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(mn.cmd_leg_env([]), 0)
+        facts = dict(line.split("=", 1) for line in out.getvalue().splitlines() if line.startswith("_MN_") and "=" in line)
+        self.assertEqual((facts["_MN_HOST"], facts["_MN_PORT"], facts["_MN_TOPOLOGY"], facts["_MN_NNODES"]),
+                         ("10.10.0.166", "30890", "pd_disagg", "2"))
+        self.assertEqual(facts["_MN_LOCK_KEY"], "node-f2a0+node-fc54")
+        leases = shlex.split(out.getvalue().split("_MN_LEASES=", 1)[1])[0].splitlines()
+        self.assertEqual(len(leases), 16)
+        self.assertEqual(leases[3], mn.lease_file(dict(PD_STATE, shared_fs=tmp), PD_STATE["nodes"][0], 3))
+
+    def test_ranks_on_one_machine_lease_each_card_once(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        p, d = PD_STATE["nodes"]
+        same = dict(d, ip=p["ip"], hostname=p["hostname"], node_id=p["node_id"])
+        pin = os.path.join(tmp, "pin.json")
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump(dict(PD_STATE, shared_fs=tmp, nodes=[p, same]), f)
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(mn.cmd_leg_env([]), 0)
+        leases = shlex.split(out.getvalue().split("_MN_LEASES=", 1)[1])[0].splitlines()
+        self.assertEqual(leases, [mn.lease_file(dict(PD_STATE, shared_fs=tmp), p, g) for g in range(8)])
+
+    def test_xpyd_profiles_one_engine_per_role_and_health_asks_every_replica(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        extra = dict(PD_STATE["nodes"][0], rank=2, node_id="n2", ip="10.10.0.32", hostname="node-c489", replica=1)
+        pin = os.path.join(tmp, "pin.json")
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump(dict(PD_STATE, shared_fs=tmp, nodes=[PD_STATE["nodes"][0], extra, PD_STATE["nodes"][1]]), f)
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(mn.cmd_leg_env([]), 0)
+        def fact(name):
+            return shlex.split(out.getvalue().split(f"_MN_{name}=", 1)[1])[0].splitlines()
+        self.assertEqual(fact("PD_ENGINES"),
+                         ["prefill=http://10.10.0.166:30891", "decode=http://10.10.0.183:30892"])
+        self.assertEqual(fact("PD_HEALTH"),
+                         ["http://10.10.0.166:30891", "http://10.10.0.32:30891", "http://10.10.0.183:30892"])
+
+
+PROVIDED_ROUTER = {"rank": "lb", "node_id": "r", "ip": "10.10.0.32", "hostname": "node-c489", "role": "router",
+                   "port": 8000, "launch_command": router_cmd(["10.10.0.166"], ["10.10.0.183"])}
+PROVIDED_PD = dict(PD_STATE, mode="provided", backend="sglang", master_ip="10.10.0.32", serve_port=8000, nodes=[
+    dict(PD_STATE["nodes"][0], role="prefill", tp=8, gpus=8, port=8000, bootstrap_port=8998,
+         launch_command=sg_cmd("prefill")),
+    dict(PD_STATE["nodes"][1], role="decode", tp=8, gpus=8, port=8000, launch_command=sg_cmd("decode")),
+], router=PROVIDED_ROUTER)
+
+
+@unittest.skipUnless(HAVE_SH, "needs bash")
 class ProvidedLaunchTest(_PinnedEnv):
     def setUp(self):
         super().setUp()
@@ -1433,6 +1781,126 @@ class SingleNodeGeneratedLaunchTest(_PinnedEnv):
         self.assertIn("> /tmp/geak_mn/rank0.pid\necho STARTED_PID=$SERVER_PID", self.rendered("rank0"))
 
 
+class ExecTest(_PinnedEnv):
+    def setUp(self):
+        super().setUp()
+        self.pin(PD_STATE)
+        self.sent = []
+
+    def exec(self, *argv):
+        def stream(state, node, script, timeout=None):
+            self.sent.append((node, script, timeout))
+            return 5
+        with mock.patch.object(mn, "ssh_stream", stream):
+            return mn.cmd_exec(list(argv))
+
+    def test_targets_resolve_to_pinned_nodes(self):
+        state = dict(PD_STATE, pd=mn.pd_config(PD_STATE))
+        pick = lambda name: mn.exec_target(state, name)["rank"]  # noqa: E731
+        self.assertEqual([pick(t) for t in ("master", "rank1", "prefill", "decode",
+                                            "10.10.0.183", "node-fc54")],
+                         [0, 1, 0, 1, 1, 0])
+        with self.assertRaisesRegex(SystemExit, "no pinned node 'rank2'"):
+            pick("rank2")
+
+    def test_a_command_runs_on_the_target_in_this_directory_on_the_leased_card(self):
+        self.assertEqual(self.exec("--target", "decode", "--gpu", "3", "--timeout", "9",
+                                   "--", "python3", "-c", "print('hi there')"), 5)
+        node, script, timeout = self.sent[0]
+        self.assertEqual((node["ip"], timeout), ("10.10.0.183", 9))
+        self.assertIn(f"cd {shlex.quote(os.getcwd())}", script)
+        self.assertIn("export HIP_VISIBLE_DEVICES=3 GPU_ID=3\n", script)
+        self.assertIn("\npython3 -c 'print('\"'\"'hi there'\"'\"')'\n\nGEAK_MN_BODY_", script)
+        self.assertTrue(script.startswith("{\nexport GEAK_MN_HOP=1\n"), "run under the watchdog")
+
+    def test_a_script_file_runs_verbatim(self):
+        path = os.path.join(self.tmp, "job.sh")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("set -e\nrocm-smi\n")
+        self.exec("--script", path)
+        node, script, _ = self.sent[0]
+        self.assertEqual(node["rank"], 0)
+        self.assertNotIn("HIP_VISIBLE_DEVICES", script)
+        self.assertIn("set -e\nrocm-smi\n", script)
+
+    def test_env_ships_exported_vars_but_not_host_identity_masks_or_secrets(self):
+        env = {"OVERLAY_PYTHONPATH": "/w/ov", "GEAK_GPU_ALLOWED": "0,1", "TORCH_EXTENSIONS_DIR": "/w/a b",
+               "GEAK_MN_STATE": os.environ["GEAK_MN_STATE"], "PATH": "/x", "CLAUDE_BIN": "/opt/claude",
+               "HOME": "/h", "HIP_VISIBLE_DEVICES": "", "ANTHROPIC_API_KEY": "k", "GH_TOKEN": "t"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.exec("--env", "--", "true")
+            plain = mn.exported_env()
+        script = self.sent[0][1]
+        self.assertIn("export TORCH_EXTENSIONS_DIR='/w/a b'\n", script)
+        self.assertIn("export GEAK_GPU_ALLOWED=0,1\n", script)
+        for name in ("CLAUDE_BIN", "PATH", "HOME", "HIP_VISIBLE_DEVICES", "ANTHROPIC", "GH_TOKEN"):
+            self.assertNotIn(f"export {name}", script)
+        self.assertEqual(sorted(re.findall(r"export (\w+)=", plain)),
+                         ["GEAK_GPU_ALLOWED", "GEAK_MN_STATE", "OVERLAY_PYTHONPATH", "TORCH_EXTENSIONS_DIR"])
+        self.exec("--", "true")
+        self.assertNotIn("TORCH_EXTENSIONS_DIR", self.sent[1][1])
+
+    @unittest.skipUnless(HAVE_SH and mn.local_identity(), "bash + a Linux boot_id")
+    def test_a_target_that_is_this_machine_runs_here_in_this_directory(self):
+        state = dict(PD_STATE, nodes=[dict(PD_STATE["nodes"][0], node_id=mn.local_identity()),
+                                      PD_STATE["nodes"][1]])
+        self.pin(state)
+        work = os.path.join(self.tmp, "ws")
+        os.makedirs(work)
+        proc = subprocess.run([sys.executable, os.path.join(MN, "mn.py"), "exec", "--target", "master",
+                               "--", "bash", "-c", 'echo "$PWD"; exit 7'],
+                              cwd=work, capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (7, work), proc.stderr)
+
+    @unittest.skipUnless(HAVE_SH and sys.platform.startswith("linux") and mn.local_identity(), "bash + flock")
+    def test_gpu_lock_holds_the_same_card_lease_as_mn_exec(self):
+        import socket
+        gpu_lock = os.path.realpath(os.path.join(MN, "..", "..", "..", "kernel_workflow", "scripts", "gpu_lock.sh"))
+        lock = mn.lease_file(dict(PD_STATE, shared_fs=self.tmp), {"hostname": socket.gethostname()}, 2)
+        probe = ("import fcntl,sys; f=open(sys.argv[1],'w')\n"
+                 "try: fcntl.flock(f, fcntl.LOCK_EX|fcntl.LOCK_NB); print('free')\n"
+                 "except BlockingIOError: print('held')")
+        # This machine as both nodes: `decode:2` and the bare pool both forward back here through
+        # mn.py exec, to the run directory's copy, which finds the leases without mn.py.
+        me = {"node_id": mn.local_identity(), "hostname": socket.gethostname()}
+        self.pin(dict(PD_STATE, nodes=[n | me for n in PD_STATE["nodes"]],
+                      tools_dir=mn.stage_tools(os.path.join(self.tmp, "run"))))
+        env = dict(os.environ, GEAK_GPU_REQUIRE_IDLE="0",
+                   KERNEL_ENV_SKIP_ENUM_REAP="1", KERNEL_ENV_KEEP_ARCH="1")
+        for spec in ("decode:2", "2,9"):
+            proc = subprocess.run(["bash", gpu_lock, spec, "bash", "-c",
+                                   f'echo "$HIP_VISIBLE_DEVICES"; {shlex.quote(sys.executable)} -c "$0" "$1"',
+                                   probe, lock], cwd=self.tmp, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.stdout.split(), ["2", "held"], (spec, proc.stderr))
+
+    def test_bad_usage_is_refused(self):
+        for argv in (("--gpu", "all", "--", "true"), ("--script", "x", "--", "true"), ()):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.exec(*argv)
+        self.assertEqual(self.sent, [])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "flock")
+    def test_a_leased_card_is_held_until_the_command_ends(self):
+        probe = ("import fcntl,sys; f=open(sys.argv[1],'w')\n"
+                 "try: fcntl.flock(f, fcntl.LOCK_EX|fcntl.LOCK_NB); print('free')\n"
+                 "except BlockingIOError: print('held')")
+        lock = os.path.join(self.tmp, ".mn_lease", "node-f2a0.gpu3.lock")
+        with mn.gpu_lease(PD_STATE | {"shared_fs": self.tmp}, PD_STATE["nodes"][1], "3"):
+            inside = subprocess.run([sys.executable, "-c", probe, lock], capture_output=True, text=True).stdout
+        after = subprocess.run([sys.executable, "-c", probe, lock], capture_output=True, text=True).stdout
+        self.assertEqual((inside.strip(), after.strip()), ("held", "free"))
+
+    def test_an_engine_prefix_on_the_card_picks_the_node(self):
+        self.exec("--gpu", "decode:3", "--", "true")
+        node, script, _ = self.sent[0]
+        self.assertEqual(node["ip"], "10.10.0.183")
+        self.assertIn("export HIP_VISIBLE_DEVICES=3 GPU_ID=3\n", script)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.exec("--target", "prefill", "--gpu", "decode:3", "--", "true")
+        self.assertEqual(len(self.sent), 1)
+
+
+
 class PidFileTest(unittest.TestCase):
     def test_an_unanswered_ssh_is_not_a_substituted_machine(self):
         state = {"nodes": [{"rank": 0, "node_id": "h/b", "hostname": "h", "ip": "10.0.0.1"}], "ssh": {}}
@@ -1543,6 +2011,127 @@ class SharedFsProofTest(unittest.TestCase):
         self.assertEqual(os.listdir(os.path.join(tmp, ".mn_probe")), [], "markers are cleaned up")
 
 
+def healthy(rank, **kw):
+    return {"rank": rank, "host": f"node{rank}", "serve": 1, "pid": "1", "schedulers": 1, "zombies": 0, **kw}
+
+
+class SupervisorTest(unittest.TestCase):
+    real_teardown = staticmethod(mn.teardown)
+    STATE = {"topology": "tp_span", "nodes": [{"rank": 0, "hostname": "node0", "ip": "10.0.0.1"},
+                                              {"rank": 1, "hostname": "node1", "ip": "10.0.0.2"}]}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.torn = []
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(mn, "_out_dir", self.tmp))
+        stack.enter_context(mock.patch.object(mn, "_stopping", False))
+        stack.enter_context(mock.patch.object(mn, "_state", None))
+        stack.enter_context(mock.patch.object(mn, "load_state", lambda: dict(self.STATE)))
+        stack.enter_context(mock.patch.object(mn, "time", mock.Mock(time=time.time, sleep=lambda _s: None)))
+        stack.enter_context(mock.patch.object(mn.signal, "signal", lambda *_a: None))
+        stack.enter_context(mock.patch.object(mn.signal, "getsignal", lambda _s: mn.on_term))
+        stack.enter_context(mock.patch.object(mn, "teardown", lambda s, **k: self.torn.append(s) or [{}]))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+
+    def verdict(self):
+        with open(os.path.join(self.tmp, "mn_supervisor.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_a_rank_with_zombie_workers_for_two_polls_is_dead(self):
+        polls = iter([[healthy(0), healthy(1)], [healthy(0), healthy(1, zombies=2)],
+                      [healthy(0), healthy(1, zombies=2)]])
+        with mock.patch.object(mn, "engine_health", lambda _s: next(polls)):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        doc = self.verdict()
+        self.assertEqual(doc["verdict"], "rank_died")
+        self.assertEqual(doc["dead_ranks"], ["rank1@node1"])
+        self.assertIn("zombie worker", doc["why"])
+        self.assertEqual(len(self.torn), 1, "survivors are reaped")
+
+    def test_ranks_that_stay_unobservable_end_the_watch(self):
+        with mock.patch.object(mn, "engine_health", side_effect=RuntimeError("ssh down")):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "unobservable")
+        self.assertEqual(self.verdict()["consecutive_failures"], mn.ERR_MISSES)
+
+    def test_a_lost_sigterm_handler_refuses_to_watch(self):
+        with mock.patch.object(mn.signal, "getsignal", lambda _s: None):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "handler_lost")
+
+    def test_term_reaps_the_ranks_once_and_exits_clean(self):
+        mn._state = dict(self.STATE)
+        with self.assertRaises(SystemExit) as stop:
+            mn.on_term(signal.SIGTERM, None)
+        self.assertEqual(stop.exception.code, 0)
+        self.assertEqual((self.verdict()["verdict"], self.verdict()["cleared"]), ("torn_down", True))
+        self.assertIsNone(mn.on_term(signal.SIGTERM, None), "a second signal is ignored")
+        self.assertEqual(len(self.torn), 1)
+
+    def test_a_teardown_that_raises_is_recorded(self):
+        mn._state = dict(self.STATE)
+        with mock.patch.object(mn, "teardown", side_effect=RuntimeError("ssh down")), \
+                self.assertRaises(SystemExit):
+            mn.on_term(signal.SIGTERM, None)
+        self.assertEqual(self.verdict()["error"], "ssh down")
+
+    def test_a_dead_load_balancer_is_named(self):
+        self.assertIn("load balancer is gone", mn._death_reason(healthy(0, lb=0)))
+        self.assertEqual(mn._death_reason(healthy(0, serve=0)), "no serve process")
+
+    def test_a_post_mortem_teardown_that_raises_still_reports_the_death(self):
+        polls = iter([[healthy(0, serve=0), healthy(1)]] * 2)
+        with mock.patch.object(mn, "engine_health", lambda _s: next(polls)), \
+                mock.patch.object(mn, "teardown", side_effect=RuntimeError("ssh down")):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "rank_died")
+
+    def test_an_unwritable_out_dir_does_not_stop_the_record(self):
+        blocker = os.path.join(self.tmp, "file")
+        open(blocker, "w").close()
+        out = io.StringIO()
+        with mock.patch.object(mn, "_out_dir", blocker), contextlib.redirect_stdout(out):
+            mn.record("watching", {})
+        self.assertIn("could not write mn_supervisor.json", out.getvalue())
+
+    def test_a_teardown_that_never_clears_gives_up_and_names_the_co_tenant(self):
+        busy = dict(probe("node0.x", serve_procs=1), foreign_gpu_pids=1, gpu_pids=2, max_use=90)
+        clock = iter(range(0, 10000, 100))
+        lines = []
+        with mock.patch.object(mn, "resolve", lambda s: s["nodes"]), \
+                mock.patch.object(mn, "ssh_each", lambda *a, **k: []), \
+                mock.patch.object(mn, "probe_all", lambda s, nodes: [busy]), \
+                mock.patch.object(mn, "time", mock.Mock(time=lambda: next(clock), sleep=lambda _s: None)):
+            self.assertIsNone(self.real_teardown(self.STATE, wait_idle_s=150, verbose=lines.append))
+        self.assertIn("waiting on node0(use=90 pids=2 of which 1 from another container", lines[0])
+        self.assertIn("node0 has a co-tenant we cannot reap", lines[-1])
+
+    def test_an_unknown_command_prints_the_usage(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(mn.main(["nope"]), 2)
+        self.assertIn("usage: mn.py {check|launch", err.getvalue())
+
+    def test_abandoning_a_launch_survives_a_teardown_that_raises(self):
+        err = io.StringIO()
+        with mock.patch.object(mn, "teardown", side_effect=RuntimeError("boom")), contextlib.redirect_stderr(err):
+            self.assertEqual(mn.abandon_launch(self.STATE), 1)
+        self.assertIn("reaping the failed launch raised: boom", err.getvalue())
+
+    def test_stop_reports_whether_the_cards_cleared(self):
+        self.assertEqual(mn.cmd_stop([self.tmp]), 0)
+        with mock.patch.object(mn, "teardown", lambda s, **k: None):
+            self.assertEqual(mn.cmd_stop([self.tmp]), 1)
+
+    def test_serve_counts_read_each_rank(self):
+        with mock.patch.object(mn, "resolve", lambda s: s["nodes"]), \
+                mock.patch.object(mn, "ssh_each", lambda s, jobs: [{"out": "serve=2 pid=7"}, {"out": ""}]):
+            self.assertEqual(mn.serve_counts(self.STATE), [2, 0])
+
+
 class ClientPreflightTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -1587,4 +2176,84 @@ class ReachTest(unittest.TestCase):
         self.assertTrue(mn.dials_here("127.0.0.1", port))
         srv.close()
         self.assertFalse(mn.dials_here("127.0.0.1", port))
+
+
+class ActivePinCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pointer = os.path.join(self.tmp, "state_path")
+        patch = mock.patch.object(mn, "ACTIVE_PIN", self.pointer)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_release_drops_only_the_callers_own_pointer(self):
+        with open(self.pointer, "w") as f:
+            json.dump({"pid": os.getppid() + 1}, f)
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0)
+        self.assertTrue(os.path.exists(self.pointer))
+        with open(self.pointer, "w") as f:
+            json.dump({"pid": os.getppid()}, f)
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0)
+        self.assertFalse(os.path.exists(self.pointer))
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0, "no pointer: nothing to drop")
+
+    def test_no_pin_or_a_missing_pin_file_stops_with_a_reason(self):
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": ""}):
+            with self.assertRaisesRegex(SystemExit, "no pin: GEAK_MN_STATE is unset"):
+                mn.load_state()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": os.path.join(self.tmp, "gone.json")}):
+            with self.assertRaisesRegex(SystemExit, "no pinned node set at"):
+                mn.load_state()
+
+    def test_leg_env_refuses_a_pin_without_a_serving_address(self):
+        pin = os.path.join(self.tmp, "mn_state.json")
+        with open(pin, "w") as f:
+            json.dump({"nodes": []}, f)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stderr(err):
+            self.assertEqual(mn.cmd_leg_env([]), 3)
+        self.assertIn("has no master_ip/serve_port", err.getvalue())
+
+    def test_probe_prints_its_one_line(self):
+        out = io.StringIO()
+        with mock.patch.object(mn, "probe_node", lambda ports: {"ports": ports}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.main(["probe", "30000"]), 0)
+        self.assertEqual(out.getvalue().strip(), mn.PROBE_TAG + '{"ports": [30000]}')
+
+    def test_the_active_pin_is_printed(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": "/shared/pins/a.json"}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.cmd_active_pin([]), 0)
+        self.assertEqual(out.getvalue().strip(), "/shared/pins/a.json")
+
+    def test_lease_dir_prints_the_pins_lease_dir_or_fails_on_an_unreadable_pin(self):
+        pin = os.path.join(self.tmp, "mn_state.json")
+        with open(pin, "w") as f:
+            json.dump({"shared_fs": self.tmp, "tools_dir": "/t"}, f)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.cmd_active_pin(["--lease-dir"]), 0)
+        self.assertEqual(out.getvalue().strip(), f"{pin}\t{os.path.join(self.tmp, '.mn_lease')}\t/t")
+        with open(pin, "w") as f:
+            f.write("{")
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(mn.cmd_active_pin(["--lease-dir"]), 1)
+
+
+class GpuLeaseTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "fcntl")
+    def test_a_card_leased_by_another_task_is_waited_for(self):
+        import fcntl
+        import threading
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        state, node = {"shared_fs": tmp}, {"hostname": "node0.cluster.local"}
+        other = open(mn.lease_file(state, node, 3), "w")
+        fcntl.flock(other, fcntl.LOCK_EX)
+        threading.Timer(0.3, other.close).start()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mn.gpu_lease(state, node, "3") as ids:
+            self.assertEqual(ids, "3")
+        self.assertIn("waiting for node0 gpu3", err.getvalue())
 

@@ -86,7 +86,11 @@ Steps:
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
    `aiter.ops.flydsl.is_flydsl_available()` — NOT `import flydsl` / ckProfiler /
-   hipblaslt-bench?), and the model's **arch class** from its `config.json`.    Degrade gracefully
+   hipblaslt-bench?), and the model's **arch class** from its `config.json`.
+   On a multinode run (your prompt gives an `mn.py exec` line) this machine sees no GPU and the nodes
+   have no GEAK code: copy `gpu_identity.py` into `$EVAL_DIR`, and run that copy and every GPU / stack
+   probe of this step (including `env_info.txt` below) on the master, prefixed with
+   `<that mn.py exec> --target master --`. Degrade gracefully
    (a missing OPTIONAL tool → record a limitation, don't abort); hard-stop ONLY on a true blocker
    (no MODEL / stack / GPU) with an actionable remedy. Write `EVAL_DIR/env_report.{md,json}`
    (downstream phases read it). **For every OPTIONAL backend that is NOT available, also write an

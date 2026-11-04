@@ -386,6 +386,40 @@ fi
 # back. The authored-kernel OVERLAY (OVERLAY_PYTHONPATH) is applied BY the launcher, since
 # an external harness usually cannot, so overlay and recipe-parity coexist. FRESH launches
 # only (REUSE_SERVER=0); nothing else in the measurement changes.
+# A multinode run (`mn.py active-pin`: GEAK_MN_STATE, else the pin a live workflow on this
+# machine owns) serves on its pinned nodes, launched from here: this machine serves nothing
+# itself. On a node (GEAK_MN_HOP: `mn.py exec` brought this bench there) only an isolated
+# one-card server (TP=1, one GPU) starts.
+_MN_PIN="${GEAK_MN_STATE:-}"
+if [ -z "$_MN_PIN" ] && [ -f /tmp/geak_mn/state_path ]; then
+  _mn_py="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mn_py") or "")' \
+             /tmp/geak_mn/state_path 2>/dev/null || true)"
+  [ -f "$_mn_py" ] && _MN_PIN="$(python3 "$_mn_py" active-pin 2>/dev/null || true)"
+fi
+if [ -n "$_MN_PIN" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  if [ -n "${GEAK_MN_HOP:-}" ]; then
+    BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
+    if [ "$BENCH_LAUNCHER" = "multinode" ] || [ "${TP:-1}" != "1" ] || ! [[ "${GPU:-0}" =~ ^[0-9]+$ ]]; then
+      echo "!!! On a pinned node (pin $_MN_PIN) this bench may only start an isolated one-card server" \
+           "(TP=1, one GPU), not BENCH_LAUNCHER=$BENCH_LAUNCHER TP=${TP:-1} GPU=${GPU:-0}. Serving legs run" \
+           "from the driver." >&2
+      exit 3
+    fi
+  else
+    case "${BENCH_LAUNCHER:-auto}" in
+      auto|multinode)
+        BENCH_LAUNCHER=multinode GEAK_MN_STATE="$_MN_PIN"
+        export BENCH_LAUNCHER GEAK_MN_STATE ;;
+      *)
+        echo "!!! A multinode run drives its nodes from this machine (pin $_MN_PIN), which serves nothing" \
+             "itself: BENCH_LAUNCHER=$BENCH_LAUNCHER. Leave BENCH_LAUNCHER unset to serve on the pinned nodes;" \
+             "start an isolated one-card server on a node with" \
+             "\`python3 <mn.py> exec --env --gpu <target>:<id> -- bash $0\` (BENCH_LAUNCHER=native TP=1)." >&2
+        exit 3 ;;
+    esac
+  fi
+fi
+unset _mn_py
 BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
 if [ "$BENCH_LAUNCHER" != "native" ]; then
   LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
@@ -795,8 +829,9 @@ fi
 # free-VRAM floor the baseline leg cleared into MEM_HEADROOM_MIN_MB; a candidate below it fails parity.
 # Fail-OPEN on any parse error (missing rocm-smi / unexpected schema) so non-AMD or partial rigs are
 # unaffected — this only ever rejects when it can POSITIVELY prove the headroom regressed.
-if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ]; then
-  _free_mb=$(rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
+# A multinode leg's cards are on the nodes, not here: rocm-smi on this machine says nothing about them.
+_min_free_vram_mb() {
+  rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -806,7 +841,10 @@ try:
     print(min(vals) if vals else "")
 except Exception:
     print("")
-' 2>/dev/null || echo "")
+' 2>/dev/null || echo ""
+}
+if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ] && [ "$BENCH_LAUNCHER" != "multinode" ]; then
+  _free_mb=$(_min_free_vram_mb)
   if [ -n "$_free_mb" ] && [ "$_free_mb" -lt "$MEM_HEADROOM_MIN_MB" ] 2>/dev/null; then
     echo "!!! Overlay resident VRAM headroom ${_free_mb}MB < baseline floor ${MEM_HEADROOM_MIN_MB}MB"
     echo "    -> memory-parity FAIL; rejecting candidate before timed legs."

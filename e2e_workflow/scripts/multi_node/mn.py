@@ -704,6 +704,157 @@ def probe_all(state: dict, nodes: list, ports: list | None = None) -> list:
     return _parallel([functools.partial(probe, state, n, ports) for n in nodes])
 
 
+def resolve(state: dict) -> list[dict]:
+    """The pinned machines (state_targets), each confirmed to still be the machine that was
+    pinned. An ssh that does not get through is a RuntimeError (the node may be fine);
+    another machine answering at the pinned IP is a hard stop."""
+    nodes = state_targets(state)
+    for node, res in zip(nodes, ssh_each(state, [(n, IDENTITY_SH, 60) for n in nodes])):
+        if res["rc"] != 0 or not res["out"]:
+            raise RuntimeError(f"pinned rank{node['rank']} {node['hostname']} ({node['ip']}) did not answer "
+                               f"over ssh (rc={res['rc']}): {res.get('err') or 'no output'}")
+        if res["out"] != node["node_id"]:
+            raise SystemExit(
+                f"!!! multinode: pinned rank{node['rank']} {node['hostname']} ({node['ip']}) now answers as {res['out'] or res.get('err') or 'nothing'!r}.\n    {SUBSTITUTION_REFUSAL}")
+    return nodes
+
+
+# The LB is killed even on tp_span: a survivor on the client port answers /health
+# for engines that are gone.
+KILL_OURS = "sleep 3; ".join(
+    "".join(f"pkill {sig}-f '{p}' 2>/dev/null || true; "
+            for p in (SERVE_PATTERN, ENGINE_PATTERN, LB_PATTERN))
+    + f"kill {sig}$({OUR_WORKER_PIDS}) 2>/dev/null || true; "
+    for sig in ("", "-9 ")) + "echo killed"
+
+
+def kill_script(node: dict) -> str:
+    """Kill order: the recorded server's process group (a provided router is found only
+    this way: no name pattern knows every backend's router), then everything of ours by name."""
+    steps = [f'p=$({live_pid(node["rank"])}); pg=""',
+             'case "$p" in ""|gone) ;; *) pg=$(ps -o pgid= -p "$p" | tr -d " ") ;; esac',
+             'case "$pg" in ""|0|1) pg="" ;; *) kill -TERM -- "-$pg" 2>/dev/null || true ;; esac',
+             KILL_OURS,
+             '[ -z "$pg" ] || kill -9 -- "-$pg" 2>/dev/null || true',
+             f"rm -f {PID_DIR}/rank{node['rank']}.pid"]
+    return "\n".join(steps) + "\n"
+
+
+# role / ssh: the transport picks the node's sshd endpoint from them.
+LAUNCH_NODE_KEYS = ("rank", "node_id", "hostname", "ip", "role", "ssh")
+
+
+def launched_nodes(out_dir: str):
+    """(nodes, router) the launch in `out_dir` spawned on, or None if unrecorded.
+
+    The pin answers where the NEXT launch goes; another run rewriting it must not
+    move this launch's supervisor and teardown onto other boxes."""
+    try:
+        with open(os.path.join(out_dir, "mn_launch.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    nodes = doc.get("nodes")
+    if not nodes or not all(n.get("node_id") for n in nodes):
+        return None
+    return nodes, doc.get("router") or {}
+
+
+def supervised_state(state: dict, out_dir: str) -> dict:
+    launched = launched_nodes(out_dir)
+    return {**state, "nodes": launched[0], "router": launched[1]} if launched else state
+
+
+def teardown(state: dict, wait_idle_s: int = 180, verbose=print) -> list | None:
+    """Kill every rank of a previous launch and wait for the cards to clear.
+    Returns the last probe of every node once clear (launch reads the stack from it), else None.
+
+    Runs before every launch: a surviving scheduler holds the dist-init port
+    while /health still answers 200. It is also what clears the ranks of a
+    supervisor that was killed with -9 (nothing else is left to reap them)."""
+    nodes = resolve(state)
+    ssh_each(state, [(n, kill_script(n), 120) for n in nodes])
+
+    def still_ours(p) -> bool:
+        # Another container's pids are the caller's choice of machines, not ours to wait on.
+        return (bool(p["serve_procs"]) or bool(p.get("worker_procs"))
+                or (p["gpu_pids"] or 0) > (p.get("foreign_gpu_pids") or 0))
+
+    deadline = time.time() + wait_idle_s
+    while True:
+        probes = probe_all(state, nodes)
+        busy = [
+            f"{_short(p['hostname'])}(use={p['max_use']} pids={p['gpu_pids']}"
+            + (f" of which {p['foreign_gpu_pids']} from another container"
+               if p.get("foreign_gpu_pids") else "")
+            + f" serve={p['serve_procs']} workers={p.get('worker_procs', 0)})"
+            for p in probes if still_ours(p)
+        ]
+        if not busy:
+            verbose(f">>> multinode teardown: all {len(nodes)} nodes clear")
+            return probes
+        if time.time() > deadline:
+            foreign = [_short(p["hostname"]) for p in probes if p.get("foreign_gpu_pids")]
+            verbose(f"!!! multinode teardown: still busy after {wait_idle_s}s: "
+                    + ", ".join(busy)
+                    + (f"; {', '.join(foreign)} has a co-tenant we cannot reap"
+                       if foreign else ""))
+            return None
+        verbose(">>> multinode teardown: waiting on " + ", ".join(busy))
+        time.sleep(10)
+
+
+def serve_counts(state: dict) -> list[int]:
+    nodes = resolve(state)
+    results = ssh_each(state, [(n, serve_alive(n["rank"]), 90) for n in nodes])
+    return [int(m.group(1)) if (m := re.search(r"serve=(\d+)", r["out"] or "")) else 0 for r in results]
+
+
+def engine_health(state: dict) -> list[dict]:
+    """Per rank: serve process (by its pid file), scheduler workers, zombies; plus the LB on a PD master.
+
+    Zombie schedulers behind a live HTTP front end are a dead engine. The LB is
+    asked on its client port, not found by name (the router renames itself).
+    A node whose probe does not come back over ssh raises: that is not a dead rank."""
+    nodes = resolve(state)
+    workers = (f"echo sched=$(pgrep -c -f '{SCHED_PATTERN}' || true) "
+               "zombie=$(ps -eo stat=,args= | awk '/(sglang|VLLM)::/ && $1 ~ /Z/' | wc -l)")
+    watch_lb = topology_of(state) == "pd_disagg"
+    # A pin without a "pd" block takes pd_config's defaults; reading the raw key would probe port None.
+    lb_port = pd_config(state)["lb_port"] if watch_lb else None
+    lb_probe = (
+        f"echo lb=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 http://127.0.0.1:{lb_port}/health || echo 000)"
+    )
+
+    lb_rank = (lb_node(state) or {}).get("rank") if watch_lb else None
+
+    def is_lb(n):
+        return watch_lb and n["rank"] == lb_rank
+
+    def health_script(n):
+        return "\n".join([serve_alive(n["rank"]), workers, *([lb_probe] if is_lb(n) else []), "echo ok=1"]) + "\n"
+
+    results = ssh_each(state, [(n, health_script(n), 90) for n in nodes])
+    out = []
+    for node, res in zip(nodes, results):
+        if "ok=1" not in (res["out"] or "").split():
+            raise RuntimeError(f"rank{node['rank']} {node['ip']} did not answer over ssh "
+                               f"(rc={res.get('rc')}): {(res.get('err') or '')[-300:]}")
+        vals = dict(part.split("=", 1) for part in (res["out"] or "").split() if "=" in part)
+        num = lambda key: int(vals[key]) if vals.get(key, "").isdigit() else 0  # noqa: E731
+        entry = {
+            "rank": node["rank"],
+            "host": _short(node["hostname"]),
+            "serve": num("serve"),
+            "pid": vals.get("pid", "none"),
+            "schedulers": num("sched"),
+            "zombies": num("zombie"),
+        }
+        if is_lb(node):
+            entry["lb_http"] = num("lb")
+            entry["lb"] = 1 if entry["lb_http"] == 200 else 0
+        out.append(entry)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -937,6 +1088,83 @@ def check_verdict(pin: str, problems: list, spec: dict | None = None) -> int:
     return 2 if problems else 0
 
 
+# The pin of the multinode run on this machine, with its owner: the process that ran the
+# check (run_e2e.py, which outlives the workflow), or for a prompt-started workflow the Claude Code
+# process its check agent ran under. The pin counts only while that very process lives, so a single-host
+# run after it, or after it was killed, is not taken for a multinode one. It also names this
+# mn.py, for bench_e2e.sh copies that have no multi_node/ beside them.
+ACTIVE_PIN = f"{PID_DIR}/state_path"
+
+
+def _proc_start(pid) -> str:
+    """The process's start time (as _START_TIME reads it); '' if there is no such process."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, ValueError, IndexError, TypeError):
+        return ""
+
+
+def claude_ancestor() -> int:
+    """The nearest ancestor that is the Claude Code process (0 if none). A Workflow's agents run in
+    that one process and their Bash commands are its children, so it outlives the workflow, while
+    the shell an agent ran check from is gone the moment the command returns."""
+    pid = os.getppid()
+    while pid > 1:
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+                stat = f.read()
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().decode(errors="replace").split("\0")[:2]
+        except OSError:
+            return 0
+        if stat[stat.index("(") + 1:stat.rindex(")")] == "claude" or any(
+                os.path.basename(a) == "claude" or "@anthropic-ai/claude-code" in a for a in argv):
+            return pid
+        pid = int(stat.rsplit(")", 1)[1].split()[1])
+    return 0
+
+
+def active_pin() -> str:
+    """GEAK_MN_STATE (the handoff entry sets it), else the pin a live run on this machine owns."""
+    if os.environ.get("GEAK_MN_STATE"):
+        return os.environ["GEAK_MN_STATE"]
+    try:
+        with open(ACTIVE_PIN, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    alive = doc.get("start") and _proc_start(doc.get("pid")) == doc["start"]
+    return str(doc.get("state") or "") if alive else ""
+
+
+def cmd_active_pin(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py active-pin")
+    ap.add_argument("--lease-dir", action="store_true",
+                    help="also print the pin's card-lease directory and kernel-tools copy (tab-separated)")
+    ap.add_argument("--release", action="store_true", help="drop the pointer the calling process owns")
+    a = ap.parse_args(argv)
+    if a.release:
+        try:
+            with open(ACTIVE_PIN, encoding="utf-8") as f:
+                owner = json.load(f).get("pid")
+            if owner == os.getppid():
+                os.remove(ACTIVE_PIN)
+        except (OSError, ValueError, AttributeError):
+            pass
+        return 0
+    pin = active_pin()
+    if pin and a.lease_dir:
+        try:
+            with open(pin, encoding="utf-8") as f:
+                doc = json.load(f)
+            print(f"{pin}\t{lease_dir(doc)}\t{doc.get('tools_dir') or ''}")
+        except (OSError, ValueError, KeyError) as exc:
+            sys.stderr.write(f"!!! multinode: the active pin {pin} is unreadable: {exc}\n")
+            return 1
+    elif pin:
+        print(pin)
+    return 0
 
 
 def cmd_check(argv: list) -> int:
@@ -1519,6 +1747,292 @@ def cmd_launch(argv: list) -> int:
     if any(c < 1 for c in counts):
         print("!!! multinode: at least one rank has no serve process after the spawn; see the rank logs.", file=sys.stderr)
         return abandon_launch(state)
+    return 0
+
+
+def abandon_launch(state: dict) -> int:
+    """No supervisor exists yet, so reap whatever did spawn."""
+    try:
+        teardown(state, wait_idle_s=TEARDOWN_WAIT_S)
+    except Exception as exc:
+        print(f"!!! multinode: reaping the failed launch raised: {exc}", file=sys.stderr)
+    return 1
+
+
+def cmd_stop(argv: list) -> int:
+    """`mn.py stop <out_dir>`: reap the launch in out_dir when no supervisor came up to do it."""
+    out_dir = argv[0] if argv else os.environ.get("OUT_DIR", ".")
+    return 0 if teardown(supervised_state(load_state(), out_dir)) else 1
+
+
+# --------------------------------------------------------------------------
+# SUPERVISE  (mn.py supervise)
+# --------------------------------------------------------------------------
+# The local pid bench_e2e.sh watches and kills. It exits when a rank stops
+# serving (no process, zombie workers, or a dead PD front end) so the bench sees
+# `died_early` within one poll, and its SIGTERM handler reaps the remote ranks
+# (after a kill -9 they hold the cards until the next launch's teardown).
+# It never writes to $LOG (bench_e2e.sh greps it).
+
+SUP_POLL_S = 20
+MISSES = 2          # empty observations before "dead"
+ERR_MISSES = 6      # probe errors before giving up
+# Must finish inside server_teardown.sh's TERM->KILL grace (SERVER_STOP_GRACE_S=90).
+TEARDOWN_WAIT_S = 60
+
+_state = None
+_out_dir = os.environ.get("OUT_DIR", ".")
+_stopping = False
+
+
+def record(verdict: str, detail: dict) -> None:
+    try:
+        _write_json(os.path.join(_out_dir, "mn_supervisor.json"),
+                    {"verdict": verdict, "at": _utc(), **detail})
+    except OSError as exc:
+        log(f"could not write mn_supervisor.json: {exc}")
+
+
+def on_term(signum, _frame):
+    """Reap the remote ranks and exit 0 (a requested stop is not a crash)."""
+    global _stopping
+    if _stopping:
+        return
+    _stopping = True
+    log(f"signal {signum}: tearing down the remote ranks")
+    try:
+        cleared = teardown(_state, wait_idle_s=TEARDOWN_WAIT_S)
+        log("remote ranks reaped" if cleared else
+            "remote teardown did not fully clear; the next launch will wait for the cards")
+        record("torn_down", {"signal": int(signum), "cleared": bool(cleared)})
+    except Exception as exc:
+        log(f"remote teardown raised: {exc}")
+        record("torn_down", {"signal": int(signum), "error": str(exc)})
+    sys.exit(0)
+
+
+def _death_reason(rank: dict) -> str:
+    if rank["serve"] < 1:
+        return "no serve process"
+    if rank["zombies"] > 0:
+        return (f"{rank['zombies']} zombie worker(s) -- the engine aborted while the HTTP front end kept answering")
+    return ("the disaggregation load balancer is gone -- both engines are up but nothing serves the client port")
+
+
+def cmd_supervise(argv: list) -> int:
+    global _state
+    _state = supervised_state(load_state(), _out_dir)
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
+    if signal.getsignal(signal.SIGTERM) is not on_term:
+        log("!!! SIGTERM is not ours; the ranks would outlive this process")
+        record("handler_lost", {})
+        return 1
+    ranks = [f"rank{n['rank']}@{_short(n['hostname'])}" for n in _state["nodes"]]
+    log(f"watching {', '.join(ranks)} every {SUP_POLL_S}s (dead after {MISSES} empty polls, {ERR_MISSES} failed probes)")
+    record("watching", {"ranks": ranks, "poll_s": SUP_POLL_S})
+
+    empty = [0] * len(state_targets(_state))
+    errors = 0
+    while True:
+        time.sleep(SUP_POLL_S)
+        try:
+            health = engine_health(_state)
+            errors = 0
+        except Exception as exc:
+            errors += 1
+            log(f"probe failed ({errors}/{ERR_MISSES}): {exc}")
+            if errors >= ERR_MISSES:
+                record("unobservable", {"error": str(exc), "consecutive_failures": errors})
+                log("giving up: the ranks have been unobservable for too long")
+                return 1
+            continue
+
+        for i, rank in enumerate(health):
+            gone = rank["serve"] < 1 or rank["zombies"] > 0 or rank.get("lb", 1) < 1
+            empty[i] = empty[i] + 1 if gone else 0
+
+        dead = [i for i, misses in enumerate(empty) if misses >= MISSES]
+        if dead:
+            names = [f"rank{health[i]['rank']}@{health[i]['host']}" for i in dead]
+            why = "; ".join(f"rank{health[i]['rank']}: {_death_reason(health[i])}" for i in dead)
+            log(f"{why} -- exiting so the benchmark sees a dead server now instead of hanging until the stall window expires")
+            record("rank_died", {"dead_ranks": names, "why": why, "health": health})
+            # Survivors are blocked in a collective that will never complete.
+            try:
+                teardown(_state, wait_idle_s=60)
+            except Exception as exc:
+                log(f"post-mortem teardown raised: {exc}")
+            return 1
+
+
+# --------------------------------------------------------------------------
+# EXEC  (mn.py exec)
+# --------------------------------------------------------------------------
+# The driver GEAK runs on sees no GPU; this reaches a pinned node for op benches, shape
+# captures, kernel tests and one-card servers. --gpu leases the cards so parallel tasks
+# never share one.
+
+def exec_target(state: dict, name: str) -> dict:
+    """master | rank<N> | prefill | decode | a pinned IP or hostname."""
+    nodes, pd = state["nodes"], topology_of(state) == "pd_disagg"
+    if name == "master":
+        return next((n for n in nodes if n["ip"] == state.get("master_ip")), nodes[0])
+    if re.fullmatch(r"rank\d+", name) and int(name[4:]) < len(nodes):
+        return nodes[int(name[4:])]
+    if pd and name in PD_ROLES and engine_nodes(state, name):
+        return engine_nodes(state, name)[0]
+    for n in nodes:
+        if name in (n["ip"], n["hostname"], _short(n["hostname"])):
+            return n
+    raise SystemExit(f"!!! multinode exec: no pinned node {name!r}; use master, rank0..rank{len(nodes) - 1}"
+                     + (", prefill, decode" if pd else "") + " or a pinned host")
+
+
+def lease_dir(state: dict) -> str:
+    return os.path.join(state["shared_fs"], ".mn_lease")
+
+
+def lease_file(state: dict, node: dict, gpu) -> str:
+    """One lock file per card on the shared mount: exec tasks, gpu_lock.sh and serving legs
+    (multinode.sh) take the same files, so no two GEAK tasks hold one card. gpu_lock.sh
+    writes the same name itself (its LOCK_PREFIX)."""
+    os.makedirs(lease_dir(state), exist_ok=True)
+    return os.path.join(lease_dir(state), f"{_short(node['hostname'])}.gpu{gpu}.lock")
+
+
+@contextlib.contextmanager
+def gpu_lease(state: dict, node: dict, gpus: str):
+    """Exclusive per-card locks held while the command runs; yields the leased id(s)."""
+    ids = sorted({int(g) for g in gpus.split(",") if g})   # one order: no deadlock
+    if not ids:
+        yield ""
+        return
+    try:
+        import fcntl
+    except ImportError:                                 # pragma: no cover - not Linux
+        yield gpus
+        return
+    host = _short(node["hostname"])
+    held = []
+    try:
+        for gpu in ids:
+            f = open(lease_file(state, node, gpu), "w")
+            held.append(f)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f">>> mn exec: waiting for {host} gpu{gpu}, leased by another task",
+                      file=sys.stderr, flush=True)
+                fcntl.flock(f, fcntl.LOCK_EX)
+        yield ",".join(map(str, ids))
+    finally:
+        for f in held:
+            f.close()
+
+
+# Never shipped: this host's own paths and identity (the claude binary included), and card masks.
+LOCAL_ENV = re.compile(r"\w*_VISIBLE_DEVICES|BASH\w*|SHLVL|PATH|HOME|PWD"
+                       r"|OLDPWD|SHELL|USER|LOGNAME|HOSTNAME|TERM|TMPDIR|LANG|LC_\w+|LD_LIBRARY_PATH|LD_PRELOAD"
+                       r"|PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|CONDA_\w+|SSH_\w+|DISPLAY|MAIL\w*|XDG_\w+"
+                       r"|(GEAK_)?CLAUDE_BIN")
+# Credentials stay on the machine GEAK runs on.
+CREDENTIAL_ENV = re.compile(r"\w*(TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)\w*|ANTHROPIC_\w+|CLAUDE\w*")
+
+
+def exported_env() -> str:
+    return "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(os.environ.items())
+                   if re.fullmatch(r"[A-Z_][A-Z0-9_]*", k) and not LOCAL_ENV.fullmatch(k)
+                   and not CREDENTIAL_ENV.fullmatch(k))
+
+
+# Once the caller's ssh is gone, the command's session gets TERM and, this much later, KILL:
+# room for bench_e2e.sh to tear down a one-card server (TERM->KILL 90s) and a bench to clean up.
+EXEC_GRACE_S = 180
+
+
+def exec_script(body: str, grace: int = EXEC_GRACE_S) -> str:
+    """`body` in its own session on the node, watched for the caller hanging up. GEAK_MN_HOP
+    tells bench_e2e.sh, gpu_lock.sh and profile_kernel.sh they already run on the node.
+    One brace group: bash parses all of it before running any, so the watchdog's `cat`
+    reads only what comes after the script -- nothing, until EOF."""
+    q = shlex.quote
+    watchdog = f'cat >/dev/null; pkill -TERM -s "$1"; sleep {grace}; pkill -KILL -s "$1"'
+    eof = f"GEAK_MN_BODY_{uuid.uuid4().hex}"
+    return ("{\n"
+            "export GEAK_MN_HOP=1\n"
+            'body=$(mktemp) || exit 97\n'
+            f"cat > \"$body\" <<'{eof}'\n{body}\n{eof}\n"
+            'setsid bash "$body" </dev/null &\n'
+            "pid=$!\n"
+            f"setsid bash -c {q(watchdog)} _ \"$pid\" <&0 >/dev/null 2>&1 &\n"
+            'wait "$pid"\n'
+            'rc=$?; rm -f "$body"; exit $rc\n'
+            "}\n")
+
+
+def cmd_exec(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py exec",
+                                 description="Run a command on a pinned node, in this directory.")
+    ap.add_argument("--target", default="", help="master (default) | rank<N> | prefill | decode | a pinned host")
+    ap.add_argument("--gpu", default="",
+                    help="[<target>:]card id(s) on that node, e.g. 3, 0,1 or decode:3: leased, "
+                         "exported as HIP_VISIBLE_DEVICES and GPU_ID")
+    ap.add_argument("--script", default="", help="bash script file to run instead ('-' = stdin)")
+    ap.add_argument("--timeout", type=int, default=0)
+    ap.add_argument("--env", action="store_true", help="also export this shell's environment there")
+    ap.add_argument("cmd", nargs=argparse.REMAINDER)
+    a = ap.parse_args(argv)
+    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    if bool(cmd) == bool(a.script):
+        ap.error("give either a command after -- or --script")
+    spec = re.fullmatch(r"(?:([\w.-]+):)?(\d+(?:,\d+)*)", a.gpu) if a.gpu else None
+    if a.gpu and not spec:
+        ap.error(f"--gpu takes card ids such as 3, 0,1 or decode:3; got {a.gpu!r}")
+    prefix, gpus = spec.groups() if spec else (None, "")
+    if prefix and a.target and prefix != a.target:
+        ap.error(f"--gpu {a.gpu} names {prefix!r} but --target is {a.target!r}")
+    if a.script:
+        with (contextlib.nullcontext(sys.stdin) if a.script == "-" else open(a.script, encoding="utf-8")) as f:
+            body = f.read()
+    else:
+        body = shlex.join(cmd)
+    state = load_state()
+    node = exec_target(state, a.target or prefix or "master")
+    with gpu_lease(state, node, gpus) as leased:
+        script = (f"cd {shlex.quote(os.getcwd())} 2>/dev/null || true\n"
+                  + (exported_env() if a.env else "")
+                  + (f"export HIP_VISIBLE_DEVICES={leased} GPU_ID={leased}\n" if leased else "")
+                  + body + "\n")
+        return ssh_stream(state, node, exec_script(script), a.timeout or None)
+
+
+# --------------------------------------------------------------------------
+# LEG ENV  (mn.py leg-env)
+# --------------------------------------------------------------------------
+
+def cmd_leg_env(argv: list) -> int:
+    """The pin's facts multinode.sh needs, as `_MN_<NAME>=<value>` lines for eval. Exits 3
+    on a pin it cannot serve from, before multinode.sh takes any lease or lock."""
+    state = load_state()
+    if not state.get("master_ip") or not state.get("serve_port"):
+        sys.stderr.write(f"!!! multinode launcher: {state_path()} has no master_ip/serve_port; re-run mn.py check.\n")
+        return 3
+    topology = topology_of(state)
+    facts = {
+        "HOST": state["master_ip"], "PORT": state["serve_port"], "TOPOLOGY": topology,
+        "NNODES": len(state["nodes"]), "SHARED_FS": state["shared_fs"],
+        # The serving lock is keyed on the pinned node set, so runs on disjoint sets do not serialise.
+        "LOCK_KEY": "+".join(sorted(_short(n["hostname"]).lower() for n in state["nodes"])),
+        # One engine per role (replica 0) opens the profile window; health asks every replica.
+        "PD_ENGINES": "\n".join(f"{e['role']}={e['url']}" for e in engine_urls(state) if not e["replica"])
+                      if topology == "pd_disagg" else "",
+        "PD_HEALTH": "\n".join(e["url"] for e in engine_urls(state)) if topology == "pd_disagg" else "",
+        # Once per card: ranks sharing a machine name the same files, and multinode.sh would
+        # block on its own lock taking one twice.
+        "LEASES": "\n".join(dict.fromkeys(lease_file(state, n, g) for n in state["nodes"] for g in range(n["ngpu"]))),
+    }
+    print("".join(f"_MN_{k}={shlex.quote(str(v))}\n" for k, v in facts.items()), end="")
     return 0
 
 

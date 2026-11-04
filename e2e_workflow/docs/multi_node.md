@@ -90,6 +90,95 @@ CONC 8): **165.42 tok/s, spread 1.96%** over three timed rounds. That run used t
 untimed warmup rounds instead of the default one, through a bench option that is not
 part of this change.
 
+## Why the server still has a local pid
+
+ssh only spawns one process per node; the distributed work is the framework's
+own (each rank is told which rank it is, and the ranks form their own
+`torch.distributed` world over the cluster NIC). `bench_e2e.sh`'s lifecycle
+contract is that it owns a **local pid** and `kill`ing it stops the server; every
+stall check, teardown and acceptance gate is built on that. `mn.py supervise` *is*
+that pid on the driver; on SIGTERM it reaps the remote ranks over ssh. A
+supervisor killed with -9 cannot; its ranks keep the cards until the next
+`mn.py launch`, which always tears down whatever the pin's nodes still run.
+
+Each rank records its server's pid and start time on its own node
+(`/tmp/geak_mn/rank<N>.pid`; provided mode records magpie's server once its
+server phase is up). Liveness reads that record; a pid that now belongs to
+another process counts as dead. A probe that does not come back over ssh is a
+failed probe (six of them in a row give up), never a dead rank.
+Teardown kills, per node: the recorded pid's process group, then
+our servers by name, then the group with -9, and removes the record. A provided
+router is a node of its own (`ranklb.pid`, possibly a pod with no GPU) torn down the same way.
+
+## Where commands run
+
+Every agent command, serving leg, `mn.py launch` and `mn.py supervise` runs on the
+driver, and so does `run_e2e.py`: there is no forwarding. The driver sees no GPU:
+`run_e2e.py` empties `ROCR/HIP/CUDA_VISIBLE_DEVICES` for a multinode handoff, and check
+refuses a driver whose `rocminfo` still lists a GPU (start Claude with the three masks
+empty on the prompt entry). What a node executes is either shipped by content over ssh
+(check's probe, the GPU identity probe, each rank's script) or a run artifact under
+`shared_fs` (the eval dir's `bench_e2e.sh` and `adapters/`, the overlay, the task dirs,
+and `<work_dir>/.mn_tools`).
+
+`mn.py check` records the active pin in `/tmp/geak_mn/state_path` on the driver,
+owned by `run_e2e.py`, or (`check --owner claude`, a prompt-started workflow) by the
+Claude Code process the check agent ran under; the record counts only while that
+process lives. While it is active:
+
+- `bench_e2e.sh` with no launcher (or `auto`) serves on the pin; any other launcher is
+  refused. An isolated one-card server goes through `mn.py exec --gpu` (below), where
+  `bench_e2e.sh` accepts only `BENCH_LAUNCHER=native TP=1` on one card;
+- `gpu_lock.sh` and `profile_kernel.sh` run on a node through `mn.py exec --env`: a bare
+  id on the master, `<engine>:<id>` (e.g. `decode:3`) on that engine's machine. What
+  runs there is the copy check staged in `<work_dir>/.mn_tools`, and it locks the pin's
+  card leases (`<shared_fs>/.mn_lease`) instead of `/tmp/team_gpu_locks`.
+
+Another machine is reached explicitly:
+
+```bash
+GEAK_MN_STATE=<pin> python3 mn.py exec --target <master|rank<N>|prefill|decode|host> [--gpu 3] -- <cmd>
+GEAK_MN_STATE=<pin> python3 mn.py exec --gpu decode:3 -- <cmd>        # the card names its engine
+GEAK_MN_STATE=<pin> python3 mn.py exec --target rank0 --script job.sh
+```
+
+It runs on the pinned node, in the same directory (the shared mount is at the same
+path everywhere), and returns the remote exit code; a target that is this machine
+runs locally, without ssh. The command runs in its own session and exports
+`GEAK_MN_HOP=1`, so a tool started there does not forward again; when the ssh closes
+(the caller died, or got TERM/INT, or `--timeout` passed) that session gets TERM, then
+KILL 180 s later. `--gpu` exports `HIP_VISIBLE_DEVICES` and `GPU_ID` and
+holds a per-card `flock` under `<shared_fs>/.mn_lease/` while the command runs, so
+parallel tasks never share a card. A serving leg holds the same leases for every
+card of every pinned node (`multinode.sh`, until the leg ends), so no GEAK task runs
+on a card GEAK is serving from; it waits instead. `--env` also exports this shell's
+environment there (minus host paths, card masks and credentials). Every e2e role
+prompt is told this command; an isolated one-card server is
+`mn.py exec --target T --gpu N -- env BENCH_LAUNCHER=native GPU=N TP=1 ... bash bench_e2e.sh`.
+
+A serving leg runs on the driver except for the ranks, so the health probe, the
+profiler requests and the bench client cross the network to the client (or
+load-balancer) port, which check dials from the driver. The bench client runs where
+its dependencies are. The InferenceX client (the checkout Hyperloom names in
+`handoff.inferencex_path` or `INFERENCEX_PATH`) and the AgentX aiperf client import no
+serving framework and run on the driver, the vantage point Hyperloom's rebench measures
+from; check finds `benchmark_serving.py` there, imports the client's packages and reads
+the model's tokenizer. The backend's own client (`native`: `sglang.bench_serving`,
+`vllm bench serve`, atom's; also what `auto` falls back to without a checkout) imports
+its GPU stack and runs on rank0 through `mn.py exec --target rank0 --env`, with the
+leg's shell variables and functions and a warning; check imports it on rank0 and dials
+the client port from there, and the result records `bench_client_host: rank0`.
+A profile round never reaches a client's `--profile`: the launcher starts a fresh load
+and opens its own window, which spans every rank. Sampling points (`PROFILE=1 REPEATS=0
+PROFILE_PROBE_POINTS=<points> PROFILE_PROBE_IDS=<ids> SKILL_ROOT=<kernel-extract>`) are not
+such a round: one boot, then the kernel-extract skill's `serving_probe.py` per point, on the
+driver like the client. `adapter_probe_args` says where: requests to the client port (the LB),
+the window on the engine of the point's phase, occupancy from the decode engine's TP-0 log
+(no engine serves `/metrics`), one trace expected per rank of that engine;
+`adapter_probe_after` runs `trace-gate --role` on that engine. The result line lands in
+`RESULT_JSONL` on the shared mount. The single-host memory-parity guard is skipped: the driver's `rocm-smi`
+cannot see the nodes' cards.
+
 ## What the caller must hand over
 
 GEAK selects no machines and does not create, resize or tear down the cluster.
