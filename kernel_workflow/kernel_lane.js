@@ -564,12 +564,24 @@ const COMMIT_SCHEMA = obj({
   committed: { type: 'boolean' }, current_best_diff: { type: 'string' }, note: { type: 'string' },
 }, ['committed']);
 
-// eikos v2 E1 (R3): the TechLead's return after a FAILED commit is recovered — which artifact actually
-// remains installed in the canonical workspace (the pre-attempt incumbent) once the stray commit / dirty
-// tree left by the failed attempt has been reset away.
+// eikos v2 E1 (R3 round-3): the host-side SNAPSHOT taken immediately BEFORE a commit attempt (routed runs
+// only). It records the pre-attempt incumbent reference the recovery must restore to. Captured OUTSIDE the
+// model's commit prompt (R4 request parity) via a guaranteed dispatch, and RETURNED so the host holds the
+// expected reference and can verify recovery against it (Astra re-review #3 findings 1,5).
+const PRECOMMIT_SCHEMA = obj({
+  precommit_ref: { type: 'string' }, note: { type: 'string' },
+}, ['precommit_ref']);
+
+// eikos v2 E1 (R3 round-3): the TechLead's return after a FAILED commit is recovered — which artifact
+// actually remains installed in the canonical workspace (the pre-attempt incumbent) once the stray commit /
+// dirty tree / attempt-introduced untracked files have been restored away. `verified` is true ONLY when the
+// recovery shell CONFIRMED its postcondition (HEAD == the expected pre-attempt ref AND no owned change
+// remains) and exited zero; the host ADDITIONALLY checks recovered_head === the expected ref it holds, and
+// STOPS THE RUN AS FAILED if recovery cannot be established (Astra re-review #3 findings 1,2).
 const RECOVERY_SCHEMA = obj({
-  recovered_head: { type: 'string' }, note: { type: 'string' },
-}, []);
+  recovered_head: { type: 'string' }, expected_ref: { type: 'string' },
+  verified: { type: 'boolean' }, note: { type: 'string' },
+}, ['recovered_head', 'verified']);
 
 const REPORT_SCHEMA = obj({
   final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
@@ -976,8 +988,15 @@ function __routeOutcome(scope, ok, evidence, kind, source, label, dispatchId, p1
   const __p1st = __p1Ladder[scope];
   const __p1d = dispatchId != null ? __routeDispatchById[dispatchId] : null;
   let __p1skip = false;
-  if (__p1d) {
-    const __p1why = (__p1d.scope !== scope || __p1d.label !== String(label || '')) ? 'dispatch id issued for another label or scope'
+  // eikos v2 E1 (R1 residual / Astra re-review #3 finding 3): VALIDATE whenever an id was supplied
+  // (dispatchId != null), not only when it RESOLVES (the pre-fix `if (__p1d)` let a NON-NULL but UNKNOWN id
+  // bypass validation and silently bump the shadow floor via last_dispatch_model, with no ignored-outcome
+  // event). A non-null unknown id is now REJECTED (ignored + audited), matching the __p1WorkerOutcome shadow
+  // guard below AND the Python DispatchBook.resolve replica (both already reject unknown ids) — resolving
+  // the JS/Python replica mismatch. A NULL id still falls through to the legacy-safe fallback (unchanged).
+  if (dispatchId != null) {
+    const __p1why = !__p1d ? 'unknown dispatch id'
+      : (__p1d.scope !== scope || __p1d.label !== String(label || '')) ? 'dispatch id issued for another label or scope'
       : __p1d.p1Outcome != null ? `duplicate: p1 outcome already recorded (${__p1d.p1Outcome})` : '';
     if (__p1why) {
       __routeAudit.push({ event: 'p1_outcome_ignored', decider: 'sonnet', scope, label: label || '',
@@ -1805,6 +1824,16 @@ async function agentTCore(p, o) {
   }
   return null;
 }
+
+// eikos v2 E1 (R3 round-3 / Astra re-review #3 finding 1): a GUARANTEED agent dispatch OUTSIDE ordinary
+// worker routing eligibility. It is NOT gated by the router's quota / exhausted-lane / output kill-switch
+// (it never calls __routePick), so a host-CRITICAL bookkeeping or workspace-recovery step can never be
+// silently SKIPPED while the run is told it succeeded. It uses the SAME transport as every other call
+// (agentTCore: the API-fault retries + the hung-agent timeout guard), so a genuine hang still resolves to
+// null — therefore the CALLER MUST treat a null/absent/unverified result as FAILURE (the recovery caller
+// stops the run). It consults no router and writes no routing state. Reached only on the routed
+// failed-commit path (and its pre-attempt snapshot), so the non-routed default is untouched.
+async function agentGuaranteed(p, o) { return agentTCore(p, o); }
 
 
 // ---------------------------------------------------------------------------
@@ -2874,10 +2903,21 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         // sonnet/eikos ladder, so routing stays byte-identical; it only feeds P1's shadow. (A worker-fault
         // climb for the verifier is NOT inferred — the host has no clean self-malfunction signal here.)
         if (ROUTING_ON && ver != null) {
+          // eikos v2 E1 (R2 residual / Astra re-review #3 finding 4): "not invalid_measurement" was too
+          // broad — VERIFY_SCHEMA permits ANY status string, so a non-null status:'failed' (or any unknown
+          // status) was booked as SUCCESS. Require a RECOGNIZED, adequately-evidenced terminal verdict for
+          // success: `verified` (a usable good-kernel measurement) OR `correctness_failed` (the verifier
+          // established the kernel is wrong — still a usable measurement; the verifier did its job). An
+          // `invalid_measurement` is INFRA (moves nothing). ANY other/unknown/incomplete status (incl.
+          // 'failed', 'apply_failed', or an arbitrary schema string) is NOT an established measurement: it
+          // is recorded as `no_result` (moves nothing) — NOT success, and NOT a verifier work-product fault
+          // (the host has no clean verifier self-malfunction signal here). Shadow-only; routing byte-identical.
+          const vUsable = says(ver.status, 'verified') || says(ver.status, 'correctness_failed');
           const vInvalid = says(ver.status, 'invalid_measurement');
-          __p1WorkerOutcome(__routeScope(vlabel), !vInvalid,
+          __p1WorkerOutcome(__routeScope(vlabel), vUsable,
             `verify status=${ver.status || ''} correctness=${ver.correctness || ''}`,
-            vInvalid ? 'invalid_measurement' : 'work_product', 'host', vlabel, vroute ? vroute.dispatch_id : null);
+            vUsable ? 'work_product' : (vInvalid ? 'invalid_measurement' : 'no_result'),
+            'host', vlabel, vroute ? vroute.dispatch_id : null);
         }
         return { d, eng, ver, patch, route };
       });
@@ -2973,16 +3013,41 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
+    // eikos v2 E1 (R3/R4 round-3): capture the PRE-ATTEMPT incumbent reference as a GUARANTEED host-side
+    // bookkeeping op BEFORE the commit — OUTSIDE the model's commit prompt (so the commit request stays
+    // byte-identical to legacy: request parity, Astra re-review #3 finding 5) and OUTSIDE ordinary worker
+    // routing eligibility (agentGuaranteed bypasses the quota / exhausted-lane / output kill-switch, so the
+    // reference the recovery depends on can never be "skipped": finding 1). ROUTED RUNS ONLY — a
+    // routing=false run never reaches the recovery branch below (its gate advances unconditionally), so it
+    // skips this op entirely and stays byte-identical in BOTH accounting AND request/prompt. The op also
+    // snapshots the pre-attempt untracked set so recovery removes ONLY the files the failed attempt adds.
+    let precommitRef = null;
+    if (ROUTING_ON) {
+      const precommit = await agentGuaranteed(
+        `You are the TechLead SNAPSHOTTING the canonical workspace IMMEDIATELY BEFORE round ${round}'s ` +
+        `commit attempt, so a FAILED commit can be recovered to the artifact that actually remains ` +
+        `installed. Capture the current incumbent reference and the current untracked-file set, then ` +
+        `report the reference.
+\`\`\`bash
+set -eu
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+ref=$(git rev-parse HEAD)
+[ -n "$ref" ] || { echo "PRECOMMIT_FAILED: empty HEAD" >&2; exit 2; }
+printf '%s\\n' "$ref" > ${EVAL_DIR}/.precommit_ref
+git -c core.quotepath=false status --porcelain --untracked-files=all | awk '/^\\?\\?/{ print substr($0,4) }' | LC_ALL=C sort > ${EVAL_DIR}/.precommit_untracked
+echo "PRECOMMIT_REF=$ref"
+\`\`\`
+Return JSON {precommit_ref, note} with precommit_ref set to the captured reference.`,
+        { phase: 'Merge', label: `commit precheck r${round}`, schema: PRECOMMIT_SCHEMA });
+      precommitRef = precommit && precommit.precommit_ref ? String(precommit.precommit_ref).trim() : null;
+    }
     const commitRoute = {};   // eikos v2 E1 (bug 1): carries the host dispatch id so the commit's outcome binds to P1
     const commitRes = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
-# eikos v2 E1 (R3): record the PRE-ATTEMPT incumbent HEAD so a FAILED commit (one that created a stray
-# commit before its correctness recheck failed) can be reset back to the artifact that actually remains
-# installed. Written every attempt; read only by the failed-commit recovery step.
-git rev-parse HEAD > ${EVAL_DIR}/.precommit_ref 2>/dev/null || true
 git checkout -- .
 # Try a plain apply first, then a 3-way apply (auto-reconciles context-line drift against the blobs)
 # before falling back to a manual reconstruction. --3way resolves most "patch does not apply" cases
@@ -3032,32 +3097,81 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         }),
         { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
     } else {
-      // eikos v2 E1 (R3): the commit was attempted (improved) but FAILED under a routed run. Before the
-      // next round's engineers materialize from the canonical workspace, RECOVER it to the artifact that
-      // actually remains installed — the pre-attempt incumbent recorded in .precommit_ref — undoing any
-      // stray commit or dirty tree the failed attempt left behind. The incumbent (cumulative/finalWinner)
-      // is unchanged; this only restores the canonical bytes so the search continues from the real best.
-      __routeAudit.push({ event: 'commit_recovery', round, improved: true, committed: false,
-                          source: winner.source, geomean: winner.geomean });
-      const recov = await agentT(
+      // eikos v2 E1 (R3 round-3 / Astra re-review #3 findings 1,2): the commit was attempted (improved) but
+      // FAILED under a routed run. RECOVERY INTEGRITY — recovery now runs on a GUARANTEED path
+      // (agentGuaranteed, NOT the ordinary `commit` worker scope, so quota / exhausted-lane / output
+      // kill-switch can no longer SKIP it), restores to the EXPECTED pre-attempt reference the host captured
+      // above, and the host VERIFIES the postcondition: the recovery shell confirmed HEAD == the expected
+      // ref AND a clean owned tree AND exited zero (verified===true), AND the returned ref equals the
+      // expected ref the host independently holds. If restoration CANNOT be established — no captured ref,
+      // a null/unverified recovery, or a ref mismatch — the run STOPS AS FAILED rather than continuing the
+      // search from an unknown artifact. The audit is emitted AFTER confirmed recovery (not before the
+      // attempt). `cumulative`/`finalWinner` are unchanged — this only restores the canonical bytes.
+      if (!precommitRef || !/^[0-9a-fA-F]{7,64}$/.test(precommitRef)) {
+        throw new Error(`eikos v2 E1 (R3): round ${round} commit FAILED and NO valid pre-attempt reference ` +
+          `was captured (precommit_ref=${precommitRef == null ? 'null' : JSON.stringify(precommitRef)}) — ` +
+          `cannot establish restoration of the canonical workspace; STOPPING THE RUN AS FAILED rather than ` +
+          `continuing from an unknown artifact.`);
+      }
+      const recov = await agentGuaranteed(
         `You are the TechLead RECOVERING the canonical workspace after round ${round}'s commit FAILED its ` +
-        `correctness recheck. The failed attempt may have left a STRAY COMMIT and/or a dirty tree. Restore ` +
-        `the canonical workspace to the artifact that ACTUALLY remains installed (the pre-attempt incumbent), ` +
-        `then report its ref.
+        `correctness recheck. The failed attempt may have left a STRAY COMMIT, a dirty tracked tree, and/or ` +
+        `newly-introduced untracked files. Restore the canonical workspace to the EXACT pre-attempt ` +
+        `incumbent reference, remove ONLY the files this attempt introduced, regenerate the affected ` +
+        `artifact, VERIFY the result, and report it. The script EXITS NON-ZERO on any failure — do NOT work ` +
+        `around a failure; report verified=false if it does not reach RECOVERED_HEAD.
 \`\`\`bash
+set -eu
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
-git checkout -- .
-# reset HARD to the HEAD captured BEFORE this round's commit attempt (the last known-good incumbent)
-if [ -s ${EVAL_DIR}/.precommit_ref ]; then git reset --hard "$(cat ${EVAL_DIR}/.precommit_ref)"; fi
-git checkout -- .
-head=$(git rev-parse HEAD); echo "RECOVERED_HEAD=$head"
+EXPECTED_REF='${precommitRef}'
+# (0) ensure a possibly-still-running (timed-out) commit worker is no longer MID-WRITE before we mutate:
+#     wait (bounded) for .git/index.lock to clear. Never force-remove it (a live writer still holds it) —
+#     if it will not clear, FAIL so the host stops instead of racing a concurrent writer.
+i=0; while [ -e .git/index.lock ] && [ "$i" -lt 60 ]; do i=$((i+1)); sleep 1; done
+[ -e .git/index.lock ] && { echo "RECOVERY_FAILED: .git/index.lock still held after 60s (commit worker may still be mutating)" >&2; exit 11; }
+# (1) VALIDATE the attempt-specific reference BEFORE any mutation (no "|| true" swallowing).
+[ -n "$EXPECTED_REF" ] || { echo "RECOVERY_FAILED: no pre-attempt reference" >&2; exit 12; }
+git rev-parse --verify --quiet "$EXPECTED_REF^{commit}" >/dev/null 2>&1 || { echo "RECOVERY_FAILED: pre-attempt reference $EXPECTED_REF is not a valid commit" >&2; exit 13; }
+EXPECTED_FULL=$(git rev-parse "$EXPECTED_REF^{commit}")
+# (2) RESTORE owned tracked contents to EXACTLY that reference (undo a stray commit + any dirty tracked tree).
+git reset --hard "$EXPECTED_FULL"
+# (3) remove ONLY the untracked files this FAILED attempt introduced (diff vs the pre-attempt snapshot),
+#     leaving pre-existing untracked / ignored build artifacts intact (preferred over indiscriminate cleanup).
+PRE=${EVAL_DIR}/.precommit_untracked; [ -f "$PRE" ] || PRE=/dev/null
+git -c core.quotepath=false status --porcelain --untracked-files=all | awk '/^\\?\\?/{ print substr($0,4) }' | LC_ALL=C sort > ${EVAL_DIR}/.recov_untracked_now
+LC_ALL=C comm -23 ${EVAL_DIR}/.recov_untracked_now "$PRE" > ${EVAL_DIR}/.recov_untracked_new
+while IFS= read -r f; do [ -n "$f" ] && rm -rf -- "$f"; done < ${EVAL_DIR}/.recov_untracked_new
+# (4) REGENERATE the affected artifact from the restored incumbent so a stale failed-attempt diff cannot survive.
+git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+# (5) VERIFY the postcondition: HEAD is EXACTLY the expected ref, NO attempt-introduced untracked file
+#     remains, and the tracked tree is clean. Any failure exits NON-ZERO (the host then stops the run).
+HEAD_NOW=$(git rev-parse HEAD)
+[ "$HEAD_NOW" = "$EXPECTED_FULL" ] || { echo "RECOVERY_FAILED: HEAD $HEAD_NOW != expected $EXPECTED_FULL" >&2; exit 14; }
+git -c core.quotepath=false status --porcelain --untracked-files=all | awk '/^\\?\\?/{ print substr($0,4) }' | LC_ALL=C sort > ${EVAL_DIR}/.recov_untracked_after
+LC_ALL=C comm -23 ${EVAL_DIR}/.recov_untracked_after "$PRE" > ${EVAL_DIR}/.recov_untracked_residual
+[ -s ${EVAL_DIR}/.recov_untracked_residual ] && { echo "RECOVERY_FAILED: attempt-introduced untracked files remain:" >&2; cat ${EVAL_DIR}/.recov_untracked_residual >&2; exit 15; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "RECOVERY_FAILED: tracked tree not clean after restore" >&2; git status --porcelain --untracked-files=no >&2; exit 16; }
+echo "RECOVERED_HEAD=$HEAD_NOW"
 \`\`\`
-Return JSON {recovered_head, note}.`,
+Return JSON {recovered_head, expected_ref, verified, note}: recovered_head = the printed RECOVERED_HEAD,
+expected_ref = ${precommitRef}, verified = true ONLY if the script reached RECOVERED_HEAD (exit 0), else verified = false.`,
         { phase: 'Merge', label: `commit recovery r${round}`, schema: RECOVERY_SCHEMA });
-      log(`Round ${round}: commit FAILED — canonical recovered to the pre-attempt incumbent` +
-          `${recov && recov.recovered_head ? ' (' + String(recov.recovered_head).slice(0, 12) + ')' : ''}; ` +
-          `incumbent stays ${cumulative.toFixed(2)}x; stagnation will NOT reset on this rediscovered candidate.`);
+      const recoveredHead = recov && recov.recovered_head ? String(recov.recovered_head).trim() : null;
+      const confirmed = !!(recov && recov.verified === true && recoveredHead && recoveredHead === precommitRef);
+      if (!confirmed) {
+        throw new Error(`eikos v2 E1 (R3): round ${round} commit FAILED and recovery could NOT be VERIFIED ` +
+          `(expected ${precommitRef.slice(0, 12)}, recovered ${recoveredHead ? recoveredHead.slice(0, 12) : 'null'}, ` +
+          `verified=${recov ? recov.verified : 'null'}) — the canonical workspace is NOT provably restored to ` +
+          `the pre-attempt incumbent; STOPPING THE RUN AS FAILED rather than continuing from an unknown artifact.`);
+      }
+      // audit emitted AFTER confirmed recovery (Astra re-review #3 finding 1)
+      __routeAudit.push({ event: 'commit_recovery', round, improved: true, committed: false, verified: true,
+                          expected_ref: precommitRef, recovered_head: recoveredHead,
+                          source: winner.source, geomean: winner.geomean });
+      log(`Round ${round}: commit FAILED — canonical VERIFIED-recovered to the pre-attempt incumbent ` +
+          `(${recoveredHead.slice(0, 12)}); incumbent stays ${cumulative.toFixed(2)}x; stagnation will NOT ` +
+          `reset on this rediscovered candidate.`);
     }
   }
 

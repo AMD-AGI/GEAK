@@ -122,7 +122,7 @@ async function main() {
     ok('the host input of a fresh code-change scope: policy rank, list-price order, floors, no top-lane cap, availability',
       JSON.stringify(BASE) === JSON.stringify({ reducer_version: 'lane_reduce.v2', scope_class: 'code_change', tau: 0.9,
         policy_rank: [H45, S5, O55], price_order: [H45, S5, O55], class_floor_rank: 1, operator_floor_rank: 0,
-        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: null, available: [H45, S5, O55] }));
+        scope_floor_rank: 1, effective_rank: -1, episode_identity: false, excluded: [], top_quota_left: null, available: [H45, S5, O55] }));
     ok('a set cap reaches the host input as the quota left',
       lane({ route_max_top_escalations: '2' }).__routeHostInput('eng:memory', 'code_change').top_quota_left === 2);
     let r = R({ scope_class: 'paperwork', tau: 0.7, class_floor_rank: 0, scope_floor_rank: 0, estimates: P(0.95, 0.5, 0.92) });
@@ -475,7 +475,9 @@ async function main() {
     ok('the engineer site passes a host-owned context to agentT, keeps it through verify, and reports its id',
       /const route = ROUTING_ON \? \{\} : null;/.test(eng) && /schema: ENG_SCHEMA \}, route\s*\)\.then\(\(eng\) => \(\{ d, eng, route \}\)\)/.test(eng) &&
       /const \{ d, eng, route \} = prev;/.test(eng) && /return \{ d, eng, ver: null, route \};/.test(eng) &&
-      /\.then\(\(ver\) => \(\{ d, eng, ver, patch, route \}\)\)/.test(eng) &&
+      // R2 residual: the verify `.then` is now a BLOCK body (it first feeds the verifier's own terminal
+      // outcome to P1's shadow), still returning the host-owned ctx { d, eng, ver, patch, route }.
+      /\.then\(\(ver\) => \{/.test(eng) && /return \{ d, eng, ver, patch, route \};/.test(eng) &&
       // eikos v2 E1 (bug 5): the engineer outcome now also threads the shadow-only corrected kind (p1Kind)
       // as the final arg, after the host-owned dispatch id. The dispatch-id threading is still asserted.
       /r\.route \? r\.route\.dispatch_id : null, p1Kind\);/.test(eng));
