@@ -28,6 +28,8 @@ import re
 import subprocess
 import sys
 import tarfile
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -35,6 +37,7 @@ sys.path.insert(0, os.path.join(os.environ.get("WORKLOAD_ROOT", ""), "scripts"))
 from emit_result import emit, read_json  # noqa: E402
 
 API = "https://api.github.com/repos/%s/actions/runs/%s/artifacts?per_page=100&page=%d"
+IX_API = "https://inferencex.semianalysis.com/api/v1"
 KINDS = ("server_logs_", "bmk_agentic_", "agentic_", "power_audit_", "job_event_")
 THROUGHPUT_KEY = "request_metrics.throughput.output.tokens_per_second"
 TOKENS_KEYS = ("server_metrics.tokens.generation_total",)
@@ -112,6 +115,73 @@ def local_artifacts(dirs):
                 if os.path.isdir(p) and name.startswith(KINDS):
                     found.setdefault(name, os.path.abspath(p))
     return found
+
+
+def ix_get(path, **params):
+    """GET from the InferenceX public API — the same rows the website charts."""
+    url = IX_API + "/" + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Accept": "application/json",
+                                               "User-Agent": "workload/adopt-ci-artifacts"})
+    with urllib.request.urlopen(req, timeout=60) as fh:
+        doc = json.load(fh)
+    return doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+
+
+def optimal_only(rows):
+    """The website's "Optimal Only" curve: rows no other row beats on BOTH axes
+    (x = 1/p90 ITL, tok/s/user; y = tput_per_gpu, tok/s/chip)."""
+    pts = []
+    for r in rows:
+        m = r.get("metrics") or {}
+        itl = m.get("p90_full_response_itl") or m.get("p90_itl")
+        y = m.get("tput_per_gpu")
+        if itl and y:
+            pts.append((1.0 / float(itl), float(y), r))
+    return [(x, y, r) for x, y, r in pts
+            if not any(ox >= x and oy >= y and (ox, oy) != (x, y) for ox, oy, _ in pts)]
+
+
+def resolve_published(res):
+    """Adopt what the site currently publishes for this chip, instead of a pinned run id.
+
+    Newest AgentX date for the model, then the rows matching the declared chip/framework/
+    precision (single-node, not disaggregated). `run_id` is the GitHub run those rows name.
+    When several EP groups share that run, the one owning the Optimal-Only frontier's peak
+    tok/s/chip is adopted: a campaign covers one EP group, and that is the group the site
+    itself puts at the top of the curve.
+    """
+    api_model = res["api_model"]
+    want = {k: res[k] for k in ("hardware", "framework", "precision") if res.get(k)}
+    dates = sorted({a["date"] for a in ix_get("availability")
+                    if a.get("model") == res.get("db_model", res.get("model_prefix"))
+                    and a.get("benchmark_type") == res.get("benchmark_type", "agentic_traces")
+                    and all(a.get(k) == v for k, v in want.items() if k in a)})
+    if not dates:
+        raise SystemExit("no published AgentX date for %r on %s" % (api_model, want))
+    rows = [r for r in ix_get("benchmarks", model=api_model, date=dates[-1])
+            if all(r.get(k) == v for k, v in want.items())
+            and not r.get("disagg") and not r.get("is_multinode")]
+    if not rows:
+        raise SystemExit("published %s rows for %s carry nothing matching %s" % (dates[-1], api_model, want))
+    runs = {re.search(r"/runs/(\d+)", r.get("run_url") or "").group(1)
+            for r in rows if r.get("run_url")}
+    if len(runs) != 1:
+        raise SystemExit("published rows name %d runs (%s); pin ci.run_id" % (len(runs), sorted(runs)))
+    front = optimal_only(rows)
+    peak = max(front, key=lambda t: t[1])[2]
+    ep = peak.get("decode_ep")
+    by_ep = {}
+    for _x, _y, r in front:
+        by_ep.setdefault(r.get("decode_ep"), []).append(r.get("conc"))
+    return {
+        "run_id": runs.pop(), "ep": ep, "date": dates[-1], "image": peak.get("image"),
+        "tp": peak.get("decode_tp"), "chips": peak.get("num_decode_gpu"),
+        "peak_tput_per_gpu": (peak.get("metrics") or {}).get("tput_per_gpu"),
+        "frontier_by_ep": {str(k): sorted(v) for k, v in by_ep.items()},
+        "rows_considered": len(rows),
+    }
 
 
 def point_key(name):
@@ -283,6 +353,22 @@ def main():
     run_id = str(ci.get("run_id") or "")
     token = os.environ.get(ci.get("token_env", "GITHUB_TOKEN")) or None
     local = local_artifacts(ci.get("artifacts_dirs") or [])
+    sel = dict(params.get("select") or {})
+    # A pinned ci.run_id wins. Without one, adopt what the site publishes now (ci.resolve), and
+    # let the published frontier name the EP group unless select.ep already does. Resolution is
+    # recorded so the campaign stays reproducible even though the choice was adaptive.
+    resolution = None
+    if not run_id and ci.get("resolve"):
+        try:
+            resolution = resolve_published(ci["resolve"])
+        except (urllib.error.URLError, OSError) as e:
+            return emit("blocked", notes="cannot reach the InferenceX API to resolve the latest "
+                                         "published run (%s); pin ci.run_id to run offline" % e)
+        run_id = resolution["run_id"]
+        if "ep" not in sel and resolution.get("ep") is not None:
+            sel["ep"] = [resolution["ep"]]
+        json.dump(resolution, open(os.path.join(out, "resolution.json"), "w"), indent=1)
+    params["select"] = sel
     noise_band = float(params.get("noise_band", 1.045))
     group_by = params.get("group_by", ["ep"])
     split_on = params.get("split_on", SPLIT_ON)
@@ -502,7 +588,7 @@ def main():
                groups={g: [b["point_id"] for b in sorted(bs, key=lambda b: b["config"]["concurrency"])]
                        for g, bs in groups.items()},
                group_by=group_by, split_on=split_on, launch_diff=launch_diff,
-               representative=rep,
+               representative=rep, resolution=resolution,
                note="top-level throughput/config are the first representative point's; every "
                     "point's own baseline is under points/<pid>/baseline.json")
     json.dump(top, open(os.path.join(out, "baseline.json"), "w"), indent=1)
@@ -512,8 +598,11 @@ def main():
     return emit("ok", artifacts={"baseline": "baseline.json"},
                 metrics={"points": len(points), "groups": len(groups),
                          "representative": len(rep), "throughput": head["throughput"]},
-                notes="CI run %s: %d points in %d groups (%s); representative %s%s"
-                      % (run_id or "<local>", len(points), len(groups), ", ".join(sorted(groups)),
+                notes="CI run %s%s: %d points in %d groups (%s); representative %s%s"
+                      % (run_id or "<local>",
+                         (" (resolved: published %s, ep%s)" % (resolution["date"], resolution["ep"]))
+                         if resolution else " (pinned)",
+                         len(points), len(groups), ", ".join(sorted(groups)),
                          rep, ("; skipped: " + " | ".join(problems)) if problems else ""))
 
 

@@ -35,7 +35,18 @@ must cover it.
 }
 ```
 
-- `ci.run_id`: the Actions run. Listing its artifacts needs no credential; **downloading
+- `ci.run_id`: the Actions run. **Optional.** With no run id and a `ci.resolve` block, the
+  baseline adopts what the site publishes *now* instead: the newest AgentX date for the
+  declared `hardware`/`framework`/`precision`, the single run its rows name, and — unless
+  `select.ep` already says — the EP group owning that curve's Optimal-Only peak tok/s/chip,
+  because a campaign covers one EP group and that is the group the site itself puts at the top
+  of the curve. The choice is written to `$OUT/resolution.json` and to `baseline.json`
+  (`resolution`), so a campaign that selected adaptively still records exactly which run and
+  image it ran against; pin `ci.run_id` to freeze it. Resolution needs the network, so it
+  happens when the stage runs, never at `--dry-run` time. Declaring `target.image` alongside a
+  resolved run makes `target.enforce` refuse any run whose image differs — leave it out to let
+  the image follow the resolution, and the model stays the hard guard.
+  Listing a run's artifacts needs no credential; **downloading
   them does**, even for a public repository. The token is read from the variable named by
   `ci.token_env` (default `GITHUB_TOKEN`) and is sent to `api.github.com` only, never to the
   storage host the download redirects to. Keep it in `runner_env.env_file`, not in config.
