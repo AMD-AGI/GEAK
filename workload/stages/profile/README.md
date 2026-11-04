@@ -192,7 +192,7 @@ None of this is checked by code; all of it decides whether the evidence means an
   reader even after its GPU child succeeds. Publish a separate immutable version when
   a change cannot wait, and retain the earlier file until its readers finish. Preserve
   the native task verdict and the outer launcher's exit as separate evidence.
-- Run each delivered Python UT through `python3 "$WORKLOAD_ROOT/scripts/run_task_entry.py" "$TASK_DIR"`
+- Run each delivered Python UT through `python3 "$WORKLOAD_ROOT/campaign/run_task_entry.py" "$TASK_DIR"`
   in the pinned runtime, with the normal GPU lease and physical isolation around it.
   Directly launching a file named `unittest.py` can shadow Python's standard-library
   `unittest` package and fail in `unittest.mock` before any kernel is tested. The shared

@@ -15,7 +15,10 @@ import socket
 import shutil
 import sys
 
-sys.path.insert(0, os.path.join(os.environ.get("WORKLOAD_ROOT", ""), "scripts"))
+# The same rule every slot uses: the stages root, then `_shared`. Resolved from this
+# file rather than from $WORKLOAD_ROOT, so running the script by hand needs no env.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 VALID_FLAGS = ("submission_valid", "power_valid")

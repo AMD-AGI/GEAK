@@ -14,7 +14,7 @@ Hence two checks, both free, both run before a single GPU hour is spent:
 
   * **naming** -- a scenario config must declare `target.model`, and the run directory
     must carry a recognisable token of it. `agentx_dsv4` and `amd/GLM-5.2-MXFP4` share no
-    token, so `stage.py plan` refuses the run. An abbreviation the tokeniser cannot derive
+    token, so `run.py plan` refuses the run. An abbreviation the tokeniser cannot derive
     (`dsv4` for DeepSeek-V4) is still allowed, but only by writing it into
     `target.name_tokens` -- a deliberate declaration instead of an accident.
   * **identity** -- the declaration is cross-checked against what the stages actually

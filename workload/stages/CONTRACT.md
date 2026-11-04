@@ -51,7 +51,7 @@ An implementation must support at least one of these, and may support both.
 
 **A. Script shape (`run.sh` exists)** — for deterministic steps. The driver runs
 `bash $SKILL_ROOT/run.sh` to completion and spends no tokens. This is what
-`stage.py run` invokes.
+`run.py run` invokes.
 
 **B. Agent shape (no `run.sh`, or `"mode": "agent"` in the config)** — for steps that
 require judgement (extracting a unit test, reading a trace, deciding a boundary). The
@@ -98,7 +98,7 @@ external interface.
   stage `ok` lets downstream burn 48 hours on fabricated inputs — the most expensive
   mistake available in this pipeline.
 
-The driver (`scripts/stage.py validate`) checks this file and records the outcome in
+The driver (`run.py validate`) checks this file and records the outcome in
 `$RUN_ROOT/STATE.json`. Before each invocation it records `inputs.json`: the stage,
 skill, parameters, target and hashes of preceding stages' `result.json` receipts.
 Validation checks that these inputs still match. Resume revalidates retained results
@@ -115,13 +115,22 @@ continuation context. Each attempt needs a fresh session or slot-finalizer resul
 an empty retry cannot inherit an earlier `ok`. Reports honor driver and native-summary rejections even while
 older artifacts remain present.
 
-Write it with `scripts/emit_result.py` (both a library and a CLI), which validates the
+Write it with `_shared/emit_result.py` (both a library and a CLI), which validates the
 structure before it touches disk:
 
 ```bash
-python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok \
+python3 "$WORKLOAD_ROOT/stages/_shared/emit_result.py" --status ok \
     --artifact baseline=baseline.json --metric throughput=446.87889
 ```
+
+`_shared/` holds the few helpers that **several slots need in order to judge** — today
+the envelope writer above and `task_plan.py`, which reads task ownership out of a
+`task_plan.json` whose key names differ between the standalone skill and older slot
+deliveries. It belongs to this contract, not to the pipeline that runs it: a slot that
+reached up into `core/` for a tool would tie a replaceable skill to the plumbing, and
+the point of the slot is that the plumbing can be swapped out from under it. Criteria
+themselves stay in each slot's own `finalize.py` (section 3.1); nothing scenario-specific
+or stage-specific goes here.
 
 ### 3.0 Saying which stack you ran against
 
@@ -135,11 +144,11 @@ A stage that can observe the stack it ran against should say so, either as an op
 ```
 
 or by writing `$OUT/stack_identity.json` (a document that names the stack in force under
-an `active_stack` key is read only there). `stage.py validate` compares whatever it finds
+an `active_stack` key is read only there). `run.py validate` compares whatever it finds
 against the `target` block of the config and **fails the stage on a contradiction**: if
 the config says one model and the stage observed another, one of them is wrong and every
 label downstream is wrong with it. A stage that observes nothing is reported as
-`unverified`, which is a statement rather than a pass. See `scripts/target.py` for the
+`unverified`, which is a statement rather than a pass. See `core/target.py` for the
 whole gate, and `README.md` for the naming half of it.
 
 ### 3.1 The slot's verdict: `finalize.py`
@@ -147,7 +156,7 @@ whole gate, and `README.md` for the naming half of it.
 **Every slot has `stages/<stage>/finalize.py`.** It reads `$IN`, `$OUT` and `$PARAMS`,
 writes `$OUT/result.json`, and is the stage's conclusion. Whatever the implementation
 wrote there — agent session or `run.sh` — is archived and overwritten. The driver runs it
-after every stage of either shape; `stage.py --dry-run` refuses a slot that does not have
+after every stage of either shape; `run.py --dry-run` refuses a slot that does not have
 one, so this is enforced before a campaign starts rather than discovered at the end of it.
 
 ```
@@ -220,7 +229,7 @@ must be stated separately, and only `applyback` may claim an end-to-end gain.
    the downstream files per section 4.
 3. Change one line in the config: `"<stage>": {"skill": "<name>"}`.
 4. Confirm resolution with
-   `python3 workload/scripts/stage.py --config <cfg> --dry-run`.
+   `python3 workload/run.py --config <cfg> --dry-run`.
 
 No registry, no driver changes. A directory that exists and contains a `SKILL.md` is a
 selectable implementation.

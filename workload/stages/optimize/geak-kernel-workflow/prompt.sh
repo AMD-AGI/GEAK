@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the prompt for one attempt and write it to $PROMPT_OUT. Called by scripts/worker.sh.
+# Build the prompt for one attempt and write it to $PROMPT_OUT. Called by campaign/worker.sh.
 #
 # Every input arrives through the environment (see the boundary diagram in SKILL.md):
 #   K TASK_DIR KERNEL_SRC ATTEMPT BEST_SPEEDUP KEEP_THRESHOLD RUN_DIR EVAL_DIR
@@ -177,7 +177,7 @@ Make the change wherever it belongs and the measurement still sees it."
 fi
 # The slot script the prompt tells the agent to call, resolved here so no path is
 # guessed inside the prompt text.
-WORKLOAD_SCRIPTS="${WORKLOAD_SCRIPTS:-$GEAK_ROOT/workload/scripts}"
+WORKLOAD_SCRIPTS="${WORKLOAD_SCRIPTS:-$GEAK_ROOT/workload/campaign}"
 EXTRA_STEER="${EXTRA_STEER:-}"
 
 # Hints from the task directory save the agent a detour, but their absence must not be

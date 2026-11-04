@@ -6,9 +6,8 @@
 # the skill selected for the optimize stage, through two hooks:
 #
 #   $SKILL_ROOT/prompt.sh    required. Builds this attempt's prompt into $PROMPT_OUT.
-#   $SKILL_ROOT/measure.sh   optional. Measures the current kernel_src and prints
-#                            STATUS=/SPEEDUP=. Without it the default below applies
-#                            (running the task's own frozen unittest.py).
+#   $SKILL_ROOT/measure.sh   required. Runs the method's measurement and prints
+#                            STATUS= SPEEDUP= CLEAN= SINGLE=.
 #
 # Runs inside a **one-container-per-GPU** sandbox (the container mounts exactly one
 # /dev/dri/renderD*, so no other GPU is reachable from within). All durable state lives
@@ -17,12 +16,18 @@
 set -uo pipefail
 
 K="${1:?kernel name}"
+export K
 SLOT="${2:-unknown}"
 
 : "${WORK_ROOT:?WORK_ROOT}"      # this stage's work root (= $OUT/work)
 : "${TASK_DIR:?TASK_DIR}"        # this kernel's frozen-harness task directory
 : "${SKILL_ROOT:?SKILL_ROOT}"    # the skill selected for the optimize stage
 : "${RUNNER:?RUNNER}"            # runner script, see runners/CONTRACT.md
+
+if [ ! -f "$SKILL_ROOT/measure.sh" ]; then
+  echo "[worker] required measurement hook is missing: $SKILL_ROOT/measure.sh" >&2
+  exit 78
+fi
 
 TARGET="${TARGET:-172800}"               # optimization budget per kernel; 48 h default
 REQUIRE_FULL_BUDGET="${REQUIRE_FULL_BUDGET:-0}"
@@ -64,24 +69,91 @@ note() { echo "[$(date '+%F %T')] $*" >> "$LOG/worker.log"; }
 
 [ -d "$TASK_DIR/kernel_src" ] || { note "FATAL no kernel_src/ under $TASK_DIR"; exit 2; }
 SOURCE_TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source_tree.py"
-RETAIN_MEASUREMENT="$(dirname "$SOURCE_TREE")/retain_measurement.py"
+RETAIN_MEASUREMENT="$(dirname "$SOURCE_TREE")/../evidence/retain_measurement.py"
+STATE_IO="$(dirname "$SOURCE_TREE")/durable_write.py"
 PENDING_EVIDENCE="$RUN/.evidence_pending"
+exec 201>"$RUN/.measurement.lock" || exit 78
+
+# Preparation can outlive scheduler startup grace. It proves liveness without
+# crediting recovery, archival or frozen-harness work as optimization time.
+PARENT=$$
+PARENT_START="$(awk '{print $22}' "/proc/$PARENT/stat")" || exit 78
+ticker() {  # Optional BASE START enables credit only after preparation succeeds.
+  local state started now pause="" stopping=0
+  exec 201>&-
+  # A graceful join waits for any current metadata write before switching phases.
+  # Interruptible sleep avoids adding the 20-second cadence to every startup/exit.
+  trap 'stopping=1' INT TERM
+  trap '[ -z "$pause" ] || { kill "$pause" 2>/dev/null; wait "$pause" 2>/dev/null; }' EXIT
+  while [ "$stopping" -eq 0 ]; do
+    read -r state started < <(awk '{print $3, $22}' "/proc/$PARENT/stat" 2>/dev/null)
+    case "${state:-gone}" in Z|X|gone) exit 0 ;; esac
+    [ "${started:-}" = "$PARENT_START" ] || exit 0
+    now="$(date +%s)"
+    if [ "$#" -eq 2 ] && ! python3 "$STATE_IO" "$CREDIT" "$(( $1 + now - $2 ))"; then
+      echo "[worker] accounting storage failed; previous complete counters were retained" >&2
+      exit 1
+    fi
+    if ! python3 "$STATE_IO" "$HB" "$now"; then
+      echo "[worker] heartbeat storage failed; previous complete counters were retained" >&2
+      exit 1
+    fi
+    [ "$stopping" -eq 0 ] || exit 0
+    sleep 20 &
+    pause=$!
+    [ "$stopping" -eq 0 ] || exit 0
+    if wait "$pause"; then pause=""; fi
+  done
+  exit 0
+}
+ticker_running() {
+  # A failed ticker may have been reaped during lengthy preparation; its reused
+  # PID must never identify an unrelated process as our job or receive our signal.
+  jobs -pr | grep -qx -- "$TICKER"
+}
+stop_ticker() {
+  ticker_running && kill "$TICKER" 2>/dev/null || return 78
+  wait "$TICKER" || return 78
+}
+cleanup_ticker() {
+  if ticker_running; then kill "$TICKER" 2>/dev/null || :; fi
+  wait "$TICKER" 2>/dev/null || :
+}
+ticker &
+TICKER=$!
+trap cleanup_ticker EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+lock_measurement() {
+  # A bounded operational wait lets a surviving manual wrapper finish copying.
+  # Expiry blocks the task; it never permits overwriting unretained evidence.
+  if ! flock -x -w "${MEASUREMENT_LOCK_TIMEOUT:-300}" 201; then
+    note "FATAL another measurement/retention still owns this task"
+    exit 78
+  fi
+}
+recover_pending() {
 # A failed/interrupted copy must not be followed by another agent or sweep that
 # overwrites the only remaining working evidence. Keep its partial archive visible.
-if [ -e "$PENDING_EVIDENCE" ]; then
+if [ -e "$PENDING_EVIDENCE" ] || [ -L "$PENDING_EVIDENCE" ]; then
   note "recovering pending evidence before any working files change: $(cat "$PENDING_EVIDENCE")"
   if ! python3 "$RETAIN_MEASUREMENT" recover "$TASK_DIR" "$PENDING_EVIDENCE" \
-       --raw-log "$RUN/.measure.log" >> "$LOG/worker.log" 2>&1; then
+       --raw-log "$RUN/.measure.log" --lock-timeout "$MEASURE_TIMEOUT" >> "$LOG/worker.log" 2>&1; then
     note "FATAL evidence retention is still incomplete; stopping without overwriting working evidence"
     exit 78
   fi
 fi
+}
+lock_measurement
+recover_pending
 if [ ! -f "$RUN/pre_search_evidence.path" ]; then
   INITIAL_EVIDENCE="$(python3 "$RETAIN_MEASUREMENT" begin "$TASK_DIR" "$RUN/evidence" \
                        --label pre-search --pending "$PENDING_EVIDENCE" \
                        2>> "$LOG/worker.log")" || exit 2
   python3 "$RETAIN_MEASUREMENT" retain "$TASK_DIR" "$INITIAL_EVIDENCE" \
       --raw-log "$RUN/.measure.log" --complete-pointer "$RUN/pre_search_evidence.path" \
+      --lock-timeout "$MEASURE_TIMEOUT" \
       >> "$LOG/worker.log" 2>&1 || exit 2
   rm "$PENDING_EVIDENCE" || exit 2
 fi
@@ -113,276 +185,35 @@ copy_sources() {
   }
 }
 
-[ -f "$CREDIT" ] || echo 0 > "$CREDIT"
-BASE="$(python3 - "$CREDIT" "$STATUS" <<'PY'
-import json, sys
-values = [0]
-try:
-    values.append(int(open(sys.argv[1]).read().strip() or 0))
-except (OSError, ValueError):
-    pass
-try:
-    values.append(int(json.load(open(sys.argv[2])).get('credited_seconds', 0)))
-except (OSError, ValueError, TypeError):
-    pass
-print(max(values))
-PY
-)"
-START="$(date +%s)"
-
-# Heartbeat + credit ticker. The scheduler treats a stale .hb as a dead worker, and
-# .credit is the only reason an interruption resumes instead of starting over.
-#
-# The ticker re-checks its parent every cycle. The trap below does **not** run under
-# SIGKILL — observed in practice: kill -9 the worker and the ticker is orphaned, keeps
-# crediting time to a worker that died long ago and keeps refreshing its heartbeat, so
-# the scheduler never notices the death and an entire slice of budget evaporates.
-# Zombies count as dead too: after -9 and before the parent reaps, `kill -0` still
-# succeeds against a zombie.
-PARENT=$$
-(
-  while :; do
-    st="$(awk '{print $3}' "/proc/$PARENT/stat" 2>/dev/null)"
-    case "${st:-gone}" in Z|X|gone) exit 0 ;; esac
-    now="$(date +%s)"
-    echo "$now" > "$HB"
-    echo $(( BASE + now - START )) > "$CREDIT.$PARENT.tmp"
-    mv -f "$CREDIT.$PARENT.tmp" "$CREDIT"
-    sleep 20
-  done
-) &
-TICKER=$!
-trap 'kill "$TICKER" 2>/dev/null' EXIT INT TERM
-
-# Default measurement: run the task's own frozen entry and read what it contracts to print.
-# The baseline leg is always the **originally installed module**, not your previous change,
-# so this speedup is always the cumulative figure against the real baseline.
-#
-# The entry is launched through scripts/run_task_entry.py rather than with `cd $TASK_DIR &&
-# python3 unittest.py`: a task directory contains its own `unittest.py`, which lands on
-# sys.path[0] and shadows the standard library package, and the failure surfaces far away
-# ("No module named 'unittest.mock'") as an empty measurement rather than as an error.
-#
-# Two output contracts are accepted, because both kinds of harness exist in the wild:
-#   * `CORRECTNESS: PASS` plus `GEAK_GEOMEAN_SPEEDUP <x>`
-#   * a JSON line {"exit": 0, "weighted": <x>}, where exit 0 means every gate passed
-#     (correctness, negative controls, tail contracts) and `weighted` is the
-#     serving-weighted speedup over the whole shape sweep;
-#   * a JSON *document* {"ut_result": "run/ut_result.json", "ok": true, "gates": {...}} --
-#     what the AgentX extraction harness emits. It is pretty-printed, so it has to be read
-#     as a whole document, and the speedup is not in it at all: it lives in the referenced
-#     ut_result.json under gates.timing.aggregate.primary (weighted, falling back to the
-#     geomean). `ok` is the conjunction of the six frozen-harness gates.
-#
-# Accepting only the first two cost a real measurement on 2026-10-19: all six gates passed,
-# the sweep returned a serving-weighted 0.95806 over 13/13 buckets, and the attempt was
-# recorded as unmeasured. A regression is a result; "no measurement" is a broken harness.
-# Reporting the second when the first happened teaches the optimizer nothing and spends
-# the budget anyway.
-default_measure() {
-  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  ( timeout "$MEASURE_TIMEOUT" python3 "$here/run_task_entry.py" "$TASK_DIR" unittest.py ) \
-      > "$RUN/.measure.log" 2>&1
-  local measure_rc=$?
-  # This is transport metadata for retention, not a second interpretation of the UT.
-  MEASURE_NATIVE_RC="$measure_rc"
-  if [ "$measure_rc" -ne 0 ]; then
-    echo "STATUS=0 SPEEDUP= CLEAN= SINGLE=0"
-    return
-  fi
-  local sp ok clean="" single=0
-  sp="$(grep -oE 'GEAK_GEOMEAN_SPEEDUP [^[:space:]]+' "$RUN/.measure.log" | tail -1 | awk '{print $2}')"
-  ok=0; grep -q '^CORRECTNESS: PASS' "$RUN/.measure.log" && ok=1
-  if [ -z "$sp" ]; then
-    # A non-whitespace delimiter preserves missing score fields. Plain read would
-    # shift the trailing single-pair count (often zero) into an empty speedup.
-    IFS='|' read -r ok sp clean single <<<"$(python3 - "$RUN/.measure.log" "$TASK_DIR" <<'PY'
-import json, math, os, sys
-
-log, task_dir = sys.argv[1], sys.argv[2]
-text = open(log, errors="replace").read()
-
-
-def positive_score(value, allow_text=False):
-    if isinstance(value, bool) or not isinstance(value, (int, float, str) if allow_text else (int, float)):
-        return None
-    try:
-        value = float(value)
-    except (ValueError, OverflowError):
-        return None
-    return value if math.isfinite(value) and value > 0 else None
-
-
-def docs(s):
-    """Every JSON object in the log, pretty-printed ones included.
-
-    The harness writes its summary with indent=2, so a line-wise reader sees only "{".
-    Scanning with raw_decode from each "{" at the start of a line costs nothing and
-    handles both shapes.
-    """
-    dec = json.JSONDecoder()
-    i = 0
-    while True:
-        i = s.find("{", i)
-        if i < 0:
-            return
-        if i and s[i - 1] not in "\n\r":
-            i += 1
-            continue
-        try:
-            obj, end = dec.raw_decode(s, i)
-        except ValueError:
-            i += 1
-            continue
-        yield obj
-        i = end
-
-
-def aggregate_speedup(path):
-    """(primary, clean, single_pair_count) from an agentx_ut_result document.
-
-    `primary` is the harness's own serving-weighted figure. `clean` re-weights the same
-    way over the buckets it measured more than once: the harness stops repeating a bucket
-    whose first pair falls outside its undecided band, so a single-pair bucket is one
-    unrepeated sample and per-pair noise on a collective seam reaches 12%.
-    """
-    try:
-        d = json.load(open(path))
-    except (OSError, ValueError):
-        return None, None, 0
-    if not isinstance(d, dict):
-        return None, None, 0
-    gates = d.get("gates") or {}
-    timing = (gates.get("timing") or {}) if isinstance(gates, dict) else {}
-    if not isinstance(timing, dict):
-        return None, None, 0
-    agg = timing.get("aggregate")
-    if agg is None and not timing:
-        # Some frozen tasks keep the shared harness's aggregate at the top level.
-        # Read that result; the caller still requires the task's own gate verdict.
-        agg = d.get("serving_weighted_speedup")
-        if isinstance(agg, dict):
-            timing = dict(timing, per_case=d.get("per_case") or [])
-    if not isinstance(agg, dict):
-        agg = {}
-    primary = None
-    for key in ("primary", "weighted", "geomean"):
-        v = positive_score(agg.get(key))
-        if v is not None:
-            primary = v
-            break
-    if primary is None:
-        # Interval form: the harness reports two serving aggregates because the prefix
-        # history behind the dominant buckets was never recorded, and refuses to pick
-        # one. Decide on the low end -- the high end would assert the model the harness
-        # just said it cannot support.
-        ends = [positive_score(v) for k, v in timing.items()
-                if k.startswith("serving_weighted_speedup_")
-                and positive_score(v) is not None]
-        iv = timing.get("serving_weighted_speedup_interval")
-        if isinstance(iv, (list, tuple)):
-            ends += [positive_score(v) for v in iv if positive_score(v) is not None]
-        if ends:
-            primary = min(ends)
-    cases = (timing.get("per_case") or [])
-    rows = (timing.get("rows") or [])
-    reps = {c.get("sig"): c.get("reps") for c in (cases or rows)}
-    num = den = 0.0
-    single = 0
-    if not cases and rows:
-        # The interval variant carries no weights, only measured rows. Count how many
-        # rest on a single pair so the worker can say so; the aggregate stays the
-        # harness's own.
-        single = sum(1 for r in rows if (r.get("reps") or 0) < 2)
-        return primary, None, single
-    for c in (agg.get("per_case") or []):
-        if not c.get("included"):
-            continue
-        w, sp = c.get("weight"), c.get("speedup")
-        if not isinstance(w, (int, float)) or not isinstance(sp, (int, float)):
-            continue
-        if (reps.get(c.get("sig")) or 0) >= 2:
-            num += w * sp
-            den += w
-        else:
-            single += 1
-    clean = (num / den) if den > 0 else None
-    return primary, clean, single
-
-
-ok, sp, clean, single = 0, "", "", 0
-for d in docs(text):
-    if not isinstance(d, dict):
-        continue
-    if "exit" in d:
-        # A gate failure is not a measurement: report STATUS=0 and let the worker revert.
-        ok = 1 if d.get("exit") == 0 else 0
-        w = positive_score(d.get("weighted"), allow_text=True)
-        sp = "" if w is None else repr(w)
-        break
-    if "gates" not in d and d and all(isinstance(v, bool) for v in d.values()):
-        # Bare gate map: the pass/fail verdict is the document itself, and the numbers
-        # are in the task's own ut_result.json. "UT PASS" in the log is the harness's
-        # verdict; require the gates to agree with it.
-        ok = 1 if (d.values() and all(d.values()) and "UT PASS" in text) else 0
-        for cand in ("ut_result.json", os.path.join("run", "ut_result.json")):
-            p = os.path.join(task_dir, cand)
-            if os.path.exists(p):
-                v, c, single = aggregate_speedup(p)
-                if v is not None:
-                    sp = repr(v)
-                if c is not None:
-                    clean = repr(c)
-                break
-        break
-    if "ut_result" in d and "gates" in d:
-        gates = d.get("gates") or {}
-        # `ok` is the harness's own verdict; require the gate map to agree, so a future
-        # gate the summary forgets to fold in cannot pass silently.
-        ok = 1 if (d.get("ok") is True and all(v is True for v in gates.values())) else 0
-        p = d["ut_result"]
-        if not os.path.isabs(p):
-            p = os.path.join(task_dir, p)
-        v, c, single = aggregate_speedup(p)
-        if v is not None:
-            sp = repr(v)
-        if c is not None:
-            clean = repr(c)
-        break
-clean = positive_score(clean, allow_text=True)
-print("|".join(map(str, (ok, sp, "" if clean is None else clean, single))))
-PY
-)"
-  fi
-  # A passing gate verdict without a finite positive score is no measurement.
-  # Check the legacy text form too, including scientific notation and malformed tokens.
-  if ! python3 - "$sp" <<'PY'
-import math, sys
-try:
-    value = float(sys.argv[1])
-    valid = math.isfinite(value) and value > 0
-except (ValueError, OverflowError):
-    valid = False
-sys.exit(0 if valid else 1)
-PY
-  then
-    ok=0
-    sp=""
-  fi
-  echo "STATUS=${ok:-0} SPEEDUP=${sp:-} CLEAN=${clean:-} SINGLE=${single:-0}"
+# Join the heartbeat-only phase before reading credit or starting its clock. A
+# failed preparation ticker must not be replaced by a healthy accounting ticker.
+stop_ticker || {
+  echo "[worker] preparation heartbeat stopped; preserve state and repair storage before resuming" >&2
+  exit 78
 }
 
+BASE="$(python3 - "$STATE_IO" "$CREDIT" "$STATUS" <<'PY_CREDIT'
+import os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from durable_write import read_credit_pair
+print(read_credit_pair(sys.argv[2], sys.argv[3]))
+PY_CREDIT
+)" || exit 78
+[ -f "$CREDIT" ] || python3 "$STATE_IO" "$CREDIT" "$BASE" || exit 78
+START="$(date +%s)"
+
+ticker "$BASE" "$START" &
+TICKER=$!
+
 measure() {
-  if [ -x "$SKILL_ROOT/measure.sh" ] || [ -f "$SKILL_ROOT/measure.sh" ]; then
-    TASK_DIR="$TASK_DIR" RUN_DIR="$RUN" MEASURE_TIMEOUT="$MEASURE_TIMEOUT" \
-      bash "$SKILL_ROOT/measure.sh"
-  else
-    default_measure
-  fi
+  TASK_DIR="$TASK_DIR" RUN_DIR="$RUN" MEASURE_TIMEOUT="$MEASURE_TIMEOUT" \
+    MEASURE_NATIVE_RC_FILE="$MEASURE_NATIVE_RC_FILE" \
+    bash "$SKILL_ROOT/measure.sh" 201>&-
 }
 
 measure_and_retain() {  # <sweep number>; leaves the unchanged measure output in M
   local archive measure_rc
+  recover_pending
   archive="$(python3 "$RETAIN_MEASUREMENT" begin "$TASK_DIR" "$EVAL_DIR/worker_measurements" \
                 --label "sweep-$1" --pending "$PENDING_EVIDENCE" \
                 2>> "$LOG/worker.log")" || return 2
@@ -391,17 +222,19 @@ measure_and_retain() {  # <sweep number>; leaves the unchanged measure output in
   if [ -e "$RUN/.measure.log" ] || [ -L "$RUN/.measure.log" ]; then
     mv "$RUN/.measure.log" "$archive/previous_measure.log" || return 2
   fi
-  MEASURE_NATIVE_RC=""
+  MEASURE_NATIVE_RC_FILE="$archive/native_exit_code"
   measure > "$archive/measure.stdout.log" 2> "$archive/measure.stderr.log"
   measure_rc=$?
   M="$(cat "$archive/measure.stdout.log")" || return 2
   local native_args=()
-  [ -n "$MEASURE_NATIVE_RC" ] && native_args=(--native-exit "$MEASURE_NATIVE_RC")
+  [ -f "$MEASURE_NATIVE_RC_FILE" ] && native_args=(--native-exit "$(cat "$MEASURE_NATIVE_RC_FILE")")
   python3 "$RETAIN_MEASUREMENT" retain "$TASK_DIR" "$archive" \
       --raw-log "$RUN/.measure.log" --measure-exit "$measure_rc" "${native_args[@]}" \
+      --lock-timeout "$MEASURE_TIMEOUT" \
       >> "$LOG/worker.log" 2>&1 || return 2
   rm "$PENDING_EVIDENCE" || return 2
   note "attempt $N: sweep $1 evidence retained at $archive"
+  return "$measure_rc"
 }
 
 BEST="$(python3 -c "
@@ -449,10 +282,12 @@ PY
 }
 
 write_status() {  # status credited best attempts [measured rc]
-  python3 - "$STATUS" "$@" <<'PY'
+  python3 - "$STATE_IO" "$STATUS" "$@" <<'PY'
 import json, os, sys
-p, st, cred, best, n = sys.argv[1:6]
-extra = sys.argv[6:]
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from durable_write import write_text
+p, st, cred, best, n = sys.argv[2:7]
+extra = sys.argv[7:]
 d = json.load(open(p)) if os.path.exists(p) else {}
 d.update(status=st, credited_seconds=int(cred), best_speedup=float(best),
          attempts=int(n), slot=os.environ.get("SLOT", d.get("slot")))
@@ -466,19 +301,21 @@ if extra:
         rec["measured_repeated_buckets_only"] = extra[2]
         rec["single_pair_buckets"] = int(extra[3])
     d.setdefault("history", []).append(rec)
-with open(p + ".tmp", "w") as f:
-    json.dump(d, f, indent=1)
-os.replace(p + ".tmp", p)
+write_text(p, json.dumps(d, indent=1) + "\n")
 PY
 }
 export SLOT
 
 while :; do
+  if ! ticker_running; then
+    echo "[worker] accounting ticker stopped; preserve state and repair storage before resuming" >&2
+    exit 78
+  fi
   now="$(date +%s)"; CRED=$(( BASE + now - START ))
   if [ "$CRED" -ge "$TARGET" ]; then
     note "budget exhausted (${CRED}s >= ${TARGET}s) -- stopping"
     N="$(ls "$RUN" 2>/dev/null | grep -c '^attempt_')"
-    write_status done "$CRED" "$BEST" "$N"
+    write_status done "$CRED" "$BEST" "$N" || exit 78
     touch "$STATE/$K.done"
     exit 0
   fi
@@ -497,7 +334,7 @@ while :; do
   if [ "$REQUIRE_FULL_BUDGET" != 1 ] && [ "$DONE_ATTEMPTS" -gt 0 ] && [ "$REMAIN" -lt "$(( ATTEMPT_MIN + RESERVE ))" ]; then
     note "stopping: ${REMAIN}s left, not enough for a ${ATTEMPT_MIN}s attempt plus its \
 ${RESERVE}s measurement -- an unscored candidate is worth nothing"
-    write_status done "$CRED" "$BEST" "$DONE_ATTEMPTS"
+    write_status done "$CRED" "$BEST" "$DONE_ATTEMPTS" || exit 78
     touch "$STATE/$K.done"
     exit 0
   fi
@@ -533,10 +370,13 @@ ${RESERVE}s measurement -- an unscored candidate is worth nothing"
   HO="$RUN/HANDOFF.md"
   HO_BEFORE=""
   [ -f "$HO" ] && HO_BEFORE="$(md5sum "$HO" 2>/dev/null | cut -d' ' -f1)"
+  flock -u 201 || exit 78
   timeout --signal=TERM --kill-after=120 "$CAP" \
-      bash "$RUNNER" "$PROMPT_OUT" "$TASK_DIR" "$LOG/attempt_$N.log"
+      bash "$RUNNER" "$PROMPT_OUT" "$TASK_DIR" "$LOG/attempt_$N.log" 201>&-
   RC=$?
   note "attempt $N runner rc=$RC"
+  lock_measurement
+  recover_pending
 
   # The session's closing output is the handoff. prompt.sh reads HANDOFF.md and the
   # ledger promises it, so an attempt that refutes a direction without landing a diff
@@ -637,10 +477,13 @@ no candidate to measure, skipping the sweep"
   # A sweep past this point is bounded by MEASURE_TIMEOUT and is the only thing this
   # attempt was for. Mark it so the scheduler's budget check does not kill it halfway.
   : > "$STATE/$K.measuring"
-  if ! measure_and_retain 1; then
+  if measure_and_retain 1; then
+    :
+  else
+    MEASURE_STEP_RC=$?
     rm -f "$STATE/$K.measuring"
-    note "FATAL measurement evidence was not retained; stopping before overwrite or revert"
-    exit 2
+    note "FATAL measurement hook or evidence retention failed; stopping before overwrite or revert"
+    exit "$MEASURE_STEP_RC"
   fi
   rm -f "$STATE/$K.measuring"
   parse_measurement "$M"
@@ -658,10 +501,13 @@ print(1 if $SP < $KEEP_THRESHOLD <= $CLEAN else 0)")"
       note "attempt $N: ${SP} and ${CLEAN} straddle the ${KEEP_THRESHOLD} threshold on \
 ${SINGLE} single-pair bucket(s) -- re-measuring once, and deciding on that"
       : > "$STATE/$K.measuring"
-      if ! measure_and_retain 2; then
+      if measure_and_retain 2; then
+        :
+      else
+        MEASURE_STEP_RC=$?
         rm -f "$STATE/$K.measuring"
-        note "FATAL second-sweep evidence was not retained; stopping before overwrite or revert"
-        exit 2
+        note "FATAL second-sweep hook or evidence retention failed; stopping before overwrite or revert"
+        exit "$MEASURE_STEP_RC"
       fi
       M2="$M"
       rm -f "$STATE/$K.measuring"
@@ -730,5 +576,5 @@ be measured"
 
   now="$(date +%s)"
   write_status running "$(( BASE + now - START ))" "$BEST" "$N" "${SP:-null}" "$RC" \
-      "${CLEAN:-null}" "${SINGLE:-0}"
+      "${CLEAN:-null}" "${SINGLE:-0}" || exit 78
 done

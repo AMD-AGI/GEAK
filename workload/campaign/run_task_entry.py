@@ -89,7 +89,8 @@ def main(argv):
                             ".evidence_pending") if work else None)
     try:
         if os.environ.get("WORKLOAD_ORACLE_ARCHIVE_DIR") or (pending and os.path.lexists(pending)):
-            helper = os.path.join(os.path.dirname(__file__), "generated_oracle_archive.py")
+            helper = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                  "evidence", "generated_oracle_archive.py")
             spec = importlib.util.spec_from_file_location("_workload_oracle_archive", helper)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)

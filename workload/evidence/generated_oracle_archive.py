@@ -1,7 +1,8 @@
 """Optional opaque-oracle retention used by ``run_task_entry.py``.
 
 Activation is an absolute ``WORKLOAD_ORACLE_ARCHIVE_DIR`` outside the task, or
-the worker's existing ``WORK_ROOT/runs/<task>/.evidence_pending`` handoff. The
+the worker's existing ``WORK_ROOT/runs/<task>/.evidence_pending`` handoff,
+including its configured external evidence placement. The
 explicit directory takes precedence, must not be a symlink, and is created if
 absent. Each entry creates a fresh ``generated-oracles-*`` session. With neither
 handoff the entry does not load this helper or install an observer.
@@ -39,6 +40,7 @@ verdicts remain the frozen entry's own and are never derived from copied bytes.
 import ast
 from contextlib import nullcontext
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -94,13 +96,35 @@ def archive_destination(task):
         raise OracleArchiveFailure("pending evidence pointer must not be a symlink")
     if not pending.exists():
         return None
-    path = Path(pending.read_text().strip())
+    handoff = pending.read_text()
+    path = Path(handoff.strip())
     outside(task, path)
-    if not path.is_absolute() or not path.resolve().is_relative_to(run.resolve()):
-        raise OracleArchiveFailure("pending oracle archive is outside this worker's run")
+    if not path.is_absolute():
+        raise OracleArchiveFailure("pending oracle archive must be absolute")
     record = json.loads((path / "retention.json").read_text())
-    if Path(record.get("task_dir", "")).resolve() != task or record.get("complete") is not False:
+    if (not isinstance(record, dict) or record.get("task_dir") != str(task)
+            or record.get("complete") is not False):
         raise OracleArchiveFailure("pending evidence does not identify this active task measurement")
+    if not path.resolve().is_relative_to(run.resolve()):
+        root = os.environ.get("WORKLOAD_EVIDENCE_ROOT")
+        placement = record.get("evidence_placement")
+        if not root or not isinstance(placement, dict):
+            raise OracleArchiveFailure("pending oracle archive is outside this worker's run")
+        # Use the retention writer's exact placement rule. Trust neither an arbitrary
+        # external pointer nor a receipt whose owner/root differs from this worker.
+        helper = Path(__file__).with_name("retain_measurement.py")
+        spec = importlib.util.spec_from_file_location("_oracle_retention_placement", helper)
+        retention = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(retention)
+        if not callable(getattr(retention, "evidence_parent", None)):
+            raise OracleArchiveFailure("retention helper lacks the configured evidence placement contract")
+        retention.outside_task(task, pending)
+        parent, expected = retention.evidence_parent(
+            task, Path(placement.get("original_parent", "")), pending, Path(root))
+        if placement != expected or path.parent.resolve() != parent:
+            raise OracleArchiveFailure("pending oracle archive does not match its configured evidence placement")
+    if pending.is_symlink() or pending.read_text() != handoff:
+        raise OracleArchiveFailure("pending evidence changed during oracle archive admission")
     return path
 
 

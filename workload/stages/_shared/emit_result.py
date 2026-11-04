@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Write `$OUT/result.json` — a stage's only outward interface (see ../stages/CONTRACT.md §3).
+"""Write `$OUT/result.json` — a stage's only outward interface (see ../CONTRACT.md §3).
 
 It is both a library and a CLI, so Python implementations can `from emit_result import
 emit` while shell implementations simply call it:
 
-    python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok \\
+    python3 "$WORKLOAD_ROOT/stages/_shared/emit_result.py" --status ok \\
         --artifact baseline=baseline.json --metric throughput=446.87889 \\
         --notes "adopted the 2026-09-16 receipt"
 
-It validates locally before writing, so a result.json that stage.py would certainly
+It validates locally before writing, so a result.json that run.py would certainly
 reject never reaches disk.
 """
 
@@ -38,7 +38,7 @@ def emit(status, artifacts=None, metrics=None, notes="", out=None,
     skill = skill or os.environ.get("STAGE_SKILL")
     if not out or not stage or not skill:
         print("missing OUT/STAGE/STAGE_SKILL; a stage must run inside the environment "
-              "prepared by stage.py prepare", file=sys.stderr)
+              "prepared by run.py prepare", file=sys.stderr)
         return 2
     if status not in VALID_STATUS:
         print("status must be one of %s" % list(VALID_STATUS), file=sys.stderr)

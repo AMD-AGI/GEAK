@@ -7,7 +7,7 @@ description: Optimize one frozen-harness task with the runner's own coding tools
 
 An implementation of the optimize stage, for a runner that does **not** expose GEAK's
 Workflow tool. Everything else is the same as `geak-kernel-workflow/`: the same
-`scripts/worker.sh`, the same frozen harness, the same cold verification, the same
+`campaign/worker.sh`, the same frozen harness, the same cold verification, the same
 KEEP threshold. Only `prompt.sh` differs — it asks the session to edit
 `kernel_src/` with whatever coding tools it has, instead of driving
 `kernel_workflow.js`.
@@ -28,7 +28,7 @@ method takes no such lock. It hands the session the whole assigned set through
 
 ## Device width is the task's own declaration
 
-`scripts/scheduler.py` reads `required_gpus` from each task's `meta.json` and gives the
+`campaign/scheduler.py` reads `required_gpus` from each task's `meta.json` and gives the
 worker that many consecutive GPUs, physically mounted. A single-rank elementwise kernel
 and a TP8/EP8 collective therefore run in the same campaign, side by side, with no
 grouping step and no per-campaign GPU width. A task that declares nothing gets
@@ -48,12 +48,12 @@ output — plus two that only matter without the Workflow tool:
   that narrows it measures a different task than the one it was given.
 - **Reuse the qualified harness.** The profile stage already built and timed it. An
   attempt that spends its budget rebuilding a harness has optimized nothing. The
-  authoritative check is `scripts/run_task_entry.py "$TASK_DIR"`, never
+  authoritative check is `campaign/run_task_entry.py "$TASK_DIR"`, never
   `python3 unittest.py` from inside the task directory, which shadows the stdlib module
   of that name.
 
 ## Output
 
-None of its own. Per-kernel results are `scripts/worker.sh`'s
+None of its own. Per-kernel results are `campaign/worker.sh`'s
 `$WORK_ROOT/state/<kernel>.status.json`; the stage's verdict is
 `stages/optimize/finalize.py` (`stages/CONTRACT.md` 3.1).

@@ -16,7 +16,7 @@ the target                    headroom       per GPU        measure e2e
 Before anything else, a config must declare what it optimizes, in a `target` block (model,
 image, component commits). The config filename and `run_root` have to carry a recognisable
 token of that model, and every `validate` cross-checks the declaration against the stack
-the stages actually observed. Writing a new scenario config starts there; `scripts/target.py`
+the stages actually observed. Writing a new scenario config starts there; `core/target.py`
 says why, and refuses the run otherwise.
 
 Changing this pipeline rather than running it: read `PRINCIPLES.md` first. It is the charter — what the pipeline was asked to do, and the rules a change has to leave intact.
@@ -27,8 +27,8 @@ Run the whole thing:
 cd <GEAK repo root>
 CFG=workload/config/agentx_glm52.json
 
-python3 workload/scripts/stage.py --config $CFG --dry-run   # check resolution first
-python3 workload/scripts/stage.py --config $CFG all         # the whole campaign, unattended
+python3 workload/run.py --config $CFG --dry-run   # check resolution first
+python3 workload/run.py --config $CFG all         # the whole campaign, unattended
 ```
 
 That is the whole command. Every stage runs in order, including the ones that are
@@ -63,7 +63,7 @@ inputs, or use a fresh run root for a changed experiment.
 ### While it runs
 
 **The run reports every 30 minutes without being asked.** `all` starts
-`scripts/watch.py` alongside it, which each tick appends a block to
+`core/watch.py` alongside it, which each tick appends a block to
 `$RUN_ROOT/PROGRESS.md` — per-stage state and results so far, how much was written, what
 changed in the window, which GPUs are held — keeps the latest snapshot in
 `progress.json`, and **re-renders `$RUN_ROOT/REPORT.md`** from whatever the stages have
@@ -125,6 +125,13 @@ Agents work the same way; see `runners/CONTRACT.md`. The repository ships `claud
 (validated), `codex.sh` and `codex-oob.sh` (written to the contract, not yet validated)
 and `stub.sh` (calls no agent — it exists to prove the scheduler does not depend on one).
 
+## Where the code lives
+
+`run.py` is the only entry point. `core/` is how one campaign walks from stage to stage,
+`campaign/` is how eight GPUs are held and dispatched to, `tools/` is the single-purpose
+utilities, `evidence/` retains and reuses measurement evidence, and `stages/` is the five
+slots. `README.md` has the full table.
+
 ## The two contracts
 
 Modularity rests on two contracts and nothing else:
@@ -153,8 +160,8 @@ Modularity rests on two contracts and nothing else:
 ## Self-check
 
 ```bash
-python3 workload/scripts/skill_manifest.py verify-all     # vendored skills unchanged
-python3 workload/scripts/stage.py --config $CFG --dry-run  # the config resolves
+python3 workload/tools/skill_manifest.py verify-all     # vendored skills unchanged
+python3 workload/run.py --config $CFG --dry-run  # the config resolves
 ```
 
 Both are CPU-only: no GPUs, no tokens, no network.

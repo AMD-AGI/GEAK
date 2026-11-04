@@ -40,14 +40,17 @@ Everything else it finds is reported, not acted on. A dead driver, a GPU held by
 job, a stage that reported `blocked` -- those need a decision, and a monitor inventing
 one would be worse than a monitor that says clearly what it saw.
 
-    python3 scripts/watch.py --config <cfg> [--interval 1800] [--once]
+    python3 core/watch.py --config <cfg> [--interval 1800] [--once]
 
-`stage.py all` starts one of these itself, so a plain campaign already reports on a
+`run.py all` starts one of these itself, so a plain campaign already reports on a
 cadence without being asked; `--no-report` there turns it off.
 """
 
 import argparse
+import heapq
 import json
+import math
+import operator
 import os
 import signal
 import subprocess
@@ -144,37 +147,87 @@ def kill_tree(pids, log):
 
 # ----------------------------------------------------------------- filesystem
 
+def scan_settings(cfg):
+    """Operational scan budgets; legacy `watch` overrides use the existing merge."""
+    settings = stage_mod.report_settings(cfg)
+    entries = settings.get("scan_max_entries", 10000)
+    seconds = settings.get("scan_max_sec", 5.0)
+    if type(entries) is not int or entries <= 0:
+        raise ValueError("report.scan_max_entries must be a positive integer")
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("report.scan_max_sec must be a positive finite number")
+    return {"max_entries": entries, "max_seconds": float(seconds)}
+
+
+def _scan(out_dir, since=None, limit=8, include_recent=False,
+          max_entries=None, max_seconds=None):
+    """One streaming traversal for totals and recent rows, with explicit coverage.
+
+    Budgets are checked between filesystem calls: an individual blocked stat/readdir
+    can exceed the time budget. A partial traversal cannot prove filesystem silence.
+    """
+    started = time.monotonic()
+    newest, count, size, entries, errors = 0.0, 0, 0, 0, 0
+    pending, rows, reason = [out_dir], [], None
+    if include_recent and limit is not None:
+        limit = operator.index(limit)
+    while pending and reason is None:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as children:
+                while True:
+                    if max_entries is not None and entries >= max_entries:
+                        reason = "max_entries"
+                        break
+                    if max_seconds is not None and time.monotonic() - started >= max_seconds:
+                        reason = "max_seconds"
+                        break
+                    try:
+                        child = next(children)
+                    except StopIteration:
+                        break
+                    entries += 1
+                    try:
+                        if child.is_dir():
+                            if not child.name.startswith(".") and not child.is_symlink():
+                                pending.append(child.path)
+                            continue
+                        st = os.stat(child.path)
+                    except OSError:
+                        errors += 1
+                        continue
+                    count += 1
+                    size += st.st_size
+                    newest = max(newest, st.st_mtime)
+                    if include_recent and st.st_mtime > since:
+                        row = (st.st_mtime, os.path.relpath(child.path, out_dir), st.st_size)
+                        if limit is None or limit < 0:
+                            rows.append(row)  # Preserve the standalone helper's slice contract.
+                        elif len(rows) < limit:
+                            heapq.heappush(rows, row)
+                        elif limit and row > rows[0]:
+                            heapq.heapreplace(rows, row)
+        except OSError:
+            errors += 1
+    recent = sorted(rows, reverse=True)
+    if limit is None or limit < 0:
+        recent = recent[:limit]
+    return {"files": count, "bytes": size, "newest": newest,
+            "scan_complete": reason is None and errors == 0,
+            "scan_reason": reason or ("io_errors" if errors else "complete"),
+            "scan_entries": entries, "scan_errors": errors,
+            "scan_elapsed_sec": time.monotonic() - started,
+            "scan_max_entries": max_entries, "scan_max_sec": max_seconds}, recent
+
+
 def scan(out_dir):
-    """Newest mtime, file count and total size under a stage's output directory."""
-    newest, count, size = 0.0, 0, 0
-    for root, dirs, files in os.walk(out_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        for fn in files:
-            p = os.path.join(root, fn)
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            count += 1
-            size += st.st_size
-            newest = max(newest, st.st_mtime)
-    return {"files": count, "bytes": size, "newest": newest}
+    """Compatibility helper for callers explicitly requesting an unbounded total."""
+    totals, _ = _scan(out_dir)
+    return {key: totals[key] for key in ("files", "bytes", "newest")}
 
 
 def changed_since(out_dir, since, limit=8):
-    rows = []
-    for root, dirs, files in os.walk(out_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        for fn in files:
-            p = os.path.join(root, fn)
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            if st.st_mtime > since:
-                rows.append((st.st_mtime, os.path.relpath(p, out_dir), st.st_size))
-    rows.sort(reverse=True)
-    return rows[:limit]
+    return _scan(out_dir, since, limit, include_recent=True)[1]
 
 
 def human_age(seconds):
@@ -239,6 +292,7 @@ def gpu_usage():
 
 def snapshot(cfg, prev, driver_pid):
     now = time.time()
+    limits = scan_settings(cfg)
     state = stage_mod.load_state(cfg)
     stages = []
     for name in cfg["order"]:
@@ -248,19 +302,29 @@ def snapshot(cfg, prev, driver_pid):
         s = {"stage": name, "skill": lay["skill"], "mode": lay["mode"],
              "status": rec.get("status") or ("-" if not os.path.isdir(out) else "running"),
              "out": out, "notes": rec.get("notes") or ""}
-        s.update(scan(out) if os.path.isdir(out) else {"files": 0, "bytes": 0, "newest": 0})
+        totals, recent = (_scan(out, (prev or {}).get("at", now - 1800),
+                                include_recent=True, **limits) if os.path.isdir(out) else
+                          ({"files": 0, "bytes": 0, "newest": 0, "scan_complete": True,
+                            "scan_reason": "output_absent", "scan_entries": 0,
+                            "scan_errors": 0, "scan_elapsed_sec": 0,
+                            "scan_max_entries": limits["max_entries"],
+                            "scan_max_sec": limits["max_seconds"]}, []))
+        s.update(totals)
         s["pids"] = tree_for(out) if os.path.isdir(out) else []
         s["cpu"] = tree_cpu(s["pids"]) if s["pids"] else 0.0
         p = (prev or {}).get("stages", {}).get(name) or {}
-        s["new_files"] = s["files"] - p.get("files", s["files"])
+        comparable = s["scan_complete"] and p.get("scan_complete", True)
+        s["new_files"] = s["files"] - p.get("files", s["files"]) if comparable else None
         s["cpu_delta"] = s["cpu"] - p.get("cpu", s["cpu"]) if p else 0.0
         s["quiet_since"] = (p.get("quiet_since", now)
-                            if p and s["newest"] <= p.get("newest", 0) else now)
-        s["recent"] = changed_since(out, (prev or {}).get("at", now - 1800)) \
-            if os.path.isdir(out) else []
+                            if p and comparable and s["newest"] <= p.get("newest", 0) else now)
+        s["recent"] = recent
         stages.append(s)
-    return {"at": now, "driver_alive": proc_stat(driver_pid) is not None if driver_pid else None,
-            "driver_pid": driver_pid, "gpu_vram_used": gpu_usage(),
+    driver_alive = proc_stat(driver_pid) is not None if driver_pid else None
+    vram_used = gpu_usage()
+    return {"at": time.time(), "started_at": now,
+            "driver_alive": driver_alive,
+            "driver_pid": driver_pid, "gpu_vram_used": vram_used,
             "stages": {s["stage"]: s for s in stages}, "order": list(cfg["order"])}
 
 
@@ -272,13 +336,20 @@ def findings(snap, prev, stall_sec, min_cpu_sec):
         if not done:
             out.append(("report", None,
                         "the driver process (pid %s) is gone but the campaign is not "
-                        "finished. Nothing is running. Re-issue `stage.py ... all` to "
+                        "finished. Nothing is running. Re-issue `run.py ... all` to "
                         "resume; completed stages are skipped."
                         % snap["driver_pid"]))
     for name in snap["order"]:
         s = snap["stages"][name]
         if s["status"] == "blocked":
             out.append(("report", name, "reported blocked: %s" % (s["notes"] or "(no note)")))
+        if not s.get("scan_complete", True):
+            out.append(("report", name,
+                        "partial filesystem scan (%s, %d entries inspected); totals and "
+                        "recent writes cover only the inspected subset. Stall evaluation "
+                        "is disabled for this observation."
+                        % (s["scan_reason"], s["scan_entries"])))
+            continue
         if not s["pids"] or s["status"] == "ok":
             continue
         quiet = snap["at"] - s["quiet_since"]
@@ -306,21 +377,27 @@ def render(snap, prev, acts, tick, rows=None):
     for name in snap["order"]:
         s = snap["stages"][name]
         age = ("%s ago" % human_age(snap["at"] - s["newest"])) if s["newest"] else "never"
-        win = ("+%d files, %.0fs CPU" % (s["new_files"], s["cpu_delta"])) if s["pids"] \
-            else ("+%d files" % s["new_files"] if s["new_files"] else "-")
-        L.append("| %s | %s | %d | %s | %s | %s |"
-                 % (name, s["status"], s["files"], human_size(s["bytes"]), age, win))
+        partial = not s.get("scan_complete", True)
+        file_delta = ("file delta unavailable" if s["new_files"] is None else
+                      "%+d files" % s["new_files"])
+        win = ("%s, %.0fs CPU" % (file_delta, s["cpu_delta"])) if s["pids"] else file_delta
+        suffix = " (partial)" if partial else ""
+        L.append("| %s | %s | %s | %s | %s | %s |"
+                 % (name, s["status"], str(s["files"]) + suffix,
+                    human_size(s["bytes"]) + suffix, age + (" (observed)" if partial else ""), win))
     live = [n for n in snap["order"] if snap["stages"][n]["pids"]]
     if live:
         s = snap["stages"][live[0]]
-        L += ["", "Written in the last window (%s):" % live[0]]
+        partial = not s.get("scan_complete", True)
+        L += ["", "Written in the last window (%s%s):" %
+              (live[0], "; inspected subset only" if partial else "")]
         if s["recent"]:
             for mt, rel, size in s["recent"]:
                 L.append("  - `%s` (%s, %s)"
                          % (rel, human_size(size),
                             time.strftime("%H:%M:%S", time.gmtime(mt))))
         else:
-            L.append("  - nothing")
+            L.append("  - none observed in the inspected subset" if partial else "  - nothing")
     # --- What the run has produced so far, not merely that it is alive. Rendered from
     # the same rows as the final REPORT.md, so a reader of a tick and a reader of the
     # finished report are looking at one set of numbers.
@@ -414,7 +491,7 @@ def main(argv=None):
     ap.add_argument("--on-stall", choices=("restart-attempt", "report"), default=None)
     ap.add_argument("--max-interventions", type=int, default=None)
     ap.add_argument("--driver-pid", type=int, default=0,
-                    help="pid of the stage.py that owns this run; 0 means do not check")
+                    help="pid of the run.py that owns this run; 0 means do not check")
     ap.add_argument("--once", action="store_true", help="one tick, then exit")
     args = ap.parse_args(argv)
     args.dry_run = False
@@ -422,6 +499,7 @@ def main(argv=None):
     cfg = stage_mod.load_config(args)
 
     w = stage_mod.report_settings(cfg)
+    limits = scan_settings(cfg)
     if args.interval is None:
         args.interval = int(w.get("interval_sec") or 1800)
     if args.stall_sec is None:
@@ -440,8 +518,11 @@ def main(argv=None):
         "< %.0fs CPU; on stall: %s (max %d/stage)"
         % (args.interval, args.stall_sec, args.min_cpu_sec, args.on_stall,
            args.max_interventions))
+    log("[watch] filesystem scan limits per stage: %d entries / %.3gs; partial scans "
+        "never trigger stall intervention" % (limits["max_entries"], limits["max_seconds"]))
     prev, counts, tick = None, {}, 0
     while True:
+        tick_started = time.monotonic()
         tick += 1
         try:
             prev = tick_once(cfg, prev, args, tick, counts, log)
@@ -452,7 +533,7 @@ def main(argv=None):
         if args.driver_pid and proc_stat(args.driver_pid) is None:
             log("[watch] the driver is gone; one final report was written. Exiting.")
             return 0
-        time.sleep(args.interval)
+        time.sleep(max(0, args.interval - (time.monotonic() - tick_started)))
 
 
 if __name__ == "__main__":

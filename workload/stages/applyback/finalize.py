@@ -27,7 +27,7 @@ Whatever native-validity fields a particular harness exposes are scenario config
 (`params.native_validation`), read here as paths and required values. No harness's field
 names live in this file.
 
-    python3 stages/applyback/finalize.py      # inside the environment stage.py prepares
+    python3 stages/applyback/finalize.py      # inside the environment run.py prepares
 """
 import json
 import math
@@ -36,7 +36,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 THROUGHPUT_KEYS = ("throughput_tok_s_median", "output_token_throughput",
@@ -114,7 +114,7 @@ def check_identity(out, run_root):
 def main():
     out = os.environ.get("OUT")
     if not out:
-        print("run this inside the environment stage.py prepares", file=sys.stderr)
+        print("run this inside the environment run.py prepares", file=sys.stderr)
         return 2
     run_root = os.environ.get("RUN_ROOT") or os.path.dirname(os.path.dirname(out))
     params = read_json(os.environ["PARAMS"]) if os.environ.get("PARAMS") else {}

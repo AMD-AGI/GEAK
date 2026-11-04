@@ -7,7 +7,7 @@ number, the implementation skill ships it (`scripts/fold.py`), and this file she
 it. Swapping in a different roofline implementation only requires that it also provide
 `scripts/fold.py` and `rows.json`; this file does not change.
 
-Usage (inside the environment prepared by stage.py prepare):
+Usage (inside the environment prepared by run.py prepare):
     python3 stages/roofline/finalize.py [--roof-key roofline_us] [--rows rows.json]
 """
 
@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # stages/roofline
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 from task_plan import task_records  # noqa: E402
 
@@ -164,7 +164,7 @@ def main(argv=None):
     inp = os.environ.get("IN")
     skill_root = os.environ.get("SKILL_ROOT")
     if not out or not skill_root:
-        print("OUT/SKILL_ROOT missing; run stage.py prepare roofline first", file=sys.stderr)
+        print("OUT/SKILL_ROOT missing; run run.py prepare roofline first", file=sys.stderr)
         return 2
     params = read_json(os.environ.get("PARAMS", ""), {})
     roof_key = args.roof_key or params.get("roof_key") or "roofline_us"

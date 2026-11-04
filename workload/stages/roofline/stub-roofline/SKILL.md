@@ -12,7 +12,7 @@ directory, a `SKILL.md` (plus `run.sh`), and one line of config — with no regi
 touch. Swap it for `kernel-roofline/` and the other four stages need no edit at all.
 
 ```bash
-python3 workload/scripts/stage.py --config <cfg> --set stages.roofline.skill=stub-roofline run roofline
+python3 workload/run.py --config <cfg> --set stages.roofline.skill=stub-roofline run roofline
 ```
 
 Its artifact conventions match `kernel-roofline` (a `kernels` list in `roofline.json`,

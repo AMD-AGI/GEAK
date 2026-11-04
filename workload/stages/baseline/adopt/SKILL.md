@@ -27,7 +27,7 @@ prevent.
 | `metric`, `unit` | no | recorded as written; default `output_token_throughput` / `tok/s` |
 | `noise_band` | no | keep threshold; default `1.045`, calibrated by measurement rather than quoted |
 | `config` | no | deployment shape (`tp`/`ep`/`gpus`/`concurrency`) when the receipt does not carry it under those names |
-| `model_key`, `image_key` | no | dotted paths to what the receipt says it served; default `model` / `image`. Recorded in provenance, where `scripts/target.py` cross-checks them against the declared target |
+| `model_key`, `image_key` | no | dotted paths to what the receipt says it served; default `model` / `image`. Recorded in provenance, where `core/target.py` cross-checks them against the declared target |
 | `node` | no | which machine the receipt was measured on. An A/B is same-node or it is nothing, so the slot requires this |
 
 **`throughput_key` is named, not guessed.** This step used to try five aliases in turn and
@@ -39,7 +39,7 @@ is then decided here instead of in the scenario config.
 ## Running it
 
 ```bash
-python3 "$WORKLOAD_ROOT/scripts/stage.py" run baseline
+python3 "$WORKLOAD_ROOT/run.py" run baseline
 ```
 
 Or manually: `source $OUT/env.sh && bash $SKILL_ROOT/run.sh`.

@@ -13,7 +13,7 @@ the authority on the delivery.
 Checked here rather than left to the session because an agent that optimized six of ten
 tasks will report on six.
 
-    python3 stages/optimize/finalize.py          # inside the environment stage.py prepares
+    python3 stages/optimize/finalize.py          # inside the environment run.py prepares
 """
 
 import argparse
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)) + "/scripts")
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 

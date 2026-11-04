@@ -6,7 +6,7 @@ kernel boundary, deciding which dispatch branch is one operator, reading a roofl
 saying what it implies. Those are judgement, and the contract (stages/CONTRACT.md §2 B)
 says so by letting a skill ship a `SKILL.md` and no `run.sh`.
 
-Until now that meant a human-attended session: `stage.py run profile` printed "this is an
+Until now that meant a human-attended session: `run.py run profile` printed "this is an
 agent-mode stage" and stopped. The judgement is still the agent's, but *dispatching* it is
 not judgement -- it is the same four steps every time, and the runner contract already
 isolates "start one unattended agent session" from any particular CLI. So this module
@@ -55,8 +55,8 @@ THE CONTRACT (stages/CONTRACT.md), which is the whole of what this stage owes an
   4. Finish by writing $OUT/result.json:
        {"stage": "<stage>", "skill": "<skill>", "status": "ok|blocked|fail",
         "artifacts": {"name": "relative/path"}, "metrics": {...}, "notes": "..."}
-     Use $WORKLOAD_ROOT/scripts/emit_result.py to write it -- it validates the shape and
-     refuses a malformed one.
+     Use $WORKLOAD_ROOT/stages/_shared/emit_result.py to write it -- it validates the
+     shape and refuses a malformed one.
 
 status means exactly this:
   ok      -- the work described in SKILL.md was done and its artifacts are in $OUT.
@@ -187,10 +187,16 @@ def finalize(env, log_cb=print):
     exist is how three of the five slots ended up grading their own work, two of them
     under a different filename. `stages/CONTRACT.md` section 3.1 is the rule; a missing
     one is a defect in the slot, reported here and caught before the run by
-    `stage.py --dry-run`.
+    `run.py --dry-run`.
     """
-    script = os.path.join(env.get("WORKLOAD_ROOT", ""), "stages", env.get("STAGE", ""),
-                          "finalize.py")
+    stages_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "stages")
+    script = os.path.join(stages_root, env.get("STAGE", ""), "finalize.py")
+    # The envelope writer belongs to the stage contract, not to the plumbing, so it lives
+    # with the contract in stages/_shared (stages/CONTRACT.md 3). The dependency points
+    # that way round on purpose: the pipeline implements the contract, and a slot that
+    # reached back up here for a tool would couple a replaceable skill to this file.
+    sys.path.insert(0, os.path.join(stages_root, "_shared"))
     from emit_result import emit, read_json
 
     result_path = os.path.join(env["OUT"], "result.json")
@@ -255,7 +261,7 @@ def dispatch(cfg, lay, env, log_cb=print):
     result_path = os.path.join(out, "result.json")
     deadline = time.time() + budget
     why, repair, recorded = None, None, None
-    # Session numbers survive a new stage.py invocation, so prompts/logs and the
+    # Session numbers survive a new run.py invocation, so prompts/logs and the
     # continuation inventory survive node or controller recovery too.
     offset = max([int(match.group(1)) for name in os.listdir(out)
                   if (match := re.fullmatch(r'agent_prompt\.(\d+)\.txt', name))] or [0])

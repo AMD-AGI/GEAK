@@ -13,6 +13,6 @@ json.dump({"kernels": [{"kernel": "stub_kernel_a", "pct_gpu_time": 10.0,
                        "measurement, and must not be reported"]},
           open(os.path.join(os.environ["OUT"], "roofline.json"), "w"), indent=1)
 PY
-python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok \
+python3 "$WORKLOAD_ROOT/stages/_shared/emit_result.py" --status ok \
   --artifact roofline=roofline.json --metric kernels=2 \
   --notes "stub implementation, used only to demonstrate that the slot is swappable; the numbers are hardcoded and must not be reported."

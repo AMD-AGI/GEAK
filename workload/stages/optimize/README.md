@@ -99,7 +99,7 @@ measurement basis. Retain old credit in cost accounting; compare performance onl
 the matching harness version.
 
 ```
-python3 $WORKLOAD_ROOT/scripts/scheduler.py run \
+python3 $WORKLOAD_ROOT/campaign/scheduler.py run \
     --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> [--gpus-per-task <n>] --target <sec> --backend docker --image <img> \
@@ -136,7 +136,7 @@ scenario config.
 For every task with a `state/<kernel>.status.json`, run it **twice** in a fresh process:
 
 ```
-python3 $WORKLOAD_ROOT/scripts/run_task_entry.py $TASKS_DIR/<kernel>
+python3 $WORKLOAD_ROOT/campaign/run_task_entry.py $TASKS_DIR/<kernel>
 ```
 
 Use the retained source snapshot for that task, with the same frozen harness that scored
@@ -264,14 +264,14 @@ Before trusting any number, two things are worth checking and neither needs code
   task's harness files — a number measured by an edited harness measures the edit;
 * the only sources that changed under `kernel_src/` are the ones `meta.json` declares
   editable (`kernel_extraction.editable_leaves` / `candidate_bind.editable_leaves`).
-  `python3 $WORKLOAD_ROOT/scripts/source_tree.py check-frozen <task> <snapshot>` does the
+  `python3 $WORKLOAD_ROOT/campaign/source_tree.py check-frozen <task> <snapshot>` does the
   first. For the second, `source_tree.py editable <task>` prints the declaration and
   `source_tree.py check <before> <task>/kernel_src --allowed "<those names>"` exits 2
   naming every file it will not accept.
 
 ## The `prompt.sh` interface
 
-An implementation supplies the optimization method and nothing else. `scripts/worker.sh`
+An implementation supplies the optimization method and nothing else. `campaign/worker.sh`
 passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 
 | Variable | Meaning |
@@ -288,8 +288,21 @@ passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 | `ATTEMPT_CAP` | this attempt's second limit (enforced externally) |
 | `PROMPT_OUT` | where to write the prompt |
 
-`measure.sh` is optional and must print `STATUS=<0|1> SPEEDUP=<x>`; without it the worker
-runs the task entry as in step 2.
+`measure.sh` is required. The worker passes `TASK_DIR`, `RUN_DIR`, `MEASURE_TIMEOUT`,
+and `MEASURE_NATIVE_RC_FILE`; the hook prints
+`STATUS=<0|1> SPEEDUP=<x> CLEAN=<x-or-empty> SINGLE=<count>`.
+The three native-task implementations (`geak-kernel-workflow`, `native-frozen`,
+`subagent-raw`) delegate to the single reader in `stages/optimize/measure.sh`.
+That reader runs the frozen task entry and interprets its output; the worker only
+invokes the hook, retains evidence, and consumes those fields. The slot's final
+acceptance criterion remains in `stages/optimize/finalize.py`.
+
+The hook's exit code describes hook execution. A completed native UT with a failing
+verdict is reported through `STATUS=0`; a missing hook or nonzero hook exit stops the
+worker. After a hook invocation, its logs are retained before stopping. A hook may
+write the native process exit code to `MEASURE_NATIVE_RC_FILE` so retention can record
+it separately from the hook exit code. This optional file is transport metadata;
+it neither adds a verdict nor changes the four stdout fields.
 
 `KEEP_THRESHOLD` is the noise gate against the original baseline, not a requirement to
 multiply the current best by that threshold on every iteration. Give the session the

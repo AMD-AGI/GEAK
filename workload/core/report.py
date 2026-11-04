@@ -10,7 +10,7 @@ notes, which every stage must produce) for all five stages, and adds a detail se
 only when a well-known artifact is present. A replacement skill that writes the same
 artifact gets the same section; one that does not still appears in the summary.
 
-It is also the renderer `scripts/watch.py` calls on every tick, so the report an
+It is also the renderer `core/watch.py` calls on every tick, so the report an
 unattended run leaves behind mid-flight is the same document as the one it finishes
 with -- and a campaign that never reaches `applyback` still has a readable one. That is
 why `stage_rows` exists as a function rather than as a loop inside `main`: one mapping

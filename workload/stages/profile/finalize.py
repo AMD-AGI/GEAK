@@ -29,7 +29,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)) + "/scripts")
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 sys.path.insert(0, HERE)
 from emit_result import emit, read_json  # noqa: E402
 from select_candidates import selector_args  # noqa: E402
@@ -54,7 +54,7 @@ def worse(a, b):
 def stage_params(out):
     """What was actually asked of this stage.
 
-    `$PARAMS` is the merged parameter file `stage.py prepare` wrote; `$CONFIG` is the
+    `$PARAMS` is the merged parameter file `run.py prepare` wrote; `$CONFIG` is the
     fallback so this script can be run against a finished `$OUT` from anywhere."""
     params = read_json(os.environ.get("PARAMS") or os.path.join(out, "params.json"),
                        default={})
@@ -320,7 +320,7 @@ def reported_coverage(out):
 def main():
     out = os.environ.get("OUT")
     if not out:
-        print("OUT is not set; run stage.py prepare profile first", file=sys.stderr)
+        print("OUT is not set; run run.py prepare profile first", file=sys.stderr)
         return 2
 
     missing = [f for f in REQUIRED if not os.path.exists(os.path.join(out, f))]

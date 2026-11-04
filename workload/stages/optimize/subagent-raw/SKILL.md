@@ -11,8 +11,8 @@ explicitly asks for: "besides geak, add an option that optimizes with a bare sub
 Its only difference from `geak-kernel-workflow/` is the prompt that `prompt.sh` writes.
 Instead of invoking `kernel_workflow.js`, it hands the agent the loop itself — read the
 code, change it, run `unittest.py`, keep whatever is faster. Scheduling, timing, fault
-tolerance and KEEP/revert reuse exactly the same `scripts/worker.sh` and
-`scripts/scheduler.py`.
+tolerance and KEEP/revert reuse exactly the same `campaign/worker.sh` and
+`campaign/scheduler.py`.
 
 To enable:
 
@@ -20,7 +20,7 @@ To enable:
 
 or without touching the config:
 
-    python3 workload/scripts/stage.py --config <cfg> \
+    python3 workload/run.py --config <cfg> \
         --set stages.optimize.skill=subagent-raw run optimize
 
 ## Why it is kept
@@ -44,5 +44,5 @@ self-test command and the acceptance criteria far more explicitly.
 
 Identical to `geak-kernel-workflow` — which is precisely what makes the comparison
 possible: source lands in `$TASK_DIR/kernel_src/`, results are written by
-`scripts/worker.sh` into `$WORK_ROOT/state/<kernel>.status.json`, and cold re-verification
+`campaign/worker.sh` into `$WORK_ROOT/state/<kernel>.status.json`, and cold re-verification
 and the stage summary are steps 2 and 3 of [the slot's README](../README.md).

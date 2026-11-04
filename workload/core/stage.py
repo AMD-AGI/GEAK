@@ -6,15 +6,15 @@ stage's run environment, and validate the `result.json` the stage hands back bef
 recording it in `STATE.json`. All stage logic lives in `stages/<stage>/<skill>/`; this
 file knows no individual skill. Contract in ../stages/CONTRACT.md.
 
-    stage.py plan                      # resolve and print where all five stages land (= --dry-run)
-    stage.py prepare <stage>           # create OUT, write params.json/env.sh, print the SKILL.md path
-    stage.py run <stage>               # prepare + execute + validate, script or agent mode
-    stage.py all [stage ...]           # every stage in order, unattended; resumes by default
-                                       #   (reports every 30 min via scripts/watch.py;
-                                       #    --no-report opts out)
-    stage.py validate <stage>          # validate $OUT/result.json on its own
-    stage.py status                    # print STATE.json
-    stage.py next                      # print the next pending stage (for resume); empty when done
+    run.py plan              # resolve and print where all five stages land (= --dry-run)
+    run.py prepare <stage>   # create OUT, write params.json/env.sh, print the SKILL.md path
+    run.py run <stage>       # prepare + execute + validate, script or agent mode
+    run.py all [stage ...]   # every stage in order, unattended; resumes by default
+                             #   (reports every 30 min via core/watch.py;
+                             #    --no-report opts out)
+    run.py validate <stage>  # validate $OUT/result.json on its own
+    run.py status            # print STATE.json
+    run.py next              # print the next pending stage (for resume); empty when done
 
 Common arguments:
     --config F        layer in a config, repeatable (default.json is always at the bottom)
@@ -589,7 +589,7 @@ def cmd_all(cfg, args):
     A/B a stack nothing was applied to. The run stops with the reason on screen and in
     STATE.json, and resumes with the same command once the precondition is met.
 
-    It reports while it runs, by default: scripts/watch.py is started alongside and
+    It reports while it runs, by default: core/watch.py is started alongside and
     writes PROGRESS.md, progress.json and a refreshed REPORT.md every half hour. A day
     and a half of unattended GPU time that reports only at the end is how a stage that
     went wrong in its first ten minutes gets to spend the rest of its window going
@@ -641,7 +641,8 @@ def start_reporter(cfg, args):
     rep = report_settings(cfg)
     if getattr(args, "no_report", False) or rep.get("enabled") is False:
         return None
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch.py")
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "watch.py")
     run_root = resolve_path(cfg["run_root"])
     os.makedirs(run_root, exist_ok=True)
     cmd = [sys.executable, script, "--driver-pid", str(os.getpid())]
@@ -763,7 +764,7 @@ def main(argv=None):
     # --no-watch is the previous spelling, kept because the flag appears in launch
     # scripts and in campaign notes; both names set the same dest.
     p.add_argument("--no-report", "--no-watch", dest="no_report", action="store_true",
-                   help="do not report periodically (scripts/watch.py is not started)")
+                   help="do not report periodically (core/watch.py is not started)")
     p.add_argument("--report-interval", type=int, default=None, metavar="SEC",
                    help="seconds between progress reports (default from config: 1800)")
     p = sub.add_parser("validate"); p.add_argument("stage")
