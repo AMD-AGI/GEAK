@@ -19,8 +19,10 @@ class SglangProfileWindowTest(unittest.TestCase):
         self.profile = self.tmp / "profile"
         self.profile.mkdir()
 
-    def _run(self, finishing_ranks: str) -> subprocess.CompletedProcess:
-        """Each rank's export starts truncated; the ranks in ``finishing_ranks`` complete one second later."""
+    def _run(self, finishing_ranks: str, name: str = "123.4-TP-$r-EP-$r") -> subprocess.CompletedProcess:
+        """Each rank's export starts truncated; the ranks in ``finishing_ranks`` complete one second later.
+
+        ``name`` is the trace file stem, with ``$r`` standing for the rank."""
         driver = self.tmp / "driver.sh"
         driver.write_text(f'''#!/usr/bin/env bash
 set -uo pipefail
@@ -30,12 +32,12 @@ curl() {{
   case "$*" in
     *start_profile*)
       for r in 0 1; do
-        printf '{{"traceEvents": [' | gzip | head -c 20 > "$PROFILE_DIR/123.4-TP-$r-EP-$r.trace.json.gz"
+        printf '{{"traceEvents": [' | gzip | head -c 20 > "$PROFILE_DIR/{name}.trace.json.gz"
       done
       ( /bin/sleep 1
         for r in {finishing_ranks}; do
           printf '{{"traceEvents": [{{"cat": "kernel"}}]}}' | gzip > "$PROFILE_DIR/.w$r"
-          mv "$PROFILE_DIR/.w$r" "$PROFILE_DIR/123.4-TP-$r-EP-$r.trace.json.gz"
+          mv "$PROFILE_DIR/.w$r" "$PROFILE_DIR/{name}.trace.json.gz"
         done ) &
       ;;
   esac
@@ -64,6 +66,12 @@ exit $rc
         self.assertEqual(proc.stdout.count("VALID"), 2, proc.stdout)
         for trace in self.profile.glob("*.trace.json.gz"):
             self.assertIn(b"kernel", gzip.decompress(trace.read_bytes()))
+
+    def test_counts_a_trace_named_without_a_tp_rank(self):
+        proc = self._run("0 1", name="rank$r")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.count("VALID"), 2, proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
 
     def test_refuses_a_capture_where_one_rank_never_finishes(self):
         proc = self._run("0")

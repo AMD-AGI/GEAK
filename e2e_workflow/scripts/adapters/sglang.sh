@@ -85,10 +85,12 @@ adapter_bench() {
 _sglang_finalized_ranks() {
   # One line per TP rank whose NEW trace (newer than $1) is a complete gzip stream. A trace file exists
   # from the moment its export starts, so only a stream that passes ``gzip -t`` counts as written.
+  # A name without SGLang's -TP-<n> counts as its own rank: ignoring it would hold every capture
+  # until the hard deadline and then refuse it.
   find "$PROFILE_DIR" -type f -newer "$1" -name '*.trace.json.gz' -print0 2>/dev/null |
     while IFS= read -r -d '' _trace; do
       gzip -t "$_trace" >/dev/null 2>&1 && basename "$_trace"
-    done | sed -nE 's#^.*-(TP-[0-9]+).*$#\1#p' | sort -u
+    done | sed -E 's#^.*-(TP-[0-9]+).*$#\1#' | sort -u
 }
 
 adapter_profile_window() {
@@ -119,7 +121,8 @@ adapter_profile_window() {
       rm -f "$marker"
       return 0
     fi
-    sz=$(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json*' -printf '%s\n' 2>/dev/null | sort -rn | head -1)
+    sz=$(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json*' -printf '%s\n' 2>/dev/null |
+      awk '{ s += $1 } END { if (NR) printf "%.0f\n", s }')
     if [ -n "$sz" ] && [ "$sz" != "$last_sz" ]; then
       last_sz="$sz"; quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
     fi
