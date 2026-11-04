@@ -703,7 +703,7 @@ const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', event
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
 // Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
 // Returns the event so the caller flips `ok` once the attempt resolves (null when off).
-function tlAgent(prompt, o, attempt) {
+function tlAgent(prompt, o, attempt, dispatchId) {
   if (!LLM_STATS) return null;
   const m = TL_ROLE_RE.exec(String(prompt || ''));
   const e = {
@@ -715,6 +715,13 @@ function tlAgent(prompt, o, attempt) {
     attempt: attempt,
     ok: false,
   };
+  // NIT (Astra re-review #6): thread the router's host dispatch id into the timeline event so the
+  // abort receipt_ref (keyed on dispatch_id) is reachable END-TO-END — a post-mortem can match
+  // commit_failure.receipt_ref.dispatch_id to THIS event's dispatch_id in the persisted agent_timeline/
+  // ledger geak_report.py renders, closing "reachable by dispatch id". Set ONLY when a routed dispatch id
+  // is present: a non-routed call (routing=false, or a router's own carrier) passes none, so the event
+  // stays BYTE-IDENTICAL to before — routing-off timeline parity preserved; __routeReduce untouched.
+  if (dispatchId != null) e.dispatch_id = dispatchId;
   LLM_TL.events.push(e);
   return e;
 }
@@ -1764,7 +1771,11 @@ async function agentT(p, o, route) {
     o = Object.assign({}, o, { model: pick.model });
     try { log(`  [route] ${(o && o.label) || 'agent'} @${(o && o.phase) || ''} -> ${pick.model}`); } catch (e) {}
   }
-  const r = await agentTCore(p, o);
+  // eikos v2 E1 (Astra re-review #6 — NIT): thread the host dispatch id the router just issued (the SAME
+  // id written to `route.dispatch_id` above, and the one the abort `receipt_ref` keys on) into the agent
+  // timeline event, so the commit's execution evidence is reachable BY DISPATCH ID end-to-end. Routed
+  // calls only; routing=false never reaches here (it returned agentTCore(p, o) above with no id).
+  const r = await agentTCore(p, o, pick.dispatch_id || null);
   // An engineer's cycle is judged by the oracle after verify (see the Optimize round), not here. For
   // every other worker the one deterministic failure visible at this layer is no result at all.
   if (pick.scope && !/^(eng|deep):/.test(pick.scope) && r == null) {
@@ -1775,10 +1786,16 @@ async function agentT(p, o, route) {
 }
 
 async function agentTCore(p, o) {
+  // eikos v2 E1 (Astra re-review #6 — NIT): the router's host dispatch id is threaded as an OPTIONAL 3rd
+  // argument and read via `arguments` so this function's declared signature stays two-arg — the in-repo
+  // routing test (scripts/test_eikos_route.js) slices the agentT region using this function's two-arg
+  // declaration as its end sentinel, so a signature change would break that slice. null/absent when
+  // non-routed (routing=false calls it with no id), so the recorded timeline event stays byte-identical.
+  const dispatchId = arguments.length > 2 ? arguments[2] : null;
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
-    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
+    const ev = tlAgent(p, o, attempt, dispatchId);   // record AT DISPATCH; ok=false until it resolves (dispatch id threaded for receipt-by-id — Astra re-review #6)
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
         const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
