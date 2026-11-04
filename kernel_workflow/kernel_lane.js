@@ -1,6 +1,6 @@
 export const meta = {
   name: 'kernel-lane',
-  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series GPUs (MI300X/300A/308X/325X on CDNA3 gfx942, MI350X/355X on CDNA4 gfx950 — the target card is auto-detected on-box).',
+  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target.',
   whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
@@ -39,6 +39,16 @@ if (!WORKFLOW_DIR) {
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 const KERNEL_PATH_ORIG = A.kernel_path;
+const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
+const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
+const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
+const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
+}
+if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
+  throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -146,18 +156,22 @@ const primSpeedup = (o) => {
 // answers "PASS - 15/15 draws" and a `=== 'pass'` test silently drops a genuinely verified candidate.
 // Match the leading word instead: "PASS - ..." / "passed" gate open, "FAIL"/"did not pass" stay shut.
 const says = (v, w) => String(v == null ? '' : v).trim().toLowerCase().startsWith(w);
-const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
+let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
 // priors only: a matched `validated` skill is a HIGH-PRIOR author/optimize candidate the planning/author
 // roles reproduce, then gate by the isolated A/B vs the oracle — it NEVER overrides measurement. Default
 // OFF (opt-in: pass use_expert_skills="true"). When OFF (the default) NOTHING is injected -> byte-identical
 // to a build without this feature. When invoked by the e2e layer the flag + dir are passed down.
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS_REQUESTED = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+let USE_EXPERT_SKILLS = USE_EXPERT_SKILLS_REQUESTED;
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
+// Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
+let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201';
 
 // --- Deep Research Agent (DRA) -------------------------------------------------------------------
 // OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
@@ -203,7 +217,7 @@ const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
 // before the run was stopped. A parse test cannot catch that: the file compiles, and the reference
 // only resolves when the line runs. Default ON, matching this branch's design where the tech_lead
 // role reads INDEX.md unconditionally; `use_learned_kb=false` turns the budget block off with it.
-const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
+let USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
 const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
 const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
@@ -224,7 +238,13 @@ const FROZEN_ORACLE = String(A.frozen_oracle != null ? A.frozen_oracle : 'false'
 //   return_after_read | adopt then RETURN before the optimize loop.
 //   off/false/none, a STATE_DIR resume, or no arch => cold start (byte-identical to pre-feature).
 const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
-const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+let WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+if (SKILLS_ISOLATE) {
+  KERNEL_KNOWLEDGE_DIR = '';
+  USE_LEARNED_READ = false;
+  WARM_START_ON = false;
+  USE_EXPERT_SKILLS = false;
+}
 const WARM_START_REF_ONLY = WARM_START === 'reference';
 const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
@@ -364,7 +384,12 @@ const obj = (props, required) => ({ type: 'object', properties: props, required:
 
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
-  kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
+  kernel_name: { type: 'string' },
+  device_gfx: { type: 'string' },
+  device_target: { type: 'string' },
+  device_name: { type: 'string' },
+  physical_cu_count: { type: 'number' },
+  source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
   // the real online kernel — the immutable baseline_src/ dir OR an importable meta.baseline_callable —
   // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
@@ -379,7 +404,7 @@ const SETUP_SCHEMA = obj({
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
   }, []),
-}, ['eval_dir', 'workspace', 'kernel_name']);
+}, ['eval_dir', 'workspace', 'kernel_name', 'device_gfx', 'device_target', 'physical_cu_count']);
 
 const AUTHOR_SCHEMA = obj({
   authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },
@@ -509,8 +534,9 @@ const ENG_SCHEMA = obj({
   // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
   speedup_weighted: { type: 'number' },
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
+  measurement_valid: { type: 'boolean' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
-}, ['status', 'speedup_geomean']);
+}, ['status', 'speedup_geomean', 'measurement_valid']);
 
 const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' },
@@ -646,11 +672,58 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
+// agent instead of getting an agent of their own. In the historical Qwen3 run the
+// storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
+// 152 calls across 8 agents ($13.90), because every one of them paid the full
+// bootstrap floor and then held a conversation. Folding removes the dispatch; the
+// command still runs, verbatim, as the next agent's first action.
+const ABLATION_ARM = String(A.ablation_arm || '').trim().toUpperCase();
+const ABL_B6 = ABLATION_ARM === 'B6';
+const ABL_PENDING = [];
+const ABL_DRAINED = [];
+function ablDrainPrelude() {
+  if (!ABL_PENDING.length) return '';
+  const cmds = ABL_PENDING.splice(0, ABL_PENDING.length);
+  for (const c of cmds) ABL_DRAINED.push(c);
+  return '## FIRST, run these registered maintenance commands EXACTLY as written, then continue with your task.\n' +
+    cmds.map((c) => '```bash\n' + c + '\n```').join('\n') + '\n\n';
+}
+
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -659,10 +732,12 @@ async function agentT(p, o) {
         }, AGENT_TIMEOUT_MS);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      if (ev && r) ev.ok = true;
+      return r;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
@@ -756,13 +831,64 @@ const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
-    MODE, TARGET_LANGUAGE, OP_SPEC,
+    MODE, TARGET_LANGUAGE, OP_SPEC, EXPECTED_GFX, EXPECTED_TARGET,
+    EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
+const GFX = String(setup.device_gfx || '').trim().toLowerCase();
+const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
+const SETUP_DEVICE_NAME = String(setup.device_name || '').trim();
+const SETUP_PHYSICAL_CU_COUNT = Number(setup.physical_cu_count);
+if (!GFX) {
+  throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
+}
+if (!DEVICE_TARGET) {
+  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | unknown)');
+}
+if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
+  throw new Error('Setup failed: director did not return a positive physical_cu_count');
+}
+if (GFX === 'gfx1200') {
+  throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+}
+if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
+  throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${GFX || 'unknown'}`);
+}
+if (EXPECTED_TARGET && DEVICE_TARGET !== EXPECTED_TARGET) {
+  throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DEVICE_TARGET || 'unknown'}`);
+}
+const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+if (EXPECTED_DEVICE_NAME &&
+    normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)) {
+  log(`Setup identity telemetry differs from the deterministic probe: device_name expected ` +
+      `${EXPECTED_DEVICE_NAME}, Director returned ${SETUP_DEVICE_NAME || 'unknown'}; using expected value.`);
+}
+if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
+    SETUP_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
+  log(`Setup identity telemetry differs from the deterministic probe: physical_cu_count expected ` +
+      `${EXPECTED_PHYSICAL_CU_COUNT}, Director returned ${SETUP_PHYSICAL_CU_COUNT}; using expected value.`);
+}
+const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
+const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
+  ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
+// Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
+const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
+  ? `calibrated-${DEVICE_TARGET}`
+  : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
+const RDNA4_ISOLATE = GFX === 'gfx1201';
+if (RDNA4_ISOLATE) {
+  // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
+  // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
+  USE_EXPERT_SKILLS = false;
+  KERNEL_KNOWLEDGE_DIR = '';
+  USE_LEARNED_READ = false;
+  WARM_START_ON = false;
+}
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
 // side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
@@ -832,7 +958,7 @@ phase('Analyze');
 const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
-    KERNEL_KNOWLEDGE_DIR,
+    KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
@@ -870,7 +996,7 @@ phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
-    COMMANDMENT,
+    COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
@@ -1000,7 +1126,6 @@ if (setup.resumed && setup.prior_state) {
 // measurement through the verify gate here. gfx comes from the baseline profile's
 // on-box `device` string (no extra probe).
 // ===========================================================================
-const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
 // One benched candidate -> one of kb/attest.py's four outcomes. `inapplicable` is a verdict on the
 // PAIRING, excluded from the retire arithmetic — both "this workspace lacks those files" and "it
 // won but could not be committed here" belong there. A patch that ran and gave a WRONG ANSWER is
@@ -1246,6 +1371,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
   }
 }
 
+let plannerStopReason = '';
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -1269,6 +1395,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+    GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
     // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
     // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
@@ -1328,8 +1455,25 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     left = await secondsLeft(`replan-r${round}`);
   }
 
+  if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
+    const before = plan.directions.length;
+    plan.directions = plan.directions.filter((d) =>
+      !/roofline|peak\s*(?:flops|bandwidth)|%\s*of\s*peak/i.test(
+        `${d && d.title || ''} ${d && d.prompt || ''} ${d && d.why || ''}`));
+    if (plan.directions.length !== before) {
+      log(`Round ${round}: removed ${before - plan.directions.length} direction(s) that relied on unknown peaks.`);
+    }
+    if (before > 0 && plan.directions.length === 0) {
+      plannerStopReason = 'all_directions_filtered_unknown_peaks';
+    }
+  }
+
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
+    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+      log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
+    } else {
+      log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
+    }
     break;
   }
 
@@ -1398,6 +1542,7 @@ ${cfg({
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
+        GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
         ...KB_INPUTS,
       })}
 
@@ -1423,7 +1568,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
       // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
       // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR);
+      // An invalid/missing source verdict must reach Verify, even after an empty-patch return.
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -1433,6 +1580,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
           EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
@@ -1629,6 +1777,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
     ` fi` +
     `; echo STORAGE_RECLAIM_DONE round=${round}`;
+  if (ABL_B6) {
+    ABL_PENDING.push(reclaimCmd);
+    log(`  [B6] storage reclaim r${round} folded into the next agent — no dedicated dispatch.`);
+  } else
   await agentT(
     `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
     `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
@@ -1707,8 +1859,11 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimar
         'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
           SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
+          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
           WINNER: {
             kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
+            device_target: DEVICE_TARGET, physical_cu_count: PHYSICAL_CU_COUNT,
             kernel_class: (analysis && analysis.kernel_type) || '',
             speedup: finalPrimary, validation_status: validation ? validation.validation_status : '',
             bottleneck: profileSummary ? profileSummary.bottleneck : '',
@@ -1855,6 +2010,9 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
 
 return {
   mode: MODE,
+  // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
+  // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.
+  llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
@@ -1884,7 +2042,7 @@ return {
   stopped_by: deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
-    : 'tech_lead_stop',
+    : (plannerStopReason || 'tech_lead_stop'),
   deadline_hit: deadlineHit,
   forced_replans: forcedReplans,
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was

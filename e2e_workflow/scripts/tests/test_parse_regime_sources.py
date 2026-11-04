@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -230,6 +231,14 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
         self.assertEqual(got["quant"]["method"], "awq")
         self.assertEqual(got["quant"]["source"], "flag")
 
+    def test_quant_flag_reports_conflicting_fp8_model_config(self):
+        cfg = self._write(json.dumps(
+            {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}),
+            suffix=".json")
+        got = pr.parse_regime("--quantization awq", model_config_path=cfg)
+        self.assertEqual(got["quant"]["method"], "awq")
+        self.assertIn("model config says fp8", got["notes"])
+
     def test_model_config_used_when_no_quant_flag(self):
         cfg = self._write(json.dumps(
             {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}),
@@ -243,13 +252,104 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
         got = pr.parse_regime("", backend="vllm")
         self.assertEqual(got["compile"], "torch_compile")
         self.assertFalse(got["enforce_eager"])
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "fallback_inference")
         self.assertIn("compiles the backbone by default", got["notes"])
+
+    def test_atom_compiles_by_default_at_level_three(self):
+        got = pr.parse_regime("", backend="atom")
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "fallback_inference")
+        self.assertEqual(got["diagnostics"], [])
+        self.assertIn("ATOM compile level 3", got["notes"])
+
+    def test_atom_level_zero_is_eager(self):
+        got = pr.parse_regime("--level 0", backend="atom")
+        self.assertEqual(got["compile"], "eager")
+        self.assertEqual(got["regime_source"]["compile"], "flags")
+
+    def test_atom_invalid_level_falls_back_to_compile_default(self):
+        got = pr.parse_regime("--level auto", backend="atom")
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertIn("level was unreadable", got["notes"])
+
+    def test_unrelated_server_log_does_not_override_atom_defaults(self):
+        log = self._write("loading /opt/atom/compile_helpers.py\n")
+        state, diagnostic = pr._read_server_log_state(log)
+        self.assertEqual(state, {})
+        self.assertIn("no parseable CompilationConfig", diagnostic)
+        got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "fallback_inference")
+        self.assertIn("no parseable CompilationConfig", got["diagnostics"][0])
+        self.assertIn("no parseable CompilationConfig", got["notes"])
+
+    def test_missing_atom_server_log_reports_fallback(self):
+        missing = os.path.join(tempfile.gettempdir(), "missing-atom-server.log")
+        try:
+            os.unlink(missing)
+        except FileNotFoundError:
+            pass
+        got = pr.parse_regime("--level 0", backend="atom", server_log=missing)
+        self.assertEqual(got["regime_source"]["compile"], "flags")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "fallback_inference")
+        self.assertIn("server log does not exist", got["diagnostics"][0])
+
+    def test_server_log_diagnostics_are_atom_only(self):
+        got = pr.parse_regime(
+            "", backend="vllm", server_log="/nonexistent/not-an-atom-server.log")
+        self.assertEqual(got["diagnostics"], [])
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+
+    def test_unreadable_atom_server_log_reports_fallback(self):
+        log = self._write("CompilationConfig(level=0, use_cudagraph=False)\n")
+        with mock.patch("builtins.open", side_effect=PermissionError("permission denied")):
+            got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertIn("could not read server log", got["diagnostics"][0])
+        self.assertIn("permission denied", got["diagnostics"][0])
+
+    def test_atom_server_log_with_unknown_config_fields_reports_fallback(self):
+        log = self._write("CompilationConfig(custom_backend=True)\n")
+        got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["regime_source"]["compile"], "fallback_inference")
+        self.assertIn("no recognized fields", got["diagnostics"][0])
+
+    def test_atom_live_compilation_config_overrides_flags(self):
+        log = self._write(
+            "Engine kwargs: compilation_config=CompilationConfig("
+            "level=3, use_cudagraph=True, use_inductor=True)\n"
+        )
+        got = pr.parse_regime("--level 0", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
+        self.assertEqual(got["regime_source"]["compile"], "live_log")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "live_log")
+        self.assertEqual(got["diagnostics"], [])
+        self.assertIn("server log CompilationConfig overrides", got["notes"])
+
+    def test_atom_live_eager_config_overrides_default(self):
+        log = self._write(
+            "CompilationConfig(level=0, use_cudagraph=False, use_inductor=False)\n"
+        )
+        got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "eager")
+        self.assertFalse(got["cuda_graph"])
+        self.assertEqual(got["regime_source"]["compile"], "live_log")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "live_log")
 
     def test_enforce_eager_makes_eager_the_faithful_baseline(self):
         got = pr.parse_regime("--enforce-eager", backend="vllm")
         self.assertTrue(got["enforce_eager"])
         self.assertEqual(got["compile"], "eager")
         self.assertFalse(got["cuda_graph"])
+        self.assertEqual(got["regime_source"]["compile"], "flags")
+        self.assertEqual(got["regime_source"]["cuda_graph"], "flags")
 
     def test_bare_attention_backend_flag_is_empty_string(self):
         # `--attention-backend` with no value tokenizes to True; the descriptor must carry '' not True.
@@ -302,8 +402,20 @@ class TestMain(_TmpFileMixin, unittest.TestCase):
         self.assertEqual(
             set(regime),
             {"backend", "quant", "kv_cache_dtype", "compile", "enforce_eager",
-             "cuda_graph", "attention_backend", "prefill_chunk", "notes"},
+             "cuda_graph", "regime_source", "diagnostics", "attention_backend",
+             "prefill_chunk", "notes"},
         )
+
+    def test_missing_atom_server_log_warns_on_stderr(self):
+        missing = os.path.join(tempfile.gettempdir(), "missing-atom-cli-server.log")
+        try:
+            os.unlink(missing)
+        except FileNotFoundError:
+            pass
+        out, err = self._run("--backend", "atom", "--server-log", missing)
+        self.assertIn("warning: ATOM live configuration unavailable", err)
+        self.assertIn("server log does not exist", err)
+        self.assertIn("server log does not exist", json.loads(out)["diagnostics"][0])
 
     def test_out_file_matches_stdout(self):
         path = self._write("", suffix=".json")

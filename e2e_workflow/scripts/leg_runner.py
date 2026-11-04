@@ -93,6 +93,7 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--draws", type=int, default=0)
+    ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
     a = ap.parse_args()
 
     task = os.path.abspath(a.task)
@@ -100,8 +101,10 @@ def main():
         meta = json.load(fh)
 
     if a.mode == "resolve":
-        print(json.dumps(_identity(meta["target_callable"])))
+        print(json.dumps(_identity(a.target_callable or meta["target_callable"])))
         return
+    if a.target_callable:
+        ap.error("--target-callable is only valid with --mode resolve")
 
     h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
     cases = _load("cases", os.path.join(task, "cases.py"))
@@ -112,18 +115,36 @@ def main():
         return
 
     call = cases.call
-    if h.deployment_compile_mode(regime):
+    if meta.get("phase_regimes") is None and h.deployment_compile_mode(regime):
         call = h.compiled_op(call, regime)
     graph = h.deployment_graph_mode(regime)
+
+    def case_execution(case):
+        phase_regimes = meta.get("phase_regimes")
+        if phase_regimes is None:
+            return call, graph
+        phase = case.get("regime", "")
+        if not isinstance(phase_regimes, dict) or not isinstance(phase_regimes.get(phase), dict):
+            raise ValueError(f"missing phase_regimes entry for {phase!r}")
+        phase_regime = phase_regimes[phase]
+        phase_call = cases.call
+        if h.deployment_compile_mode(phase_regime):
+            phase_call = h.compiled_op(phase_call, phase_regime)
+        return phase_call, h.deployment_graph_mode(phase_regime)
 
     if a.mode == "time":
         sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
         out = []
         for c in sel:
-            r = h.time_op(lambda c=c: call(c["args"]), graph=graph, detail=True)
+            case_call, case_graph = case_execution(c)
+            r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True)
             out.append({"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
                         "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
-                        "timer": (r or {}).get("timer")})
+                        "timer": (r or {}).get("timer"),
+                        # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
+                        # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
+                        # see harness_lib.cache_policy), so the two must never be folded together.
+                        "cache_condition": (r or {}).get("cache_condition")})
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
         return
 
@@ -132,9 +153,10 @@ def main():
     draws = a.draws or int(meta.get("random_draws", 3))
     blob = {}
     for shape in cases.random_shapes(h, meta):
+        case_call, _ = case_execution(shape)
         for i in range(max(1, draws)):
             rng = torch.Generator(device=device).manual_seed(int(a.seed) + i)
-            out = call(shape["make_inputs"](rng))
+            out = case_call(shape["make_inputs"](rng))
             blob[f"{shape['sig']}|{i}"] = _snapshot(out)
     torch.save(blob, a.out)
     print(json.dumps({"out": a.out, "n": len(blob)}))

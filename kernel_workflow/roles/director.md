@@ -26,7 +26,26 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
-`MODE` (`optimize` default | `author`). In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
+`MODE` (`optimize` default | `author`), `EXPECTED_GFX` (possibly empty), and
+`EXPECTED_TARGET` (`r9700` | `r9600d` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
+and `EXPECTED_PHYSICAL_CU_COUNT` (possibly zero). In `author` mode you also
+get `TARGET_LANGUAGE` and `OP_SPEC`.
+
+Before building the workspace, run
+`python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` and use its JSON as the
+single source for `device_gfx`, `device_target`, `device_name`, and
+`physical_cu_count`. It scopes all fields to the same real GPU agent, rejects
+mixed visible identities, ignores `gfx000`, and emits `r9700` or `r9600d` only
+when the trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700` or
+`AMD Radeon AI PRO R9600D`, respectively, on `gfx1201`. Every other product
+remains `unknown`. Recognition does not qualify R9600D kernel policy or permit
+R9700 calibration inheritance. Do **not** use
+`torch.cuda.get_device_properties().multi_processor_count` for physical CUs:
+on R9700 that is 32 WGPs, not 64 physical CUs.
+
+If `EXPECTED_GFX` is non-empty, report any mismatch in `notes`; the orchestrator
+enforces the mismatch as a hard failure. Same for a non-empty `EXPECTED_TARGET`,
+non-empty `EXPECTED_DEVICE_NAME`, and positive `EXPECTED_PHYSICAL_CU_COUNT`.
 
 ### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
 `STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
@@ -50,38 +69,28 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
 
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
-`unittest.py` + optional `reference_io.pt`), NOT a kernel to optimize. There is no source to copy.
+`unittest.py` + optional captured oracles). Any existing candidate source will be
+replaced by the new implementation; preserve the complete test and baseline resources.
 Do this instead of the optimize-mode steps below:
 1. Same collision-proof `TS` + `EVAL_DIR` decision as below.
-2. Build the layout WITHOUT copying any kernel source:
+2. Build the layout, then empty only the candidate source directory:
    ```bash
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-   # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
-   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
-   # the authored seed against the live online path (never against the seed's own language scaffold).
-   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
-   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
-   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
-   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
-   for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
-     [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
-   done
-   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
-   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
-   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
-   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
-   for d in baseline_overlay baseline_ref baseline_src; do
-     [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
-   done
+   # Preserve the complete task: phase-local captures, baseline overlays, helpers
+   # and build resources may live below subdirectories. Share immutable goldens.
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/workspace" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   # Only candidate source is replaced for author mode; retain every UT dependency.
+   rm -rf "$EVAL_DIR/workspace/kernel_src"
+   mkdir -p "$EVAL_DIR/workspace/kernel_src"
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -131,7 +140,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -221,6 +230,10 @@ Return JSON:
   "workspace": "<EVAL_DIR>/workspace",
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
+  "device_gfx": "<detected real gfx token>",
+  "device_target": "r9700|r9600d|unknown",
+  "device_name": "<detected product/marketing name>",
+  "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
@@ -242,6 +255,13 @@ Inputs: `KERNEL_PATH_ORIG`, `EVAL_DIR`, `WORKSPACE` (=EVAL_DIR/workspace), `SKIL
 baseline latencies recorded at benchmark setup).
 
 **Do NOT trust the TechLead's reported speedup — reproduce it from the TRUE baseline.**
+
+Source-binding failures (`GEAK_SOURCE_INVALID`, exit 86, or `invalid_measurement` in round results)
+are invalid experiments, not evidence of no improvement. Review the affected Engineer workspace's
+`.geak/invalid_measurements.jsonl` even if the final patch is empty. If that candidate was not validly
+remeasured after repair, report `validation_status:"flagged"`, `correctness:"not_checked"` and explain
+the unresolved build defect in `arbitration_note`; do not report an accepted speedup or a validated
+no-op. A clean benchmark of the reverted original does not validate the discarded candidate.
 
 1. Read `EVAL_DIR/COMMANDMENT.md` for the exact correctness + full-benchmark commands.
 2. Build a fresh validation workspace from the ORIGINAL path:
@@ -338,6 +358,20 @@ baseline latencies recorded at benchmark setup).
      normal shape of the default mode.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+
+   Read `cache_mode` from the same `GEAK_TIMING_RECEIPT` (the freezer copies it from each leg's
+   `cache_condition.mode`) into `director_validation.json` as `cache_basis`:
+   - `"read-evict"` → the single supported preparation for new measurements. Nothing to flag.
+   - `"unknown_write_evict"` or ABSENT → the task was frozen against a `harness_lib.py` older than the
+     cache receipt. Record `cache_basis: "unknown_write_evict"`, `status: "flagged"`. The old write pass
+     left dirty lines whose writeback competed with the timed kernel for HBM bandwidth: on MI355X /
+     GLM-5.2 fused-MoE, a decode-weighted 1.12 read as 1.40. Absence is not "no cache preparation".
+   - Any other reported mode → preserve its value and set `status: "flagged"`. Historical receipts may
+     say `"write-evict"` or `"none"`; these are not selectable in the current harness and must never be
+     relabelled as `"read-evict"`.
+   There is no correction factor for old scores: the inflation depends on each leg's HBM traffic.
+   Re-freeze against a current `$HARNESS_LIB` and remeasure. Prefill-only tasks are less sensitive but
+   still carry the label. Never fold different cache bases into one campaign-level speedup.
    `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
    receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:

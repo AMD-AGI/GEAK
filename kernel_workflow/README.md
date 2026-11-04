@@ -3,7 +3,10 @@
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
-CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950 — the card is detected on-box, not assumed). The
+CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950) **and the validated Radeon AI PRO R9700
+product on gfx1201**.
+The card is detected on-box (`rocminfo`), not assumed. On gfx1201, agents must follow `knowledge/amd_rdna4.md`
+(wave32, WMMA) rather than Instinct MFMA/wave64 tables. The
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
 
@@ -241,6 +244,7 @@ advisory, never a hard fail. Cost ≈ N languages × one single-lane run.
 ```
 Workflow({ scriptPath: "<WF_DIR>/kernel_workflow.js", args: {
   kernel_path: "/abs/path/to/my_hip_kernel", workflow_dir: "<WF_DIR>",
+  expected_gfx: "gfx1201", expected_target: "r9700", // optional pin; Freeze detects before Discover
   mode: "bakeoff", backends: ["hip","triton","flydsl"], gpu_ids: "0,1,2", budget: 6,
 }})
 ```
@@ -284,7 +288,8 @@ roles/               director, tech_lead, engineer, deep_engineer (deep_explore)
                      update_experience (learned-card curation, every run),
                      researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
-                     amd_instinct (multi-card: gfx942/gfx950), self_monitoring, geomean_levers
+                     amd_instinct (CDNA gfx942/gfx950), amd_rdna4 (RDNA4 gfx1201),
+                     self_monitoring, geomean_levers
 knowledge/learned/   distilled experience cards (ADVISORY priors; each card self-describing via its
                      discovery header, INDEX.md GENERATED from them; written by the
                      TechLead update_experience step at the end of EVERY run). This sink is

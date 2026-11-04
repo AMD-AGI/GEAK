@@ -8,14 +8,17 @@
   <a href="https://rocm.docs.amd.com/projects/geak/en/latest/"><b>📚 Documentation</b></a>
 </p>
 
-GEAK is an autonomous optimization agent that makes AMD Instinct GPUs run faster, automatically. Built as a
+GEAK is an autonomous optimization agent that makes AMD GPUs run faster, automatically. Built as a
 multi-agent system with an evolving knowledge base, it learns from every optimization run and continuously
 improves its strategies over time. Point it at a single kernel or a live model-serving stack such as vLLM or
 sglang, and GEAK runs the full optimization loop: it finds the bottlenecks, generates and tunes better kernels
 across paths such as Triton, FlyDSL, TileLang, and HIP, and validates the speedup on the real system. What
 normally takes weeks of expert kernel engineering becomes an automated, repeatable, and self-improving process.
 
-GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), driven by
+GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), and also runs
+on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the validated RDNA4 product Radeon AI PRO R9700
+(gfx1201). gfx1201 is an ISA shared by other products; it does not by itself select R9700 images,
+calibrated peaks, or serving policy. It is driven by
 Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
@@ -41,9 +44,9 @@ optimize a single kernel.
 
 ### 1. Prerequisites
 
-- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
-  `rocprofv3` / `rocprof`), Python 3.8+.
-- For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
+- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or a **Radeon AI PRO R9700** (validated RDNA4/gfx1201 product), **ROCm 6+**, a profiler (`rocprof-compute` /
+  `rocprofv3` / `rocprof`; RDNA4 PMCs may be sparse — kernel-trace still counts), Python 3.8+.
+- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 is vLLM-only) and the model weights on disk.
 
 > **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
 > need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
@@ -130,6 +133,31 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 **Output** lands under `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`,
 `architect_report.md`, `final/` (overlay + patch + `final_launch.sh`), and per-stage artifacts.
 
+### Example — AgentX trace replay
+
+`ISL/OSL=…` above describes a synthetic sweep, where every request has the same shape. An AgentX
+submission instead replays a recorded corpus: the client owns the request mix and the duration. A
+standalone run is graded on **InferenceX P90 interactivity** (`1000 / P90(ITL)` in tok/s/user, the
+x-axis of the InferenceX pareto), with total tok/s reported beside it as a guard. Say so, and the
+workflow configures the whole run for it:
+
+```
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Kimi-K3 on vllm, gpus 0-7 tp=8,
+workload_kind=agentx_trace_replay (the canonical AgentX corpus, graded on InferenceX P90 interactivity).
+isl/osl 114000/819 are the average shape to OPTIMIZE for, not a benchmark to reproduce.
+```
+
+Check the box before starting — every AgentX prerequisite is otherwise invisible until a server has
+already been launched and warmed:
+
+```bash
+MODEL=/models/Kimi-K3 bash e2e_workflow/scripts/agentx_smoke.sh
+```
+
+See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#standalone-agentx-trace-replay-no-orchestrator)
+for the full arg spelling, what the declaration changes, and the two things that surprise people
+(`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
+
 ---
 
 ## kernel_workflow — single kernel
@@ -176,7 +204,7 @@ optimization). This makes runs reliable and reproducible.
 GEAK/
 ├── e2e_workflow/        # ⭐ End-to-end LLM serving-throughput optimizer (wraps kernel_workflow/)
 │   ├── e2e_workflow.js   # system-layer orchestration (config / head-GEMM / kernel tracks + e2e gate)
-│   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm}.sh, op_bench.py, parse_profile.py, …
+│   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm,atom}.sh, op_bench.py, parse_profile.py, …
 │   └── README.md / PLAN.md
 ├── kernel_workflow/     # Single-kernel optimizer
 │   ├── kernel_workflow.js       # deterministic JS orchestration

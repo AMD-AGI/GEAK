@@ -179,24 +179,29 @@ changes that alter Gluon JIT / layout / lowering or flip tuned config choices
 record enough environment information to reproduce the selected path
 (`benchmark-hygiene.md`).
 
-## RDNA4 client PMC availability (gfx1201 / R9700 / RX9070)
+## RDNA4 client PMC availability (gfx1201 ISA; observed on R9700)
 
 **Observed on R9700 (gfx1201):** `rocprofv3 --kernel-trace` reliably captures dispatches
 (count > 0), but the **PMC counter path differs from CDNA** — the available counter set
 and counter naming/semantics on RDNA4 client parts are not the same as on Instinct
 (CDNA), and client-GPU PMC profiling is less complete. CDNA counter names
 (`SQ_WAVES` / `VALUInsts` / the `MfmaUtil` / `VALUBusy` family) may be absent or differ.
+The ISA caveat may apply to other gfx1201 products, but GEAK's calibrated
+product policy and evidence remain R9700-only.
 
 Decision rule (per-box preflight):
-- Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3 --list-counters` and
-  confirm the specific counters you need actually exist on this device.
+- Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3-avail list --pmc` and
+  confirm the specific counters you need actually exist on this device. For
+  rocprofv3 itself, use `rocprofv3 -L` / `--list-avail`; older profiler
+  generations used `--list-basic`, `--list-derived`, or `--list-counters`.
+  Treat this as a CLI rename, not an R9700-image defect.
 - If the discriminating counters are unavailable, do **not** fabricate them — fall back to
   the no-profiler evidence path: analytical roofline (`hardware/roofline-models.md`) +
   static `.amdgcn`/`.s` audit (`../scripts/asm_loop_audit.py`) + floor probe + A/B timing
   at the production boundary (`phases/profile.md ## Profiler-capability preflight`).
 
 > Scope: seen on R9700/gfx1201; the exact available counter set is device+ROCm-version
-> dependent — always `--list-counters` on the actual box.
+> dependent — always query `rocprofv3-avail` on the actual box.
 
 ## `int64_strides=false` regression on gfx1201 under CUDA graph
 

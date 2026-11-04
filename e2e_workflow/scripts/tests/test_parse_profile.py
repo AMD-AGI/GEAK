@@ -89,7 +89,7 @@ def _shared_impl(func):
 # window [300,350), cpu_ops carrying the shapes, and kernel launches placed
 # both inside and outside those windows.
 # --------------------------------------------------------------------------- #
-GEMM = "void gemm_kernel<float>(int)"
+GEMM = "void hipblaslt::gemm_kernel<float>(int)"
 
 
 def _trace_events():
@@ -207,6 +207,7 @@ class TestClassify(unittest.TestCase):
             "rms_norm_forward": ("reduction_norm", "triton", True),
             "vectorized_elementwise_add": ("elementwise_overhead", "torch_native", True),
             "Memcpy DtoH": ("memory", "torch_native", False),
+            "ncclDevKernel_Generic_1": ("communication", "rccl", False),
         }
         for name, want in expected.items():
             with self.subTest(name=name):
@@ -230,6 +231,27 @@ class TestClassify(unittest.TestCase):
 
     def test_classification_is_case_insensitive(self):
         self.assertEqual(pp.classify("TRITON_FOO")[0], "triton")
+
+    def test_atom_and_jit_gemms_are_not_mislabeled_as_hipblaslt(self):
+        cases = {
+            "void ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle<int>()":
+                ("fused_custom", "ck", True),
+            "_batched_gemm_a8w8_kernel_BLOCK_SIZE_M_4_BLOCK_SIZE_N_16":
+                ("triton", "triton", True),
+            "void kn_mla_reduce_v1_ps<MlaTraits>()":
+                ("fused_custom", "aiter", True),
+            "void kn_get_mla_metadata_v1_2<MlaTraits>()":
+                ("fused_custom", "aiter", True),
+            "_ZN5aiter35fused_qk_rmsnorm_group_quant_kernel":
+                ("fused_custom", "aiter", True),
+        }
+        for name, want in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(pp.classify(name)[:3], want)
+
+    def test_generic_gemm_name_is_not_assumed_to_be_hipblaslt(self):
+        cls, backend, editable, _ = pp.classify("custom_gemm_dispatch")
+        self.assertEqual((cls, backend, editable), ("other", "unknown", True))
 
 
 class TestShortNameAndNormKey(unittest.TestCase):
@@ -342,6 +364,21 @@ class TestEntityEvidence(unittest.TestCase):
         self.assertEqual(rows[0]["entity_evidence"]["matched_profiled_kernel"],
                          "void ns::gemm_kernel<bf16>(int)")
         self.assertEqual(stats["gpu_kernel"], 1)
+
+    def test_an_annotated_gpu_kernel_row_carries_the_profiled_symbol_as_device_kernel(self):
+        """The head gate adopts entity_kind only through device_kernel; an annotated Top-N row that
+        resolves to a gpu_kernel must carry the profiler's symbol there, and other kinds must not."""
+        host = {"aten::mm": {"calls": 2, "total_us": 4.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"void ns::gemm_kernel<bf16>(int)": {"calls": 3, "total_us": 9.0,
+                                                      "cat_counts": {"kernel": 3}}}
+        rows, _ = pp.annotate_rows(
+            [{"name": "gemm_kernel"}, {"name": "aten::mm"},
+             {"name": "kept", "device_kernel": "already_named"}],
+            pp.merge_entity_evidence(host, device), "tracelens")
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["gemm_kernel"]["device_kernel"], "void ns::gemm_kernel<bf16>(int)")
+        self.assertNotIn("device_kernel", by_name["aten::mm"])
+        self.assertEqual(by_name["kept"]["device_kernel"], "already_named")
 
     def test_c9_collision_resolution_is_merge_order_independent(self):
         # The setdefault bug made the collision winner depend on which aggregate was merged first.
@@ -473,6 +510,28 @@ class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
 # serving-phase step windows
 # --------------------------------------------------------------------------- #
 class TestStepSpans(unittest.TestCase):
+    def test_sglang_step_dialect_preserves_prefill_and_speculative_decode(self):
+        self.assertEqual(pp._classify_step("step[EXTEND bs=2 toks=64]"), (True, 64, 0, 0))
+        self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
+        self.assertIsNone(pp._classify_step("step[malformed]"))
+
+    def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):
+        from unittest.mock import patch
+        events = [{"cat": "gpu_user_annotation", "name": "step[NEW_MODE bs=4]", "ts": 1, "dur": 5}]
+        with tempfile.TemporaryDirectory() as directory:
+            filename = os.path.join(directory, "trace.json")
+            with open(filename, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "0"}):
+                pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "0"}):
+                with self.assertRaisesRegex(ValueError, "none parsed"):
+                    pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "1"}):
+                with contextlib.redirect_stderr(io.StringIO()) as warnings:
+                    pp.parse_torch_trace(filename)
+                self.assertIn("continuing unphased", warnings.getvalue())
+
     def test_seg_without_the_tag_is_all_zeros(self):
         self.assertEqual(pp._seg("execute_model", "context"), (0, 0, 0))
         self.assertEqual(pp._seg("context_abc(12)", "context"), (0, 0, 0))

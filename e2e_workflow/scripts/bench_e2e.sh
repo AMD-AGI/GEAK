@@ -25,10 +25,14 @@
 #                     for every purpose, i.e. Hyperloom's warmup_round/measure_round protocol:
 #                     two client passes, the second is the number.  Spread, if any, is WITHIN-server
 #                     (client noise), not boot-to-boot.  1 boot per leg.
+#                     A trace replay (BENCH_CLIENT=agentx) runs no outer round: each replay warms
+#                     itself per lane before its window opens, which is how Hyperloom measures
+#                     AgentX (see "trace-replay warmup" below).
 #   isolated_server   one FRESH server per timed replica (bench_replica.sh), median across
 #                     replicas; spread bounds boot-to-boot variance.  N replicas = N cold boots,
 #                     serialized behind the serving-GPU lock.
-#   legacy            one server, short warmup, $REPEATS timed rounds, median.
+#   legacy            one server, short warmup (none for a trace replay), $REPEATS timed rounds,
+#                     median.
 # All three emit the same acceptance contract.
 #
 # The adapter contract (each scripts/adapters/<BACKEND>.sh must define):
@@ -36,6 +40,7 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                             PROFILE_PYTHONPATH (vllm only; others ignore it)
 #                                      MUST launch through the shared prefix:
 #                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
 #                                      That prefix (server_teardown.sh) puts the server in its OWN
@@ -60,6 +65,9 @@
 #                                      /start_profile has no step count, so start->sleep->stop). If
 #                                      undefined, the PROFILE step falls back to a (less faithful)
 #                                      saturated PROF=1 bench.
+#   adapter_prepare_measurement     -> OPTIONAL. Called after untimed warmup and before RESULT_JSONL
+#                                      is cleared/timed. Return nonzero when backend JIT/compile state
+#                                      cannot be proven stable; timed measurements then fail closed.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   server_start.json      {status, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
@@ -73,6 +81,29 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- per-run workload env (the caller-less channel) ----
+# A workload whose identity cannot be expressed as ISL/OSL/CONC -- an AgentX
+# trace replay -- needs BENCH_CLIENT/E2E_METRIC/AGENTX_* set on EVERY bench in
+# the run, including the ones the role prompts issue.  Under an orchestrator
+# those arrive in the inherited environment (interface/run_e2e.py exports them).
+# Standalone there is no such parent, so the workflow drops ONE file next to the
+# copied bench script and every invocation picks it up here.
+#
+# Contract, in this order of authority:
+#   1. the real environment (an orchestrator's export ALWAYS wins),
+#   2. this file (the standalone declaration),
+#   3. the defaults further down (synthetic ISL/OSL sweep).
+# The file must therefore only ever assign an unset-or-empty name
+# (`[ -n "${VAR:-}" ] || VAR='...'`), never a bare `VAR=`.
+# When it does not exist NOTHING here runs, so a synthetic run is byte-identical
+# to one from before this channel existed.
+BENCH_ENV_FILE="${BENCH_ENV_FILE:-$HERE/bench_env.sh}"
+if [ -f "$BENCH_ENV_FILE" ]; then
+  echo ">>> sourcing per-run workload env: $BENCH_ENV_FILE"
+  # shellcheck source=/dev/null
+  . "$BENCH_ENV_FILE"
+fi
 
 # ---- staged siblings ----
 # This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
@@ -156,6 +187,21 @@ _resolve_samples() {   # _resolve_samples VALIDATION_DEFAULT NOUN MODE -> sets _
   esac
 }
 
+# ---- trace-replay warmup ----
+# A trace replay warms itself: every aiperf pass replays AGENTX_WARMUP_REQUESTS_PER_LANE requests per
+# lane (inside AGENTX_WARMUP_GRACE_PERIOD) before its measured window opens, and Hyperloom's AgentX
+# baseline and rebench are exactly that -- a fresh server and ONE pass.  The client ignores the prompt
+# count, so an outer round in front of it is one more full window (3600s on a parity or validation
+# leg), and on GLM-5.2 it moved the timed pass by only -1.3%..+2.7%.  So a trace replay with a timed
+# round to follow runs none.  It is kept where it is the only traffic (REPEATS=0 shape capture), for
+# ATOM (whose readiness check is defined to run after it), and when GEAK_AGENTX_OUTER_WARMUP=1.
+_agentx_self_warm() {   # _agentx_self_warm TIMED_ROUNDS -> rc 0 when the replay is its own warmup
+  [ "${BENCH_CLIENT:-native}" = "agentx" ] || return 1
+  [ "${BACKEND:-sglang}" != "atom" ] || return 1
+  [ "${GEAK_AGENTX_OUTER_WARMUP:-0}" != "1" ] || return 1
+  case "${1:-}" in ''|*[!0-9]*|0) return 1 ;; esac
+}
+
 # ---- warm-server measurement protocol (Hyperloom-aligned) ----
 # ONE server per leg: a full untimed round populates the prefix cache, then $ROUNDS timed rounds on
 # that same hot server (median).  Byte-for-byte baseline.py's warmup_round/measure_round, so both
@@ -169,16 +215,26 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
   _resolve_samples 1 "timed round" warm-server
   _rounds="$_samples"
   REPEATS="$_rounds"
-  BENCH_OUTER_WARMUP_FULL_ROUND=1   # round 1 is a FULL round, and it is discarded
+  if _agentx_self_warm "$_rounds"; then
+    BENCH_OUTER_WARMUP_FULL_ROUND=0 # the replay's own per-lane warmup is the whole warmup
+  else
+    BENCH_OUTER_WARMUP_FULL_ROUND=1 # round 1 is a FULL round, and it is discarded
+  fi
   BENCH_COLD_FINAL=0                # a cold round would defeat the point of warming
-  GEAK_ISOLATED_REPLICA=0           # not a replica: the outer warmup MUST run
+  GEAK_ISOLATED_REPLICA=0           # not a replica: a replica's warmup skip must not apply
   WARM_SERVER_ROUNDS="$_rounds"
   MEASUREMENT_PURPOSE="$_purpose"
   export REPEATS BENCH_OUTER_WARMUP_FULL_ROUND BENCH_COLD_FINAL \
          GEAK_ISOLATED_REPLICA WARM_SERVER_ROUNDS MEASUREMENT_PURPOSE
-  echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
-       "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded," \
-       "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
+  if [ "$BENCH_OUTER_WARMUP_FULL_ROUND" = 1 ]; then
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+         "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded," \
+         "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
+  else
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+         "(Hyperloom AgentX lifecycle: 1 server, no outer round -- the replay warms itself per lane," \
+         "$([ "$_rounds" = 1 ] && echo "then its window is the reported number)" || echo "median of the $_rounds timed rounds)")"
+  fi
   GEAK_REPEAT_MODE=legacy
 fi
 # ---- isolated-server measurement protocol ----
@@ -194,6 +250,28 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
     exit 4
   fi
+  # Attempts per replica. Two (one retry) is right for the fixed-shape workloads,
+  # whose launches do not fault on their own, and stays their default.
+  #
+  # The agentx trace replay is the exception, so it gets three. It drives ~113k-token
+  # contexts for an hour at a time, and the HSA queue abort that comes with it
+  # (HSA_STATUS_ERROR_EXCEPTION 0x1016) has now reproduced on three separate nodes,
+  # which makes it a property of this workload on this stack rather than of one box
+  # or one candidate. Two attempts is one too few against a fault that is independent
+  # of the config being measured: on the 20260909 run both baseline attempts faulted
+  # 30 minutes apart, and exhausting the budget cost the entire Setup phase.
+  #
+  # A rejected value falls back to the workload's default rather than failing the
+  # measurement.
+  case "${GEAK_WORKLOAD_KIND:-}" in
+    agentx_trace_replay) _attempts_default=3 ;;
+    *) _attempts_default=2 ;;
+  esac
+  _max_attempts="${BENCH_MAX_ATTEMPTS:-$_attempts_default}"
+  case "$_max_attempts" in
+    ''|*[!0-9]*) _max_attempts="$_attempts_default" ;;
+    *) [ "$_max_attempts" -ge 1 ] || _max_attempts="$_attempts_default" ;;
+  esac
   _purpose="${MEASUREMENT_PURPOSE:-search}"
   _resolve_samples 3 "isolated replica" isolated-server
   _requested="$_samples"
@@ -208,10 +286,10 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     mkdir -p "$_replica_dir"
     rm -f "$_replica_dir/selected_summary.json" "$_replica_dir/selected_attempt"
     _replica_ok=0
-    for _attempt in 1 2; do
+    for ((_attempt=1; _attempt<=_max_attempts; _attempt++)); do
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
-      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/$_max_attempts) ..."
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
@@ -242,7 +320,7 @@ PY
       echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
     done
     if [ "$_replica_ok" != "1" ]; then
-      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+      echo "!!! Isolated replica $_replica failed after $_max_attempts attempt(s); continuing without same-server fallback." >&2
     fi
   done
 
@@ -445,7 +523,12 @@ NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
 # (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
 # either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
-REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
+# A trace-replay client owns its duration, so one call is one full measured window and three of
+# them would triple a 900s leg. Defaulted HERE rather than exported by the caller: an explicit
+# REPEATS outranks REPLICAS above, and both multi-sample lifecycles have already set their own.
+_repeats_default=3
+[ "$BENCH_CLIENT" = "agentx" ] && _repeats_default=1
+REPEATS=${REPEATS:-$_repeats_default}  # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 
 # ---- client trust-remote-code (general, model-agnostic) ----
@@ -533,6 +616,19 @@ PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${
 # profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
 PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
 PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+# Window placement. 0 arms the profiler at load start, which is what a synthetic
+# sweep wants (the initial prefill burst stays in the trace). A client that owns
+# its own load has a ramp of its own -- corpus resolve, per-lane warmup, drain --
+# and arming at load start would capture that instead of steady state, so it may
+# publish adapter_profile_warmup_s() to place the window itself. An explicit
+# PROFILE_WARMUP_SEC from the caller always wins; no hook => unchanged 0.
+if [ -z "${PROFILE_WARMUP_SEC:-}" ] && declare -F adapter_profile_warmup_s >/dev/null; then
+  PROFILE_WARMUP_SEC="$(adapter_profile_warmup_s 2>/dev/null || echo 0)"
+  case "$PROFILE_WARMUP_SEC" in
+    ''|*[!0-9]*) PROFILE_WARMUP_SEC=0 ;;
+  esac
+  echo ">>> profile window placed by the $BENCH_CLIENT client adapter: warmup ${PROFILE_WARMUP_SEC}s"
+fi
 PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
 PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
@@ -544,6 +640,18 @@ LOG=${LOG:-$OUT_DIR/server.log}
 
 mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
+# On ROCm 10.0 with torch 2.12 and vLLM 0.27 (gfx1201), vLLM's EngineCore inherits
+# ROCPROFILER_REGISTER_LIBRARY from its parent, and its torch profiler then records no GPU events.
+# The adapters/profile_env shim drops it at interpreter start-up. The vllm adapter and the magpie
+# launcher put it ahead of the overlay; the other adapters ignore it.
+PROFILE_PYTHONPATH=""
+if [ "$PROFILE" = "1" ]; then
+  if _profile_env="$(_stage_lookup adapters/profile_env/sitecustomize.py)"; then
+    PROFILE_PYTHONPATH="$(dirname "$_profile_env")"
+  else
+    echo ">>> adapters/profile_env/sitecustomize.py not found; the trace may have no GPU events on ROCm." >&2
+  fi
+fi
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
@@ -554,7 +662,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
+export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_PYTHONPATH PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
@@ -731,11 +839,21 @@ fi
 # ---- optional outer warmup (never timed) ----
 # Cache-cold isolated replicas skip it (the client still warms itself internally; the
 # timed prompt set just is not pre-replayed). Legacy keeps the short CONC-prompt warmup;
-# warm_server sets BENCH_OUTER_WARMUP_FULL_ROUND=1 for the full discarded round.
+# warm_server sets BENCH_OUTER_WARMUP_FULL_ROUND=1 for the full discarded round. A trace
+# replay with a timed round to follow skips it (see "trace-replay warmup").
+# BENCH_WARMUP_PROTOCOL tells bench_summarize.py which warmup a trace replay's number had.
+unset BENCH_WARMUP_PROTOCOL
 if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
    && [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ]; then
   echo ">>> Skipping outer warmup (compute-warm/cache-cold isolated replica) ..."
+elif [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ] && _agentx_self_warm "$REPEATS"; then
+  echo ">>> Skipping outer warmup: the trace replay warms itself per lane before its measured" \
+       "window (Hyperloom's AgentX protocol) ..."
+  BENCH_WARMUP_PROTOCOL=replay_per_lane; export BENCH_WARMUP_PROTOCOL
 else
+  if [ "$BENCH_CLIENT" = "agentx" ]; then
+    BENCH_WARMUP_PROTOCOL=outer_round; export BENCH_WARMUP_PROTOCOL
+  fi
   _warmup_prompts="$CONC"
   if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
     _warmup_prompts="$NUM_PROMPTS"
@@ -749,6 +867,16 @@ else
            "(the timed rounds would not be warm)." >&2
       exit 2
     fi
+  fi
+fi
+
+# ATOM may become HTTP-healthy before request-triggered JIT has settled. Verify its backend-specific
+# ready state after warmup without changing the measurement lifecycle of other serving backends.
+if [ "$BACKEND" = "atom" ] && declare -F adapter_prepare_measurement >/dev/null; then
+  echo ">>> Verifying ATOM is measurement-ready after warmup ..."
+  if ! adapter_prepare_measurement; then
+    echo "!!! Backend did not reach a stable measurement-ready state; refusing to time it." >&2
+    exit 2
   fi
 fi
 # the warmup line should not pollute the timed results
@@ -835,6 +963,17 @@ PY
     sleep "$PROFILE_WARMUP_SEC"
     if kill -0 "$_bg_load" 2>/dev/null; then
       adapter_profile_window || echo "!!! profile window failed"
+    elif [ "${GEAK_ISL_OSL_INACTIVE:-0}" = "1" ]; then
+      # The load this run measures is not expressible as ISL/OSL (a trace replay),
+      # so the usual fallback is not a degraded version of it -- it is a different
+      # workload. Writing its trace into this run's profile dir would hand every
+      # downstream consumer a profile of something the run never serves, and it
+      # would look exactly like a real one. No trace is the honest outcome.
+      echo "!!! the replay ended before the profile window opened (warmup ${PROFILE_WARMUP_SEC}s" \
+           "vs the leg's own duration) — NO trace captured." >&2
+      echo "!!! not substituting a synthetic ISL/OSL profile: it would describe a different workload." >&2
+      echo "!!! lower AGENTX_PROFILE_WARMUP_S, or profile a leg that runs the longer window" \
+           "(MEASUREMENT_PURPOSE=parity)." >&2
     else
       echo "!!! background load exited before the profile window (load too short?) — falling back"
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"

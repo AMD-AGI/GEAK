@@ -167,7 +167,7 @@ _server_descendants() {
     }'
 }
 
-server_teardown() {
+_server_teardown_launched() {
   [ -n "${SERVER_PID:-}" ] || return 0
   # A server we launched can never BE init, and a non-numeric pid means a pid file /
   # launcher handed us garbage. Refuse before any signal, so the pid-only fallback
@@ -242,4 +242,62 @@ server_teardown() {
     done
   fi
   wait "$SERVER_PID" 2>/dev/null || true
+}
+
+# A Magpie-launched ATOM server leads its OWN process group (the recipe setsid's it),
+# while SERVER_PID above is GEAK's supervisor in a different group. Reaping that group
+# was the supervisor's TERM trap alone -- a trap that never installs when TERM arrives
+# ignored, and never runs when the supervisor is SIGKILLed -- leaving rank workers
+# holding every GPU. So teardown reaps it directly, on every exit path of the above.
+#
+# Only LIVE members count. In a container whose PID 1 never reaps (`sleep infinity`),
+# an exited ATOM leaves zombies in the group: they hold no GPU and ignore signals, and
+# `kill -0` still succeeds on them, so counting them would report a leak that is not
+# there and wait out the whole grace.
+#
+# Identity: the kernel never hands out a pid number while a process group of that id
+# still has members, so a group named MAGPIE_INNER_SERVER_PID with live members is the
+# one this launch created, even after its leader exited. A process that now holds that
+# pid with a different start time means the group emptied and the pid was reused:
+# refuse rather than signal a stranger.
+_live_group_members() {  # _live_group_members PGID -> pids of its non-zombie members
+  ps -eo pid=,pgid=,stat= 2>/dev/null | awk -v g="$1" '$2==g && $3 !~ /^Z/ {print $1}'
+}
+
+_reap_magpie_inner_group() {
+  local _g="${MAGPIE_INNER_SERVER_PID:-}" _ticks="${MAGPIE_INNER_SERVER_START_TICKS:-}"
+  local _p _now _members _i _grace="${SERVER_STOP_GRACE_S:-10}"
+  unset MAGPIE_INNER_SERVER_PID MAGPIE_INNER_SERVER_START_TICKS
+  case "$_g" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_g" -gt 1 ] || return 0
+  case "$_grace" in ''|*[!0-9]*) _grace=10 ;; esac
+  for _p in $SERVER_PROTECTED_PGIDS; do
+    [ "$_g" = "$_p" ] && { echo "!!! magpie inner group $_g is protected; not signalled." >&2; return 0; }
+  done
+  _members="$(_live_group_members "$_g")"
+  [ -n "$_members" ] || return 0
+  _now="$(_start_ticks_of "$_g" 2>/dev/null || true)"
+  if [ -n "$_ticks" ] && [ -n "$_now" ] && [ "$_now" != "$_ticks" ]; then
+    echo "!!! magpie inner pid $_g start_time changed (was $_ticks, now $_now): the pid was" \
+         "REUSED; group not signalled." >&2
+    return 0
+  fi
+  for _p in $_members; do
+    if [ "$_p" = "1" ] || [ "$_p" = "$BENCH_PID" ]; then
+      echo "!!! magpie inner group $_g contains pid $_p; not signalled." >&2
+      return 0
+    fi
+  done
+  echo ">>> Reaping Magpie inner server group pgid=$_g ($(echo $_members | wc -w) live member(s)) ..."
+  kill -TERM "-$_g" 2>/dev/null || true
+  for _i in $(seq 1 "$_grace"); do
+    [ -n "$(_live_group_members "$_g")" ] || return 0
+    sleep 1
+  done
+  kill -KILL "-$_g" 2>/dev/null || true
+}
+
+server_teardown() {
+  _server_teardown_launched
+  _reap_magpie_inner_group
 }

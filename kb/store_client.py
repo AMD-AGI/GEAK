@@ -65,6 +65,16 @@ def kb_store_token() -> str:
     return (os.environ.get("GEAK_KB_STORE_TOKEN") or os.environ.get("KB_STORE_TOKEN") or "").strip()
 
 
+def kb_read_only() -> bool:
+    """``GEAK_KB_READ_ONLY=1``: recall from the store, never change it.
+
+    Every write the service accepts is a POST (knowledge merges, attestations,
+    champion promotion, the file grant/commit pair) and none can be undone, so a
+    trial run against a shared store refuses them here rather than at each caller.
+    """
+    return os.environ.get("GEAK_KB_READ_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 #: Must match ``knowledge_base.canonical.RECORD_NAMESPACE``.
 RECORD_NAMESPACE = uuid.UUID("0f4d5e6a-8b7c-4d1e-9f2a-3c5b7d9e1f00")
 
@@ -233,6 +243,8 @@ class KBStoreClient:
     # -- transport ----------------------------------------------------------
 
     def _request(self, method: str, path: str, payload: Any = None) -> Any:
+        if method != "GET" and kb_read_only():
+            raise KBStoreError(f"{method} {path} refused: GEAK_KB_READ_ONLY is set")
         url = self._base + path
         data = None
         headers = {"Accept": "application/json"}

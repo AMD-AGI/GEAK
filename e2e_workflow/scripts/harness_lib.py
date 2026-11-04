@@ -126,12 +126,17 @@ def regime_dtype(name, torch=None, arch=None):
     if "fp8" in n or "e4m3" in n or "e5m2" in n:
         mant = "e5m2" if "e5m2" in n else "e4m3"
         if n.endswith("fnuz"):
-            suffix = "fnuz"
+            attr = f"float8_{mant}fnuz"
         elif n.endswith("fn"):
-            suffix = "fn"
-        else:  # bare/generic name → pick by arch (this is the MI300-vs-MI355 fork)
-            suffix = "fnuz" if fp8_is_fnuz(arch if arch is not None else detect_arch(torch)) else "fn"
-        return getattr(torch, f"float8_{mant}{suffix}", torch.bfloat16)
+            # OCP e5m2 has no `float8_e5m2fn` attribute — torch exposes `float8_e5m2`.
+            attr = "float8_e5m2" if mant == "e5m2" else f"float8_{mant}fn"
+        else:
+            use_fnuz = fp8_is_fnuz(arch if arch is not None else detect_arch(torch))
+            if mant == "e5m2":
+                attr = "float8_e5m2fnuz" if use_fnuz else "float8_e5m2"
+            else:
+                attr = "float8_e4m3fnuz" if use_fnuz else "float8_e4m3fn"
+        return getattr(torch, attr, torch.bfloat16)
     return torch.bfloat16
 
 
@@ -306,7 +311,7 @@ def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
         return fn
 
 
-def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True, detail=False):
+def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
     `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
@@ -317,9 +322,14 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
         sub-microsecond kernels (amortizes event/launch resolution).
       - WALL time (perf_counter+sync) is measured in the SAME loop and reported as a REFERENCE only
         (host+device); a large wall≫device gap flags a host-bound op.
-    `flush_cache` (default True) evicts the last-level/Infinity cache BEFORE each timed sample so a
-    memory-bound decode kernel reads its weights COLD from HBM — matching the live server, where the model
-    working set >> cache and every weight is evicted between decode steps. Flushed OUTSIDE the event window.
+    CACHE CONDITION. Before each timed sample the harness runs one eviction pass over a buffer larger
+    than the last-level cache (default 512MB > MI300's 256MB Infinity Cache), so a memory-bound decode
+    kernel does not read weights that the previous sample left resident — the live server evicts them
+    between decode steps. The pass always READS the buffer with a float32 sum: the old write pass
+    inflated a measured decode speedup from 1.12 to 1.40 through writeback contention. Buffer size is
+    configured by HARNESS_CACHE_FLUSH_MB; the preparation cannot be disabled or switched to writes.
+    Runs OUTSIDE the event window. `detail=True` carries the policy back as `cache_condition`; its
+    `deployment_calibrated: False` is literal — this is a sensitivity condition, not a residency proof.
 
     `graph=True` times a captured CUDA-graph replay (the decode deployment context) with the same
     event+flush method; falls back to eager event timing if capture is unavailable (see the `timer` field).
@@ -337,6 +347,7 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
     Returns median device ms (float), or {ms, wall_ms, timer} when detail=True — plus {primed, host_ms}
     whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
     unavailable so ms == wall_ms and timer='wall'."""
+    policy = cache_policy()   # outside the try: a bad size must raise, not read as "call raised"
     torch = _torch()
     inner = max(1, int(inner))
     try:
@@ -344,28 +355,34 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
     except Exception:
         have_cuda = False
     try:
+        if have_cuda:
+            _flush_buffer(torch, policy["bytes"])   # allocate once BEFORE warmup, never inside a sample
         if have_cuda and graph:
             g = _try_capture(torch, call, inner)
             if g is not None:
-                dev, wall = _time_graph(torch, g, warmup, repeats, flush_cache)
+                dev, wall = _time_graph(torch, g, warmup, repeats, policy)
                 # One replay issues all `inner` launches, so divide to put host on the SAME per-launch
                 # basis as `dev` -- otherwise a clean inner>1 graph reads as host-bound.
                 host = _host_dispatch_ms(torch, lambda: g[0].replay()) / g[1]
-                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev)
+                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev, policy)
         if have_cuda:
-            dev, wall = _time_events(torch, call, warmup, repeats, inner, flush_cache)
+            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy)
             host = _host_dispatch_ms(torch, call)
-            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev)
+            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy)
         wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
-        return _timing_result(wall, wall, "wall", detail)
+        return _timing_result(wall, wall, "wall", detail, policy=policy)
     except Exception:
         return None
 
 
-def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None):
+def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, policy=None):
     if not detail:
         return dev_ms
     d = {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
+    if policy is not None:
+        # ABSENT means the measurement predates the cache receipt, i.e. it was taken under an
+        # unconditional write-evict -- see director.md. Never read absence as "no cache preparation".
+        d["cache_condition"] = policy
     if host_ms is not None:
         # Both keys or neither. A consumer distinguishes "host-bound" from "cannot tell" by PRESENCE
         # (oracle_freezer.md step 4), so half a receipt would be read as a whole one.
@@ -405,31 +422,73 @@ def _host_dispatch_ms(torch, call):
 
 
 _CACHE_FLUSH_BUF = None
+_CACHE_FLUSH_SINK = None
+_CACHE_FLUSH_DEV = None
+
+
+def cache_policy():
+    """Describe the fixed read eviction performed before each timed GPU sample.
+
+    The old 512 MiB `zero_()` left dirty cache lines whose later writeback competed with the timed
+    kernel for HBM bandwidth. On MI355X / GLM-5.2 fused-MoE, decode-weighted speedups were 1.408/1.395
+    with write eviction, 1.121/1.129 with read eviction, and 1.104/1.117 without eviction. An absolute-
+    time probe also confirmed that reading evicts cached data, supporting read eviction as the single
+    measurement policy. Only the buffer size is configurable, via HARNESS_CACHE_FLUSH_MB (MiB)."""
+    mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512"))
+    if mb <= 0:
+        raise ValueError("Eviction requires positive HARNESS_CACHE_FLUSH_MB")
+    return {"mode": "read-evict", "bytes": mb * (1 << 20), "preparation": "float32-sum",
+            # The preparation runs outside both the event and the reference wall window. It is a
+            # sensitivity condition, NOT a proof that the deployed cache state was reproduced.
+            "outside_timing": True, "deployment_calibrated": False}
+
+
+def _flush_buffer(torch, size):
+    """Persistent eviction buffer, sized EXACTLY to the request (not `>=`): a stale oversized buffer
+    would silently evict more than the caller asked for. No-op (None) without CUDA, so read-evict on a
+    CPU box behaves like the old write-evict did rather than raising."""
+    global _CACHE_FLUSH_BUF
+    try:
+        if not torch.cuda.is_available():
+            return None
+    except Exception:
+        return None
+    n = max(1, size // 4)
+    # The device is tracked HERE rather than read back off the tensor: `buf.device` is a torch.device on
+    # real torch but a bare string on the test double, so comparing it would silently never match and
+    # reallocate 512MB every single sample -- with every test still passing.
+    global _CACHE_FLUSH_DEV
+    try:
+        device = torch.cuda.current_device()
+    except Exception:
+        device = None
+    if _CACHE_FLUSH_BUF is None or _CACHE_FLUSH_BUF.numel() != n or _CACHE_FLUSH_DEV != device:
+        # Finite input for the read reduction. Allocation is outside the samples and before warmup.
+        _CACHE_FLUSH_BUF = torch.ones(n, dtype=torch.float32, device="cuda")
+        _CACHE_FLUSH_DEV = device
+    return _CACHE_FLUSH_BUF
 
 
 def flush_cache(torch=None, mb=None):
-    """Evict the GPU last-level / Infinity cache so the NEXT launch reads cold from HBM (matches decode:
-    the model working set >> cache, so every weight is evicted between reuses). Writes a persistent buffer
-    larger than the cache (default 512MB > MI300's 256MB Infinity Cache; override HARNESS_CACHE_FLUSH_MB).
-    No-op without CUDA."""
-    global _CACHE_FLUSH_BUF
+    """Read an eviction buffer with a float32 sum, without dirtying its cache lines.
+
+    Never claims a particular hardware residency — see `cache_policy` for why the preparation method is
+    part of the measurement and is reported in the timing receipt."""
+    size = cache_policy()["bytes"] if mb is None else int(mb) * (1 << 20)
+    if size <= 0:
+        raise ValueError("Eviction buffer must be positive")
     torch = torch or _torch()
-    try:
-        if not torch.cuda.is_available():
-            return
-    except Exception:
-        return
-    mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512")) if mb is None else int(mb)
-    n = max(1, (mb << 20) // 4)
-    if _CACHE_FLUSH_BUF is None or _CACHE_FLUSH_BUF.numel() < n:
-        _CACHE_FLUSH_BUF = torch.empty(n, dtype=torch.float32, device="cuda")
-    _CACHE_FLUSH_BUF.zero_()
+    buf = _flush_buffer(torch, size)
+    if buf is None:
+        return          # no CUDA
+    global _CACHE_FLUSH_SINK
+    _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
 
 
-def _time_events(torch, call, warmup, repeats, inner, flush):
+def _time_events(torch, call, warmup, repeats, inner, policy):
     """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
-    cuda.Event (host-free), wall via perf_counter (reference). Cache flushed before each sample when
-    `flush`, so a memory-bound kernel is timed cold.
+    cuda.Event (host-free), wall via perf_counter (reference). `policy` names the cache preparation run
+    before each sample, so a memory-bound kernel is not timed on lines the previous sample left resident.
 
     The per-sample sync is deliberate. Batching the samples into one queue with no intervening sync was
     tried and REJECTED on measurement: fitting per-launch ms against 1/inner on MI355X (torch 2.9 / ROCm
@@ -444,8 +503,7 @@ def _time_events(torch, call, warmup, repeats, inner, flush):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        if flush:
-            flush_cache(torch)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()
@@ -495,10 +553,10 @@ def _try_capture(torch, call, inner):
         return None
 
 
-def _time_graph(torch, g, warmup, repeats, flush):
-    """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, cache flushed
-    before each sample when `flush` (replay reuses static buffers, so without a flush the weights stay
-    hot — unrepresentative of cold decode)."""
+def _time_graph(torch, g, warmup, repeats, policy):
+    """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, with `policy`'s
+    read eviction before each sample so replay's static buffers do not keep weights resident across
+    samples."""
     graph, inner = g
     for _ in range(max(1, warmup)):
         graph.replay()
@@ -507,8 +565,7 @@ def _time_graph(torch, g, warmup, repeats, flush):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        if flush:
-            flush_cache(torch)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()
@@ -550,6 +607,19 @@ def to_device_like(ref, dev):
 
 def reconstruct_captured(obj, device="cpu"):
     """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
+    if isinstance(obj, dict) and obj.get("__needs_regen__"):
+        # structure_only capture: the recorded output came from the real operands, which the
+        # file no longer holds, so there is nothing here to compare against. Raising is the
+        # point -- a placeholder that reached a correctness gate would pass it vacuously.
+        raise ValueError(
+            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
+            "output has not been regenerated. Run scripts/regen_reference.py against it "
+            "inside the serving container and point the task at the regenerated file.")
+    if isinstance(obj, dict) and obj.get("__synth__"):
+        raise ValueError(
+            "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
+            "first with capture_shapes.materialize_synth(...), which rebuilds it from the "
+            "recorded seed; do NOT rebuild operands through the serving stack at UT time.")
     if isinstance(obj, dict) and obj.get("__tensor__"):
         t = obj["data"]
         return t.to(device) if hasattr(t, "to") else t
@@ -670,6 +740,17 @@ def correct(out, ref, tol):
 
 
 def _correct_one(out, ref, tol):
+    """Element check with EXPLICIT non-finite handling.
+
+    A legitimately non-finite reference element exists in real ops — an attention LSE over an EMPTY
+    KV slice (varlen `cu_seqlens_k=[...,n,n]`) is exactly -inf. Two failure modes are handled here
+    instead of being papered over:
+      * `-inf - -inf = nan`, and `nan <= x` is False, so a bit-identical output used to FAIL;
+      * `RMS(ref)` over a tensor containing an inf is inf, so `atol` became inf and EVERY element
+        passed — a silent false-PASS hole that hid real drift on any output with an inf.
+    Rule: non-finite positions must be IDENTICAL (`-inf` vs `-inf`) to pass — NaN never matches
+    (`nan != nan`), inf-vs-finite never matches — and the tolerance floor is the RMS of the FINITE
+    bulk only."""
     torch = _torch()
     try:
         if tuple(out.shape) != tuple(ref.shape):
@@ -677,6 +758,31 @@ def _correct_one(out, ref, tol):
         out = out.float()
         ref = ref.float()
         atol = tol * ref.pow(2).mean().sqrt().clamp_min(1e-6)   # noise floor = tol * RMS(ref)
+        diff = (out - ref).abs()
+        ok = bool((diff <= (atol + tol * ref.abs())).all())
+        err = diff.div(ref.abs() + atol).max().item()
+        if math.isfinite(err) and math.isfinite(float(atol.item())):
+            return ok, err                                      # all-finite: unchanged behavior
+        return _correct_one_nonfinite(out, ref, tol)
+    except Exception:
+        return False, float("inf")
+
+
+def _correct_one_nonfinite(out, ref, tol):
+    """Slow path for tensors carrying inf/NaN — entered ONLY when the plain path produced a
+    non-finite error or a non-finite tolerance floor."""
+    torch = _torch()
+    try:
+        finite = torch.isfinite(out) & torch.isfinite(ref)
+        # A non-finite position passes only if the two sides are IDENTICAL there (-inf vs -inf, which
+        # `==` reports True and NaN never does). Otherwise it is a real mismatch.
+        if bool(((~finite) & (out != ref)).any()):
+            return False, float("inf")
+        zero = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        ref = torch.where(finite, ref, zero)
+        out = torch.where(finite, out, zero)
+        n = max(1, int(finite.sum().item()))
+        atol = tol * (ref.pow(2).sum() / n).sqrt().clamp_min(1e-6)
         diff = (out - ref).abs()
         ok = bool((diff <= (atol + tol * ref.abs())).all())
         err = diff.div(ref.abs() + atol).max().item()
@@ -690,18 +796,33 @@ def assert_independent_outputs(call, args_a, args_b):
     shortcut). Call with two DIFFERENT inputs and verify:
       1. the first output is NOT mutated by the second call (snapshot compare), and
       2. the two outputs do not share storage (distinct data_ptr).
-    A correct `fn(args) -> fresh out` launcher passes both. Returns (ok, reason)."""
+    A correct `fn(args) -> fresh out` launcher passes both. Returns (ok, reason).
+
+    A MULTI-TENSOR return (attention's `(out, lse)`, a dict) is flattened and every component is
+    checked — the contract applies to each of them, and treating the return as a bare tensor used to
+    raise AttributeError here and fail an otherwise-correct multi-output op."""
     torch = _torch()
     try:
-        out_a = call(args_a)
-        snap = out_a.detach().clone()
-        out_b = call(args_b)
-        if out_a.data_ptr() == out_b.data_ptr():
-            return False, ("shared_output_buffer: two calls returned the SAME storage "
-                           f"(data_ptr={out_a.data_ptr():#x}) — a persistent/static return buffer. "
-                           "The launcher contract is fn(args) -> FRESH out; a shared buffer is a "
-                           "tight-loop cheat that is incorrect for any real (batched) caller.")
-        if not torch.equal(out_a, snap):
+        parts_a = flatten_outputs(call(args_a))
+        if not parts_a:
+            return False, "no_tensor_output: the launcher returned no tensor to check"
+        snap = [t.detach().clone() for t in parts_a]
+        parts_b = flatten_outputs(call(args_b))
+        for out_a, out_b in zip(parts_a, parts_b):
+            if out_a.data_ptr() == out_b.data_ptr():
+                return False, ("shared_output_buffer: two calls returned the SAME storage "
+                               f"(data_ptr={out_a.data_ptr():#x}) — a persistent/static return "
+                               "buffer. The launcher contract is fn(args) -> FRESH out; a shared "
+                               "buffer is a tight-loop cheat that is incorrect for any real "
+                               "(batched) caller.")
+        unchanged = all(torch.equal(a, s) for a, s in zip(parts_a, snap))
+        if not unchanged:
+            try:    # NaN-safe retry: torch.equal reports a NaN-carrying (unmutated) output as changed
+                unchanged = all(bool(((a == s) | (a.ne(a) & s.ne(s))).all())
+                                for a, s in zip(parts_a, snap))
+            except Exception:
+                pass
+        if not unchanged:
             return False, ("mutated_prior_output: the second call overwrote the first call's returned "
                            "tensor — the launcher aliases a persistent buffer instead of allocating a "
                            "fresh output. Incorrect for real callers.")
@@ -952,6 +1073,47 @@ def _analytic_calls_from_meta(meta):
     return swm.get("analytic_calls") or {}
 
 
+def _observed_workload_cases(meta):
+    """Return measured workload buckets, or None for the unchanged fixed-load path.
+
+    Observed call mass is indexed by case signature (including KV and dispatch),
+    never inferred from client concurrency or assigned to the largest M.
+    """
+    workload = (meta or {}).get("workload") or {}
+    model = workload.get("serving_weight_model") or {}
+    observed_sources = {"observed_workload", "agentx_log_fold"}  # legacy AgentX tasks remain readable
+    # Activation is AgentX-only; the arithmetic/phase labels are model-agnostic.
+    # An explicit non-AgentX kind wins even over leftover observed-model fields.
+    kind = workload.get("kind")
+    requires_observed = (kind == "agentx_trace_replay"
+                         or (not kind and model.get("source") == "agentx_log_fold"))
+    if not requires_observed:
+        return None
+    if model.get("source") not in observed_sources or not model.get("evidence_path"):
+        raise HarnessIncompleteError("Observed-workload UT requires an observed model with evidence_path; no analytic fallback")
+    cases = workload.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise HarnessIncompleteError("Observed-workload UT requires observed workload.cases")
+    out = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            raise HarnessIncompleteError("Observed workload case must be an object")
+        sig = case.get("sig")
+        if not isinstance(sig, str) or not sig.strip() or sig in out:
+            raise HarnessIncompleteError("Observed workload cases require unique nonempty sig values")
+        try:
+            mass = float(case["effective_calls"])
+        except (KeyError, TypeError, ValueError):
+            raise HarnessIncompleteError(f"Observed case {sig}: missing/invalid effective_calls") from None
+        if isinstance(case["effective_calls"], bool) or not math.isfinite(mass) or mass < 0:
+            raise HarnessIncompleteError(f"Observed case {sig}: effective_calls must be finite and nonnegative")
+        regime = str(case.get("regime") or "").strip().lower()
+        if not regime:
+            raise HarnessIncompleteError(f"Observed case {sig}: regime must be a nonempty workload phase")
+        out[sig] = {**case, "regime": regime, "effective_calls": mass}
+    return out
+
+
 def served_regimes(meta):
     """Regimes this kernel actually runs in (lower-cased set); empty set = ungated. Preference:
       1. meta['served_regimes'] (extractor override, if set), else
@@ -967,7 +1129,11 @@ def served_regimes(meta):
 
 
 def served_buckets(meta):
-    """The M buckets this kernel actually SERVES, with their analytic per-wave pass counts.
+    """The M buckets this kernel serves, with measured or analytic call counts.
+
+    Observed weighting sums call mass by (phase, M), preserving phase identity;
+    KV/dispatch distinctions still require the full UT. The fixed-load path
+    below retains its analytic per-wave model and de-duplication by M.
 
     `op_bench` benched at `max(m_buckets)`, on the premise that the largest bucket carries the
     GPU-time mass. It does not. Mass = per-launch time x LAUNCHES, and the analytic call model
@@ -983,6 +1149,21 @@ def served_buckets(meta):
     Returns [(phase, M, calls), ...] ordered by descending calls, de-duplicated by M. Returns []
     when meta carries no serving model (offline / unit-test metas), which leaves callers on their
     previous single-bucket behaviour."""
+    observed = _observed_workload_cases(meta)
+    if observed is not None:
+        served = served_regimes(meta)
+        out = {}
+        for case in observed.values():
+            phase, mass = case["regime"], case["effective_calls"]
+            if (served and phase not in served) or mass == 0:
+                continue
+            m = _int_or_none(case.get("m"))
+            if m is None or m <= 0:
+                raise HarnessIncompleteError(f"Observed case {case['sig']}: missing positive m for op benchmark")
+            key = (phase, m)
+            out[key] = out.get(key, 0.0) + mass
+        return [(phase, m, mass) for (phase, m), mass in
+                sorted(out.items(), key=lambda item: -item[1])]
     swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
     calls = swm.get("analytic_calls") or {}
     if not calls:
@@ -1022,13 +1203,16 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
 
       (1) served-regimes gate: drop any case whose regime is not in `served_regimes(meta)` (when set),
           so a decode case that leaked into a prefill-only kernel's oracle cannot be weighted onto it.
-      (2) analytic call model (NEVER profiled counts): calls come from
+      (2) Observed workload: use per-signature effective_calls from the measured
+          observed_workload model (or legacy agentx_log_fold); require every positive-mass served case and
+          retain measured unchanged cases in the denominator. No analytic fallback.
+          Fixed ISL/OSL workloads: calls come from
           meta.workload.serving_weight_model.analytic_calls (prefill already CONC-scaled by
           attribute_weights: CONC*ceil(ISL/chunk); decode = OSL). Within each served regime the regime's
           total passes go to the LARGEST-M bucket (decode M==CONC; prefill M==chunk/ISL); smaller/
           transient buckets get calls=1 and stay visible. CONC enters decode via the SHAPE (M) and
           prefill via the COUNT — one consistent per-wave basis.
-      (3) pseudo-identity guard: a bucket whose baseline_ms == optimized_ms to `identity_eps` (a warm-JIT
+      (3) fixed-load pseudo-identity guard: a bucket whose baseline_ms == optimized_ms to `identity_eps` (a warm-JIT
           / autotune-converged / byte-identical-candidate artifact, NOT a real measured null) is flagged
           and EXCLUDED. If EVERY surviving bucket is identity, `weighted` is None with a reason so the
           caller does not trust an unmeasured 1.0x (re-measure per-bucket ms in a fresh subprocess under
@@ -1049,6 +1233,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
     Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}."""
     served = served_regimes(meta)
+    observed = _observed_workload_cases(meta)
     calls_model = _analytic_calls_from_meta(meta)
 
     def _f(x):
@@ -1058,8 +1243,11 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             return None
 
     rows, dropped_unserved = [], []
+    seen = set()
     for c in per_case:
         reg = str(c.get("regime") or "").lower()
+        if observed is not None:
+            reg = reg.strip()
         if served and reg and reg not in served:
             dropped_unserved.append(c.get("sig") or c.get("name") or reg)
             continue
@@ -1068,6 +1256,25 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             spd = b / o
         rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
                      "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+        if observed is not None:
+            sig = rows[-1]["sig"]
+            if sig in seen or sig not in observed:
+                raise HarnessIncompleteError(f"Observed timed case {sig!r}: duplicate or absent from observed workload")
+            case = observed[sig]
+            if reg != case["regime"] or (case.get("m") is not None and c.get("m") != case["m"]):
+                raise HarnessIncompleteError(f"Observed timed case {sig}: regime/M differs from observed workload")
+            mass = case["effective_calls"]
+            if mass > 0 and any(v is None or not math.isfinite(v) or v <= 0 for v in (b, o)):
+                raise HarnessIncompleteError(f"Observed timed case {sig}: positive call mass requires both measured latencies")
+            rows[-1]["calls"] = mass
+            seen.add(sig)
+
+    if observed is not None:
+        required = {sig for sig, case in observed.items()
+                    if case["effective_calls"] > 0 and (not served or case["regime"] in served)}
+        missing = required - seen
+        if missing:
+            raise HarnessIncompleteError(f"Observed-workload UT omitted positive-mass cases: {sorted(missing)}")
 
     # assign analytic passes: the largest-M bucket in each regime carries that regime's calls, rest = 1.
     by_reg = {}
@@ -1081,6 +1288,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             return float(x["baseline_ms"] or 0.0)
 
     for reg, members in by_reg.items():
+        if observed is not None:
+            continue  # measured call mass was joined by signature above
         total_calls = int(calls_model.get(reg, 1) or 0) if reg else 1
         dom = max(members, key=_m) if members else None
         for r in members:
@@ -1093,7 +1302,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
                        and abs(b - o) <= identity_eps * max(abs(b), 1e-12))
         r["identity"] = bool(is_identity)
         r["weight"] = (b or 0.0) * r.get("calls", 1)
-        if is_identity:
+        if is_identity and observed is None:
             suspect.append(r["sig"]); r["included"] = False
         elif spd and spd > 0 and r["weight"] > 0:
             r["included"] = True; included.append(r)
@@ -1298,7 +1507,8 @@ def _kill_process_group(proc, grace=5.0):
             continue
 
 
-def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
+def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
+             target_callable=""):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
@@ -1309,6 +1519,10 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
+    if target_callable:
+        if mode != "resolve":
+            raise ValueError("target_callable override is only valid for identity resolution")
+        cmd += ["--target-callable", target_callable]
     # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
@@ -1357,21 +1571,31 @@ def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
     """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
     resolves OUTSIDE the task dir."""
     task = os.path.abspath(task_dir)
-    target = meta["target_callable"]
-    bi = _run_leg(task, base, "resolve", timeout=timeout)
-    ci = _run_leg(task, cand, "resolve", timeout=timeout)
-    for who, ident in (("baseline", bi), ("candidate", ci)):
-        if ident.get("error"):
-            raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
-    if bi == ci:
-        raise RuntimeError(
-            f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
-            "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
-    if bi.get("file", "").startswith(task + os.sep):
-        raise RuntimeError(
-            f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
-            "serving stack, never a copy the optimizer can edit.")
-    return bi, ci
+    phase_targets = meta.get("phase_target_callables", {})
+    if not isinstance(phase_targets, dict) or any(
+            not isinstance(t, str) or not t.strip() for t in phase_targets.values()):
+        raise RuntimeError("phase_target_callables must map phases to exact callable specs")
+    targets = list(dict.fromkeys([meta["target_callable"], *phase_targets.values()]))
+    primary = None
+    for index, target in enumerate(targets):
+        # Leave the original single-target command unchanged for legacy tasks.
+        extra = {"target_callable": target} if index else {}
+        bi = _run_leg(task, base, "resolve", timeout=timeout, **extra)
+        ci = _run_leg(task, cand, "resolve", timeout=timeout, **extra)
+        for who, ident in (("baseline", bi), ("candidate", ci)):
+            if ident.get("error"):
+                raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
+        if bi == ci:
+            raise RuntimeError(
+                f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
+                "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
+        if bi.get("file", "").startswith(task + os.sep):
+            raise RuntimeError(
+                f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
+                "serving stack, never a copy the optimizer can edit.")
+        if index == 0:
+            primary = (bi, ci)
+    return primary
 
 
 def _median(xs):

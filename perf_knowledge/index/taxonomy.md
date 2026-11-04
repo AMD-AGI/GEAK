@@ -10,10 +10,11 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx90a` | CDNA2 | MI210, MI250, MI250X |
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
+| `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK product calibration is R9700-only |
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·
-`fp8_e4m3_fnuz` · `fp8_e5m2_fnuz` (CDNA3 FNUZ) · `fp8_e4m3` · `fp8_e5m2` (OCP, CDNA4) ·
+`fp8_e4m3_fnuz` · `fp8_e5m2_fnuz` (CDNA3 FNUZ) · `fp8_e4m3` · `fp8_e5m2` (OCP, CDNA4 and RDNA4 client) ·
 `fp6_e2m3` · `fp6_e3m2` · `fp4_e2m1` · `mxfp8` · `mxfp6` · `mxfp4` (block-scaled, E8M0 scale) ·
 `int8` · `int4`
 
@@ -49,6 +50,10 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 **Library / auto backends (select-an-impl)**:
 `aiter` · `hipblaslt` · `rocblas` · `ck_lib` · `miopen` · `pytorch_inductor` · `mori` · `rccl` ·
 `fa_rocm` (FlashAttention-ROCm)
+**ONNX-Runtime EP backends (external `ROCm/hip-ep` repo; author/optimize a per-op kernel)**:
+`hip_ep` (HIP Execution Provider custom kernels — RDNA3.5 WMMA wave32 on gfx1151/gfx1150 client,
+CDNA MFMA wave64 on gfx942/gfx950 DC; op kernels in `lib/Runtime/Kernels/hip/<op>_kernel.hip`) ·
+`cpu_ep` (CPU Execution Provider reference / secondary target). See `languages/hip_ep/`.
 **Explicitly N/A on AMD** (record as `na` with reason): `flashinfer` (NVIDIA-only), `cutlass` (native),
 `cudnn`, `transformer_engine`.
 

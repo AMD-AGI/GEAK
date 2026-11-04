@@ -15,8 +15,11 @@ which kernels dominate.
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/e2e_optimization.md` (Tier 0 knobs),
 `SKILL_DIR/knowledge/sglang_internals.md` (the exact flags/env + how to verify a swap took effect),
 `SKILL_DIR/knowledge/backend_playbook.md` (which backend the Architect ranked for each shape), and
-`SKILL_DIR/knowledge/learned/INDEX.md` (distilled flag/env levers — open cards matching this run's gfx,
-e.g. `--attention-backend triton`).
+when `E2E_LEARNED_KB=on`, `SKILL_DIR/knowledge/learned/INDEX.md` (distilled flag/env levers — open
+cards matching this run's gfx, e.g. `--attention-backend triton`). When
+`E2E_LEARNED_KB=off`, do **not** open, list, or cite `knowledge/learned/`;
+derive the sweep from the current profile and architecture-appropriate static
+knowledge only.
 
 ## Discipline
 - **One axis at a time.** Change a single flag/env, measure, keep or revert. Never sweep two axes in

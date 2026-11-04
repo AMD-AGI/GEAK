@@ -2,6 +2,10 @@
 
 Patterns are ranked by priority. Higher priority (P0) = higher expected impact. Always start with P0 strategies before moving to lower priorities.
 
+**Wavefront size is not always 64.** Detect `gfx` first: Instinct CDNA (gfx942/gfx950) is wave64 /
+MFMA (`amd_instinct.md`); RDNA4 gfx1201 is **wave32 / WMMA** (`amd_rdna4.md`). Examples
+below that divide by 64 assume CDNA — on RDNA4 use 32.
+
 ## P0: Algorithm Restructuring (Highest Impact)
 
 ### Template Parameterization
@@ -164,7 +168,7 @@ Use `#pragma unroll` for small, fixed-trip-count loops. Use `#pragma unroll N` t
 ## P4: Launch Configuration
 
 ### Block Size Tuning
-- Must be multiple of 64 (wavefront size on AMD)
+- Must be a multiple of the wavefront size (**64** CDNA / **32** RDNA4 — detect gfx)
 - Common sweet spots: 64, 128, 256
 - Use `__launch_bounds__(max_threads, min_waves)` to guide compiler
 

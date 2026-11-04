@@ -46,6 +46,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -248,6 +249,20 @@ class _T:
     def __le__(self, other):
         return self._bin(other, lambda x, y: float(x <= y))
 
+    def __ne__(self, other):
+        """Elementwise, like a real tensor. `nan != nan` is True, which is exactly what
+        makes a NaN position a MISMATCH rather than a match in the non-finite check."""
+        if not isinstance(other, (_T, int, float)):
+            return NotImplemented    # leave odd comparisons on the default behaviour
+        return self._bin(other, lambda x, y: float(x != y))
+
+    def __and__(self, other):
+        return self._bin(other, lambda x, y: float(bool(x) and bool(y)))
+
+    def __invert__(self):
+        return _T(self.shape, [0.0 if v else 1.0 for v in self.tolist()],
+                  dtype=self.dtype, device=self.device)
+
     def div(self, other):
         return self.__truediv__(other)
 
@@ -272,6 +287,14 @@ class _T:
     def _reduce(self, fn):
         return _T((), [fn(self.tolist())], dtype=self.dtype, device=self.device)
 
+    def sum(self):
+        """Short-circuits the lazy fill: flush_cache reduces a 512MB buffer, and going through
+        `_reduce` would materialize 134M floats and hang the suite. Returns a _T, not a float, so it
+        mirrors the real thing -- a device tensor that costs nothing on the host until `.item()`."""
+        if self._data is None:
+            return _T((), [self._fill * self.numel()], dtype=self.dtype, device=self.device)
+        return self._reduce(sum)
+
     def mean(self):
         return self._reduce(lambda v: sum(v) / len(v))
 
@@ -284,11 +307,35 @@ class _T:
     def all(self):
         return all(v != 0.0 for v in self.tolist())
 
+    def any(self):
+        return any(v != 0.0 for v in self.tolist())
+
+    def sum(self):
+        return self._reduce(sum)
+
     def item(self):
         return self.tolist()[0]
 
     def __repr__(self):
         return "_T(shape=%s, dtype=%s, data=%s)" % (self.shape, self.dtype, self.tolist())
+
+
+def _isfinite(t):
+    """Mask of the finite positions, 1.0/0.0 like a real bool tensor."""
+    return _T(t.shape, [float(math.isfinite(v)) for v in t.tolist()],
+              dtype=t.dtype, device=t.device)
+
+
+def _where(cond, a, b):
+    """Elementwise select. `b` is a 0-d fill in the non-finite path, so it broadcasts."""
+    mask = cond.tolist()
+    av, bv = a.tolist(), b.tolist()
+    if len(av) == 1:
+        av = av * len(mask)
+    if len(bv) == 1:
+        bv = bv * len(mask)
+    return _T(cond.shape, [x if m else y for m, x, y in zip(mask, av, bv)],
+              dtype=a.dtype, device=a.device)
 
 
 # --------------------------------------------------------------------------- #
@@ -437,7 +484,7 @@ class _Stack:
             is_available=_is_available, synchronize=_synchronize,
             get_device_properties=_get_device_properties, Event=_Event, Stream=_Stream,
             current_stream=lambda: default_stream, stream=_stream_ctx,
-            CUDAGraph=_CUDAGraph, graph=_graph_ctx)
+            CUDAGraph=_CUDAGraph, graph=_graph_ctx, current_device=lambda: 0)
         torch.finfo = lambda dt: types.SimpleNamespace(max=dt.max, min=-dt.max)
         torch.iinfo = lambda dt: types.SimpleNamespace(max=dt.max, min=-dt.max - 1)
         torch.Generator = _Generator
@@ -448,6 +495,8 @@ class _Stack:
         torch.randperm = _randperm
         torch.equal = _equal
         torch.tensor = lambda data, dtype=None: _T((len(data),), list(data), dtype=dtype or FP32)
+        torch.isfinite = _isfinite
+        torch.where = _where
         return torch
 
 
@@ -517,8 +566,9 @@ class _HarnessTestCase(unittest.TestCase):
         self.clock = _Clock(_wall_deltas(self.WALL_MS) if self.WALL_MS else (0.001,))
         self.addCleanup(setattr, hl, "time", hl.time)
         hl.time = self.clock
-        hl._CACHE_FLUSH_BUF = None
-        self.addCleanup(setattr, hl, "_CACHE_FLUSH_BUF", None)
+        for g in ("_CACHE_FLUSH_BUF", "_CACHE_FLUSH_SINK", "_CACHE_FLUSH_DEV"):
+            setattr(hl, g, None)
+            self.addCleanup(setattr, hl, g, None)
 
     def _restore_torch(self):
         if self._prev_torch is _MISSING:
@@ -580,7 +630,7 @@ class TestArch(_HarnessTestCase):
             self.assertTrue(hl.fp8_is_fnuz(arch), arch)
 
     def test_cdna4_and_unknown_archs_use_the_ocp_fp8(self):
-        for arch in ("gfx950", "gfx1100", "", None):
+        for arch in ("gfx950", "gfx1100", "gfx1151", "", None):
             self.assertFalse(hl.fp8_is_fnuz(arch), arch)
 
 
@@ -624,13 +674,12 @@ class TestRegimeDtype(_HarnessTestCase):
         self.assertIs(hl.regime_dtype("fp8_e4m3fn", self.torch, arch="gfx942"), FP8_E4M3FN)
         self.assertIs(hl.regime_dtype("fp8_e5m2fnuz", self.torch, arch="gfx950"), FP8_E5M2FNUZ)
 
-    def test_bare_e5m2_on_an_ocp_arch_degrades_to_bf16(self):
-        # SOURCE GAP, pinned as-is: the OCP fp8 pair torch exposes is float8_e4m3fn + float8_e5m2 --
-        # there is NO float8_e5m2fn. The suffix rule appends "fn" to both mantissa forms, so a bare
-        # "fp8_e5m2"/"e5m2" KV dtype on gfx950 resolves to bf16 (silently 2x the intended KV bytes,
-        # which also doubles pack_x) instead of torch.float8_e5m2.
-        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx950"), BF16)
-        self.assertIs(hl.regime_dtype("e5m2", self.torch, arch="gfx950"), BF16)
+    def test_bare_e5m2_on_an_ocp_arch_is_torch_float8_e5m2(self):
+        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx950"), FP8_E5M2)
+        self.assertIs(hl.regime_dtype("e5m2", self.torch, arch="gfx950"), FP8_E5M2)
+        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx1201"), FP8_E5M2)
+        # There is no torch.float8_e5m2fn; the OCP `fn` spelling still maps to float8_e5m2.
+        self.assertIs(hl.regime_dtype("fp8_e5m2fn", self.torch, arch="gfx942"), FP8_E5M2)
 
 
 # --------------------------------------------------------------------------- #
@@ -968,15 +1017,59 @@ class TestTimeOpEvents(_CudaTestCase):
         self.assertAlmostEqual(got["wall_ms"], 10.0)
         self.assertAlmostEqual(got["host_ms"], 1.0)         # eager call() is one launch -> no division
 
-    def test_the_cache_is_flushed_once_per_sample_outside_the_event_window(self):
-        hl.time_op(lambda: None, warmup=1, repeats=3)
-        self.assertIsNotNone(hl._CACHE_FLUSH_BUF)
+    def test_the_cache_is_prepared_once_per_sample_outside_the_event_window(self):
+        reads, real_sum = [], _T.sum
+
+        def read(buf):
+            reads.append(len(self.stack.events))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="none"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        # One actual read before each sample's start event; the removed env switch cannot skip it.
+        self.assertEqual(reads, [0, 3, 6])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
         # sync() before each sample, the post-warmup sync, and the host probe's own two
         self.assertEqual(self.stack.syncs, 6)
 
-    def test_flush_can_be_disabled_for_a_deliberately_hot_measurement(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_the_receipt_reports_which_cache_condition_produced_the_number(self):
+        with _env(HARNESS_CACHE_FLUSH_MB="64"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertEqual(got["cache_condition"]["bytes"], 64 << 20)
+        self.assertFalse(got["cache_condition"]["deployment_calibrated"])
+        self.assertIn("primed", got)                        # and the timing receipt is still intact
+
+    def test_the_removed_switch_cannot_change_the_measurement_policy(self):
+        for value in (True, False, None):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                hl.time_op(lambda: None, flush_cache=value)
+        # The old positional switch must not silently become the detail argument.
+        with self.assertRaises(TypeError):
+            hl.time_op(lambda: None, 1, 2, 1, False, False)
+
+    def test_a_bad_buffer_size_is_a_configuration_error_before_the_call_runs(self):
+        box, call = self._counting_call()
+        with _env(HARNESS_CACHE_FLUSH_MB="0"), self.assertRaises(ValueError):
+            hl.time_op(call)
+        self.assertEqual(box["n"], 0)
+
+    def test_the_buffer_size_is_fixed_before_warmup_even_if_the_environment_changes(self):
+        def call():
+            os.environ["HARNESS_CACHE_FLUSH_MB"] = "0"
+
+        with _env(HARNESS_CACHE_FLUSH_MB="8"):
+            got = hl.time_op(call, warmup=1, repeats=3, detail=True)
+        self.assertEqual(got["cache_condition"]["bytes"], 8 << 20)
+        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
+
+    def test_the_buffer_is_allocated_before_warmup_not_inside_a_sample(self):
+        # A 512MB allocation inside the timed loop would land between the flush and the kernel.
+        allocs = []
+        real_ones = self.torch.ones
+        self.torch.ones = lambda *a, **k: (allocs.append(len(self.stack.events)), real_ones(*a, **k))[1]
+        hl.time_op(lambda: None, warmup=1, repeats=3)
+        self.assertEqual(allocs, [0])                       # once, before any event was recorded
 
     def test_each_sample_records_start_and_end_and_waits_on_the_end_event(self):
         # Pinned deliberately: a batched variant dropping these syncs measured WORSE per-window overhead
@@ -1054,9 +1147,18 @@ class TestTimeOpGraph(_CudaTestCase):
         # 3 failed-capture warmups + 2 warmup + 3 samples + the host probe's warmups and launches
         self.assertEqual(box["n"], 8 + 3 + hl._HOST_PROBE_LAUNCHES)
 
-    def test_graph_replay_can_also_be_timed_hot(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_graph_replay_reads_the_buffer_before_each_sample_outside_capture(self):
+        reads, real_sum = [], _T.sum
+
+        def read(buf):
+            reads.append((len(self.stack.events), self.stack.capturing))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="write-evict"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, detail=True)
+        self.assertEqual(reads, [(0, False), (3, False)])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertEqual(hl._CACHE_FLUSH_BUF.tolist()[:4], [1.0] * 4)
 
 
 class TestTimingResult(unittest.TestCase):
@@ -1075,6 +1177,19 @@ class TestTimingResult(unittest.TestCase):
                           "host_ms": 0.5, "primed": True})
         self.assertEqual(set(hl._timing_result(1.5, 2.25, "cuda_event", True, None, True)),
                          {"ms", "wall_ms", "timer"})
+
+    def test_the_cache_condition_rides_the_receipt_and_is_independent_of_the_host_keys(self):
+        policy = {"mode": "read-evict", "bytes": 1 << 20}
+        got = hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, True, policy)
+        self.assertEqual(got["cache_condition"], policy)
+        self.assertEqual(got["primed"], True)                       # the fix must not cost the old keys
+        self.assertEqual(set(hl._timing_result(1.5, 2.25, "wall", True, policy=policy)),
+                         {"ms", "wall_ms", "timer", "cache_condition"})
+
+    def test_an_absent_cache_condition_is_left_absent_so_old_receipts_stay_identifiable(self):
+        # director.md reads ABSENCE as "frozen under the unconditional write-evict". Emitting a default
+        # here would make every stale task claim it had been measured under the new policy.
+        self.assertNotIn("cache_condition", hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, True))
 
     def test_primed_is_serialized_as_a_real_bool_for_the_receipt_json(self):
         # The receipt is a JSON line the gate parses; an int here serializes as 0/1 and misses `=== true`.
@@ -1097,6 +1212,17 @@ class TestFlushCache(_HarnessTestCase):
         hl.flush_cache(self.torch)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
+    def test_read_evict_on_a_cpu_box_does_not_allocate_or_reduce(self):
+        hl.flush_cache(self.torch)
+        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+        self.assertIsNone(hl._CACHE_FLUSH_SINK)
+
+    def test_the_wall_fallback_still_reports_the_cache_condition_it_could_not_apply(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=2, detail=True)
+        self.assertEqual(got["timer"], "wall")
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertNotIn("primed", got)                     # no CUDA -> the timer still cannot tell
+
 
 class TestFlushCacheOnDevice(_CudaTestCase):
     def test_the_default_buffer_is_larger_than_mi300_s_infinity_cache(self):
@@ -1116,24 +1242,74 @@ class TestFlushCacheOnDevice(_CudaTestCase):
             hl.flush_cache(self.torch, mb=8)
         self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
 
-    def test_a_zero_size_still_allocates_something_writable(self):
-        hl.flush_cache(self.torch, mb=0)
-        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), 1)
+    def test_a_nonpositive_size_is_rejected_rather_than_silently_evicting_nothing(self):
+        """mb=0 used to allocate a 1-element buffer: a flush that evicts nothing while still reporting
+        that the sample was prepared. The read eviction must have a positive buffer size."""
+        for mb in (0, -1):
+            with self.subTest(mb=mb), self.assertRaises(ValueError):
+                hl.flush_cache(self.torch, mb=mb)
+        self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
-    def test_a_big_enough_buffer_is_reused_and_only_rezeroed(self):
+    def test_the_removed_mode_argument_cannot_disable_or_switch_eviction(self):
+        for mode in ("none", "write-evict", "read-evict"):
+            with self.subTest(mode=mode), self.assertRaises(TypeError):
+                hl.flush_cache(self.torch, mode=mode)
+
+    def test_a_same_size_buffer_is_reused_and_read_again(self):
         hl.flush_cache(self.torch, mb=8)
         first = hl._CACHE_FLUSH_BUF
-        first.overwrite_([1.0] * 4)                          # pretend a prior flush left data behind
-        hl.flush_cache(self.torch, mb=4)
+        first_sum = hl._CACHE_FLUSH_SINK
+        hl.flush_cache(self.torch, mb=8)
         self.assertIs(hl._CACHE_FLUSH_BUF, first)
-        self.assertEqual(first.tolist()[:4], [0.0, 0.0, 0.0, 0.0])
+        self.assertIsNot(hl._CACHE_FLUSH_SINK, first_sum)
+        self.assertEqual(first.tolist()[:4], [1.0] * 4)
 
-    def test_a_larger_request_reallocates(self):
+    def test_read_evict_reduces_the_buffer_instead_of_dirtying_it(self):
+        """The whole point of the fix: same traffic, no dirty lines for the NEXT (timed) kernel to
+        contend with. The buffer must come back untouched and the reduction must be kept alive."""
+        hl.flush_cache(self.torch, mb=8)
+        buf = hl._CACHE_FLUSH_BUF
+        n = (8 << 20) // 4
+        self.assertEqual(buf.numel(), n)
+        self.assertEqual(buf.tolist()[:4], [1.0, 1.0, 1.0, 1.0])   # ones, NOT zeroed
+        self.assertIsNotNone(hl._CACHE_FLUSH_SINK)
+        self.assertEqual(hl._CACHE_FLUSH_SINK.item(), float(n))
+
+    def test_a_different_size_reallocates_in_either_direction(self):
+        """Exact size, not `>=`: reusing a stale oversized buffer would evict more than was asked for
+        and the receipt's `bytes` would be a lie."""
         hl.flush_cache(self.torch, mb=4)
         first = hl._CACHE_FLUSH_BUF
         hl.flush_cache(self.torch, mb=8)
         self.assertIsNot(hl._CACHE_FLUSH_BUF, first)
         self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
+        hl.flush_cache(self.torch, mb=4)
+        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (4 << 20) // 4)
+
+
+class TestCachePolicy(_HarnessTestCase):
+    def test_the_policy_is_read_evict(self):
+        p = hl.cache_policy()
+        self.assertEqual(p["mode"], "read-evict")
+        self.assertEqual(p["preparation"], "float32-sum")
+        self.assertEqual(p["bytes"], 512 << 20)
+
+    def test_the_removed_environment_switch_cannot_change_the_policy(self):
+        for mode in ("none", "write-evict", "read-evict", "cold"):
+            with self.subTest(mode=mode), _env(HARNESS_CACHE_MODE=mode):
+                p = hl.cache_policy()
+                self.assertEqual((p["mode"], p["preparation"], p["bytes"]),
+                                 ("read-evict", "float32-sum", 512 << 20))
+
+    def test_the_policy_never_claims_the_deployed_cache_state_was_reproduced(self):
+        p = hl.cache_policy()
+        self.assertFalse(p["deployment_calibrated"])
+        self.assertTrue(p["outside_timing"])
+
+    def test_eviction_with_a_nonpositive_budget_is_rejected(self):
+        for size in ("0", "-1"):
+            with self.subTest(size=size), _env(HARNESS_CACHE_FLUSH_MB=size), self.assertRaises(ValueError):
+                hl.cache_policy()
 
 
 # --------------------------------------------------------------------------- #
@@ -1186,6 +1362,56 @@ class TestCorrect(_HarnessTestCase):
         ok, err = hl.correct(_T((3,), [1.0, 1.0, 1.0]), _T((2,), [1.0, 1.0]), 0.5)
         self.assertFalse(ok)
         self.assertEqual(err, float("inf"))
+
+    # ---- non-finite references (attention LSE over an EMPTY KV slice is exactly -inf) ----
+    def test_a_bit_identical_infinite_element_passes_instead_of_failing_on_nan(self):
+        """`-inf - -inf` is NaN and `nan <= x` is False, so the plain path used to FAIL a
+        bit-identical output. The non-finite path compares those positions for identity."""
+        ref = _T((3,), [float("-inf"), 2.0, 2.0])
+        ok, err = hl.correct(ref.clone(), ref, 0.5)
+        self.assertTrue(ok)
+        self.assertEqual(err, 0.0)
+
+    def test_the_floor_is_the_rms_of_the_finite_bulk_not_an_infinite_budget(self):
+        """RMS over a tensor containing an inf is inf, which made atol inf and passed EVERY
+        element -- a silent false-PASS hole. The floor here is the RMS of the finite bulk:
+        finite part is [4, 0, 0] -> sum(x^2)/n = 16/3 -> RMS 2.309, atol = 1.1547. A 1.5
+        error on a near-zero element must still FAIL."""
+        ref = _T((4,), [float("-inf"), 4.0, 0.0, 0.0])
+        ok, err = hl.correct(_T((4,), [float("-inf"), 4.0, 1.5, 0.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(err, 1.5 / 1.1547005383792515, places=9)
+
+    def test_an_infinity_against_a_finite_element_is_a_real_mismatch(self):
+        """inf-vs-finite must never pass: the position is where the two sides disagree most."""
+        ref = _T((2,), [float("-inf"), 2.0])
+        ok, err = hl.correct(_T((2,), [0.0, 2.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_nan_never_matches_even_against_itself(self):
+        """`nan != nan`, so a NaN position is a mismatch on both sides -- a kernel that
+        produced NaN where the reference did must not be certified as agreeing."""
+        nan = float("nan")
+        ok, err = hl.correct(_T((2,), [nan, 2.0]), _T((2,), [nan, 2.0]), 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_opposite_infinities_are_a_mismatch(self):
+        ref = _T((2,), [float("-inf"), 2.0])
+        ok, err = hl.correct(_T((2,), [float("inf"), 2.0]), ref, 0.5)
+        self.assertFalse(ok)
+        self.assertEqual(err, float("inf"))
+
+    def test_a_failure_inside_the_non_finite_path_fails_closed(self):
+        """A check that cannot complete must report INCORRECT, never raise: an exception
+        escaping here aborts the whole suite instead of rejecting one candidate. Only the
+        slow path is broken, so the plain path still routes into it first."""
+        def _boom(*_a, **_kw):
+            raise RuntimeError("no masked select on this device")
+        self.torch.where = _boom            # fresh fake torch per test; nothing to restore
+        ref = _T((2,), [float("-inf"), 2.0])
+        self.assertEqual(hl.correct(ref.clone(), ref, 0.5), (False, float("inf")))
 
     def test_a_non_tensor_output_is_incorrect_rather_than_an_exception(self):
         self.assertEqual(hl.correct(None, _T((2,), [1.0, 1.0]), 0.5), (False, float("inf")))
@@ -1252,6 +1478,13 @@ class TestAssertIndependentOutputs(_HarnessTestCase):
     def test_a_fresh_output_per_call_passes_with_no_reason(self):
         self.assertEqual(hl.assert_independent_outputs(_echo_call, (1.0, 2.0), (3.0, 4.0)),
                          (True, ""))
+
+    def test_a_launcher_returning_no_tensor_is_named_rather_than_passing_vacuously(self):
+        """Nothing to compare is not evidence of independence. A launcher that returns no
+        tensor must be reported by name, not silently certified."""
+        ok, reason = hl.assert_independent_outputs(lambda args: None, (1.0,), (2.0,))
+        self.assertFalse(ok)
+        self.assertIn("no_tensor_output", reason)
 
     def test_a_shared_return_buffer_is_named_with_its_storage_address(self):
         call = _StaticOutCall()
@@ -2466,6 +2699,28 @@ class TestBuildCandidateOverlay(_LegTestCase):
 
 
 class TestAssertLegsDiffer(_LegTestCase):
+    def test_joint_phase_entries_are_all_checked(self):
+        self._legs()
+        self.meta["phase_target_callables"] = {
+            "decode": self.meta["target_callable"], "prefill": "live_stack.moe:prefill"}
+        hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual(self.sub.modes(), ["resolve"] * 4)
+
+    def test_joint_secondary_phase_cannot_resolve_to_the_baseline(self):
+        calls = []
+        self.meta["phase_target_callables"] = {"prefill": "live_stack.moe:prefill"}
+
+        def resolve(task, overlay, mode, **kwargs):
+            calls.append(kwargs.get("target_callable", self.meta["target_callable"]))
+            if kwargs.get("target_callable"):
+                return self.BASE_IDENT
+            return self.BASE_IDENT if overlay == self.base else self.CAND_IDENT
+
+        with _patched(hl, _run_leg=resolve):
+            with self.assertRaisesRegex(RuntimeError, "prefill.*SAME code"):
+                hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual(calls[-2:], ["live_stack.moe:prefill"] * 2)
+
     def test_two_legs_importing_different_code_are_accepted(self):
         self._legs()
         bi, ci = hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)

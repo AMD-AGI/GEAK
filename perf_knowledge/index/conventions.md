@@ -10,7 +10,7 @@ kind: hardware | language | backend | operator_overview | sota_card | technique 
 # for sota_card (operators/<op>/backends/<backend>.md):
 operator: dense_gemm
 backend: flydsl            # one of the controlled backend ids (see taxonomy.md)
-gens: [gfx942, gfx950]     # gfx906=MI100, gfx90a=MI200, gfx942=MI300, gfx950=MI350
+gens: [gfx942, gfx950]     # gfx906=MI100, gfx90a=MI200, gfx942=MI300, gfx950=MI350; gfx1201=RDNA4
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp4_e2m1, fp6, int8]
 regimes: [prefill, decode, training, both]
 status: sota | competitive | legacy | experimental | na

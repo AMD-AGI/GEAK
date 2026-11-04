@@ -21,7 +21,7 @@ planning a tile that has not been compiled yet.
 Provenance of the tables (`basis: compiler-derived`, reproducible in seconds, independent of
 any kernel or measurement):
 
-    for v in $(seq 1 254); do
+    for v in $(seq 1 256); do
       clob=$(python3 -c "print(','.join('~{v%d}'%i for i in range($v)))")
       printf 'target triple = "amdgcn-amd-amdhsa"\\n
       define amdgpu_kernel void @k(ptr addrspace(1) %%o) #0 {\\n
@@ -31,11 +31,13 @@ any kernel or measurement):
     done
 
 Verified against ROCm 7.2.1 / LLVM 22 for gfx90a, gfx942, gfx950, gfx1100, gfx1151, gfx1200,
-gfx1201, gfx1250 -- every step below is a measured breakpoint of that sweep, not an estimate.
+gfx1201, gfx1250. The gfx1201 table was regenerated unchanged with AMD clang/LLVM 23 from the
+ROCm 10 R9700 image on 2026-09-21. Every step below is a measured compiler breakpoint.
 
 Usage:
   python3 amd_occupancy.py --vgpr 249 --arch gfx1201     # model lookup
   python3 amd_occupancy.py --asm kernel.s                # read the KD + LLVM's own answer
+  python3 amd_occupancy.py --compiler-sweep --arch gfx1201 --format json
   python3 amd_occupancy.py --selftest
 """
 from __future__ import annotations
@@ -44,6 +46,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,6 +94,7 @@ _TARGET_RE = re.compile(r"^\s*(?:\.amdgcn_target|amdhsa\.target:)\s*\"?[^\"]*?"
                         r"(gfx\w+)", re.M)
 _WAVE32_RE = re.compile(r"^\s*\.amdhsa_wavefront_size32\s+1\s*$", re.M)
 _LLVM_OCC_RE = re.compile(r"^;\s*Occupancy:\s*(\d+)\s*$", re.M)
+_LLVM_NUM_VGPR_RE = re.compile(r"^;\s*NumVgprs:\s*(\d+)\s*$", re.M)
 
 
 def family_for(arch):
@@ -155,6 +160,111 @@ def occupancy_from_asm(text, vgpr=None):
         return occ, "llvm-comment", f"{label}; LLVM `; Occupancy:` in this dump"
     waves, label = waves_by_vgpr(vgpr, arch=arch, model=m)
     return waves, ("model" if waves is not None else "unknown"), label
+
+
+# ---------------------------------------------------------------- compiler-derived sweep
+def _sweep_ir(clobbered_vgprs):
+    clobbers = ",".join(f"~{{v{i}}}" for i in range(int(clobbered_vgprs)))
+    return (
+        'target triple = "amdgcn-amd-amdhsa"\n'
+        'define amdgpu_kernel void @k(ptr addrspace(1) %o) #0 {\n'
+        f'  call void asm sideeffect "", "{clobbers}"()\n'
+        '  store float 1.0, ptr addrspace(1) %o\n'
+        '  ret void\n'
+        '}\n'
+        'attributes #0 = { "amdgpu-flat-work-group-size"="256,256" }\n'
+    )
+
+
+def _compress_sweep(records):
+    """Return [max NumVgprs, waves/SIMD] breakpoints from compiler records."""
+    by_vgpr = {}
+    for row in records:
+        by_vgpr[int(row["num_vgprs"])] = int(row["occupancy"])
+    ordered = sorted(by_vgpr.items())
+    if not ordered:
+        return []
+    steps = []
+    for index, (vgpr, waves) in enumerate(ordered):
+        next_waves = ordered[index + 1][1] if index + 1 < len(ordered) else None
+        if next_waves != waves:
+            steps.append([vgpr, waves])
+    return steps
+
+
+def _default_rocm_compiler():
+    """Prefer a ROCm-bundled LLVM; never silently use an unrelated system clang."""
+    for path in (
+        "/opt/rocm/llvm/bin/llc",
+        "/opt/rocm/llvm/bin/clang",
+    ):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    for name in ("amdclang", "llc", "clang"):
+        path = shutil.which(name)
+        real = os.path.realpath(path) if path else ""
+        if path and ("rocm" in real.lower() or "_rocm_sdk" in real.lower()):
+            return path
+    return None
+
+
+def compiler_sweep(arch, compiler=None, max_clobbered_vgprs=256):
+    """Run the documented LLVM clobber sweep and return raw rows + breakpoints."""
+    binary = compiler or _default_rocm_compiler()
+    if not binary:
+        raise RuntimeError(
+            "a ROCm-bundled llc/clang was not found (pass --compiler explicitly)"
+        )
+    version_proc = subprocess.run(
+        [binary, "--version"], check=False, capture_output=True, text=True
+    )
+    if version_proc.returncode != 0:
+        raise RuntimeError(f"{binary} --version exited {version_proc.returncode}")
+    version = (version_proc.stdout or version_proc.stderr).strip()
+    compiler_name = os.path.basename(os.path.realpath(binary))
+    is_clang = "clang" in compiler_name
+    records = []
+    for count in range(1, int(max_clobbered_vgprs) + 1):
+        command = (
+            [binary, "-x", "ir", "--target=amdgcn-amd-amdhsa",
+             f"-mcpu={arch}", "-S", "-o", "-", "-"]
+            if is_clang
+            else [binary, "-mtriple=amdgcn-amd-amdhsa", f"-mcpu={arch}", "-o", "-"]
+        )
+        proc = subprocess.run(
+            command,
+            input=_sweep_ir(count),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip().splitlines()
+            raise RuntimeError(
+                f"llc sweep failed at {count} clobbered VGPRs: "
+                f"{detail[-1] if detail else 'unknown error'}"
+            )
+        vgpr_match = _LLVM_NUM_VGPR_RE.search(proc.stdout)
+        occ_match = _LLVM_OCC_RE.search(proc.stdout)
+        if not vgpr_match or not occ_match:
+            raise RuntimeError(
+                f"llc output at {count} clobbered VGPRs omitted NumVgprs/Occupancy"
+            )
+        records.append(
+            {
+                "clobbered_vgprs": count,
+                "num_vgprs": int(vgpr_match.group(1)),
+                "occupancy": int(occ_match.group(1)),
+            }
+        )
+    return {
+        "arch": arch,
+        "compiler": os.path.realpath(binary),
+        "compiler_version": version,
+        "max_clobbered_vgprs": int(max_clobbered_vgprs),
+        "records": records,
+        "vgpr_wave_steps": _compress_sweep(records),
+    }
 
 
 # --------------------------------------------------------------------------------- reference SoT
@@ -244,6 +354,12 @@ def _selftest():
     assert occupancy_from_asm(cdna_asm, 81)[:2] == (5, "model"), occupancy_from_asm(cdna_asm, 81)
     # A dump with no target at all: refuse, do not guess.
     assert occupancy_from_asm("s_nop 0\n", 64)[1] == "unknown"
+    assert _compress_sweep([
+        {"num_vgprs": 24, "occupancy": 16},
+        {"num_vgprs": 48, "occupancy": 16},
+        {"num_vgprs": 72, "occupancy": 12},
+        {"num_vgprs": 96, "occupancy": 12},
+    ]) == [[48, 16], [96, 12]]
 
     # The reference lookup is bounded on purpose; both bounds have failed in the field.
     import tempfile
@@ -300,8 +416,29 @@ def main():
     ap.add_argument("--vgpr", type=int, default=None, help="next_free_vgpr (arch+AGPR on CDNA)")
     ap.add_argument("--arch", default=None, help="gfx target, e.g. gfx942 / gfx1201")
     ap.add_argument("--asm", default=None, help="AMDGCN .s: read target + LLVM's own occupancy")
+    ap.add_argument("--compiler-sweep", action="store_true",
+                    help="derive NumVgprs/Occupancy breakpoints by invoking llc")
+    ap.add_argument("--compiler", "--llc", dest="compiler", default=None,
+                    help="LLVM llc or clang binary for --compiler-sweep")
+    ap.add_argument("--max-clobbered-vgprs", type=int, default=256,
+                    help="highest v-register clobber count in the compiler sweep")
+    ap.add_argument("--format", choices=("json", "tsv"), default="json",
+                    help="compiler-sweep output format")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
+    if a.compiler_sweep:
+        if not a.arch:
+            raise SystemExit("--compiler-sweep requires --arch")
+        result = compiler_sweep(a.arch, a.compiler, a.max_clobbered_vgprs)
+        if a.format == "json":
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print("clobbered_vgprs\tnum_vgprs\toccupancy")
+            for row in result["records"]:
+                print(f"{row['clobbered_vgprs']}\t{row['num_vgprs']}\t{row['occupancy']}")
+            print("# vgpr_wave_steps=" + json.dumps(result["vgpr_wave_steps"]))
+            print("# compiler_version=" + json.dumps(result["compiler_version"]))
+        return 0
     if a.asm:
         text = open(a.asm, errors="ignore").read()
         vgpr = a.vgpr

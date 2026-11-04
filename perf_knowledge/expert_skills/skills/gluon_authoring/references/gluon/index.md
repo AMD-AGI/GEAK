@@ -4,7 +4,8 @@ Owned, self-contained Gluon API reference for tile-programming-gluon. **Start at
 `../hardware/atlas.md`** (phase read order + backbone layer map). Organized by the
 **tile-programming mechanism / backbone layer** you are working on, not as an
 alphabetical API dump. gfx950 (CDNA4) is the default; gfx942 (CDNA3) is the
-downgrade. RDNA4 client WMMA (gfx1201, R9700 / RX9070 XT): `rdna-wmma-reference.md`.
+downgrade. RDNA4 client WMMA ISA (gfx1201; GEAK product calibration is
+R9700-only): `rdna-wmma-reference.md`.
 gfx1250 (CDNA5 / MI450) WMMA+TDM: structured sub-target, separate data-center fork.
 
 Planning constants: `../hardware/planning-constants.md`. ISA shapes: `../hardware/isa-mechanisms.md`.

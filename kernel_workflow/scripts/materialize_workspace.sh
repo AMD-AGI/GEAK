@@ -6,7 +6,8 @@
 # regress. This script is the single copy path for director / engineer / verify / integrate.
 #
 # Contract:
-#   - Never dereference symlinks (-h): absolute symlinks (reference_io / shared aiter) stay links.
+#   - Never dereference symlinks (-h): external reference/vendor links stay shared.
+#   - Rebase workspace-owned source links to DST, including copied build overlays.
 #   - Never copy build artifacts or nested *.so/*.o (recursive exclude).
 #   - Optionally symlink immutable trees (aiter/) onto a shared physical copy.
 #   - Does NOT touch kernel_src editability: source trees that are not excluded remain writable files.
@@ -51,6 +52,7 @@ DST="$(cd "$DST" && pwd)"
 TAR_EXCLUDES=(
   --wildcards --wildcards-match-slash
   --exclude='./.git' --exclude='*/.git'
+  --exclude='./.geak'
   --exclude='./build' --exclude='*/build'
   --exclude='./__pycache__' --exclude='*/__pycache__'
   --exclude='./.torch_ext' --exclude='*/.torch_ext'
@@ -69,13 +71,13 @@ find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 # Critical: do NOT pass -h/--dereference. Symlinks must be preserved as symlinks.
 ( cd "$SRC" && tar "${TAR_EXCLUDES[@]}" -cf - . ) | ( cd "$DST" && tar -xf - )
 
-# Share the immutable golden when present on SRC (or as a dangling absolute link target).
-if [[ -e "$SRC/reference_io.pt" || -L "$SRC/reference_io.pt" ]]; then
-  rm -f "$DST/reference_io.pt"
-  ln -s "$(readlink -f "$SRC/reference_io.pt" 2>/dev/null || echo "$SRC/reference_io.pt")" \
-    "$DST/reference_io.pt" 2>/dev/null \
-    || ln -s "$SRC/reference_io.pt" "$DST/reference_io.pt"
-fi
+# Share root and phase-local goldens; the tar excludes both. Keep each relative
+# path intact so B tasks can load captures/<phase>/reference_io.pt after cloning.
+while IFS= read -r -d '' golden; do
+  relative="${golden#"$SRC/"}"
+  [[ -d "$DST/$(dirname "$relative")" ]] || continue  # excluded build/archive tree
+  ln -sfn "$(readlink -f "$golden" 2>/dev/null || echo "$golden")" "$DST/$relative"
+done < <(find "$SRC" \( -type f -o -type l \) -name reference_io.pt -print0)
 
 # Optional: one physical aiter/ tree per eval (shared-root), symlink into DST.
 # Only for immutable vendor trees — never for editable kernel_src/.
@@ -102,6 +104,8 @@ if [[ "$LINK_AITER" -eq 1 ]]; then
     fi
   done
 fi
+
+python3 "$(dirname "${BASH_SOURCE[0]}")/workspace_sources.py" relocate --src "$SRC" --dst "$DST"
 
 bytes_dst=$(du -sb "$DST" 2>/dev/null | awk '{print $1}')
 n_so=$(find "$DST" -type f -name '*.so' 2>/dev/null | wc -l | tr -d ' ')

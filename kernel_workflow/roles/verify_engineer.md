@@ -10,8 +10,8 @@ absolute per-case latencies. The script trusts only your numbers.
 - `PATCH` — path to the candidate's `best_patch.diff` (generated relative to `CANONICAL`'s git HEAD).
   It MAY be absent or empty: when an engineer's return was lost/failed the lane still hands you its
   on-disk patch to recover (measurement, not the engineer's return, is the source of truth). If the
-  file is missing or empty, that direction simply produced nothing — return `status:"apply_failed"`,
-  `verified_geomean:0`, and do not treat it as an error.
+  file is missing or empty, first check the Engineer's source audit (step 0). Without an invalid
+  experiment, return `status:"apply_failed"`, `verified_geomean:0`.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -21,6 +21,12 @@ absolute per-case latencies. The script trusts only your numbers.
   the immutable oracle's correctness/tolerance.
 
 ## Steps
+0. When `ENGINEER_WORKSPACE` is supplied, read its `.geak/invalid_measurements.jsonl` if present.
+   If the patch is missing/empty and this log records a source-binding failure, return
+   `status:"invalid_measurement"`, `correctness:"not_checked"`, zero speedups, no per-case timings,
+   and explain that the earlier candidate experiment was invalid. Do NOT treat this as a measured
+   no-op or evidence that the edit had no benefit. For an available patch, preserve that history in
+   `notes` and proceed with independent measurement after any build defect has been repaired.
 1. Build a clean copy and apply the patch:
    ```bash
    # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
@@ -39,6 +45,10 @@ absolute per-case latencies. The script trusts only your numbers.
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.
 2. Read `COMMANDMENT.md` for the exact correctness + full-benchmark commands + parse hint.
 3. Run CORRECTNESS (cwd = your ws). If it fails → `status:"correctness_failed"`, no speedup.
+   Exception: exit 86 / `GEAK_SOURCE_INVALID` from any build/test command means
+   `status:"invalid_measurement"`, `correctness:"not_checked"`, zero speedups and no per-case timings.
+   Discard every PASS/timing line from that invocation, even if the error occurred after the command.
+   Report a harness/source-binding defect; never classify it as regression or correct-but-no-gain.
 4. Run FULL_BENCHMARK via `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. Parse per-case
    latency using the parse hint. Run it **twice** and keep the better/median if the two disagree by
    >5% (note the variance).
@@ -71,8 +81,8 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Return JSON
 ```json
 {
-  "status": "verified|correctness_failed|apply_failed|regression",
-  "correctness": "pass|fail",
+  "status": "verified|correctness_failed|apply_failed|regression|invalid_measurement",
+  "correctness": "pass|fail|not_checked",
   "verified_geomean": 0.0,
   "verified_arithmetic": 0.0,
   "verified_weighted": 0.0,

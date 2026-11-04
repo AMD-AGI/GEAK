@@ -171,8 +171,10 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
    `kernel_workflow` for code-level optimization (it already enforces the immutable unittest).
 5. Emit the winner = (backend, winner_kind ∈ {env, flag, patch}, tuning_artifact|code_patch,
    isolated_speedup). The e2e Integrator turns that into an overlay/config and runs the Amdahl gate.
-6. **CURATE** `knowledge/learned/` after the run (read INDEX → merge/insert ≥★★ / archive
-   contradicted), per `knowledge/learned/README.md`. Do NOT append run narratives to this file.
+6. When `E2E_LEARNED_KB=on`, **CURATE** `knowledge/learned/` after the run
+   (read INDEX → merge/insert ≥★★ / archive contradicted), per
+   `knowledge/learned/README.md`. When `E2E_LEARNED_KB=off`, do not open or
+   curate that directory. Do NOT append run narratives to this file.
 
 ## Parity / accuracy gate (read before accepting a head-kernel win)
 - Same-dtype backend swap or tuning → expect near-identical, but **verify e2e greedy/temp=0 parity**.
@@ -181,6 +183,7 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
 - Any quantization (Tier D) → byte parity is expected to fail by design → **always** the accuracy gate.
 
 ## Learned experience → `knowledge/learned/`
+This section applies only when `E2E_LEARNED_KB=on`.
 Per-head/per-shape optimization findings are NOT appended here anymore. They live as distilled,
 evidence-cited cards in **`knowledge/learned/`**, read via **`knowledge/learned/INDEX.md`** (grouped by
 reuse key `kernel_class · gfx`). Open only the cards matching the current run's `(kernel_class, gfx,

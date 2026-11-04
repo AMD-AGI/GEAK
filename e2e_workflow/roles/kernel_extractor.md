@@ -74,6 +74,15 @@ def eager_cases(h, meta):             # [{args, ref}] from reference_io.pt (the 
 
 ---
 
+## Smoke status contract (both phases)
+
+`smoke` (extract_op) / `unittest_smoke` (extract) MUST be **exactly** the lowercase string `"pass"` or
+`"fail"` — nothing else. `"PASS"`, `"pass."`, `"PASS (exit 0) ..."`, `"passed"` are all REJECTED by the
+output schema and you will be asked to re-answer. `"pass"` means the smoke run exited 0 AND correctness
+passed; a genuine failure is `"fail"` (exit 3 / `UT_HARNESS_INCOMPLETE` is NOT a failure yet:
+regenerate the UT first, see PHASE=extract step 6). Put the command, exit code, GPU, case counts and
+any caveats in `smoke_detail` (and `notes`), never in the status field.
+
 ## PHASE=extract
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
@@ -94,6 +103,7 @@ python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
   --backend "$BACKEND" \
+  --server-log "<current benchmark server.log>" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
@@ -484,7 +494,8 @@ freeze an out-of-regime oracle nobody should trust.
    > the family×M-buckets for gemm; wire `fill/run/read_out`) and re-run the smoke. Retry up to 3 times.
    > Do **NOT** record `unittest_smoke:"fail"` or drop the head for exit 3 — that status is reserved for a
    > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
-   > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
+   > `unittest_smoke:"fail"` and start `smoke_detail` with `harness_incomplete_unrecoverable` (the workflow
+   > reads the failure reason from `smoke_detail`/`notes`, not from a separate `reason` field).
 
 Return JSON:
 ```json
@@ -508,7 +519,8 @@ Return JSON:
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
   "build": false,
-  "unittest_smoke": "pass|fail",
+  "unittest_smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in unittest_smoke",
   "reference_io_sha256": "...",
   "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
@@ -682,6 +694,7 @@ python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
   --backend "$BACKEND" \
+  --server-log "<current benchmark server.log>" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
@@ -812,6 +825,14 @@ force real compact-operand compute:
      (the OUTER leaf described above — engages on ALL gfx and subsumes aiter tuned_gemm; confirm the symbol
      imports in the serving venv before trusting it).
    - **vLLM · unquantized bf16/fp16 · CUDA** → `torch.nn.functional:linear`.
+   - **ATOM · fp8 a8w8 blockscale dense GEMM · ROCm (gfx950)** → seed the live-seam search with
+     `atom.model_ops.linear:gemm_a8w8_blockscale_preshuffle_impl`.
+   - **ATOM · DeepSeek-V2/R1 fused QKV-A projection** → seed the live-seam search with
+     `atom.models.deepseek_v2:_fuse_qkv_a_proj_reduce_rmsnorm_quant_fp8`.
+     These ATOM entries are **version/model-specific candidates, not an authority**: confirm that the
+     symbol imports in the serving environment, prove `engagement_hits>0`, and require the normal
+     `deepest_verified:true` device-kernel correlation. If either check fails, discover and certify the
+     live seam from the installed ATOM version instead of forcing the recorded name.
    - **fp8/quantized · non-vLLM backend (sglang/atom) · attention · MoE** → do NOT guess a seam (a wrong
      fp8/attn seam is just another dead rebind). GREP the live server for the actual quant-apply / backend
      forward and use that verbatim; for attention the seam is the backend forward you captured.
@@ -865,7 +886,8 @@ Return JSON:
   ],
   "selection_validation": {"contract": "kernel_selection", "ok": true, "deepest_verified": true},
   "baseline_callable": "<module:attr of the live default backend, resolved OUTSIDE the task dir>",
-  "smoke": "pass|fail",
+  "smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in smoke",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```

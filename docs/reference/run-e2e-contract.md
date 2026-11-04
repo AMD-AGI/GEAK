@@ -22,7 +22,7 @@ Run the external orchestrator entry point as follows.
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-- Exit code `0`: `result.json.status` is `ok` or `no_gain`.
+- Exit code `0`: `result.json.status` is `ok`, `no_gain` or `timeout`.
 - Exit code `1`: a crash; `result.json.status == "error"` with an `error` field.
 - Exit code `2`: bad usage or unreadable handoff.
 - `--dry-run`: print the mapped `e2e_workflow.js` args and the prompt and
@@ -31,6 +31,14 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
+
+E2E KB recall can use an independent GEAK policy: set
+`GEAK_E2E_KB_METRIC_BASIS=e2e_norm_intvty_p50` in the parent process environment,
+or `e2e_kb_metric_basis` in the handoff (higher precedence). Explicit policies
+exclude other and unlabelled metric bases without changing the benchmark axis,
+acceptance rule, or identity ladder. See the
+[recall policy contract](../../interface/run_e2e.md#e2e-kb-recall-policy) for
+defaults, diagnostics, and overlay compatibility.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
@@ -182,6 +190,29 @@ alignment metric. `measurement_divergence_pct` remains an exact compatibility
 alias for existing callers. If `orchestrator_best_tput_same_config` is absent,
 the same-config fields are `null` and `baseline_alignment.status` is
 `unavailable`; GEAK never treats raw-session divergence as measurement drift.
+
+### When there is no result to report
+
+When no workflow return exists and none can be rebuilt from disk (see Handoff
+resilience below), `result.json` reports the failure instead:
+
+```jsonc
+{
+  "schema_version": 2,
+  "status": "timeout | error",
+  "error_class": "timeout | llm_unreachable | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
+  "error": "no workflow return within the 32400s budget (furthest phase on disk: search)",
+  "phase_reached": "setup | search | finalize | validate"
+}
+```
+
+- `llm_unreachable`: Claude Code could not reach the model API (connection
+  refused or dropped, DNS, no route, proxy or TLS failure). `error` keeps the
+  original message, which contains Claude Code's `API Error: ...` reply.
+- `phase_reached` is the furthest phase the eval dir shows: `setup` until
+  Setup's baseline summary exists, `search` until the final phase fences the
+  GPUs (`.final_phase_fence`), then the fenced stage. It is absent when the eval
+  dir does not exist.
 
 ## Handoff resilience
 

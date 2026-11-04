@@ -27,8 +27,12 @@ from __future__ import annotations
 import ast
 import atexit
 import glob
+import gzip
 import hashlib
+import importlib.util
 import json
+import uuid as _uuid
+import datetime as _dt
 import math
 import os
 import re
@@ -47,9 +51,19 @@ from typing import Any
 
 try:
     # Package import under pytest / module use.
-    from interface.effective_config import resolve_effective_config
+    from interface.effective_config import _flag_map, _parse_env, resolve_effective_config
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
-    from effective_config import resolve_effective_config
+    from effective_config import _flag_map, _parse_env, resolve_effective_config
+
+try:
+    from interface import claude_trace_mirror
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    import claude_trace_mirror
+
+try:
+    from interface import geak_outcome_report
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    import geak_outcome_report
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
@@ -67,8 +81,8 @@ E2E_CHECKPOINT_LEVELS = {
 # ratio was computed against a different pair than the one we report.
 SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
 
-# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
-# is treated as corruption rather than a win. Mirrors
+# Headroom over an Amdahl estimate before an accuracy-gated win needs an
+# independent measurement review. Exceeding it is not a correctness failure. Mirrors
 # IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
 # ceiling); both sides MUST agree or the recovery path banks what the live path
 # refuses, so this is the SINGLE source of truth: map_args() forwards it to the
@@ -109,6 +123,13 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+# Products with a `product:` section in roofline/peaks.md; keep in sync with it
+# and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
+RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
+GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
+RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
+# run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
+RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
@@ -220,6 +241,120 @@ USE_RUNTIME = bool(EFFECTIVE_BACKEND or AGENT_PROFILE)
 DONE_GRACE_S = float(os.environ.get("GEAK_DONE_GRACE_S", "1800"))
 DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 
+# Claude Code keeps this run's ENTIRE LLM ledger under its own home, which the
+# launching environment picks and which on a container is routinely an overlay
+# that dies with the container. These two pieces of state let the run copy that
+# ledger into its own (durable) eval_dir as it goes. See claude_trace_mirror.
+_LAST_SDK_SESSION: dict[str, str] = {}
+_MIRROR_STATE: dict[str, float] = {"t": 0.0}
+_RUN_EXP_ROOT: dict[str, str] = {}
+
+# Seconds between mid-run mirror passes. `_emit` is the guaranteed final shot,
+# but a container destroyed at hour 12 of 18 never runs atexit handlers and
+# never delivers SIGTERM, so the ledger has to be copied while the run lives.
+# 0 disables the mid-run pass.
+TRACE_MIRROR_EVERY_S = float(os.environ.get("GEAK_TRACE_MIRROR_INTERVAL_S", "900"))
+
+
+def _note_session_id(msg: object) -> None:
+    """Record the SDK session id if this message carries one.
+
+    Module-level (rather than inline in the message loop) so it is testable
+    without importing ``claude_agent_sdk``. A message type that has no such
+    attribute, a ``None``, or a non-string all degrade to a no-op: there is no
+    path here that raises into the message loop.
+
+    Args:
+        msg: Any SDK message object or decoded CLI payload.
+    """
+    sid = getattr(msg, "session_id", None)
+    if not isinstance(sid, str) and isinstance(msg, dict):
+        sid = msg.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        _LAST_SDK_SESSION["session_id"] = sid.strip()
+
+
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def _foreground_wait_env() -> dict[str, str]:
+    """Turn Claude Code background tasks off unless the operator chose a value.
+
+    Role agents wait out hour-long serving legs in foreground Bash calls. With
+    background tasks on, Claude Code 2.1.310+ refuses a call that starts with
+    ``sleep N`` (N >= 25) and steers the agent to Monitor/``run_in_background``,
+    whose notification arrives after a workflow agent's turn has ended, and a
+    turn ending is that agent's return.
+
+    Returns:
+        ``{BACKGROUND_TASKS_ENV: "1"}``, or ``{}`` when it is already set.
+    """
+    if BACKGROUND_TASKS_ENV in os.environ:
+        return {}
+    return {BACKGROUND_TASKS_ENV: "1"}
+
+
+def _sdk_child_env() -> dict[str, str]:
+    """Build the environment overlay for the Claude Code child process.
+
+    Module-level so it is testable without importing ``claude_agent_sdk``.
+
+    ``GEAK_CLAUDE_CONFIG_DIR`` is deliberately opt-in rather than defaulted to
+    a per-run directory: the Claude config dir holds OAuth credentials,
+    settings, plugins and cross-run session resume, so pointing a fresh empty
+    one at every run trades a working login for durability the trace mirror
+    already provides unconditionally. Set it only with a seeded directory.
+
+    Returns:
+        Variables to overlay on the child's environment.
+    """
+    env: dict[str, str] = {}
+    # Claude Code refuses bypassPermissions under root unless it is running
+    # in an explicit sandbox. Scope this to the SDK child process only.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        env["IS_SANDBOX"] = "1"
+    config_dir = os.environ.get("GEAK_CLAUDE_CONFIG_DIR", "").strip()
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    run_mark = os.environ.get(RUN_MARK_ENV, "")
+    if run_mark:
+        env[RUN_MARK_ENV] = run_mark
+    env.update(_foreground_wait_env())
+    return env
+
+
+def _mirror_trace(eval_dir: object, *, throttle: bool = False) -> dict:
+    """Mirror this run's Claude ledger into ``eval_dir``.
+
+    Args:
+        eval_dir: This run's eval dir. Falsy values are a no-op.
+        throttle: When true, do nothing unless ``TRACE_MIRROR_EVERY_S`` has
+            elapsed since the last pass. Uses a monotonic clock, so a burst of
+            task notifications costs one mirror.
+
+    Returns:
+        The mirror receipt, or a status dict explaining why nothing was done.
+        Never raises — telemetry must not be able to end a run.
+    """
+    if not eval_dir:
+        return {"status": "no_eval_dir"}
+    if throttle:
+        if TRACE_MIRROR_EVERY_S <= 0:
+            return {"status": "disabled"}
+        now = time.monotonic()
+        if now - _MIRROR_STATE["t"] < TRACE_MIRROR_EVERY_S:
+            return {"status": "throttled"}
+        _MIRROR_STATE["t"] = now
+    try:
+        return claude_trace_mirror.mirror_run_trace(
+            eval_dir,
+            exp_root=_RUN_EXP_ROOT.get("exp_root") or None,
+            session_id=_LAST_SDK_SESSION.get("session_id"),
+            render=not throttle,
+        )
+    except Exception as exc:  # pragma: no cover - mirror_run_trace catches its own
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
 
 # ---------------------------------------------------------------------------
 # Serving-launch FIDELITY: backend-agnostic knob -> per-adapter CLI flag map.
@@ -233,6 +368,7 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 _SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
     "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
     "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+    "atom": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
 }
 
 
@@ -357,8 +493,10 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     aiperf's trace replay, which owns the sequence lengths. But the agents still
     read isl/osl as the analytic serving call model when they synthesize
     GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
-    defaults would aim the whole search two orders of magnitude below the real
-    load (the corpus averages ~112k input tokens per request).
+    defaults would aim the whole search orders of magnitude below the real load
+    (a trace corpus's average input length dwarfs a synthetic prompt). The real
+    figure is deliberately not quoted here: it moves with the corpus, the
+    tokenizer and the window, so it is measured, never asserted.
 
     ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
     MEASURED on its own baseline. Prefer them; fall back to the synthetic
@@ -378,19 +516,166 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     except (TypeError, ValueError):
         obs_isl = obs_osl = 0
     if obs_isl <= 0 or obs_osl <= 0:
+        # Not an error, and no longer a dead end: the workflow measures the shape
+        # it actually served off its own baseline and adopts it before any kernel
+        # work is scheduled (adoptMeasuredShape). So the honest label here is
+        # "pending", which the workflow reads as "you may replace me", not
+        # "synthetic_fallback", which reads as a decision already made.
         sys.stderr.write(
-            "!!! AgentX workload carries no observed_isl/observed_osl; kernel "
-            f"targeting falls back to the synthetic {syn_isl}/{syn_osl}, which "
-            "is far below the real replay shape. Kernel choices may be aimed at "
-            "the wrong regime (the MEASUREMENT is unaffected).\n"
+            "note: AgentX workload carries no observed_isl/observed_osl, so the "
+            f"kernel-targeting shape starts at the synthetic {syn_isl}/{syn_osl} "
+            "and is replaced by what the baseline actually serves. Pass "
+            "observed_isl/observed_osl only to target a regime deliberately.\n"
         )
-        return syn_isl, syn_osl, "synthetic_fallback_on_agentx"
+        return syn_isl, syn_osl, "agentx_pending_baseline"
     return obs_isl, obs_osl, "agentx_observed"
 
 
-def map_args(h: dict, timeout_s: int | None = None) -> dict:
+def _expected_gpu_identity(h: dict) -> dict[str, Any]:
+    """Resolve policy identity before the workflow chooses backend or knowledge.
+
+    A caller may explicitly pin the expected ISA/product. Otherwise the shared
+    structured rocminfo parser establishes both. A bare gfx1201 remains product
+    `unknown`; exact R9700 and R9600D detection produces the corresponding
+    product target without establishing serving-policy qualification.
+    """
+    explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
+    explicit_target = str(h.get("expected_target") or "").strip().lower()
+    if explicit_gfx or explicit_target:
+        if not explicit_gfx or not explicit_target:
+            raise ValueError(
+                "expected_gfx and expected_target must be supplied together"
+            )
+        if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
+            raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
+        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+            raise ValueError(
+                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
+            )
+        if explicit_target in RDNA4_SERVING_PRODUCTS and explicit_gfx != "gfx1201":
+            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
+        return {
+            "gfx": explicit_gfx,
+            "target": explicit_target,
+            "marketing_name": str(h.get("expected_device_name") or ""),
+            "physical_cu_count": int(h.get("expected_physical_cu_count") or 0),
+        }
+
+    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
+    if env_identity:
+        try:
+            identity = json.loads(env_identity)
+        except json.JSONDecodeError as error:
+            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
+    else:
+        proc = subprocess.run(
+            [sys.executable, str(GPU_IDENTITY_SCRIPT)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
+            raise RuntimeError(
+                "GPU identity must be established before E2E policy selection: "
+                f"{detail}. Pass expected_gfx and expected_target explicitly if "
+                "this host cannot run rocminfo."
+            )
+        try:
+            identity = json.loads(proc.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("GPU identity probe returned invalid JSON") from error
+
+    gfx = str(identity.get("gfx") or "").strip().lower()
+    target = str(identity.get("target") or "unknown").strip().lower()
+    if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
+        raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
+    if target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+        raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
+    if target in RDNA4_SERVING_PRODUCTS and gfx != "gfx1201":
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
+    return {
+        "gfx": gfx,
+        "target": target,
+        "marketing_name": str(identity.get("marketing_name") or ""),
+        "physical_cu_count": int(identity.get("physical_cu_count") or 0),
+    }
+
+
+def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
+    """How many ranks the experts are sharded over, as the BASELINE was launched.
+
+    ``ep`` is a KB addressing dimension beside ``tp``: two runs of the same model on the same
+    stack with the experts sharded differently are different deployments, and a store that cannot
+    name the difference files them on one page with nothing to tell them apart.
+
+    Sources, most authoritative first -- all of them things ``map_args`` already holds, because a
+    second flag parser living here is exactly how a reader and a writer end up on different pages:
+
+    1. the handoff's own ``ep`` (beside ``tp``), when the orchestrator stated it;
+    2. ``--ep-size N`` in the resolved server args, read through the resolver's own flag map so a
+       spelling it canonicalises is seen the same way here;
+    3. ``--enable-expert-parallel``: vLLM spreads EP over the whole TP x DP group;
+    4. the effective environment's ``EP_SIZE``, then the recipe's recorded value;
+    5. otherwise 1 -- no expert parallelism, which is also the right answer for a dense model.
+    """
+    def _positive(raw: Any) -> int:
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    stated = _positive(h.get("ep"))
+    if stated:
+        return stated
+    flags = _flag_map(
+        effective.final_server_args
+        if effective is not None
+        else (h.get("accepted_flags", "") or "")
+    )
+    sized = flags.get("--ep-size")
+    if sized is not None and _positive(getattr(sized, "value", None)):
+        return _positive(sized.value)
+    if "--enable-expert-parallel" in flags:
+        dp_flag = flags.get("--data-parallel-size") or flags.get("-dp")
+        dp = _positive(getattr(dp_flag, "value", None)) or 1
+        return max(tp, 1) * dp
+    env = (getattr(effective, "final_env", {}) if effective is not None
+           else _parse_env(h.get("accepted_env", ""))) or {}
+    if _positive(env.get("EP_SIZE")):
+        return _positive(env["EP_SIZE"])
+    recorded = _positive(
+        _recipe_env_block(str(h.get("launch_recipe") or "")).get("EP_SIZE")
+    )
+    if recorded:
+        return recorded
+    return 1
+
+
+def map_args(
+    h: dict,
+    timeout_s: int | None = None,
+    *,
+    artifact_cutoff_ts: float | None = None,
+    dry_run: bool = False,
+) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
+    has_explicit_identity = bool(
+        str(h.get("expected_gfx") or "").strip()
+        or str(h.get("expected_target") or "").strip()
+    )
+    has_env_identity = bool(os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip())
+    # A dry-run validates handoff-to-args wiring on a host that is explicitly
+    # documented not to need a GPU. Do not turn it into a runnable identity:
+    # omit expected_* and mark the dispatch metadata unavailable. Real runs,
+    # partial explicit identity, and supplied env identity stay fail-closed.
+    gpu_identity = (
+        None
+        if dry_run and not has_explicit_identity and not has_env_identity
+        else _expected_gpu_identity(h)
+    )
     effective = None
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
@@ -434,8 +719,12 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
-        "backend": h.get("framework", "sglang"),
+        "backend": h.get("framework") or (
+            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
+        ),
         "tp": tp,
+        # Beside tp, and resolved the same way: see _resolve_ep.
+        "ep": _resolve_ep(h, effective, tp),
         "gpu_ids": str(gpu_ids),
         # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
         # not the shape anything is measured at (see _targeting_shape).
@@ -443,6 +732,20 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "osl": target_osl,
         "workload_shape_provenance": shape_provenance,
         "conc": int(workload.get("conc", 64)),
+        # Forward the workload declaration into the workflow rather than relying
+        # only on the environment exported below. It is the SAME mechanism the
+        # standalone entry point uses, which is the point: one declaration, one
+        # set of defaults, one place where roles are told what they are
+        # measuring. The workflow's own channel assigns nothing that is already
+        # exported, so everything set here still wins -- this only closes the gap
+        # where a bench runs in a context that did not inherit the environment.
+        # Absent/synthetic workload_spec => omitted, and the args are unchanged.
+        **(
+            {"workload_spec": h["workload_spec"]}
+            if isinstance(h.get("workload_spec"), dict)
+            and str(h["workload_spec"].get("kind") or "") == WORKLOAD_KIND_AGENTX
+            else {}
+        ),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
         "initial_extra_server_args": initial_server_args,
@@ -463,8 +766,9 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "search_replicas": 1,
         "validation_replicas": 3,
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
-        # on one server, report the second.  A 3-round median would be a different statistic from
-        # the one it rebenches against, so the round count is not a knob here.
+        # on one server, report the second (one pass for an AgentX replay, which warms itself per
+        # lane, as Hyperloom's AgentX rebench does).  A 3-round median would be a different
+        # statistic from the one it rebenches against, so the round count is not a knob here.
         "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
@@ -473,6 +777,23 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    if gpu_identity is not None:
+        ps_args.update({
+            "expected_gfx": gpu_identity["gfx"],
+            "expected_target": gpu_identity["target"],
+            "expected_device_name": gpu_identity["marketing_name"],
+            "expected_physical_cu_count": gpu_identity["physical_cu_count"],
+        })
+    else:
+        ps_args["gpu_identity_status"] = "unavailable_dry_run"
+    # Launch identity for the execution tracker. A nonce allocated HERE -- before
+    # the workflow is invoked -- is unique by construction, so the runtime records
+    # it in the run's own args and the tracker can join THIS launch. Argument
+    # equality cannot do that: a relaunch may legitimately reuse every argument.
+    # Without it the tracker refuses to attach rather than guess, so tracking is
+    # simply unavailable.
+    ps_args["geak_launch_nonce"] = "geak-%s-%s" % (
+        _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%f"), _uuid.uuid4().hex[:12])
     if effective is not None:
         ps_args["effective_config_digest"] = effective.digest
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
@@ -485,12 +806,55 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget; a trace
+    # replay floors it at what its own final phase costs); this lets an operator widen it per
+    # run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
+    # not bound by it. Optional in the same way as the reserve itself.
+    reserve_cap = _float_or_none(
+        os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
+    if reserve_cap is not None:
+        ps_args["final_reserve_cap_frac"] = reserve_cap
+    # ...and the boot + replay warmup + drain that floor adds to each trace-replay leg's window
+    # (JS default 1200s). Raise it for a model whose server boots slower.
+    leg_overhead = _int_or_none(
+        os.environ.get("GEAK_AGENTX_LEG_OVERHEAD_S"), "GEAK_AGENTX_LEG_OVERHEAD_S")
+    if leg_overhead is not None:
+        ps_args["agentx_leg_overhead_s"] = leg_overhead
+    # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
+    # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
+    # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
+    # to "no result" instead of retrying.
+    agent_timeout_ms = _int_or_none(os.environ.get("GEAK_AGENT_TIMEOUT_MS"), "GEAK_AGENT_TIMEOUT_MS")
+    if agent_timeout_ms is not None:
+        ps_args["agent_timeout_ms"] = agent_timeout_ms
+    if os.environ.get("GEAK_AGENT_TIMEOUT_RETRY", "").strip():
+        ps_args["agent_timeout_retry"] = (
+            "true" if _as_bool(os.environ["GEAK_AGENT_TIMEOUT_RETRY"]) else "false")
+    # Correctness bar: task accuracy (gsm8k) instead of greedy byte-parity, for kernels that round
+    # differently by design. Unset keeps the workflow's own default.
+    accuracy_gate = os.environ.get("GEAK_E2E_ACCURACY_GATE", "").strip().lower()
+    if accuracy_gate in ("none", "gsm8k"):
+        ps_args["accuracy_gate"] = accuracy_gate
+    elif accuracy_gate:
+        sys.stderr.write(f"ignoring unknown GEAK_E2E_ACCURACY_GATE: {accuracy_gate!r}\n")
+    accuracy_limit = _int_or_none(
+        os.environ.get("GEAK_E2E_ACCURACY_LIMIT"), "GEAK_E2E_ACCURACY_LIMIT")
+    if accuracy_limit is not None:
+        ps_args["accuracy_limit"] = accuracy_limit
+    accuracy_tol = _float_or_none(os.environ.get("GEAK_E2E_ACCURACY_TOL"), "GEAK_E2E_ACCURACY_TOL")
+    if accuracy_tol is not None:
+        ps_args["accuracy_tol"] = accuracy_tol
+    # Simulated speculative acceptance makes a stack perf-comparable and nothing more: what it serves
+    # is neither deterministic nor the model's own output, so a parity or accuracy probe run under it
+    # measures the simulator. Name the switches so correctness probes can serve without them.
+    simulated = _simulated_acceptance_env(initial_env)
+    if simulated:
+        ps_args["correctness_unset_env"] = ",".join(simulated)
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -530,6 +894,11 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
+    # Recall policy is independent of the workload's measurement/acceptance contract.
+    kb_basis = str(h.get("e2e_kb_metric_basis")
+                   or os.environ.get("GEAK_E2E_KB_METRIC_BASIS", "")).strip()
+    if kb_basis:
+        ps_args["e2e_kb_metric_basis"] = kb_basis
     # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
     # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
     # the lifecycle the rest of the run used.
@@ -551,6 +920,22 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # resume continues from where a previous phase invocation left off.
     if h.get("state"):
         ps_args["state"] = h["state"]
+    # GEAK-ABLATION-ARMS-v1: forward the ablation knobs to the workflow. Allowlisted
+    # rather than a blanket passthrough so a stray handoff key can never reach args and
+    # change a production run's behaviour. Absent keys are omitted entirely, so a handoff
+    # with no ablation block maps byte-identically to the pre-patch build.
+    for _abl_k in ("ablation_arm", "ablation_seed", "ablation_head_trial_ms",
+                   "ablation_audit_probability",
+                   # GEAK-ABLATION-ARMS-v2: preparation, the implementation trial and an
+                   # audited continuation are separate budget lines. v1 charged all three
+                   # to one clock, so a head could be paused for slow PREPARATION and an
+                   # admitted head could then author without any limit at all.
+                   "ablation_prep_ms", "ablation_audit_ms",
+                   # Knowledge inputs must be identical and pinned across arms, or a later
+                   # arm reads what an earlier arm learned and the comparison is confounded.
+                   "perf_knowledge_dir", "warm_start", "use_learned_kb"):
+        if h.get(_abl_k) is not None:
+            ps_args[_abl_k] = str(h[_abl_k])
     # Pin ONE EVAL_DIR for the whole run (workflow reads A.eval_dir ->
     # EVAL_DIR_OVERRIDE). Without it, every PHASE=setup invocation mints a fresh
     # timestamped dir, so a re-entered setup leaves an abandoned preflight-only
@@ -577,7 +962,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
     # the key is omitted entirely, so a tracelens-less run is byte-identical.
-    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl = resolve_tracelens_report(
+        h.get("exp_root", ""),
+        not_after=artifact_cutoff_ts,
+    )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
@@ -598,6 +986,10 @@ _TRACELENS_ARTIFACT_PATTERNS = {
     "trace_file": "runs/roofline/**/torch_trace",
 }
 
+_BENCHMARK_TIMESTAMP_RE = re.compile(
+    r"(?:^|/)benchmark_[^/]+_(\d{8}_\d{6})(?:/|$)"
+)
+
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
     """Return the experiment root (the directory that CONTAINS ``geak``).
@@ -611,17 +1003,53 @@ def _experiment_root_from_exp_root(exp_root: str) -> str:
     return norm
 
 
-def _find_latest_artifact(root: str, pattern: str) -> str | None:
-    """Return the latest match for ``pattern`` under ``root`` (or None).
+def _artifact_timestamp(path: str) -> float:
+    """Return an artifact's chronological timestamp.
 
-    Matches are sorted for determinism; the timestamps embedded in the run
-    directory names sort chronologically, so the last entry is the most recent.
+    Roofline paths put a random run id before ``benchmark_<backend>_<UTC>``;
+    sorting the full path therefore orders by that random id, not by time. Use
+    the embedded benchmark timestamp when present. For other artifacts, and
+    legacy layouts without that component, fall back to the artifact mtime.
     """
-    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    return matches[-1] if matches else None
+    match = _BENCHMARK_TIMESTAMP_RE.search(path)
+    if match:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+    return Path(path).stat().st_mtime
 
 
-def resolve_tracelens_report(exp_root: str) -> dict:
+def _find_latest_artifact(
+    root: str,
+    pattern: str,
+    *,
+    not_after: float | None = None,
+) -> str | None:
+    """Return the newest artifact under ``root`` at the cutoff (or ``None``).
+
+    ``not_after`` freezes discovery at the handoff boundary, preventing a
+    resumed GEAK run from consuming artifacts written later into the same
+    experiment directory.
+    """
+    candidates: list[tuple[float, str]] = []
+    for path in glob.glob(os.path.join(root, pattern), recursive=True):
+        try:
+            timestamp = _artifact_timestamp(path)
+        except (OSError, ValueError):
+            continue
+        if not_after is not None and timestamp > not_after:
+            continue
+        candidates.append((timestamp, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+def resolve_tracelens_report(
+    exp_root: str,
+    *,
+    not_after: float | None = None,
+) -> dict:
     """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
@@ -631,7 +1059,10 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     root = _experiment_root_from_exp_root(exp_root)
     report: dict = {"search_root": root}
     for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
-        report[key] = _find_latest_artifact(root, pattern) if root else None
+        report[key] = (
+            _find_latest_artifact(root, pattern, not_after=not_after)
+            if root else None
+        )
     return report
 
 
@@ -657,13 +1088,13 @@ PROCESS_SAFETY = (
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
-    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
-    # trace, and surface them to the agent as a single tracelens_report block.
-    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
-    # The prompt only needs the four artifact paths, not the internal search_root.
+    # Artifact discovery is frozen once in map_args. Re-scanning here can pick
+    # files written after the handoff and make the prompt disagree with the
+    # actual Workflow args.
+    resolved_tracelens = ps_args.get("tracelens") or {}
     tracelens_prompt_payload = {
-        k: v for k, v in tracelens_report.items() if k != "search_root"
+        key: resolved_tracelens.get(key)
+        for key in _TRACELENS_ARTIFACT_PATTERNS
     }
     tracelens_block = (
         "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
@@ -753,6 +1184,14 @@ def apply_bench_client(h: dict) -> str:
     return client
 
 
+# metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
+# interactivity bases are absent on purpose: _BASES accepts each one as its own token.
+_E2E_METRIC_FOR_BASIS = {
+    "aggregate_output_tok_s": "output",
+    "aggregate_total_token_tok_s": "total",
+}
+
+
 def apply_workload_spec(h: dict) -> dict:
     """Export AgentX workload identity so bench_e2e.sh drives the trace replay.
 
@@ -766,10 +1205,9 @@ def apply_workload_spec(h: dict) -> dict:
     exported: dict[str, str] = {}
     os.environ["GEAK_WORKLOAD_KIND"] = WORKLOAD_KIND_AGENTX
     os.environ["GEAK_ISL_OSL_INACTIVE"] = "1"
-    # Long agentic windows: one repeat unless the caller explicitly overrides.
-    if "REPEATS" not in os.environ:
-        os.environ["REPEATS"] = "1"
-        exported["REPEATS"] = "1"
+    # REPEATS is deliberately left alone. bench_e2e.sh already gives the trace-replay
+    # client one window per call, and an exported REPEATS outranks REPLICAS there, so
+    # pinning it here turned an isolated validation's replicas into one.
     mapping = (
         ("scenario", "GEAK_AGENTX_SCENARIO"),
         ("corpus", "AGENTX_DATASET"),
@@ -795,6 +1233,21 @@ def apply_workload_spec(h: dict) -> dict:
     if metric_basis:
         os.environ["GEAK_METRIC_BASIS"] = metric_basis
         exported["GEAK_METRIC_BASIS"] = metric_basis
+        # GEAK_METRIC_BASIS records the DECLARED basis; it is not what selects
+        # the axis. bench_e2e.sh medians whichever throughput E2E_METRIC names
+        # and defaults it to "output". Under Hyperloom that variable arrives in
+        # our own environment (the orchestrator injects it), which is why this
+        # was never noticed -- but nothing inside GEAK was setting it, so a run
+        # driven from a handoff alone graded a 140:1 prefill-heavy trace on the
+        # output axis, where a large change in total work barely moves the
+        # number. Derive it here, and never overwrite an inherited value so the
+        # orchestrator stays authoritative over its own runs. A basis this build
+        # cannot measure goes through verbatim: bench_summarize.py refuses it by
+        # name, where defaulting to output would grade a different axis silently.
+        if "E2E_METRIC" not in os.environ:
+            axis = _E2E_METRIC_FOR_BASIS.get(metric_basis, metric_basis)
+            os.environ["E2E_METRIC"] = axis
+            exported["E2E_METRIC"] = axis
     return exported
 
 
@@ -826,19 +1279,22 @@ def agentx_preflight(h: dict) -> list[str]:
             "client cannot replay traces. Install the AgentX-capable aiperf "
             "into this environment, or set AIPERF_BIN to its path."
         )
+    # The mapper is only a real gap when the vendored fallback is missing too.
+    # GEAK ships a copy beside the client adapter precisely so a run without an
+    # InferenceX checkout is not a failure; reporting its absence as a problem
+    # would send an operator hunting for a checkout they do not need.
+    vendored_mapper = E2E_DIR / "scripts" / "adapters" / "clients" / "map_aiperf.py"
     ix_root = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not ix_root:
-        problems.append(
-            "INFERENCEX_PATH is unset, so map_aiperf.py cannot be located to "
-            "convert the aiperf export into a canonical result."
-        )
-    elif not any(
+    ix_mapper = ix_root and any(
         os.path.isfile(os.path.join(ix_root, rel))
         for rel in ("benchmarks/map_aiperf.py", "assets/agentx/map_aiperf.py")
-    ):
+    )
+    if not ix_mapper and not vendored_mapper.is_file():
         problems.append(
-            f"map_aiperf.py not found under INFERENCEX_PATH={ix_root!r} "
-            "(expected benchmarks/ or assets/agentx/)."
+            "no map_aiperf.py to convert the aiperf export into a canonical "
+            f"result: INFERENCEX_PATH={ix_root or '<unset>'} has none (expected "
+            f"benchmarks/ or assets/agentx/) and the vendored copy at "
+            f"{vendored_mapper} is missing."
         )
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
@@ -851,7 +1307,7 @@ def agentx_preflight(h: dict) -> list[str]:
 # Backends for which Magpie ships a server-phase launch script (its scripts all
 # share ONE contract, so a single backend-agnostic launcher adapter serves them
 # all). Extend this set as Magpie adds backends — never add per-backend code.
-_MAGPIE_BACKENDS = {"sglang", "vllm"}
+_MAGPIE_BACKENDS = {"atom", "sglang", "vllm"}
 
 # The flat scalars we need out of the orchestrator's launch recipe. Keep this
 # lightweight scan separate from the BaseLoader parse used for the nested
@@ -1365,7 +1821,9 @@ def _magpie_script_from_recipe(h: dict) -> str:
         # multi_node/).
         candidates = [benchmarks / name]
         try:
-            candidates.extend(sorted(benchmarks.rglob(name)))
+            # rglob rejects an absolute pattern with NotImplementedError
+            if not Path(name).is_absolute():
+                candidates.extend(sorted(benchmarks.rglob(name)))
         except OSError:
             pass
         for candidate in candidates:
@@ -1395,7 +1853,7 @@ def apply_bench_launcher(h: dict) -> str:
     adapter — which Magpie itself cannot do), mirroring :func:`apply_bench_client`.
 
     BACKEND-AGNOSTIC (never model/case specific): the SAME ``magpie`` launcher and
-    the SAME resolution logic serve sglang, vllm and any future Magpie backend —
+    the SAME resolution logic serve atom, sglang, vllm and any future Magpie backend —
     the launcher derives the per-backend flag/profiler var names from ``$BACKEND``.
 
     Resolution:
@@ -1404,7 +1862,7 @@ def apply_bench_launcher(h: dict) -> str:
         script cannot run on this box);
       * else enable ``magpie`` ONLY when a script is discoverable
         (``handoff.launch_server_script``, or generic ``$MAGPIE_LAUNCH_SCRIPT``,
-        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``,
+        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_ATOM_SCRIPT``,
         or derived from ``handoff.launch_recipe``)
         AND the backend is one Magpie supports; otherwise ``native``.
 
@@ -1468,9 +1926,9 @@ def apply_bench_launcher(h: dict) -> str:
     # handoff carried it; absent => the script's own default stands, which is
     # what the orchestrator served with.
     #
-    # gpu-mem-util is deliberately NOT forwarded the same way: no handoff has
-    # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
-    # are trying to match.
+    # gpu-mem-util is deliberately NOT synthesized from a GEAK default here:
+    # the recipe script and its recorded EXTRA_<BACKEND>_ARGS are the source of
+    # truth (vLLM and ATOM do not necessarily share the same default).
     if launcher == "magpie":
         replay, owned = _recipe_launch_env(h)
         _export_recipe_env(h, replay, owned, source)
@@ -1699,6 +2157,8 @@ def apply_bench_protocol(h: dict) -> dict:
         # Warm-server parity -- one server per leg, a discarded full warmup round, then the
         # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
         # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
+        # An AgentX replay gets no discarded round: bench_e2e.sh lets the replay warm itself per
+        # lane, which is exactly Hyperloom's AgentX baseline and rebench.
         aligned = {
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
@@ -1753,6 +2213,37 @@ def apply_bench_protocol(h: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
+# Everything the agent says is CAPTURED for the life of the run: the SDK path
+# accumulates fragments and joins them at the end, and the CLI path asks for
+# --output-format json, which emits one blob on exit. Either way a multi-hour run
+# prints nothing to its container log, so the workflow's own log() lines -- the
+# phase transitions, and the "Kernel-targeting shape measured" line that says
+# whether kernel work is aimed at the right regime -- are unreadable until it is
+# over. Both consumption paths funnel through _iter_message_text(), so teeing
+# there makes a run watchable with one write and no change to what is returned.
+# Unset GEAK_LIVE_LOG => byte-identical behaviour.
+_LIVE_LOG_PATH = os.environ.get("GEAK_LIVE_LOG", "")
+_LIVE_LOG_BROKEN = False
+
+
+def _live_log(texts: list[str]) -> None:
+    """Append streamed agent text to a watchable file. Never raises.
+
+    Observability must not be able to fail a run, so the first write error
+    disables the tee for good rather than retrying on every message.
+    """
+    global _LIVE_LOG_BROKEN
+    if not _LIVE_LOG_PATH or _LIVE_LOG_BROKEN or not texts:
+        return
+    try:
+        with open(_LIVE_LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+            for text in texts:
+                fh.write(text if text.endswith("\n") else text + "\n")
+            fh.flush()
+    except Exception:
+        _LIVE_LOG_BROKEN = True
+
+
 def _iter_message_text(msg: Any) -> list[str]:
     """Best-effort extraction of every text fragment from one SDK message.
 
@@ -1795,6 +2286,7 @@ def _iter_message_text(msg: Any) -> list[str]:
     if isinstance(msg, dict):
         _take(msg.get("text"))
         _take(msg.get("result"))
+    _live_log(out)
     return out
 
 
@@ -1859,11 +2351,6 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         extra: dict = {}
         if CLAUDE_EFFORT in VALID_EFFORTS:
             extra["effort"] = CLAUDE_EFFORT
-        sdk_env: dict[str, str] = {}
-        # Claude Code refuses bypassPermissions under root unless it is running
-        # in an explicit sandbox. Scope this to the SDK child process only.
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            sdk_env["IS_SANDBOX"] = "1"
         return ClaudeAgentOptions(
             model=CLAUDE_MODEL,
             allowed_tools=ALLOWED_TOOLS,
@@ -1871,7 +2358,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             settings=WORKFLOW_SETTINGS,
             extra_args=extra,
             cwd=str(E2E_DIR),
-            env=sdk_env,
+            env=_sdk_child_env(),
             **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
         )
 
@@ -1895,6 +2382,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                 await client.query(prompt)
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
+                    _note_session_id(msg)
                     name = type(msg).__name__
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
@@ -1916,6 +2404,13 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                         summ = getattr(msg, "summary", None)
                         if isinstance(summ, str) and summ.strip():
                             chunks.append(summ)
+                        # Phase-granularity heartbeat: cheap insurance against
+                        # losing the ledger to a container that never gets to
+                        # run _emit. Rate-limited, incremental, best-effort.
+                        # A run that backgrounds nothing emits no notifications
+                        # and gets only the final shot -- acceptable, because
+                        # such runs are short.
+                        _mirror_trace(eval_dir, throttle=True)
                     elif name == "ResultMessage":
                         saw_result = True
 
@@ -1975,6 +2470,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         with anyio.fail_after(timeout_s):
             async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
+                _note_session_id(msg)
         return "\n".join(chunks)
 
     return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
@@ -1992,20 +2488,24 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     ]
     if CLAUDE_EFFORT in VALID_EFFORTS:
         cmd += ["--effort", CLAUDE_EFFORT]
+    # IS_SANDBOX stays unconditional on this path (pre-existing behaviour);
+    # _sdk_child_env only adds the opt-in config-dir redirect on top.
     env = dict(os.environ, IS_SANDBOX="1")
+    env.update(_sdk_child_env())
     proc = subprocess.run(
         cmd, cwd=str(E2E_DIR), env=env, capture_output=True, text=True,
         timeout=timeout_s,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        # A failed API call exits 1 with stderr empty: the error is in the stdout JSON.
+        detail = (proc.stderr or "")[-2000:] or (proc.stdout or "")[-2000:]
+        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {detail}")
     # claude -p --output-format json wraps the assistant text; try to unwrap.
     out = proc.stdout.strip()
     try:
         wrapped = json.loads(out)
         if isinstance(wrapped, dict):
+            _note_session_id(wrapped)
             return str(wrapped.get("result") or wrapped.get("text") or out)
     except json.JSONDecodeError:
         pass
@@ -2072,8 +2572,8 @@ def _invoke_via_runtime(
     # the wrapper a margin so a graceful finalize is never killed prematurely.
     wrap_timeout = (timeout_s + 900) if timeout_s else None
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
-        text=True, timeout=wrap_timeout,
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ, **_foreground_wait_env()),
+        capture_output=True, text=True, timeout=wrap_timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -2206,6 +2706,15 @@ def _parse_last_json_line(raw: str) -> dict:
     )
 
 
+# Claude Code's reply when it cannot reach the model API. 2.1.177 says "Unable to
+# connect to API (<code>)" for every connection failure; 2.1.309 and 2.1.316 say
+# e.g. "Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)".
+_LLM_UNREACHABLE_RE = re.compile(
+    r"API Error: (?:Unable to connect to API|Connection (?:error|refused|dropped|lost before)"
+    r"|Can't reach the API server|No internet route|Couldn't connect through your proxy)"
+)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
@@ -2216,11 +2725,15 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
+    # arrives as agent output inside a parse error or a failed CLI's message.
+    if _LLM_UNREACHABLE_RE.search(msg):
+        return "llm_unreachable"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -2618,10 +3131,176 @@ def _parse_sglang_server_args(text: str) -> dict[str, Any]:
     return observed
 
 
+# Launch facts ATOM's `Engine kwargs: {...}` startup line records that decide which
+# server was served. Run-scoped values (ports, profiler dir, log cadence) are left
+# out: they legitimately differ between two launches of the same configuration.
+_ATOM_ENGINE_IDENTITY_KEYS = (
+    "trust_remote_code",
+    "tensor_parallel_size",
+    "data_parallel_size",
+    "enforce_eager",
+    "enable_prefix_caching",
+    "kv_cache_dtype",
+    "index_cache_dtype",
+    "max_model_len",
+    "max_num_batched_tokens",
+    "max_num_seqs",
+    "gpu_memory_utilization",
+    "enable_expert_parallel",
+    "enable_dp_attention",
+    "moe_backend",
+    "online_quant_config",
+    "kv_cache_block_size",
+    "enable_tbo",
+    "moe_all2all_backend",
+)
+_ATOM_ENGINE_KWARGS_MARKER = "Engine kwargs: {"
+
+
+def _split_top_level_items(body: str) -> list[str]:
+    """Split ``a: 1, b: X(c=1, d=[2, 3])`` at depth-0 commas, quotes respected."""
+    items: list[str] = []
+    depth, quote, escaped, start = 0, "", False, 0
+    for index, char in enumerate(body):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in ("'", '"'):
+            quote = char
+        elif char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(body[start:index])
+            start = index + 1
+    items.append(body[start:])
+    return [item.strip() for item in items if item.strip()]
+
+
+def _parse_atom_engine_kwargs(text: str) -> dict[str, Any]:
+    """Extract stable launch fields from ATOM's ``Engine kwargs: {...}`` line.
+
+    The record is a Python repr holding config objects (``SpeculativeConfig(...)``,
+    ``<CUDAGraphMode.FULL: 2>``) that no literal parser accepts as a whole, so each
+    top-level item is evaluated on its own and the speculative / compilation objects
+    contribute the few fields that identify a launch. A field present in the record
+    but not in a form this parser knows is listed under ``unparsed`` rather than
+    guessed, so a version-drifted log reads as unverified instead of as a value.
+    """
+    start = text.find(_ATOM_ENGINE_KWARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_ATOM_ENGINE_KWARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        if not sep:
+            continue
+        try:
+            key = ast.literal_eval(raw_key.strip())
+        except (ValueError, SyntaxError):
+            continue
+        raw_value = raw_value.strip()
+        if key == "speculative_config":
+            if raw_value == "None":
+                observed["speculative_method"] = None
+                observed["num_spec_tokens"] = 0
+                continue
+            method = re.search(r"\bmethod=['\"]([^'\"]*)['\"]", raw_value)
+            tokens = re.search(r"\bnum_spec(?:ulative)?_tokens=(\d+)", raw_value)
+            if not method or not tokens:
+                unparsed.append("speculative_config")
+                continue
+            observed["speculative_method"] = method.group(1)
+            observed["num_spec_tokens"] = int(tokens.group(1))
+            continue
+        if key == "compilation_config":
+            level = re.search(r"\blevel=(\d+)", raw_value)
+            sizes = re.search(r"\bcudagraph_capture_sizes=(\[[^\]]*\]|None)", raw_value)
+            mode = re.search(r"\bcudagraph_mode=<\w+\.(\w+)", raw_value)
+            if level:
+                observed["compilation_level"] = int(level.group(1))
+            if sizes:
+                try:
+                    observed["cudagraph_capture_sizes"] = ast.literal_eval(sizes.group(1))
+                except (ValueError, SyntaxError):
+                    unparsed.append("cudagraph_capture_sizes")
+            if mode:
+                observed["cudagraph_mode"] = mode.group(1)
+            continue
+        if key not in _ATOM_ENGINE_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value)
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
+def _open_server_log(log_path: Path):
+    """Open a server log as text; Hyperloom keeps rotated attempts gzipped."""
+    if log_path.suffix == ".gz":
+        return gzip.open(log_path, "rt", encoding="utf-8", errors="ignore")
+    return log_path.open(encoding="utf-8", errors="ignore")
+
+
+_VLLM_NON_DEFAULT_ARGS_MARKER = "non-default args: {"
+# Logged on every launch yet never part of the configuration: transport, the positional echo of ``model``, and
+# GEAK's own torch profiler wrapper (only its profile servers carry it).
+_VLLM_NON_IDENTITY_KEYS = frozenset({"host", "port", "model_tag", "profiler_config"})
+
+
+def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
+    """Extract launch fields from vLLM's ``non-default args: {...}`` line.
+
+    vLLM logs once, at startup, every CLI argument that differs from its default as a dict repr, so the key set is
+    open: every field except the run-scoped ``_VLLM_NON_IDENTITY_KEYS`` is part of the identity and is compared,
+    including one this parser has never seen. Each top-level item is evaluated on its own. A field whose value is
+    not a literal is listed under ``unparsed``, so a version-drifted log reads as unverified instead of as a value;
+    so is an item that is not a ``key: value`` pair.
+    """
+    start = text.find(_VLLM_NON_DEFAULT_ARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_VLLM_NON_DEFAULT_ARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        try:
+            key = ast.literal_eval(raw_key.strip()) if sep else None
+        except (ValueError, SyntaxError):
+            key = None
+        if not isinstance(key, str):
+            unparsed.append("<malformed item>")
+            continue
+        if key in _VLLM_NON_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value.strip())
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             lines = iter(handle)
             for line in lines:
                 if not _SERVER_ARGS_RECORD_RE.search(line):
@@ -2643,10 +3322,34 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
     except OSError:
         return {}, ""
 
+    # ATOM logs its resolved engine configuration once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _ATOM_ENGINE_KWARGS_MARKER not in line:
+                    continue
+                server_args = _parse_atom_engine_kwargs(line)
+                if server_args:
+                    return {"backend": "atom", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
+    # vLLM logs the arguments that differ from its defaults once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _VLLM_NON_DEFAULT_ARGS_MARKER not in line:
+                    continue
+                server_args = _parse_vllm_non_default_args(line)
+                if server_args:
+                    return {"backend": "vllm", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
     # A Magpie recipe can log its immutable identity directly. This is useful
     # for backends other than SGLang and for opaque upstream digest identities.
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             for line in handle:
                 match = re.search(
                     r"\b(?:observed_)?(?:server_|launch_)?identity\s*[:=]\s*"
@@ -2694,13 +3397,16 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     observed_args = observed.get("server_args", observed)
     if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
         return None
+    # A field one side logged in a form its parser did not know cannot be compared.
+    if expected_args.get("unparsed") or observed_args.get("unparsed"):
+        return None
     # An upstream observation may intentionally include only a subset. Missing
     # observed fields are a verification failure, never silently ignored.
     comparable_keys = [
         key
         for key in expected_args
         if key
-        not in {"backend", "launch_identity", "identity", "source", "evidence_paths"}
+        not in {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
     ]
     if not comparable_keys:
         return None
@@ -2716,8 +3422,85 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     return not expected_backend or expected_backend == observed_backend
 
 
+def _orchestrator_server_log_identity(handoff: dict) -> tuple[dict[str, Any], str, str]:
+    """Launch facts parsed from the orchestrator's own baseline server log.
+
+    An upstream identity is often an opaque digest no GEAK log can reproduce, which
+    left every non-SGLang run "unverified" -- including runs that served a different
+    configuration. The server log the orchestrator measured is named in the handoff,
+    so read what that server actually came up with and compare like with like.
+
+    Returns ``(facts, path, problem)``: the facts and the exact log they came from, or
+    empty facts and the reason none could be trusted.
+    """
+    spec = handoff.get("baseline_env_spec")
+    evidence = spec.get("measurement_evidence") if isinstance(spec, dict) else None
+    path = str((evidence or {}).get("actual_server_log_path") or "").strip() if isinstance(evidence, dict) else ""
+    if not path:
+        return {}, "", ""
+    parsed: list[tuple[Path, dict[str, Any]]] = []
+    for candidate in _orchestrator_server_log_candidates(Path(path)):
+        observed, _ = _read_server_identity_evidence(candidate)
+        if observed.get("server_args"):
+            parsed.append((candidate, observed))
+    if not parsed:
+        return {}, "", f"no parseable launch record in {path} or its rotated attempts"
+    newest_path, newest = parsed[0]
+    disagree = [str(p) for p, o in parsed[1:] if o["server_args"] != newest["server_args"]]
+    if disagree:
+        return {}, "", f"attempts disagree on the launch: {newest_path} vs {', '.join(disagree)}"
+    return newest, str(newest_path), ""
+
+
+def _orchestrator_server_log_candidates(path: Path) -> list[Path]:
+    """The orchestrator's server logs, newest first.
+
+    Hyperloom reuses a round slot across attempts: before each relaunch it gzips the
+    live ``server.log`` into ``attempts/<NNN>/server.log.gz`` and unlinks it, but the
+    handoff keeps naming the live path. The live file, when present, is the newest
+    attempt; it may also be a relaunch that never reached engine start, so the caller
+    keeps searching older attempts for a complete record.
+    """
+    rotated = [
+        p for p in (path.parent / "attempts").glob(f"*/{path.name}.gz") if p.parent.name.isdigit()
+    ]
+    rotated.sort(key=lambda p: int(p.parent.name), reverse=True)
+    return ([path] if path.is_file() else []) + rotated
+
+
+# Servers GEAK itself launches after Setup. The Setup baseline may be imported from
+# the orchestrator's run, so only these prove what GEAK actually served.
+_GEAK_LAUNCHED_SERVER_LOGS = (
+    ("profile", ("profile", "round_0", "server.log")),
+    ("validation_base", ("validation", "base", "server.log")),
+    ("validation_final", ("validation", "final", "server.log")),
+)
+
+
+def _identity_mismatches(expected: Any, observed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Name each launch fact that differs, so a mismatch is actionable from result.json."""
+    expected_args = expected.get("server_args") if isinstance(expected, dict) else None
+    observed_args = observed.get("server_args")
+    if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
+        return []
+    return [
+        {"key": key, "expected": value, "observed": observed_args.get(key)}
+        for key, value in expected_args.items()
+        if key in observed_args and observed_args[key] != value
+    ]
+
+
 def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
-    """Compare upstream identity with actual Setup-server launch evidence."""
+    """Compare the Setup server, and every server GEAK launched itself, with upstream.
+
+    Two references are kept apart. ``expected`` is the upstream identity as handed
+    over (an opaque digest or launch facts) and judges the Setup server. The
+    orchestrator's own baseline server log, when named and parseable, gives canonical
+    launch facts: they judge Setup when the upstream identity cannot, and they always
+    judge the servers GEAK launched after Setup, because a matching Setup digest says
+    nothing about those. The aggregate status is the worst of all checks:
+    mismatched > unverified > matched.
+    """
     expected, expected_source = _handoff_observed_identity(handoff)
     candidates = [
         eval_dir / "baseline" / "server.log",
@@ -2730,20 +3513,66 @@ def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
         if observed:
             break
 
+    reference, reference_path, reference_problem = _orchestrator_server_log_identity(handoff)
+    if reference_path:
+        evidence_paths.append(reference_path)
+
+    equal = _identity_value_equal(expected, observed) if expected is not None and observed else None
+    if equal is None and observed.get("server_args") and reference:
+        expected, expected_source = reference, "orchestrator_server_log"
+        equal = _identity_value_equal(expected, observed)
+
     if expected is None:
         status = "unavailable"
     elif not observed:
         status = "unverified"
     else:
-        equal = _identity_value_equal(expected, observed)
         status = "unverified" if equal is None else "matched" if equal else "mismatched"
-    return {
+
+    # Check what GEAK served after Setup: a matched Setup says nothing about a later
+    # launch that dropped the recipe's flags.
+    leg_reference = reference or (expected if isinstance(expected, dict) else None)
+    launched: list[dict[str, Any]] = []
+    if leg_reference:
+        for leg, parts in _GEAK_LAUNCHED_SERVER_LOGS:
+            path = eval_dir.joinpath(*parts)
+            if not path.is_file():
+                continue
+            leg_observed, _ = _read_server_identity_evidence(path)
+            leg_equal = _identity_value_equal(leg_reference, leg_observed) if leg_observed else None
+            launched.append({
+                "leg": leg,
+                "path": str(path),
+                "status": "unverified" if leg_equal is None else "matched" if leg_equal else "mismatched",
+                "mismatches": _identity_mismatches(leg_reference, leg_observed) if leg_equal is False else [],
+            })
+            evidence_paths.append(str(path))
+    leg_statuses = {leg["status"] for leg in launched}
+    if "mismatched" in leg_statuses:
+        status = "mismatched"
+    elif status == "matched" and "unverified" in leg_statuses:
+        status = "unverified"
+
+    out = {
         "expected": expected,
         "expected_source": expected_source or None,
         "observed": observed or None,
         "status": status,
         "evidence_paths": evidence_paths,
     }
+    if equal is False:
+        out["mismatches"] = _identity_mismatches(expected, observed)
+    if any(path.is_file() for path in candidates) and not observed:
+        out["observed_problem"] = (
+            "no launch record this parser recognises (SGLang ServerArgs, ATOM Engine kwargs, vLLM non-default "
+            "args, identity=) in the Setup server log"
+        )
+    if launched:
+        out["geak_launched"] = launched
+        out["geak_launched_reference"] = "orchestrator_server_log" if reference else expected_source
+    if reference_problem:
+        out["orchestrator_reference_problem"] = reference_problem
+    return out
 
 
 def _build_handoff_alignment(
@@ -2879,7 +3708,7 @@ def _overlay_has_loadable_code(path: Path) -> bool:
         return False
     if not isinstance(spec, dict):
         return False
-    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures") or spec.get("installers"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
@@ -3037,6 +3866,96 @@ def _same_session_baseline(
     if value > 0.0:
         return value, "director_drift_corrected"
     return 0.0, ""
+
+
+def handoff_acceptance(h: dict) -> dict | None:
+    """The caller's KEEP rule for the axis it handed GEAK; None leaves GEAK's own verdict.
+
+    Hyperloom publishes one in an AgentX ``workload_spec`` graded on interactivity: the
+    ``objective`` must gain at least ``min_gain_pct`` over the reference, while each guard in
+    ``guard_max_drop_pct`` -- named by basis, like the objective -- may fall no further below
+    the reference than its band. A block that does not parse is ignored with a warning rather
+    than half-applied: GEAK's own verdict stands, and the caller re-measures what it keeps.
+    """
+    spec = h.get("workload_spec")
+    block = spec.get("acceptance") if isinstance(spec, dict) else None
+    if block is None:
+        return None
+    try:
+        objective = str(block["objective"]).strip()
+        min_gain_pct = float(block["min_gain_pct"])
+        guards = {
+            str(basis).strip(): float(band)
+            for basis, band in (block.get("guard_max_drop_pct") or {}).items()
+        }
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        problem = repr(exc)
+    else:
+        if objective and all(math.isfinite(v) for v in (min_gain_pct, *guards.values())):
+            return {
+                "objective": objective,
+                "min_gain_pct": min_gain_pct,
+                "guard_max_drop_pct": guards,
+            }
+        problem = "no objective, or a band that is not a finite number"
+    sys.stderr.write(f"!!! workload_spec.acceptance ignored ({problem}): {block!r}\n")
+    return None
+
+
+def acceptance_verdict(
+    rule: dict,
+    *,
+    measured_basis: str,
+    baseline: float,
+    final: float,
+    reference: dict,
+    candidate: dict,
+) -> dict:
+    """Apply the caller's KEEP rule to the pair this run publishes.
+
+    Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
+    objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
+    (1 - max_drop_pct / 100)``. Guards are read from the ``guard_<basis>_median`` fields of the
+    two legs' bench summaries, and one missing from either leg fails: a guard nobody measured
+    is not one the candidate held. Hyperloom also refuses rounds of unequal length or with more
+    failed requests and applies its latency budget; the summaries carry neither, so Hyperloom's
+    re-measurement keeps the last word.
+    """
+    objective = rule["objective"]
+    gain_pct = (final - baseline) / baseline * 100.0 if baseline > 0.0 and final > 0.0 else None
+    reasons = []
+    if measured_basis != objective:
+        reasons.append(f"measured {measured_basis or 'an unnamed axis'}, not {objective}")
+    elif gain_pct is None:
+        reasons.append(f"no {objective} pair to compare")
+    elif gain_pct < rule["min_gain_pct"]:
+        reasons.append(f"{objective} gained {gain_pct:.3f}%, below {rule['min_gain_pct']}%")
+    guards = {}
+    for basis, max_drop_pct in rule["guard_max_drop_pct"].items():
+        ref = _positive_finite_float(reference.get(f"guard_{basis}_median"))
+        cand = _positive_finite_float(candidate.get(f"guard_{basis}_median"))
+        measured = ref > 0.0 and cand > 0.0
+        holds = measured and cand >= ref * (1.0 - max_drop_pct / 100.0)
+        guards[basis] = {
+            "reference": ref or None,
+            "candidate": cand or None,
+            "max_drop_pct": max_drop_pct,
+            "holds": holds,
+        }
+        if not measured:
+            reasons.append(f"guard {basis} was not measured on both legs")
+        elif not holds:
+            reasons.append(f"guard {basis} fell {(1.0 - cand / ref) * 100.0:.3f}%, "
+                           f"past {max_drop_pct}%")
+    return {
+        "objective": objective,
+        "measured_basis": measured_basis,
+        "gain_pct": round(gain_pct, 3) if gain_pct is not None else None,
+        "min_gain_pct": rule["min_gain_pct"],
+        "guards": guards,
+        "keep": not reasons,
+        "reasons": reasons,
+    }
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -3513,14 +4432,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
+    # The one exception is ``acceptance``, added below only when the handoff states
+    # the caller's KEEP rule.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
+    # The metric-neutral spread first: the output_*-named alias is only written on the output
+    # basis, so on any other axis it would leave both legs' scatter unknown.
     base_spread_pct = _positive_finite_float(
-        base_leg_summary.get("output_throughput_tok_s_spread_pct")
+        base_leg_summary.get("throughput_tok_s_spread_pct")
+        or base_leg_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("base_block") or {}).get("spread_pct")
+        or baseline_summary.get("throughput_tok_s_spread_pct")
         or baseline_summary.get("output_throughput_tok_s_spread_pct")
     )
     final_spread_pct = _positive_finite_float(
-        final_summary.get("output_throughput_tok_s_spread_pct")
+        final_summary.get("throughput_tok_s_spread_pct")
+        or final_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("final_block") or {}).get("spread_pct")
     )
     noise_band_pct = _positive_finite_float(validation.get("noise_band_pct"))
@@ -3568,6 +4494,39 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "recovery": wf.get("recovery_evidence") or None,
     }
 
+    # Measurement basis: read back from the bench_summary.json that actually produced these numbers
+    # (bench_summarize.py records the throughput or interactivity axis E2E_METRIC selected),
+    # so the label never lies about the basis. Falls back to output when neither summary carries it.
+    # See run_e2e.md alignment table.
+    metric_basis = (
+        final_summary.get("metric_basis")
+        or wf.get("metric_basis")
+        or baseline_summary.get("metric_basis")
+        or "aggregate_output_tok_s"
+    )
+
+    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
+    # interactivity grading), "ok" means that rule keeps the published pair, not merely
+    # that the final beat the baseline. Guards come from the two legs the pair was read
+    # from; a pair with no such legs (a recovered win) cannot show its guards held.
+    acceptance = handoff_acceptance(h)
+    if acceptance is not None:
+        verdict = acceptance_verdict(
+            acceptance,
+            measured_basis=metric_basis,
+            baseline=geak_baseline,
+            final=promoted_final,
+            reference={
+                "validation_base_bench_summary": base_leg_summary,
+                "setup_baseline": baseline_summary,
+            }.get(baseline_basis_source, {}),
+            candidate={} if wf.get("recovered_intermediate") else final_summary,
+        )
+        validation_evidence["acceptance"] = verdict
+        if status == "ok" and not verdict["keep"]:
+            status = "no_gain"
+
     result = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3595,15 +4554,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # _material_overlay_path / _material_patch_path).
         "final_patch": _material_patch_path(eval_dir, wf),
         "final_overlay": _material_overlay_path(eval_dir, wf),
-        # Measurement basis: read back from the bench_summary.json that actually produced these numbers
-        # (bench_e2e.sh records "aggregate_output_tok_s" or "aggregate_total_token_tok_s" per E2E_METRIC),
-        # so the label never lies about the basis. Falls back to output when neither summary carries it.
-        # See run_e2e.md alignment table.
-        "metric_basis": (
-            final_summary.get("metric_basis")
-            or baseline_summary.get("metric_basis")
-            or "aggregate_output_tok_s"
-        ),
+        "metric_basis": metric_basis,
         # Which bench client measured these numbers. "inferencex" => identical
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
@@ -3645,6 +4596,20 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
+        # Exposed for backfill; _enrich_kb_return also carries it to the salvage writer's input.
+        "comparability": workload_comparability,
+        # Preserve the declaration and the workflow's observed shape for KB backfill/recovery.
+        "workload": {
+            **(h.get("workload_spec") or {}), **workload,
+            **(wf.get("workload") or {}),
+            **({
+                "isl": round(float(baseline_summary["observed_isl"])),
+                "osl": round(float(baseline_summary["observed_osl"])),
+                "shape_provenance": "agentx_measured_this_run",
+            } if (h.get("workload_spec") or {}).get("kind") == WORKLOAD_KIND_AGENTX
+            and _positive_finite_float(baseline_summary.get("observed_isl"))
+            and _positive_finite_float(baseline_summary.get("observed_osl")) else {}),
+        },
         # Never advertise a report that is not on disk: the old unconditional
         # fallback handed the caller a path to a file that was never written.
         # _emit fills this in with the synthesized report if the workflow died first.
@@ -3833,6 +4798,19 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
     identity = alignment.get("server_identity") or result.get("server_identity") or {}
     identity_status = str(identity.get("status") or "unavailable")
     identity_paths = identity.get("evidence_paths") or []
+    # Each server GEAK launched itself, so a failing leg is visible, not only the aggregate.
+    identity_legs = [
+        f"  - `{leg.get('leg')}`: `{leg.get('status')}`"
+        + (
+            " — " + ", ".join(
+                f"`{m.get('key')}` expected `{m.get('expected')}`, observed `{m.get('observed')}`"
+                for m in leg.get("mismatches") or []
+            )
+            if leg.get("mismatches")
+            else ""
+        )
+        for leg in identity.get("geak_launched") or []
+    ]
     stack = result.get("serving_stack") or {}
     launcher = str(stack.get("launcher") or "unknown")
     recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
@@ -3898,6 +4876,7 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
                     else "unavailable"
                 )
             ),
+            *(["- GEAK-launched servers:", *identity_legs] if identity_legs else []),
             f"- Server launch recipe: `{launcher}`",
             *reference_caveat,
             *recipe_caveat,
@@ -4007,6 +4986,9 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
 FINAL_REPORT_FILE = "final_report.md"
+# run_reaper.py's FENCE_FILE; its "stage" is the final-phase stage that took the GPUs.
+FINAL_PHASE_FENCE_FILE = ".final_phase_fence"
+FINAL_PHASE_STAGES = ("finalize", "validate")
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -5344,7 +6326,7 @@ def _ir_float(ir: dict, *keys: str) -> float:
 
 
 def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
-    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+    """Advisory e2e estimate from a GPU-time share and isolated speedup.
 
     Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
     missing, so an unknown profile never flags anything (fail-open).
@@ -5357,18 +6339,8 @@ def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
 
 
 def _parity_is_soft(ir: dict) -> bool:
-    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
-
-    Byte-exact parity is a hard correctness guarantee, so a speedup above the
-    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
-    degenerate output, so an impossible speedup there is treated as corruption.
-
-    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
-    back to the run's ``accuracy_gate`` arg when the label is absent or
-    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
-    candidate is therefore treated as soft — the guard still needs the delta to
-    exceed twice the ceiling before it fires, and a missing profile makes the
-    ceiling infinite, so this cannot drop a win on schema grounds alone.
+    """Accuracy-gated results can need review. Legacy unlabelled disk results
+    are treated as soft because the workflow's accuracy_gate arg is unavailable.
     """
     kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
     if kind in ("byte_exact", "none"):
@@ -5376,8 +6348,95 @@ def _parity_is_soft(ir: dict) -> bool:
     return True
 
 
-def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
-    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
+def _speedup_estimate(ir: dict) -> dict:
+    """Mirror speedupEstimate: disjoint current-reference coverage, else head fallback."""
+    isolated = _ir_float(ir, "isolated_speedup")
+    pct = _ir_float(ir, "pct_gpu_time")
+    fallback = {"pct_gpu_time": pct, "estimate_pct": _amdahl_ceiling_pct(pct, isolated),
+                "source": "head_estimate"}
+    coverage = ir.get("affected_gpu_time") or {}
+    measured = ir.get("measurement_evidence") or {}
+    if not isinstance(coverage, dict) or not isinstance(measured, dict):
+        return fallback
+    rows = coverage.get("kernels")
+    if (not coverage.get("profile_path") or not measured.get("candidate_digest")
+            or coverage.get("candidate_digest") != measured["candidate_digest"]
+            or not measured.get("reference_digest")
+            or not measured.get("workload_digest")
+            or coverage.get("reference_digest") != measured["reference_digest"]
+            or coverage.get("workload_digest") != measured["workload_digest"]
+            or not isinstance(rows, list) or not rows):
+        return fallback
+    seen = {}
+    pct, saved, uniform = 0.0, 0.0, False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            return fallback
+        share = row.get("pct_gpu_time")
+        if (type(share) not in (int, float) or not math.isfinite(share)
+                or not 0 <= share <= 100):
+            return fallback
+        signature = (share, row.get("isolated_speedup"), row.get("removed") is True)
+        if row["id"] in seen:
+            if seen[row["id"]] != signature:
+                return fallback
+            continue
+        seen[row["id"]] = signature
+        pct += share
+        if row.get("removed") is True:
+            saved += share / 100
+        else:
+            speedup = row.get("isolated_speedup")
+            if type(speedup) not in (int, float) or not math.isfinite(speedup) or speedup <= 0:
+                speedup, uniform = isolated, True
+            if not math.isfinite(speedup) or speedup <= 0:
+                return fallback
+            saved += share / 100 * (1 - 1 / speedup)
+    if not 0 < pct <= 100 + 1e-9:
+        return fallback
+    return {"pct_gpu_time": pct,
+            "estimate_pct": math.inf if saved >= 1 else (1 / (1 - saved) - 1) * 100,
+            "source": "coverage_uniform_estimate" if uniform else "coverage_per_path"}
+
+
+def _confirmation_evidence_matches(ir: dict) -> bool:
+    """A distinct pair with the same candidate, baseline and workload confirms a win."""
+    review = ir.get("speedup_review") or {}
+    if not isinstance(review, dict) or review.get("status") != "confirmed":
+        return False
+    before = review.get("original_measurement") or {}
+    after = ir.get("measurement_evidence") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    paths = [before.get("ref_summary"), before.get("cand_summary"),
+             after.get("ref_summary"), after.get("cand_summary")]
+    if (not before.get("measurement_id") or not after.get("measurement_id")
+            or before["measurement_id"] == after["measurement_id"]
+            or not all(isinstance(p, str) and p for p in paths) or len(set(paths)) != 4
+            or after.get("fresh_pair") is not True or after.get("configs_matched") is not True
+            or after.get("workload_matched") is not True):
+        return False
+    for key in ("ref_replicas", "cand_replicas"):
+        value = after.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 2 or value != int(value)):
+            return False
+    # protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+    if ((before.get("protocol_digest") or after.get("protocol_digest"))
+            and before.get("protocol_digest") != after.get("protocol_digest")):
+        return False
+    return all(isinstance(before.get(key), str) and before[key] and before[key] == after.get(key)
+               for key in ("candidate_digest", "reference_digest", "workload_digest"))
+
+
+def _confirmed_speedup(ir: dict) -> bool:
+    return (ir.get("gate") == "accepted" and ir.get("ab_complete") is True
+            and ir.get("output_parity") == "pass" and ir.get("parity_kind") in ("accuracy", "byte_exact")
+            and _confirmation_evidence_matches(ir))
+
+
+def _speedup_needs_review(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """Review trigger only; independently confirmed gains can exceed it."""
     if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
         return False
     return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
@@ -5402,19 +6461,43 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
         if not base.is_dir():
             continue
+        # The workflow checkpoint records the final reviewed result, after the agent's raw A/B.
+        # Match the immutable original measurement ID before applying it to a disk candidate.
+        reviewed = {}
+        for checkpoint in sorted(base.glob("candidate_*/e2e_validation.json")):
+            result = (_read_json(checkpoint) or {}).get("integration_result") or {}
+            if not isinstance(result, dict):
+                continue
+            review = result.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                continue
+            original = review.get("original_measurement") or {}
+            if isinstance(original, dict) and isinstance(original.get("measurement_id"), str):
+                reviewed[original["measurement_id"]] = result
         for cand in sorted(base.glob("cand_*")):
             if cand.name in seen:
                 continue
             ir = _read_json(cand / "integrate_result.json")
             if not ir:
                 continue
+            original = ir.get("measurement_evidence") or {}
+            if not isinstance(original, dict):
+                original = {}
+            result = reviewed.get(original.get("measurement_id"))
+            if result and (result["speedup_review"].get("original_measurement") == original):
+                ir = {**ir, **result}
             seen.add(cand.name)
             gate = str(ir.get("gate") or "")
             delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            ceiling_pct = _amdahl_ceiling_pct(
-                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
-            )
-            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            estimate = _speedup_estimate(ir)
+            ceiling_pct = estimate["estimate_pct"]
+            needs_review = _speedup_needs_review(ir, delta_pct, ceiling_pct)
+            review = ir.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                review = {}
+            review_pending = (review.get("status") in
+                              ("pending", "inconclusive", "rejected")
+                              or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
             if separated is None:
@@ -5433,7 +6516,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                 "amdahl_ceiling_pct": (
                     round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
                 ),
-                "implausible": implausible,
+                "speedup_estimate": {**estimate, "estimate_pct": (
+                    ceiling_pct if math.isfinite(ceiling_pct) else None)},
+                "speedup_review_pending": review_pending,
                 "output_parity": parity or None,
                 "separated": separated,
                 # winner_kind in {"env","config","flags"} => config-only.
@@ -5443,7 +6528,7 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     and delta_pct > 0.0
                     and parity != "fail"
                     and ir.get("ab_complete") is not False
-                    and not implausible
+                    and not review_pending
                 ),
             })
     return records
@@ -5734,8 +6819,9 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
-            "excluded_as_implausible": [
-                c["short_name"] for c in candidates if c["implausible"]
+            "speedup_estimate": best["speedup_estimate"],
+            "awaiting_speedup_review": [
+                c["short_name"] for c in candidates if c["speedup_review_pending"]
             ] or None,
         },
     }
@@ -5756,8 +6842,11 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
 
     With NO accepted change the served path is unchanged, so final == baseline by
     construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
-    Returns ``None`` only when no baseline throughput was ever measured (the run
-    genuinely produced nothing to keep).
+    Returns ``None`` when no baseline throughput was ever measured (the run
+    genuinely produced nothing to keep), or when the Finalize bundle
+    (``final/final_launch.sh``) is missing: a run cut off mid-optimization also has
+    a measured baseline, and reporting it as no_gain tells the caller GEAK finished
+    and found nothing. ``None`` surfaces the run's classified error instead.
 
     This is the LAST recovery tier: :func:`_recover_workflow_return` reaches it only
     after ruling out an accepted kernel win AND an adopted serving config
@@ -5766,9 +6855,13 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    # bench_summarize.py writes the selected metric basis (output, total or an
+    # interactivity axis) to throughput_tok_s_median; output_throughput_tok_s_median
+    # is an alias it fills only on the output axis, so an AgentX baseline has it null.
     baseline_tput = (
         official.get("baseline_throughput_tok_s")
         or official.get("plateau_median_tok_s")
+        or summary.get("throughput_tok_s_median")
         or summary.get("output_throughput_tok_s_median")
     )
     if not baseline_tput:
@@ -5776,6 +6869,8 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     try:
         baseline_tput = float(baseline_tput)
     except (TypeError, ValueError):
+        return None
+    if not (eval_dir / "final" / "final_launch.sh").is_file():
         return None
     return {
         "eval_dir": str(eval_dir),
@@ -5798,6 +6893,30 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     }
 
 
+def _phase_reached(eval_dir: str | Path | None) -> str:
+    """The furthest workflow phase an eval dir shows, for a result with no workflow return.
+
+    ``setup`` until Setup's baseline summary exists, then ``search`` until the final
+    phase fences the GPUs, then the fenced stage (``finalize`` or ``validate``).
+    ``""`` when there is no eval dir to read.
+    """
+    if not eval_dir:
+        return ""
+    root = Path(eval_dir)
+    try:
+        if not root.is_dir():
+            return ""
+        fence = _read_json(root / FINAL_PHASE_FENCE_FILE)
+        stage = fence.get("stage") if isinstance(fence, dict) else None
+        if stage in FINAL_PHASE_STAGES:
+            return stage
+        if (root / "baseline" / "bench_summary.json").is_file():
+            return "search"
+    except OSError:
+        return ""
+    return "setup"
+
+
 def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
     """Persist the authoritative workflow return beside the artifacts (best-effort)."""
     try:
@@ -5805,6 +6924,19 @@ def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
             json.dumps(wf, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def _enrich_kb_return(wf: dict, result: dict) -> dict:
+    """Put normalized metadata on the file the salvage writer actually reads."""
+    enriched = {**wf, **{key: result[key] for key in ("comparability", "workload", "metric_basis")
+                         if result.get(key)}}
+    evidence = result.get("validation_evidence") or {}
+    if evidence.get("acceptance") is not None:
+        enriched["validation_evidence"] = evidence
+        # The acceptance verdict must travel with the same pair it evaluated.
+        for key in ("baseline_throughput_tok_s", "final_throughput_tok_s", "throughput_speedup"):
+            enriched[key] = result[key]
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -6523,6 +7655,67 @@ def _publish_protected_pgids() -> str:
     return value
 
 
+_RUN_REAPER: Any = None
+
+
+def _run_reaper() -> Any:
+    """``e2e_workflow/scripts/run_reaper.py``, loaded once: the workflow runs it as a script, the runner imports it."""
+    global _RUN_REAPER
+    if _RUN_REAPER is None:
+        spec = importlib.util.spec_from_file_location("geak_run_reaper", RUN_REAPER_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUN_REAPER = module
+    return _RUN_REAPER
+
+
+def _mark_run(eval_dir: str) -> dict | None:
+    """Mark every process this run is about to start, so its exit can find them however they were detached.
+
+    Returns:
+        dict | None: the run record ``_stop_run_processes`` needs, or None when the run could not be marked.
+    """
+    try:
+        return _run_reaper().mark_run(eval_dir)
+    except Exception as exc:  # an unmarked run still runs; only its exit cleanup is lost
+        sys.stderr.write(
+            f"[run_e2e] could not mark this run's processes ({type(exc).__name__}: {exc}); "
+            "whatever it leaves running at exit will not be stopped\n"
+        )
+        return None
+
+
+def _stop_run_processes(run: dict | None, eval_dir: str) -> dict | None:
+    """Stop everything this run left running, so the caller gets its GPUs back free.
+
+    A leg launched detached (``setsid nohup``) outlives the workflow and every agent in it, and the caller's
+    next server boot fails its memory-balance check on GPUs that still hold that leg's weights. Called after
+    result.json is written: the interface files outrank this, so a slow stop can never cost them.
+
+    Returns:
+        dict | None: the reaper's receipt, or None when there was no run record or the reaper failed.
+    """
+    if not run:
+        return None
+    try:
+        receipt = _run_reaper().reap(eval_dir, mode="exit", run=run)
+    except Exception as exc:
+        sys.stderr.write(f"[run_e2e] could not stop this run's leftover processes ({type(exc).__name__}: {exc})\n")
+        return None
+    stopped = receipt.get("stopped") or []
+    survivors = receipt.get("survivors") or []
+    names = ", ".join(sorted({str(row.get("name")) for row in stopped}))[:300]
+    line = f"[run_e2e] exit: stopped {len(stopped)} process(es) this run left running"
+    if names:
+        line += f" ({names})"
+    if survivors:
+        line += f"; {len(survivors)} still up: " + ", ".join(f"{s.get('pid')} {s.get('name')}" for s in survivors)
+    if receipt.get("note"):
+        line += f"; {receipt['note']}"
+    sys.stderr.write(line + "\n")
+    return receipt
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -6538,6 +7731,33 @@ def _int_or_none(raw: str | None, what: str) -> int | None:
     except ValueError:
         sys.stderr.write(f"ignoring non-integer {what}: {raw!r}\n")
         return None
+
+
+def _float_or_none(raw: str | None, what: str) -> float | None:
+    """Positive float, or None (with a note) for junk — same contract as ``_int_or_none``."""
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        sys.stderr.write(f"ignoring non-numeric {what}: {raw!r}\n")
+        return None
+    return value if value > 0 else None
+
+
+SIMULATED_ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC"
+
+
+def _simulated_acceptance_env(extra_env: str) -> list[str]:
+    """Simulated-acceptance switches set in this process's env or in the seed ``K=V`` env string."""
+    names = {k for k in os.environ if k.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX)}
+    try:
+        tokens = shlex.split(extra_env or "")
+    except ValueError:
+        tokens = (extra_env or "").split()
+    names.update(t.split("=", 1)[0] for t in tokens
+                 if "=" in t and t.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX))
+    return sorted(names)
 
 
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
@@ -6595,7 +7815,17 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h, timeout_s)
+    try:
+        artifact_cutoff_ts = handoff_path.stat().st_mtime
+    except OSError:
+        artifact_cutoff_ts = None
+    is_dry_run = "--dry-run" in flags
+    ps_args = map_args(
+        h,
+        timeout_s,
+        artifact_cutoff_ts=artifact_cutoff_ts,
+        dry_run=is_dry_run,
+    )
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
@@ -6608,6 +7838,12 @@ def main(argv: list[str]) -> int:
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
+    # Module B writes workflow_return.json before normalize_result runs. Send the same
+    # comparability calculation into that return while the selected client is known.
+    ps_args["comparability"] = _workload_comparability(h)
+    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # until then; _kb_write_back handles successful runs too when Module B left no receipt.
+    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
@@ -6615,7 +7851,7 @@ def main(argv: list[str]) -> int:
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
 
-    if "--dry-run" in flags:
+    if is_dry_run:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,
@@ -6637,6 +7873,23 @@ def main(argv: list[str]) -> int:
 
     exp_root = Path(h.get("exp_root") or "")
     eval_dir_hint = ps_args["eval_dir"]
+
+    # Telemetry durability: Claude Code writes this run's whole LLM ledger into
+    # its own config home. If that home is on a different filesystem from
+    # exp_root -- which is by construction this run's durable output location --
+    # then the ledger has a different lifetime from the run that produced it,
+    # and a container overlay takes it with it. Warn and continue: an 18-hour
+    # optimization job must never die over telemetry.
+    _RUN_EXP_ROOT["exp_root"] = str(exp_root)
+    if os.environ.get("GEAK_TELEMETRY_WARN", "1") != "0":
+        try:
+            for _home in claude_trace_mirror.candidate_homes():
+                _warning = claude_trace_mirror.warn_if_volatile(_home, exp_root)
+                if _warning:
+                    print(f"[run_e2e] WARNING: {_warning}", file=sys.stderr, flush=True)
+                break
+        except Exception:
+            pass
 
     # ── Guaranteed interface-file emission ──────────────────────────────────
     # CONTRACT: as long as GEAK produced ANY measured E2E effect on disk,
@@ -6669,12 +7922,21 @@ def main(argv: list[str]) -> int:
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
+                phase = _phase_reached(eval_dir_hint)
+                message = str(error or "")
+                if not message and error_class == "timeout":
+                    # anyio.fail_after raises a TimeoutError with no message.
+                    message = f"no workflow return within the {timeout_s}s budget"
+                    if phase:
+                        message += f" (furthest phase on disk: {phase})"
                 out = {
                     "schema_version": SCHEMA_VERSION,
                     "status": "timeout" if error_class == "timeout" else "error",
                     "error_class": error_class or "runner_error",
-                    "error": str(error or ""),
+                    "error": message,
                 }
+                if phase:
+                    out["phase_reached"] = phase
         except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,
@@ -6693,6 +7955,7 @@ def main(argv: list[str]) -> int:
             eval_dir = Path(eval_dir_str)
             if wf is not None:
                 try:
+                    wf = _enrich_kb_return(wf, out)
                     _persist_workflow_return(eval_dir, wf)
                 except Exception:
                     pass
@@ -6711,6 +7974,20 @@ def main(argv: list[str]) -> int:
                     out["final_report_synthesized"] = not had_report
             except Exception as fr_exc:
                 out["final_report_error"] = f"{type(fr_exc).__name__}: {fr_exc}"
+            # What the run bought, beside what it cost: the throughput each
+            # phase measured, read from this run's own artifacts.
+            try:
+                out["outcome_report"] = geak_outcome_report.write(eval_dir)
+            except Exception as or_exc:
+                out["outcome_report_error"] = f"{type(or_exc).__name__}: {or_exc}"
+            # Claude Code's LLM ledger lives in a home this run does not own and
+            # whose lifetime it does not control. Mirror it into eval_dir so the
+            # run's cost record shares the run's own durability. Local-filesystem
+            # work, so it belongs before the atomic result.json write below.
+            try:
+                out["claude_trace"] = _mirror_trace(eval_dir)
+            except Exception as ct_exc:
+                out["claude_trace_error"] = f"{type(ct_exc).__name__}: {ct_exc}"
         if out.get("baseline_basis"):
             try:
                 updated_reports = _update_baseline_alignment_reports(out)
@@ -6811,6 +8088,7 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    run = _mark_run(eval_dir_hint)
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
@@ -6829,6 +8107,7 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
+        _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),
                       "result_json": str(result_path),

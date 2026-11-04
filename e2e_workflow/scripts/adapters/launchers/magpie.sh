@@ -24,8 +24,8 @@
 #
 # bench_e2e.sh contract: sets global SERVER_PID; writes $LOG. Reads env:
 #   BACKEND MODEL TP PORT GPU EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-#   PROFILE PROFILE_DIR LOG OUT_DIR MAX_MODEL_LEN PROFILE_MAX_ITERS
-#   PROFILE_DELAY_ITERS.
+#   PROFILE PROFILE_DIR PROFILE_PYTHONPATH LOG OUT_DIR MAX_MODEL_LEN
+#   PROFILE_MAX_ITERS PROFILE_DELAY_ITERS.
 #
 # TWO logs, deliberately: Magpie's script redirects the server with a
 # TRUNCATING '> $SERVER_LOG', so anything this adapter appended to the same file
@@ -37,8 +37,42 @@
 # adapter_health is inherited from the BACKEND adapter (curl $BASE_URL/health),
 # which works regardless of who launched the server, so it is NOT redefined.
 
+# ATOM's multiprocessing leader can exit promptly on SIGTERM while rank workers
+# remain alive in its process group and keep all GPU memory allocated.  The
+# native ATOM adapter prevents that with its own long-lived supervisor, but a
+# Magpie launch bypasses that adapter_launch implementation.  Wrap the verified
+# Magpie ATOM process group in a small GEAK-owned supervisor: GEAK tears down the
+# supervisor, and its TERM trap drains the external ATOM group through SIGKILL
+# even when the original leader has already exited.
+_MAGPIE_ATOM_SUPERVISOR='
+_server_pid="$1"
+_server_pgid="$2"
+_grace="${3:-5}"
+case "$_grace" in ""|*[!0-9]*) _grace=5 ;; esac
+_group_alive() { kill -0 "-$_server_pgid" 2>/dev/null; }
+_stop_group() {
+  trap - TERM INT
+  kill -TERM "-$_server_pgid" 2>/dev/null || kill -TERM "$_server_pid" 2>/dev/null || true
+  _i=0
+  while _group_alive && [ "$_i" -lt "$_grace" ]; do
+    sleep 1
+    _i=$((_i + 1))
+  done
+  _group_alive && kill -KILL "-$_server_pgid" 2>/dev/null || true
+  exit 0
+}
+trap _stop_group TERM INT
+while kill -0 "$_server_pid" 2>/dev/null; do sleep 1; done
+# A crashed/exited ATOM leader can leave reparented workers in the group.  Reap
+# that group before the supervisor exits so bench_e2e observes a clean failure.
+_group_alive && _stop_group
+exit 0
+'
+
 adapter_launch() {
   local backend_uc script var_script
+  # Inner-group state belongs to THIS launch only; never inherit a previous leg's.
+  unset MAGPIE_INNER_SERVER_PID MAGPIE_INNER_SERVER_START_TICKS
   backend_uc="$(printf '%s' "${BACKEND:-sglang}" | tr '[:lower:]' '[:upper:]')"
 
   # generic path first, then per-backend MAGPIE_<BACKEND>_SCRIPT (indirection).
@@ -214,6 +248,50 @@ PY
     fi
   fi
 
+  # Recipe scripts expand ${_args_var} UNQUOTED (atom_mi355x.sh: `$EXTRA_ATOM_ARGS`), so a shell-quoted
+  # value from the effective config (`--online_quant_config '{"a":1}'`) would reach the server with its
+  # quotes still on. Re-render as bare words: a whitespace-free JSON value survives word splitting
+  # intact. An argument the unquoted expansion cannot carry losslessly -- one holding whitespace, or a
+  # glob that matches a file where the recipe runs -- fails the launch instead of reaching the server
+  # changed.
+  if [ -n "${_extra_args//[[:space:]]/}" ]; then
+    local _split_helper _split_out _t
+    local -a _argv=()
+    _split_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/split_args.py"
+    if [ ! -f "$_split_helper" ]; then
+      echo "!!! magpie launcher: $_split_helper is missing; refusing to launch with unsplit server args." >&2
+      return 2
+    fi
+    _split_out="$(mktemp)" || return 2
+    if ! python3 "$_split_helper" "$_extra_args" > "$_split_out"; then
+      rm -f "$_split_out"
+      echo "!!! magpie launcher: server args do not split (see above); refusing to launch." >&2
+      return 2
+    fi
+    mapfile -d '' -t _argv < "$_split_out"
+    rm -f "$_split_out"
+    if [ "${#_argv[@]}" -eq 0 ]; then
+      echo "!!! magpie launcher: server args split to no arguments; refusing to launch." >&2
+      return 2
+    fi
+    for _t in "${_argv[@]}"; do
+      case "$_t" in *[[:space:]]*)
+        echo "!!! magpie launcher: server arg '$_t' contains whitespace; the recipe's unquoted" \
+             "\$${_args_var} would split it. Refusing to launch." >&2
+        return 2 ;;
+      esac
+      case "$_t" in *[*?[]*) : ;; *) continue ;; esac
+      # Expand it the way the recipe will (unquoted, default globbing) and compare.
+      # shellcheck disable=SC2086
+      if [ "$(shopt -u nullglob failglob dotglob; set +f; printf '%s\n' $_t)" != "$_t" ]; then
+        echo "!!! magpie launcher: server arg '$_t' matches files in $(pwd); the recipe's unquoted" \
+             "\$${_args_var} would replace it with their names. Refusing to launch." >&2
+        return 2
+      fi
+    done
+    _extra_args="${_argv[*]}"
+  fi
+
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
   # policy: recipe replay first, then the accepted env under test, then the
   # run-scoped names GEAK owns -- so a later layer knowingly overrides an
@@ -266,7 +344,7 @@ PY
   env "${_env_unset[@]}" -- \
     ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
-    PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    PYTHONPATH="${PROFILE_PYTHONPATH:+$PROFILE_PYTHONPATH:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \
     MODEL="$MODEL" \
@@ -303,9 +381,29 @@ PY
   # own group, and a stale file can name a pid that now belongs to someone else
   # entirely (worst case: the caller's orchestrator). Either case must DISABLE group
   # teardown here, at launch, rather than be discovered by a kill that already fired.
-  local _mp_pgid _mp_args
-  _mp_pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-  _mp_args="$(ps -o args= -p "$SERVER_PID" 2>/dev/null)"
+  # The probe must also SETTLE before it judges.  A launch script records $! at
+  # FORK and can hand us the pid (and exit) before that child has reached
+  # setsid(2)/exec, so the FIRST sample still shows the SCRIPT's group and the
+  # pre-exec argv.  That window is not exotic: pinned to one core it is lost
+  # ~100% of the time, and a 2-vCPU CI runner loses it often enough to fail.
+  # Judging on one sample turns a race into SERVER_GROUP_UNVERIFIED=1, which
+  # disables group teardown AND skips the ATOM supervisor -- leaking exactly the
+  # rank workers they exist to reap.  Re-probe instead: a pid that genuinely
+  # never leads its own group still ends up unverified, just a few seconds later.
+  local _mp_pgid _mp_args _mp_server_pid _mp_atom_wrapped=0
+  local _mp_pgid_i
+  _mp_server_pid="$SERVER_PID"
+  _mp_pgid="$(ps -o pgid= -p "$_mp_server_pid" 2>/dev/null | tr -d ' ')"
+  _mp_pgid_i=0
+  while [ "$_mp_pgid" != "$_mp_server_pid" ] && [ "$_mp_pgid_i" -lt 100 ] && \
+        kill -0 "$_mp_server_pid" 2>/dev/null; do
+    sleep 0.05
+    _mp_pgid="$(ps -o pgid= -p "$_mp_server_pid" 2>/dev/null | tr -d ' ')"
+    _mp_pgid_i=$((_mp_pgid_i + 1))
+  done
+  # Read argv only AFTER the settle loop: `setsid ... exec -a <name>` renames the
+  # process inside the same window, so an early sample mis-judges identity too.
+  _mp_args="$(ps -o args= -p "$_mp_server_pid" 2>/dev/null)"
   if [ "$_mp_pgid" != "$SERVER_PID" ]; then
     SERVER_GROUP_UNVERIFIED=1
     echo "!!! magpie launcher: pid $SERVER_PID does not lead its own group (pgid=${_mp_pgid:-?});" \
@@ -322,6 +420,33 @@ PY
            "PORT='$PORT' (args='$(printf '%s' "$_mp_args" | cut -c1-120)') — stale pid file?" \
            "group teardown disabled for this launch." >&2 ;;
   esac
+
+  # Magpie's ATOM script returns the real multiprocessing leader.  Preserve it
+  # for evidence, but expose a GEAK-owned supervisor as SERVER_PID so teardown
+  # cannot lose the rank workers when that leader exits before the grace window.
+  if [ "$backend_uc" = "ATOM" ] && [ "$_mp_pgid" = "$_mp_server_pid" ] && \
+     [ "${SERVER_GROUP_UNVERIFIED:-0}" != "1" ] && command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "$_MAGPIE_ATOM_SUPERVISOR" atom-magpie-supervisor \
+      "$_mp_server_pid" "$_mp_pgid" "${ATOM_MAGPIE_STOP_GRACE_S:-5}" &
+    SERVER_PID=$!
+    # Read only by server_teardown in this same shell's EXIT trap, so not exported. The start
+    # ticks let teardown refuse a pid that was reused after this group emptied.
+    # shellcheck disable=SC2034  # read by server_teardown.sh, sourced into this shell
+    MAGPIE_INNER_SERVER_PID="$_mp_server_pid"
+    # shellcheck disable=SC2034
+    MAGPIE_INNER_SERVER_START_TICKS=""
+    if declare -F _start_ticks_of >/dev/null; then
+      MAGPIE_INNER_SERVER_START_TICKS="$(_start_ticks_of "$_mp_server_pid" || true)"
+    fi
+    _mp_atom_wrapped=1
+    echo ">>> magpie launcher: ATOM server pid=$_mp_server_pid wrapped by" \
+         "supervisor pid=$SERVER_PID for worker-safe teardown."
+  fi
   export SERVER_GROUP_UNVERIFIED
-  echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID, pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  if [ "$_mp_atom_wrapped" = "1" ]; then
+    echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID," \
+         "inner_pid=$_mp_server_pid, inner_pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  else
+    echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID, pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  fi
 }

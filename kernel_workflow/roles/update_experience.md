@@ -67,10 +67,16 @@ per-round ledger, insights, and each round's directions/results/winner/cumulativ
 you decompose a stacked win and find the pitfalls), `PROFILE` (lane only: the final profile summary —
 bottleneck class and key metrics for the `roofline:` line; convert anything absolute in it into a
 fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (bake-off only), and
-`PERF_KNOWLEDGE_DIR` (the read-only reference base; may be empty).
+`PERF_KNOWLEDGE_DIR` (the read-only reference base; may be empty), `CURATION_ISOLATE`
+(`true` on R9700 / gfx1201 — do not mine CDNA learned cards), and `REQUIRED_PLATFORMS`
+(when set, every proposed card MUST use exactly those `platforms` values).
 
 ## Steps
 1. Read `${LEARNED_DIR}/README.md` and `${LEARNED_DIR}/INDEX.md`.
+   If `CURATION_ISOLATE=true` or `PERF_KNOWLEDGE_DIR` is empty: do **not** cite or merge
+   CDNA / Instinct cards. Skip INDEX entries whose `platforms` are not gfx1201/r9700.
+   Do not read operator SOTA cards from `PERF_KNOWLEDGE_DIR`. A new card on this run
+   MUST set `platforms` to `REQUIRED_PLATFORMS` (typically `['gfx1201']`).
 2. Read `${REPORT_PATH}` and the `WINNER` input. Write the reuse `key` as **one line of plain English**
    naming what this card is about — the op, the arch, and whatever else actually distinguishes it
    (framework, dtype/quant format, shape regime): e.g. `bf16 fused-MoE grouped GEMM · gfx942/MI300X ·

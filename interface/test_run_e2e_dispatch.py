@@ -49,6 +49,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -187,6 +188,12 @@ class _RunE2ECase(unittest.TestCase):
 
     def setUp(self):
         self._env = dict(os.environ)
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({
+            "gfx": "gfx950",
+            "target": "unknown",
+            "marketing_name": "AMD Instinct MI355X",
+            "physical_cu_count": 256,
+        })
         self._attrs: list[tuple[str, object]] = []
         self._mods: list[tuple[str, object]] = []
         self._sigterm = signal.getsignal(signal.SIGTERM)
@@ -238,6 +245,20 @@ class TestMapArgs(_RunE2ECase):
         h.update(extra)
         return h
 
+    def _write_roofline_trace(
+        self,
+        root: Path,
+        run_id: str,
+        timestamp: str,
+        *,
+        framework: str = "sglang",
+    ) -> Path:
+        run_dir = root / "runs" / "roofline" / run_id
+        trace_dir = run_dir / f"benchmark_{framework}_{timestamp}" / "torch_trace"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        (trace_dir / "1-TP-0.trace.json.gz").write_text("x", encoding="utf-8")
+        return trace_dir
+
     def test_optional_workflow_knobs_are_forwarded_verbatim(self):
         """launch_recipe / phases / carried state are the resume channel:
         dropping one silently re-runs a phase the caller pinned.
@@ -266,6 +287,146 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_structured_identity_is_forwarded_before_policy(self):
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
+        self.assertEqual(ps["expected_gfx"], "gfx950")
+        self.assertEqual(ps["expected_target"], "unknown")
+        self.assertEqual(ps["expected_physical_cu_count"], 256)
+        self.assertEqual(ps["backend"], "sglang")
+
+    def test_probe_less_dry_run_marks_identity_unavailable(self):
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx(
+            "_expected_gpu_identity",
+            lambda _handoff: self.fail("dry-run must not probe GPU identity"),
+        )
+        ps = rx.map_args(
+            self._handoff(eval_dir=str(self.tmp / "e2e_dry_no_gpu")),
+            dry_run=True,
+        )
+        self.assertEqual(ps["gpu_identity_status"], "unavailable_dry_run")
+        self.assertNotIn("expected_gfx", ps)
+        self.assertNotIn("expected_target", ps)
+
+    def test_explicit_r9700_identity_selects_vllm_without_gfx_promotion(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_r9700"),
+            expected_gfx="gfx1201",
+            expected_target="r9700",
+            expected_device_name="AMD Radeon AI PRO R9700",
+            expected_physical_cu_count=64,
+        ))
+        self.assertEqual(ps["expected_target"], "r9700")
+        self.assertEqual(ps["backend"], "vllm")
+
+    def test_partial_or_incompatible_product_identity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            rx.map_args(self._handoff(expected_gfx="gfx1201"))
+        with self.assertRaisesRegex(ValueError, "requires expected_gfx=gfx1201"):
+            rx.map_args(self._handoff(
+                expected_gfx="gfx950", expected_target="r9700",
+            ))
+
+    def test_r9600d_identity_is_preserved(self):
+        expected = {
+            "gfx": "gfx1201", "target": "r9600d",
+            "marketing_name": "AMD Radeon AI PRO R9600D",
+            "physical_cu_count": 48,
+        }
+        identity = rx._expected_gpu_identity({
+            "expected_gfx": "gfx1201", "expected_target": "r9600d",
+            "expected_device_name": expected["marketing_name"],
+            "expected_physical_cu_count": 48,
+        })
+        self.assertEqual(identity, expected)
+        mapped = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_r9600d"), backend="vllm",
+            expected_gfx="gfx1201", expected_target="r9600d",
+            expected_device_name=expected["marketing_name"],
+            expected_physical_cu_count=48,
+        ))
+        self.assertEqual(mapped["expected_target"], "r9600d")
+        self.assertEqual(mapped["expected_gfx"], "gfx1201")
+        self.assertEqual(mapped["expected_physical_cu_count"], 48)
+        self.assertEqual(mapped["expected_device_name"], expected["marketing_name"])
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
+        self.assertEqual(rx._expected_gpu_identity({}), expected)
+
+    def test_r9600d_defaults_to_vllm_like_r9700(self):
+        for target, name, cus in (
+            ("r9700", "AMD Radeon AI PRO R9700", 64),
+            ("r9600d", "AMD Radeon AI PRO R9600D", 48),
+        ):
+            with self.subTest(target=target):
+                mapped = rx.map_args(self._handoff(
+                    eval_dir=str(self.tmp / f"e2e_{target}_default"),
+                    expected_gfx="gfx1201", expected_target=target,
+                    expected_device_name=name, expected_physical_cu_count=cus,
+                ))
+                self.assertEqual(mapped["backend"], "vllm")
+
+    def test_r9600d_identity_rejects_wrong_isa(self):
+        with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
+            rx._expected_gpu_identity({
+                "expected_gfx": "gfx950", "expected_target": "r9600d",
+            })
+
+    def test_explicit_identity_rejects_malformed_values(self):
+        with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
+            rx._expected_gpu_identity(
+                {"expected_gfx": "rdna4", "expected_target": "unknown"})
+        with self.assertRaisesRegex(ValueError, "must be 'r9700', 'r9600d' or 'unknown'"):
+            rx._expected_gpu_identity(
+                {"expected_gfx": "gfx1201", "expected_target": "r9600"})
+
+    def test_env_identity_must_be_valid_and_consistent(self):
+        cases = [
+            ("{not json", ValueError, "not valid JSON"),
+            (json.dumps({"gfx": "RDNA4"}), RuntimeError, "invalid gfx"),
+            (json.dumps({"gfx": "gfx1201", "target": "r9600"}),
+             RuntimeError, "invalid target"),
+            (json.dumps({"gfx": "gfx950", "target": "r9700"}),
+             RuntimeError, "r9700 on a non-gfx1201 ISA"),
+            (json.dumps({"gfx": "gfx950", "target": "r9600d"}),
+             RuntimeError, "r9600d on a non-gfx1201 ISA"),
+        ]
+        for raw, exc, pattern in cases:
+            with self.subTest(raw=raw):
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = raw
+                with self.assertRaisesRegex(exc, pattern):
+                    rx._expected_gpu_identity({})
+
+    def test_identity_probe_is_structured_and_fails_closed(self):
+        """Without a pinned or env identity, the rocminfo probe is the only
+        source; a failed or garbled probe must stop policy selection."""
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        calls = []
+
+        def probe(returncode=0, stdout="", stderr=""):
+            def run(argv, **_kwargs):
+                calls.append(argv)
+                return types.SimpleNamespace(
+                    returncode=returncode, stdout=stdout, stderr=stderr)
+            return types.SimpleNamespace(run=run)
+
+        self.patch_rx("subprocess", probe(stdout=json.dumps({
+            "gfx": "gfx1201", "target": "r9700",
+            "marketing_name": "AMD Radeon AI PRO R9700", "physical_cu_count": 64,
+        })))
+        identity = rx._expected_gpu_identity({})
+        self.assertEqual(identity["target"], "r9700")
+        self.assertEqual(identity["physical_cu_count"], 64)
+        self.assertEqual(calls[-1][-1], str(rx.GPU_IDENTITY_SCRIPT))
+
+        self.patch_rx("subprocess", probe(returncode=1, stderr="no GPU agent"))
+        with self.assertRaisesRegex(
+            RuntimeError, "no GPU agent.*Pass expected_gfx and expected_target"):
+            rx._expected_gpu_identity({})
+
+        self.patch_rx("subprocess", probe(stdout="not json"))
+        with self.assertRaisesRegex(RuntimeError, "returned invalid JSON"):
+            rx._expected_gpu_identity({})
+
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
         direct, non-interface invocation)."""
@@ -289,6 +450,34 @@ class TestMapArgs(_RunE2ECase):
         self.assertNotIn("max_model_len", ps)
         self.assertNotIn("mem_fraction", ps)
         self.assertEqual(ps["initial_extra_server_args"], "")
+
+    def test_an_agentx_handoff_forwards_its_declaration_to_the_workflow(self):
+        """The workflow declares the workload for standalone runs; forwarding the
+        handoff's spec through the same arg means one mechanism serves both entry
+        points, rather than the environment for one and args for the other."""
+        spec = {
+            "kind": rx.WORKLOAD_KIND_AGENTX,
+            "corpus": "semianalysis_cc_traces_weka_062126_256k",
+            "metric_basis": "aggregate_total_token_tok_s",
+        }
+        ps = rx.map_args(self._handoff(workload_spec=spec))
+        self.assertEqual(ps["workload_spec"], spec)
+
+    def test_a_synthetic_handoff_forwards_no_declaration(self):
+        """Absent the arg, the workflow's channel stays inert and the fixed
+        ISL/OSL path is unchanged."""
+        self.assertNotIn("workload_spec", rx.map_args(self._handoff()))
+
+    def test_a_non_agentx_workload_spec_is_not_forwarded(self):
+        ps = rx.map_args(self._handoff(workload_spec={"kind": "synthetic_isl_osl"}))
+        self.assertNotIn("workload_spec", ps)
+
+    def test_a_malformed_workload_spec_is_not_forwarded(self):
+        for bad in (None, "agentx_trace_replay", 7, []):
+            with self.subTest(spec=bad):
+                self.assertNotIn(
+                    "workload_spec", rx.map_args(self._handoff(workload_spec=bad))
+                )
 
     def test_eval_dir_is_minted_under_exp_root_when_unpinned(self):
         os.environ.pop("GEAK_EVAL_DIR", None)
@@ -319,10 +508,12 @@ class TestMapArgs(_RunE2ECase):
         analysis = root / "kernel-agent" / "r1" / "tracelens" / "analysis.md"
         cands = root / "kernel-agent" / "r1" / "kernel_candidates.json"
         report = root / "kernel-agent" / "r1" / "tracelens" / "tracelens_report.json"
-        trace = root / "runs" / "roofline" / "r9" / "torch_trace"
-        for p in (analysis, cands, report, trace):
+        for p in (analysis, cands, report):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x", encoding="utf-8")
+        trace = self._write_roofline_trace(
+            root, "synthetic-run", "20260102_020202"
+        )
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
         self.assertEqual(ps["tracelens"], {
             "analysis_md": str(analysis),
@@ -331,6 +522,37 @@ class TestMapArgs(_RunE2ECase):
             "trace_file": str(trace),
         })
         self.assertNotIn("search_root", ps["tracelens"])
+
+    def test_roofline_trace_orders_by_benchmark_time_not_random_run_id(self):
+        root = self.tmp / "exp"
+        oldest = self._write_roofline_trace(
+            root, "ffffffffffffffffffffffffffffffff", "20260101_010101"
+        )
+        newest = self._write_roofline_trace(
+            root, "11111111111111111111111111111111", "20260102_020202",
+            framework="vllm",
+        )
+        report = rx.resolve_tracelens_report(str(root / "geak"))
+        self.assertNotEqual(str(oldest), str(newest))
+        self.assertEqual(report["trace_file"], str(newest))
+
+    def test_roofline_trace_respects_handoff_cutoff(self):
+        root = self.tmp / "exp"
+        self._write_roofline_trace(
+            root, "ffffffffffffffffffffffffffffffff", "20260101_010101",
+        )
+        expected = self._write_roofline_trace(
+            root, "11111111111111111111111111111111", "20260102_020202",
+        )
+        self._write_roofline_trace(
+            root, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "20260103_030303",
+        )
+        cutoff = rx.datetime.strptime(
+            "20260102_030000", "%Y%m%d_%H%M%S"
+        ).replace(tzinfo=rx.timezone.utc).timestamp()
+        handoff = self._handoff(eval_dir=str(self.tmp / "e2e_x"))
+        ps = rx.map_args(handoff, artifact_cutoff_ts=cutoff)
+        self.assertEqual(ps["tracelens"]["trace_file"], str(expected))
 
     def test_tracelens_key_omitted_when_nothing_discoverable(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
@@ -359,6 +581,21 @@ class TestMapArgs(_RunE2ECase):
         # search_root is internal bookkeeping and must never reach the agent.
         self.assertNotIn("search_root", prompt)
 
+    def test_build_prompt_uses_frozen_tracelens_without_rescanning(self):
+        frozen = {
+            "analysis_md": "/frozen/analysis.md",
+            "trace_file": "/frozen/torch_trace",
+        }
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_prompt")))
+        ps["tracelens"] = frozen
+        self.patch_rx(
+            "resolve_tracelens_report",
+            lambda *_args, **_kwargs: self.fail("build_prompt rescanned artifacts"),
+        )
+        prompt = rx.build_prompt(ps)
+        self.assertIn("/frozen/analysis.md", prompt)
+        self.assertIn("/frozen/torch_trace", prompt)
+
     def test_build_prompt_leads_with_process_safety(self):
         """The driver agent holds Bash under bypassPermissions as a direct child of
         this process, so it needs the same pattern-kill ban the role agents get: one
@@ -368,6 +605,19 @@ class TestMapArgs(_RunE2ECase):
         self.assertTrue(prompt.startswith("## PROCESS SAFETY"), prompt[:80])
         for banned in ("pkill -f", "killall", "kill -- -PGID"):
             self.assertIn(banned, prompt)
+
+    def test_role_agent_wait_rule_never_starts_a_command_with_a_long_sleep(self):
+        """With background tasks on, Claude Code 2.1.310+ refuses a Bash call that
+        starts with `sleep N` (N >= 25). A role agent that copies such an example is
+        refused, arms a Monitor, and returns before its leg has finished."""
+        src = rx.E2E_SCRIPT.read_text(encoding="utf-8")
+        start = src.index("const PROCESS_SAFETY = `")
+        safety = src[start:src.index("\n`;", start)]
+        examples = re.findall(r"\\`(.*?)\\`", safety) + re.findall(r"^ {4}(\S.*)$", safety, re.MULTILINE)
+        long_leading = [cmd for cmd in examples
+                        if (m := re.match(r"sleep\s+(\d+)", cmd.strip())) and int(m.group(1)) >= 25]
+        self.assertEqual(long_leading, [])
+        self.assertRegex(safety, re.compile(r"^ {4}timeout \d+ bash -c 'until ", re.MULTILINE))
 
 
 class TestProtectedPgids(_RunE2ECase):
@@ -498,7 +748,10 @@ class TestBenchClient(_RunE2ECase):
         self.assertEqual(os.environ["GEAK_WORKLOAD_KIND"], rx.WORKLOAD_KIND_AGENTX)
         self.assertEqual(os.environ["GEAK_ISL_OSL_INACTIVE"], "1")
         self.assertEqual(os.environ["AGENTX_DATASET"], "semianalysis_cc_traces_weka_062126")
-        self.assertEqual(exported["REPEATS"], "1")
+        # bench_e2e.sh gives the trace client one round per call itself; an exported
+        # REPEATS would outrank REPLICAS and collapse an isolated validation to one replica.
+        self.assertNotIn("REPEATS", exported)
+        self.assertNotIn("REPEATS", os.environ)
         self.assertEqual(os.environ["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
         self.assertEqual(exported["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
 
@@ -506,6 +759,83 @@ class TestBenchClient(_RunE2ECase):
         os.environ.pop("GEAK_WORKLOAD_KIND", None)
         self.assertEqual(rx.apply_workload_spec({"workload": {"isl": 1024}}), {})
         self.assertNotIn("GEAK_WORKLOAD_KIND", os.environ)
+
+    def _agentx_spec(self, **extra):
+        return {"workload_spec": {"kind": rx.WORKLOAD_KIND_AGENTX, **extra}}
+
+    def test_a_total_token_basis_selects_the_axis_bench_e2e_reads(self):
+        """GEAK_METRIC_BASIS records the declared basis; E2E_METRIC selects the
+        axis bench_e2e.sh medians, and it defaults to output. Nothing inside
+        GEAK used to set it, so a handoff-driven run graded a 140:1
+        prefill-heavy trace on the axis that barely moves."""
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        exported = rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_total_token_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "total")
+        self.assertEqual(exported["E2E_METRIC"], "total")
+        self.assertEqual(
+            os.environ["GEAK_METRIC_BASIS"], "aggregate_total_token_tok_s"
+        )
+
+    def test_an_output_basis_keeps_the_output_axis(self):
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_output_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "output")
+
+    def test_an_inherited_axis_is_never_overwritten(self):
+        """The orchestrator injects E2E_METRIC itself and stays authoritative."""
+        os.environ["E2E_METRIC"] = "output"
+        exported = rx.apply_workload_spec(
+            self._agentx_spec(metric_basis="aggregate_total_token_tok_s")
+        )
+        self.assertEqual(os.environ["E2E_METRIC"], "output")
+        self.assertNotIn("E2E_METRIC", exported)
+
+    def test_no_declared_basis_leaves_the_axis_alone(self):
+        for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+            os.environ.pop(var, None)
+        rx.apply_workload_spec(self._agentx_spec())
+        self.assertNotIn("E2E_METRIC", os.environ)
+
+    def test_a_synthetic_handoff_never_touches_the_axis(self):
+        os.environ.pop("E2E_METRIC", None)
+        rx.apply_workload_spec({"workload": {"isl": 1024}})
+        self.assertNotIn("E2E_METRIC", os.environ)
+
+    def test_an_interactivity_basis_is_selected_by_its_own_token(self):
+        """The old derivation knew only total/output, so either interactivity
+        basis was silently graded on the output axis."""
+        for basis in ("p90_intvty_inferencex", "e2e_norm_intvty_p90"):
+            with self.subTest(basis=basis):
+                for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+                    os.environ.pop(var, None)
+                exported = rx.apply_workload_spec(self._agentx_spec(metric_basis=basis))
+                self.assertEqual(os.environ["E2E_METRIC"], basis)
+                self.assertEqual(exported["E2E_METRIC"], basis)
+
+    def test_a_basis_this_build_cannot_measure_is_passed_through_by_name(self):
+        """bench_summarize.py refuses an unknown E2E_METRIC by name; defaulting
+        to output here would grade a different axis without saying so."""
+        os.environ.pop("E2E_METRIC", None)
+        rx.apply_workload_spec(self._agentx_spec(metric_basis="e2e_norm_intvty_p75"))
+        self.assertEqual(os.environ["E2E_METRIC"], "e2e_norm_intvty_p75")
+
+    def test_every_basis_the_summary_records_round_trips_through_its_token(self):
+        spec = importlib.util.spec_from_file_location(
+            "bench_summarize_for_dispatch", rx.E2E_DIR / "scripts" / "bench_summarize.py"
+        )
+        summarize = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(summarize)
+        bases = {entry[1] for entry in summarize._BASES.values()}
+        for basis in bases:
+            with self.subTest(basis=basis):
+                axis = rx._E2E_METRIC_FOR_BASIS.get(basis, basis)
+                self.assertEqual(summarize._BASES[axis][1], basis)
 
     def test_explicit_inferencex_without_path_degrades_loudly(self):
         """Silently measuring with a different client than the orchestrator is
@@ -530,15 +860,16 @@ class TestBenchLauncher(_RunE2ECase):
     def setUp(self):
         super().setUp()
         for key in ("BENCH_LAUNCHER", "MAGPIE_LAUNCH_SCRIPT",
-                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
+                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_ATOM_SCRIPT",
+                    "MAGPIE_VLLM_SCRIPT",
                     "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN",
                     "RECIPE_ENV_FILE", "RECIPE_ENV_SOURCE", "RECIPE_ENV_REPLAYED",
                     "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV",
                     "EFFECTIVE_SERVER_ARGS_COMPLETE"):
             os.environ.pop(key, None)
 
-    def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
-                with_lib=True, write_script=True):
+    def _recipe(self, *, script="vllm_mi355x.sh", framework="vllm", subdir="",
+                root=None, with_lib=True, write_script=True):
         """An orchestrator launch recipe next to a checkout it can point at.
 
         ``write_script=False`` + ``with_lib=False`` leaves the checkout path
@@ -557,7 +888,7 @@ class TestBenchLauncher(_RunE2ECase):
         recipe = self.tmp / "baseline_config.with_envs.yaml"
         recipe.write_text(
             "benchmark:\n"
-            "  framework: vllm\n"
+            f"  framework: {framework}\n"
             "  model: /models/Qwen3-8B\n"
             "  envs:\n"
             "    TP: 1\n"
@@ -599,6 +930,27 @@ class TestBenchLauncher(_RunE2ECase):
         os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
         self.assertEqual(rx.apply_bench_launcher({"framework": "sglang"}), "magpie")
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/sglang.sh")
+
+    def test_atom_per_backend_env_script_is_discovered(self):
+        os.environ["MAGPIE_ATOM_SCRIPT"] = "/magpie/atom.sh"
+        self.assertEqual(rx.apply_bench_launcher({"framework": "atom"}), "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/atom.sh")
+
+    def test_atom_recipe_enables_magpie_and_replays_atom_env(self):
+        recipe, script = self._recipe(script="atom_mi355x.sh", framework="atom")
+        launcher = rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "framework": "atom",
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+        self.assertIn("MAX_MODEL_LEN", os.environ["RECIPE_ENV_REPLAYED"].split())
+        self.assertIn(
+            b"MAX_MODEL_LEN=6144\0",
+            Path(os.environ["RECIPE_ENV_FILE"]).read_bytes(),
+        )
 
     def test_unsupported_backend_keeps_native_even_with_a_script(self):
         launcher = rx.apply_bench_launcher(
@@ -647,6 +999,31 @@ class TestBenchLauncher(_RunE2ECase):
         rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
 
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_an_absolute_script_in_the_recipe_is_taken_as_is(self):
+        """Some orchestrators record benchmark_script as a full path. Searching
+        for it would raise NotImplementedError (rglob rejects an absolute
+        pattern, and the OSError guard does not catch it), losing a script the
+        first candidate already resolved."""
+        checkout = self.tmp / "InferenceX@abc123"
+        (checkout / "benchmarks").mkdir(parents=True)
+        elsewhere = self.tmp / "scripts"
+        elsewhere.mkdir()
+        script = elsewhere / "vllm_mi355x.sh"
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (elsewhere / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            f"  benchmark_script: {script}\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+
+        rx.apply_bench_launcher({"launch_recipe": str(recipe), "framework": "vllm"})
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], str(script))
 
     def test_an_explicit_script_outranks_the_recipe(self):
         recipe, _ = self._recipe()
@@ -1181,9 +1558,11 @@ class TestTargetingShape(_RunE2ECase):
     """isl/osl stop being the measured load on AgentX, but still aim the search.
 
     The kernel agents read isl/osl as the analytic serving call model when they
-    synthesize GEMM/attention shapes. A trace replay whose corpus averages ~112k
-    input tokens would be optimized for a 1024-token prefill if the synthetic
+    synthesize GEMM/attention shapes. A trace replay whose corpus averages far
+    longer inputs would be optimized for a 1024-token prefill if the synthetic
     handoff defaults were taken at face value -- honest numbers, wrong target.
+    The real average is measured, never quoted here: it moves with the corpus,
+    the tokenizer and the window.
     """
 
     def test_synthetic_handoff_keeps_the_handoff_workload_shape(self):
@@ -1210,14 +1589,19 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual((isl, osl), (112020, 796))
         self.assertEqual(prov, "agentx_observed")
 
-    def test_agentx_without_an_observed_shape_says_so_loudly(self):
-        """Silence here would aim the search 100x low with no trace of why."""
+    def test_agentx_without_an_observed_shape_is_marked_pending(self):
+        """Pending, not fallback: the workflow replaces this from its baseline.
+
+        The label is what the workflow keys on. "synthetic_fallback" reads as a
+        decision already taken and would leave the search aimed 100x low;
+        "pending" tells it to adopt the shape the baseline actually serves.
+        """
         isl, osl, prov = rx._targeting_shape({
             "workload": {"isl": 1024, "osl": 1024},
             "workload_spec": {"kind": "agentx_trace_replay"},
         })
         self.assertEqual((isl, osl), (1024, 1024))
-        self.assertEqual(prov, "synthetic_fallback_on_agentx")
+        self.assertEqual(prov, "agentx_pending_baseline")
 
     def test_a_malformed_observed_shape_is_not_trusted(self):
         for bad in ("", "abc", 0, -5, None):
@@ -1230,7 +1614,7 @@ class TestTargetingShape(_RunE2ECase):
                         "observed_osl": 796,
                     },
                 })
-                self.assertEqual(prov, "synthetic_fallback_on_agentx")
+                self.assertEqual(prov, "agentx_pending_baseline")
 
     def test_map_args_carries_the_shape_and_its_provenance(self):
         ps = rx.map_args({
@@ -1247,7 +1631,10 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 112020)
         self.assertEqual(ps["osl"], 796)
         self.assertEqual(ps["workload_shape_provenance"], "agentx_observed")
-        # Concurrency still comes from the workload block (the replay honours it).
+        # Concurrency reaches the workflow from the workload block, but on an AgentX run it no
+        # longer decides anything downstream: e2e_workflow.js derives CONC from
+        # AGENTX.concurrency when the spec carries one, and kbIdentityFlags() addresses the KB
+        # with THAT. This assertion pins the forwarding, not the authority.
         self.assertEqual(ps["conc"], 8)
 
     def test_map_args_is_byte_identical_for_synthetic_runs(self):
@@ -1261,6 +1648,119 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 4096)
         self.assertEqual(ps["osl"], 256)
         self.assertEqual(ps["workload_shape_provenance"], "handoff_workload")
+
+
+class TestResolveEp(_RunE2ECase):
+    """ep is a KB addressing dimension, so guessing it wrong strands a page.
+
+    Two runs of the same model on the same stack with the experts sharded differently are
+    different deployments. The address can now say so -- but only if something resolves the degree,
+    and nothing in this repo set EP_SIZE before (adapters/atom.sh read a variable no caller wrote).
+    Each source below is a different thing an orchestrator does; the order is authority order, so
+    each test fixes one source while leaving a LOWER-ranked one contradicting it.
+    """
+
+    def _effective(self, server_args):
+        return types.SimpleNamespace(final_server_args=server_args)
+
+    def _recipe(self, body):
+        path = self.tmp / "recipe.yaml"
+        path.write_text(body)
+        return str(path)
+
+    def test_the_handoff_outranks_everything_else(self):
+        ep = rx._resolve_ep(
+            {"ep": 4, "launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--ep-size 8 --enable-expert-parallel"),
+            tp=8,
+        )
+        self.assertEqual(ep, 4)
+
+    def test_an_ep_size_flag_is_read_through_the_resolver_flag_map(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--tp-size 8 --ep-size 8"),
+            tp=8,
+        )
+        self.assertEqual(ep, 8)
+
+    def test_the_equals_spelling_is_the_same_flag(self):
+        """--ep-size=8 and --ep-size 8 launch the same server; _flag_map is what makes them the
+        same flag here, which is the whole reason this does not parse argv itself."""
+        self.assertEqual(
+            rx._resolve_ep({}, self._effective("--ep-size=8"), tp=8), 8
+        )
+
+    def test_the_recipe_env_block_is_used_when_no_flag_states_it(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n  OTHER: x\n")},
+            self._effective("--tp-size 8"),
+            tp=8,
+        )
+        self.assertEqual(ep, 2)
+
+    def test_a_bare_expert_parallel_flag_means_the_whole_group(self):
+        """vLLM spreads EP over the entire TP x DP group, so the degree is tp. Reading it as 1
+        would file an 8-way-EP deployment on the same page as a dense one."""
+        self.assertEqual(
+            rx._resolve_ep({}, self._effective("--enable-expert-parallel"), tp=8), 8
+        )
+
+    def test_vllm_ep_includes_dp_and_outranks_recipe_env(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        for dp_flag in ("--data-parallel-size", "-dp"):
+            effective = self._effective(f"--enable-expert-parallel {dp_flag} 2")
+            self.assertEqual(rx._resolve_ep(h, effective, tp=8), 16)
+
+    def test_effective_env_outranks_recipe_ep(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        effective = types.SimpleNamespace(final_server_args="", final_env={"EP_SIZE": "4"})
+        self.assertEqual(rx._resolve_ep(h, effective, tp=8), 4)
+
+    def test_nothing_stated_is_one(self):
+        self.assertEqual(rx._resolve_ep({}, self._effective(""), tp=8), 1)
+        self.assertEqual(rx._resolve_ep({}, None, tp=8), 1)
+
+    def test_a_malformed_degree_falls_through_rather_than_addressing_on_junk(self):
+        for bad in ("", "abc", 0, -2, None, {}):
+            with self.subTest(ep=bad):
+                self.assertEqual(
+                    rx._resolve_ep({"ep": bad}, self._effective(""), tp=8), 1
+                )
+
+    def test_a_malformed_flag_value_still_falls_back_to_the_recipe(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--ep-size notanumber"),
+            tp=8,
+        )
+        self.assertEqual(ep, 2)
+
+    def test_without_a_resolver_the_handoff_accepted_flags_are_read(self):
+        """A salvage path can reach map_args with no resolved config. The accepted flags are the
+        same statement about the same server, so the address must not silently become ep_1."""
+        self.assertEqual(
+            rx._resolve_ep({"accepted_flags": "--ep-size 8"}, None, tp=8), 8
+        )
+
+    def test_map_args_puts_the_resolved_degree_beside_tp(self):
+        ps = rx.map_args({
+            "model_path": "/models/m",
+            "workload": {"isl": 1024, "osl": 1024, "conc": 8},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+            "ep": 4,
+        })
+        self.assertEqual(ps["ep"], 4)
+
+    def test_map_args_defaults_the_degree_to_one(self):
+        ps = rx.map_args({
+            "model_path": "/models/m",
+            "workload": {"isl": 1024, "osl": 1024, "conc": 8},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(ps["ep"], 1)
 
 
 class TestAgentXPreflight(_RunE2ECase):
@@ -1286,15 +1786,40 @@ class TestAgentXPreflight(_RunE2ECase):
         problems = rx.agentx_preflight(dict(self.AGENTX))
         self.assertTrue(any("aiperf-agentx" in p for p in problems))
 
-    def test_missing_inferencex_path_is_reported(self):
+    def test_no_inferencex_checkout_is_not_a_problem_on_its_own(self):
+        """GEAK vendors map_aiperf.py beside the client adapter, so a standalone
+        run needs no InferenceX checkout. Reporting its absence would send an
+        operator hunting for something they do not need."""
         os.environ.pop("INFERENCEX_PATH", None)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertTrue(any("INFERENCEX_PATH is unset" in p for p in problems))
+        self.assertFalse(
+            any("map_aiperf" in p for p in problems),
+            msg=f"the vendored mapper should satisfy this: {problems}",
+        )
 
-    def test_inferencex_path_without_the_mapper_is_reported(self):
+    def test_an_inferencex_path_without_the_mapper_falls_back_quietly(self):
         os.environ["INFERENCEX_PATH"] = str(self.tmp)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertTrue(any("map_aiperf.py not found" in p for p in problems))
+        self.assertFalse(any("map_aiperf" in p for p in problems))
+
+    def test_the_mapper_is_reported_only_when_the_vendored_copy_is_gone_too(self):
+        """The real gap: no checkout AND nothing vendored to fall back to.
+
+        Point E2E_DIR at an empty tree so the vendored copy genuinely is not
+        there, rather than patching a stdlib predicate out from under the code.
+        """
+        os.environ.pop("INFERENCEX_PATH", None)
+        original = rx.E2E_DIR
+        rx.E2E_DIR = rx.Path(str(self.tmp)) / "no_such_workflow"
+        self.addCleanup(setattr, rx, "E2E_DIR", original)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(
+            any("no map_aiperf.py" in p for p in problems), msg=str(problems)
+        )
+        self.assertTrue(
+            any("map_aiperf.py is missing" in p for p in problems),
+            msg=f"the message must name the path that was missing: {problems}",
+        )
 
     def test_a_satisfied_environment_reports_no_problems(self):
         bench = os.path.join(str(self.tmp), "benchmarks")
@@ -1317,7 +1842,9 @@ class TestAgentXPreflight(_RunE2ECase):
         os.environ["PATH"] = "/nonexistent"
         os.environ.pop("INFERENCEX_PATH", None)
         problems = rx.agentx_preflight(dict(self.AGENTX))
-        self.assertEqual(len(problems), 2)
+        # aiperf only: the vendored mapper covers the other prerequisite.
+        self.assertEqual(len(problems), 1)
+        self.assertIn("aiperf", problems[0])
 
 
 class TestAlignmentFlags(_RunE2ECase):
@@ -1450,6 +1977,49 @@ class TestClassifyError(_RunE2ECase):
         )
         self.assertEqual(rx._classify_error(ValueError("other")), "runner_error")
 
+    # Claude Code's replies, verbatim, to a refused, unresolvable and reset model API
+    # endpoint: 2.1.177 first, then 2.1.309 / 2.1.316.
+    UNREACHABLE_REPLIES = (
+        "API Error: Unable to connect to API (ConnectionRefused)",
+        "API Error: Unable to connect to API (FailedToOpenSocket)",
+        "API Error: Unable to connect to API (ECONNRESET)",
+        "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+        "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+        ("API Error: Connection dropped (ECONNRESET). Check the gateway set in "
+         "ANTHROPIC_BASE_URL, then try again."),
+    )
+
+    def test_an_unreachable_model_api_is_not_a_parse_error(self):
+        """The CLI answers a failed API call with an "API Error: ..." reply, which reaches
+        run_e2e as agent output; an outage must not read as malformed workflow output."""
+        for reply in self.UNREACHABLE_REPLIES:
+            with self.subTest(reply=reply):
+                with self.assertRaises(rx.WorkflowParseError) as ctx:
+                    rx._parse_last_json_line(f"{reply}\n{reply}")
+                self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
+                self.assertIn(reply, str(ctx.exception))
+                cli = RuntimeError(f'claude CLI failed (rc=1): {{"result": "{reply}"}}')
+                self.assertEqual(rx._classify_error(cli), "llm_unreachable")
+        self.assertEqual(
+            rx._classify_error(TimeoutError(self.UNREACHABLE_REPLIES[0])), "timeout")
+
+    def test_connection_errors_outside_the_model_api_keep_their_class(self):
+        """A bench or server connection error in the transcript is the run's own; only
+        Claude Code's API Error reply names the model endpoint."""
+        for text in (
+            ("aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host "
+             "127.0.0.1:8000 ssl:default [Connection refused]"),
+            "curl: (7) Failed to connect to localhost port 8000: Connection refused",
+            "Error: connect ECONNREFUSED 127.0.0.1:8000",
+            ("API Error: 500 Internal server error. This is a server-side issue, usually "
+             "temporary — try again in a moment."),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    rx._classify_error(rx.WorkflowParseError(f"Last 2000 chars:\n{text}")),
+                    "workflow_parse_error",
+                )
+
 
 # =========================================================================== #
 # SDK invocation + completion gate
@@ -1555,6 +2125,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         pipeline (rather than the agent 'backgrounding' it) under root."""
         self.patch_rx("CLAUDE_EFFORT", "high")
         self.patch_rx("CLAUDE_BIN", "/opt/claude-2.1.181/claude")
+        os.environ.pop(rx.BACKGROUND_TASKS_ENV, None)
         _anyio, sdk = self._install([ResultMessage(result="done")])
         real_geteuid = os.geteuid
         os.geteuid = lambda: 0
@@ -1569,7 +2140,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(kwargs["settings"], rx.WORKFLOW_SETTINGS)
         self.assertEqual(kwargs["cwd"], str(rx.E2E_DIR))
         self.assertEqual(kwargs["extra_args"], {"effort": "high"})
-        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1"})
+        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1", rx.BACKGROUND_TASKS_ENV: "1"})
         self.assertEqual(kwargs["cli_path"], "/opt/claude-2.1.181/claude")
 
     def test_public_build_effort_is_not_forwarded(self):
@@ -1684,6 +2255,19 @@ class TestInvokeViaCli(_RunE2ECase):
         self.assertIn("claude CLI failed (rc=3)", msg)
         self.assertIn("TAIL", msg)
         self.assertEqual(rx._classify_error(ctx.exception), "cli_failed")
+
+    def test_a_failed_api_call_reported_on_stdout_reaches_the_error(self):
+        """claude -p reports a failed API call in its stdout JSON and exits 1 with
+        stderr empty."""
+        self._fake_which("/usr/bin/claude")
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+        self._fake_subprocess(_FakeProc(returncode=1, stdout=json.dumps(
+            {"type": "result", "is_error": True, "result": reply}, ensure_ascii=False)))
+        with self.assertRaises(RuntimeError) as ctx:
+            rx._invoke_via_cli("P", 10)
+        self.assertIn(reply, str(ctx.exception))
+        self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
 
     def test_json_wrapper_variants_are_unwrapped_or_passed_through(self):
         self._fake_which("/usr/bin/claude")
@@ -2475,6 +3059,18 @@ class TestMain(_RunE2ECase):
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())
 
+    def test_probe_less_dry_run_is_host_only(self):
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx(
+            "_expected_gpu_identity",
+            lambda _handoff: self.fail("dry-run must not probe GPU identity"),
+        )
+        rc, stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual(rc, 0)
+        mapped = json.loads(stdout)["mapped_args"]
+        self.assertEqual(mapped["gpu_identity_status"], "unavailable_dry_run")
+        self.assertNotIn("expected_gfx", mapped)
+
     def test_protected_pgids_are_published_before_any_launch(self):
         """Pins the CALL SITE, not just the helper: the veto must be in the
         environment before main() can reach a bench, so it is set even on the
@@ -2561,6 +3157,73 @@ class TestMain(_RunE2ECase):
                 self.assertEqual(
                     json.loads(stdout)["mapped_args"].get("final_reserve_s"),
                     expected)
+
+    def _set_env_until_test_end(self, names, values):
+        for name in names:
+            saved = os.environ.pop(name, None)
+            if saved is not None:
+                self.addCleanup(os.environ.__setitem__, name, saved)
+            self.addCleanup(os.environ.pop, name, None)
+            if values.get(name) is not None:
+                os.environ[name] = values[name]
+
+    def test_run_knobs_are_forwarded_only_when_set(self):
+        """Reserve cap, hung-agent policy and the accuracy gate are operator knobs:
+        unset => each arg is absent and the JS default wins; junk is dropped with a
+        note instead of aborting the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        knobs = {
+            "GEAK_FINAL_RESERVE_CAP_FRAC": "final_reserve_cap_frac",
+            "GEAK_AGENTX_LEG_OVERHEAD_S": "agentx_leg_overhead_s",
+            "GEAK_AGENT_TIMEOUT_MS": "agent_timeout_ms",
+            "GEAK_AGENT_TIMEOUT_RETRY": "agent_timeout_retry",
+            "GEAK_E2E_ACCURACY_GATE": "accuracy_gate",
+            "GEAK_E2E_ACCURACY_LIMIT": "accuracy_limit",
+            "GEAK_E2E_ACCURACY_TOL": "accuracy_tol",
+        }
+        cases = (
+            ({}, {}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENTX_LEG_OVERHEAD_S": "1800",
+              "GEAK_AGENT_TIMEOUT_MS": "18000000",
+              "GEAK_AGENT_TIMEOUT_RETRY": "0", "GEAK_E2E_ACCURACY_GATE": "GSM8K",
+              "GEAK_E2E_ACCURACY_LIMIT": "400", "GEAK_E2E_ACCURACY_TOL": "0.02"},
+             {"final_reserve_cap_frac": 0.4, "agentx_leg_overhead_s": 1800,
+              "agent_timeout_ms": 18000000,
+              "agent_timeout_retry": "false", "accuracy_gate": "gsm8k",
+              "accuracy_limit": 400, "accuracy_tol": 0.02}),
+            ({"GEAK_AGENT_TIMEOUT_RETRY": "yes"}, {"agent_timeout_retry": "true"}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_AGENTX_LEG_OVERHEAD_S": "slow",
+              "GEAK_E2E_ACCURACY_GATE": "mmlu", "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self._set_env_until_test_end(knobs, env)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                mapped = json.loads(stdout)["mapped_args"]
+                self.assertEqual(
+                    {arg: mapped[arg] for arg in knobs.values() if arg in mapped}, expected)
+
+    def test_simulated_acceptance_switches_are_named_for_correctness_probes(self):
+        """Simulated speculative acceptance makes greedy output irreproducible, so the
+        workflow is told which switches its correctness probes must drop — whether
+        they arrive in the process env or in the seed env. No switch => no arg."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        names = ("SGLANG_SIMULATE_ACC_LEN", "SGLANG_SIMULATE_ACC_METHOD")
+        cases = (
+            ({}, "", None),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "",
+             "SGLANG_SIMULATE_ACC_LEN"),
+            ({}, "SGLANG_SIMULATE_ACC_METHOD=match-expected FOO=1",
+             "SGLANG_SIMULATE_ACC_METHOD"),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "SGLANG_SIMULATE_ACC_METHOD=match-expected",
+             "SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD"),
+        )
+        for env, accepted_env, expected in cases:
+            with self.subTest(env=env, accepted_env=accepted_env):
+                self._set_env_until_test_end(names, env)
+                _rc, stdout = self._run(self._handoff(accepted_env=accepted_env), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("correctness_unset_env"), expected)
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"
@@ -2661,6 +3324,43 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["status"], "timeout")
         self.assertEqual(out["error_class"], "timeout")
         self.assertIn("self-stop to flush interface files", out["error"])
+
+    def test_a_silent_timeout_says_what_ran_out_and_how_far_the_run_got(self):
+        """anyio.fail_after raises TimeoutError() with no message; the result must
+        still name the budget and the furthest phase on disk."""
+        self.write_json(self.eval_dir / "baseline" / "bench_summary.json",
+                        {"metric_basis": "aggregate_output_tok_s",
+                         "throughput_tok_s_median": 400.0})
+
+        def silent_timeout(prompt, timeout_s, eval_dir, ps_args=None):
+            raise TimeoutError()
+
+        self.patch_rx("invoke_workflow", silent_timeout)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 0)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "timeout")
+        self.assertEqual(out["error_class"], "timeout")
+        self.assertEqual(out["phase_reached"], "search")
+        self.assertEqual(
+            out["error"],
+            "no workflow return within the 43200s budget (furthest phase on disk: search)")
+
+    def test_an_unreachable_model_api_is_reported_as_such(self):
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+
+        def outage(prompt, timeout_s, eval_dir, ps_args=None):
+            return rx._parse_last_json_line(f"{reply}\n{reply}")
+
+        self.patch_rx("invoke_workflow", outage)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error_class"], "llm_unreachable")
+        self.assertIn("Could not parse a JSON workflow return", out["error"])
+        self.assertIn(reply, out["error"])
 
     def test_recovery_failure_after_a_crashed_workflow_is_contained(self):
         """Both the post-crash recovery and the one inside _emit raise; the run
@@ -2856,6 +3556,54 @@ class TestE2EDenominatorIsPublished(_RunE2ECase):
         self.assertIsNone(e2e["base_tput"])
         self.assertIsNone(e2e["new_tput"])
         self.assertEqual(e2e["e2e_gain_pct"], 25.0)
+
+
+# =========================================================================== #
+# live-log tee
+# =========================================================================== #
+class TestLiveLogTee(_RunE2ECase):
+    """A multi-hour run prints nothing to its container log until it is over, so the
+    agent's streamed text is teed to a watchable file. Observability must not be able
+    to fail the run it is observing."""
+
+    def test_streamed_text_is_appended_one_line_per_fragment(self):
+        path = self.tmp / "live.log"
+        self.patch_rx("_LIVE_LOG_PATH", str(path))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["first", "second\n"])
+        rx._live_log(["third"])
+        # A fragment that already ends in a newline must not gain a second one:
+        # the file is read by a human tailing it, and blank lines between every
+        # message make a long run unreadable.
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         "first\nsecond\nthird\n")
+
+    def test_an_unset_path_writes_nothing(self):
+        """Unset GEAK_LIVE_LOG => byte-identical behaviour, no file created."""
+        self.patch_rx("_LIVE_LOG_PATH", "")
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["anything"])
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_nothing_to_say_is_not_a_write(self):
+        path = self.tmp / "empty.log"
+        self.patch_rx("_LIVE_LOG_PATH", str(path))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log([])
+        self.assertFalse(path.exists())
+
+    def test_a_write_failure_disables_the_tee_for_good_and_never_raises(self):
+        """The first error stops the tee rather than retrying on every message: a run
+        must not die, or spend its time failing, because a log file went away."""
+        unwritable = self.tmp / "a_directory"
+        unwritable.mkdir()
+        self.patch_rx("_LIVE_LOG_PATH", str(unwritable))
+        self.patch_rx("_LIVE_LOG_BROKEN", False)
+        rx._live_log(["this cannot be written"])
+        self.assertTrue(rx._LIVE_LOG_BROKEN)
+        # Still inert on the next call, and still silent.
+        rx._live_log(["nor this"])
+        self.assertTrue(rx._LIVE_LOG_BROKEN)
 
 
 if __name__ == "__main__":
