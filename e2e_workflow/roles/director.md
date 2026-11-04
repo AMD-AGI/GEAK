@@ -149,6 +149,13 @@ Steps:
    this model/box has produced before.
    Only when the run asked for several samples (`REPLICAS>1`, or `isolated_server`) does spread mean
    anything: > ~5% then, re-run — a noisy baseline poisons every later comparison.
+   **A baseline with `usable_for_acceptance=false` or `hollow_rounds > 0` is not a baseline.** A hollow
+   round is one whose requests came back empty (retokenized output far below the credited length, or
+   TTFT and ITL exactly 0) — the client still credits the full output length, so it reads as an
+   impossibly high tok/s. On a disaggregated pair this is a dead KV handoff (`KVTransferError` /
+   `transfer failed` in either engine's `server.log`). Re-run the baseline on a fresh server (up to 2
+   more attempts), report the failure and its log line in `notes`, and never return a hollow number as
+   `baseline_throughput_tok_s`.
    Set `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with same-lifecycle
    reference/candidate legs, non-overlap, and engagement proof. Only widen it (e.g. to 1–2%) if a
    multi-sample measurement showed the spread is genuinely large on this box and can't be tightened.
