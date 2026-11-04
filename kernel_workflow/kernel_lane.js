@@ -564,6 +564,13 @@ const COMMIT_SCHEMA = obj({
   committed: { type: 'boolean' }, current_best_diff: { type: 'string' }, note: { type: 'string' },
 }, ['committed']);
 
+// eikos v2 E1 (R3): the TechLead's return after a FAILED commit is recovered — which artifact actually
+// remains installed in the canonical workspace (the pre-attempt incumbent) once the stray commit / dirty
+// tree left by the failed attempt has been reset away.
+const RECOVERY_SCHEMA = obj({
+  recovered_head: { type: 'string' }, note: { type: 'string' },
+}, []);
+
 const REPORT_SCHEMA = obj({
   final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
@@ -934,7 +941,17 @@ async function __routePick(p, o) {
   // eikos v2 E1 (bugs 3,4): pass the model ACTUALLY dispatched (ROUTE_LANES[lane], post quota-downgrade)
   // and the pre-dispatch quota snapshot; __p1Shadow records the dispatched model for the outcome hook.
   __p1Shadow('sonnet', scope, (o && o.label) || '', ROUTE_LANES[lane], __p1TopUsedPre);   // never changes the pick above
-  return { model: ROUTE_LANES[lane], scope };
+  // eikos v2 E1 (R1): issue an IMMUTABLE per-dispatch shadow record for THIS sonnet dispatch, keyed by a
+  // host-issued dispatch id, and return the id so the outcome path binds back to the model ACTUALLY
+  // dispatched here (not a later same-scope dispatch's mutable last_dispatch_model). This mirrors the
+  // eikos/live-P1 per-dispatch binding; it is P1-shadow observability and never alters the legacy ladder
+  // (`__routeLadder[scope]` still keys only on scope, exactly as before) or the live pick above.
+  const __p1Did = `d${++__routeDispatchSeq}`;
+  const __p1Rec = { id: __p1Did, label: (o && o.label) || '', scope, seq: __routeDispatchSeq, model: ROUTE_LANES[lane],
+                    outcome: null, p1Outcome: null, decider: 'sonnet' };
+  __routeDispatchById[__p1Did] = __p1Rec;
+  (__routeDispatches[(o && o.label) || ''] = __routeDispatches[(o && o.label) || ''] || []).push(__p1Rec);
+  return { model: ROUTE_LANES[lane], scope, dispatch_id: __p1Did };
 }
 // Deterministic outcome of one cycle for a worker scope. ok=false queues a re-classification before the
 // scope's next dispatch. `evidence` must be compact: status words and numbers, never a log.
@@ -948,13 +965,32 @@ function __routeOutcome(scope, ok, evidence, kind, source, label, dispatchId, p1
   const st = __routeLadder[scope];
   if (!st) return;
   if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source, label, dispatchId, p1Kind);
-  // eikos v2 E1 shadow (bug 3): attribute to the model ACTUALLY dispatched (captured at dispatch in the
-  // shadow state), not ROUTE_LANES[st.lane] — these differ after a top-lane quota downgrade (Opus->Sonnet),
-  // which would otherwise log a Sonnet failure as an Opus failure and wrongly raise P1's floor. (bug 5):
-  // use the corrected shadow kind when supplied. Writes ONLY __p1Ladder.
+  // eikos v2 E1 shadow (bug 3 / R1): attribute to the model ACTUALLY dispatched. R1 binds to the IMMUTABLE
+  // per-dispatch record issued at dispatch (keyed by dispatchId) so two overlapping same-scope dispatches
+  // (A=Opus, B quota-downgraded to Sonnet) each book their OWN model — A's failure is no longer mis-booked
+  // on Sonnet because B overwrote a single mutable value. The record is also VALIDATED (scope+label) and
+  // DEDUPLICATED (a replayed outcome must not double-count and promote the floor). When no dispatch id
+  // flowed we fall back to the per-scope last_dispatch_model, then ROUTE_LANES[st.lane] (legacy-safe).
+  // (bug 5): use the corrected shadow kind when supplied. Writes ONLY __p1Ladder — the legacy ladder below
+  // is byte-identical.
   const __p1st = __p1Ladder[scope];
-  const __p1Model = __p1st && __p1st.last_dispatch_model != null ? __p1st.last_dispatch_model : ROUTE_LANES[st.lane];
-  __p1Observe(scope, __p1Model, ok, (p1Kind || kind) || 'work_product');
+  const __p1d = dispatchId != null ? __routeDispatchById[dispatchId] : null;
+  let __p1skip = false;
+  if (__p1d) {
+    const __p1why = (__p1d.scope !== scope || __p1d.label !== String(label || '')) ? 'dispatch id issued for another label or scope'
+      : __p1d.p1Outcome != null ? `duplicate: p1 outcome already recorded (${__p1d.p1Outcome})` : '';
+    if (__p1why) {
+      __routeAudit.push({ event: 'p1_outcome_ignored', decider: 'sonnet', scope, label: label || '',
+        dispatch_id: dispatchId, ok: !!ok, kind: kind || 'work_product', why: __p1why });
+      __p1skip = true;
+    }
+  }
+  if (!__p1skip) {
+    const __p1Model = __p1d ? __p1d.model
+      : (__p1st && __p1st.last_dispatch_model != null ? __p1st.last_dispatch_model : ROUTE_LANES[st.lane]);
+    __p1Observe(scope, __p1Model, ok, (p1Kind || kind) || 'work_product');
+    if (__p1d) __p1d.p1Outcome = ok ? 'ok' : ((p1Kind || kind) || 'work_product');
+  }
   if (ok) { st.fails = 0; return; }
   st.fails++;
   st.pending = true;
@@ -978,7 +1014,14 @@ function __routeReport() {
            p1: { reducer: P1_REDUCER_VERSION, live: ROUTE_P1_ON, shadow: __p1ShadowSummary(),
                  // eikos v2 E1 (bug 2): expose P1's OWN state separately from the legacy ladder, and the
                  // per-dispatch terminal outcomes (incl. successes) that otherwise lived only in memory.
-                 ladder: __p1Ladder, dispatches: __routeDispatchById },
+                 ladder: __p1Ladder, dispatches: __routeDispatchById,
+                 // eikos v2 E1 (R2): the measured P1 policy is SCOPED to the roles with a terminal
+                 // success/work_product signal. Other routed roles contribute only `no_result` (infra, via
+                 // agentT's null-return path), which moves nothing — reported here so the scope is explicit.
+                 coverage: {
+                   roles_with_terminal_feedback: ['eng/deep (engineer cycle outcome)', 'commit (committed=true/false)', 'verify (usable measurement = success; invalid/empty = infra)'],
+                   roles_without_terminal_feedback: ['plan/replan (tech_lead)', 'profile/reprofile', 'tech_lead:memory', 'integrate', 'condense', 'route:classify', 'storage reclaim'],
+                   note: 'roles_without_terminal_feedback still report no_result on a null return (moves nothing); their success/work_product is not yet distinguished at the host layer.' } },
            // route_decider=eikos only: its settings, all reported as unvalidated experimental values.
            eikos: ROUTE_EIKOS_ON ? { question: ROUTE_EIKOS_QUESTION_VERSION, policy: ROUTE_EIKOS_POLICY_VERSION,
              reducer: ROUTE_REDUCER_VERSION, tau: ROUTE_EIKOS_TAU, tau_status: 'unvalidated_experimental',
@@ -1660,9 +1703,24 @@ function __p1OutcomeLive(scope, ok, evidence, kind, source, label, dispatchId) {
 function __p1WorkerOutcome(scope, ok, evidence, kind, source, label, dispatchId) {
   if (!ROUTING_ON || !scope) return;
   if (ROUTE_P1_ON) { __p1OutcomeLive(scope, ok, evidence, kind || 'work_product', source, label, dispatchId); return; }
+  // SHADOW path (sonnet/eikos live). eikos v2 E1 (R1 hardening): when a host dispatch id is present, bind to
+  // its IMMUTABLE record, VALIDATE scope+label and DEDUPLICATE — replaying one commit/verify outcome twice
+  // must NOT double-count and promote the shadow floor. The model is the one ACTUALLY dispatched (d.model),
+  // not the scope's mutable last_dispatch_model, so overlapping same-scope dispatches attribute correctly.
   const d = dispatchId != null ? __routeDispatchById[dispatchId] : null;
+  if (dispatchId != null) {
+    const why = !d ? 'unknown dispatch id'
+      : (d.scope !== scope || d.label !== String(label || '')) ? 'dispatch id issued for another label or scope'
+      : d.p1Outcome != null ? `duplicate: p1 outcome already recorded (${d.p1Outcome})` : '';
+    if (why) {
+      __routeAudit.push({ event: 'p1_worker_outcome_ignored', decider: ROUTE_EIKOS_ON ? 'eikos' : 'sonnet',
+        scope, label: label || '', dispatch_id: dispatchId, ok: !!ok, kind: kind || 'work_product', why });
+      return;
+    }
+  }
   const model = d ? d.model : (__p1Ladder[scope] ? __p1Ladder[scope].last_dispatch_model : null);
   __p1Observe(scope, model, ok, kind || 'work_product');   // shadow state only
+  if (d) d.p1Outcome = ok ? 'ok' : (kind || 'work_product');
   const st = __p1Ladder[scope];
   __routeAudit.push({ event: 'p1_worker_outcome', decider: ROUTE_EIKOS_ON ? 'eikos' : 'sonnet', scope,
     label: label || '', ok: !!ok, kind: kind || 'work_product', model: model || null,
@@ -2795,6 +2853,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
+      // eikos v2 E1 (R2): carry a host dispatch id for the verifier too, so its OWN terminal outcome can
+      // reach P1's shadow (coverage beyond the engineer cycle + committer).
+      const vlabel = `verify ${d.id}${recovered ? ' (recovered)' : ''}`;
+      const vroute = ROUTING_ON ? {} : null;
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
@@ -2803,8 +2865,22 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
-        { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch, route }));
+        { phase: 'Verify', label: vlabel, schema: VERIFY_SCHEMA }, vroute
+      ).then((ver) => {
+        // eikos v2 E1 (R2): feed the verifier's own terminal outcome to P1 (shadow by default). A verifier
+        // that produced a USABLE measurement did its job — SUCCESS — even if it found a bad kernel; an
+        // `invalid_measurement` is INFRA (not the verifier's fault) and moves nothing; a null return is
+        // already reported as `no_result` by agentT (so it is skipped here). This never touches the legacy
+        // sonnet/eikos ladder, so routing stays byte-identical; it only feeds P1's shadow. (A worker-fault
+        // climb for the verifier is NOT inferred — the host has no clean self-malfunction signal here.)
+        if (ROUTING_ON && ver != null) {
+          const vInvalid = says(ver.status, 'invalid_measurement');
+          __p1WorkerOutcome(__routeScope(vlabel), !vInvalid,
+            `verify status=${ver.status || ''} correctness=${ver.correctness || ''}`,
+            vInvalid ? 'invalid_measurement' : 'work_product', 'host', vlabel, vroute ? vroute.dispatch_id : null);
+        }
+        return { d, eng, ver, patch, route };
+      });
     }
   );
 
@@ -2890,6 +2966,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
   // A round with NO candidate is never progress, so a dead round still counts against MAX_NO_IMPROVE.
   const madeProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
+  // eikos v2 E1 (R3): did the winner ACTUALLY get installed into the canonical workspace this round? This
+  // is the only thing that may reset the stagnation stop below besides genuine new search progress. A
+  // rediscovered-but-uninstalled candidate (improved, yet the commit failed) must NOT reset it.
+  let installed = false;
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
@@ -2899,6 +2979,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
+# eikos v2 E1 (R3): record the PRE-ATTEMPT incumbent HEAD so a FAILED commit (one that created a stray
+# commit before its correctness recheck failed) can be reset back to the artifact that actually remains
+# installed. Written every attempt; read only by the failed-commit recovery step.
+git rev-parse HEAD > ${EVAL_DIR}/.precommit_ref 2>/dev/null || true
 git checkout -- .
 # Try a plain apply first, then a 3-way apply (auto-reconciles context-line drift against the blobs)
 # before falling back to a manual reconstruction. --3way resolves most "patch does not apply" cases
@@ -2926,15 +3010,19 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     // by agentT, so it is skipped here. This NEVER touches the legacy sonnet/eikos ladder.
     if (commitRes != null) __p1WorkerOutcome(__routeScope(`commit r${round}`), committed,
       `committed=${committed}`, 'work_product', 'host', `commit r${round}`, commitRoute.dispatch_id);
-    // A failed commit did NOT install the winner, so the tracked incumbent must not advance on it. This
-    // is a LIVE-run behavior change (it would alter the default sonnet/eikos run too), so to keep the
-    // default path byte-identical it is SCOPED to the dormant, default-OFF route_decider=p1 path and
-    // FLAGGED in the fix report (bug 1). With P1 off the advance is unconditional, exactly as before.
-    if (!ROUTE_P1_ON || committed) {
+    // eikos v2 E1 (R3/R4 — SHARED HARNESS, BOTH ARMS): a FAILED commit did NOT install the winner, so the
+    // tracked incumbent must not advance on it. This is a user-APPROVED behavior change to commit/progress
+    // semantics applied to BOTH routed arms (sonnet AND eikos), so E1 compares routing on a common, correct
+    // commit/stopping harness instead of confounding it with different commit handling. R4: the gate is
+    // ROUTING_ON (was ROUTE_P1_ON, which only covered route_decider=p1) — the correctness fix applies
+    // whenever ROUTING is on, while the LEGACY unconditional advance is preserved only when routing is
+    // globally OFF (routing=false). With routing off, `installed` therefore tracks `improved` exactly.
+    if (!ROUTING_ON || committed) {
       cumulative = winner.geomean;
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;
       roundsCommitted += 1;
+      installed = true;        // the winner is now the installed incumbent artifact
 
       // --- (f) Re-profile the new best ------------------------------------
       profileSummary = await agentT(
@@ -2943,16 +3031,49 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
         { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    } else {
+      // eikos v2 E1 (R3): the commit was attempted (improved) but FAILED under a routed run. Before the
+      // next round's engineers materialize from the canonical workspace, RECOVER it to the artifact that
+      // actually remains installed — the pre-attempt incumbent recorded in .precommit_ref — undoing any
+      // stray commit or dirty tree the failed attempt left behind. The incumbent (cumulative/finalWinner)
+      // is unchanged; this only restores the canonical bytes so the search continues from the real best.
+      __routeAudit.push({ event: 'commit_recovery', round, improved: true, committed: false,
+                          source: winner.source, geomean: winner.geomean });
+      const recov = await agentT(
+        `You are the TechLead RECOVERING the canonical workspace after round ${round}'s commit FAILED its ` +
+        `correctness recheck. The failed attempt may have left a STRAY COMMIT and/or a dirty tree. Restore ` +
+        `the canonical workspace to the artifact that ACTUALLY remains installed (the pre-attempt incumbent), ` +
+        `then report its ref.
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+git checkout -- .
+# reset HARD to the HEAD captured BEFORE this round's commit attempt (the last known-good incumbent)
+if [ -s ${EVAL_DIR}/.precommit_ref ]; then git reset --hard "$(cat ${EVAL_DIR}/.precommit_ref)"; fi
+git checkout -- .
+head=$(git rev-parse HEAD); echo "RECOVERED_HEAD=$head"
+\`\`\`
+Return JSON {recovered_head, note}.`,
+        { phase: 'Merge', label: `commit recovery r${round}`, schema: RECOVERY_SCHEMA });
+      log(`Round ${round}: commit FAILED — canonical recovered to the pre-attempt incumbent` +
+          `${recov && recov.recovered_head ? ' (' + String(recov.recovered_head).slice(0, 12) + ')' : ''}; ` +
+          `incumbent stays ${cumulative.toFixed(2)}x; stagnation will NOT reset on this rediscovered candidate.`);
     }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
-  if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
+  // eikos v2 E1 (R3): reset the stagnation stop ONLY on genuine new search progress (a candidate better
+  // than any seen before) or a REAL install (the winner actually committed into the canonical workspace).
+  // A rediscovered-but-uninstalled candidate (`improved` yet the commit failed) no longer resets it, so a
+  // run that keeps re-finding the same uninstallable 2x candidate still stagnates and stops. When routing
+  // is OFF, `installed === improved` (every improved round advances), so this reduces to the legacy
+  // `madeProgress || improved` and the default non-routed behavior is preserved exactly.
+  if (madeProgress || installed) { noImprove = 0; } else { noImprove++; }
   if (EIKOS_SHADOW_ON) {
     // Measured facts only. The commit agent's own return is not captured by the lane, so a commit is
     // recorded as "not_captured", never inferred from the tracked incumbent value.
     const o = { verified_candidates: verified.length, winner_speedup: winner ? winner.geomean : null,
-                improved: improved, made_progress: madeProgress, commit_reported: 'not_captured',
+                improved: improved, made_progress: madeProgress, installed: installed, commit_reported: 'not_captured',
                 tracked_incumbent_after: cumulative };
     if (eikosRec) eikosRec.outcome = o;
     eikosLastOutcome = o;
