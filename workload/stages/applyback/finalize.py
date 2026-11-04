@@ -182,13 +182,18 @@ def main():
         if bad:
             return fail(bad)
 
-    base = read_json(os.path.join(run_root, "baseline", "out", "baseline.json"))
-    if "measured" in base and base["measured"] is not True:
+    historical = read_json(os.path.join(run_root, "baseline", "out", "baseline.json"))
+    if "measured" in historical and historical["measured"] is not True:
         return fail("the baseline is not a measured receipt; complete the baseline stage "
                     "before an A/B", status="blocked")
+    base = summary.get("stock_control")
+    if not isinstance(base, dict) or base.get("admissible") is not True:
+        return fail("bench_summary.json has no admissible fresh stock_control; measure "
+                    "the unchanged stack in this A/B before comparing the candidate",
+                    status="blocked")
     base_tp, base_key = pick_throughput(base)
     if base_tp is None:
-        return fail("baseline.json contains no finite positive throughput (tried %s)"
+        return fail("stock_control contains no finite positive throughput (tried %s)"
                     % ", ".join(THROUGHPUT_KEYS))
     cand_tp, cand_key = pick_throughput(summary)
     if cand_tp is None:
@@ -203,7 +208,7 @@ def main():
 
     ratio = cand_tp / base_tp
     delta_pct = (ratio - 1.0) * 100.0
-    band_pct = ((base.get("noise_band") or 1.045) - 1.0) * 100.0
+    band_pct = ((historical.get("noise_band") or 1.045) - 1.0) * 100.0
     verdict = ("no_change" if abs(delta_pct) <= band_pct
                else "gain" if delta_pct > 0 else "regression")
 
@@ -212,6 +217,7 @@ def main():
     ab = {
         "baseline": {"throughput": base_tp, "metric": base_key, "basis": basis_a,
                      "provenance": base.get("provenance")},
+        "historical_baseline": historical,
         "candidate": {"throughput": cand_tp, "metric": cand_key, "basis": basis_b,
                       "repeats": summary.get("repeats")},
         "e2e_ratio": round(ratio, 6),

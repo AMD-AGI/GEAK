@@ -23,7 +23,7 @@ prevent.
 | `throughput_key` | yes | which field holds the number. A **dotted path** (`request_metrics.throughput.output.tokens_per_second`, list indices allowed) reaches into a nested receipt |
 | `reference_receipt` | no | a sibling document holding the reference figure, when the harness writes the throughput and the comparison into two files. Copied and hashed exactly like the receipt |
 | `reference_key` | no | dotted path to the reference value, in `reference_receipt` if set, otherwise in the receipt |
-| `valid_flags` | no | which fields carry the harness's own validity verdict; default `["submission_valid", "power_valid"]`. They are copied into `provenance` and judged by the slot |
+| `valid_flags` | no | fields carrying the harness's validity verdict; defaults come from `config/default.json`. They are copied into `provenance` and the slot judges the same configured fields |
 | `metric`, `unit` | no | recorded as written; default `output_token_throughput` / `tok/s` |
 | `noise_band` | no | keep threshold; default `1.045`, calibrated by measurement rather than quoted |
 | `config` | no | deployment shape (`tp`/`ep`/`gpus`/`concurrency`) when the receipt does not carry it under those names |

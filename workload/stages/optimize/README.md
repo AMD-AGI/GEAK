@@ -9,6 +9,10 @@ clears its noise band.
 (order by expected e2e gain; absent, directory order — ranking degrades, correctness
 does not).
 
+The slot resolves tasks from profile, independently of `$IN` (roofline's output in the
+normal order). For a standalone smoke run, set `TASKS_DIR` to the fixture task directory;
+`finalize.py --tasks-dir` remains available for inspecting a delivery directly.
+
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
 
 ## Implementations
@@ -303,6 +307,10 @@ worker. After a hook invocation, its logs are retained before stopping. A hook m
 write the native process exit code to `MEASURE_NATIVE_RC_FILE` so retention can record
 it separately from the hook exit code. This optional file is transport metadata;
 it neither adds a verdict nor changes the four stdout fields.
+
+Hook or retention failures leave the task's existing status `blocked`, which tells the
+scheduler to stop redispatching it. After repairing the cause, retain the failure logs
+and set that status back to `pending` to resume; keep its credit, history and evidence.
 
 `KEEP_THRESHOLD` is the noise gate against the original baseline, not a requirement to
 multiply the current best by that threshold on every iteration. Give the session the

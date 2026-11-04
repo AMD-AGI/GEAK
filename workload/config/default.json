@@ -24,6 +24,7 @@
       "params": {
         "receipt": null,
         "throughput_key": null,
+        "valid_flags": ["submission_valid", "power_valid"],
         "metric": "output_token_throughput",
         "unit": "tok/s",
         "noise_band": 1.045

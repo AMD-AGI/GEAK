@@ -148,6 +148,13 @@ Write `$OUT/e2e/bench_summary.json` with the candidate throughput, its `metric_b
 repeat count, and the per-arm records. Whichever benchmark ran, this one file is what the
 verdict reads.
 
+Include the fresh unchanged arm as `stock_control`: `throughput`, `metric_basis`,
+`admissible` (the native validity verdict), and `provenance` pointing to its raw receipt.
+Normalize both arms to the same metric basis. Report drift against the historical
+baseline separately in this control record; leave the baseline stage's receipt intact.
+The finalizer uses the fresh control for A/B and keeps the historical baseline alongside
+it. Without a usable fresh control, report `blocked` rather than substituting history.
+
 ## 4. Do not grade yourself
 
 `../finalize.py` writes `result.json`, after this session, and it is the stage's

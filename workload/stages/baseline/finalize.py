@@ -12,8 +12,8 @@ number:
 
   1. An unmeasured baseline must not enter applyback's A/B, so `measured=false` is a
      `blocked` here rather than a footnote downstream.
-  2. `submission_valid` / `power_valid` false is `blocked`. A non-compliant submission
-     cannot serve as a reference. (InferenceX writes either `true` or `1`.)
+  2. A false configured validity flag is `blocked`. A non-compliant submission cannot
+     serve as a reference. Field names come from `params.valid_flags`.
   3. Drift past the configured band is `blocked`. This is the failure the slot exists to
      catch: a run that completes successfully and lands outside the band quietly
      re-labels every delta measured against it.
@@ -35,8 +35,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
-
-VALIDITY = ("submission_valid", "power_valid")
 
 
 def truthy(value):
@@ -71,7 +69,7 @@ def main():
                         "denominator of an A/B; re-measure or adopt a receipt that was")
 
     # 2. A non-compliant submission is not a reference.
-    for key in VALIDITY:
+    for key in params.get("valid_flags") or []:
         value = find(baseline, key)
         if value is not None and not truthy(value):
             problems.append("%s is %r in the receipt" % (key, value))

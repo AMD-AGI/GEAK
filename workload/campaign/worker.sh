@@ -24,11 +24,6 @@ SLOT="${2:-unknown}"
 : "${SKILL_ROOT:?SKILL_ROOT}"    # the skill selected for the optimize stage
 : "${RUNNER:?RUNNER}"            # runner script, see runners/CONTRACT.md
 
-if [ ! -f "$SKILL_ROOT/measure.sh" ]; then
-  echo "[worker] required measurement hook is missing: $SKILL_ROOT/measure.sh" >&2
-  exit 78
-fi
-
 TARGET="${TARGET:-172800}"               # optimization budget per kernel; 48 h default
 REQUIRE_FULL_BUDGET="${REQUIRE_FULL_BUDGET:-0}"
 # Nodes get reclaimed. On a churning node a long attempt rarely reaches its
@@ -71,6 +66,40 @@ note() { echo "[$(date '+%F %T')] $*" >> "$LOG/worker.log"; }
 SOURCE_TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source_tree.py"
 RETAIN_MEASUREMENT="$(dirname "$SOURCE_TREE")/../evidence/retain_measurement.py"
 STATE_IO="$(dirname "$SOURCE_TREE")/durable_write.py"
+
+write_status() {  # status [credited best attempts [measured rc]]
+  python3 - "$STATE_IO" "$STATUS" "$@" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from durable_write import write_text
+p, st = sys.argv[2:4]
+extra = sys.argv[7:]
+d = json.load(open(p)) if os.path.exists(p) else {"credited_seconds": 0}
+d["status"] = st
+if len(sys.argv) > 4:
+    cred, best, n = sys.argv[4:7]
+    d.update(credited_seconds=int(cred), best_speedup=float(best),
+             attempts=int(n), slot=os.environ.get("SLOT", d.get("slot")))
+if extra:
+    rec = {"attempt": int(n), "slot": os.environ.get("SLOT"),
+           "measured": extra[0], "rc": int(extra[1])}
+    if len(extra) > 3:
+        # The same serving weighting over the buckets the harness measured more than
+        # once, and how many it measured only once. A gap between the two is the harness
+        # freezing a first pair that fell outside its undecided band, not the edit.
+        rec["measured_repeated_buckets_only"] = extra[2]
+        rec["single_pair_buckets"] = int(extra[3])
+    d.setdefault("history", []).append(rec)
+write_text(p, json.dumps(d, indent=1) + "\n")
+PY
+}
+
+if [ ! -f "$SKILL_ROOT/measure.sh" ]; then
+  echo "[worker] required measurement hook is missing: $SKILL_ROOT/measure.sh" >&2
+  write_status blocked || exit 78
+  exit 78
+fi
+
 PENDING_EVIDENCE="$RUN/.evidence_pending"
 exec 201>"$RUN/.measurement.lock" || exit 78
 
@@ -281,29 +310,6 @@ json.dump({"attempt": int(n), "measured": num(meas), "clean": num(clean),
 PY
 }
 
-write_status() {  # status credited best attempts [measured rc]
-  python3 - "$STATE_IO" "$STATUS" "$@" <<'PY'
-import json, os, sys
-sys.path.insert(0, os.path.dirname(sys.argv[1]))
-from durable_write import write_text
-p, st, cred, best, n = sys.argv[2:7]
-extra = sys.argv[7:]
-d = json.load(open(p)) if os.path.exists(p) else {}
-d.update(status=st, credited_seconds=int(cred), best_speedup=float(best),
-         attempts=int(n), slot=os.environ.get("SLOT", d.get("slot")))
-if extra:
-    rec = {"attempt": int(n), "slot": os.environ.get("SLOT"),
-           "measured": extra[0], "rc": int(extra[1])}
-    if len(extra) > 3:
-        # The same serving weighting over the buckets the harness measured more than
-        # once, and how many it measured only once. A gap between the two is the harness
-        # freezing a first pair that fell outside its undecided band, not the edit.
-        rec["measured_repeated_buckets_only"] = extra[2]
-        rec["single_pair_buckets"] = int(extra[3])
-    d.setdefault("history", []).append(rec)
-write_text(p, json.dumps(d, indent=1) + "\n")
-PY
-}
 export SLOT
 
 while :; do
@@ -483,6 +489,7 @@ no candidate to measure, skipping the sweep"
     MEASURE_STEP_RC=$?
     rm -f "$STATE/$K.measuring"
     note "FATAL measurement hook or evidence retention failed; stopping before overwrite or revert"
+    write_status blocked || exit 78
     exit "$MEASURE_STEP_RC"
   fi
   rm -f "$STATE/$K.measuring"
@@ -507,6 +514,7 @@ ${SINGLE} single-pair bucket(s) -- re-measuring once, and deciding on that"
         MEASURE_STEP_RC=$?
         rm -f "$STATE/$K.measuring"
         note "FATAL second-sweep hook or evidence retention failed; stopping before overwrite or revert"
+        write_status blocked || exit 78
         exit "$MEASURE_STEP_RC"
       fi
       M2="$M"

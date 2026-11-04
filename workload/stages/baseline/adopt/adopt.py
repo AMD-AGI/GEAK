@@ -21,8 +21,6 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
-VALID_FLAGS = ("submission_valid", "power_valid")
-
 
 def at(doc, path):
     """`a.b.0.c` into nested dicts and lists; None when any step is absent."""
@@ -101,7 +99,7 @@ def main():
         shutil.copyfile(ref_path, os.path.join(out, "reference.copy.json"))
 
     flags = dict((f, at(doc, f) if at(doc, f) is not None else at(ref_doc, f))
-                 for f in (p.get("valid_flags") or VALID_FLAGS))
+                 for f in (p.get("valid_flags") or []))
     cfg = dict((k, doc[k]) for k in ("tp", "ep", "dp", "gpus", "concurrency")
                if isinstance(doc, dict) and k in doc)
     cfg.update(p.get("config") or {})

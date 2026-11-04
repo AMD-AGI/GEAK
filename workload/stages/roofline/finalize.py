@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""The roofline slot's verdict: fold, compute expected_e2e_gain_pct, order the work.
+"""The roofline slot's verdict: read evidence, compute expected_e2e_gain_pct, order work.
 
-It belongs to the slot, not to any one implementation. It deliberately does **not** write
-its own folding sum — there is exactly one correct way to fold many shapes into a single
-number, the implementation skill ships it (`scripts/fold.py`), and this file shells out to
-it. Swapping in a different roofline implementation only requires that it also provide
-`scripts/fold.py` and `rows.json`; this file does not change.
+The implementation produces rows.json and folded.json using its own tools. This slot
+judges their coverage and maps the fold to workload shares; it invokes no skill code.
+The native folding command and artifact contract are in README.md.
 
 Usage (inside the environment prepared by run.py prepare):
     python3 stages/roofline/finalize.py [--roof-key roofline_us] [--rows rows.json]
@@ -15,7 +13,6 @@ import argparse
 import json
 import math
 import os
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # stages/roofline
@@ -162,9 +159,8 @@ def main(argv=None):
 
     out = os.environ.get("OUT")
     inp = os.environ.get("IN")
-    skill_root = os.environ.get("SKILL_ROOT")
-    if not out or not skill_root:
-        print("OUT/SKILL_ROOT missing; run run.py prepare roofline first", file=sys.stderr)
+    if not out:
+        print("OUT missing; run run.py prepare roofline first", file=sys.stderr)
         return 2
     params = read_json(os.environ.get("PARAMS", ""), {})
     roof_key = args.roof_key or params.get("roof_key") or "roofline_us"
@@ -176,25 +172,14 @@ def main(argv=None):
                           "per-case rows.json (kernel/regime/case/measured_us/%s); see "
                           "this stage's README." % (args.rows, roof_key))
 
-    fold = os.path.join(skill_root, "scripts", "fold.py")
-    if not os.path.exists(fold):
-        return emit(status="fail", artifacts={},
-                    notes="implementation %s has no scripts/fold.py. The folding algorithm "
-                          "must come from the implementation itself; this adapter does not "
-                          "reimplement the sum." % os.path.basename(skill_root))
-
     folded_path = os.path.join(out, "folded.json")
-    proc = subprocess.run(
-        ["python3", fold, "--rows", rows_path, "--roof-key", roof_key,
-         "--out", folded_path, "--label", "roof"],
-        capture_output=True, text=True)
-    with open(os.path.join(out, "fold.log"), "w") as f:
-        f.write(proc.stdout + proc.stderr)
-    if proc.returncode != 0 or not os.path.exists(folded_path):
-        return emit(status="fail", artifacts={},
-                    notes="fold.py exited %d, see fold.log." % proc.returncode)
-
+    if not os.path.exists(folded_path):
+        return emit(status="blocked", notes="folded.json is missing; complete the skill's "
+                    "folding step described in the slot README before finalizing")
     folded = read_json(folded_path)
+    if not isinstance(folded, dict) or not folded:
+        return emit(status="fail", notes="folded.json must contain the per-kernel/regime "
+                    "folds for rows.json; preserve the failed attempt and regenerate them")
     rows = (read_json(rows_path).get("rows") or [])
     weights = regime_weights(rows)
     bounds = bound_by_time(rows)
@@ -315,7 +300,7 @@ def main(argv=None):
         "formula": "pct_gpu_time * time_share_within_kernel * (1 - 1/attainable_speedup), summed over regimes",
         "roofline_mode": params.get("roofline_mode", "unknown"),
         "roof_key": roof_key,
-        "fold": "performed by the implementation's own scripts/fold.py (time domain; numerator and denominator summed separately, divided once)",
+        "fold": "provided by the implementation in folded.json (time domain; numerator and denominator summed separately, divided once)",
         "caveats": [
             "bound_type is a model's classification, not proof of the measured bottleneck.",
             "suspect=true means efficiency > 1, which falsifies the denominator; it is not clamped to 100% and no speedup may be inferred from it.",
@@ -353,9 +338,10 @@ def main(argv=None):
     elif not ranked:
         notes.append("all task analyses completed with unsupported whole-task bounds; retained execution order follows task_plan, not predicted gain")
 
-    return emit(status=status,
-                artifacts={"roofline": "roofline.json", "folded": "folded.json",
-                           "fold_log": "fold.log", "rows": args.rows},
+    artifacts = {"roofline": "roofline.json", "folded": "folded.json", "rows": args.rows}
+    if os.path.exists(os.path.join(out, "fold.log")):
+        artifacts["fold_log"] = "fold.log"
+    return emit(status=status, artifacts=artifacts,
                 metrics={"kernel_count": len(kernels), "ranked_count": len(ranked),
                          "sum_expected_e2e_gain_pct": doc["sum_expected_e2e_gain_pct"]},
                 notes="; ".join(notes))

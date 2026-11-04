@@ -144,14 +144,16 @@ def main():
     will be held to."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks-dir", type=Path,
-                        help="extracted task directories; default $IN/tasks")
+                        help="extracted tasks; default $TASKS_DIR or $RUN_ROOT/profile/out/tasks")
     parser.add_argument("--optimized", type=Path, help="default $OUT/optimized.json")
     parser.add_argument("--task-limit", type=int, help="default the stage's task_limit")
     args = parser.parse_args()
     out = os.environ.get("OUT")
     params = read_json(os.environ["PARAMS"]) if os.environ.get("PARAMS") else {}
-    tasks_dir = args.tasks_dir or (Path(os.environ["IN"]) / "tasks"
-                                   if os.environ.get("IN") else None)
+    task_root = os.environ.get("TASKS_DIR")
+    if not task_root and os.environ.get("RUN_ROOT"):
+        task_root = os.path.join(os.environ["RUN_ROOT"], "profile", "out", "tasks")
+    tasks_dir = args.tasks_dir or (Path(task_root) if task_root else None)
     optimized = args.optimized or (Path(out) / "optimized.json" if out else None)
 
     try:
@@ -159,7 +161,7 @@ def main():
         valid_limit(limit)
         if tasks_dir is None or not tasks_dir.is_dir():
             raise ValueError("no extracted task directory to account against (%s); the "
-                             "profile stage owns it" % (tasks_dir or "$IN/tasks"))
+                             "profile stage owns it" % (tasks_dir or "$RUN_ROOT/profile/out/tasks"))
         tasks = sorted(p.name for p in tasks_dir.iterdir() if p.is_dir())
         if not tasks:
             raise ValueError("No extracted task directories were found")
