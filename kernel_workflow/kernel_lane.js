@@ -3075,6 +3075,13 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
                           ambiguous, quarantined: true, reason: 'commit_failed',
                           dispatch_id: (commitRoute && commitRoute.dispatch_id) || null,
                           receipt: commitRes || null, workspace: CANONICAL,
+                          // NIT (Astra re-review #5): `receipt` is the committer's TYPED return, not its full
+                          // tool transcript. Retain a LINK to the underlying execution evidence — reachable by
+                          // dispatch id in the persisted agent timeline/ledger even when `receipt` is null.
+                          receipt_ref: { dispatch_id: (commitRoute && commitRoute.dispatch_id) || null,
+                                         scope: `commit r${round}`,
+                                         timeline: `${EVAL_DIR}/reports/trace/agent_timeline.json`,
+                                         ledger: `${EVAL_DIR}/reports/trace/llm_calls.jsonl` },
                           source: winner.source, geomean: winner.geomean });
       log(`Round ${round}: commit ${ambiguous ? 'AMBIGUOUS (committer timed out/unverified — cannot confirm ' +
           'it stopped)' : 'FAILED'} under routing — ABORT-AND-QUARANTINE: the canonical workspace is left ` +
@@ -3083,8 +3090,22 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
           `is intact.`);
       return {
         mode: MODE,
+        // eikos v2 E1 (R5 / Astra re-review #5 — failed-run ACCOUNTING): carry the TERMINAL agent timeline so
+        // the parent dispatcher persists it and runs the token/time/cost ledger + report for an ABORTED run
+        // too. kernel_workflow.js REQUIRES `r.eval_dir && r.llm_timeline` (optimize/author passthrough ~:94)
+        // before it writes agent_timeline.json + invokes geak_report.py, and the bakeoff path (~:598) only
+        // NESTS a lane's timeline when `r.llm_timeline` is present — without this field an aborted run's SPEND
+        // was never ledgered (automatic reporting was skipped). Built byte-identically to the normal return
+        // (…LLM_TL + instance=EVAL_DIR); LLM_TL already holds every attempt dispatched up to the abort, which
+        // is what the ledger later attributes (including a late-finishing worker's spend, by dispatch id).
+        // ADDITIVE accounting ONLY — no recovery, no resume, no workspace mutation; routing=false NEVER reaches
+        // this branch (its gate `!ROUTING_ON` advanced above), so routing-off accounting is unchanged.
+        llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
         eval_dir: EVAL_DIR,
         kernel_name: KERNEL_NAME,
+        // Failure/validation metadata so the scorer + report classify this as a TERMINAL FAILED run (not
+        // 'unknown') while its spend is still counted; N stays not-completed / not-accepted downstream.
+        validation_status: 'failed',
         // TERMINAL FAILURE (eikos v2 E1, R4): a routed commit could not be confirmed installed. The canonical
         // workspace is QUARANTINED as-is (NOT restored) for post-mortem; no false progress was recorded.
         status: 'failed',
@@ -3095,6 +3116,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
           committed: false, ambiguous,
           dispatch_id: (commitRoute && commitRoute.dispatch_id) || null,
           receipt: commitRes || null,          // the committer's typed receipt/transcript (null if ambiguous)
+          // NIT (Astra re-review #5): a LINK to the committer's FULL execution evidence (its tool transcript),
+          // not just the typed `receipt` above — reachable by dispatch id in the persisted timeline/ledger that
+          // geak_report.py renders under the eval dir, so a post-mortem has evidence even when receipt is null.
+          receipt_ref: {
+            dispatch_id: (commitRoute && commitRoute.dispatch_id) || null,
+            scope: `commit r${round}`,
+            timeline: `${EVAL_DIR}/reports/trace/agent_timeline.json`,
+            ledger: `${EVAL_DIR}/reports/trace/llm_calls.jsonl`,
+          },
         },
         cumulative_at_failure: cumulative,      // the incumbent did NOT advance
         rounds: round,
