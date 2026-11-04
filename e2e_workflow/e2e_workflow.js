@@ -203,6 +203,7 @@ const TRACELENS_INPUTS = {
   TRACELENS_KERNEL_CANDIDATES_JSON: String(TL.kernel_candidates_json || ''),
   TRACELENS_REPORT_JSON: String(TL.tracelens_report_json || ''),
   TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
+  TRACELENS_TRACE_FILES: Array.isArray(TL.trace_files) ? TL.trace_files.join(' ') : '',
 };
 if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
 
@@ -1095,6 +1096,7 @@ const PROFILE_ROW_SCHEMA = obj({
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  profile_topN_by_role: { type: 'object' }, profile_workload_by_role: { type: 'object' },
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' },
   top_kernels: { type: 'array', items: PROFILE_ROW_SCHEMA },
   shift_note: { type: 'string' }, notes: { type: 'string' },
@@ -6094,6 +6096,8 @@ const carryState = {
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
+  profile_topn_by_role: (profile && profile.profile_topN_by_role) || null,
+  profile_workload_by_role: (profile && profile.profile_workload_by_role) || null,
   config_directions: (strategy && strategy.config_directions) || [],
   // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
   // undispatched task survives a resume (references/workflow-handoff.md).

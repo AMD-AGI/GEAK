@@ -374,6 +374,40 @@ Under `$OUT_DIR`:
 
 Under `shared_fs`: `mn_state.json` (the pin `mn.py check` wrote) and `mn_check.json`.
 
+## The trace gate
+
+With `PROFILE=1`, all N ranks export into the shared profile directory and the
+gate decides whether that set can be believed. `verdict: pass` requires every
+expected rank present and readable, **collective kernels in every rank** (a TP
+group spanning machines that shows no collectives did not do what it claimed),
+both nodes represented, and a trace for the selected rank (`--select-rank`, default 0),
+which the report names as `parsed_trace` (`parsed_trace_by_role` for PD). A failed gate is non-fatal — the bench that came with it is still valid —
+but the verdict is on disk so a Top-N built on a partial set is never mistaken
+for one built on the whole server.
+
+Two things it exists to prevent, both of which look like a successful capture:
+
+- **Waiting for the file count returns too early.** torch creates each rank's
+  file when the export starts and then streams ~25 MB into it, so the count
+  reaches N while all N are still writing. Measured: three traces truncated
+  mid-write, six at zero bytes, and a reported 62% node imbalance that did not
+  exist. The completion signal is total bytes going quiet instead.
+- **`ls -t | head -1` picks a random rank.** With N sibling traces the newest
+  file is whichever rank's NFS write landed last, and two legs of an A/B would
+  compare different ranks; a stray `.json` (the gate's own report, once) would be
+  parsed *as* the trace. The profiler therefore parses `parsed_trace` from
+  `ranks/mn_trace_report.json` and only falls back to `ls -t` on a single box.
+  No trace is moved.
+
+### The ROCm runtime
+
+On the ROCm 7.2.0 image roctracer drops the kernels a CUDA graph replays (6 per
+replay instead of 725 on Qwen3-8B TP8 decode), and a `pd_disagg` decode rank whose
+profiler window is open while KV arrives can wedge in `hipGraphLaunch`. A newer
+runtime avoids both: pass `EXTRA_ENV="LD_LIBRARY_PATH=<dir>:..."` with `<dir>` at
+the same path on every pinned node. A baseline and a candidate must run on the
+same runtime to be comparable.
+
 ## When comparing two legs
 
 - Same machines. A different pair measured ~13% apart under an identical

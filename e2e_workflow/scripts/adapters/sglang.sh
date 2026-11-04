@@ -151,3 +151,10 @@ adapter_profile_window() {
   rm -f "$marker"
   return 1
 }
+
+# adapter_probe_args <phase> <point dir> — serving_probe.py's flags for this server, one per
+# line (bench_e2e.sh PROFILE_PROBE_POINTS). Occupancy from the scheduler log: no --enable-metrics.
+adapter_probe_args() {
+  printf '%s\n' --base-url "$BASE_URL" --occupancy-log "$LOG" --trace-dir "$2" \
+    --expect-traces "$TP" --record-shapes --with-stack "${SGLANG_PROFILE_WITH_STACK:-false}"
+}

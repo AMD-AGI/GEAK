@@ -1389,6 +1389,264 @@ class BenchPinGuardTest(unittest.TestCase):
 
 
 @unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
+class MultinodeProfileWindowTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_window_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.profile = os.path.join(self.tmp, "profile")
+        os.makedirs(self.profile)
+        self.state = os.path.join(self.tmp, "mn_state.json")
+        with open(self.state, "w", encoding="utf-8") as handle:
+            json.dump({
+                "nodes": [
+                    {"rank": 0, "node_id": mn.local_identity() or "n0", "ip": "10.10.0.32",
+                     "hostname": "h0", "cluster_if": "ens50f0", "ngpu": 8},
+                    {"rank": 1, "node_id": "n1", "ip": "10.10.0.166",
+                     "hostname": "h1", "cluster_if": "ens50f0", "ngpu": 8},
+                ],
+                "master_ip": "10.10.0.32", "serve_port": 30890,
+                "dist_init_port": 30531,
+                "shared_fs": self.tmp, "mn_dir": MN,
+            }, handle)
+
+    def _run(self, *, traces=16, expect=16, stub=STUB_NATIVE, timeout=120,
+             quiet_s=5, settle_s=5, base_url="http://127.0.0.1:1"):
+        # The trace wait is constants in the launcher; a copy with test-sized ones.
+        with open(LAUNCHER, encoding="utf-8") as handle:
+            text = handle.read()
+        for name, value in (("_MN_TRACE_SETTLE_S", settle_s), ("_MN_TRACE_QUIET_S", quiet_s),
+                            ("_MN_TRACE_TIMEOUT_S", timeout)):
+            text, n = re.subn(rf"^{name}=\d+$", f"{name}={value}", text, flags=re.M)
+            self.assertEqual(n, 1, name)
+        launcher = os.path.join(self.tmp, "multinode.sh")
+        with open(launcher, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        driver = os.path.join(self.tmp, "driver.sh")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(DRIVER.format(
+                scripts=SCRIPTS_DIR.replace("\\", "/"),
+                launcher=launcher.replace("\\", "/"),
+                stub=stub.format(count=traces, collective=COLLECTIVE)
+                if stub else ""))
+        env = dict(os.environ)
+        env.update(
+            GEAK_MN_STATE=self.state,
+            PROFILE_DIR=self.profile,
+            PROFILE_NUM_STEPS="40",
+            TP=str(expect),
+            BASE_URL=base_url,
+            # The launcher copy has no adapters/ beside it, so no client check to pass.
+            BACKEND="fake",
+        )
+        proc = subprocess.run([BASH, driver], env=env, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=300)
+        report_path = os.path.join(self.profile, "ranks", "mn_trace_report.json")
+        report = {}
+        if os.path.isfile(report_path):
+            with open(report_path, encoding="utf-8") as handle:
+                report = json.load(handle)
+        return proc, report
+
+    def _rc(self, proc):
+        for line in proc.stdout.splitlines():
+            if line.startswith("WINDOW_RC="):
+                return int(line.split("=", 1)[1])
+        self.fail(f"the driver never reported a return code:\n{proc.stdout}\n{proc.stderr}")
+
+    def test_complete_set_passes_and_is_gated(self):
+        proc, report = self._run(traces=16, expect=16)
+        self.assertEqual(self._rc(proc), 0, proc.stdout + proc.stderr)
+        self.assertEqual(report.get("verdict"), "pass", report)
+        self.assertIn("16/16 rank trace(s) landed", proc.stdout)
+        self.assertIn("TP-0-DP-0", os.path.basename(report["parsed_trace"]))
+
+    def test_incomplete_set_is_reported_but_does_not_fail_the_round(self):
+        proc, report = self._run(traces=8, expect=16, quiet_s=5, timeout=40)
+        self.assertEqual(self._rc(proc), 0, proc.stdout + proc.stderr)
+        self.assertEqual(report.get("verdict"), "fail", report)
+        self.assertIn("did NOT pass the gate", proc.stderr)
+        self.assertIn("8/16 rank trace(s) landed", proc.stdout)
+
+    def test_no_traces_at_all_fails_the_window(self):
+        proc, _ = self._run(traces=0, expect=16, quiet_s=5, timeout=30)
+        self.assertEqual(self._rc(proc), 1, proc.stdout + proc.stderr)
+
+    def test_waits_for_streaming_writers_to_finish(self):
+        import time
+        start = time.time()
+        proc, report = self._run(traces=16, expect=16, stub=STUB_STREAMING,
+                                 settle_s=5, quiet_s=60, timeout=300)
+        elapsed = time.time() - start
+        self.assertEqual(self._rc(proc), 0, proc.stdout + proc.stderr)
+        self.assertGreater(elapsed, 8, "returned before the writers finished")
+        self.assertEqual(report.get("verdict"), "pass", report.get("problems"))
+        self.assertTrue(all(r["readable"] for r in report["per_rank"]),
+                        [r for r in report["per_rank"] if not r["readable"]])
+        self.assertTrue(all(r["kernel_events"] > 0 for r in report["per_rank"]))
+
+    def test_empty_files_do_not_count_as_landed_traces(self):
+        stub = """
+adapter_profile_window_native() {{
+  python3 - "$PROFILE_DIR" <<'PY'
+import sys
+for tp in range(16):
+    open(f"{{sys.argv[1]}}/prof-TP-{{tp}}-DP-{{tp//8}}.trace.json.gz", "wb").close()
+PY
+  return 0
+}}
+"""
+        proc, _ = self._run(traces=0, expect=16, stub=stub, quiet_s=5,
+                            settle_s=5, timeout=40)
+        self.assertEqual(self._rc(proc), 1, proc.stdout + proc.stderr)
+        self.assertIn("0/16 rank trace(s) landed", proc.stdout)
+
+    def test_stuck_export_stops_waiting_instead_of_burning_the_timeout(self):
+        import time
+        start = time.time()
+        proc, _ = self._run(traces=8, expect=16, quiet_s=5, timeout=600)
+        elapsed = time.time() - start
+        self.assertEqual(self._rc(proc), 0, proc.stdout + proc.stderr)
+        self.assertLess(elapsed, 120, f"waited {elapsed:.0f}s; the quiet-window "
+                                      "check did not end the wait")
+        self.assertIn("no new bytes", proc.stderr)
+
+
+
+KX_SCRIPTS = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                          "kernel-extract", "scripts")
+
+PROBE_DRIVER = """set -uo pipefail
+HERE="{scripts}"
+source "{adapter}"
+{facts}
+{fn} "$1" "$2"
+echo "FN_RC=$?"
+"""
+
+
+@unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
+class ProbeArgsTest(unittest.TestCase):
+    """adapter_probe_args feeds the kernel-extract skill's serving_probe.py: whatever it prints
+    must be flags that script's own parser accepts, naming this server's engines and logs."""
+
+    PD_FACTS = ('_MN_TOPOLOGY=pd_disagg\n'
+                "_MN_PD_ENGINES=$'prefill=http://10.0.0.1:30891\\ndecode=http://10.0.0.2:30892'")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_probe_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state = os.path.join(self.tmp, "mn_state.json")
+        with open(self.state, "w", encoding="utf-8") as handle:
+            json.dump({
+                "nodes": [
+                    {"rank": 0, "node_id": mn.local_identity() or "n0", "ip": "10.10.0.32",
+                     "hostname": "h0", "cluster_if": "ens50f0", "ngpu": 8},
+                    {"rank": 1, "node_id": "n1", "ip": "10.10.0.166",
+                     "hostname": "h1", "cluster_if": "ens50f0", "ngpu": 8},
+                ],
+                "master_ip": "10.10.0.32", "serve_port": 30890, "dist_init_port": 30531,
+                "shared_fs": self.tmp, "mn_dir": MN,
+            }, handle)
+        self.point = os.path.join(self.tmp, "profile", "de_2")
+        os.makedirs(self.point)
+
+    def launch_json(self):
+        with open(os.path.join(self.tmp, "mn_launch.json"), "w", encoding="utf-8") as handle:
+            json.dump({"topology": "pd_disagg", "pd": {
+                "engine_tp_by_role": {"prefill": 8, "decode": 4},
+                "engines": [
+                    {"role": "prefill", "rank": 0, "tp": 8, "log": "/fs/server.log"},
+                    {"role": "decode", "rank": 1, "tp": 4, "log": "/fs/server.rank1.log"},
+                    {"role": "decode", "rank": 2, "tp": 4, "replica": 1, "log": "/fs/server.rank2.log"}]}},
+                handle)
+
+    def call(self, fn, phase, *, adapter=LAUNCHER, facts="", backend="fake"):
+        driver = os.path.join(self.tmp, "driver.sh")
+        with open(driver, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(PROBE_DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"),
+                                             adapter=adapter.replace("\\", "/"),
+                                             facts=facts, fn=fn))
+        env = dict(os.environ, GEAK_MN_STATE=self.state, OUT_DIR=self.tmp, TP="16",
+                   BASE_URL="http://10.10.0.32:30890", LOG="/fs/server.log", BACKEND=backend)
+        proc = subprocess.run([BASH, driver, phase, self.point], env=env, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+        lines = proc.stdout.splitlines()
+        rc = next(int(l.split("=", 1)[1]) for l in lines if l.startswith("FN_RC="))
+        flags = [l for l in lines if not l.startswith((">>>", "FN_RC="))]
+        return rc, flags, proc
+
+    def parsed(self, flags):
+        sys.path.insert(0, KX_SCRIPTS)
+        try:
+            import serving_probe
+        finally:
+            sys.path.remove(KX_SCRIPTS)
+        return serving_probe.build_parser().parse_args(
+            ["--points", "p.json", "--point-id", "de_2", "--out", "j.json", *flags])
+
+    def test_pd_points_open_their_own_engine_and_read_the_decode_log(self):
+        self.launch_json()
+        for phase, url, ranks, sub in (("DECODE", "http://10.0.0.2:30892", 4, "decode"),
+                                       ("PREFILL", "http://10.0.0.1:30891", 8, "prefill")):
+            rc, flags, proc = self.call("adapter_probe_args", phase, facts=self.PD_FACTS)
+            self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+            args = self.parsed(flags)
+            self.assertEqual(args.base_url, "http://10.10.0.32:30890", phase)
+            self.assertEqual(args.profile_url, url, phase)
+            self.assertEqual(args.occupancy_log, "/fs/server.rank1.log", phase)
+            self.assertEqual(args.expect_traces, ranks, phase)
+            self.assertEqual(args.trace_dir, os.path.join(self.point, sub), phase)
+            self.assertEqual((args.record_shapes, args.with_stack), (True, "false"), phase)
+            self.assertEqual(args.mode, "multinode", phase)
+
+    def test_an_sglang_probe_reads_the_engine_metrics_not_a_log(self):
+        self.launch_json()
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE", facts=self.PD_FACTS,
+                                    backend="sglang")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertIsNone(args.occupancy_log)
+        self.assertEqual(args.profile_url, "http://10.0.0.2:30892")
+
+    def test_a_tp_span_point_uses_the_one_server_and_all_its_ranks(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890",) * 2)
+        self.assertEqual((args.occupancy_log, args.expect_traces), ("/fs/server.log", 16))
+        self.assertEqual(args.trace_dir, self.point)
+
+    def test_a_pd_point_without_the_launch_record_prints_no_flags(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE", facts=self.PD_FACTS)
+        self.assertEqual(rc, 1)
+        self.assertEqual(flags, [])
+        self.assertIn("no decode engine url/log/tp", proc.stderr)
+
+    def test_the_single_host_sglang_adapter_speaks_the_same_flags(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE",
+                                    adapter=os.path.join(SCRIPTS_DIR, "adapters", "sglang.sh"))
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890", None))
+        self.assertEqual((args.occupancy_log, args.expect_traces), ("/fs/server.log", 16))
+        self.assertEqual(args.mode, "single")
+
+    def test_after_a_pd_point_the_gate_indexes_that_engine_alone(self):
+        self.launch_json()
+        os.makedirs(os.path.join(self.point, "decode"))
+        for rank in range(4):
+            write_trace(os.path.join(self.point, "decode"), rank, 0)
+        rc, _flags, proc = self.call("adapter_probe_after", "DECODE", facts=self.PD_FACTS)
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        with open(os.path.join(self.point, "ranks", "mn_trace_roles.json"), encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual(index["verdict"], "pass")
+        self.assertEqual([(r["role"], r["ranks"]) for r in index["roles"]], [("decode", 4)])
+
+
+GATE = os.path.join(SCRIPTS_DIR, "multi_node", "mn.py")
+
+
 def run_mn(argv):
     """`mn.py <argv>` in this process, so coverage sees it; shaped like subprocess.run's result."""
     out, err = io.StringIO(), io.StringIO()
@@ -1403,6 +1661,780 @@ def run_mn(argv):
 COMPUTE = "Cijk_Alik_Bljk_HHS_BH_MT128x128x16"
 
 
+def write_trace(directory, tp_rank, dp_rank, *, collectives=2, kernels=5,
+                truncate=False):
+    events = []
+    for i in range(kernels):
+        events.append({"cat": "kernel", "name": COMPUTE, "ts": 1000 + i,
+                       "dur": 42, "pid": tp_rank, "tid": 1})
+    for i in range(collectives):
+        events.append({"cat": "kernel", "name": COLLECTIVE, "ts": 2000 + i,
+                       "dur": 137, "pid": tp_rank, "tid": 2})
+    payload = json.dumps({"schemaVersion": 1, "traceEvents": events})
+    path = os.path.join(
+        directory, f"prof-2026-09-15-TP-{tp_rank}-DP-{dp_rank}.trace.json.gz")
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(payload)
+    if truncate:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        with open(path, "wb") as handle:
+            handle.write(raw[: len(raw) // 2])
+    return path
+
+
+def full_set(directory, ranks=range(16), gpus_per_node=8, **kwargs):
+    for rank in ranks:
+        write_trace(directory, rank, rank // gpus_per_node, **kwargs)
+
+
+def run_gate(directory, *args):
+    if "--nodes" not in args:
+        args = ("--nodes", "2", *args)
+    proc = run_mn(
+        ["trace-gate", "--profile-dir", directory, *args])
+    report = {}
+    for candidate in (os.path.join(directory, "ranks", "mn_trace_report.json"),
+                      os.path.join(directory, "mn_trace_report.json")):
+        if os.path.isfile(candidate):
+            with open(candidate, encoding="utf-8") as handle:
+                report = json.load(handle)
+            break
+    return proc, report
+
+
+class TraceGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_gate_")
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def test_complete_set_passes_and_reports_both_nodes(self):
+        full_set(self.tmp)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["verdict"], "pass", report["problems"])
+        self.assertEqual(report["found_ranks"], list(range(16)))
+        self.assertEqual(report["nodes_represented"], [0, 1])
+        self.assertEqual(len(report["ranks_with_collectives"]), 16)
+
+    def test_the_report_names_the_selected_rank_and_moves_nothing(self):
+        full_set(self.tmp)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TP-0-DP-0", os.path.basename(report["parsed_trace"]))
+        self.assertEqual(len(glob.glob(os.path.join(self.tmp, "*.json.gz"))), 16)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "ranks")), ["mn_trace_report.json"])
+
+    def test_the_report_does_not_shadow_the_trace_it_approves(self):
+        full_set(self.tmp)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(
+            os.path.isfile(os.path.join(self.tmp, "mn_trace_report.json")),
+            "the report is in the directory the parser globs")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "ranks", "mn_trace_report.json")))
+
+    def test_a_newer_stray_json_does_not_change_the_parsed_trace(self):
+        full_set(self.tmp)
+        with open(os.path.join(self.tmp, "zz_someone_elses_notes.json"), "w", encoding="utf-8") as handle:
+            json.dump({"not": "a trace"}, handle)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TP-0-DP-0", os.path.basename(report["parsed_trace"]))
+
+    def test_selected_rank_is_configurable(self):
+        full_set(self.tmp)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16",
+                                "--select-rank", "8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TP-8-DP-1", os.path.basename(report["parsed_trace"]))
+
+    def test_missing_ranks_fail(self):
+        full_set(self.tmp, ranks=[r for r in range(16) if r != 11])
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(report["verdict"], "fail")
+        self.assertTrue(any("11" in p for p in report["problems"]),
+                        report["problems"])
+
+    def test_whole_remote_node_missing_fails(self):
+        full_set(self.tmp, ranks=range(8))
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(report["nodes_represented"], [0])
+        self.assertTrue(any("node" in p for p in report["problems"]),
+                        report["problems"])
+
+    def test_truncated_export_fails(self):
+        full_set(self.tmp, ranks=range(15))
+        write_trace(self.tmp, 15, 1, truncate=True)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(any("unreadable" in p or "truncated" in p
+                            for p in report["problems"]), report["problems"])
+        bad = [r for r in report["per_rank"] if r["tp_rank"] == 15][0]
+        self.assertFalse(bad["readable"])
+        self.assertTrue(bad["error"])
+
+    def test_set_without_collectives_fails(self):
+        full_set(self.tmp, collectives=0)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(report["ranks_with_collectives"], [])
+        self.assertTrue(any("RCCL" in p for p in report["problems"]),
+                        report["problems"])
+
+    def test_empty_dir_is_a_hard_failure(self):
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(report, {})
+        self.assertIn("no traces", proc.stderr)
+
+    def test_missing_dir_is_a_hard_failure(self):
+        proc, _ = run_gate(os.path.join(self.tmp, "nope"), "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 2)
+
+    def test_selected_rank_absent_is_a_failure(self):
+        full_set(self.tmp, ranks=range(1, 16))
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16",
+                                "--select-rank", "0")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(report["parsed_trace"], "")
+
+    def test_node_imbalance_is_quantified(self):
+        full_set(self.tmp, ranks=range(8), kernels=10)          # node0 busy
+        for rank in range(8, 16):                               # node1 idle-ish
+            write_trace(self.tmp, rank, 1, kernels=2)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        by_node = {int(k): v for k, v in report["kernel_events_by_node"].items()}
+        self.assertGreater(by_node[0], by_node[1])
+        self.assertGreater(report["node_kernel_imbalance_pct"], 0)
+
+    def test_a_merged_trace_is_not_a_rank(self):
+        full_set(self.tmp)
+        with gzip.open(os.path.join(self.tmp, "merged-prof.trace.json.gz"),
+                       "wt", encoding="utf-8") as handle:
+            handle.write(json.dumps({"traceEvents": []}))
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(report["found_ranks"], list(range(16)))
+        self.assertEqual(report["unranked_files"], [])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TP-0-DP-0", os.path.basename(report["parsed_trace"]))
+
+    def test_the_gate_is_idempotent(self):
+        full_set(self.tmp)
+        run_gate(self.tmp, "--expect-ranks", "16")
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["found_ranks"], list(range(16)))
+        self.assertIn("TP-0-DP-0", os.path.basename(report["parsed_trace"]))
+
+    def test_the_node_count_drives_the_node_mapping(self):
+        full_set(self.tmp, gpus_per_node=4)
+        proc, report = run_gate(self.tmp, "--expect-ranks", "16", "--nodes", "4")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["nodes_represented"], [0, 1, 2, 3])
+
+
+def pd_launch_json(directory, roles=("prefill", "decode"), tp_by_role=None):
+    path = os.path.join(directory, "mn_launch.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"topology": "pd_disagg", "pd": {
+            "engine_tp_by_role": tp_by_role or {r: 8 for r in roles},
+            "engines": [{"role": r, "rank": i, "url": f"http://10.0.0.{i}:3089{i}"}
+                        for i, r in enumerate(roles)],
+        }}, handle)
+    return path
+
+
+class PdTraceGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_pd_gate_")
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        self.profile = os.path.join(self.tmp, "profile")
+        os.makedirs(self.profile)
+
+    def engine(self, role, ranks=range(8), **kwargs):
+        directory = os.path.join(self.profile, role)
+        os.makedirs(directory, exist_ok=True)
+        for rank in ranks:
+            write_trace(directory, rank, 0, **kwargs)
+        return directory
+
+    def gate(self, *args, tp_by_role=None):
+        return run_gate(self.profile, "--launch-json",
+                        pd_launch_json(self.tmp, tp_by_role=tp_by_role), *args)
+
+    def test_engines_with_different_tp_are_each_held_to_their_own(self):
+        self.engine("prefill", ranks=range(8))
+        self.engine("decode", ranks=range(4))
+        proc, report = self.gate(tp_by_role={"prefill": 8, "decode": 4})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        by_role = {r["role"]: r for r in report["per_role"]}
+        self.assertEqual([by_role[r]["expected_ranks"] for r in ("prefill", "decode")], [8, 4])
+
+    def test_a_short_decode_engine_fails_against_its_own_tp(self):
+        self.engine("prefill", ranks=range(4))
+        self.engine("decode", ranks=range(4))
+        proc, report = self.gate(tp_by_role={"prefill": 4, "decode": 8})
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(any("decode:7" in p for p in report["problems"]), report["problems"])
+
+    def test_both_engines_present_passes_with_per_role_accounting(self):
+        self.engine("prefill")
+        self.engine("decode")
+        proc, report = self.gate()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["verdict"], "pass", report["problems"])
+        self.assertEqual(report["topology"], "pd_disagg")
+        by_role = {r["role"]: r for r in report["per_role"]}
+        self.assertEqual(by_role["prefill"]["found_ranks"], list(range(8)))
+        self.assertEqual(by_role["decode"]["found_ranks"], list(range(8)))
+        self.assertEqual(by_role["prefill"]["node_index"], 0)
+        self.assertEqual(by_role["decode"]["node_index"], 1)
+        self.assertEqual(report["nodes_represented"], [0, 1])
+
+    def test_each_engine_keeps_its_own_rank0_for_the_parser(self):
+        self.engine("prefill")
+        self.engine("decode")
+        proc, report = self.gate()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for role in ("prefill", "decode"):
+            trace = report["parsed_trace_by_role"][role]
+            self.assertEqual(os.path.dirname(trace), os.path.join(self.profile, role))
+            self.assertIn("TP-0-DP-0", os.path.basename(trace))
+
+    def test_the_roles_index_names_one_trace_per_engine(self):
+        self.engine("prefill")
+        self.engine("decode")
+        self.gate()
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual([r["role"] for r in index["roles"]],
+                         ["prefill", "decode"])
+        for entry in index["roles"]:
+            self.assertTrue(os.path.isfile(entry["trace"]), entry)
+            self.assertIn(f"{os.sep}{entry['role']}{os.sep}", entry["trace"])
+            self.assertEqual((entry["ranks"], entry["instances"]), (8, 1))
+
+    def test_the_roles_index_counts_each_roles_replicas(self):
+        self.engine("prefill")
+        self.engine("decode")
+        launch = pd_launch_json(self.tmp)
+        with open(launch, encoding="utf-8") as handle:
+            doc = json.load(handle)
+        doc["pd"]["engines"].append({"role": "decode", "rank": 2, "replica": 1})
+        with open(launch, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        run_gate(self.profile, "--launch-json", launch)
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual({r["role"]: r["instances"] for r in index["roles"]},
+                         {"prefill": 1, "decode": 2})
+
+    def test_a_silent_engine_is_named_not_counted_as_a_missing_node(self):
+        self.engine("decode")
+        proc, report = self.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(any("prefill" in p and "NO traces" in p
+                            for p in report["problems"]), report["problems"])
+        by_role = {r["role"]: r for r in report["per_role"]}
+        self.assertEqual(by_role["prefill"]["found_ranks"], [])
+        self.assertEqual(by_role["decode"]["found_ranks"], list(range(8)))
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual({r["role"]: bool(r["trace"]) for r in index["roles"]},
+                         {"prefill": False, "decode": True})
+
+    def test_a_rank_missing_inside_one_engine_names_the_engine(self):
+        self.engine("prefill", ranks=[r for r in range(8) if r != 5])
+        self.engine("decode")
+        proc, report = self.gate()
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(any("prefill:5" in p for p in report["problems"]),
+                        report["problems"])
+
+    def test_a_probe_gates_only_the_engine_it_opened(self):
+        self.engine("decode", ranks=range(4))
+        proc, report = self.gate("--role", "decode", tp_by_role={"prefill": 8, "decode": 4})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([r["role"] for r in report["per_role"]], ["decode"])
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual([(r["role"], r["ranks"]) for r in index["roles"]], [("decode", 4)])
+        proc, _ = self.gate("--role", "router")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("no router engine", proc.stderr)
+
+    def test_the_shared_directory_collision_is_what_this_avoids(self):
+        for rank in range(8):
+            write_trace(self.profile, rank, 0)
+        proc, report = run_gate(self.profile, "--expect-ranks", "8", "--nodes", "1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(report["nodes_represented"], [0])
+        self.assertNotIn("per_role", report)
+
+
+class PdTopnMergeTest(unittest.TestCase):
+    # The hand-checked case, AgentX's analytic counts (ISL 500, OSL 101, CONC 30, one chunk):
+    # prefill 10 ms over 2 steps x 30 steps x 8 ranks = 1200, decode 90 ms over 9 steps x 101 x 8
+    # = 8080: prefill 12.93% / decode 87.07%.
+    PREFILL_LEDGER = {"token_source": "annotation", "prefill_tokens": 1000, "prefill_gpu_ms": 10.0}
+    DECODE_LEDGER = {"token_source": "annotation", "decode_gpu_ms": 90.0, "decode_active_ms": 100.0}
+    CALLS = {"prefill": 30, "decode": 101}
+    W_PREFILL = 1200.0 / 9280.0
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_topn_")
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def topn(self, role, total_ms, kernels, ledger=None, tag="", steps=None, calls=None):
+        path = os.path.join(self.tmp, f"profile_topN_{role}{tag}.json")
+        doc = {
+            "source": "torch-trace", "total_gpu_time_ms": total_ms,
+            "num_kernel_launches": 100, "num_distinct_kernels": len(kernels),
+            "top_kernels": [
+                {"rank": i + 1, "short_name": name, "calls": 10,
+                 "total_ms": total_ms * pct / 100.0, "avg_us": 1.0,
+                 "pct_gpu_time": pct, "shapes": [], "dtypes": [],
+                 "classification": "library_gemm", "backend_guess": "hipblaslt",
+                 "editable": False, "opt_hint": "hint"}
+                for i, (name, pct) in enumerate(kernels)],
+        }
+        if ledger is None:
+            ledger = self.PREFILL_LEDGER if role == "prefill" else self.DECODE_LEDGER
+        if isinstance(ledger, str):
+            doc["step_ledger_unavailable"] = ledger
+        elif ledger:
+            doc["step_ledger"] = ledger
+        if steps is None:
+            steps = 2 if role == "prefill" else 9
+        doc["serving"] = {f"n_{role}_steps": steps,
+                          "analytic_calls": self.CALLS if calls is None else calls}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        return f"{role}={path}"
+
+    def engines(self):
+        return (self.topn("prefill", 100.0, [("gemm_p", 60.0)]),
+                self.topn("decode", 300.0, [("attn_d", 40.0)]))
+
+    def roles(self, prefill=8, decode=8, decode_instances=1):
+        path = os.path.join(self.tmp, f"mn_trace_roles_{prefill}_{decode}_{decode_instances}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"roles": [{"role": "prefill", "ranks": prefill, "instances": 1},
+                                 {"role": "decode", "ranks": decode, "instances": decode_instances}]}, handle)
+        return path
+
+    def merge(self, *engines, roles=None):
+        out = os.path.join(self.tmp, "profile_topN")
+        for suffix in (".json", ".md"):
+            if os.path.exists(out + suffix):
+                os.remove(out + suffix)
+        argv = ["topn-merge", "--out", out,
+                *[a for e in (engines or self.engines()) for a in ("--engine", e)]]
+        if roles is not False:
+            argv += ["--roles", roles or self.roles()]
+        proc = run_mn(argv)
+        doc = {}
+        if os.path.isfile(out + ".json"):
+            with open(out + ".json", encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_without_points_rows_are_weighted_on_agentx_analytic_step_counts(self):
+        proc, doc = self.merge()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        w = doc["engine_weights"]
+        self.assertEqual(w["rule"], "analytic_calls")
+        self.assertAlmostEqual(w["weights"]["prefill"], self.W_PREFILL, places=5)
+        self.assertAlmostEqual(w["weights"]["decode"], 1 - self.W_PREFILL, places=5)
+        self.assertEqual(w["inputs"]["per_step_ms"], {"PREFILL": 5.0, "DECODE": 10.0})
+        self.assertEqual(w["inputs"]["calls_per_wave"], {"PREFILL": 30, "DECODE": 101})
+        self.assertIn("analytic count", w["warnings"][0])
+        self.assertIn("analytic count", proc.stderr)
+        rows = {r["short_name"]: r for r in doc["top_kernels"]}
+        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time"], 60.0 * self.W_PREFILL, places=3)
+        self.assertAlmostEqual(rows["attn_d"]["pct_gpu_time"], 40.0 * (1 - self.W_PREFILL), places=3)
+        self.assertEqual(rows["gemm_p"]["pct_gpu_time_in_engine"], 60.0)
+        self.assertNotIn("pct_gpu_time_deployment", rows["gemm_p"])
+        per = {e["engine"]: e for e in doc["per_engine"]}
+        self.assertEqual(per["prefill"]["weight_pct"], 12.93)
+        self.assertNotIn("metric_weight_pct", per["prefill"])
+        self.assertEqual(doc["bottleneck_engine"], "decode")
+        with open(os.path.join(self.tmp, "profile_topN.md"), encoding="utf-8") as handle:
+            self.assertIn("engine weights `analytic_calls`", handle.read())
+
+    def test_the_profile_windows_length_does_not_move_the_weights(self):
+        _proc, base = self.merge()
+        long_prefill = self.topn("prefill", 1000.0, [("gemm_p", 60.0)],
+                                 ledger={"token_source": "annotation", "prefill_tokens": 10000,
+                                         "prefill_gpu_ms": 100.0}, tag="_x10", steps=20)
+        long_decode = self.topn("decode", 3000.0, [("attn_d", 40.0)],
+                                ledger={"token_source": "annotation", "decode_gpu_ms": 900.0,
+                                        "decode_active_ms": 1000.0}, tag="_x10", steps=90)
+        proc, doc = self.merge(long_prefill, long_decode)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(doc["engine_weights"]["weights"], base["engine_weights"]["weights"])
+        self.assertEqual([(r["short_name"], r["pct_gpu_time"]) for r in doc["top_kernels"]],
+                         [(r["short_name"], r["pct_gpu_time"]) for r in base["top_kernels"]])
+
+    def test_engine_tp_scales_its_gpu_time(self):
+        proc, doc = self.merge(roles=self.roles(prefill=4, decode=8))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertAlmostEqual(doc["engine_weights"]["weights"]["prefill"], 600.0 / 8680.0, places=5)
+
+    def test_every_row_carries_its_engine(self):
+        _proc, doc = self.merge(self.topn("prefill", 100.0, [("shared", 50.0)]),
+                                self.topn("decode", 100.0, [("shared", 50.0)]))
+        self.assertEqual(sorted(r["engine"] for r in doc["top_kernels"]), ["decode", "prefill"])
+
+    def assert_fails(self, why, proc, doc):
+        self.assertEqual(proc.returncode, 2, why)
+        self.assertIn("cannot ledger the engines", proc.stderr, why)
+        self.assertEqual(doc, {}, why)
+
+    def test_any_missing_input_fails_the_merge_without_a_fallback(self):
+        unavailable = "no step annotations, and aten::embedding carries no indices shape"
+        prefill, decode = self.engines()
+        cases = [
+            ("prefill without step_ledger", dict(engines=(
+                self.topn("prefill", 100.0, [("gemm_p", 60.0)], ledger=unavailable, tag="_n"), decode)),
+             unavailable),
+            ("decode counted from embedding", dict(engines=(prefill, self.topn(
+                "decode", 300.0, [("attn_d", 40.0)], tag="_e", steps=0,
+                ledger={"token_source": "embedding", "prefill_tokens": 64, "prefill_gpu_ms": 9.0}))),
+             "only step annotations give"),
+            ("no analytic counts", dict(engines=(prefill, self.topn(
+                "decode", 300.0, [("attn_d", 40.0)], tag="_c", calls={}))),
+             "serving.analytic_calls.decode"),
+            ("no --roles", dict(roles=False), "no --roles"),
+            ("xPyD", dict(roles=self.roles(decode_instances=2)), "several instances"),
+            ("one engine", dict(engines=(decode,)), "no --engine for ['prefill']"),
+            ("unreadable engine", dict(engines=(f"prefill={os.path.join(self.tmp, 'nope.json')}", decode)),
+             "nope.json"),
+        ]
+        for why, kwargs, needle in cases:
+            proc, doc = self.merge(*kwargs.pop("engines", ()), **kwargs)
+            self.assert_fails(why, proc, doc)
+            self.assertIn(needle, proc.stderr, why)
+
+    def coverage(self, planned=2, measured=(1, 1), mass_us=(60e6, 40e6), warnings=()):
+        plan = os.path.join(self.tmp, f"points_{planned}.json")
+        with open(plan, "w", encoding="utf-8") as handle:
+            json.dump({"points": [{"point_id": f"p{i}"} for i in range(planned)]}, handle)
+        path = os.path.join(self.tmp, f"coverage_{planned}_{measured}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"points_plan": plan, "warnings": list(warnings), "phases": {
+                phase: {"points_measured": n, "total_mass_us": m}
+                for phase, n, m in zip(("PREFILL", "DECODE"), measured, mass_us)}}, handle)
+        return path
+
+    def merge_mass(self, coverage, roles=None):
+        out = os.path.join(self.tmp, "profile_topN_mass")
+        proc = run_mn(["topn-merge", "--out", out, "--coverage", coverage,
+                       "--roles", roles or self.roles(),
+                       *[a for e in self.engines() for a in ("--engine", e)]])
+        doc = {}
+        if os.path.isfile(out + ".json"):
+            with open(out + ".json", encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_probed_mass_weighs_the_engines_without_ttft_or_tpot(self):
+        proc, doc = self.merge_mass(self.coverage())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        w = doc["engine_weights"]
+        self.assertEqual(w["rule"], "gpu_time_mass")
+        self.assertEqual(w["weights"], {"prefill": 0.6, "decode": 0.4})
+        rows = {r["short_name"]: r for r in doc["top_kernels"]}
+        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time"], 36.0, places=4)
+        self.assertAlmostEqual(rows["attn_d"]["pct_gpu_time"], 16.0, places=4)
+        with open(os.path.join(self.tmp, "profile_topN_mass.md"), encoding="utf-8") as handle:
+            self.assertIn("engine weights `gpu_time_mass`", handle.read())
+        proc, doc = self.merge_mass(self.coverage(), roles=self.roles(prefill=4, decode=8))
+        self.assertAlmostEqual(doc["engine_weights"]["weights"]["prefill"], 240 / 560, places=5)
+
+    def test_one_workload_covers_both_engines_at_their_weights(self):
+        def workload(role, total_ms, cases):
+            path = os.path.join(self.tmp, f"profile_workload_{role}.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"schema": "workload-v1", "total_gpu_time_ms": total_ms, "kernels": [
+                    {"name": "fused_moe", "short_name": "fused_moe", "pct_gpu_time": 50.0,
+                     "cases": [{"dims": [[m, 7168]], "count": 1, "weight": w} for m, w in cases]}]}, handle)
+            return f"{role}={path}"
+        out = os.path.join(self.tmp, "profile_workload.json")
+        proc = run_mn(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
+                       *[a for e in self.engines() for a in ("--engine", e)],
+                       "--workload", workload("prefill", 100.0, [(4096, 30e3)]),
+                       "--workload", workload("decode", 300.0, [(8, 60e3), (16, 60e3)]),
+                       "--workload-out", out])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(out, encoding="utf-8") as handle:
+            doc = json.load(handle)
+        cases = [(k["engine"], c["dims"][0][0], c["regime"], c["weight"]) for k in doc["kernels"] for c in k["cases"]]
+        # One window's share of its engine x that engine's weight (0.6 / 0.4), over the 400 ms of both.
+        self.assertEqual(sorted(cases), [("decode", 8, "decode", 32000.0), ("decode", 16, "decode", 32000.0),
+                                         ("prefill", 4096, "prefill", 72000.0)])
+        self.assertEqual({k["engine"]: k["pct_gpu_time"] for k in doc["kernels"]}, {"prefill": 30.0, "decode": 20.0})
+        bad = run_mn(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
+                      *[a for e in self.engines() for a in ("--engine", e)],
+                      "--workload", workload("decode", 300.0, [(8, 1.0)]), "--workload-out", out + ".x"])
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("no --workload for ['prefill']", bad.stderr)
+
+    def test_an_unmeasured_point_weighs_on_and_says_so_as_on_one_node(self):
+        gap = "1 planned point(s) have no census and contributed NO mass: p2."
+        proc, doc = self.merge_mass(self.coverage(planned=3, warnings=[gap]))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(doc["engine_weights"]["warnings"], [gap])
+        self.assertIn(gap, proc.stderr)
+
+
+class PdPointsTest(unittest.TestCase):
+    SKILL = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                         "kernel-extract")
+    ARGS = ("[2026-10-30 10:00:00] server_args=ServerArgs(model_path='m', chunked_prefill_size=8192, "
+            "cuda_graph_bs=[1, 2, 4, 8, 16], decode_log_interval=40, disaggregation_mode='{}')")
+    # Newer sglang logs a dict, and splits the graph sizes per phase.
+    ARGS_DICT = ("[2026-10-30 10:00:00] server_args={{'model_path': 'm', 'chunked_prefill_size': 8192, "
+                 "'cuda_graph_bs_decode': [1, 2, 4, 8, 16], 'cuda_graph_bs_prefill': None, "
+                 "'decode_log_interval': 40, 'disaggregation_mode': '{}'}}")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_points_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def log(self, name, header, lines):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("".join(line + "\n" for line in ([header] if header else []) + lines))
+        return path
+
+    def logs(self, args=True, header=None):
+        pre = [f"[2026-10-30 10:00:{i:02d}] Prefill batch, #new-seq: {k}, #new-token: {512 * k}, "
+               "#cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, "
+               "#pending-token: 0, #bootstrap-req: 0, #inflight-req: 1, #optimistic-req: 0, "
+               "cuda graph: False, input throughput (token/s): 12.3"
+               for i, k in enumerate([1, 1, 1, 2, 2, 4])]
+        dec = [f"[2026-10-30 10:01:{i:02d}] Decode batch, #running-req: {bs}, #token: {600 * bs}, "
+               "token usage: 0.00, pre-allocated usage: 0.00, #prealloc-req: 0, #transfer-req: 0, "
+               "#retracted-req: 0, cuda graph: True, gen throughput (token/s): 78.57, #queue-req: 0"
+               for i, bs in enumerate([16, 16, 16, 8, 3])]
+        header = header or self.ARGS
+        return (self.log("prefill.log", args and header.format("prefill"), pre),
+                self.log("decode.log", args and header.format("decode"), dec))
+
+    def plan(self, pre, dec):
+        out = os.path.join(self.tmp, "points")
+        proc = run_mn(["pd-points", "--skill-root", self.SKILL, "--out-dir", out, "--points-per-phase", "2",
+                       "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"])
+        path = os.path.join(out, "sampling_points.json")
+        doc = {}
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_each_engine_gives_the_points_of_its_own_phase(self):
+        proc, doc = self.plan(*self.logs())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        by_engine = {}
+        for p in doc["points"]:
+            by_engine.setdefault(p["engine"], set()).add(p["phase"])
+        self.assertEqual(by_engine, {"prefill": {"PREFILL"}, "decode": {"DECODE"}})
+        prefill = {p["new_tokens"]: p["new_seq"] for p in doc["points"] if p["phase"] == "PREFILL"}
+        self.assertTrue(all(tokens == 512 * seqs for tokens, seqs in prefill.items()), prefill)
+        ids = [p["point_id"] for p in doc["points"]]
+        self.assertIn("PROFILE_PROBE_IDS=" + ",".join(ids), proc.stdout)
+
+    def test_the_dict_form_of_server_args_plans_the_same_points(self):
+        _proc, old = self.plan(*self.logs())
+        proc, new = self.plan(*self.logs(header=self.ARGS_DICT))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([p["point_id"] for p in new["points"]], [p["point_id"] for p in old["points"]])
+        with open(os.path.join(self.tmp, "points", "server_info_decode.json"), encoding="utf-8") as handle:
+            info = json.load(handle)
+        self.assertEqual(info["cuda_graph_bs"], [1, 2, 4, 8, 16])
+        self.assertEqual(info["decode_log_interval"], 40)
+
+    def test_a_log_without_server_args_is_exit_2(self):
+        pre, dec = self.logs(args=False)
+        proc, doc = self.plan(pre, dec)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("decode_log_interval", proc.stderr)
+        self.assertEqual(doc, {})
+
+
+class PdMassTest(unittest.TestCase):
+    # geak+agentx场景逻辑.md: M_P = 60 s, M_D = 40 s; A is 20% of prefill, B 5% of decode.
+    RANKING = {"denominators": {"basis": "agent busy rate"}, "ranking": [
+        {"id": "A", "name": "A", "share_of_phase_pct": {"PREFILL": 20.0}, "selection_pct_gpu_time": 12.0},
+        {"id": "B", "name": "B", "share_of_phase_pct": {"DECODE": 5.0}, "selection_pct_gpu_time": 2.0},
+        {"id": "both", "name": "both", "share_of_phase_pct": {"PREFILL": 10.0, "DECODE": 30.0},
+         "selection_pct_gpu_time": 18.0},
+        {"id": "P_rest", "name": "P_rest", "share_of_phase_pct": {"PREFILL": 70.0}, "selection_pct_gpu_time": 42.0},
+        {"id": "D_rest", "name": "D_rest", "share_of_phase_pct": {"DECODE": 65.0}, "selection_pct_gpu_time": 26.0}]}
+    SELECT = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                          "kernel-extract", "scripts", "select_targets.py")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_mass_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def path(self, name, doc):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        return path
+
+    def coverage(self, name="coverage.json", warnings=(), **mass_us):
+        mass_us = mass_us or {"PREFILL": 60e6, "DECODE": 40e6}
+        return self.path(name, {"phases": {p: {"total_mass_us": m} for p, m in mass_us.items()},
+                                "warnings": list(warnings)})
+
+    def roles(self, prefill=8, decode=8, decode_instances=1):
+        return self.path(f"mn_trace_roles_{prefill}_{decode}_{decode_instances}.json", {"roles": [
+            {"role": "prefill", "ranks": prefill, "instances": 1},
+            {"role": "decode", "ranks": decode, "instances": decode_instances}]})
+
+    def mass(self, coverage=None, roles=None, ranking=None):
+        ranking = ranking or self.path("kernel_ranking.json", self.RANKING)
+        argv = ["pd-mass", "--roles", roles or self.roles(), "--apply", ranking]
+        for c in (coverage or [self.coverage()]):
+            argv += ["--coverage", c]
+        proc = run_mn(argv)
+        with open(ranking, encoding="utf-8") as handle:
+            return proc, json.load(handle)
+
+    def rows(self, doc):
+        return {r["id"]: r["selection_pct_gpu_time"] for r in doc["ranking"]}
+
+    def test_the_hand_checked_case(self):
+        proc, doc = self.mass()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("prefill 60.0% / decode 40.0%", proc.stdout)
+        rows = self.rows(doc)
+        self.assertAlmostEqual(rows["A"], 12.0, places=4)
+        self.assertAlmostEqual(rows["B"], 2.0, places=4)
+        proc, doc = self.mass(roles=self.roles(prefill=4, decode=8))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = self.rows(doc)
+        self.assertAlmostEqual(rows["A"], 100 * 48 / 560, places=3)
+        self.assertAlmostEqual(rows["B"], 100 * 16 / 560, places=3)
+
+    def test_equal_ranks_is_single_node_agentx_both_phases_mass_summed(self):
+        _proc, doc = self.mass()
+        m_p, m_d = 60e6, 40e6
+        for row in self.RANKING["ranking"]:
+            shares = row["share_of_phase_pct"]
+            summed = 100 * (shares.get("PREFILL", 0) / 100 * m_p + shares.get("DECODE", 0) / 100 * m_d) / (m_p + m_d)
+            self.assertAlmostEqual(self.rows(doc)[row["id"]], summed, places=3, msg=row["id"])
+
+    def test_apply_keeps_the_agents_number_and_stamps_the_rule(self):
+        ranking = self.path("kernel_ranking.json", self.RANKING)
+        for _ in range(2):   # idempotent: a second --apply keeps the agent's original
+            proc, doc = self.mass(ranking=ranking, roles=self.roles(prefill=4))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = {r["id"]: r for r in doc["ranking"]}
+        self.assertEqual(rows["A"]["selection_pct_gpu_time_agent"], 12.0)
+        self.assertEqual(doc["denominators"]["rule"], "gpu_time_mass")
+        self.assertEqual(doc["denominators"]["inputs"],
+                         {"mass_us": {"PREFILL": 60e6, "DECODE": 40e6}, "ranks": {"prefill": 4, "decode": 8}})
+        out = os.path.join(self.tmp, "selection_targets.json")
+        subprocess.run([sys.executable, self.SELECT, ranking, "--output", out], check=True)
+        with open(out, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["denominators"]["rule"], "gpu_time_mass")
+
+    def test_one_ledger_per_engine_adds_up(self):
+        proc, doc = self.mass(coverage=[self.coverage("p.json", PREFILL=60e6),
+                                        self.coverage("d.json", ["no census for d3"], DECODE=40e6)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertAlmostEqual(self.rows(doc)["A"], 12.0, places=4)
+        self.assertEqual(doc["denominators"]["warnings"], ["no census for d3"])
+
+    def test_one_roles_file_per_probed_engine_adds_up(self):
+        prefill = self.path("roles_p.json", {"roles": [{"role": "prefill", "ranks": 4, "instances": 1}]})
+        decode = self.path("roles_d.json", {"roles": [{"role": "decode", "ranks": 8, "instances": 1}]})
+        ranking = self.path("kernel_ranking.json", self.RANKING)
+        proc = run_mn(["pd-mass", "--roles", prefill, "--roles", decode, "--apply", ranking,
+                       "--coverage", self.coverage()])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(ranking, encoding="utf-8") as handle:
+            self.assertAlmostEqual(self.rows(json.load(handle))["A"], 100 * 48 / 560, places=3)
+        proc = run_mn(["pd-mass", "--roles", decode, "--roles", decode, "--apply", ranking,
+                       "--coverage", self.coverage()])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("more than one --roles", proc.stderr)
+
+    def test_what_it_cannot_mass_is_exit_2_and_the_ranking_is_untouched(self):
+        cases = [
+            ("no DECODE phase", dict(coverage=[self.coverage("p.json", PREFILL=60e6)]), "['DECODE']"),
+            ("zero mass", dict(coverage=[self.coverage("z.json", PREFILL=60e6, DECODE=0)]), "['DECODE']"),
+            ("one phase in two files", dict(coverage=[self.coverage("a.json"), self.coverage("b.json")]),
+             "more than one --coverage"),
+            ("no ranks", dict(roles=self.roles(decode=0)), "no ranks for ['decode']"),
+            ("xPyD", dict(roles=self.roles(decode_instances=2)), "several instances"),
+            ("unknown phase", dict(ranking=self.path("mixed.json", {"ranking": [
+                {"id": "k", "share_of_phase_pct": {"MIXED": 50.0}, "selection_pct_gpu_time": 50.0}]})),
+             "names no pd_disagg engine"),
+            ("shares over 100.5", dict(ranking=self.path("over.json", {"ranking": [
+                {"id": "k", "share_of_phase_pct": {"PREFILL": 60.0}, "selection_pct_gpu_time": 30.0},
+                {"id": "j", "share_of_phase_pct": {"PREFILL": 41.0}, "selection_pct_gpu_time": 20.0}]})),
+             "> 100.5"),
+        ]
+        for why, kwargs, needle in cases:
+            ranking = kwargs.get("ranking") or self.path("kernel_ranking.json", self.RANKING)
+            with open(ranking, encoding="utf-8") as handle:
+                before = json.load(handle)
+            proc, after = self.mass(**{**kwargs, "ranking": ranking})
+            self.assertEqual(proc.returncode, 2, why)
+            self.assertIn("cannot mass the engines", proc.stderr, why)
+            self.assertIn(needle, proc.stderr, why)
+            self.assertEqual(after, before, why)
+
+
+PD_STATE = {
+    "topology": "pd_disagg",
+    "master_ip": "10.10.0.166",
+    "serve_port": 30890, "dist_init_port": 30531,
+    "shared_fs": "/shared/geak",
+    "nodes": [
+        {"rank": 0, "node_id": "n0", "ip": "10.10.0.166",
+         "hostname": "node-fc54", "cluster_if": "ens50f0", "ngpu": 8, "role": "prefill"},
+        {"rank": 1, "node_id": "n1", "ip": "10.10.0.183",
+         "hostname": "node-f2a0", "cluster_if": "ens50f0", "ngpu": 8, "role": "decode"},
+    ],
+}
+
+FAKE_PD_ADAPTER = """\
+adapter_pd_mode() { echo pd_roles; }
+adapter_pd_args() {
+  local role="$1" boot="$2" backend="${3:-mooncake_tcp}" ib="${4:-}"
+  local out="--disaggregation-mode $role --disaggregation-transfer-backend $backend"
+  [ "$role" = "prefill" ] && out="$out --disaggregation-bootstrap-port $boot"
+  [ -n "$ib" ] && out="$out --disaggregation-ib-device $ib"
+  echo "$out"
+}
+adapter_pd_lb_launch() {
+  echo "LB_CALL=[$1 $2 $3 $4 $5]"
+  echo "LB_MODEL=$MODEL LB_EXTRA=[$LB_EXTRA_ARGS]"
+  SERVER_PID=777
+}
+adapter_launch() {
+  echo "FINAL_ARGS=[$EXTRA_SERVER_ARGS]"
+  echo "GPU=$GPU HOST=$HOST PORT=$PORT TP=$TP BASE_URL=$BASE_URL"
+  SERVER_PID=4242
+}
+"""
+
+
 class TopologyOfTest(unittest.TestCase):
     def test_the_pin_decides_not_the_environment(self):
         self.assertEqual(mn.topology_of(PD_STATE), "pd_disagg")
@@ -1414,6 +2446,12 @@ class TopologyOfTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             mn.topology_of(dict(PD_STATE, topology="half_and_half"))
         self.assertIn("half_and_half", str(e.exception))
+
+
+class PdSpanningTraceGateTest(unittest.TestCase):
+    def test_a_spanning_engines_ranks_map_onto_its_nodes(self):
+        self.assertEqual([mn_traces.lane_node([1, 2], r, 16) for r in (0, 7, 8, 15)], [1, 1, 2, 2])
+        self.assertEqual(mn_traces.lane_node([0], 5, 8), 0)
 
 
 class RankHeadTest(unittest.TestCase):
@@ -2257,3 +3295,61 @@ class GpuLeaseTest(unittest.TestCase):
             self.assertEqual(ids, "3")
         self.assertIn("waiting for node0 gpu3", err.getvalue())
 
+
+class TraceEdgeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def path(self, name, doc):
+        p = os.path.join(self.tmp, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(doc if isinstance(doc, str) else json.dumps(doc))
+        return p
+
+    def test_a_trace_without_a_rank_or_kernels_is_reported(self):
+        full_set(self.tmp, ranks=range(2), gpus_per_node=1)
+        write_trace(self.tmp, 2, 0, collectives=0, kernels=0)
+        with gzip.open(os.path.join(self.tmp, "host.trace.json.gz"), "wt") as f:
+            f.write("{}")
+        proc, report = run_gate(self.tmp, "--expect-ranks", "3", "--nodes", "1")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual([u["file"] for u in report["unranked_files"]], ["host.trace.json.gz"])
+        self.assertIn("zero kernel events", " ".join(report["problems"]))
+
+    def test_pd_lanes_skip_replicas_and_an_unreadable_launch(self):
+        launch = self.path("mn_launch.json", {"pd": {"engine_tp_by_role": {"prefill": 8}, "engines": [
+            {"role": "prefill", "rank": 0}, {"role": "prefill", "rank": 1, "replica": 1}]}})
+        self.assertEqual(mn_traces.pd_lanes(launch), [("prefill", 0, 8, [0])])
+        self.assertEqual(mn_traces.pd_lanes(self.path("bad.json", "{")), [])
+
+    def test_topn_merge_refuses_what_it_cannot_merge(self):
+        bad = run_mn(["topn-merge", "--engine", "prefill"])
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("wants prefill=PATH and decode=PATH", bad.stderr)
+        gone = run_mn(["topn-merge", "--engine", f"prefill={os.path.join(self.tmp, 'nope.json')}"])
+        self.assertEqual(gone.returncode, 2)
+        self.assertIn("nope.json", gone.stderr)
+        idle = self.path("idle.json", {"total_gpu_time_ms": 0, "top_kernels": []})
+        self.assertIn("no --engine for ['prefill']", run_mn(["topn-merge", "--engine", f"decode={idle}"]).stderr)
+
+    def test_topn_merge_without_out_prints_the_table(self):
+        def topn(name, role, gpu_ms, steps, calls):
+            return self.path(name, {
+                "total_gpu_time_ms": gpu_ms, "num_kernel_launches": 3, "num_distinct_kernels": 1,
+                "step_ledger": {f"{role}_gpu_ms": gpu_ms},
+                "serving": {f"n_{role}_steps": steps, "analytic_calls": {role: calls}},
+                "top_kernels": [{"short_name": f"gemm_{role[0]}", "pct_gpu_time": 100.0, "classification": "gemm",
+                                 "backend_guess": "hipblaslt", "editable": False, "calls": 3,
+                                 "total_ms": gpu_ms, "avg_us": 3333.3, "opt_hint": "tune"}]})
+        roles = self.path("roles.json", {"roles": [{"role": "prefill", "ranks": 1, "instances": 1},
+                                                   {"role": "decode", "ranks": 1, "instances": 1}]})
+        proc = run_mn(["topn-merge", "--roles", roles,
+                       "--engine", f"prefill={topn('p.json', 'prefill', 10.0, 2, 1)}",
+                       "--engine", f"decode={topn('d.json', 'decode', 90.0, 9, 10)}"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("| 1 | decode | `gemm_d` |", proc.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
