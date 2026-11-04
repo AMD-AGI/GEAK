@@ -170,6 +170,25 @@ class LogOccupancy:
         return self.last[0], self.last[1], None
 
 
+def vocab_size(model):
+    """vocab_size from the model's config.json; None when the path is not a readable model dir."""
+    if not model:
+        return None
+    try:
+        with open(os.path.join(model, "config.json")) as f:
+            cfg = json.load(f)
+        return int(cfg.get("vocab_size") or cfg.get("text_config", {})["vocab_size"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def fresh_seed(seed=None):
+    """`seed`, or a new one per invocation. Prompts from one seed are prefixes of each
+    other, so a repeated or retried probe is answered from the prefix cache and its
+    prefill computes only the last page."""
+    return seed if seed is not None else random.SystemRandom().randrange(1 << 31)
+
+
 def rand_ids(n, seed, vocab=None):
     # Ids past the model's vocab make the embedding gather read out of bounds and fault the
     # engine (DeepSeek-V4 has 129280).
@@ -584,8 +603,8 @@ def drive_prefill(base, point, args, journal):
     # forward, and a long generation would mix decode into the window.
     with ThreadPoolExecutor(max_workers=nseq) as ex:
         for i in range(nseq):
-            ex.submit(generate, base, rand_ids(toks, args.seed + i), 1, journal,
-                      "prefill_seq%d" % i, args.request_timeout)
+            ex.submit(generate, base, rand_ids(toks, args.seed + i, getattr(args, "vocab", None)),
+                      1, journal, "prefill_seq%d" % i, args.request_timeout)
 
 
 def drive_prefill_batched(base, point, args, journal, engine=None):
@@ -622,7 +641,7 @@ def drive_decode(base, point, args, journal):
     ctx = int(point.get("context_tokens") or 1024)
     ex = ThreadPoolExecutor(max_workers=bs)
     for i in range(bs):
-        ex.submit(generate, base, rand_ids(ctx, args.seed + 100 + i),
+        ex.submit(generate, base, rand_ids(ctx, args.seed + 100 + i, getattr(args, "vocab", None)),
                   args.decode_tokens, journal, "decode_req%d" % i, args.request_timeout)
     return ex
 
@@ -712,7 +731,13 @@ def build_parser():
                          "requests resident until the window closes; the trace check also fails "
                          "prefix-cache hits and stray steps")
     ap.add_argument("--request-timeout", type=float, default=1800)
-    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="prompt seed; default is a new one per run, recorded in the "
+                         "journal. A seed already sent to this server is answered from "
+                         "its prefix cache. vLLM defaults to 1234: its cache_salt "
+                         "isolates every run instead")
+    ap.add_argument("--model", default=os.environ.get("MODEL"),
+                    help="model dir whose config.json bounds the random prompt ids")
     ap.add_argument("--out", required=True, help="journal JSON for this point")
     ap.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
     ap.add_argument("--served-model")
@@ -737,7 +762,11 @@ def main():
         ap.error("--served-model is required for vLLM")
     if args.vocab_size is not None and args.vocab_size < 1:
         ap.error("--vocab-size must be positive")
-    ID_HI = min(150000, args.vocab_size - 1) if args.vocab_size else 31999
+    args.vocab = args.vocab_size or vocab_size(args.model)
+    ID_HI = min(150000, args.vocab - 1) if args.vocab else 31999
+    if FRAMEWORK == "vllm" and args.seed is None:
+        args.seed = 1234
+    args.seed = fresh_seed(args.seed)
     os.makedirs(args.trace_dir, exist_ok=True)
     profile_url = args.profile_url or args.base_url
 
