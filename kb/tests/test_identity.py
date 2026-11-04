@@ -130,6 +130,22 @@ def test_ep_rides_the_tp_rung_and_is_never_dropped_alone():
     assert not any(c.endswith(":tp_8") for c in cids)
 
 
+def test_a_multinode_spread_rides_the_tp_rung_after_ep():
+    """TP16 over two nodes or a PD split is a different deployment from one host at the same tp:
+    its own exact and tp rungs, the same parallelism-agnostic model rung, no rung of its own."""
+    one_host = kbid.e2e_canonical_ids(kbid.e2e_identity(
+        "M", "gfx950", "sglang", "0.5.6", "fp8", tp=8, ep=1, isl=1024, osl=1024, conc=64))
+    pd = kbid.e2e_canonical_ids(kbid.e2e_identity(
+        "M", "gfx950", "sglang", "0.5.6", "fp8", tp=8, ep=1, isl=1024, osl=1024, conc=64,
+        topology="pd_p8x1_d8x2"))
+    assert pd[0] == "geak:e2e:m:gfx950:sglang:0.5.6:fp8:tp_8:ep_1:pd_p8x1_d8x2:isl_1024:osl_1024:conc_64"
+    assert pd[1].endswith(":tp_8:ep_1:pd_p8x1_d8x2")
+    assert pd[2] == one_host[2]
+    assert not set(pd[:2]) & set(one_host)
+    assert kbid.e2e_canonical_ids(kbid.e2e_identity(
+        "M", "gfx950", "sglang", "0.5.6", "fp8", topology="tpspan_n2")) == one_host[2:]
+
+
 def test_ep_without_tp_creates_no_rung():
     """ep qualifies a tp split; on its own it has nothing to qualify."""
     cids = kbid.e2e_canonical_ids(

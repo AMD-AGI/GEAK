@@ -274,6 +274,20 @@ adapter_profile_window() {
   [ "$(( _after - _before ))" -gt 0 ]
 }
 
+# pd_disagg: the router answers /health before any worker is reachable, so the LB
+# AND every engine replica must answer.
+if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+  adapter_health() {
+    local _url
+    curl -sf "${BASE_URL}/health" >/dev/null 2>&1 || return 1
+    printf '%s\n' "${_MN_PD_HEALTH:-}" | while read -r _url; do
+      [ -n "$_url" ] || continue
+      curl -sf --max-time "$_MN_PD_HEALTH_TIMEOUT_S" "${_url}/health" \
+        >/dev/null 2>&1 || exit 1
+    done
+  }
+fi
+
 adapter_launch() {
   local _out_dir="${OUT_DIR:-$(pwd)}"
   # Both logs stay OUT of $LOG: bench_e2e.sh greps and size-watches it.

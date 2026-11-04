@@ -973,6 +973,14 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    # PD: a stack accepted on ONE engine seeds that engine alone.
+    for src, dst in (("accepted_flags_by_role", "initial_extra_server_args_by_role"),
+                     ("accepted_env_by_role", "initial_extra_env_by_role")):
+        by_role = h.get(src)
+        if isinstance(by_role, dict):
+            seeded = {r: str(by_role.get(r) or "").strip() for r in ("prefill", "decode")}
+            if any(seeded.values()):
+                ps_args[dst] = seeded
     if gpu_identity is not None:
         ps_args.update({
             "expected_gfx": gpu_identity["gfx"],

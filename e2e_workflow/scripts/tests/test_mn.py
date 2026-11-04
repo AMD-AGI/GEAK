@@ -2435,6 +2435,29 @@ adapter_launch() {
 """
 
 
+class PdConfigTest(unittest.TestCase):
+
+    def test_the_client_port_is_the_load_balancers(self):
+        pd = mn.pd_config(PD_STATE)
+        self.assertEqual(pd["lb_port"], PD_STATE["serve_port"])
+        self.assertNotIn(PD_STATE["serve_port"], pd["role_ports"])
+
+    def test_defaults_are_derived_from_the_pin(self):
+        pd = mn.pd_config(PD_STATE)
+        self.assertEqual(pd["roles"], ["prefill", "decode"])
+        self.assertEqual(pd["role_ports"], [30891, 30892])
+        self.assertEqual(pd["bootstrap_port"], 30898)
+
+    def test_the_transfer_backend_defaults_to_tcp(self):
+        self.assertEqual(mn.pd_config(PD_STATE)["transfer_backend"], "mooncake_tcp")
+
+    def test_the_handoffs_pd_block_sets_the_transport_and_ports_follow_serve_port(self):
+        state = dict(PD_STATE, serve_port=31000, pd={"backend": "mooncake", "ib_device": "mlx5_0", "lb": "minilb"})
+        pd = mn.pd_config(state)
+        self.assertEqual((pd["lb_port"], pd["role_ports"], pd["bootstrap_port"]), (31000, [31001, 31002], 31008))
+        self.assertEqual((pd["transfer_backend"], pd["ib_device"], pd["lb"]), ("mooncake", "mlx5_0", "minilb"))
+
+
 class TopologyOfTest(unittest.TestCase):
     def test_the_pin_decides_not_the_environment(self):
         self.assertEqual(mn.topology_of(PD_STATE), "pd_disagg")
@@ -2448,10 +2471,392 @@ class TopologyOfTest(unittest.TestCase):
         self.assertIn("half_and_half", str(e.exception))
 
 
+class PdRenderTest(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        with open(os.path.join(self.tmp, "fake.sh"), "w", encoding="utf-8") as f:
+            f.write(FAKE_PD_ADAPTER)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def engine(self, rank):
+        pd = mn.pd_config(PD_STATE)
+        node = PD_STATE["nodes"][rank]
+        port = pd["role_ports"][rank]
+        structural = (f'adapter_pd_args {pd["roles"][rank]} {pd["bootstrap_port"]} '
+                      f'{pd["transfer_backend"]}')
+        env = rank_vars(self.tmp, tp=8, port=port, base_url=f"http://{node['ip']}:{port}",
+                        log=os.path.join(self.tmp, f"server.rank{rank}.log"),
+                        extra_env="SHARED_V=1",
+                        extra_args="--attention-backend aiter --chunked-prefill-size 8192")
+        return mn.launch_script([], env, os.path.join(self.tmp, "fake.sh"),
+                                "adapter_launch", structural)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_prefill_engine_gets_the_role_and_the_bootstrap_registry(self):
+        out = subprocess.run(["bash"], input=self.engine(0),
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        args = [l for l in out.stdout.splitlines() if l.startswith("FINAL_ARGS=")][0]
+        self.assertIn("--disaggregation-mode prefill", args)
+        self.assertIn("--disaggregation-bootstrap-port 30898", args)
+        self.assertIn("--disaggregation-transfer-backend mooncake_tcp", args)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_decode_engine_is_not_given_a_bootstrap_port(self):
+        out = subprocess.run(["bash"], input=self.engine(1),
+                             capture_output=True, text=True)
+        args = [l for l in out.stdout.splitlines() if l.startswith("FINAL_ARGS=")][0]
+        self.assertIn("--disaggregation-mode decode", args)
+        self.assertNotIn("--disaggregation-bootstrap-port", args)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_no_rank_or_world_reaches_a_disaggregated_engine(self):
+        for rank in (0, 1):
+            out = subprocess.run(["bash"], input=self.engine(rank),
+                                 capture_output=True, text=True)
+            args = [l for l in out.stdout.splitlines()
+                    if l.startswith("FINAL_ARGS=")][0]
+            for leak in ("--nnodes", "--node-rank", "--dist-init-addr"):
+                self.assertNotIn(leak, args, f"rank{rank} was given {leak}")
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_each_engine_answers_on_its_own_endpoint_not_the_clients(self):
+        for rank, port in ((0, "30891"), (1, "30892")):
+            out = subprocess.run(["bash"], input=self.engine(rank),
+                                 capture_output=True, text=True)
+            line = [l for l in out.stdout.splitlines() if l.startswith("GPU=")][0]
+            self.assertIn(f"PORT={port}", line)
+            self.assertIn("TP=8", line)
+            self.assertNotIn(":30890", line)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_swept_flags_go_ahead_of_the_pd_args(self):
+        out = subprocess.run(["bash"], input=self.engine(0),
+                             capture_output=True, text=True)
+        args = [l for l in out.stdout.splitlines() if l.startswith("FINAL_ARGS=")][0]
+        self.assertLess(args.index("--attention-backend aiter --chunked-prefill-size 8192"),
+                        args.index("--disaggregation-mode"))
+        self.assertLess(args.index("--chunked-prefill-size 8192"),
+                        args.index("--disaggregation-mode"))
+
+
+PD3_STATE = {
+    "topology": "pd_disagg", "master_ip": "10.10.0.183",
+    "serve_port": 30890, "dist_init_port": 30531,
+    "nodes": [
+        {"rank": 0, "node_id": "n0", "ip": "10.10.0.183", "hostname": "node-f2a0",
+         "cluster_if": "ens50f0", "role": "prefill", "tp": 8, "gpus": 8},
+        {"rank": 1, "node_id": "n1", "ip": "10.10.0.247", "hostname": "node-f2b9",
+         "cluster_if": "ens50f0", "role": "decode", "tp": 16, "gpus": 8,
+         "engine_rank": 0, "engine_nnodes": 2},
+        {"rank": 2, "node_id": "n2", "ip": "10.10.0.166", "hostname": "node-fc54",
+         "cluster_if": "ens50f0", "role": "decode", "tp": 16, "gpus": 8,
+         "engine_rank": 1, "engine_nnodes": 2},
+    ],
+}
+
+
+class PdSpanningEngineLaunchTest(unittest.TestCase):
+    """A dry-run launch of 1P + a decode engine over two nodes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.saved = {k: os.environ.get(k) for k in (
+            "GEAK_MN_STATE", "MODEL", "BACKEND",
+            "LOG", "PROFILE_DIR", "OUT_DIR", "GEAK_MN_DRY_RUN", "TP", "GEAK_MN_PD_SWEEP_ARGS_DECODE",
+            "OVERLAY_PYTHONPATH")}
+        here = adapter_root(self.tmp, "fake", FAKE_PD_ADAPTER +
+                            'adapter_dist_args() { echo "--nnodes $2 --node-rank $1 --dist-init-addr $3:$4"; }\n')
+        here.start()
+        self.addCleanup(here.stop)
+        state = dict(PD3_STATE, shared_fs=self.tmp)
+        with open(os.path.join(self.tmp, "pin.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.environ.update(
+            GEAK_MN_STATE=os.path.join(self.tmp, "pin.json"), BACKEND="fake", MODEL="/m",
+            LOG=os.path.join(self.tmp, "server.log"), PROFILE_DIR=os.path.join(self.tmp, "prof"),
+            OUT_DIR=self.tmp, GEAK_MN_DRY_RUN="1", TP="8",
+            GEAK_MN_PD_SWEEP_ARGS_DECODE="--dp 2 --enable-dp-attention --ep-size 16")
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def rendered(self, name):
+        with open(os.path.join(self.tmp, f"mn_{name}.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_every_engine_imports_the_same_overlay(self):
+        os.environ["OVERLAY_PYTHONPATH"] = os.path.join(self.tmp, "ovl")
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(mn.cmd_launch([]), 0)
+        exports = {n: [l for l in self.rendered(n).splitlines() if l.startswith("export OVERLAY_PYTHONPATH=")]
+                   for n in ("rank0", "rank1", "rank2")}
+        self.assertEqual(exports["rank0"], [f"export OVERLAY_PYTHONPATH={shlex.quote(os.environ['OVERLAY_PYTHONPATH'])}"])
+        self.assertEqual(exports["rank1"], exports["rank0"])
+        self.assertEqual(exports["rank2"], exports["rank0"])
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_decode_ranks_form_their_own_world_and_prefill_stays_closed(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(mn.cmd_launch([]), 0)
+        pre, d0, d1, lb = (self.rendered(n) for n in ("rank0", "rank1", "rank2", "lb"))
+        self.assertNotIn("adapter_dist_args", pre)
+        for rank, script in ((0, d0), (1, d1)):
+            self.assertIn(f"adapter_dist_args {rank} 2", script)
+            self.assertIn("MASTER_ADDR=10.10.0.247", script)
+            self.assertIn("export PORT=30892", script)
+            self.assertIn("export BASE_URL=http://10.10.0.247:30892", script)
+            self.assertIn("SYNC_TOKEN_IDS_ACROSS_TP=1", script)
+            self.assertIn("--enable-dp-attention", script)
+        self.assertIn("http://10.10.0.183:30891", lb)
+        self.assertIn("http://10.10.0.247:30892", lb)
+        self.assertNotIn("10.10.0.166:30892", lb)
+        # Without the node-facts NIC probe, which needs the real interface.
+        script = "\n".join(l for l in d1.splitlines() if not l.startswith("ip -4"))
+        out = subprocess.run(["bash"], input=script, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        args = [l for l in out.stdout.splitlines() if l.startswith("FINAL_ARGS=")][0]
+        self.assertIn("--disaggregation-mode decode", args)
+        self.assertIn("--nnodes 2 --node-rank 1 --dist-init-addr 10.10.0.247:30531", args)
+        self.assertLess(args.index("--enable-dp-attention"), args.index("--disaggregation-mode"))
+
+
 class PdSpanningTraceGateTest(unittest.TestCase):
     def test_a_spanning_engines_ranks_map_onto_its_nodes(self):
         self.assertEqual([mn_traces.lane_node([1, 2], r, 16) for r in (0, 7, 8, 15)], [1, 1, 2, 2])
         self.assertEqual(mn_traces.lane_node([0], 5, 8), 0)
+
+
+class PdRankSweepTest(unittest.TestCase):
+
+    def setUp(self):
+        self._saved = {
+            name: os.environ.get(name)
+            for name in (
+                "GEAK_MN_PD_SWEEP_ARGS_PREFILL", "GEAK_MN_PD_SWEEP_ARGS_DECODE",
+                "GEAK_MN_PD_SWEEP_ENV_PREFILL", "GEAK_MN_PD_SWEEP_ENV_DECODE",
+            )
+        }
+        for name in self._saved:
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_each_engine_keeps_only_its_own_sweep(self):
+        os.environ["GEAK_MN_PD_SWEEP_ARGS_PREFILL"] = "--chunked-prefill-size 8192"
+        os.environ["GEAK_MN_PD_SWEEP_ARGS_DECODE"] = "--max-running-requests 64"
+        os.environ["GEAK_MN_PD_SWEEP_ENV_PREFILL"] = "PREFILL_ONLY=1"
+        os.environ["GEAK_MN_PD_SWEEP_ENV_DECODE"] = "DECODE_ONLY=1"
+        shared = ["SHARED=1"]
+        prefill_args, prefill_env, prefill_dropped = mn.pd_rank_swept(
+            "prefill", "--attention-backend aiter", shared)
+        decode_args, decode_env, decode_dropped = mn.pd_rank_swept(
+            "decode", "--attention-backend aiter", shared)
+        self.assertEqual(
+            prefill_args, "--attention-backend aiter --chunked-prefill-size 8192")
+        self.assertNotIn("max-running-requests", prefill_args)
+        self.assertEqual(
+            decode_args, "--attention-backend aiter --max-running-requests 64")
+        self.assertNotIn("chunked-prefill-size", decode_args)
+        self.assertLess(prefill_args.index("--attention-backend"),
+                        prefill_args.index("--chunked-prefill-size"))
+        self.assertEqual(prefill_env, ["SHARED=1", "PREFILL_ONLY=1"])
+        self.assertEqual(decode_env, ["SHARED=1", "DECODE_ONLY=1"])
+        self.assertEqual(prefill_dropped, [])
+        self.assertEqual(decode_dropped, [])
+        self.assertEqual(shared, ["SHARED=1"])
+
+    def test_unset_role_sweep_leaves_the_shared_layer(self):
+        args, env, dropped = mn.pd_rank_swept("prefill", "--page-size 64", ["A=1"])
+        self.assertEqual(args, "--page-size 64")
+        self.assertEqual(env, ["A=1"])
+        self.assertEqual(dropped, [])
+
+
+class PdLoadBalancerRenderTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        with open(os.path.join(self.tmp, "fake.sh"), "w", encoding="utf-8") as f:
+            f.write(FAKE_PD_ADAPTER)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def script(self, lb="router"):
+        pd = dict(mn.pd_config(PD_STATE), lb=lb)
+        return mn.pd_lb_script(PD_STATE, pd, self.tmp, "pd01", adapter=os.path.join(self.tmp, "fake.sh"),
+                               model="/models/m", pythonpath="", extra_env="")
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_lb_script_delegates_and_is_handed_both_engines(self):
+        out = subprocess.run(["bash"], input=self.script(),
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        call = [l for l in out.stdout.splitlines() if l.startswith("LB_CALL=")][0]
+        self.assertEqual(
+            call,
+            "LB_CALL=[0.0.0.0 30890 http://10.10.0.166:30891 30898 "
+            "http://10.10.0.183:30892]")
+        self.assertIn("STARTED_PID=777", out.stdout)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_xpyd_hands_the_lb_every_replica_and_the_router_takes_them_all(self):
+        extra = dict(PD_STATE["nodes"][0], rank=2, ip="10.10.0.32", replica=1)
+        state = dict(PD_STATE, nodes=[PD_STATE["nodes"][0], extra, PD_STATE["nodes"][1]])
+        script = mn.pd_lb_script(state, mn.pd_config(state), self.tmp, "pd01", adapter=os.path.join(self.tmp, "fake.sh"),
+                                 model="/models/m", pythonpath="", extra_env="")
+        self.assertIn("adapter_pd_lb_launch 0.0.0.0 30890 'http://10.10.0.166:30891 http://10.10.0.32:30891' "
+                      "30898 http://10.10.0.183:30892", script)
+        log = os.path.join(self.tmp, "lb.log")
+        real = os.path.realpath(os.path.join(HERE, "..", "adapters", "sglang.sh"))
+        subprocess.run(["bash", "-c", f'. "$1"; SERVER_LAUNCH_PREFIX=echo MODEL=/m LOG={shlex.quote(log)}; '
+                        'adapter_pd_lb_launch 0.0.0.0 30890 "http://a:1 http://b:1" 30898 "http://c:2 http://d:2"; wait',
+                        "x", real], check=True)
+        with open(log, encoding="utf-8") as f:
+            line = f.read()
+        self.assertIn("--pd-disaggregation --prefill http://a:1 30898 --prefill http://b:1 30898 "
+                      "--decode http://c:2 --decode http://d:2 --host 0.0.0.0 --port 30890", line)
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_lb_choice_travels_as_an_argument_not_a_second_template(self):
+        out = subprocess.run(["bash"], input=self.script(lb="minilb"),
+                             capture_output=True, text=True)
+        self.assertIn("LB_EXTRA=[--mini-lb]", out.stdout)
+
+
+class PdAdapterSeamTest(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, name, body):
+        p = os.path.join(self.tmp, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        return p
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_an_adapter_with_no_pd_functions_is_refused(self):
+        with adapter_root(self.tmp, "tponly", "adapter_dist_mode() { echo per_rank; }\n"
+                                              "adapter_dist_args() { echo x; }\n"):
+            with self.assertRaises(SystemExit) as e:
+                mn.resolve_adapter("tponly", self.tmp, "pd_disagg")
+        self.assertIn("adapter_pd_args", str(e.exception))
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_an_adapter_that_can_split_but_not_balance_is_refused(self):
+        with adapter_root(self.tmp, "half", "adapter_pd_mode() { echo pd_roles; }\n"
+                                            "adapter_pd_args() { echo x; }\n"):
+            with self.assertRaises(SystemExit) as e:
+                mn.resolve_adapter("half", self.tmp, "pd_disagg")
+        self.assertIn("adapter_pd_lb_launch", str(e.exception))
+
+    @unittest.skipUnless(HAVE_SH, "needs bash")
+    def test_the_real_sglang_adapter_declares_pd_roles(self):
+        root = os.path.realpath(os.path.join(HERE, "..", ".."))
+        self.assertTrue(mn.resolve_adapter("sglang", root, "pd_disagg")
+                        .endswith("adapters/sglang.sh"))
+
+
+class PdTeardownTest(unittest.TestCase):
+    def test_the_load_balancer_is_in_the_kill_set(self):
+        self.assertIn("mini_lb", mn.LB_PATTERN)
+        self.assertNotIn("router", mn.SERVE_PATTERN)
+
+    def test_the_pattern_matches_the_name_the_router_gives_itself(self):
+        seen = "sglang::router"          # what ps/pgrep actually report
+        self.assertRegex(seen, mn.LB_PATTERN)
+        launched_as = "python -m sglang_router.launch_router --pd-disaggregation"
+        self.assertNotRegex(launched_as, mn.LB_PATTERN)
+
+    def test_killing_the_load_balancer_does_not_match_the_engines(self):
+        self.assertNotRegex("sglang::scheduler", mn.LB_PATTERN)
+        self.assertNotRegex("sglang::scheduler_TP0", mn.LB_PATTERN)
+
+
+class PdLoadBalancerLivenessTest(unittest.TestCase):
+
+    def setUp(self):
+        self.state = dict(PD_STATE, pd=mn.pd_config(PD_STATE))
+        self.sent = {}
+        replies = self.replies = {}
+
+        def reply(_task, node, args):
+            self.sent[node["rank"]] = args[0]
+            return {"out": replies.get(node["rank"], "serve=1 sched=8 zombie=0") + " ok=1"}
+
+        self.stack = contextlib.ExitStack()
+        self.stack.enter_context(fake_ssh(reply))
+        self.stack.enter_context(mock.patch.object(mn, "resolve", lambda s: s["nodes"]))
+
+    def tearDown(self):
+        self.stack.close()
+
+    def test_the_probe_queries_the_client_port(self):
+        mn.engine_health(self.state)
+        master = self.sent[0]
+        self.assertIn(str(self.state["pd"]["lb_port"]), master)
+        self.assertIn("/health", master)
+
+    def test_a_pin_without_a_pd_block_probes_the_default_client_port(self):
+        bare = {k: v for k, v in self.state.items() if k != "pd"}
+        mn.engine_health(bare)
+        self.assertIn(f"127.0.0.1:{mn.pd_config(bare)['lb_port']}/health", self.sent[0])
+        self.assertNotIn(":None/", self.sent[0])
+
+    def test_a_router_that_answers_is_not_reported_dead(self):
+        self.replies[0] = "serve=1 sched=8 zombie=0 lb=200"
+        master = mn.engine_health(self.state)[0]
+        self.assertEqual(master["lb"], 1)
+        self.assertEqual(master["lb_http"], 200)
+
+    def test_nothing_listening_is_reported_dead(self):
+        self.replies[0] = "serve=1 sched=8 zombie=0 lb=000"
+        self.assertEqual(mn.engine_health(self.state)[0]["lb"], 0)
+
+    def test_listening_but_refusing_is_reported_dead_and_distinguishable(self):
+        self.replies[0] = "serve=1 sched=8 zombie=0 lb=503"
+        master = mn.engine_health(self.state)[0]
+        self.assertEqual(master["lb"], 0)
+        self.assertEqual(master["lb_http"], 503)
+
+    def test_only_the_master_is_asked_about_the_load_balancer(self):
+        mn.engine_health(self.state)
+        self.assertNotIn("/health", self.sent[1])
+
+    def test_a_tp_span_pin_is_not_asked_at_all(self):
+        span = dict(PD_STATE, topology="tp_span")
+        span.pop("pd", None)
+        health = mn.engine_health(span)
+        self.assertNotIn("/health", self.sent[0])
+        self.assertNotIn("lb", health[0])
+
+    def test_a_probe_that_does_not_come_back_is_an_error_not_a_dead_rank(self):
+        self.replies[1] = ""
+        with fake_ssh(lambda task, node, args: {"rc": 255, "out": "", "err": "ssh: connect timed out"}
+                      if node["rank"] == 1 else {"rc": 0, "out": "serve=1 sched=8 zombie=0 lb=200 ok=1"}):
+            with self.assertRaisesRegex(RuntimeError, "rank1 .* did not answer over ssh .*connect timed out"):
+                mn.engine_health(self.state)
 
 
 class RankHeadTest(unittest.TestCase):

@@ -441,6 +441,61 @@ def rank_layout(topology: str, tp: int, nnodes: int, tp_by_role: dict | None = N
     return [{"tp": tp, "gpus": tp // nnodes} for _ in range(nnodes)]
 
 
+def pd_config(state: dict) -> dict:
+    """The PD ports, all from serve_port, and the transfer settings check pinned from
+    handoff.multinode.pd. The LB owns serve_port, so the client side needs no notion
+    of PD; engines sit above it."""
+    base = int(state.get("serve_port", 30890))
+    pd = state.get("pd") or {}
+    return {
+        "roles": list(PD_ROLES),
+        "lb_port": base,
+        "role_ports": [base + 1 + i for i in range(len(PD_ROLES))],
+        "bootstrap_port": base + 8,
+        # No verbs provider on this fleet, so the RDMA backends have nothing to bind.
+        "transfer_backend": pd.get("backend") or "mooncake_tcp",
+        "ib_device": pd.get("ib_device") or "",
+        "lb": pd.get("lb") or "router",
+    }
+
+
+def node_role(state: dict, node: dict) -> str:
+    return node.get("role") or ""
+
+
+def engine_nodes(state: dict, role: str) -> list:
+    """The pinned nodes of one PD engine, its node-rank 0 (HTTP front end) first."""
+    return [n for n in state["nodes"] if node_role(state, n) == role]
+
+
+def engine_urls(state: dict) -> list[dict]:
+    """One entry per PD engine replica, at its node-rank 0 (the other nodes of a spanning
+    engine serve no HTTP): the only place an engine's address is derived. A provided
+    command's own --port wins over the port derived from serve_port."""
+    pd = pd_config(state)
+    out = []
+    for i, role in enumerate(pd["roles"]):
+        nodes = engine_nodes(state, role)
+        for rep in sorted({n.get("replica", 0) for n in nodes}):
+            en = [n for n in nodes if n.get("replica", 0) == rep]
+            port = en[0].get("port") or pd["role_ports"][i]
+            out.append({"role": role, "replica": rep, "node": en[0], "port": port,
+                        "url": f"http://{en[0]['ip']}:{port}", "nodes": en})
+    return out
+
+
+def lb_node(state: dict) -> dict:
+    """Where the PD front end runs: the caller's router machine, else the master node."""
+    return state.get("router") if (state.get("router") or {}).get("ip") else \
+        next((n for n in state["nodes"] if n["ip"] == state.get("master_ip")), None)
+
+
+def state_targets(state: dict) -> list[dict]:
+    """Every machine a launch touches: the nodes, then a provided router's own machine."""
+    router = state.get("router") or {}
+    return [*state["nodes"], *([router] if router.get("node_id") else [])]
+
+
 def _resident_gpu_pids(showpids: str) -> tuple[list[str], int]:
     """(pids holding VRAM, count of KFD pids with 0 VRAM) from `rocm-smi --showpids`.
 
@@ -1354,6 +1409,20 @@ def span_sync_env(kept_env: list[str], spanning: bool) -> list[str]:
     if not sync:
         return [*kept_env, "SYNC_TOKEN_IDS_ACROSS_TP=1"]
     return list(kept_env)
+
+
+def _role_env(prefix: str, role: str) -> str:
+    return (os.environ.get(f"{prefix}{(role or '').upper()}", "") or "").strip()
+
+
+def pd_rank_swept(role: str, shared_args: str, shared_env: list) -> tuple:
+    """(args, env, dropped) for one engine: GEAK_MN_PD_SWEEP_ARGS_/ENV_<ROLE> is
+    appended after the shared sweep, so last-wins keeps it on this engine only."""
+    extra = " ".join(p for p in ((shared_args or "").strip(),
+                                 _role_env("GEAK_MN_PD_SWEEP_ARGS_", role)) if p)
+    kept, dropped = accepted_env(_role_env("GEAK_MN_PD_SWEEP_ENV_", role))
+    return extra, list(shared_env) + kept, dropped
+
 
 # topology -> (functions the adapter must define, mode function, its default, the mode we implement)
 _ADAPTER_CONTRACT = {

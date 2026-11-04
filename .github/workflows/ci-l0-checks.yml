@@ -319,6 +319,13 @@ jobs:
           node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
           node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
+      # Multi-node serving: the args.multinode mapping and the PD per-engine guards, each
+      # EXTRACTED from the shipped e2e_workflow.js.
+      - name: multinode args and PD guards
+        run: |
+          set -e
+          node e2e_workflow/scripts/test_multinode_args.js
+          node e2e_workflow/scripts/test_pd_guards.js
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
