@@ -158,6 +158,21 @@ See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#st
 for the full arg spelling, what the declaration changes, and the two things that surprise people
 (`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
 
+### Example — one server across machines
+
+A TP group that spans two machines, or a prefill/decode pair, is still **one** server to GEAK. The
+caller names the machines in a `node_state.json` and points `MULTI_NODE_STATE` at it; `run_e2e.py`
+then serves through `BENCH_LAUNCHER=multinode`. GEAK runs on a driver that needs no GPU and
+reaches every node over ssh; the backend adapter, bench client, metric and acceptance contract
+are the single-host ones, so the tok/s number is comparable to every other GEAK result.
+
+```bash
+MULTI_NODE_STATE=/shared/run1/node_state.json python interface/run_e2e.py handoff.json result.json
+```
+
+See [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md) for what the caller must
+hand over, the environment check that runs before Setup, and the failure messages.
+
 ---
 
 ## kernel_workflow — single kernel

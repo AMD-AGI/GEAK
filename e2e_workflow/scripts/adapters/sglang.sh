@@ -49,6 +49,14 @@ adapter_launch() {
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
 
+# ---- multi-node (read by adapters/launchers/multinode.sh) ----
+# per_rank: one server process per node, each told which rank it is.
+adapter_dist_mode() { echo per_rank; }
+# adapter_dist_args RANK NNODES MASTER DIST_PORT
+adapter_dist_args() { echo "--nnodes $2 --node-rank $1 --dist-init-addr $3:$4"; }
+
+# pd_roles: one complete TP-closed server per role; no rank/world triple.
+
 # adapter_bench NUM_PROMPTS MAX_CONC PROFILE_FLAG
 adapter_bench() {
   local NUMP="$1" MAXC="$2" PROF="${3:-0}"
