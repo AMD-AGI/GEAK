@@ -336,18 +336,18 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
 
     meta_target = ""
     observed_calls = 0
-    compiled_calls = 0
+    compiled_observed = False
     if isinstance(capture_meta, dict):
         module = str(capture_meta.get("module") or "").strip()
         attr = str(capture_meta.get("attr") or "").strip()
         meta_target = f"{module}:{attr}" if module and attr else ""
         observed_calls = int(capture_meta.get("total_calls_observed") or 0)
-        compiled_calls = int(capture_meta.get("compiled_passthrough_calls") or 0)
+        compiled_observed = bool(capture_meta.get("compiled_passthrough_observed"))
     if meta_target != target_callable:
         failed.append("capture_target_mismatch")
     # A hook that only ran inside torch.compile regions leaves no marker in the trace, so the trace
     # checks below would fail for that one reason; name it once instead.
-    compiled_only = observed_calls <= 0 < compiled_calls
+    compiled_only = observed_calls <= 0 and compiled_observed
     if compiled_only:
         failed.append("capture_compiled_unobservable")
     elif observed_calls <= 0:

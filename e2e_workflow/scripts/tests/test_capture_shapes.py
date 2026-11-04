@@ -100,7 +100,7 @@ def _reset_state(mod):
         share_min_bytes=16 << 20, shared_tensors={}, shared_bytes_est=0,
         oracle_bytes_est=0, budget_exceeded=False,
         budget_skip_count=0, oracle_save_count=0, meta_flush_count=0,
-        compiled_passthrough_calls=0,
+        compiled_passthrough_observed=False,
     )
 
 
@@ -419,7 +419,7 @@ class TestWrapperRecording(_RecorderTestCase):
             self.assertIs(cs._wrapper(argument, option=option), result)
             original.assert_called_once_with(argument, option=option)
             is_compiling.assert_called_once_with()
-            self.assertEqual(cs._STATE["compiled_passthrough_calls"], 1)
+            self.assertTrue(cs._STATE["compiled_passthrough_observed"])
             self.assertEqual(cs._STATE["calls"], 0)
             self.assertEqual(cs._STATE["records"], [])
             self.assertEqual(cs._STATE["shape_counts"], {})
@@ -724,7 +724,7 @@ class TestFlush(_RecorderTestCase):
             cs._flush()
         meta = self._meta()
         self.assertEqual(meta["total_calls_observed"], 0)
-        self.assertEqual(meta["compiled_passthrough_calls"], 2)
+        self.assertTrue(meta["compiled_passthrough_observed"])
         self.assertEqual(meta["num_cases"], 0)
         self.assertEqual(meta["module"], "fake_serving_layer")
         self.assertEqual(meta["attr"], "op")
