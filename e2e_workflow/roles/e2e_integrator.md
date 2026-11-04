@@ -204,7 +204,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    > That is the exact overlay entry the isolated unittest measured its win with (`kind:"module"` →
    > `add-module --module <module> --patched-file <task>/<file>`; `kind:"rebind"` → `add-rebind --target
    > <target> --impl-module/--impl-attr`), always seeded `--from "$CURRENT_OVERLAY"`. The branches below
-   > are for tasks that carry no `candidate_bind`.
+   > are for tasks that carry no `candidate_bind`, and for a bake-off winner (env / config / backend
+   > swap) of an op task whose bind is only there for the kernel layer's authored candidate.
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
      **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is

@@ -70,10 +70,13 @@ async function run(body, overrides = {}, reply = selection()) {
     TRACELENS_INPUTS: {}, ANALYSIS_SKILL_INPUTS: {}, KB_REF_INPUTS: {},
     profile: { profile_workload_json: '/old/workload.json', kernel_ranking_json: '/old/ranking.json' },
     strategy: null, kernelQueue: [], headQueue: [], history: { ledger: [] },
-    ST: {}, A: {}, FAST_MODE: false, DEEP_MODE: false,
+    ST: {}, A: { kernel_extract_resumes: 0 }, FAST_MODE: false, DEEP_MODE: false,
     e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
-    MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
+    MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [], extractTried: new Set(),
+    heads: [candidate('head')], TIME_DEADLINE_HIT: false,
+    TIME_BUDGET_MS: 100800000, FINAL_RESERVE_MS: 3600000, remainingMs: () => 90000000,
+    agentTimeoutFor: () => 7200000,
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
     SERVING_TOPOLOGY: '', MN: null, MN_SPEC: null, curPd: { prefill: {}, decode: {} },
     AGENTX_METRIC_BASIS: 'aggregate_output_tok_s',
@@ -89,7 +92,7 @@ async function run(body, overrides = {}, reply = selection()) {
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
     ${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
-    return {profile, strategy, headQueue, kernelQueue,
+    return {profile, strategy, headQueue, kernelQueue, extractTried: [...extractTried],
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
       state: typeof carryState === 'undefined' ? null : carryState};`)(env);
@@ -153,6 +156,28 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.deepEqual((await run(initial, pdOverrides, noneLeft)).kernelQueue, [],
     'both captures failed: an empty queue, as on a single node');
 
+  // Deferred tasks with budget left: resume from the saved evidence, bounded, as an ordinary agent.
+  const resumed2 = await run(initial, { A: {} });
+  assert.deepEqual(resumed2.calls.map(c => c.phase), ['prepare', 'resume', 'resume']);
+  const res = resumed2.calls[1];
+  assert.equal(res.inputs.PREVIOUS_DELIVERY_PATH, '/eval/delivery.json');
+  assert.deepEqual(res.inputs.DEFERRED_TASKS, selection().deferred_tasks);
+  assert.equal(res.inputs.AGENT_DEADLINE_MIN, undefined);
+  assert.equal(res.tries, undefined, 'the generic agent cap and retries, as on every role');
+  assert.equal(resumed2.calls[0].tries, undefined);
+  const cleared = { ...selection(), deferred_tasks: [] };
+  let resumeReads = 0;
+  const once = await run(initial, { A: {}, readAgentXPreparation: async () => structuredClone(resumeReads++ ? cleared : selection()) });
+  assert.deepEqual(once.calls.map(c => c.phase), ['prepare', 'resume'], 'nothing deferred: no further resume');
+  resumeReads = 0;
+  const kept = await run(initial, { A: {}, readAgentXPreparation: async () => {
+    if (resumeReads++) throw new Error('bad resume'); return structuredClone(selection()); } });
+  assert.deepEqual(kept.calls.map(c => c.phase), ['prepare', 'resume', 'repair_delivery']);
+  assert.equal(kept.kernelQueue.length, 1, 'an unreadable resume keeps the previous delivery');
+  const nearDeadline = await run(initial, { A: {}, remainingMs: () => 4200000 });
+  assert.deepEqual(nearDeadline.calls.map(c => c.phase), ['prepare'], 'no room for another agent: no resume');
+  const deadline = await run(initial, { A: {}, TIME_DEADLINE_HIT: true });
+  assert.deepEqual(deadline.calls.map(c => c.phase), ['prepare'], 'past the deadline: no resume');
   const span = await run(initial, { MN: { nodes: ['a', 'b'] }, SERVING_TOPOLOGY: 'tp_span' });
   assert.equal(span.calls[0].inputs.CAPTURE_ON_ENGINE, 'tp_span');
   assert.equal(first.headQueue[0].pct_gpu_time, 7.25, 'routing uses attributable share, not window pct');
@@ -217,6 +242,36 @@ async function run(body, overrides = {}, reply = selection()) {
     assert.equal(old.calls.length, expectedFixedCalls, name);
     assert(old.calls.every(c => ['profiler', 'system_architect'].includes(c.role)), name);
   }
+  // A head win reshapes the AgentX ranking: one re-extraction on the current stack, minus done heads.
+  const postHead = await run(head);
+  assert.deepEqual(postHead.calls.map(c => [c.role, c.phase]), [['kernel_extractor', 'prepare']]);
+  assert(postHead.calls[0].intro.includes('POST-HEAD ROUND'));
+  assert.equal(postHead.calls[0].inputs.ROUND, 'post_head');
+  assert.deepEqual(postHead.kernelQueue.map(c => c.short_name), ['kernel']);
+  assert.deepEqual(postHead.extractTried, ['head'], 'done heads are never re-delivered later');
+  // A milestone win reshapes it too: the AgentX counterpart of the fixed-load re-profile.
+  const refresh = await run(milestoneRefresh, { extractTried: new Set(['head', 'done']),
+    kernelQueue: [candidate('left')] });
+  assert.deepEqual(refresh.calls.map(c => [c.role, c.phase]), [['kernel_extractor', 'prepare']]);
+  assert(refresh.calls[0].intro.includes('MILESTONE ROUND'));
+  assert(refresh.calls[0].intro.includes('Do not re-deliver: head, done.'));
+  assert.equal(refresh.calls[0].inputs.ROUND, 'm2');
+  assert.deepEqual(refresh.kernelQueue.map(c => c.short_name), ['left', 'kernel'],
+    'new candidates join the leftovers; tried and queued ones are dropped');
+  const oldRefresh = await run(milestoneRefresh, { KERNEL_EXTRACT_ON: false });
+  assert.deepEqual(oldRefresh.calls.map(c => [c.role, c.phase]), [['profiler', 'reprofile']]);
+  for (const [why, o] of [['no improvement', { milestoneImproved: false }], ['budget spent', { dispatched: 2 }],
+    ['deadline', { TIME_DEADLINE_HIT: true }], ['closed search', { searchClosed: () => true }]])
+    assert.deepEqual((await run(milestoneRefresh, o)).calls, [], `milestone re-extraction: ${why}`);
+  const failedRefresh = await run(milestoneRefresh, { kernelQueue: [candidate('left')],
+    readAgentXPreparation: async () => { throw new Error('bad'); } });
+  assert.deepEqual(failedRefresh.kernelQueue.map(c => c.short_name), ['left'], 'a failed round keeps the queue');
+  assert.deepEqual((await run(head, { acceptedHeads: [] })).calls, [], 'no win, no re-extraction');
+  assert.deepEqual((await run(head, { A: { phases: 'head' } })).calls, [], 'no kernel phase, no re-extraction');
+  const brokenRound = await run(head, { readAgentXPreparation: async () => { throw new Error('bad'); } });
+  assert.deepEqual(brokenRound.kernelQueue, [], 'a failed re-extraction finalizes the accepted stack');
+  const oldHead = await run(head, { KERNEL_EXTRACT_ON: false });
+  assert.deepEqual(oldHead.calls.map(c => c.role), ['profiler']);
   const queued = await run(milestonePlan, { kernelQueue: [candidate('saved')] });
   assert.equal(queued.calls.length, 0, 'consume saved candidates without rediscovery');
   assert.equal(queued.plan.kernel_candidates[0].short_name, 'saved');
@@ -227,7 +282,7 @@ async function run(body, overrides = {}, reply = selection()) {
   let queue = inventory;
   for (const expected of inventory) {
     const batch = await run(milestonePlan + milestoneFilter + milestoneSchedule + milestoneRefresh + carry,
-      {kernelQueue: queue, remaining: 1});
+      {kernelQueue: queue, remaining: 1, milestoneImproved: false});
     assert.equal(batch.scheduled[0].short_name, expected.short_name);
     assert.deepEqual(batch.calls, [], 'consuming the inventory needs no extraction');
     const resumedBatch = await run(resume, {ST: batch.state});
