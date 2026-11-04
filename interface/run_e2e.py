@@ -2497,9 +2497,9 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         timeout=timeout_s,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        # A failed API call exits 1 with stderr empty: the error is in the stdout JSON.
+        detail = (proc.stderr or "")[-2000:] or (proc.stdout or "")[-2000:]
+        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {detail}")
     # claude -p --output-format json wraps the assistant text; try to unwrap.
     out = proc.stdout.strip()
     try:
@@ -2706,6 +2706,15 @@ def _parse_last_json_line(raw: str) -> dict:
     )
 
 
+# Claude Code's reply when it cannot reach the model API. 2.1.177 says "Unable to
+# connect to API (<code>)" for every connection failure; 2.1.309 and 2.1.316 say
+# e.g. "Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)".
+_LLM_UNREACHABLE_RE = re.compile(
+    r"API Error: (?:Unable to connect to API|Connection (?:error|refused|dropped|lost before)"
+    r"|Can't reach the API server|No internet route|Couldn't connect through your proxy)"
+)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
@@ -2716,11 +2725,15 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
+    # arrives as agent output inside a parse error or a failed CLI's message.
+    if _LLM_UNREACHABLE_RE.search(msg):
+        return "llm_unreachable"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -4953,6 +4966,9 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
 FINAL_REPORT_FILE = "final_report.md"
+# run_reaper.py's FENCE_FILE; its "stage" is the final-phase stage that took the GPUs.
+FINAL_PHASE_FENCE_FILE = ".final_phase_fence"
+FINAL_PHASE_STAGES = ("finalize", "validate")
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -6819,9 +6835,13 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    # bench_summarize.py writes the selected metric basis (output, total or an
+    # interactivity axis) to throughput_tok_s_median; output_throughput_tok_s_median
+    # is an alias it fills only on the output axis, so an AgentX baseline has it null.
     baseline_tput = (
         official.get("baseline_throughput_tok_s")
         or official.get("plateau_median_tok_s")
+        or summary.get("throughput_tok_s_median")
         or summary.get("output_throughput_tok_s_median")
     )
     if not baseline_tput:
@@ -6851,6 +6871,30 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
         "recovered_from_disk": True,
         "recovered_no_gain": True,
     }
+
+
+def _phase_reached(eval_dir: str | Path | None) -> str:
+    """The furthest workflow phase an eval dir shows, for a result with no workflow return.
+
+    ``setup`` until Setup's baseline summary exists, then ``search`` until the final
+    phase fences the GPUs, then the fenced stage (``finalize`` or ``validate``).
+    ``""`` when there is no eval dir to read.
+    """
+    if not eval_dir:
+        return ""
+    root = Path(eval_dir)
+    try:
+        if not root.is_dir():
+            return ""
+        fence = _read_json(root / FINAL_PHASE_FENCE_FILE)
+        stage = fence.get("stage") if isinstance(fence, dict) else None
+        if stage in FINAL_PHASE_STAGES:
+            return stage
+        if (root / "baseline" / "bench_summary.json").is_file():
+            return "search"
+    except OSError:
+        return ""
+    return "setup"
 
 
 def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
@@ -7858,12 +7902,21 @@ def main(argv: list[str]) -> int:
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
+                phase = _phase_reached(eval_dir_hint)
+                message = str(error or "")
+                if not message and error_class == "timeout":
+                    # anyio.fail_after raises a TimeoutError with no message.
+                    message = f"no workflow return within the {timeout_s}s budget"
+                    if phase:
+                        message += f" (furthest phase on disk: {phase})"
                 out = {
                     "schema_version": SCHEMA_VERSION,
                     "status": "timeout" if error_class == "timeout" else "error",
                     "error_class": error_class or "runner_error",
-                    "error": str(error or ""),
+                    "error": message,
                 }
+                if phase:
+                    out["phase_reached"] = phase
         except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,
