@@ -143,8 +143,50 @@ def _seg(name, tag):
     return (lead, int(inner) if inner.isdigit() else 0, 0)
 
 
-def _classify_step(name):
-    """-> (is_prefill, ctx_tokens, decode_batch, kv) for an execute_* span, else None."""
+# Step-span annotation DIALECTS.
+#
+# A serving stack names its per-forward annotation however it likes, and the name
+# is the only place the phase (prefill vs decode) and the shape are recorded. There
+# is more than one dialect in the wild and they share no substring, so a parser that
+# knows one of them returns None on the others -- and None is indistinguishable from
+# "this span is not a forward". That failure is silent and total: every kernel falls
+# out of the phase split, the trace reads as 100% unphased, and the Top-N table is
+# built from a denominator of zero phased work without anything in the output saying
+# so. Hence a registry, and hence _collect_step_spans raising when a trace is full of
+# step-shaped spans it cannot read. A new deployment should cost one entry here, not
+# a silently empty census.
+#
+# Each dialect: (name, detector, parser). parser -> (is_prefill, ctx_tokens,
+# decode_batch, kv) or None if this particular span is genuinely not a forward.
+
+# sglang: sglang.srt.utils.profile_utils.build_step_span_name
+#   step[EXTEND bs=<bs> toks=<n>] / step[TARGET_VERIFY bs=<bs>]
+#   step[DECODE bs=<bs>]          / step[DRAFT_EXTEND_V2 bs=<bs>]
+# EXTEND and DRAFT_EXTEND_V2 are context shapes; DECODE (the EAGLE draft forward)
+# and TARGET_VERIFY are generation shapes -- the same split
+# step_span_utils.build_detailed_annotation_suffix makes with its c_/g_ prefixes.
+_SGLANG_STEP_RE = re.compile(
+    r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?\]")
+_SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True,
+                        "DECODE": False, "TARGET_VERIFY": False}
+
+
+def _parse_sglang_step(name):
+    m = _SGLANG_STEP_RE.search(name)
+    if not m:
+        return None
+    is_prefill = _SGLANG_MODE_PREFILL.get(m.group("mode"))
+    if is_prefill is None:
+        return None
+    bs = int(m.group("bs"))
+    toks = int(m.group("toks") or 0)
+    # Prefill carries its token count; decode's "shape" is the batch.
+    return (is_prefill, toks, 0 if is_prefill else bs, 0)
+
+
+# GEAK/vLLM detailed_trace_annotation:
+#   execute_*(... context_<nreq>(<ntok>) ... generation_<batch>(sq..sk..) ...)
+def _parse_vllm_detailed(name):
     if "context_" not in name or "generation_" not in name:
         return None
     ctx = _seg(name, "context")
@@ -152,19 +194,58 @@ def _classify_step(name):
     return (ctx[1] > 0, ctx[1], gen[0] or gen[1], gen[2])
 
 
-def _collect_step_spans(events):
-    """Sorted GPU-timeline step windows: [(ts, end, 'P'|'D', ctx_tok, dec_batch)]."""
-    spans = []
+STEP_DIALECTS = [
+    ("sglang-step", lambda n: "step[" in n, _parse_sglang_step),
+    ("vllm-detailed", lambda n: n.startswith("execute_"), _parse_vllm_detailed),
+]
+
+
+def _classify_step(name):
+    """-> (is_prefill, ctx_tokens, decode_batch, kv) for a forward span, else None."""
+    for _dname, detect, parse in STEP_DIALECTS:
+        if detect(name):
+            c = parse(name)
+            if c is not None:
+                return c
+    return None
+
+
+def _step_span_candidates(events):
+    """Annotation spans that LOOK like per-forward step spans, whatever the dialect."""
     for e in events:
         if not isinstance(e, dict) or e.get("cat") != "gpu_user_annotation":
             continue
         nm = e.get("name")
-        if not (isinstance(nm, str) and nm.startswith("execute_") and "dur" in e and "ts" in e):
+        if not (isinstance(nm, str) and "dur" in e and "ts" in e):
             continue
+        if any(detect(nm) for _d, detect, _p in STEP_DIALECTS):
+            yield e, nm
+
+
+def _collect_step_spans(events, strict=False):
+    """Sorted GPU-timeline step windows: [(ts, end, 'P'|'D', ctx_tok, dec_batch)].
+
+    Raises when the trace contains step-shaped annotations that no registered
+    dialect can parse: an empty phase split must not be mistaken for a trace that
+    simply had no forwards in it.
+    """
+    spans, seen, unparsed = [], 0, {}
+    for e, nm in _step_span_candidates(events):
+        seen += 1
         c = _classify_step(nm)
-        if c:
-            spans.append((e["ts"], e["ts"] + e["dur"],
-                          "P" if c[0] else "D", c[1], c[2]))
+        if c is None:
+            if len(unparsed) < 5:
+                unparsed[nm[:160]] = unparsed.get(nm[:160], 0) + 1
+            continue
+        spans.append((e["ts"], e["ts"] + e["dur"], "P" if c[0] else "D", c[1], c[2]))
+    if strict and seen and not spans:
+        raise ValueError(
+            "parse_profile: %d step-shaped annotation spans found, none parsed by any "
+            "registered dialect (%s). The phase split would be empty and every kernel "
+            "would read as unphased. Add a dialect to STEP_DIALECTS. Examples seen: %s"
+            % (seen, ", ".join(d for d, _, _ in STEP_DIALECTS),
+               "; ".join(sorted(unparsed)))
+        )
     spans.sort()
     return spans
 
@@ -180,12 +261,23 @@ def snap_capture_size(x, sizes):
 
 
 def analytic_regime_calls(isl, osl, conc, chunk=None):
-    """Analytic per-wave forward-pass count per serving phase (the denominator the short profile
-    window cannot observe). Mirrors attribute_weights.estimate_serving_regime_calls so the topN
-    est_calls == serving_weight_model.analytic_calls the immutable unittest consumes:
+    """Analytic per-wave forward-pass count per serving phase -- A FALLBACK OF LAST RESORT.
+
+    This models a fixed-ISL/OSL sweep: every request the same length, prefill chunked
+    uniformly, decode running OSL steps. A real agentic trace replay is none of those
+    things. On a measured AgentX leg the model is wrong by whole multiples -- it cannot
+    see prefix-cache hits (which on a conversational corpus remove the large majority of
+    prefill tokens), speculative accept length, or the batch-size distribution.
+
+    So: if observed counts exist, USE THEM. `observed_workload.py` reconstructs every
+    prefill batch and every decode iteration of the measured leg from the serving log,
+    and `plan_sampling_points.py` consumes that. This function exists only for the case
+    where no serving log is available at all, and callers must record which of the two
+    they used.
+
       prefill = CONC * ceil(ISL/chunk)   (CONC is in the COUNT)
       decode  = OSL                      (CONC is in the SHAPE M, not the count)
-    Prefer the shared impl; fall back to this identical formula if the import is unavailable."""
+    """
     try:
         from attribute_weights import estimate_serving_regime_calls
         return estimate_serving_regime_calls(isl, osl, conc or 1, prefill_chunk=chunk)
@@ -255,8 +347,22 @@ def parse_torch_trace(path):
             if flat and (ext not in op_by_ext):
                 op_by_ext[ext] = (dims, a.get("Input type"))
 
-    # Serving-phase step windows (empty if the trace has no execute_* annotations).
-    spans = _collect_step_spans(events)
+    # Serving-phase step windows. Empty when the trace genuinely has no forward
+    # annotations; an exception when it has them in a dialect nothing here reads, so
+    # an unreadable trace cannot masquerade as an unphased one. Set
+    # PARSE_PROFILE_ALLOW_UNPHASED=1 to downgrade that to a warning when you have
+    # actually decided the phase split is not needed.
+    try:
+        spans = _collect_step_spans(events, strict=os.environ.get("PARSE_PROFILE_STRICT_PHASES") == "1")
+    except ValueError as exc:
+        if os.environ.get("PARSE_PROFILE_ALLOW_UNPHASED") == "1":
+            print("WARNING: %s\n  continuing unphased because "
+                  "PARSE_PROFILE_ALLOW_UNPHASED=1; every by_phase/by_step field below "
+                  "is empty for that reason, not because the workload had no phases."
+                  % exc, file=sys.stderr)
+            spans = []
+        else:
+            raise
     _starts = [s[0] for s in spans]
 
     def _phase_of(ts):
@@ -659,7 +765,7 @@ def annotate_rows(rows, agg, source):
             kind, ev = classify_entity(hit[1], source)
             ev["matched_profiled_kernel"] = hit[0]
             if kind == "gpu_kernel" and not r.get("device_kernel"):
-                r["device_kernel"] = hit[0]        # the head gate adopts entity_kind only through this field
+                r["device_kernel"] = hit[0]
         elif k in norm_collisions:
             kind = "unresolved"                    # fail closed: refuse to guess which colliding entity
             ev = {"basis": "ambiguous_name_match",

@@ -2699,6 +2699,28 @@ class TestBuildCandidateOverlay(_LegTestCase):
 
 
 class TestAssertLegsDiffer(_LegTestCase):
+    def test_joint_phase_entries_are_all_checked(self):
+        self._legs()
+        self.meta["phase_target_callables"] = {
+            "decode": self.meta["target_callable"], "prefill": "live_stack.moe:prefill"}
+        hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual(self.sub.modes(), ["resolve"] * 4)
+
+    def test_joint_secondary_phase_cannot_resolve_to_the_baseline(self):
+        calls = []
+        self.meta["phase_target_callables"] = {"prefill": "live_stack.moe:prefill"}
+
+        def resolve(task, overlay, mode, **kwargs):
+            calls.append(kwargs.get("target_callable", self.meta["target_callable"]))
+            if kwargs.get("target_callable"):
+                return self.BASE_IDENT
+            return self.BASE_IDENT if overlay == self.base else self.CAND_IDENT
+
+        with _patched(hl, _run_leg=resolve):
+            with self.assertRaisesRegex(RuntimeError, "prefill.*SAME code"):
+                hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)
+        self.assertEqual(calls[-2:], ["live_stack.moe:prefill"] * 2)
+
     def test_two_legs_importing_different_code_are_accepted(self):
         self._legs()
         bi, ci = hl.assert_legs_differ(self.task, self.base, self.cand, self.meta)

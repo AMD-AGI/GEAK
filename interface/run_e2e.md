@@ -13,7 +13,7 @@ changes while the workflow evolves internally.
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-* Exit code `0` → `result.json.status` is `ok` or `no_gain`.
+* Exit code `0` → `result.json.status` is `ok`, `no_gain` or `timeout`.
 * Exit code `1` → a crash; `result.json.status == "error"` with an `error` field.
 * Exit code `2` → bad usage / unreadable handoff.
 * `--dry-run` → print the mapped `e2e_workflow.js` args + the prompt and
@@ -148,7 +148,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|unknown; supply with expected_gfx
+  "expected_target": "unknown",          // r9700|r9600d|unknown; supply with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
@@ -187,6 +187,19 @@ example:
 ```bash
 export GEAK_GPU_IDENTITY_JSON='{"gfx":"gfx1201","target":"r9700","marketing_name":"AMD Radeon AI PRO R9700","physical_cu_count":64}'
 ```
+
+Exact `AMD Radeon AI PRO R9600D` detection produces `r9600d` and preserves
+the observed CU count (48 on the recorded board). Like `r9700`, this target
+requires `gfx1201` in explicit and detected identity pairs. The interface
+preserves the product, ISA, device name and CU count in the workflow handoff.
+
+Product identity selects product data, not separate logic. `r9700` and
+`r9600d` share the gfx1201 ISA path (vLLM-only serving, CDNA knowledge
+isolation) and differ only in the `product:` block of
+`e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
+holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.
+Unknown gfx1201 products remain `unknown` and keep their existing refusal
+behavior.
 
 `--dry-run` is host-only: when neither explicit nor environment identity is
 provided it skips rocminfo and reports `gpu_identity_status:
@@ -308,10 +321,19 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "metric_status": "aligned | warning | warning_recipe_unaligned | unavailable",
     "primary_metric": "setup_seed_same_config_divergence_pct",
     "server_identity": {
-      "expected": { /* upstream handoff observation */ },
-      "observed": { /* GEAK Setup ServerArgs or Magpie identity */ },
-      "status": "matched | mismatched | unverified | unavailable",
-      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log"]
+      "expected": { /* upstream handoff observation, or orchestrator_server_log facts */ },
+      "expected_source": "<handoff key> | orchestrator_server_log",
+      "observed": { /* GEAK Setup: SGLang ServerArgs, ATOM Engine kwargs, or Magpie identity */ },
+      "status": "matched | mismatched | unverified | unavailable",  // worst of Setup and every geak_launched leg
+      "mismatches": [{"key": "...", "expected": "...", "observed": "..."}],  // Setup only, when it mismatched
+      "geak_launched": [                // servers GEAK launched itself, judged against the orchestrator log
+        {"leg": "profile | validation_base | validation_final", "path": "...",
+         "status": "matched | mismatched | unverified", "mismatches": [ /* as above */ ]}
+      ],
+      "geak_launched_reference": "orchestrator_server_log | <handoff key>",
+      "orchestrator_reference_problem": "<why no orchestrator log could be trusted>",  // only when set
+      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log",
+                         "<orchestrator server log actually read>", ".../profile/round_0/server.log"]
     }
   },
   "measurement_drift": {                // Setup vs Validate/base, never cross-handoff alignment
@@ -500,9 +522,27 @@ accepted configuration in both harnesses. It is the numeric compatibility
 metric for the cross-handoff comparison; `handoff_alignment` is the
 authoritative verdict and is `unverified` until actual Setup launch evidence
 matches an upstream observed identity. GEAK reads that evidence from
-`baseline/server.log` (parsed SGLang `ServerArgs`) or
-`baseline/magpie_launch.log` (an emitted launch identity) and records every
-existing evidence path in `server_identity.evidence_paths`.
+`baseline/server.log` (parsed SGLang `ServerArgs`, ATOM `Engine kwargs` or vLLM
+`non-default args`) or
+`baseline/magpie_launch.log` (an emitted launch identity). When the handoff names
+the orchestrator's own baseline server log
+(`baseline_env_spec.measurement_evidence.actual_server_log_path`), GEAK parses it
+too, falling back to the newest `attempts/<NNN>/server.log.gz` that holds a complete
+launch record when Hyperloom has rotated the live file; attempts that disagree make
+it untrusted (`orchestrator_reference_problem`). Those facts judge Setup when the
+upstream identity is an opaque digest, and always judge the servers GEAK launched
+itself (`geak_launched`: profile round 0, validation base and final), because a
+matching Setup says nothing about a later launch. `server_identity.status` is the
+worst of all checks (mismatched > unverified > matched); a launch field logged in a
+form the parser does not know is recorded under `unparsed` and makes that check
+unverified. For vLLM, whose `non-default args` line lists every argument that
+differs from its default, every field is compared, including one the parser has
+never seen, except the run-scoped `host`, `port`, `model_tag` and the
+`profiler_config` of GEAK's own profile servers. Two servers that differ in a
+field are `mismatched`; a field logged by only one side is `unverified`; an item
+that is not a `key: value` pair is recorded under `unparsed`. Every evidence path
+actually read is recorded in
+`server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
 same-config fields are `null` and `handoff_alignment.status` is `unavailable`;
@@ -536,6 +576,29 @@ case so the number is not read as a measurement problem.
 Set `BENCH_LAUNCHER=native` in the environment to force the adapter launch; it
 outranks every other resolution path and is the escape hatch when the
 orchestrator's script cannot run.
+
+### When there is no result to report
+
+When no workflow return exists and none can be rebuilt from disk (see Handoff
+resilience below), `result.json` reports the failure instead:
+
+```jsonc
+{
+  "schema_version": 2,
+  "status": "timeout | error",
+  "error_class": "timeout | llm_unreachable | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
+  "error": "no workflow return within the 32400s budget (furthest phase on disk: search)",
+  "phase_reached": "setup | search | finalize | validate"
+}
+```
+
+* `llm_unreachable` → Claude Code could not reach the model API (connection
+  refused or dropped, DNS, no route, proxy or TLS failure). `error` keeps the
+  original message, which contains Claude Code's `API Error: ...` reply.
+* `phase_reached` → the furthest phase the eval dir shows: `setup` until Setup's
+  baseline summary exists, `search` until the final phase fences the GPUs
+  (`.final_phase_fence`), then the fenced stage. Absent when the eval dir does
+  not exist.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 

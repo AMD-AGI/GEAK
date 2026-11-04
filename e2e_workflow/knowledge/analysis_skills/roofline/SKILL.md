@@ -87,9 +87,11 @@ see the disagreement rather than a single blended number that hides it.
    (a kernel too small to matter is not a modelling failure and must not read as one).
 1. Resolve peaks from `peaks.md` via
    `resolve_peaks(gfx, product=env_report.device_target)`.
-   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
+   `device_target=unknown` (every card without a product section, MI300/MI355
+   included) is no
    product constraint: the ISA-keyed tables still resolve. Client RDNA4
-   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
+   numeric peaks exist only for the products with a `product:` section
+   (`r9700`, `r9600d`). A bare gfx1201 (or any other
    gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
    unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
    — it must not use that gate. Other unknown architectures may derive from
@@ -325,7 +327,7 @@ make the kernel move **fewer bytes for the same work**:
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated
    (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
-   generic op-class priors, not measured R9700 GDDR6 efficiency factors.
+   generic op-class priors, the same for every product.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the

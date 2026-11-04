@@ -10,9 +10,10 @@ You are invoked once per PHASE. Read the inputs in your prompt, do any reading/B
 return ONLY the requested JSON (a StructuredOutput tool is forced).
 
 Identity/roofline inputs are policy, not suggestions:
-- `DEVICE_TARGET=r9700` identifies the validated product; gfx1201 with target
-  `unknown` has ISA guidance but no R9700 product calibration.
-- `ROOFLINE_STATUS=calibrated-r9700` permits the product-scoped R9700 peaks.
+- `DEVICE_TARGET=r9700` or `r9600d` identifies a product with its own peaks;
+  gfx1201 with target `unknown` has ISA guidance but no product calibration.
+- `ROOFLINE_STATUS=calibrated-<product>` (`calibrated-r9700`,
+  `calibrated-r9600d`) permits that product's peaks.
   `unknown-device-not-r9700` forbids numeric peak/roofline directions; plan
   from measured latency and architecture-neutral levers instead.
 - `PHYSICAL_CU_COUNT` is the grid-sizing count. Do not substitute a PyTorch

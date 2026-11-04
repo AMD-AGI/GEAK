@@ -49,6 +49,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -326,11 +327,55 @@ class TestMapArgs(_RunE2ECase):
                 expected_gfx="gfx950", expected_target="r9700",
             ))
 
+    def test_r9600d_identity_is_preserved(self):
+        expected = {
+            "gfx": "gfx1201", "target": "r9600d",
+            "marketing_name": "AMD Radeon AI PRO R9600D",
+            "physical_cu_count": 48,
+        }
+        identity = rx._expected_gpu_identity({
+            "expected_gfx": "gfx1201", "expected_target": "r9600d",
+            "expected_device_name": expected["marketing_name"],
+            "expected_physical_cu_count": 48,
+        })
+        self.assertEqual(identity, expected)
+        mapped = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_r9600d"), backend="vllm",
+            expected_gfx="gfx1201", expected_target="r9600d",
+            expected_device_name=expected["marketing_name"],
+            expected_physical_cu_count=48,
+        ))
+        self.assertEqual(mapped["expected_target"], "r9600d")
+        self.assertEqual(mapped["expected_gfx"], "gfx1201")
+        self.assertEqual(mapped["expected_physical_cu_count"], 48)
+        self.assertEqual(mapped["expected_device_name"], expected["marketing_name"])
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
+        self.assertEqual(rx._expected_gpu_identity({}), expected)
+
+    def test_r9600d_defaults_to_vllm_like_r9700(self):
+        for target, name, cus in (
+            ("r9700", "AMD Radeon AI PRO R9700", 64),
+            ("r9600d", "AMD Radeon AI PRO R9600D", 48),
+        ):
+            with self.subTest(target=target):
+                mapped = rx.map_args(self._handoff(
+                    eval_dir=str(self.tmp / f"e2e_{target}_default"),
+                    expected_gfx="gfx1201", expected_target=target,
+                    expected_device_name=name, expected_physical_cu_count=cus,
+                ))
+                self.assertEqual(mapped["backend"], "vllm")
+
+    def test_r9600d_identity_rejects_wrong_isa(self):
+        with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
+            rx._expected_gpu_identity({
+                "expected_gfx": "gfx950", "expected_target": "r9600d",
+            })
+
     def test_explicit_identity_rejects_malformed_values(self):
         with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "rdna4", "expected_target": "unknown"})
-        with self.assertRaisesRegex(ValueError, "must be 'r9700' or 'unknown'"):
+        with self.assertRaisesRegex(ValueError, "must be 'r9700', 'r9600d' or 'unknown'"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "gfx1201", "expected_target": "r9600"})
 
@@ -342,6 +387,8 @@ class TestMapArgs(_RunE2ECase):
              RuntimeError, "invalid target"),
             (json.dumps({"gfx": "gfx950", "target": "r9700"}),
              RuntimeError, "r9700 on a non-gfx1201 ISA"),
+            (json.dumps({"gfx": "gfx950", "target": "r9600d"}),
+             RuntimeError, "r9600d on a non-gfx1201 ISA"),
         ]
         for raw, exc, pattern in cases:
             with self.subTest(raw=raw):
@@ -558,6 +605,19 @@ class TestMapArgs(_RunE2ECase):
         self.assertTrue(prompt.startswith("## PROCESS SAFETY"), prompt[:80])
         for banned in ("pkill -f", "killall", "kill -- -PGID"):
             self.assertIn(banned, prompt)
+
+    def test_role_agent_wait_rule_never_starts_a_command_with_a_long_sleep(self):
+        """With background tasks on, Claude Code 2.1.310+ refuses a Bash call that
+        starts with `sleep N` (N >= 25). A role agent that copies such an example is
+        refused, arms a Monitor, and returns before its leg has finished."""
+        src = rx.E2E_SCRIPT.read_text(encoding="utf-8")
+        start = src.index("const PROCESS_SAFETY = `")
+        safety = src[start:src.index("\n`;", start)]
+        examples = re.findall(r"\\`(.*?)\\`", safety) + re.findall(r"^ {4}(\S.*)$", safety, re.MULTILINE)
+        long_leading = [cmd for cmd in examples
+                        if (m := re.match(r"sleep\s+(\d+)", cmd.strip())) and int(m.group(1)) >= 25]
+        self.assertEqual(long_leading, [])
+        self.assertRegex(safety, re.compile(r"^ {4}timeout \d+ bash -c 'until ", re.MULTILINE))
 
 
 class TestProtectedPgids(_RunE2ECase):
@@ -1917,6 +1977,49 @@ class TestClassifyError(_RunE2ECase):
         )
         self.assertEqual(rx._classify_error(ValueError("other")), "runner_error")
 
+    # Claude Code's replies, verbatim, to a refused, unresolvable and reset model API
+    # endpoint: 2.1.177 first, then 2.1.309 / 2.1.316.
+    UNREACHABLE_REPLIES = (
+        "API Error: Unable to connect to API (ConnectionRefused)",
+        "API Error: Unable to connect to API (FailedToOpenSocket)",
+        "API Error: Unable to connect to API (ECONNRESET)",
+        "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+        "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+        ("API Error: Connection dropped (ECONNRESET). Check the gateway set in "
+         "ANTHROPIC_BASE_URL, then try again."),
+    )
+
+    def test_an_unreachable_model_api_is_not_a_parse_error(self):
+        """The CLI answers a failed API call with an "API Error: ..." reply, which reaches
+        run_e2e as agent output; an outage must not read as malformed workflow output."""
+        for reply in self.UNREACHABLE_REPLIES:
+            with self.subTest(reply=reply):
+                with self.assertRaises(rx.WorkflowParseError) as ctx:
+                    rx._parse_last_json_line(f"{reply}\n{reply}")
+                self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
+                self.assertIn(reply, str(ctx.exception))
+                cli = RuntimeError(f'claude CLI failed (rc=1): {{"result": "{reply}"}}')
+                self.assertEqual(rx._classify_error(cli), "llm_unreachable")
+        self.assertEqual(
+            rx._classify_error(TimeoutError(self.UNREACHABLE_REPLIES[0])), "timeout")
+
+    def test_connection_errors_outside_the_model_api_keep_their_class(self):
+        """A bench or server connection error in the transcript is the run's own; only
+        Claude Code's API Error reply names the model endpoint."""
+        for text in (
+            ("aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host "
+             "127.0.0.1:8000 ssl:default [Connection refused]"),
+            "curl: (7) Failed to connect to localhost port 8000: Connection refused",
+            "Error: connect ECONNREFUSED 127.0.0.1:8000",
+            ("API Error: 500 Internal server error. This is a server-side issue, usually "
+             "temporary — try again in a moment."),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    rx._classify_error(rx.WorkflowParseError(f"Last 2000 chars:\n{text}")),
+                    "workflow_parse_error",
+                )
+
 
 # =========================================================================== #
 # SDK invocation + completion gate
@@ -2022,6 +2125,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         pipeline (rather than the agent 'backgrounding' it) under root."""
         self.patch_rx("CLAUDE_EFFORT", "high")
         self.patch_rx("CLAUDE_BIN", "/opt/claude-2.1.181/claude")
+        os.environ.pop(rx.BACKGROUND_TASKS_ENV, None)
         _anyio, sdk = self._install([ResultMessage(result="done")])
         real_geteuid = os.geteuid
         os.geteuid = lambda: 0
@@ -2036,7 +2140,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(kwargs["settings"], rx.WORKFLOW_SETTINGS)
         self.assertEqual(kwargs["cwd"], str(rx.E2E_DIR))
         self.assertEqual(kwargs["extra_args"], {"effort": "high"})
-        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1"})
+        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1", rx.BACKGROUND_TASKS_ENV: "1"})
         self.assertEqual(kwargs["cli_path"], "/opt/claude-2.1.181/claude")
 
     def test_public_build_effort_is_not_forwarded(self):
@@ -2151,6 +2255,19 @@ class TestInvokeViaCli(_RunE2ECase):
         self.assertIn("claude CLI failed (rc=3)", msg)
         self.assertIn("TAIL", msg)
         self.assertEqual(rx._classify_error(ctx.exception), "cli_failed")
+
+    def test_a_failed_api_call_reported_on_stdout_reaches_the_error(self):
+        """claude -p reports a failed API call in its stdout JSON and exits 1 with
+        stderr empty."""
+        self._fake_which("/usr/bin/claude")
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+        self._fake_subprocess(_FakeProc(returncode=1, stdout=json.dumps(
+            {"type": "result", "is_error": True, "result": reply}, ensure_ascii=False)))
+        with self.assertRaises(RuntimeError) as ctx:
+            rx._invoke_via_cli("P", 10)
+        self.assertIn(reply, str(ctx.exception))
+        self.assertEqual(rx._classify_error(ctx.exception), "llm_unreachable")
 
     def test_json_wrapper_variants_are_unwrapped_or_passed_through(self):
         self._fake_which("/usr/bin/claude")
@@ -3057,6 +3174,7 @@ class TestMain(_RunE2ECase):
         self.patch_rx("invoke_workflow", lambda *a, **k: {})
         knobs = {
             "GEAK_FINAL_RESERVE_CAP_FRAC": "final_reserve_cap_frac",
+            "GEAK_AGENTX_LEG_OVERHEAD_S": "agentx_leg_overhead_s",
             "GEAK_AGENT_TIMEOUT_MS": "agent_timeout_ms",
             "GEAK_AGENT_TIMEOUT_RETRY": "agent_timeout_retry",
             "GEAK_E2E_ACCURACY_GATE": "accuracy_gate",
@@ -3065,15 +3183,17 @@ class TestMain(_RunE2ECase):
         }
         cases = (
             ({}, {}),
-            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENT_TIMEOUT_MS": "18000000",
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENTX_LEG_OVERHEAD_S": "1800",
+              "GEAK_AGENT_TIMEOUT_MS": "18000000",
               "GEAK_AGENT_TIMEOUT_RETRY": "0", "GEAK_E2E_ACCURACY_GATE": "GSM8K",
               "GEAK_E2E_ACCURACY_LIMIT": "400", "GEAK_E2E_ACCURACY_TOL": "0.02"},
-             {"final_reserve_cap_frac": 0.4, "agent_timeout_ms": 18000000,
+             {"final_reserve_cap_frac": 0.4, "agentx_leg_overhead_s": 1800,
+              "agent_timeout_ms": 18000000,
               "agent_timeout_retry": "false", "accuracy_gate": "gsm8k",
               "accuracy_limit": 400, "accuracy_tol": 0.02}),
             ({"GEAK_AGENT_TIMEOUT_RETRY": "yes"}, {"agent_timeout_retry": "true"}),
-            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_E2E_ACCURACY_GATE": "mmlu",
-              "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_AGENTX_LEG_OVERHEAD_S": "slow",
+              "GEAK_E2E_ACCURACY_GATE": "mmlu", "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
         )
         for env, expected in cases:
             with self.subTest(env=env):
@@ -3204,6 +3324,43 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["status"], "timeout")
         self.assertEqual(out["error_class"], "timeout")
         self.assertIn("self-stop to flush interface files", out["error"])
+
+    def test_a_silent_timeout_says_what_ran_out_and_how_far_the_run_got(self):
+        """anyio.fail_after raises TimeoutError() with no message; the result must
+        still name the budget and the furthest phase on disk."""
+        self.write_json(self.eval_dir / "baseline" / "bench_summary.json",
+                        {"metric_basis": "aggregate_output_tok_s",
+                         "throughput_tok_s_median": 400.0})
+
+        def silent_timeout(prompt, timeout_s, eval_dir, ps_args=None):
+            raise TimeoutError()
+
+        self.patch_rx("invoke_workflow", silent_timeout)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 0)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "timeout")
+        self.assertEqual(out["error_class"], "timeout")
+        self.assertEqual(out["phase_reached"], "search")
+        self.assertEqual(
+            out["error"],
+            "no workflow return within the 43200s budget (furthest phase on disk: search)")
+
+    def test_an_unreachable_model_api_is_reported_as_such(self):
+        reply = ("API Error: Connection refused — a firewall or proxy may be blocking it "
+                 "(ECONNREFUSED)")
+
+        def outage(prompt, timeout_s, eval_dir, ps_args=None):
+            return rx._parse_last_json_line(f"{reply}\n{reply}")
+
+        self.patch_rx("invoke_workflow", outage)
+        rc, _stdout = self._run(self._handoff())
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error_class"], "llm_unreachable")
+        self.assertIn("Could not parse a JSON workflow return", out["error"])
+        self.assertIn(reply, out["error"])
 
     def test_recovery_failure_after_a_crashed_workflow_is_contained(self):
         """Both the post-crash recovery and the one inside _emit raise; the run

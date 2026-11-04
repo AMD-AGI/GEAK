@@ -607,6 +607,19 @@ def to_device_like(ref, dev):
 
 def reconstruct_captured(obj, device="cpu"):
     """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
+    if isinstance(obj, dict) and obj.get("__needs_regen__"):
+        # structure_only capture: the recorded output came from the real operands, which the
+        # file no longer holds, so there is nothing here to compare against. Raising is the
+        # point -- a placeholder that reached a correctness gate would pass it vacuously.
+        raise ValueError(
+            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
+            "output has not been regenerated. Run scripts/regen_reference.py against it "
+            "inside the serving container and point the task at the regenerated file.")
+    if isinstance(obj, dict) and obj.get("__synth__"):
+        raise ValueError(
+            "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
+            "first with capture_shapes.materialize_synth(...), which rebuilds it from the "
+            "recorded seed; do NOT rebuild operands through the serving stack at UT time.")
     if isinstance(obj, dict) and obj.get("__tensor__"):
         t = obj["data"]
         return t.to(device) if hasattr(t, "to") else t
@@ -1060,6 +1073,47 @@ def _analytic_calls_from_meta(meta):
     return swm.get("analytic_calls") or {}
 
 
+def _observed_workload_cases(meta):
+    """Return measured workload buckets, or None for the unchanged fixed-load path.
+
+    Observed call mass is indexed by case signature (including KV and dispatch),
+    never inferred from client concurrency or assigned to the largest M.
+    """
+    workload = (meta or {}).get("workload") or {}
+    model = workload.get("serving_weight_model") or {}
+    observed_sources = {"observed_workload", "agentx_log_fold"}  # legacy AgentX tasks remain readable
+    # Activation is AgentX-only; the arithmetic/phase labels are model-agnostic.
+    # An explicit non-AgentX kind wins even over leftover observed-model fields.
+    kind = workload.get("kind")
+    requires_observed = (kind == "agentx_trace_replay"
+                         or (not kind and model.get("source") == "agentx_log_fold"))
+    if not requires_observed:
+        return None
+    if model.get("source") not in observed_sources or not model.get("evidence_path"):
+        raise HarnessIncompleteError("Observed-workload UT requires an observed model with evidence_path; no analytic fallback")
+    cases = workload.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise HarnessIncompleteError("Observed-workload UT requires observed workload.cases")
+    out = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            raise HarnessIncompleteError("Observed workload case must be an object")
+        sig = case.get("sig")
+        if not isinstance(sig, str) or not sig.strip() or sig in out:
+            raise HarnessIncompleteError("Observed workload cases require unique nonempty sig values")
+        try:
+            mass = float(case["effective_calls"])
+        except (KeyError, TypeError, ValueError):
+            raise HarnessIncompleteError(f"Observed case {sig}: missing/invalid effective_calls") from None
+        if isinstance(case["effective_calls"], bool) or not math.isfinite(mass) or mass < 0:
+            raise HarnessIncompleteError(f"Observed case {sig}: effective_calls must be finite and nonnegative")
+        regime = str(case.get("regime") or "").strip().lower()
+        if not regime:
+            raise HarnessIncompleteError(f"Observed case {sig}: regime must be a nonempty workload phase")
+        out[sig] = {**case, "regime": regime, "effective_calls": mass}
+    return out
+
+
 def served_regimes(meta):
     """Regimes this kernel actually runs in (lower-cased set); empty set = ungated. Preference:
       1. meta['served_regimes'] (extractor override, if set), else
@@ -1075,7 +1129,11 @@ def served_regimes(meta):
 
 
 def served_buckets(meta):
-    """The M buckets this kernel actually SERVES, with their analytic per-wave pass counts.
+    """The M buckets this kernel serves, with measured or analytic call counts.
+
+    Observed weighting sums call mass by (phase, M), preserving phase identity;
+    KV/dispatch distinctions still require the full UT. The fixed-load path
+    below retains its analytic per-wave model and de-duplication by M.
 
     `op_bench` benched at `max(m_buckets)`, on the premise that the largest bucket carries the
     GPU-time mass. It does not. Mass = per-launch time x LAUNCHES, and the analytic call model
@@ -1091,6 +1149,21 @@ def served_buckets(meta):
     Returns [(phase, M, calls), ...] ordered by descending calls, de-duplicated by M. Returns []
     when meta carries no serving model (offline / unit-test metas), which leaves callers on their
     previous single-bucket behaviour."""
+    observed = _observed_workload_cases(meta)
+    if observed is not None:
+        served = served_regimes(meta)
+        out = {}
+        for case in observed.values():
+            phase, mass = case["regime"], case["effective_calls"]
+            if (served and phase not in served) or mass == 0:
+                continue
+            m = _int_or_none(case.get("m"))
+            if m is None or m <= 0:
+                raise HarnessIncompleteError(f"Observed case {case['sig']}: missing positive m for op benchmark")
+            key = (phase, m)
+            out[key] = out.get(key, 0.0) + mass
+        return [(phase, m, mass) for (phase, m), mass in
+                sorted(out.items(), key=lambda item: -item[1])]
     swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
     calls = swm.get("analytic_calls") or {}
     if not calls:
@@ -1130,13 +1203,16 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
 
       (1) served-regimes gate: drop any case whose regime is not in `served_regimes(meta)` (when set),
           so a decode case that leaked into a prefill-only kernel's oracle cannot be weighted onto it.
-      (2) analytic call model (NEVER profiled counts): calls come from
+      (2) Observed workload: use per-signature effective_calls from the measured
+          observed_workload model (or legacy agentx_log_fold); require every positive-mass served case and
+          retain measured unchanged cases in the denominator. No analytic fallback.
+          Fixed ISL/OSL workloads: calls come from
           meta.workload.serving_weight_model.analytic_calls (prefill already CONC-scaled by
           attribute_weights: CONC*ceil(ISL/chunk); decode = OSL). Within each served regime the regime's
           total passes go to the LARGEST-M bucket (decode M==CONC; prefill M==chunk/ISL); smaller/
           transient buckets get calls=1 and stay visible. CONC enters decode via the SHAPE (M) and
           prefill via the COUNT — one consistent per-wave basis.
-      (3) pseudo-identity guard: a bucket whose baseline_ms == optimized_ms to `identity_eps` (a warm-JIT
+      (3) fixed-load pseudo-identity guard: a bucket whose baseline_ms == optimized_ms to `identity_eps` (a warm-JIT
           / autotune-converged / byte-identical-candidate artifact, NOT a real measured null) is flagged
           and EXCLUDED. If EVERY surviving bucket is identity, `weighted` is None with a reason so the
           caller does not trust an unmeasured 1.0x (re-measure per-bucket ms in a fresh subprocess under
@@ -1157,6 +1233,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
     Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}."""
     served = served_regimes(meta)
+    observed = _observed_workload_cases(meta)
     calls_model = _analytic_calls_from_meta(meta)
 
     def _f(x):
@@ -1166,8 +1243,11 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             return None
 
     rows, dropped_unserved = [], []
+    seen = set()
     for c in per_case:
         reg = str(c.get("regime") or "").lower()
+        if observed is not None:
+            reg = reg.strip()
         if served and reg and reg not in served:
             dropped_unserved.append(c.get("sig") or c.get("name") or reg)
             continue
@@ -1176,6 +1256,25 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             spd = b / o
         rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
                      "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+        if observed is not None:
+            sig = rows[-1]["sig"]
+            if sig in seen or sig not in observed:
+                raise HarnessIncompleteError(f"Observed timed case {sig!r}: duplicate or absent from observed workload")
+            case = observed[sig]
+            if reg != case["regime"] or (case.get("m") is not None and c.get("m") != case["m"]):
+                raise HarnessIncompleteError(f"Observed timed case {sig}: regime/M differs from observed workload")
+            mass = case["effective_calls"]
+            if mass > 0 and any(v is None or not math.isfinite(v) or v <= 0 for v in (b, o)):
+                raise HarnessIncompleteError(f"Observed timed case {sig}: positive call mass requires both measured latencies")
+            rows[-1]["calls"] = mass
+            seen.add(sig)
+
+    if observed is not None:
+        required = {sig for sig, case in observed.items()
+                    if case["effective_calls"] > 0 and (not served or case["regime"] in served)}
+        missing = required - seen
+        if missing:
+            raise HarnessIncompleteError(f"Observed-workload UT omitted positive-mass cases: {sorted(missing)}")
 
     # assign analytic passes: the largest-M bucket in each regime carries that regime's calls, rest = 1.
     by_reg = {}
@@ -1189,6 +1288,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             return float(x["baseline_ms"] or 0.0)
 
     for reg, members in by_reg.items():
+        if observed is not None:
+            continue  # measured call mass was joined by signature above
         total_calls = int(calls_model.get(reg, 1) or 0) if reg else 1
         dom = max(members, key=_m) if members else None
         for r in members:
@@ -1201,7 +1302,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
                        and abs(b - o) <= identity_eps * max(abs(b), 1e-12))
         r["identity"] = bool(is_identity)
         r["weight"] = (b or 0.0) * r.get("calls", 1)
-        if is_identity:
+        if is_identity and observed is None:
             suspect.append(r["sig"]); r["included"] = False
         elif spd and spd > 0 and r["weight"] > 0:
             r["included"] = True; included.append(r)
@@ -1406,7 +1507,8 @@ def _kill_process_group(proc, grace=5.0):
             continue
 
 
-def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600):
+def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
+             target_callable=""):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
@@ -1417,6 +1519,10 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
+    if target_callable:
+        if mode != "resolve":
+            raise ValueError("target_callable override is only valid for identity resolution")
+        cmd += ["--target-callable", target_callable]
     # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
@@ -1465,21 +1571,31 @@ def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
     """Refuse to measure unless the two legs provably import DIFFERENT code AND the baseline leg
     resolves OUTSIDE the task dir."""
     task = os.path.abspath(task_dir)
-    target = meta["target_callable"]
-    bi = _run_leg(task, base, "resolve", timeout=timeout)
-    ci = _run_leg(task, cand, "resolve", timeout=timeout)
-    for who, ident in (("baseline", bi), ("candidate", ci)):
-        if ident.get("error"):
-            raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
-    if bi == ci:
-        raise RuntimeError(
-            f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
-            "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
-    if bi.get("file", "").startswith(task + os.sep):
-        raise RuntimeError(
-            f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
-            "serving stack, never a copy the optimizer can edit.")
-    return bi, ci
+    phase_targets = meta.get("phase_target_callables", {})
+    if not isinstance(phase_targets, dict) or any(
+            not isinstance(t, str) or not t.strip() for t in phase_targets.values()):
+        raise RuntimeError("phase_target_callables must map phases to exact callable specs")
+    targets = list(dict.fromkeys([meta["target_callable"], *phase_targets.values()]))
+    primary = None
+    for index, target in enumerate(targets):
+        # Leave the original single-target command unchanged for legacy tasks.
+        extra = {"target_callable": target} if index else {}
+        bi = _run_leg(task, base, "resolve", timeout=timeout, **extra)
+        ci = _run_leg(task, cand, "resolve", timeout=timeout, **extra)
+        for who, ident in (("baseline", bi), ("candidate", ci)):
+            if ident.get("error"):
+                raise RuntimeError(f"{who} leg cannot import {target}: {ident['error']}")
+        if bi == ci:
+            raise RuntimeError(
+                f"both legs resolve {target} to the SAME code ({bi}) — the candidate overlay is not "
+                "shadowing it, so any measured 'speedup' is noise. Check meta.candidate_bind.")
+        if bi.get("file", "").startswith(task + os.sep):
+            raise RuntimeError(
+                f"baseline leg resolved INSIDE the task dir ({bi['file']}) — the baseline must be the live "
+                "serving stack, never a copy the optimizer can edit.")
+        if index == 0:
+            primary = (bi, ci)
+    return primary
 
 
 def _median(xs):
