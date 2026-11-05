@@ -17,6 +17,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const assert = require('assert/strict');
 
 const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
 const src = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'e2e_workflow.js'), 'utf8');
@@ -54,6 +55,27 @@ console.log('collisions');
   eq(r.overrides, [{ flag: 'MAX_MODEL_LEN', baseline_value: '13312', recalled_value: '16384' }],
     'env override reported');
 }
+
+console.log('literal environment values');
+{
+  const r = mergeEnv("FOO='two words' KEEP='same  spacing'", 'FOO=new');
+  eq(r.merged, "FOO=new KEEP='same  spacing'", 'an override replaces the whole quoted value, preserving untouched spaces');
+  eq(r.overrides, [{ flag: 'FOO', baseline_value: 'two words', recalled_value: 'new' }],
+    'the merge compares decoded literal values');
+}
+eq(mergeEnv("'FOO=two words' KEEP=1", "FOO='new value'").merged, "FOO='new value' KEEP=1",
+  'a quoted whole assignment still has a replaceable key');
+eq(mergeEnv('FOO=two\\ words KEEP=1', 'FOO=new').merged, 'FOO=new KEEP=1',
+  'escaped spaces stay within the replaced assignment');
+eq(mergeEnv("FOO='two words'", 'FOO="two words"').overrides, [],
+  'different quoting of the same literal value is not an override');
+{
+  const literal = "'JSON={\"x\": \"two  words\"}' EMPTY= 'CONTROL=$(literal);`literal` *'";
+  eq(mergeEnv(literal, 'OTHER=1').merged, literal + ' OTHER=1',
+    'JSON, empty values and shell-looking text remain literal and byte-preserved');
+}
+assert.throws(() => mergeEnv("FOO='unfinished", 'FOO=new'), /Unfinished quote/);
+assert.throws(() => mergeEnv('FOO=unfinished\\', 'FOO=new'), /Unfinished escape/);
 
 // ------------------------------------------------------------------ the spellings that show up
 console.log('spellings');

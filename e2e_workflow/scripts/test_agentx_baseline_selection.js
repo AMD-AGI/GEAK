@@ -62,6 +62,7 @@ async function run(body, overrides = {}, reply = selection()) {
     GPU_LIST: ['0'], SERVING_GPU: '0,1,2,3,4,5,6,7', WORKFLOW_DIR: '/wf',
     WORKLOAD: { kind: 'agentx_trace_replay' }, WORKLOAD_KIND: 'agentx_trace_replay', WORKLOAD_SPEC: {},
     BASELINE_TPUT: 400, NOISE_BAND: 0.5, NOISE_BAND_DEFAULT: 0.5,
+    curUnsetEnvs: [], curRemoveArgs: [], curArgsMode: 'append', INIT_REMOVE_ARGS: [],
     curFlags: '--tp 8', curEnv: 'MODE=deployment', curOverlay: '/accepted-overlay', curTput: 440,
     INIT_BASE_OVERLAY: '', kbSeedTput: 0, BUDGET: 2, HEAD_BUDGET: 1,
     HEAD_THRESHOLD_PCT: 5, MILESTONE_MIN_PCT: 5, CONFIG_TUNE_ENABLED: false,
@@ -108,6 +109,9 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(input.BASELINE_LOG, '/eval/baseline/server.log');
   assert.equal(input.BASELINE_BENCH_DIR, '/eval/baseline');
   assert.equal(input.CURRENT_FLAGS, '--tp 8');
+  const removed = await run(initial, { curRemoveArgs: ['--removed'], curUnsetEnvs: ['REMOVED_ENV'] });
+  assert.deepEqual(removed.calls[0].inputs.CURRENT_REMOVE_ARGS, ['--removed']);
+  assert.deepEqual(removed.calls[0].inputs.CURRENT_UNSET_ENVS, ['REMOVED_ENV']);
   assert.equal(input.CURRENT_OVERLAY, '/accepted-overlay');
   assert.equal(input.PREVIOUS_RANKING_JSON, '/old/ranking.json');
   assert.equal(input.TASK,
@@ -218,6 +222,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const env = {KERNEL_EXTRACT_ON: enabled, cands: [candidate('weighted')],
       EVAL_DIR: '/eval', MODEL_PATH: '/model', WORKLOAD: {}, WORKFLOW_DIR: '/wf', profile: {},
       curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
+      curUnsetEnvs: [], curRemoveArgs: [], INIT_REMOVE_ARGS: [],
       KERNEL_WF_SCRIPT: '/kernel.js', KERNEL_WF_DIR: '/kernel', USE_EXPERT_SKILLS: false,
       EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
@@ -241,6 +246,12 @@ async function run(body, overrides = {}, reply = selection()) {
   const baselineOnly = { eval_dir: '/saved', baseline_throughput_tok_s: 400 };
   const resumed = await run(resume, { ST: baselineOnly });
   assert.deepEqual(resumed.calls.map(c => c.role), ['kernel_extractor']);
+  const resumedControls = await run(resume, { INIT_REMOVE_ARGS: ['--new-seed'], ST: {
+    ...baselineOnly, flags: '', env: '', remove_args: [], unset_envs: ['CARRIED_ENV'], args_mode: 'replace',
+  } });
+  assert.deepEqual(resumedControls.calls[0].inputs.CURRENT_REMOVE_ARGS, [],
+    'resumed preparation clears seed removals instead of reviving them');
+  assert.deepEqual(resumedControls.calls[0].inputs.CURRENT_UNSET_ENVS, ['CARRIED_ENV']);
   assert.equal(resumed.calls[0].inputs.BASELINE_LOG, '/saved/baseline/server.log');
   assert.equal(resumed.headQueue.length, 1, 'baseline-only resume can enter head extraction');
   const saved = await run(initial + carry);

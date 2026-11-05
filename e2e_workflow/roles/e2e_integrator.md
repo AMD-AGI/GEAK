@@ -482,6 +482,14 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   Preserve `ACCEPTED_UNSET_ENVS` in that script as the JSON-array environment
+   variable `GEAK_UNSET_ENVS`, including when the accepted assignment string is
+   empty. For intermediate comparisons, pass `CURRENT_UNSET_ENVS` the same way
+   to both arms. Explicit candidate assignments may re-add a removed name.
+   Preserve the supplied `GEAK_REMOVE_ARGS` JSON string in both benchmark arms
+   and the final script, including `[]` when clearing old controls. A failed
+   live-argument check rejects that launch before measurement; it is not an
+   inconclusive speed result to replay through another harness.
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 
