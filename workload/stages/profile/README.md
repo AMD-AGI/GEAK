@@ -169,6 +169,14 @@ From the 2026-11-02 Muse Spark merge of a c8 and a c32 optimization campaign
   (`M = pad(bs) x tokens_per_req`, e.g. DFLASH 8 x the captured bs list). Add the captured
   buckets no point covers as task `envelope_cases` (tested, weight 0), so a regression at an
   M no sampled point hit is still visible.
+- **Who decides: `kernel-extract/scripts/merge_policy.py`**, from the evidence, not the
+  reviewer. Same launch group and same entry: one UT, all configs (the default). A config
+  difference splits a task only if the task's source reads it. Different entries chosen above
+  them by M form a branch group: one task only when the common caller is a replayable entry
+  whose `if` tests read a size (`merge_task`); otherwise the members stay separate tasks under
+  a cross-member regression gate (`group_gate`). A wrongly gated pair costs one extra check;
+  a wrongly merged pair would corrupt a task, so merging needs both the source and the
+  evidence. Profiler frames carry def lines, so call sites are read from the caller's source.
 - **One owner per file.** When two tasks touch one module, one owns it; a whole-module
   replacement also replaces the other functions in that file (a c32 whole-file `mxfp4_moe.py`
   silently overwrote another operator's `run_compact_a4`): rebind the function instead.

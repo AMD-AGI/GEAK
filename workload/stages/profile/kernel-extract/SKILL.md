@@ -112,6 +112,30 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   `companions` with a reason. Mandatory chains, including split-K plus reduce, are one
   task; mutually exclusive branches are separate `joint_phases` rows, never demanded in
   every invocation. Whole fused MoE keeps routing and the complete operation.
+- **Merging across configs (a multi-config group).** Run, after the draft and before
+  review:
+
+  ```bash
+  python3 "$SKILL_ROOT/scripts/merge_policy.py" --group-dir "$OUT" \
+      --baseline "$RUN_ROOT/baseline/out/baseline.json" \
+      --source-root <path in the evidence>=<the same tree readable here> --out "$OUT/merge_policy.json"
+  ```
+
+  and apply it; record each application in `decisions.json`.
+  1. Same launch group, same entry: **one UT** whose cases pool every config the task runs
+     in. An M-dependent path inside or below the entry is reached by the cases themselves.
+  2. `per_task.<t>.decision == split_by_config_value`: the task's own source reads a setting
+     that differs between configs (`launch_diff`); one UT per value of it. A difference the
+     source does not read never splits a task.
+  3. `branch_groups[*].tier == merge_task`: the path is chosen above the entries by a
+     replayable caller whose `if` tests read a size. Declare **one task** with
+     `target_callable` = `common_caller`; the members become its branches.
+  4. `tier == group_gate`: the members stay separate tasks, and every member's kept result
+     must also pass the other members' cases. Never merge a gate group by hand-writing a
+     seam, and never split a `merge_task` group because its caller "takes an object" --
+     the policy already checked the recorded arguments.
+  5. Different launch groups (EP, ...): same entry and same env, one UT with cases tagged by
+     group; otherwise separate (`cross_group`).
 - Selected indexer score/top-k is one task covering both served prefill and decode
   branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
   [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)

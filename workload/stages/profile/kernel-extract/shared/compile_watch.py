@@ -639,12 +639,36 @@ def _itemsize(torch, name):
     return torch.empty((), dtype=_dtype(torch, name)).element_size()
 
 
+def literal_object(d):
+    """(True, value) for a recorded builtin container of literals (frozenset/set/dict/tuple)
+    rebuilt from its repr; (False, None) for any other object. A dispatcher's option set --
+    e.g. the enabled-kernel frozenset an attention backend passes down -- is a value, not
+    state, and must not make an entry unreplayable."""
+    import ast
+    kind = d.get("__object__") if isinstance(d, dict) else None
+    if kind not in ("builtins.frozenset", "builtins.set", "builtins.dict", "builtins.tuple"):
+        return False, None
+    text = (d.get("repr") or "").strip()
+    if text.endswith("...") or len(text) >= 120:       # _describe truncates at 120 characters
+        return False, None
+    m = re.fullmatch(r"(frozenset|set)\((.*)\)", text, re.S)
+    try:
+        if m:
+            inner = m.group(2).strip()
+            items = ast.literal_eval(inner) if inner else ()
+            return True, (frozenset if m.group(1) == "frozenset" else set)(items)
+        return True, ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return False, None
+
+
 def plan_call(call, data):
     """Check a recorded call can be rebuilt; returns the per-tensor plan and its notes."""
     torch = __import__("torch")
     notes = []
     for name, d in call["args"].items():
-        if isinstance(d, dict) and "__object__" in d and name != "self":
+        if isinstance(d, dict) and "__object__" in d and name != "self" \
+                and not literal_object(d)[0]:
             raise Unreplayable("argument %s is a %s" % (name, d["__object__"]))
         if isinstance(d, dict) and "__missing__" in d:
             raise Unreplayable("argument %s was not bound when the kernel compiled" % name)
@@ -789,6 +813,9 @@ def materialize_call(call, data, seed=0, budget=16 << 30):
         if isinstance(d, dict) and "__seq__" in d:
             items = [value("%s[%d]" % (name, i), v) for i, v in enumerate(d["items"])]
             return tuple(items) if d["__seq__"] == "tuple" else items
+        ok, lit = literal_object(d)
+        if ok:
+            return lit
         return d
     args, kwargs = [], {}
     for name in call.get("positional") or []:
