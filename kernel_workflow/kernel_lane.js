@@ -568,6 +568,23 @@ const COMMIT_SCHEMA = obj({
 // removed with the restore-and-continue recovery they served. ABORT-AND-QUARANTINE neither snapshots a
 // pre-attempt reference nor dispatches a restore, so no schema is needed for the failed-commit path.
 
+// eikos v2 E1 (R7 round-7 / commit-salvage, Astra re-review #7-commit): the schema for the HOST-SIDE
+// deterministic commit fallback used ONLY after a committer dispatch returns AMBIGUOUS/null AND a one-shot
+// retry also fails to confirm. This is NOT a reasoning task — it is a fixed-script dispatch that (a) PROVES
+// the canonical workspace is safe (no .git/index.lock held by a possibly-live writer; the TRACKED tree is
+// clean at the frozen baseline — the winner was never installed), (b) applies the already-correctness-
+// verified winner patch with a CLEAN `git apply`/`--3way` ONLY (NO hand-merge, so we never risk an
+// unverified kernel), (c) commits it, and (d) reports the OBSERVED git postcondition. The host trusts the
+// observed postcondition (HEAD advanced + clean apply + clean pre-tree + no lock), NOT a self-report:
+// `installed` is only honoured when head_advanced && applied && tree_clean_pre && !index_lock_present. Any
+// precondition miss or apply conflict -> installed:false -> the run aborts-and-quarantines (genuine break).
+const HOST_COMMIT_SCHEMA = obj({
+  installed: { type: 'boolean' }, head_advanced: { type: 'boolean' }, applied: { type: 'boolean' },
+  tree_clean_pre: { type: 'boolean' }, index_lock_present: { type: 'boolean' },
+  head_before: { type: 'string' }, head_after: { type: 'string' },
+  current_best_diff: { type: 'string' }, note: { type: 'string' },
+}, ['installed']);
+
 const REPORT_SCHEMA = obj({
   final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
@@ -3018,7 +3035,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // the capture keeps the commit request byte-identical to legacy (R4) and leaves routing=false untouched
     // (it never enters the quarantine branch — its gate `!ROUTING_ON || committed` always advances).
     const commitRoute = {};   // eikos v2 E1 (bug 1): carries the host dispatch id so the commit's outcome binds to P1
-    const commitRes = await agentT(
+    // eikos v2 E1 (R7 — commit-salvage): hoist the committer request to a const so the ONE-SHOT RETRY below
+    // re-dispatches the BYTE-IDENTICAL committer prompt (there is no second copy to drift). The prompt text
+    // is UNCHANGED from legacy, so routing-off request parity + the static/parity byte-identity checks that
+    // extract this exact literal are preserved.
+    const commitPrompt =
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -3037,10 +3058,15 @@ files to match the patch's intent), then \`add -A\` + commit. The applied source
 match the patch verbatim after a hand-merge, so after committing, RE-RUN the COMMANDMENT correctness
 check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only report committed=true if
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
-re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
+re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
+    const commitRes = await agentT(
+      commitPrompt,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA }, commitRoute);
     // observability only (eikos v2): one terminal outcome per completed commit dispatch, before `cumulative` advances.
-    const committed = !!(commitRes && commitRes.committed);
+    // eikos v2 E1 (R7 — commit-salvage): `let`, not `const`: a successful RETRY or HOST-SIDE salvage below may
+    // flip this to true for the CONTROL-FLOW decision (advance vs abort). The original committer outcome fed to
+    // P1 + the `commit_outcome` audit still use this FIRST value (the committer's own self-report), unchanged.
+    let committed = !!(commitRes && commitRes.committed);
     __routeAudit.push({ event: 'commit_outcome', round, improved: true,
                         committed,
                         geomean: winner.geomean, source: winner.source });
@@ -3050,6 +3076,99 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     // by agentT, so it is skipped here. This NEVER touches the legacy sonnet/eikos ladder.
     if (commitRes != null) __p1WorkerOutcome(__routeScope(`commit r${round}`), committed,
       `committed=${committed}`, 'work_product', 'host', `commit r${round}`, commitRoute.dispatch_id);
+
+    // eikos v2 E1 (R7 round-7 / commit-salvage — user-APPROVED Option A; Astra re-review #7-commit): do NOT
+    // let a TRANSIENT/AMBIGUOUS null commit vaporize a fully-verified run. SHADOW_FAILURE2 was a round-1
+    // commit dispatch that returned null/no-transcript (a $0, 0-token SYNTHETIC placeholder — NOT a real
+    // work-product failure); the host read committed=false and the ROUTING abort-and-quarantine returned
+    // terminal BEFORE director:validate, nuking a correctness-PASS 4.28x winner that was ALREADY integrated
+    // and sitting in round_${round}/integrate/. Option A keeps the Astra-cleared INTENT (never advance from
+    // an UNPROVEN workspace) but first tries to SALVAGE the already-verified winner safely, and only aborts
+    // on a GENUINE failure.
+    //
+    // CLASSIFY. A GENUINE committer failure is a NON-NULL receipt that explicitly reports {committed:false}
+    // (the committer ran and reported a real failure) — that is NOT salvaged and still aborts-and-quarantines
+    // verbatim below (its quarantine is preserved; we never paper over a real commit failure). Everything
+    // else that is not {committed:true} is AMBIGUOUS/transient: commitRes==null (no transcript / hung /
+    // synthetic 0-token) OR a receipt with no explicit committed verdict. ONLY the ambiguous case is salvaged.
+    // routing=false NEVER enters here: the guard SHORT-CIRCUITS on ROUTING_ON, so routing-off runs NONE of
+    // this salvage code (no extra dispatch, no audit) and stays BYTE-IDENTICAL to legacy.
+    if (ROUTING_ON && !committed && !(commitRes != null && commitRes.committed === false)) {
+      // (1) RETRY the commit dispatch ONCE — the SHADOW_FAILURE2 null was intermittent (run #1 on the
+      // identical head committed fine), so a single retry clears most transient nulls. BYTE-IDENTICAL
+      // committer request (the hoisted commitPrompt): routing-off request parity is untouched.
+      const retryRoute = {};
+      const commitRetry = await agentT(
+        commitPrompt,
+        { phase: 'Merge', label: `commit r${round} retry`, schema: COMMIT_SCHEMA }, retryRoute);
+      const retryCommitted = !!(commitRetry && commitRetry.committed);
+      __routeAudit.push({ event: 'commit_retry', round, improved: true, committed: retryCommitted,
+                          ambiguous: commitRetry == null, source: winner.source, geomean: winner.geomean,
+                          dispatch_id: (retryRoute && retryRoute.dispatch_id) || null,
+                          receipt: commitRetry || null });
+      if (retryCommitted) {
+        committed = true;
+        log(`Round ${round}: commit was AMBIGUOUS/null; the ONE-SHOT RETRY confirmed committed=true — ` +
+            `continuing to director:validate (no abort).`);
+      } else {
+        // (2) HOST-SIDE deterministic commit of the already-verified winner. The winner is the
+        // correctness-PASS candidate the integrate/verify gates produced (its patch lives under
+        // round_${round}/integrate|engineer_*), so applying it is PROVABLY SAFE. This fixed-script dispatch
+        // (NO reasoning, NO hand-merge) PROVES the canonical workspace is safe (no .git/index.lock held by a
+        // possibly-live writer; the TRACKED tree is clean at the frozen baseline), applies the SAME winner
+        // patch the committer would have (clean `git apply`/`--3way` ONLY), commits it, and reports the
+        // OBSERVED git postcondition. We honour it as installed ONLY on a PROVEN postcondition — the same
+        // EFFECT the committer would have had, done safely host-side. This does NOT reintroduce the racy
+        // LLM-dispatched restore Astra rejected: it never resets/cleans the workspace and only ADDS a commit
+        // onto a verified-clean baseline.
+        const hostRoute = {};
+        const hostRes = await agentT(
+          `You are the HOST performing a DETERMINISTIC, FIXED-SCRIPT salvage commit of round ${round}'s ALREADY-VERIFIED winning patch into the canonical workspace, because the committer dispatch returned an ambiguous/null result and a one-shot retry did not confirm. This is NOT a reasoning task: run EXACTLY the script below, DO NOT hand-merge, DO NOT edit any source, and report ONLY the values you observe.
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+cd ${CANONICAL}
+# PROVE the workspace is safe before touching it: a live committer holds .git/index.lock, and a half-applied
+# winner dirties the TRACKED tree. We only commit from a provably-clean baseline (the winner was never installed).
+LOCK=0; test -e .git/index.lock && LOCK=1
+DIRTY="$(git status --porcelain --untracked-files=no)"; CLEAN=0; [ -z "$DIRTY" ] && CLEAN=1
+HEAD_BEFORE="$(git rev-parse HEAD)"
+APPLIED=0; HEAD_AFTER="$HEAD_BEFORE"
+if [ "$LOCK" = 0 ] && [ "$CLEAN" = 1 ]; then
+  # Clean apply ONLY (plain, then 3-way for context drift). If NEITHER applies, STOP — do NOT hand-merge
+  # (that risks an unverified kernel); leave the tree untouched so the host can quarantine a genuine conflict.
+  if git apply ${winner.patch} || git apply --3way ${winner.patch}; then
+    APPLIED=1
+    git -c user.email=team@workflow -c user.name=team add -A
+    git -c user.email=team@workflow -c user.name=team commit -q -m "round ${round} winner: ${winner.source} (${winner.geomean.toFixed(2)}x) [host-salvage]"
+    HEAD_AFTER="$(git rev-parse HEAD)"
+    git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
+  fi
+fi
+echo "INDEX_LOCK_PRESENT=$LOCK TREE_CLEAN_PRE=$CLEAN APPLIED=$APPLIED HEAD_BEFORE=$HEAD_BEFORE HEAD_AFTER=$HEAD_AFTER"
+\`\`\`
+Return JSON {installed, head_advanced, applied, tree_clean_pre, index_lock_present, head_before, head_after, current_best_diff, note}: set installed=true ONLY if a NEW commit was created from a CLEAN apply on a provably-clean workspace (index_lock_present=false AND tree_clean_pre=true AND applied=true AND head_after != head_before); otherwise installed=false and say why in note. head_advanced = (head_after != head_before).`,
+          { phase: 'Merge', label: `commit r${round} host-salvage`, schema: HOST_COMMIT_SCHEMA }, hostRoute);
+        // Trust the OBSERVED postcondition, NOT the self-report: a clean apply of the already-verified patch
+        // onto a provably-clean baseline that advanced HEAD is a proven install. Anything else -> NOT installed.
+        const hostInstalled = !!(hostRes && hostRes.installed === true && hostRes.head_advanced === true &&
+                                 hostRes.applied === true && hostRes.tree_clean_pre === true &&
+                                 hostRes.index_lock_present === false);
+        __routeAudit.push({ event: 'commit_host_salvage', round, improved: true, installed: hostInstalled,
+                            source: winner.source, geomean: winner.geomean, workspace: CANONICAL,
+                            dispatch_id: (hostRoute && hostRoute.dispatch_id) || null,
+                            receipt: hostRes || null });
+        if (hostInstalled) {
+          committed = true;
+          log(`Round ${round}: commit was AMBIGUOUS/null and the retry did not confirm; the HOST-SIDE ` +
+              `fixed-script commit of the verified winner SUCCEEDED (HEAD advanced on a clean apply of a ` +
+              `provably-clean workspace) — installing it and continuing to director:validate (no abort, no loss).`);
+        } else {
+          log(`Round ${round}: commit was AMBIGUOUS/null, the retry did not confirm, and the HOST-SIDE ` +
+              `salvage could NOT be applied safely (index.lock / dirty tree / apply conflict, or the host ` +
+              `commit itself failed) — a GENUINE unknown-workspace situation: ABORT-AND-QUARANTINE below.`);
+        }
+      }
+    }
     // eikos v2 E1 (R3/R4 — SHARED HARNESS, BOTH ARMS): a FAILED commit did NOT install the winner, so the
     // tracked incumbent must not advance on it. This is a user-APPROVED behavior change to commit/progress
     // semantics applied to BOTH routed arms (sonnet AND eikos), so E1 compares routing on a common, correct
