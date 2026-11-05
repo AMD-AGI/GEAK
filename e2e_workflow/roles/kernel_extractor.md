@@ -74,6 +74,15 @@ def eager_cases(h, meta):             # [{args, ref}] from reference_io.pt (the 
 
 ---
 
+## Smoke status contract (both phases)
+
+`smoke` (extract_op) / `unittest_smoke` (extract) MUST be **exactly** the lowercase string `"pass"` or
+`"fail"` — nothing else. `"PASS"`, `"pass."`, `"PASS (exit 0) ..."`, `"passed"` are all REJECTED by the
+output schema and you will be asked to re-answer. `"pass"` means the smoke run exited 0 AND correctness
+passed; a genuine failure is `"fail"` (exit 3 / `UT_HARNESS_INCOMPLETE` is NOT a failure yet:
+regenerate the UT first, see PHASE=extract step 6). Put the command, exit code, GPU, case counts and
+any caveats in `smoke_detail` (and `notes`), never in the status field.
+
 ## PHASE=extract
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
@@ -485,7 +494,8 @@ freeze an out-of-regime oracle nobody should trust.
    > the family×M-buckets for gemm; wire `fill/run/read_out`) and re-run the smoke. Retry up to 3 times.
    > Do **NOT** record `unittest_smoke:"fail"` or drop the head for exit 3 — that status is reserved for a
    > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
-   > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
+   > `unittest_smoke:"fail"` and start `smoke_detail` with `harness_incomplete_unrecoverable` (the workflow
+   > reads the failure reason from `smoke_detail`/`notes`, not from a separate `reason` field).
 
 Return JSON:
 ```json
@@ -509,7 +519,8 @@ Return JSON:
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
   "build": false,
-  "unittest_smoke": "pass|fail",
+  "unittest_smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in unittest_smoke",
   "reference_io_sha256": "...",
   "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
@@ -875,7 +886,8 @@ Return JSON:
   ],
   "selection_validation": {"contract": "kernel_selection", "ok": true, "deepest_verified": true},
   "baseline_callable": "<module:attr of the live default backend, resolved OUTSIDE the task dir>",
-  "smoke": "pass|fail",
+  "smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in smoke",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```

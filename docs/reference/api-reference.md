@@ -25,8 +25,8 @@ are mapped onto `args`; there is no config file for workflow parameters.
 
 | Workflow | scriptPath | Purpose |
 |---|---|---|
-| e2e | `e2e_workflow/e2e_workflow.js` | Whole-model sglang/vLLM serving-throughput optimization. |
-| single kernel | `kernel_workflow/kernel_workflow.js` | Optimize/author one AMD GPU kernel. |
+| E2e | `e2e_workflow/e2e_workflow.js` | Whole-model sglang/vLLM serving-throughput optimization. |
+| Single kernel | `kernel_workflow/kernel_workflow.js` | Optimize/author one AMD GPU kernel. |
 
 ## `e2e_workflow.js`
 
@@ -43,13 +43,13 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `model_path` | — (**required** for e2e) | Model weights directory. |
 | `kernel_path` | — | Single-kernel pass-through (mutually exclusive with `model_path`); delegates straight to the kernel layer. |
 | `workflow_dir` | — (**required**) | This folder (`e2e_workflow/`). |
-| `kernel_workflow_dir` | sibling `kernel_workflow/` | Recursive kernel layer location. |
-| `exp_root` | sibling `exp/` | Output root. |
+| `kernel_workflow_dir` | Sibling `kernel_workflow/` | Recursive kernel layer location. |
+| `exp_root` | Sibling `exp/` | Output root. |
 | `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` (selects `scripts/adapters/<backend>.sh`). |
 | `launch_script` | `""` | Optional custom launch script; else the stack default. |
 | `gpu_ids` | `0` | CSV optimization-parallelism pool. |
 | `tp` / `serving_tp` | `1` | Serving tensor-parallel size. |
-| `serving_gpu` | first `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
+| `serving_gpu` | First `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
 | `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Workload; profiling and benchmarking share these. |
 | `task` | `""` | Natural-language steer. |
 | `apply_to_original` | `false` | If `true`, emit an apply bundle (overlay + launch); never edits site-packages. |
@@ -63,7 +63,7 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
 | `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
-| `config_tune` | `true` | Tier-0 flag/env/backend sweep on/off (runs FIRST). |
+| `config_tune` | `true` | Tier-0 flag, env, and backend sweep on/off (runs FIRST). |
 | `head_threshold_pct` | `5` | Head-kernel selection threshold. |
 | `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. |
 | `head_author_max` | `2` | Author languages per head (FlyDSL + Triton). |
@@ -97,21 +97,22 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 | Arg | Default | Description |
 |---|---|---|
 | `noise_band_pct` | `0.5` | e2e acceptance band (%). |
-| `measurement_mode` | `warm_server` | Lifecycle behind EVERY throughput number. `warm_server` = boot one server per leg, discard a full warmup round, time the next round (Hyperloom's protocol). `isolated_server` = one fresh server per sample, for when boot-to-boot variance is what must be gated on. |
+| `measurement_mode` | `warm_server` | Lifecycle behind EVERY throughput number. `warm_server` = boot one server per leg, discard a full warmup round, time the next round (Hyperloom's protocol). An AgentX trace replay discards no round: each replay warms every lane before its window opens, so a leg is one pass, as in Hyperloom's AgentX baseline and rebench (`bench_summary.json.warmup_protocol: replay_per_lane`; `GEAK_AGENTX_OUTER_WARMUP=1` restores the discarded round). `isolated_server` = one fresh server per sample, for when boot-to-boot variance is what must be gated on. |
 | `search_replicas`, `parity_replicas` | `1` | Timed samples per leg for search / parity legs. |
 | `validation_measurement_mode` | `warm_server` | Lifecycle for the final re-measure; set to `isolated_server` to make validation stricter than the search that fed it. |
 | `validation_replicas` | `3` | Fresh-server samples per leg when validation is `isolated_server`. Ignored under `warm_server`, which is one timed round per leg by definition. |
 | `ab_finish_retries` | `3` | A/B leg completion retries. |
 | `use_expert_skills` | `false` | Consult `perf_knowledge/expert_skills` (advisory priors). OFF = byte-identical. |
-| `perf_knowledge_dir` | sibling `perf_knowledge/` | Authoring knowledge base. |
-| `kb_artifacts_dir` | sibling `kb_artifacts/` | Warm-start patch store, forwarded to every recursive kernel lane so one run shares one store. |
-| `warm_start`, `warm_start_match`, `warm_start_min_speedup`, `kb_mode`, `kb_store_dir`, `kb_framework_version` | see the kernel-layer table | Forwarded verbatim to the kernel lanes. Corrective re-authors are forced to `reference` (they must keep the isolated win). |
+| `perf_knowledge_dir` | Sibling `perf_knowledge/` | Authoring knowledge base. |
+| `kb_artifacts_dir` | Sibling `kb_artifacts/` | Warm-start patch store, forwarded to every recursive kernel lane so one run shares one store. |
+| `warm_start`, `warm_start_match`, `warm_start_min_speedup`, `kb_mode`, `kb_store_dir`, `kb_framework_version` | See the kernel-layer table | Forwarded verbatim to the kernel lanes. Corrective re-authors are forced to `reference` (they must keep the isolated win). |
 | `e2e_warm_start_min_speedup` | `1.0` | READ floor for the DEPLOYMENT store: a stored record whose speedup is under it never becomes a candidate. Reading is free, so this only drops records that lost — a small win still carries a config and, often, a tuned artifact worth hours to rediscover. Not the same knob as the kernel layer's `warm_start_min_speedup` (which still gates a verify slot at `1.05`); the bare name is honoured here as a fallback for older callers. |
 | `e2e_warm_start_bench_min_speedup` | `1.02` | BENCH floor: a candidate under it is offered to the consumer roles as a reference but never costs a server launch to re-measure. Set below the box's own run-to-run drift and you are paying 20-40min to measure noise. Does not gate the stored-kernel replay, which is budgeted by `e2e_warm_start_kernels_n` and ranked on its own isolated speedup. |
 | `time_budget_s`, `initial_extra_server_args`, `initial_extra_env`, `tracelens`, `agent_timeout_ms` | — | Forwarded from the external orchestrator. |
-| `final_reserve_s` | `3000` (50min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 50min covers ~p75, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. |
+| `final_reserve_s` | `3600` (60min), capped at 20% of `time_budget_s` | Hard floor of wall-clock held back for the whole final phase — Finalize + Report + Validate + the `workflow_return.json` write; no mode starts new work inside it, and each optimization agent's hung-guard is tightened so no in-flight step finishes later than `time_budget_s − reserve` (final-phase agents are exempt). Sized off 85 historical runs (p50 40min, p75 50min, p90 77min, max 86min): 60min sits above p75 and below p90, and since Report writes both reports before Validate, a longer tail still ships them (only the Validate re-measure is at risk, and `run_e2e.py` falls back). The 20% cap stops the floor from eating a short budget whole; at budgets ≥5h it never binds. Env override: `GEAK_FINAL_RESERVE_S`. **An AgentX trace replay sizes its own floor** from its windows: Finalize's search leg plus Validate's canonical legs (two under `warm_server`, `2 × validation_replicas` under `isolated_server`), each window plus `agentx_leg_overhead_s`, plus 40min for Report and the agents — 235min at the default 900s/3600s windows. That floor outranks a smaller `final_reserve_s` and the cap. The run's minimum is Setup's baseline leg, one A/B on the search window (the KB warm start's) and that final phase — 405min (6h45m) at the defaults. Under it, Setup and that A/B keep their time and the final phase gets the rest, and the startup log warns that the run may not return a validated gain. With less left after the warm start than kernel extraction plus one kernel lane need (270min at the defaults), Profile/extraction and the kernel search are skipped and the run goes straight to Finalize and Validate. In the search before it, a lane or A/B whose cost no longer fits ahead of the reserve is not started: an A/B is deferred (kept in `pending_integrations`), a speedup review's confirmation A/B (each timed replica counted as a leg) is not started and leaves the candidate unconfirmed, and a lane stops starting rounds early enough to leave its A/B time and is abandoned if still running at the boundary. Validate is skipped in two cases only: a run that adopted nothing (no accepted head or kernel, and the carried throughput, flags, env and overlay still Setup's) returns Setup's canonical number at 1.0x as `skipped_final_is_baseline`; and with less time left than Validate's canonical windows alone (120min at the defaults) it is not started. A trace replay whose Validate gives no number after a head or kernel was accepted returns no final and no speedup, so `run_e2e.py` publishes that A/B's own same-window pair instead of a search-window leg over the canonical baseline. A trace replay's Validate that returned nothing, or was skipped for time, is `flagged_no_number_used_carried_ab`, which the KB write gate refuses. |
+| `agentx_leg_overhead_s` | `1200` (20min) | AgentX only: per-leg boot, replay warmup and drain added to each window when sizing the final reserve and the search-side lane/A-B checks. |
 
-> **Throughput numbers are comparable only within one lifecycle**, and both legs of any ratio must
+> Throughput numbers are comparable only within one lifecycle, and both legs of any ratio must
 > come from the same one. `bench_summary.json.measurement_mode` records which produced a given number;
 > the full rule, with the measured evidence for it, is in the header of
 > `e2e_workflow/scripts/bench_e2e.sh`.
@@ -155,22 +156,24 @@ budget-controlled, each patch independently verified.
 | `min_improve` | `0.02` | Minimum accepted improvement (2%). |
 | `deep_cost` | `2` | Budget cost of a deep-explore engineer. |
 | `gpu_ids` | `0` | CSV GPU pool. |
+| `gpus_per_job` | detected | GPUs each GPU command needs (multi-rank ops). Unset: Setup detects it from the task's test/benchmark (`scripts/detect_gpu_requirement.py`); a detected count that is unreadable or larger than `gpu_ids` runs single-GPU with a warning. `>1` leases any N of `gpu_ids` per command (`pool:N:<ids>`). Also read from `op_spec.resource`. Not supported by `mode=bakeoff`. |
+| `job_gpu_ids` | — | Fixed GPU group for every command (`group:<ids>`); must be a subset of `gpu_ids`. Also read from `op_spec.resource`. |
 | `task` | `""` | Natural-language steer. |
-| `exp_root` | sibling `exp/` | Output root. |
+| `exp_root` | Sibling `exp/` | Output root. |
 | `eval_dir` | — | Isolated evaluation directory. |
 | `apply_to_original` | `false` | Emit apply bundle vs edit-in-place. |
 | `mode` | `optimize` | `optimize` \| `author`. |
 | `target_language` | `triton` | Author-mode language: `triton` \| `flydsl` \| `hip` \| `ck`. |
 | `op_spec` | `{}` | Op specification (author mode). |
-| `perf_knowledge_dir` | sibling `perf_knowledge/` | Knowledge base. |
+| `perf_knowledge_dir` | Sibling `perf_knowledge/` | Knowledge base. |
 | `update_experience` | `on` | Curate ONE distilled card into `kernel_workflow/knowledge/learned/` after a measured win (every lane run; once centrally per bake-off). `off` skips it. The sink is always this workflow's own `learned/` — an e2e-opened lane never writes into `e2e_workflow/knowledge/learned/`. Cards carry a skill-style discovery header (`name`/`description`/`keywords`/`kernels`/`platforms`/`kernel_class`/`regime`) and `learned/INDEX.md` is regenerated from it by `kernel_workflow/scripts/kb.py ... index` (`--check` = fail-if-stale). Numbers on a card are relative only (ratios, % of achievable peak) — never wall-clock. |
 | `warm_start` | `on` | Experience reuse from the KB (see `kb_mode` for which plane). `on` = read the top same-arch patches (one per optimization `direction`) through the verify gate; `reference` = prose only, no patch apply; `return_after_read` = apply+validate a candidate then return; `off` = cold start (byte-equivalent to pre-warm-start). |
-| `kb_artifacts_dir` | sibling `kb_artifacts/` | Lossless best-patch sink (machine-produced, code-carrying; gitignored, runtime-accumulated). Still written on every run and still the surface a curation pass edits; it is no longer what the default read addresses (see `kb_mode`), and `sync-local` carries it into the store. |
+| `kb_artifacts_dir` | Sibling `kb_artifacts/` | Lossless best-patch sink (machine-produced, code-carrying; gitignored, runtime-accumulated). Still written on every run and still the surface a curation pass edits; it is no longer what the default read addresses (see `kb_mode`), and `sync-local` carries it into the store. |
 | `warm_start_match` | `fuzzy` | How a kernel name reaches a stored page: `exact` (canonicalized name only) \| `normalized` \| `fuzzy` (closest containing page; refuses when two pages fit equally well). Names are canonicalized first, so `fused_moe_kernel_task`, `triton_fused_moe_kernel.py` and a full task path all reach the same page. `kb_mode=local` only — a canonical id is an exact address, so there is nothing to match fuzzily on the default plane. |
 | `warm_start_min_speedup` | `1.05` | Floor on a stored entry's recorded speedup before it is worth a verify slot. |
 | `kb_mode` | `store` | Which plane warm start READS. `store` = a KB Store on disk, in the shape the KernelForge service uses, addressed by canonical id (`geak:kernel:<gfx>:<name>:<triton\|hip\|ck>:rocm:<ver>`) — the same addressing the service takes, so one scheme covers both planes. `local` = the `kb_artifacts/` tree addressed by slug, kept as an escape hatch. The WRITE is unaffected: it records the tree, the on-disk store and (when credentialed) the service in one call, so the planes cannot drift. Before each `store`-mode read the lane runs `experience_store.py sync-local`, which files the tree's backlog into the store — idempotent, and it keeps whatever the store already earned (attestation ledger, retraction, reproduction count). Phases, schemas and the verify gate are identical either way. |
-| `kb_store_dir` | sibling `kb_store_local/` | Root of the on-disk store plane. Ignored when `kb_mode=local`. |
-| `kb_framework_version` | measured stack | ROCm `<major>.<minor>` for the key's `framework_version` segment. Set it on a box with no `/opt/rocm`, where the measured stack is empty and every record would otherwise file under `unspecified` — splitting one kernel's history across two keys. Affects the key only, never the recorded stack. |
+| `kb_store_dir` | Sibling `kb_store_local/` | Root of the on-disk store plane. Ignored when `kb_mode=local`. |
+| `kb_framework_version` | Measured stack | ROCm `<major>.<minor>` for the key's `framework_version` segment. Set it on a box with no `/opt/rocm`, where the measured stack is empty and every record would otherwise file under `unspecified` — splitting one kernel's history across two keys. Affects the key only, never the recorded stack. |
 | `workload_spec_path` | — | Workload-alignment spec; makes the primary metric the time-weighted ratio-of-sums. |
 | `agent_timeout_ms` | `3600000` | Per-agent timeout (1h). |
 | `agent_retries` | `4` | Agent retry count (min 1). |
@@ -192,13 +195,16 @@ Workflow({
 
 ## Helper scripts
 
+The following scripts are called by the workflows.
+
 ### `e2e_workflow/scripts/bench_e2e.sh`
 
 Backend-agnostic e2e serving-benchmark dispatcher: server lifecycle, health-wait, and cleanup
 (or `REUSE_SERVER=1`), warmup + N timed repeats + optional profiling trace, median throughput + spread.
 Env-driven; `MODEL` is **required** (no rig default).
 
-Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (default 3), `MEM_FRACTION`,
+Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (legacy-mode rounds: default 3, or 1
+with `BENCH_CLIENT=agentx`, where one call is one full replay window), `MEM_FRACTION`,
 `EXTRA_SERVER_ARGS`, `EXTRA_ENV`, `OVERLAY_PYTHONPATH`, `PROFILE`, `BENCH_CLIENT`, `PORT_BASE`/`PORT_SPAN`,
 `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED`, `PROFILE_NUM_STEPS`, `REUSE_SERVER`.
 
@@ -265,8 +271,22 @@ GPU lock + per-workspace build isolation. `flock` per GPU id (safe GPU sharing),
 `TORCH_EXTENSIONS_DIR`, pins `PYTORCH_ROCM_ARCH` to the local gfx, reaps orphaned enumerator processes.
 
 ```bash
-bash gpu_lock.sh <gpu_id> <command...>
+bash gpu_lock.sh <gpu_id> <command...>              # one GPU
+bash gpu_lock.sh <id,id,...> <command...>           # any one free GPU of the pool
+bash gpu_lock.sh group:<id,id,...> <command...>     # exactly these GPUs, held together
+bash gpu_lock.sh pool:<n>:<id,id,...> <command...>  # any n free GPUs of the pool, held together
 ```
+
+The two multi-GPU forms go through `gpu_lease.py`. It takes the same per-GPU lock files, acquires
+the whole group or nothing (no partial holds while waiting), serves older group requests first, and
+applies the idle check to every GPU of the group. The command sees `HIP_VISIBLE_DEVICES` and
+`GEAK_GPU_GROUP` set to the leased ids. It is stopped after `GEAK_GPU_RUN_TIMEOUT` seconds (default
+900, `<0` = no limit); its process group and any reparented lease workers under `GEAK_GPU_REAP_ROOT`
+(default: the working directory) are killed so a hung multi-rank job cannot keep the GPUs. A lease
+left by a dead manager is reclaimed only when its processes are gone (or, from another PID namespace,
+when its GPUs are idle). Nested `gpu_lock.sh` calls inside a lease are rejected.
+`scripts/sweep_orphan_leases.sh --eval-dir <dir> [--kill]` lists (or stops) lease jobs a run left
+behind.
 
 ### `kernel_workflow/scripts/profile_kernel.sh`
 
@@ -274,7 +294,7 @@ Thin profiling wrapper: warmup + `gpu_lock` + auto-detect best profiler + run + 
 Output entry point: `<output_dir>/profile_report.txt`.
 
 ```bash
-bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
+bash profile_kernel.sh <gpu_spec> <benchmark_cmd> <output_dir>   # gpu_spec: any gpu_lock.sh form
 ```
 
 Env: `PROFILER_PRIORITY` (default: gfx1201 uses `rocprofv3 rocprof metrix rocprof-compute omniperf`;
@@ -297,8 +317,19 @@ Stable `handoff.json` fields: `model_path`, `framework` (→ `backend`), `tp`, `
 `inferencex_path`, `raw_baseline_tput`, `orchestrator_best_tput_same_config`.
 
 Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultracode`),
-`GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_FINAL_RESERVE_S`, `GEAK_ROOT`,
-`GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
+`GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_FINAL_RESERVE_S`, `GEAK_AGENTX_LEG_OVERHEAD_S`
+(→ `agentx_leg_overhead_s`), `GEAK_ROOT`, `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
+
+`GEAK_AGENTX_OUTER_WARMUP=1` is read by `bench_e2e.sh`: it puts the discarded full round back in
+front of an AgentX leg, for comparing against numbers taken that way.
+
+`BENCH_MAX_ATTEMPTS` (`2`; `3` when `GEAK_WORKLOAD_KIND=agentx_trace_replay`) is read by
+`bench_e2e.sh` in `isolated_server` mode and bounds the attempts spent on one replica before it is
+given up. The default of 2 (one retry) assumes a failed leg means a bad config; raise it when the
+stack itself faults independently of the config — an intermittent GPU fault hitting ~20% of server
+launches will exhaust 2 attempts on ~1 replica in 25 and lose the phase that needed it. The trace
+replay starts at 3 for exactly that reason. A non-numeric or `<1` value falls back to the workload's
+default.
 
 `--timeout-s <seconds>` states the same wall-clock budget on the command line. When it and
 `GEAK_E2E_TIMEOUT_S` are both given the **smaller** wins (both name a real kill); `43200` applies only
@@ -306,6 +337,8 @@ when neither is. The resolved value is forwarded to the workflow as `time_budget
 See [External orchestrator contract](./run-e2e-contract.md) for the full contract.
 
 ## Output artifacts
+
+The following output files are created during a run.
 
 ### e2e — `<exp_root>/e2e_<model>_<timestamp>/`
 
@@ -325,7 +358,7 @@ architect_report.md                      # official verified throughput result
 director_e2e_validation.json             # independent re-measurement
 ```
 
-### single kernel — `<exp_root>/team_<kernel>_<timestamp>/<kernel>/`
+### Single kernel — `<exp_root>/team_<kernel>_<timestamp>/<kernel>/`
 
 ```text
 COMMANDMENT.md                           # measurement contract

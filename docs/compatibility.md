@@ -14,8 +14,8 @@ Use the following matrix to view the compatibility and system requirements:
 
 | AMD GPU | Arch | ROCm version | Python | Ubuntu |
 |---|---|---|---|---|
-| MI300X, MI325X, MI355X | CDNA3 `gfx942` / CDNA4 `gfx950` | 6.4x, 7.0x, 7.1x, 7.2x, 10.0.0 | 3.8, 3.12 | 22.04, 24.04 |
-| Radeon 8060S (Strix Halo APU) | RDNA3.5 `gfx1151` | 7.2x, 10 | 3.12 | 22.04, 24.04 |
+| MI300X, MI325X, MI355X | CDNA3 `gfx942` / CDNA4 `gfx950` | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 3.8, 3.12 | 22.04, 24.04 |
+| Radeon 8060S (Strix Halo APU) | RDNA3.5 `gfx1151` | 7.2.x, 10.0.0 | 3.12 | 22.04, 24.04 |
 
 ```{note}
 - The on-box card is auto-detected (`rocminfo` / `rocm_agent_enumerator`); `PYTORCH_ROCM_ARCH` is pinned
@@ -60,13 +60,13 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 
 | Backend | Default port | 
 |---|---|
-| sglang | 30000 | 
-| vllm | 8000 | 
+| Sglang | 30000 | 
+| vLLM | 8000 | 
 
 | Bench client | Notes |
 |---|---|
 | Backend-native (`bench_e2e.sh`) | Default dispatcher. |
-| inferencex | Opt-in using `BENCH_CLIENT=inferencex` (Hyperloom or Magpie parity); needs `$INFERENCEX_PATH`. |
+| Inferencex | Opt-in using `BENCH_CLIENT=inferencex` (Hyperloom or Magpie parity); needs `$INFERENCEX_PATH`. |
 
 ## Kernel languages (kernel_workflow)
 
@@ -82,7 +82,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 ## Op-backend bake-off (`op_bench.py` head kernels)
 
 - hipblaslt 
-- rocblas or TunableOp
+- rocBLAS or TunableOp
 - aiter 
 - triton (with `--triton-autotune`) 
 

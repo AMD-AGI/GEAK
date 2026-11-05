@@ -132,7 +132,9 @@ a nested map `{ "models": { "<model_key>": <image> }, "<framework>": { "<arch>":
 "<image>" } }`. `arch` is auto-detected on the compute node as **`MI300`**
 (gfx942/gfx90a), **`MI355`** (gfx950), or **`R9700`** only when structured
 rocminfo identity reports the exact Radeon AI PRO R9700 product. Bare `gfx1201`
-or `RDNA4` identifies the ISA only and cannot select the R9700 image.
+or `RDNA4` identifies the ISA only and cannot select the R9700 image. Any other
+identified ISA with no image policy is refused (`E_ARCH_UNSUPPORTED`) instead of
+falling through to the MI355 default.
 `GEAK_GPU_ARCH` is allowlisted (`gfx1200` is rejected); an explicit R9700
 expectation still requires matching on-box structured identity.
 

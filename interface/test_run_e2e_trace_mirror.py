@@ -525,6 +525,14 @@ def test_sdk_child_env_sandboxes_only_under_root(monkeypatch):
     assert "IS_SANDBOX" not in rx._sdk_child_env()
 
 
+def test_sdk_child_env_turns_background_tasks_off_unless_the_operator_set_them(monkeypatch):
+    """An operator's own value, "0" included, is inherited untouched."""
+    monkeypatch.delenv(rx.BACKGROUND_TASKS_ENV, raising=False)
+    assert rx._sdk_child_env()[rx.BACKGROUND_TASKS_ENV] == "1"
+    monkeypatch.setenv(rx.BACKGROUND_TASKS_ENV, "0")
+    assert rx.BACKGROUND_TASKS_ENV not in rx._sdk_child_env()
+
+
 def test_mirror_trace_without_an_eval_dir_is_a_no_op():
     assert rx._mirror_trace("")["status"] == "no_eval_dir"
 

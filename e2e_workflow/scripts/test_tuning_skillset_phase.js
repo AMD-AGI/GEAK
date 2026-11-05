@@ -127,7 +127,7 @@ if (phaseList) {
 // Source order is what actually runs — assert the gated blocks are in the same sequence.
 const at = (re) => src.search(re);
 const iConfig = at(/if \(want\('config'\)/);
-const iTune = at(/if \(want\('tune'\) && TUNING_SKILLSET_ENABLED\)/);
+const iTune = at(/if \(want\('tune'\) && TUNING_SKILLSET_ENABLED\b/);
 const iHead = at(/if \(want\('head'\)/);
 ok(iTune > 0, "a gated `want('tune')` block exists");
 ok(iConfig > 0 && iConfig < iTune, 'the tune block runs AFTER the ConfigSweep block');

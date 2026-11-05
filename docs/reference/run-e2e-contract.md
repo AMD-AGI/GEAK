@@ -22,7 +22,7 @@ Run the external orchestrator entry point as follows.
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-- Exit code `0`: `result.json.status` is `ok` or `no_gain`.
+- Exit code `0`: `result.json.status` is `ok`, `no_gain` or `timeout`.
 - Exit code `1`: a crash; `result.json.status == "error"` with an `error` field.
 - Exit code `2`: bad usage or unreadable handoff.
 - `--dry-run`: print the mapped `e2e_workflow.js` args and the prompt and
@@ -31,6 +31,14 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
+
+E2E KB recall can use an independent GEAK policy: set
+`GEAK_E2E_KB_METRIC_BASIS=e2e_norm_intvty_p50` in the parent process environment,
+or `e2e_kb_metric_basis` in the handoff (higher precedence). Explicit policies
+exclude other and unlabelled metric bases without changing the benchmark axis,
+acceptance rule, or identity ladder. See the
+[recall policy contract](../../interface/run_e2e.md#e2e-kb-recall-policy) for
+defaults, diagnostics, and overlay compatibility.
 
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
@@ -82,23 +90,23 @@ and forwarded calibrations agree unless the caller requests variable lengths.
 
 The mapping is owned by `run_e2e.py:map_args`.
 
-| handoff field | `e2e_workflow.js` arg | note |
+| Handoff field | `e2e_workflow.js` arg | Note |
 |---|---|---|
-| `model_path` | `model_path` | required |
+| `model_path` | `model_path` | Required |
 | `framework` | `backend` | `sglang` or `vllm` |
-| `tp` | `tp` | serving tensor-parallel (threaded to bench `TP`) |
-| `gpu_ids` or `tp` | `gpu_ids` | defaults to `0..tp-1` |
-| `workload.{isl,osl,conc}` | `isl`, `osl`, `conc` | profile and bench workload |
-| `accepted_flags` | `initial_extra_server_args` | seeds the baseline from caller best config |
-| `accepted_env` | `initial_extra_env` | seeds baseline env |
-| `launch_recipe` | `launch_script` | optional |
-| `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
-| `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
-| `exp_root` | `exp_root` | run dir root |
-| (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens artifacts; only non-null paths forwarded; key omitted entirely when none found |
-| `bench_client`, `inferencex_path` | env `BENCH_CLIENT`, `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
+| `tp` | `tp` | Serving tensor-parallel (threaded to bench `TP`) |
+| `gpu_ids` or `tp` | `gpu_ids` | Defaults to `0..tp-1` |
+| `workload.{isl,osl,conc}` | `isl`, `osl`, `conc` | Profile and bench workload |
+| `accepted_flags` | `initial_extra_server_args` | Seeds the baseline from caller best config |
+| `accepted_env` | `initial_extra_env` | Seeds baseline env |
+| `launch_recipe` | `launch_script` | Optional |
+| `raw_baseline_tput` | Result audit metadata | Pre-change session baseline; never used as the measurement-alignment signal |
+| `orchestrator_best_tput_same_config` | Result alignment metadata | Caller throughput on the accepted config GEAK uses for its baseline |
+| `exp_root` | `exp_root` | Run dir root |
+| (derived from `exp_root`) | `tracelens` | Auto-discovered upstream TraceLens artifacts; only non-null paths forwarded; key omitted entirely when none found |
+| `bench_client`, `inferencex_path` | env `BENCH_CLIENT`, `INFERENCEX_PATH` | Exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.*` | env `RANDOM_RANGE_RATIO`, `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED` | `run_e2e.py:apply_bench_protocol` exports only the provided keys; absent keys keep `bench_e2e.sh` defaults |
-| — | `config_tune="false"` | caller already did config search; not repeated |
+| — | `config_tune="false"` | Caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
 
 ### TraceLens prior autodiscovery
@@ -109,12 +117,12 @@ artifacts beside the handoff's `geak` directory (under the experiment root, whic
 is the parent of `geak`). `map_args` resolves them by glob and forwards the
 non-null paths to the workflow as `args.tracelens`.
 
-| key | glob (relative to the experiment root) | what it is |
+| Key | Glob (relative to the experiment root) | What it is |
 |---|---|---|
-| `analysis_md` | `kernel-agent/**/tracelens/analysis.md` | human TraceLens hot-kernel report |
-| `kernel_candidates_json` | `kernel-agent/**/kernel_candidates.json` | machine-readable hot-kernel list |
-| `tracelens_report_json` | `kernel-agent/**/tracelens/tracelens_report.json` | full TraceLens report |
-| `trace_file` | `runs/roofline/**/torch_trace` | roofline torch-trace directory (per-TP-rank `*.pt.trace.json.gz`) |
+| `analysis_md` | `kernel-agent/**/tracelens/analysis.md` | Human TraceLens hot-kernel report |
+| `kernel_candidates_json` | `kernel-agent/**/kernel_candidates.json` | Machine-readable hot-kernel list |
+| `tracelens_report_json` | `kernel-agent/**/tracelens/tracelens_report.json` | Full TraceLens report |
+| `trace_file` | `runs/roofline/**/torch_trace` | Roofline torch-trace directory (per-TP-rank `*.pt.trace.json.gz`) |
 
 Resolution prefers the parent of the `geak` segment in `exp_root`; if that path
 is not present it falls back to the on-disk grandparent of the handoff file.
@@ -182,6 +190,29 @@ alignment metric. `measurement_divergence_pct` remains an exact compatibility
 alias for existing callers. If `orchestrator_best_tput_same_config` is absent,
 the same-config fields are `null` and `baseline_alignment.status` is
 `unavailable`; GEAK never treats raw-session divergence as measurement drift.
+
+### When there is no result to report
+
+When no workflow return exists and none can be rebuilt from disk (see Handoff
+resilience below), `result.json` reports the failure instead:
+
+```jsonc
+{
+  "schema_version": 2,
+  "status": "timeout | error",
+  "error_class": "timeout | llm_unreachable | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
+  "error": "no workflow return within the 32400s budget (furthest phase on disk: search)",
+  "phase_reached": "setup | search | finalize | validate"
+}
+```
+
+- `llm_unreachable`: Claude Code could not reach the model API (connection
+  refused or dropped, DNS, no route, proxy or TLS failure). `error` keeps the
+  original message, which contains Claude Code's `API Error: ...` reply.
+- `phase_reached` is the furthest phase the eval dir shows: `setup` until
+  Setup's baseline summary exists, `search` until the final phase fences the
+  GPUs (`.final_phase_fence`), then the fenced stage. It is absent when the eval
+  dir does not exist.
 
 ## Handoff resilience
 
@@ -255,17 +286,17 @@ the overlay:
 The workflow measures on the same calibration as the caller's official baseline so
 `final` and sweep curves are comparable to the caller's raw baseline.
 
-| knob | aligned value |
+| Knob | Aligned value |
 |---|---|
-| primary metric | aggregate `output_throughput` (output tok/s, not per-GPU) |
-| latency | `ttft_ms` and `tpot_ms` median |
-| dataset | `random`; `random_range_ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=fixed, `>0`=variable), else standalone default `0` (fixed) |
-| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
-| warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` |
-| seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
-| TP | same tensor-parallel (TP) size as the caller (no TP=1 lock) |
-| parity | greedy output diff vs baseline at temperature 0 with fixed seed |
-| bench client | `BENCH_CLIENT=inferencex` uses the same `benchmark_serving.py` as Hyperloom |
+| Primary metric | Aggregate `output_throughput` (output tok/s, not per-GPU) |
+| Latency | `ttft_ms` and `tpot_ms` median |
+| Dataset | `random`; `random_range_ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=fixed, `>0`=variable), else standalone default `0` (fixed) |
+| Workload | Same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
+| Warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` |
+| Seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
+| TP | Same tensor-parallel (TP) size as the caller (no TP=1 lock) |
+| Parity | Greedy output diff vs baseline at temperature 0 with fixed seed |
+| Bench client | `BENCH_CLIENT=inferencex` uses the same `benchmark_serving.py` as Hyperloom |
 
 The serving stack is always launched by the backend adapter
 (`adapters/sglang.sh` or `vllm.sh`). The bench client is selected independently

@@ -27,7 +27,7 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
 `MODE` (`optimize` default | `author`), `EXPECTED_GFX` (possibly empty), and
-`EXPECTED_TARGET` (`r9700` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
+`EXPECTED_TARGET` (`r9700` | `r9600d` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
 and `EXPECTED_PHYSICAL_CU_COUNT` (possibly zero). In `author` mode you also
 get `TARGET_LANGUAGE` and `OP_SPEC`.
 
@@ -35,14 +35,16 @@ Before building the workspace, run
 `python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` and use its JSON as the
 single source for `device_gfx`, `device_target`, `device_name`, and
 `physical_cu_count`. It scopes all fields to the same real GPU agent, rejects
-mixed visible identities, ignores `gfx000`, and emits `r9700` only when the
-trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700`. Every other
-product, including another gfx1201 board, remains `unknown`. Do **not** use
+mixed visible identities, ignores `gfx000`, and emits `r9700` or `r9600d` only
+when the trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700` or
+`AMD Radeon AI PRO R9600D`, respectively, on `gfx1201`. Every other product
+remains `unknown`. Recognition does not qualify R9600D kernel policy or permit
+R9700 calibration inheritance. Do **not** use
 `torch.cuda.get_device_properties().multi_processor_count` for physical CUs:
 on R9700 that is 32 WGPs, not 64 physical CUs.
 
 If `EXPECTED_GFX` is non-empty, report any mismatch in `notes`; the orchestrator
-enforces the mismatch as a hard failure. Same for `EXPECTED_TARGET=r9700`,
+enforces the mismatch as a hard failure. Same for a non-empty `EXPECTED_TARGET`,
 non-empty `EXPECTED_DEVICE_NAME`, and positive `EXPECTED_PHYSICAL_CU_COUNT`.
 
 ### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
@@ -67,32 +69,22 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
 
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
-`unittest.py` + optional `reference_io.pt`), NOT a kernel to optimize. There is no source to copy.
+`unittest.py` + optional captured oracles). Any existing candidate source will be
+replaced by the new implementation; preserve the complete test and baseline resources.
 Do this instead of the optimize-mode steps below:
 1. Same collision-proof `TS` + `EVAL_DIR` decision as below.
-2. Build the layout WITHOUT copying any kernel source:
+2. Build the layout, then empty only the candidate source directory:
    ```bash
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-   # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
-   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
-   # the authored seed against the live online path (never against the seed's own language scaffold).
-   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
-   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
-   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
-   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
-   for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
-     [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
-   done
-   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
-   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
-   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
-   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
-   for d in baseline_overlay baseline_ref baseline_src; do
-     [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
-   done
+   # Preserve the complete task: phase-local captures, baseline overlays, helpers
+   # and build resources may live below subdirectories. Share immutable goldens.
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/workspace" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   # Only candidate source is replaced for author mode; retain every UT dependency.
+   rm -rf "$EVAL_DIR/workspace/kernel_src"
+   mkdir -p "$EVAL_DIR/workspace/kernel_src"
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
@@ -231,6 +223,23 @@ RESTORE
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
+### GPU requirement (both sub-modes)
+Decide how many GPUs ONE run of this task's correctness test / benchmark needs; every later GPU
+command leases that many together. Skip this if `OP_SPEC.resource` already sets `gpus_per_job`.
+1. Run `python3 "$SKILL_DIR/scripts/detect_gpu_requirement.py" <files>` on the task's own test and
+   benchmark entry files plus its `meta.json` (a small task dir may be passed whole; never a whole
+   repository).
+2. `single` → return it as is. Otherwise read the code it cites and find the rank count the test runs
+   with as written: torchrun `--nproc_per_node`, a `mp.spawn`/`Pool` process count, a count passed in
+   code (e.g. `run_test(8, ...)`), or a fixed parallel layout (e.g. EP8). Several counts → the largest.
+   A count that follows the visible GPUs → `scalable`. Ignore counts in capture files
+   (`selection_trace*`, `capture*`, `_capture/`): they describe the server the task was captured from.
+3. If the code does not say, return `unknown` — never guess; the lane then stays single-GPU and
+   warns that it needs `gpus_per_job`.
+
+Return it as `"gpu_requirement": {"kind": "single|fixed|scalable|unknown", "gpus_per_job": <N>,
+"evidence": "<file:line and why>"}`.
+
 Return JSON:
 ```json
 {
@@ -239,10 +248,11 @@ Return JSON:
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
   "device_gfx": "<detected real gfx token>",
-  "device_target": "r9700|unknown",
+  "device_target": "r9700|r9600d|unknown",
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
+  "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
   "notes": "anything unusual about the layout"
@@ -394,7 +404,14 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    git apply "$EVAL_DIR/final_patch.diff"
    ```
    Otherwise leave the original untouched.
-8. Write `EVAL_DIR/director_validation.json` with the full result.
+8. After all of your own GPU commands have exited, stop lease jobs this run left behind (a
+   backgrounded `gpu_lock.sh` job can still acquire GPUs after the run ends):
+   ```bash
+   bash "$SKILL_DIR/scripts/sweep_orphan_leases.sh" --kill --eval-dir "$EVAL_DIR"
+   ```
+   If it found any, say so in `arbitration_note`: the run produced a measurement that is not in the
+   report, and it may have contended with the numbers you just validated.
+9. Write `EVAL_DIR/director_validation.json` with the full result.
 
 Return JSON:
 ```json

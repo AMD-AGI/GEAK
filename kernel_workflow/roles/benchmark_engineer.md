@@ -188,8 +188,8 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `PARSE` — a one-paragraph description of how to extract per-case latency from the output (the
   exact token/regex and the case-id mapping), so verify/profile engineers parse identically.
 - `METRIC` — define the PRIMARY speedup the optimize loop is judged on:
-  - **No WORKLOAD_SPEC**: unweighted geomean of per-case speedups (unchanged default).
-  - **WORKLOAD_SPEC present**: the **time-weighted ratio-of-sums**
+  - **Neither a weighted oracle nor WORKLOAD_SPEC**: unweighted geomean of per-case speedups (unchanged default).
+  - **Weighted oracle or WORKLOAD_SPEC present**: the **time-weighted ratio-of-sums**
     `speedup = Σ_i weight_i / Σ_i (weight_i / speedup_i)` (PRIMARY), and ALSO report the unweighted
     geomean as a secondary diagnostic. List each case's `weight` and `weight_source` so every
     downstream agent computes the SAME number. State that this primary number is what the round winner

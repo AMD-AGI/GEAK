@@ -288,6 +288,14 @@ async function auditContract(root) {
   const scriptSrc = (await Promise.all(scriptFiles.map((f) => readFile(f, 'utf8')))).join('\n');
   const roleSrc = (await Promise.all(roleFiles.map((f) => readFile(f, 'utf8')))).join('\n');
   const code = stripCommentsAndStrings(scriptSrc);
+  // Comments gone, STRINGS KEPT. The template-literal pass is greedy across a file full of
+  // prompt backticks, so a real `await import(\`${DIR}/x.mjs\`)` gets swallowed whole by a
+  // neighbouring span and vanishes from `code` -- which is exactly how four of them went
+  // unreported. `import(` cannot plausibly occur as prose (a Python `import json` has no
+  // paren), so checking it one pass earlier costs no precision and does not miss.
+  const codeWithStrings = scriptSrc
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
   const rows = [];
 
   // A-primitive: undeclared called identifiers that aren't builtins or known
@@ -321,10 +329,15 @@ async function auditContract(root) {
 
   // A-forbidden: sandbox-forbidden constructs in CODE (comments/strings stripped)
   const forbidden = [];
+  // import( is the WORST of these: the others degrade at runtime, but native REFUSES the whole
+  // script at launch ("SyntaxError: import() is not available in workflow scripts"), so not one
+  // line runs. It is also the one the standalone runtime happily accepts, which is how PR #520
+  // shipped four of them and took the native e2e path down while every parser stayed green.
   for (const [name, re] of [['Date.now', /\bDate\.now\b/], ['Math.random', /\bMath\.random\b/],
     ['new Date', /\bnew\s+Date\b/], ['process.', /\bprocess\./], ['require(', /\brequire\s*\(/]]) {
     if (re.test(code)) forbidden.push(name);
   }
+  if (/\bimport\s*\(/.test(codeWithStrings)) forbidden.push('import(');
   rows.push({
     id: 'A-forbidden', required: true, rItem: 'parity',
     ok: forbidden.length === 0,

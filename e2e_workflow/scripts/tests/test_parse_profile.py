@@ -365,6 +365,21 @@ class TestEntityEvidence(unittest.TestCase):
                          "void ns::gemm_kernel<bf16>(int)")
         self.assertEqual(stats["gpu_kernel"], 1)
 
+    def test_an_annotated_gpu_kernel_row_carries_the_profiled_symbol_as_device_kernel(self):
+        """The head gate adopts entity_kind only through device_kernel; an annotated Top-N row that
+        resolves to a gpu_kernel must carry the profiler's symbol there, and other kinds must not."""
+        host = {"aten::mm": {"calls": 2, "total_us": 4.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"void ns::gemm_kernel<bf16>(int)": {"calls": 3, "total_us": 9.0,
+                                                      "cat_counts": {"kernel": 3}}}
+        rows, _ = pp.annotate_rows(
+            [{"name": "gemm_kernel"}, {"name": "aten::mm"},
+             {"name": "kept", "device_kernel": "already_named"}],
+            pp.merge_entity_evidence(host, device), "tracelens")
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["gemm_kernel"]["device_kernel"], "void ns::gemm_kernel<bf16>(int)")
+        self.assertNotIn("device_kernel", by_name["aten::mm"])
+        self.assertEqual(by_name["kept"]["device_kernel"], "already_named")
+
     def test_c9_collision_resolution_is_merge_order_independent(self):
         # The setdefault bug made the collision winner depend on which aggregate was merged first.
         # Reversing the merge input order must yield IDENTICAL kinds for every row: neither the
@@ -495,6 +510,28 @@ class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
 # serving-phase step windows
 # --------------------------------------------------------------------------- #
 class TestStepSpans(unittest.TestCase):
+    def test_sglang_step_dialect_preserves_prefill_and_speculative_decode(self):
+        self.assertEqual(pp._classify_step("step[EXTEND bs=2 toks=64]"), (True, 64, 0, 0))
+        self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
+        self.assertIsNone(pp._classify_step("step[malformed]"))
+
+    def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):
+        from unittest.mock import patch
+        events = [{"cat": "gpu_user_annotation", "name": "step[NEW_MODE bs=4]", "ts": 1, "dur": 5}]
+        with tempfile.TemporaryDirectory() as directory:
+            filename = os.path.join(directory, "trace.json")
+            with open(filename, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "0"}):
+                pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "0"}):
+                with self.assertRaisesRegex(ValueError, "none parsed"):
+                    pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "1"}):
+                with contextlib.redirect_stderr(io.StringIO()) as warnings:
+                    pp.parse_torch_trace(filename)
+                self.assertIn("continuing unphased", warnings.getvalue())
+
     def test_seg_without_the_tag_is_all_zeros(self):
         self.assertEqual(pp._seg("execute_model", "context"), (0, 0, 0))
         self.assertEqual(pp._seg("context_abc(12)", "context"), (0, 0, 0))

@@ -134,6 +134,48 @@ const R9700 = {
     ok(a.expected_target === undefined, 'expected_target is not synthesized', JSON.stringify(a.expected_target));
   }
 
+  {
+    // R9600D is a calibrated product like R9700: model mode enters the serving phase, default vllm.
+    const { run } = build({
+      model_path: '/models/m', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      expected_device_name: 'AMD Radeon AI PRO R9600D', expected_physical_cu_count: 48,
+    }, { stopAtFirstPhase: true });
+    let msg = '';
+    try { await run(); } catch (error) { msg = error.message; }
+    ok(msg === PROBE_STOP, 'R9600D model mode is accepted with the vllm default', msg || 'no throw');
+  }
+  {
+    const { run } = build({
+      model_path: '/models/m', backend: 'sglang', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      expected_device_name: 'AMD Radeon AI PRO R9600D', expected_physical_cu_count: 48,
+    }, { stopAtFirstPhase: true });
+    let msg = '';
+    try { await run(); } catch (error) { msg = error.message; }
+    ok(/R9600D E2E is vLLM-only \(got backend=sglang\)/.test(msg),
+      'R9600D explicit backend=sglang fails closed', msg || 'no throw');
+  }
+  {
+    const { run } = build({ kernel_path: '/tmp/k', expected_gfx: 'gfx950', expected_target: 'r9600d' });
+    let msg = '';
+    try { await run(); } catch (error) { msg = error.message; }
+    ok(/expected_target=r9600d requires expected_gfx=gfx1201/.test(msg), 'R9600D wrong ISA is rejected', msg);
+  }
+
+  {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      expected_device_name: 'AMD Radeon AI PRO R9600D', expected_physical_cu_count: 48,
+    });
+    await run();
+    const forwarded = (trace.workflowCalls[0] || {}).args || {};
+    ok(forwarded.expected_target === 'r9600d', 'R9600D kernel handoff preserves product');
+    ok(forwarded.expected_gfx === 'gfx1201', 'R9600D kernel handoff preserves ISA');
+    ok(forwarded.expected_device_name === 'AMD Radeon AI PRO R9600D', 'R9600D kernel handoff preserves name');
+    ok(forwarded.expected_physical_cu_count === 48, 'R9600D kernel handoff preserves 48 CUs');
+    ok(forwarded.use_learned_kb === 'false' && forwarded.use_expert_skills === 'false', 'R9600D kernel handoff isolates CDNA knowledge');
+    ok(forwarded.perf_knowledge_dir === '' && forwarded.warm_start === 'off', 'R9600D kernel handoff disables CDNA knowledge and warm start');
+  }
+
   console.log('\n# D. serving backend policy (there is no validated R9700 SGLang image)');
   {
     const { run } = build({ model_path: '/models/m', backend: 'sglang', ...R9700 },
@@ -174,7 +216,7 @@ const R9700 = {
     }, { stopAtFirstPhase: true });
     let msg = '';
     try { await run(); } catch (e) { msg = e.message; }
-    ok(/product is not confirmed as r9700/.test(msg),
+    ok(/not confirmed as one of r9700\/r9600d/.test(msg),
       'unknown gfx1201 product fails before serving policy', msg || 'no throw');
   }
   {

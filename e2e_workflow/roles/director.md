@@ -36,15 +36,18 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 (ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
 `INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
 `INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
-`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
-`EFFECTIVE_CONFIG_DIGEST`, plus the caller-established structured identity
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`,
+`EFFECTIVE_CONFIG_DIGEST`, the caller-established structured identity
 `EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, and
-`EXPECTED_PHYSICAL_CU_COUNT`.
+`EXPECTED_PHYSICAL_CU_COUNT`, and `BENCH_ENV_CONTENT` (present ONLY when the run measures a
+workload that owns its own load — an AgentX trace replay; absent on a fixed ISL/OSL run).
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
-2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` set use it; else
-   `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`. If it exists & non-empty, append `_${RANDOM}` until fresh.
+2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` is set, `EVAL_DIR` is exactly that path, even when it
+   already exists and holds files (the caller writes there first and reads results only from there).
+   Otherwise use `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`, and if that generated path exists & is non-empty,
+   append `_${RANDOM}` until fresh.
 3. Build the layout and copy the launch script in (never edit the original):
    ```bash
    mkdir -p "$EVAL_DIR"/{baseline,profile,overlay,kernels,config,logs}
@@ -57,15 +60,28 @@ Steps:
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
    cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
    ```
+   - **If `BENCH_ENV_CONTENT` is non-empty**, write it VERBATIM to `$EVAL_DIR/bench_env.sh` in this
+     same step — before you bench anything. `bench_e2e.sh` and `bench_replica.sh` source that file
+     from beside themselves on every invocation; it is what selects the trace-replay client and the
+     graded metric axis for the whole run, **including your own baseline in step 5**. Skip it and the
+     baseline silently becomes a synthetic ISL/OSL sweep on the wrong axis, which makes every later
+     delta in the run meaningless. Do not edit, reorder, or add to its contents, and do not set
+     `BENCH_CLIENT` / `E2E_METRIC` / `AGENTX_*` on any bench command line yourself — the file owns
+     them. Verify it landed (`test -s "$EVAL_DIR/bench_env.sh"`) and report the path.
+     When `BENCH_ENV_CONTENT` is absent, write NOTHING: the absence of that file is what keeps a
+     fixed ISL/OSL run on its normal synthetic path.
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +
      `WORKLOAD` (bench_e2e.sh needs no model default — `MODEL` is passed). Record the resolved server
      flags in `EVAL_DIR/config/baseline_flags.json`.
 4. **Preflight + pin the environment** — first run
    `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` and use its JSON as the
-   only product/ISA/CU source. `target=r9700` is emitted only for the exact
-   marketing name `AMD Radeon AI PRO R9700`; a different gfx1201 product remains
-   `unknown`. Hard-stop if it disagrees with `EXPECTED_GFX`,
-   `EXPECTED_TARGET=r9700`, or a positive `EXPECTED_PHYSICAL_CU_COUNT`.
+   only product/ISA/CU source. It emits `target=r9700` or `target=r9600d` only
+   for the exact marketing name `AMD Radeon AI PRO R9700` or
+   `AMD Radeon AI PRO R9600D`, respectively; any other gfx1201 product remains
+   `unknown`. Return the probe's `target` unchanged as `device_target`; never
+   infer either product from gfx1201. Hard-stop if it disagrees with
+   `EXPECTED_GFX`, a non-empty `EXPECTED_TARGET`, or a positive
+   `EXPECTED_PHYSICAL_CU_COUNT`.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
@@ -90,7 +106,10 @@ Steps:
    against, so it MUST be taken exactly the way the sweep, integrate and validate legs will be.
    The default `warm_server` boots ONE server, runs a full untimed round that populates the prefix
    cache and is discarded, then runs `REPLICAS` timed round(s) on that hot server — Hyperloom's own
-   `warmup_round`/`measure_round`. Under `isolated_server` each replica is a fresh server and
+   `warmup_round`/`measure_round`. A trace replay (`BENCH_CLIENT=agentx`) has no discarded round: the
+   replay warms every lane before its window opens, so the leg is only its timed round(s) — ONE pass
+   at `REPLICAS=1`, Hyperloom's AgentX baseline and rebench.
+   Under `isolated_server` each replica is a fresh server and
    InferenceX's internal kernel/graph warmups run but no outer full-round replay does.
    **Serving is TP=`SERVING_TP`
    on the GPU set `SERVING_GPU`** (both passed in your inputs / the SERVING CONFIG INVARIANT block of
@@ -111,7 +130,8 @@ Steps:
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
-   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   key; `metric_basis` names its axis — output or total tok/s, or an interactivity axis in
+   tok/s/user such as `e2e_norm_intvty_p50` — falls back to
    `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
    the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
@@ -144,7 +164,7 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<required gfx target from step 4, e.g. gfx950>",
-  "device_target": "r9700|unknown",
+  "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
@@ -187,6 +207,9 @@ your own. It is one of:
   two client passes per leg with the second one reported — precisely how Hyperloom measures its own
   baseline and variants (`warmup_round` discarded → `measure_round` on the re-attached hot server), so
   your number and the orchestrator's rebench are the same measurement. It costs 2 server boots total.
+  A trace replay (`BENCH_CLIENT=agentx`) skips the discarded round: the replay warms every lane itself
+  before its window opens, so each leg is only its timed round(s) — ONE pass at `REPLICAS=1`, which is
+  how Hyperloom measures AgentX.
   The spread across those rounds bounds CLIENT noise, not boot-to-boot noise — see step 1's caveat,
   and at `REPLICAS=1` there is no spread at all.
 - **`isolated_server`** (opt-in): `REPLICAS` FRESH servers per leg. Every replica retains the client's
@@ -233,7 +256,10 @@ your own. It is one of:
 2. **Output parity** (a faster wrong server is a regression): run a short greedy/temp=0 fixed-seed
    request set against both baseline and final; diff the decoded outputs. Record pass/fail. If
    parity fails (and the change was not an intentional, accuracy-approved quantization), status =
-   `flagged`.
+   `flagged`. When `ACCURACY_GATE=gsm8k` is in your inputs, the run's correctness bar is task accuracy,
+   not bytes: score both servers with `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1
+   --model <MODEL_PATH> --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` (same fixed subset), and
+   parity fails only if `final_score < base_score - ACCURACY_TOL`. Record both scores.
 3. Compute `throughput_speedup = final_med / base_med` (drift-corrected, same-session). Also report
    vs the provided baseline for reference. The COMBINED stack counts as a real win only if
    `delta% > NOISE_BAND_PCT` AND non-overlapping; otherwise report it honestly as within-noise (the

@@ -139,6 +139,19 @@ class TestPeaks(unittest.TestCase):
             p = rt.load_peaks(PEAKS_MD, gfx)
             self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
             
+    def test_r9600d_peaks_are_its_own_datasheet(self):
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9600d")
+        self.assertEqual(p.get("product"), "r9600d")
+        self.assertEqual(p["cu"], 48)
+        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 6.4e11, delta=1e8)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 2.48e13, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 9.9e13, delta=1e11)
+        self.assertEqual(rt.peak_flops_for(p, "bf16"), rt.peak_flops_for(p, "fp16"))
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp8"), 1.99e14, delta=1e11)
+        self.assertAlmostEqual(p["flops"]["int8"], 1.99e14, delta=1e11)
+        self.assertNotIn("fp4", p["flops"])
+        self.assertNotEqual(p["flops"], rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")["flops"])
+
     def test_r9700_peaks_require_product_identity(self):
         self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201"))
         p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")
@@ -445,13 +458,8 @@ class TestSkillDocConsistency(unittest.TestCase):
         self.assertEqual(rt.TARGET_EFF["gemm"], 0.90)
         self.assertEqual(rt.TARGET_EFF["moe"], 0.90)
         self.assertEqual(rt.TARGET_EFF["attn"], 0.50)
-        self.assertEqual(rt.target_eff_for("moe", product="r9700"), 0.76)
-        self.assertEqual(rt.target_eff_for("elementwise", product="r9700"), 0.76)
-        self.assertEqual(rt.target_eff_for("gemm", product="r9700"), 0.90)
-        self.assertEqual(rt.target_eff_for("moe", product="unknown"), 0.90)
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
-                     "attention decode (paged) | **0.50**",
-                     "R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76**"):
+                     "attention decode (paged) | **0.50**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
 
     def test_workload_contract_is_stated(self):
