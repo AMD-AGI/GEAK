@@ -15,17 +15,13 @@
 
 adapter_default_port() { echo 8000; }
 
-adapter_launch() {
-  # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
-  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
-  # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off. The ProfilerConfig
-  # schema is strict (extra=forbid) and aborts the server on an unknown key, so probe its fields and emit
-  # only what the installed build declares. JSON held in an array so it stays one argument.
-  local -a _prof=()
-  local -a _prof_env=()
-  if [ -n "${PROFILE_DIR:-}" ]; then
-    local _prof_fields
-    _prof_fields="$(python3 - <<'PY' 2>/dev/null
+# adapter_profiler_args: the --profiler-config JSON for $PROFILE_DIR, or nothing when this build has
+# no ProfilerConfig (<0.19: the VLLM_TORCH_PROFILER_DIR env var is the only switch). The schema is strict
+# (extra=forbid) and aborts the server on an unknown key, so probe its fields and emit only what the
+# installed build declares. Also called by multinode's wrapper around a caller's own launch_command.
+adapter_profiler_args() {
+  local _prof_fields
+  _prof_fields="$(python3 - <<'PY' 2>/dev/null
 names=set()
 try:
     from vllm.config import ProfilerConfig
@@ -41,32 +37,48 @@ except Exception:
     pass
 PY
 )"
-    _has() { case " $_prof_fields " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-    if [ -n "$_prof_fields" ]; then
-      local _json="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true"
-      # stacks default on and are the biggest per-event cost; off keeps the event buffer small.
-      _has torch_profiler_with_stack && _json="$_json,\"torch_profiler_with_stack\":false"
-      # 0.26+: max_iterations self-stops the profiler after N worker steps, bounding the buffer.
-      _has max_iterations   && _json="$_json,\"max_iterations\":${PROFILE_MAX_ITERS:-64}"
-      _has delay_iterations && _json="$_json,\"delay_iterations\":${PROFILE_DELAY_ITERS:-0}"
-      _has ignore_frontend  && _json="$_json,\"ignore_frontend\":true"
-      # 0.26+: per-iteration prefill/decode annotation the parser uses for the phase split. Cheap.
-      _has detailed_trace_annotation && _json="$_json,\"detailed_trace_annotation\":true"
-      # 0.26+ decode-shape capture: opt-in (hardcodes with_stack+profile_memory, needs mem validation).
-      if [ "${PROFILE_CAPTURE_TRACES:-0}" = "1" ]; then
-        _has capture_torch_profiler && _json="$_json,\"capture_torch_profiler\":true"
-      fi
-      _json="$_json}"
-      _prof=(--profiler-config "$_json")
+  [ -n "$_prof_fields" ] || return 0
+  _has() { case " $_prof_fields " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+  local _json="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR\",\"torch_profiler_record_shapes\":true"
+  # stacks default on and are the biggest per-event cost; off keeps the event buffer small.
+  _has torch_profiler_with_stack && _json="$_json,\"torch_profiler_with_stack\":false"
+  # 0.26+: max_iterations self-stops the profiler after N worker steps, bounding the buffer.
+  _has max_iterations   && _json="$_json,\"max_iterations\":${PROFILE_MAX_ITERS:-64}"
+  _has delay_iterations && _json="$_json,\"delay_iterations\":${PROFILE_DELAY_ITERS:-0}"
+  _has ignore_frontend  && _json="$_json,\"ignore_frontend\":true"
+  # 0.26+: per-iteration prefill/decode annotation the parser uses for the phase split. Cheap.
+  _has detailed_trace_annotation && _json="$_json,\"detailed_trace_annotation\":true"
+  # 0.26+ decode-shape capture: opt-in (hardcodes with_stack+profile_memory, needs mem validation).
+  if [ "${PROFILE_CAPTURE_TRACES:-0}" = "1" ]; then
+    _has capture_torch_profiler && _json="$_json,\"capture_torch_profiler\":true"
+  fi
+  echo "$_json}"
+}
+
+adapter_launch() {
+  # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
+  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off.
+  # JSON held in an array so it stays one argument.
+  local -a _prof=()
+  local -a _prof_env=()
+  if [ -n "${PROFILE_DIR:-}" ]; then
+    local _pjson
+    _pjson="$(adapter_profiler_args)"
+    if [ -n "$_pjson" ]; then
+      _prof=(--profiler-config "$_pjson")
     else
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")   # <0.19: no flag; the time window is the only bound
     fi
   fi
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
+  # A probe leg (PROFILE_PROBE_POINTS) needs /pause?mode=keep + /resume so a PREFILL point's
+  # sequences run as one step; vllm mounts them only in dev mode.
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
+    ${PROFILE_PROBE_POINTS:+VLLM_SERVER_DEV_MODE=1} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
     PYTHONPATH="${PROFILE_PYTHONPATH:+$PROFILE_PYTHONPATH:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
@@ -81,6 +93,17 @@ PY
 }
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
+
+# ---- multi-node (read by adapters/launchers/multinode.sh) ----
+# per_rank: vllm's mp executor spans nodes itself (one `vllm serve` per node, torch.distributed
+# rendezvous at --master-addr:--master-port). Only rank0 serves HTTP; the others run --headless.
+adapter_dist_mode() { echo per_rank; }
+# adapter_dist_args RANK NNODES MASTER DIST_PORT
+adapter_dist_args() {
+  local out="--distributed-executor-backend mp --nnodes $2 --node-rank $1 --master-addr $3 --master-port $4"
+  [ "$1" != "0" ] && out="$out --headless"
+  echo "$out"
+}
 
 # adapter_bench NUM_PROMPTS MAX_CONC PROFILE_FLAG
 adapter_bench() {

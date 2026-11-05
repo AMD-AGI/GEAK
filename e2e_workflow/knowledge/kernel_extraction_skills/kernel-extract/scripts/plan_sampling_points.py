@@ -93,6 +93,7 @@ def prefill_candidates(ow, bnd):
         cands.append({
             "phase": "PREFILL",
             "new_tokens": b["new_token_median"],
+            "new_seq": b["new_seq_mode"],
             "running": b["running_mode"],
             "cached_tokens": b["cached_token_median"],
             "bucket": b["bucket"],

@@ -173,6 +173,16 @@
       "why": "real head row: a memcpy row and its own rocprof spelling",
       "a": "Memcpy", "b": "Memcpy DtoD (Device -> Device)", "match": true
     },
+    {
+      "why": "real pd1014 trace: Triton appends its constexprs (GRID_MN_* varies with M) to the kernel the candidate names",
+      "a": "_gemm_a8w8_blockscale_kernel",
+      "b": "_gemm_a8w8_blockscale_kernel_GROUP_K_128_GROUP_N_128_BLOCK_SIZE_M_128_BLOCK_SIZE_N_128_BLOCK_SIZE_K_128_GROUP_SIZE_M_1_NUM_KSPLIT_1_SPLITK_BLOCK_SIZE_4096_EVEN_K_1_GRID_MN_348_cache_modifier_CG",
+      "match": true
+    },
+    {
+      "why": "a suffix with no constexpr value is another kernel, not a specialization",
+      "a": "_gemm_a8w8_blockscale_kernel", "b": "_gemm_a8w8_blockscale_kernel_v2", "match": false
+    },
     { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false }
   ]
 }

@@ -33,7 +33,12 @@ Schema (json):
      "backend_guess": "triton|hipblaslt|aiter|ck|rocblas|torch_native|unknown",
      "editable": bool,                       # can a source-level kernel swap touch it?
      "opt_hint": str
-  } ... ]
+  } ... ],
+  "step_ledger": {                          # torch trace only; else "step_ledger_unavailable": why
+     "token_source": "annotation|embedding",
+     "prefill_tokens", "prefill_gpu_ms",     # GPU time inside prefill steps (embedding: whole window)
+     "decode_gpu_ms", "decode_active_ms"     # annotation only: first to last decode step, minus prefill steps
+  }
 }
 
 Stdlib only.
@@ -335,12 +340,16 @@ def parse_torch_trace(path):
 
     # cpu_op External id -> (input_dims, input_types) for shape enrichment
     op_by_ext = {}
+    embed_tokens = []    # numel(indices) per aten::embedding call; None when its dims are absent
     for e in events:
         if not isinstance(e, dict) or e.get("cat") != "cpu_op":
             continue
         a = e.get("args", {})
         ext = a.get("External id")
         dims = a.get("Input Dims")
+        if e.get("name") == "aten::embedding":
+            embed_tokens.append(math.prod(dims[1]) if isinstance(dims, list) and len(dims) > 1
+                                and dims[1] else None)
         if ext is not None and dims:
             # keep the op whose dims are non-trivial
             flat = [d for d in dims if d]
@@ -380,6 +389,8 @@ def parse_torch_trace(path):
     agg = {}  # name -> dict
     total_us = 0.0
     launches = 0
+    phase_us = {"prefill": 0.0, "decode": 0.0}
+    unspanned = []  # (ts, dur) of launches outside every step span
     for e in events:
         if not isinstance(e, dict) or e.get("cat") not in ("kernel", "gpu_memcpy", "gpu_memset"):
             continue
@@ -397,10 +408,13 @@ def parse_torch_trace(path):
         # attribute this launch to its serving phase (measured from the step span it falls in)
         phase, stepM = _phase_of(e.get("ts"))
         if phase:
+            phase_us[phase] += dur
             bp = d["by_phase"].setdefault(phase, {"count": 0, "total_us": 0.0, "m": {}})
             bp["count"] += 1
             bp["total_us"] += dur
             bp["m"][stepM] = bp["m"].get(stepM, 0) + 1
+        elif spans and e.get("ts") is not None:
+            unspanned.append((float(e["ts"]), dur))
         ext = e.get("args", {}).get("External id")
         sig = ""           # shape signature (json of non-empty input dims)
         dtype_sig = ""     # dtype signature (json of per-tensor input types)
@@ -436,7 +450,63 @@ def parse_torch_trace(path):
             "prefill_tokens": sum(s[3] for s in pref),
             "decode_batches": [s[4] for s in dec],
         }
+    drafts = [(e["ts"], e["ts"] + e["dur"]) for e in events
+              if isinstance(e, dict) and e.get("cat") == "gpu_user_annotation" and "dur" in e and "ts" in e
+              and str(e.get("name", "")).startswith("draft")]
+    ledger = _step_ledger(pref, dec, phase_us, total_us, embed_tokens, unspanned, drafts)
+    if isinstance(ledger, dict):
+        phase_meta["step_ledger"] = ledger
+    elif ledger:
+        phase_meta["step_ledger_unavailable"] = ledger
     return agg, total_us, launches, phase_meta
+
+
+IDLE_GAP_STEPS = 10
+
+
+def _step_ledger(pref, dec, phase_us, total_us, embed_tokens, unspanned=(), drafts=()):
+    """Unit costs a pd_disagg merge weighs the engines by (mn.py topn-merge), or why there are none.
+
+    Prefill: kernel time inside P spans per prompt token; a P span nested in a `draft*` annotation
+    is the MTP/EAGLE draft re-reading the same tokens, so its time counts and its tokens do not.
+    Decode: every kernel from the first D span to the last that is not under a P span (the draft
+    model's forwards run outside the TARGET_VERIFY spans), over that range minus the P spans inside
+    it and minus idle gaps -- stretches with no span for over IDLE_GAP_STEPS median D-step intervals,
+    when nothing was decoding and so no TPOT was being measured.
+    Only step annotations give decode's numbers. Without them, aten::embedding's indices give the
+    prefill token count -- valid only on an engine that runs no decode, where the whole window is
+    prefill. A graph-fused embedding keeps no indices shape, and then nothing counts the tokens.
+    """
+    if pref or dec:
+        out = {"token_source": "annotation"}
+        if pref:
+            out["prefill_tokens"] = sum(s[3] for s in pref
+                                        if not any(a <= s[0] and s[1] <= b for a, b in drafts))
+            out["prefill_gpu_ms"] = round(phase_us["prefill"] / 1000.0, 4)
+        if dec:
+            lo, hi = dec[0][0], max(s[1] for s in dec)
+            inside = sum(s[1] - s[0] for s in pref if s[0] >= lo and s[1] <= hi)
+            starts = [s[0] for s in dec]
+            step = sorted(b - a for a, b in zip(starts, starts[1:]))
+            limit = IDLE_GAP_STEPS * step[len(step) // 2] if step else float("inf")
+            gaps, end = [], lo
+            for s in sorted(x for x in pref + dec if lo <= x[0] < hi):
+                if s[0] - end > limit:
+                    gaps.append((end, s[0]))
+                end = max(end, s[1])
+            loose = sum(d for t, d in unspanned
+                        if lo <= t < hi and not any(a <= t < b for a, b in gaps))
+            out["decode_gpu_ms"] = round((phase_us["decode"] + loose) / 1000.0, 4)
+            out["decode_active_ms"] = round((hi - lo - inside - sum(b - a for a, b in gaps)) / 1000.0, 4)
+        return out
+    if not embed_tokens:
+        return ("no step annotations and no aten::embedding cpu_op: the prefill token count "
+                "is unknown")
+    if None in embed_tokens:
+        return ("no step annotations, and aten::embedding carries no indices shape (graph-fused "
+                "embedding, or record_shapes off): the prefill token count is unknown")
+    return {"token_source": "embedding", "prefill_tokens": sum(embed_tokens),
+            "prefill_gpu_ms": round(total_us / 1000.0, 4)}
 
 
 # --------------------------------------------------------------------------- #
@@ -875,6 +945,9 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
     }
     if serving:
         out["serving"] = serving
+    for key in ("step_ledger", "step_ledger_unavailable"):
+        if key in pm:
+            out[key] = pm[key]
     return out
 
 
@@ -985,7 +1058,8 @@ def to_markdown(summ):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--torch-trace", default="")
+    ap.add_argument("--torch-trace", action="append", default=[],
+                    help="repeatable with --annotate (one trace per engine of a multi-node run)")
     ap.add_argument("--rocprof-dir", default="")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--out", default="", help="path prefix; writes <out>.json and <out>.md")
@@ -1012,6 +1086,9 @@ def main():
 
     if not args.torch_trace and not args.rocprof_dir:
         ap.error("provide --torch-trace and/or --rocprof-dir")
+    if len(args.torch_trace) > 1 and not args.annotate:
+        ap.error("several --torch-trace go with --annotate; a Top-N run parses one trace")
+    traces = args.torch_trace
 
     capture_sizes = [int(x) for x in args.capture_sizes.split(",") if x.strip()]
     chunk = args.prefill_chunk or None
@@ -1020,8 +1097,10 @@ def main():
 
     torch_agg = torch_total = torch_launch = None
     torch_pmeta = {}
-    if args.torch_trace:
-        torch_agg, torch_total, torch_launch, torch_pmeta = parse_torch_trace(args.torch_trace)
+    torch_aggs = []
+    for trace in traces:
+        torch_agg, torch_total, torch_launch, torch_pmeta = parse_torch_trace(trace)
+        torch_aggs.append(torch_agg)
     rp_agg = rp_total = rp_launch = None
     if args.rocprof_dir:
         rp_agg, rp_total, rp_launch = parse_rocprof_dir(args.rocprof_dir)
@@ -1032,14 +1111,21 @@ def main():
         # Preserve all same-name evidence. A host span and a dispatched kernel can legitimately share
         # an exact name; overwriting either one fabricates certainty, so classify_entity marks that row
         # unresolved and the head gate refuses it.
-        host_agg = index_host_entities(args.torch_trace) if args.torch_trace else {}
-        ev_agg = merge_entity_evidence(rp_agg, host_agg, torch_agg)
+        # Several traces (one per engine) are one union: a kernel absent from every trace is unresolved.
+        host_aggs = [index_host_entities(t) for t in traces]
+        ev_agg = merge_entity_evidence(rp_agg, *host_aggs, *torch_aggs)
         ev_src = doc.get("source") or ("merged" if (rp_agg and torch_agg) else
                                        "rocprofv3" if rp_agg else "torch-trace")
         # A third-party Top-N may aggregate an outer custom op and its device children into one row.
         # Turn that row into the actual kernels first; merely labelling/rejecting the dispatcher would
         # repeat the 0802 failure mode instead of finding the launcher/kernel that 0720 optimized.
-        dispatch_edges = index_dispatch_edges(args.torch_trace) if args.torch_trace else {}
+        dispatch_edges = {}
+        for trace in traces:
+            for host, kids in index_dispatch_edges(trace).items():
+                for kernel, entry in kids.items():
+                    acc = dispatch_edges.setdefault(host, {}).setdefault(kernel, {"calls": 0, "total_us": 0.0})
+                    acc["calls"] += entry["calls"]
+                    acc["total_us"] += entry["total_us"]
         rows, expansions = expand_dispatcher_rows(
             doc.get("top_kernels") or [], dispatch_edges, ev_agg, ev_src)
         rows, stats = annotate_rows(rows, ev_agg, ev_src)

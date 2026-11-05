@@ -18,6 +18,8 @@ const schemas = between('const obj =', '// Result of the ensure_flydsl');
 const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
 const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
+assert(!/Date\.now\(|new Date\(/.test(helper), 'the Workflow runtime throws on wall-clock reads');
+const pdHelpers = between('const PD_ROLES =', 'function roleAgent(');
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
@@ -68,23 +70,29 @@ async function run(body, overrides = {}, reply = selection()) {
     TRACELENS_INPUTS: {}, ANALYSIS_SKILL_INPUTS: {}, KB_REF_INPUTS: {},
     profile: { profile_workload_json: '/old/workload.json', kernel_ranking_json: '/old/ranking.json' },
     strategy: null, kernelQueue: [], headQueue: [], history: { ledger: [] },
-    ST: {}, A: {}, FAST_MODE: false, DEEP_MODE: false,
+    ST: {}, A: { kernel_extract_resumes: 0 }, FAST_MODE: false, DEEP_MODE: false,
     e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
-    MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
+    MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [], extractTried: new Set(),
+    heads: [candidate('head')], TIME_DEADLINE_HIT: false,
+    TIME_BUDGET_MS: 100800000, FINAL_RESERVE_MS: 3600000, remainingMs: () => 90000000,
+    agentTimeoutFor: () => 7200000,
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
+    SERVING_TOPOLOGY: '', MN: null, MN_SPEC: null, curPd: { prefill: {}, decode: {} }, pdDirectionGaps: [],
+    AGENTX_METRIC_BASIS: 'aggregate_output_tok_s',
+    captureShard: () => (overrides.SERVING_TOPOLOGY ? { CAPTURE_ON_ENGINE: overrides.SERVING_TOPOLOGY } : {}),
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
     searchClosed: () => false, searchWindowShort: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
-    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
+    safeAgent: async (prompt, opts, tries, timeoutFor) => { calls.push({ ...prompt, opts, tries, capMs: timeoutFor?.() }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
     readAgentXPreparation: async () => structuredClone(reply),
     applyOpIdentityGuard: q => q, admitHeads: q => q, ensureFlydslGate: async () => {},
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${schemas}\n${phaseSelector}\n${helper}\n${body}
-    return {profile, strategy, headQueue, kernelQueue,
+    ${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
+    return {profile, strategy, headQueue, kernelQueue, extractTried: [...extractTried],
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
       state: typeof carryState === 'undefined' ? null : carryState};`)(env);
@@ -117,6 +125,75 @@ async function run(body, overrides = {}, reply = selection()) {
     phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5, overall_pct_gt: 3,
     combination: 'phase_top_k_and_overall_threshold', backfill: false,
   });
+  assert.equal(input.CAPTURE_ON_ENGINE, undefined, 'one host: no serving-leg capture inputs');
+  assert(!first.calls[0].intro.includes('MULTINODE'), 'one host: the prompt is unchanged');
+
+  // PD: one capture over both engines, sampling through serving legs; the engine weights ranked the
+  // queue already, so it keeps the extraction's order, and an envelope without them is refused.
+  const pdSelection = selection();
+  pdSelection.kernel_candidates = [{ ...candidate('p'), engine: 'prefill' }, { ...candidate('d'), engine: 'decode' }];
+  pdSelection.engine_weights = { rule: 'gpu_time_mass', weights: { prefill: 0.6, decode: 0.4 },
+    inputs: { mass_us: { PREFILL: 60e6, DECODE: 40e6 }, ranks: { prefill: 8, decode: 8 } }, warnings: [] };
+  const pdOverrides = { MN: { nodes: ['p0', 'd0'] }, SERVING_TOPOLOGY: 'pd_disagg' };
+  const pdRun = await run(initial, { ...pdOverrides, AGENTX_METRIC_BASIS: 'p90_intvty_inferencex' }, pdSelection);
+  assert.equal(pdRun.calls[0].inputs.CAPTURE_ON_ENGINE, 'pd_disagg');
+  assert(pdRun.calls[0].intro.includes('/wf/roles/_fragments/agentx_multinode.md'), 'multinode rules fragment');
+  const mnFragment = fs.readFileSync(path.join(__dirname, '..', 'roles', '_fragments', 'agentx_multinode.md'), 'utf8');
+  for (const rule of ['PROFILE=1', 'serving_probe.py', 'run/requested_kernel.json', 'gpu_lock.sh',
+    'pd-mass', '--roles', 'phase_mass_share_pct'])
+    assert(mnFragment.includes(rule), rule);
+  assert.deepEqual(pdRun.kernelQueue.map(c => c.engine), ['prefill', 'decode'],
+    'no axis-name reordering on top of the engine weights');
+  assert(selectionSchema.properties.prepared.properties.engine_weights,
+    'the schema names engine_weights, so a schema-filling reply keeps it');
+  // Selection already ran on the pd-mass ranking; a reply that lost the envelope's copy only warns.
+  const unweighed = selection();
+  unweighed.kernel_candidates = pdSelection.kernel_candidates;
+  const warned = [];
+  const lost = await run(initial, { ...pdOverrides, log: m => warned.push(m) }, unweighed);
+  assert(warned.some(m => /WARNING: PD envelope carries no engine_weights/.test(m)), 'missing weights are logged');
+  assert.deepEqual(lost.kernelQueue.map(c => c.engine), ['prefill', 'decode'], 'the run continues on the delivery');
+  assert.equal(lost.calls.filter(c => c.phase === 'repair_delivery').length, 0, 'no repair for a log-only field');
+  const decodeOnly = selection();
+  decodeOnly.head_candidates = [];
+  decodeOnly.kernel_candidates = [{ ...candidate('d'), engine: 'decode' }];
+  decodeOnly.failed_tasks = [{ short_name: 'prefill_capture', engine: 'prefill', reason: 'profiler fault' }];
+  const solo = await run(initial, pdOverrides, decodeOnly);
+  assert.equal(solo.strategy.engine_weights, undefined, 'a failed engine capture invents no weights');
+  assert.deepEqual(solo.kernelQueue.map(c => c.short_name), ['d'], 'the surviving engine continues the run');
+  const noneLeft = { ...decodeOnly, kernel_candidates: [],
+    failed_tasks: [...decodeOnly.failed_tasks, { short_name: 'decode_capture', engine: 'decode', reason: 'fault' }] };
+  assert.deepEqual((await run(initial, pdOverrides, noneLeft)).kernelQueue, [],
+    'both captures failed: an empty queue, as on a single node');
+  const unexplained = { ...decodeOnly, failed_tasks: [] };
+  const warnedSolo = [];
+  await run(initial, { ...pdOverrides, log: m => warnedSolo.push(m) }, unexplained);
+  assert(warnedSolo.some(m => /no engine_weights/.test(m)), 'an unexplained missing engine is warned, not fatal');
+
+  // Deferred tasks with budget left: resume from the saved evidence, bounded, as an ordinary agent.
+  const resumed2 = await run(initial, { A: {} });
+  assert.deepEqual(resumed2.calls.map(c => c.phase), ['prepare', 'resume', 'resume']);
+  const res = resumed2.calls[1];
+  assert.equal(res.inputs.PREVIOUS_DELIVERY_PATH, '/eval/delivery.json');
+  assert.deepEqual(res.inputs.DEFERRED_TASKS, selection().deferred_tasks);
+  assert.equal(res.inputs.AGENT_DEADLINE_MIN, undefined);
+  assert.equal(res.tries, undefined, 'the generic agent cap and retries, as on every role');
+  assert.equal(resumed2.calls[0].tries, undefined);
+  const cleared = { ...selection(), deferred_tasks: [] };
+  let resumeReads = 0;
+  const once = await run(initial, { A: {}, readAgentXPreparation: async () => structuredClone(resumeReads++ ? cleared : selection()) });
+  assert.deepEqual(once.calls.map(c => c.phase), ['prepare', 'resume'], 'nothing deferred: no further resume');
+  resumeReads = 0;
+  const kept = await run(initial, { A: {}, readAgentXPreparation: async () => {
+    if (resumeReads++) throw new Error('bad resume'); return structuredClone(selection()); } });
+  assert.deepEqual(kept.calls.map(c => c.phase), ['prepare', 'resume', 'repair_delivery']);
+  assert.equal(kept.kernelQueue.length, 1, 'an unreadable resume keeps the previous delivery');
+  const nearDeadline = await run(initial, { A: {}, remainingMs: () => 4200000 });
+  assert.deepEqual(nearDeadline.calls.map(c => c.phase), ['prepare'], 'no room for another agent: no resume');
+  const deadline = await run(initial, { A: {}, TIME_DEADLINE_HIT: true });
+  assert.deepEqual(deadline.calls.map(c => c.phase), ['prepare'], 'past the deadline: no resume');
+  const span = await run(initial, { MN: { nodes: ['a', 'b'] }, SERVING_TOPOLOGY: 'tp_span' });
+  assert.equal(span.calls[0].inputs.CAPTURE_ON_ENGINE, 'tp_span');
   assert.equal(first.headQueue[0].pct_gpu_time, 7.25, 'routing uses attributable share, not window pct');
   assert.equal(first.kernelQueue[0].pct_gpu_time, 7.25);
   const closed = await run(initial, { searchClosed: () => true });
@@ -170,7 +247,6 @@ async function run(body, overrides = {}, reply = selection()) {
 
   for (const [name, body, expectedFixedCalls] of [
     ['config', config, 2], ['tuning', tuning, 2], ['deep', deep, 1],
-    ['head', head, 1], ['milestone refresh', milestoneRefresh, 1],
     ['milestone plan', milestonePlan, 1],
   ]) {
     const actual = await run(body);
@@ -180,6 +256,36 @@ async function run(body, overrides = {}, reply = selection()) {
     assert.equal(old.calls.length, expectedFixedCalls, name);
     assert(old.calls.every(c => ['profiler', 'system_architect'].includes(c.role)), name);
   }
+  // A head win reshapes the AgentX ranking: one re-extraction on the current stack, minus done heads.
+  const postHead = await run(head);
+  assert.deepEqual(postHead.calls.map(c => [c.role, c.phase]), [['kernel_extractor', 'prepare']]);
+  assert(postHead.calls[0].intro.includes('POST-HEAD ROUND'));
+  assert.equal(postHead.calls[0].inputs.ROUND, 'post_head');
+  assert.deepEqual(postHead.kernelQueue.map(c => c.short_name), ['kernel']);
+  assert.deepEqual(postHead.extractTried, ['head'], 'done heads are never re-delivered later');
+  // A milestone win reshapes it too: the AgentX counterpart of the fixed-load re-profile.
+  const refresh = await run(milestoneRefresh, { extractTried: new Set(['head', 'done']),
+    kernelQueue: [candidate('left')] });
+  assert.deepEqual(refresh.calls.map(c => [c.role, c.phase]), [['kernel_extractor', 'prepare']]);
+  assert(refresh.calls[0].intro.includes('MILESTONE ROUND'));
+  assert(refresh.calls[0].intro.includes('Do not re-deliver: head, done.'));
+  assert.equal(refresh.calls[0].inputs.ROUND, 'm2');
+  assert.deepEqual(refresh.kernelQueue.map(c => c.short_name), ['left', 'kernel'],
+    'new candidates join the leftovers; tried and queued ones are dropped');
+  const oldRefresh = await run(milestoneRefresh, { KERNEL_EXTRACT_ON: false });
+  assert.deepEqual(oldRefresh.calls.map(c => [c.role, c.phase]), [['profiler', 'reprofile']]);
+  for (const [why, o] of [['no improvement', { milestoneImproved: false }], ['budget spent', { dispatched: 2 }],
+    ['deadline', { TIME_DEADLINE_HIT: true }], ['closed search', { searchClosed: () => true }]])
+    assert.deepEqual((await run(milestoneRefresh, o)).calls, [], `milestone re-extraction: ${why}`);
+  const failedRefresh = await run(milestoneRefresh, { kernelQueue: [candidate('left')],
+    readAgentXPreparation: async () => { throw new Error('bad'); } });
+  assert.deepEqual(failedRefresh.kernelQueue.map(c => c.short_name), ['left'], 'a failed round keeps the queue');
+  assert.deepEqual((await run(head, { acceptedHeads: [] })).calls, [], 'no win, no re-extraction');
+  assert.deepEqual((await run(head, { A: { phases: 'head' } })).calls, [], 'no kernel phase, no re-extraction');
+  const brokenRound = await run(head, { readAgentXPreparation: async () => { throw new Error('bad'); } });
+  assert.deepEqual(brokenRound.kernelQueue, [], 'a failed re-extraction finalizes the accepted stack');
+  const oldHead = await run(head, { KERNEL_EXTRACT_ON: false });
+  assert.deepEqual(oldHead.calls.map(c => c.role), ['profiler']);
   const queued = await run(milestonePlan, { kernelQueue: [candidate('saved')] });
   assert.equal(queued.calls.length, 0, 'consume saved candidates without rediscovery');
   assert.equal(queued.plan.kernel_candidates[0].short_name, 'saved');
@@ -190,9 +296,9 @@ async function run(body, overrides = {}, reply = selection()) {
   let queue = inventory;
   for (const expected of inventory) {
     const batch = await run(milestonePlan + milestoneFilter + milestoneSchedule + milestoneRefresh + carry,
-      {kernelQueue: queue, remaining: 1});
+      {kernelQueue: queue, remaining: 1, milestoneImproved: false});
     assert.equal(batch.scheduled[0].short_name, expected.short_name);
-    assert.deepEqual(batch.calls, [], 'an accepted optimization must not replenish the inventory');
+    assert.deepEqual(batch.calls, [], 'consuming the inventory needs no extraction');
     const resumedBatch = await run(resume, {ST: batch.state});
     assert.deepEqual(resumedBatch.calls, [], 'all-phase resume reuses the completed preparation');
     queue = resumedBatch.kernelQueue;
@@ -213,6 +319,8 @@ async function run(body, overrides = {}, reply = selection()) {
 
   // Execute the actual optimization + integration block with disagreeing metrics.
   const optimizeAndIntegrate = between('  const optimized = await parallel(cands.map', '  // --- (c) If improved:');
+  const engineHelpers = ['function engineWorkload(', 'function captureShard(']
+    .map(start => between(start, '\n}\n') + '\n}\n').join('');
   async function metricDispatch(enabled, weighted, geomean) {
     const integrated = [];
     const env = {KERNEL_EXTRACT_ON: enabled, cands: [candidate('weighted')],
@@ -220,6 +328,7 @@ async function run(body, overrides = {}, reply = selection()) {
       curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
       KERNEL_WF_SCRIPT: '/kernel.js', KERNEL_WF_DIR: '/kernel', USE_EXPERT_SKILLS: false,
       EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
+      SERVING_TOPOLOGY: '', curPd: { prefill: {}, decode: {} },
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
       laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
       extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
@@ -230,7 +339,7 @@ async function run(body, overrides = {}, reply = selection()) {
       },
       integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
-    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
+    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdHelpers}\n${engineHelpers}\n${optimizeAndIntegrate}`)(env);
     return integrated;
   }
   assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
@@ -281,6 +390,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
     const kernelSelectionVerified = () => ({ ok: true });
     const guardUnhydratedVerdicts = ext => ext;
+    const withDiskSelection = async ext => ext;
     const log = () => {};
     ${extraction}
     return extractWithBaseline;
@@ -323,6 +433,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
     const log = () => {};
     const require = () => { throw new Error('no capture files in this CPU fixture'); };
+    const withDiskSelection = async ext => ext;
     ${identity}
     ${extraction}
     return extractWithBaseline;

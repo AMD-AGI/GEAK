@@ -292,6 +292,29 @@ class AgentXClientCanonicalityTest(unittest.TestCase):
             msg="a failed replay must not append a result line",
         )
 
+    def test_vendored_mapper_is_found_when_a_launcher_redeclares_the_client(self):
+        """multinode.sh re-declares adapter_bench through eval from its own file.
+
+        That moves BASH_SOURCE inside the function to the launcher, so a mapper
+        looked up beside BASH_SOURCE was missed and every leg failed at warmup.
+        """
+        launcher = Path(self.tmp) / "launchers" / "wrap.sh"
+        launcher.parent.mkdir()
+        launcher.write_text(
+            'eval "_wrapped() $(declare -f adapter_bench | sed \'1d\')"\n'
+        )
+        proc = subprocess.run(
+            [BASH, "-c", f'source "{ADAPTER}"; source "{launcher}"; _wrapped 1 8 0'],
+            env={**os.environ, "PATH": f"{Path(self.tmp) / 'bin'}:{os.environ.get('PATH', '')}",
+                 "TEST_ARGV_LOG": str(self.argv_log), "RESULT_JSONL": str(self.result_jsonl),
+                 "OUT_DIR": self.tmp, "MODEL": "/models/Kimi-K3",
+                 "BASE_URL": "http://127.0.0.1:8000", "INFERENCEX_PATH": ""},
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotIn("no map_aiperf.py", proc.stderr)
+        self.assertTrue(self.argv_log.exists(), msg=f"aiperf never ran: {proc.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()
