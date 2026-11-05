@@ -27,6 +27,46 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 
+def x_(v, nd=4):
+    return ("%%.%df×" % nd) % v if isinstance(v, (int, float)) else "—"
+
+
+def write_section(out, report):
+    """This slot's section of the run report, written where the delivery was accepted.
+
+    The per-kernel table and the sentence under it are knowledge about `optimized.json`
+    and about which of its two speedup columns is allowed to count. That belongs to the
+    slot that enforces it, not to the run-level renderer, which passes paths and reads
+    `result.json` (PRINCIPLES R3/R6).
+    """
+    kernels = report.get("kernels") or []
+    L = ["## Kernel optimization", "",
+         "Credited %s task-h across %s tasks; %s passed cold re-verification."
+         % (report.get("gpu_hours"), report.get("tasks_total"),
+            len(report.get("kept") or [])), "",
+         "| Kernel | Attempts | Credited | Claimed | **Cold-verified** | Verdict |",
+         "| --- | --- | --- | --- | --- | --- |"]
+    for k in kernels:
+        L.append("| `%s` | %s | %.1f h | %s | **%s** | %s |"
+                 % (k.get("kernel"), k.get("attempts"),
+                    (k.get("credited_seconds") or 0) / 3600.0,
+                    x_(k.get("claimed_speedup")), x_(k.get("verified_speedup")),
+                    k.get("verdict")))
+    notes = [(k.get("kernel"), n) for k in kernels for n in k.get("notes") or []]
+    if notes:
+        L.append("")
+        L += ["- `%s`: %s" % (k, n) for k, n in notes]
+    L += ["", "The claimed column is what the worker measured while optimizing. Only the "
+              "cold-verified column counts: a fresh process per repeat, the minimum "
+              "across repeats, and a code-identity check that calls an unchanged source "
+              "what it is."]
+    try:
+        with open(os.path.join(out, "REPORT.md"), "w") as f:
+            f.write("\n".join(L) + "\n")
+    except OSError:
+        pass  # the accounting verdict stands whether or not the prose could be written
+
+
 def valid_limit(limit):
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("task_limit must be a positive integer")
@@ -187,6 +227,8 @@ def main():
     if not out:
         print(json.dumps(result, indent=2))
         return 0
+    write_section(out, json.loads(optimized.read_text()))
+
     artifacts = {"optimized": os.path.relpath(str(optimized), out)}
     for name in ("REPORT.md", "work"):
         if os.path.exists(os.path.join(out, name)):

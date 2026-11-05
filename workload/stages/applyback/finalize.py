@@ -39,6 +39,66 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
+
+def pct(x):
+    return "%+.4f%%" % x if isinstance(x, (int, float)) else "—"
+
+
+def x_(v, nd=4):
+    return ("%%.%df×" % nd) % v if isinstance(v, (int, float)) else "—"
+
+
+def write_section(out, ab, summary):
+    """This slot's section of the run report -- the only end-to-end claim in the run.
+
+    It is written here, next to the four rules above, because every line of it is one of
+    those rules made visible: the two numbers side by side, the band, whether the overlay
+    was shown to have loaded. The run-level renderer passes paths and reads `result.json`;
+    it does not get to decide how a gain is presented (PRINCIPLES R3/R6).
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    cand = ab.get("candidate") or {}
+    L = ["## End to end", "",
+         "| | tok/s |", "| --- | --- |",
+         "| reference | %s |" % (ab.get("baseline") or {}).get("throughput")]
+    for leg in summary.get("legs") or []:
+        L.append("| candidate leg `%s` | %s |" % (leg.get("tag"), leg.get("throughput")))
+    L += ["| **candidate median (%s legs)** | **%s** |"
+          % (cand.get("repeats"), cand.get("throughput")),
+          "", "| | |", "| --- | --- |",
+          "| operator speedup, peak | %s |" % x_(ab.get("op_speedup_max")),
+          "| **whole machine** | **%s** |" % pct(ab.get("e2e_delta_pct")),
+          "| noise band | ±%.2f%% |" % (ab.get("noise_band_pct") or 0),
+          "| verdict | **%s** |" % ab.get("verdict"),
+          "| overlay shadowed every target | %s |" % ab.get("overlay_all_shadowed"),
+          "| overlay loaded by every leg | %s |"
+          % summary.get("overlay_loaded_by_every_leg")]
+    if summary.get("spread_pct") is not None:
+        L.append("| spread between legs | %.4f%% |" % summary["spread_pct"])
+
+    p90 = ab.get("native_interactivity_p90") or {}
+    if p90.get("available") is True:
+        L += ["", "| Native P90 interactivity | tok/s/user |", "| --- | --- |",
+              "| fresh stock | %s |" % p90["baseline"],
+              "| median of candidate runs' native P90 | %s |" % p90["candidate"],
+              "| change | %s |" % pct(p90["delta_pct"]),
+              "", "Source: `%s`. This is the native rate percentile, without inverse-ITL "
+                  "conversion." % p90["metric_path"]]
+
+    L += ["", "| Kernel installed | Operator speedup | Target |", "| --- | --- | --- |"]
+    for op in ab.get("op_level") or []:
+        L.append("| `%s` | %s | `%s` |"
+                 % (op.get("kernel"), x_(op.get("op_speedup")), op.get("target")))
+    L += ["", "The two numbers are stated separately because in this scenario they come "
+              "apart: an operator win with no system movement is the normal outcome, not "
+              "the exception. A delta inside the band means the machine did not move, and "
+              "is reported as such rather than rounded upward."]
+    try:
+        with open(os.path.join(out, "REPORT.md"), "w") as f:
+            f.write("\n".join(L) + "\n")
+    except OSError:
+        pass  # the verdict stands whether or not the prose could be written
+
 THROUGHPUT_KEYS = ("throughput_tok_s_median", "output_token_throughput",
                    "output_throughput_tok_s", "throughput_tok_s", "throughput")
 
@@ -261,6 +321,8 @@ def main():
             "native_p90_interactivity_baseline": native_p90["baseline"],
             "native_p90_interactivity_candidate": native_p90["candidate"],
             "native_p90_interactivity_delta_pct": native_p90["delta_pct"]})
+    write_section(out, ab, summary)
+
     artifacts = {"ab": "ab.json", "applied": "applied.json", "overlay": "overlay"}
     for name in ("shadow_check.json", "REPORT.md"):
         if os.path.exists(os.path.join(out, name)):

@@ -94,6 +94,13 @@ external interface.
 - Values in `artifacts` are paths **relative to `$OUT`**, never absolute. The driver
   checks that each one exists.
 - `metrics` holds numbers used for reporting and gating; it may be empty.
+- `$OUT/REPORT.md`, if present, is **this stage's own section of the run report**. The
+  run-level renderer pastes it in verbatim and never summarises it, so a stage says what
+  a stage's numbers mean. Write it from the skill if the skill is the one holding the
+  numbers (`kernel-roofline` does); otherwise the slot's `finalize.py` writes it, since
+  it already has every figure in hand at the moment it decides whether to accept them. A
+  stage that writes none still appears in the contract table — nothing downstream breaks,
+  it simply has no prose of its own.
 - When output is incomplete, report `blocked`/`fail` honestly. Marking a half-finished
   stage `ok` lets downstream burn 48 hours on fabricated inputs — the most expensive
   mistake available in this pipeline.

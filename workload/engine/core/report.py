@@ -5,10 +5,18 @@ Nothing here is retyped. Every figure is read back from `STATE.json` and the sta
 own artifacts, so the report cannot disagree with the run -- and a stage that did not
 run simply has no section rather than a stale one.
 
-The file knows no individual skill. It renders the stage contract (status + metrics +
-notes, which every stage must produce) for all five stages, and adds a detail section
-only when a well-known artifact is present. A replacement skill that writes the same
-artifact gets the same section; one that does not still appears in the summary.
+This file knows no individual stage and no individual skill. It renders two things: the
+target the run declared, and the stage contract -- status, skill, metrics, notes, which
+every stage must produce whatever implements it. Everything below that is the stage's
+own `$OUT/REPORT.md`, concatenated verbatim.
+
+That division is PRINCIPLES R3 and R6 together. The connector passes paths and reads
+`result.json`; the moment it starts knowing that `optimize` writes `optimized.json` with
+a `kernels` list, or that only the cold-verified column counts, that knowledge belongs to
+the slot that enforces it -- and it used to live in both places, which is two copies of a
+rule and therefore a rule that drifts. A slot owns what it accepts, so it owns what it
+reports. A replacement skill inherits the section by writing the file; one that writes
+nothing still appears in the table.
 
 It is also the renderer `engine/core/watch.py` calls on every tick, so the report an
 unattended run leaves behind mid-flight is the same document as the one it finishes
@@ -29,14 +37,6 @@ def rj(*parts):
             return json.load(f)
     except (OSError, ValueError):
         return None
-
-
-def pct(x):
-    return "%+.4f%%" % x if isinstance(x, (int, float)) else "—"
-
-
-def x_(v, nd=4):
-    return ("%%.%df×" % nd) % v if isinstance(v, (int, float)) else "—"
 
 
 def summary_rejection(summary):
@@ -92,6 +92,22 @@ def stage_rows(root, state=None):
     return rows
 
 
+def stage_section(root, stage):
+    """A stage's own `$OUT/REPORT.md`, if it wrote one.
+
+    Written either by the skill (profile's does) or by the slot's `finalize.py`, which
+    already has every number in hand at the moment it decides whether to accept them. It
+    is pasted in unread: this renderer does not get to summarise, reorder or second-guess
+    a stage's account of itself.
+    """
+    try:
+        with open(os.path.join(root, stage, "out", "REPORT.md")) as f:
+            text = f.read().strip()
+    except OSError:
+        return ""
+    return text + "\n" if text else ""
+
+
 def stage_table(rows, limit=4):
     L = ["| Stage | Skill | Status | Key metrics |", "| --- | --- | --- | --- |"]
     for r in rows:
@@ -138,92 +154,16 @@ def main(argv=None):
     L.append("## Stages\n")
     L.extend(stage_table(rows))
 
-    # --- Baseline.
-    b = rj(root, "baseline", "out", "baseline.json")
-    pb = rj(root, "profile", "out", "pristine_baseline.json")
-    b = b if 'baseline' in admitted else None
-    pb = pb if 'profile' in admitted else None
-    if b or pb:
-        L.append("\n## Baseline\n")
-        L.append("| Reference | tok/s | Provenance |\n| --- | --- | --- |")
-        if b:
-            L.append("| adopted receipt | %s | %s |"
-                     % (b.get("throughput"), (b.get("provenance") or {}).get("method")))
-        if pb:
-            L.append("| node-local pristine leg | %s | measured on this node by the same "
-                     "harness as the candidate legs |" % pb.get("output_tok_per_s"))
-        if pb and b:
-            L.append("\nThe A/B below is against the **node-local** leg. A receipt from "
-                     "another machine is a cross-check, not a reference: only the local "
-                     "leg shares the harness, the client flags and the corpus with the "
-                     "candidate.\n")
-
-    # --- Optimize: claimed vs cold-verified, per kernel.
-    o = rj(root, "optimize", "out", "optimized.json")
-    if o and 'optimize' in admitted:
-        L.append("\n## Kernel optimization\n")
-        L.append("Credited %s task-h across %s tasks; %s passed cold re-verification.\n"
-                 % (o.get("gpu_hours"), o.get("tasks_total"), len(o.get("kept") or [])))
-        L.append("| Kernel | Attempts | Credited | Claimed | **Cold-verified** | Verdict |"
-                 "\n| --- | --- | --- | --- | --- | --- |")
-        for k in o.get("kernels") or []:
-            L.append("| `%s` | %s | %.1f h | %s | **%s** | %s |"
-                     % (k.get("kernel"), k.get("attempts"),
-                        (k.get("credited_seconds") or 0) / 3600.0,
-                        x_(k.get("claimed_speedup")), x_(k.get("verified_speedup")),
-                        k.get("verdict")))
-        notes = [(k["kernel"], n) for k in o.get("kernels") or [] for n in k.get("notes") or []]
-        if notes:
-            L.append("")
-            L.extend("- `%s`: %s" % (k, n) for k, n in notes)
-        L.append("\nThe claimed column is what the worker measured while optimizing. Only "
-                 "the cold-verified column counts: a fresh process per repeat, the "
-                 "minimum across repeats, and a code-identity check that calls an "
-                 "unchanged source what it is.\n")
-
-    # --- Applyback: the only end-to-end claim in the run.
-    ab = rj(root, "applyback", "out", "ab.json")
-    summ = rj(root, "applyback", "out", "e2e", "bench_summary.json")
-    usable_summary = not summary_rejection(summ)
-    if ab and 'applyback' in admitted and usable_summary:
-        L.append("\n## End to end\n")
-        base, cand = ab.get("baseline") or {}, ab.get("candidate") or {}
-        L.append("| | tok/s |\n| --- | --- |")
-        L.append("| reference | %s |" % base.get("throughput"))
-        for leg in (summ or {}).get("legs") or []:
-            L.append("| candidate leg `%s` | %s |" % (leg.get("tag"), leg.get("throughput")))
-        L.append("| **candidate median (%s legs)** | **%s** |"
-                 % (cand.get("repeats"), cand.get("throughput")))
-        L.append("\n| | |\n| --- | --- |")
-        L.append("| operator speedup, peak | %s |" % x_(ab.get("op_speedup_max")))
-        L.append("| **whole machine** | **%s** |" % pct(ab.get("e2e_delta_pct")))
-        L.append("| noise band | ±%.2f%% |" % (ab.get("noise_band_pct") or 0))
-        L.append("| verdict | **%s** |" % ab.get("verdict"))
-        L.append("| overlay shadowed every target | %s |" % ab.get("overlay_all_shadowed"))
-        L.append("| overlay loaded by every leg | %s |"
-                 % (summ or {}).get("overlay_loaded_by_every_leg"))
-        if (summ or {}).get("spread_pct") is not None:
-            L.append("| spread between legs | %.4f%% |" % summ["spread_pct"])
-        native_p90 = ab.get("native_interactivity_p90") or {}
-        if native_p90.get("available") is True:
-            L.append("\n| Native P90 interactivity | tok/s/user |\n| --- | --- |")
-            L.append("| fresh stock | %s |" % native_p90["baseline"])
-            L.append("| median of candidate runs' native P90 | %s |" % native_p90["candidate"])
-            L.append("| change | %s |" % pct(native_p90["delta_pct"]))
-            L.append("\nSource: `%s`. This is the native rate percentile, without inverse-ITL conversion.\n"
-                     % native_p90["metric_path"])
-        L.append("\n| Kernel installed | Operator speedup | Target |\n| --- | --- | --- |")
-        for op in ab.get("op_level") or []:
-            L.append("| `%s` | %s | `%s` |"
-                     % (op.get("kernel"), x_(op.get("op_speedup")), op.get("target")))
-        L.append("\nThe two numbers are stated separately because in this scenario they "
-                 "come apart: an operator win with no system movement is the normal "
-                 "outcome, not the exception. A delta inside the band means the machine "
-                 "did not move, and is reported as such rather than rounded upward.\n")
-
-    elif ab:
-        L.append('\nA prior A/B artifact is retained, but the current stage or native '
-                 'summary is not admitted; no end-to-end gain is reported.\n')
+    # --- Each stage's own section, exactly as the stage wrote it.
+    # Only from a stage the driver admitted: an unadmitted stage's REPORT.md describes
+    # work whose verdict did not hold, and pasting it in makes a rejected run look
+    # finished.
+    for row in rows:
+        if row["stage"] not in admitted:
+            continue
+        section = stage_section(root, row["stage"])
+        if section:
+            L.append("\n" + section)
 
     # --- Whatever each stage flagged about itself.
     said = [(r["stage"], r["notes"]) for r in rows if r["notes"]]
