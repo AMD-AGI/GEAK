@@ -2033,7 +2033,11 @@ function __agentGuarded(prompt, opts, onHung, timeoutFor) {
     guard,
   ]);
 }
-async function __routeEscalate(prompt, opts, decision) {
+async function __routeEscalate(prompt, opts, decision, onHung, timeoutFor) {
+  // eikos v2 E1 (R8 / Astra re-review #9 item 7): thread the reserve hooks through the GATED routed branch so
+  // it matches the ORDINARY path — main's abandon-and-adopt `onHung` + per-lane `timeoutFor` were DROPPED here
+  // (every physical dispatch called __agentGuarded(p, o) with no reserve args). SCOPED: the direct
+  // kernel_workflow.js E1 entry does NOT traverse this helper, so this is a correctness fix, not an E1 blocker.
   // cheap attempt -> deterministic gate -> ONE strong fallback that BYPASSES the cheap map. Records
   // EVERY physical dispatch, at a fixed cap of 2 per cascade (1 cheap + 1 strong; a throw on the cheap
   // attempt propagates and the strong one is never made, so the cap is a ceiling, never exceeded). A
@@ -2054,7 +2058,7 @@ async function __routeEscalate(prompt, opts, decision) {
   const dispatch = async (p, o, attempt, extra) => {
     const cid = `${ph || 'wf'}:${lbl}:a${attempt}#${++__seq}`;
     try {
-      return await __agentGuarded(p, o);
+      return await __agentGuarded(p, o, onHung, timeoutFor);   // R8 item 7: reserve hooks now reach the gated path
     } catch (e) {
       const cls = (e && e.name) || (e && e.constructor && e.constructor.name) || 'Error';
       __routeAttempts.push(Object.assign(
@@ -2097,7 +2101,7 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTim
     try { log(`  [route] ${(opts && opts.label) || 'agent'} @${(opts && opts.phase) || ''} SUPPRESSED (no in-runtime verifier; staying on ${ROUTE_MODEL_STRONG})`); } catch (e) {}
     return __agentGuarded(prompt, opts, onHung, timeoutFor);
   }
-  return __routeEscalate(prompt, opts, decision);              // cheap-first + artifact gate + strong fallback (opt-in; its own guard)
+  return __routeEscalate(prompt, opts, decision, onHung, timeoutFor);   // cheap-first + artifact gate + strong fallback; R8 item 7: threads onHung/timeoutFor (reserve) like the ordinary path
 }
 
 // Attempts the hung-agent guard abandoned inside the reserve, by label. Each is still running; an
