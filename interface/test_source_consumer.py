@@ -16,6 +16,8 @@ from interface.effective_config import resolve_effective_config
 from interface.source_bundle import stage_source_bundle
 from interface.source_materialization import (
     SourceMaterializationError,
+    compose_pythonpath,
+    read_source_request,
     validate_source_materialization,
 )
 from interface.test_source_materialization import bundle as source_bundle_fixture
@@ -148,3 +150,31 @@ def test_damaged_staged_bundle_refuses_before_adapter_launch(bundle, tmp_path):
     assert result.returncode == 5
     assert "LAUNCHED" not in result.stdout
     assert "unresolved_baseline_source" in result.stderr
+
+
+def test_persisted_request_composes_candidate_then_source_without_cwd(bundle, tmp_path):
+    baseline, _, _ = bundle
+    evaluation = tmp_path / "evaluation"
+    staged = stage_source_bundle({"schema_version": 1, **baseline}, evaluation)
+    request_path = str(evaluation / "source_request.json")
+    source = read_source_request(request_path)
+    assert source == validate_source_materialization(staged)
+    overlay, stock, inherited = (str(tmp_path / name) for name in ("overlay", "stock", "inherited"))
+    composed = compose_pythonpath(
+        request_path, f":{overlay}::", f"{stock}:{overlay}", f":{stock}:{inherited}:",
+    )
+    # The persisted request is the replay boundary. Empty components must not
+    # insert CWD, and repeated defaults must not reorder the candidate/source.
+    assert composed.split(os.pathsep) == [overlay, *source.pythonpath_prefixes, stock, inherited]
+
+
+def test_staging_refuses_to_replace_an_existing_run_request(bundle, tmp_path):
+    baseline, _, _ = bundle
+    evaluation = tmp_path / "evaluation"
+    evaluation.mkdir()
+    request_path = evaluation / "source_request.json"
+    original_request = b'{"belongs_to":"another accepted source"}\n'
+    request_path.write_bytes(original_request)
+    with pytest.raises(SourceMaterializationError, match="conflicting_staged_asset"):
+        stage_source_bundle({"schema_version": 1, **baseline}, evaluation)
+    assert request_path.read_bytes() == original_request
