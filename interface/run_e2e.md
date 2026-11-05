@@ -665,7 +665,9 @@ disk. `run_e2e.py` now removes that fragility, layered:
    from the stable `overlay/cand_*` layout. A real win is therefore never lost
    to a lost handoff line. Recovery returns nothing only when no completed
    `eval_dir` exists (the run genuinely produced nothing). Recovered runs set
-   `result.recovered_from_disk = true`.
+   `result.recovered_from_disk = true`; when the workflow call failed, they also
+   carry `handoff_error_class`, `handoff_error`, `handoff_elapsed_s` and
+   `handoff_budget_s`.
 
 These are general (no model/run-specific assumptions) and key only off the
 stable artifact layout the workflow always writes.

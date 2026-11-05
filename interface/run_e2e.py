@@ -7740,9 +7740,13 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
 
     parts: list[str] = []
     parts.append("# GEAK e2e — final report (SYNTHESIZED)\n")
+    why = ""
+    if normalized.get("handoff_error_class"):
+        why = (f" (its call failed after {normalized['handoff_elapsed_s']:.0f}s of "
+               f"{normalized['handoff_budget_s']}s: `{normalized['handoff_error_class']}`)")
     parts.append(
         "> **This report was not written by the Report phase.** The workflow did not reach\n"
-        "> Finalize/Report/Validate before its wall-clock budget expired, so `run_e2e.py`\n"
+        f"> Finalize/Report/Validate{why}, so `run_e2e.py`\n"
         "> synthesized this file from the artifacts already on disk. Every number below was\n"
         "> really measured, but there was **no independent Director re-measurement**, so treat\n"
         "> the headline as provisional and re-bench before promoting it.\n"
@@ -8116,7 +8120,7 @@ def main(argv: list[str]) -> int:
     _emit_state: dict[str, Any] = {"done": False, "out": {}}
 
     def _emit(wf: dict | None = None, *, error: object = None,
-              error_class: str | None = None) -> dict:
+              error_class: str | None = None, handoff: dict | None = None) -> dict:
         if _emit_state["done"]:
             return _emit_state["out"]
         # A second SIGTERM must not interrupt the flush we are about to do.
@@ -8134,6 +8138,7 @@ def main(argv: list[str]) -> int:
                 out = normalize_result(h, wf)
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
+                out.update(handoff or {})
             else:
                 phase = _phase_reached(eval_dir_hint)
                 message = str(error or "")
@@ -8309,25 +8314,37 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    handoff: dict | None = None
     run = _mark_run(eval_dir_hint)
+    started = time.time()
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)
+        # Why the call failed, for a result recovered from disk (_emit). The tail of the message:
+        # TimeoutExpired's starts with the whole prompt.
+        handoff = {
+            "handoff_error_class": err_class,
+            "handoff_error": f"{type(e).__name__}: {str(e)[-800:]}",
+            "handoff_elapsed_s": round(time.time() - started, 1),
+            "handoff_budget_s": timeout_s,
+        }
         try:
             wf = _recover_workflow_return(exp_root)
         except Exception:
             wf = None
         if wf is not None:
             sys.stderr.write(
-                f"GEAK e2e: workflow handoff failed [{err_class}]; "
+                f"GEAK e2e: workflow handoff failed [{err_class}] after "
+                f"{handoff['handoff_elapsed_s']:.0f}s of {timeout_s}s; "
                 f"recovered from disk artifacts ({wf.get('eval_dir')}).\n"
+                f"GEAK e2e:   cause: {handoff['handoff_error']}\n"
             )
         else:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
-        out = _emit(wf=wf, error=err, error_class=err_class)
+        out = _emit(wf=wf, error=err, error_class=err_class, handoff=handoff)
         _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),

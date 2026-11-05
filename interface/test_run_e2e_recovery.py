@@ -1050,6 +1050,7 @@ def test_emit_on_success(monkeypatch, tmp_path):
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
     assert out["schema_version"] == 2
+    assert not [k for k in out if k.startswith("handoff_error")]
     assert out["baseline_alignment"]["status"] == "aligned"
     assert out["baseline_basis"]["measurement_divergence_pct"] == out[
         "baseline_basis"
@@ -1748,6 +1749,37 @@ def test_config_that_was_never_moved_is_not_a_direction(tmp_path):
     wf = {"accepted_config": {"flags": "--x 1", "env": "A=1"}}
     ps = {"initial_extra_server_args": "--x 1", "initial_extra_env": "A=1"}
     assert rx._kb_direction(wf, ps) == ""
+
+
+# ── handoff-failure attribution ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("exc, want", [
+    (RuntimeError("claude CLI failed: gateway 502"), "cli_failed"),
+    (TimeoutError("read timed out"), "timeout"),
+])
+def test_recovered_run_records_why_the_handoff_failed(monkeypatch, tmp_path, capsys, exc, want):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+
+    def boom(prompt, t, ed, ps_args=None):
+        raise exc
+
+    _rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    out = json.loads(rp.read_text())
+    assert out.get("recovered_from_disk") is True
+    assert out["handoff_error_class"] == want
+    assert str(exc) in out["handoff_error"]
+    assert 0 <= out["handoff_elapsed_s"] < out["handoff_budget_s"]
+    err = capsys.readouterr().err
+    assert f"[{want}] after 0s of" in err and f"cause: {type(exc).__name__}: {exc}" in err
+
+
+def test_synthesized_report_states_why_the_call_failed():
+    body = rx._render_synthesized_final_report({
+        "status": "no_gain", "handoff_error_class": "timeout", "handoff_elapsed_s": 1098.0,
+        "handoff_budget_s": 14400, "handoff_error": "TimeoutError: read timed out",
+    }, None)
+    assert "budget expired" not in body
+    assert "failed after 1098s of 14400s: `timeout`" in body
 
 
 if __name__ == "__main__":

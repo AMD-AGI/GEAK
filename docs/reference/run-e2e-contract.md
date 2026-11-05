@@ -238,7 +238,9 @@ disk. `run_e2e.py` removes that fragility in four layers:
    `workflow_return.json` if present, else reconstructed from
    `director_e2e_validation.json` with accepted-kernel names recovered from the
    stable `overlay/cand_*` layout. Recovery returns nothing only when no completed
-   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`.
+   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`;
+   when the workflow call failed, they also carry `handoff_error_class`,
+   `handoff_error`, `handoff_elapsed_s` and `handoff_budget_s`.
 
 ## `kernel_journey.json`
 
