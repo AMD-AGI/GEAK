@@ -1350,6 +1350,27 @@ class TestMain(_TmpMixin, unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self._main(["--torch-trace", os.path.join(self._dir(), "absent.json")])
 
+    def test_render_md_rewrites_the_table_from_the_json(self):
+        # Two rows of a Qwen3-0.6B / gfx1151 profile_topN.json. Its hand-written .md gave rank 2
+        # (34.65% of GPU time, `shapes: []`) rank 1's lm_head shape.
+        row = {"short_name": "Cijk_MT128x128x32", "classification": "library_gemm",
+               "backend_guess": "hipblaslt", "editable": False, "phase": "both", "opt_hint": ""}
+        doc = self._write("profile_topN.json", json.dumps({
+            "source": "torch-trace", "total_gpu_time_ms": 761.4977, "num_kernel_launches": 30126,
+            "num_distinct_kernels": 45, "top_kernels": [
+                dict(row, rank=1, calls=63, total_ms=101.971, pct_gpu_time=13.39, avg_us=1618.587,
+                     shapes=[[[8, 1024], [1024, 151936]]]),
+                dict(row, rank=2, calls=3528, total_ms=263.8406, pct_gpu_time=34.65, avg_us=74.785,
+                     shapes=[])]}))
+        md = doc[:-len(".json")] + ".md"
+        with open(md, "w") as fh:
+            fh.write("| 2 | `Cijk_MT128x128x32` | ... | `[[[8, 1024], [1024, 151936]]]` |\n")
+        self._main(["--render-md", doc])  # no trace: the table is fixed after the trace is gone
+        with open(md) as fh:
+            rows = [line for line in fh if line.startswith(("| 1 |", "| 2 |"))]
+        self.assertIn("151936", rows[0])
+        self.assertNotIn("151936", rows[1])
+
     def test_module_entrypoint_invokes_main(self):
         # The workflow shells out to `python parse_profile.py ...`, so the __main__ guard has to run.
         trace = self._trace_file()
