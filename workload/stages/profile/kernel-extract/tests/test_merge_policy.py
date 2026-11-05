@@ -99,12 +99,21 @@ class MergePolicyTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         return json.loads(out.read_text())
 
+    def group(self, d, members):
+        (g,) = [g for g in d["branch_groups"] if set(g["members"]) == set(members)]
+        return g
+
     def test_size_dispatched_branches_under_a_replayable_caller_are_one_task(self):
         d = self.run_policy()
-        merged = [g for g in d["branch_groups"] if g["tier"] == "merge_task"]
-        self.assertEqual([g["members"] for g in merged], [["big", "small"]])
-        self.assertEqual(merged[0]["common_caller"], "%s:dispatch" % MOD)
-        self.assertEqual(merged[0]["call_lines"], {"small": [4], "big": [6]})
+        g = self.group(d, ["big", "small"])
+        self.assertEqual((g["merged"], g["how"], g["seam"]), (True, "dispatcher", "%s:dispatch" % MOD))
+        self.assertEqual(g["call_lines"], {"small": [4], "big": [6]})
+        self.assertTrue(g["threshold_movable"])
+        self.assertEqual(g["boundaries"]["DECODE"],
+                         [{"below": "small", "max_m": 4, "above": "big", "min_m": 16}])
+        self.assertEqual(g["expected_kernels"], {"big": ["k_big"], "small": ["k_small"]})
+        self.assertEqual({r["m"] for r in g["case_sources"]["big"]}, {16})
+        self.assertIn("merged_into", d["per_task"]["big"])
 
     def test_sequential_operators_and_layer_types_are_never_grouped(self):
         d = self.run_policy()
@@ -116,9 +125,9 @@ class MergePolicyTest(unittest.TestCase):
         d = self.run_policy()
         self.assertEqual(d["per_task"]["big"]["decision"], "split_by_config_value")
         self.assertEqual(sorted(d["per_task"]["big"]["reads_config_difference"]), ["env:BIG_TUNE"])
-        self.assertEqual(d["per_task"]["small"]["decision"], "merge")
+        self.assertEqual(d["per_task"]["small"]["decision"], "merge_across_configs")
 
-    def test_a_bound_method_caller_only_gates(self):
+    def test_a_bound_method_seam_is_merged_on_a_rebuilt_instance(self):
         # Move the branches up into the method: same evidence, but the caller has `self`.
         src = Path(self.src)
         src.write_text(SRC.replace("def dispatch(x, kernels):", "def dispatch(self, kernels):"))
@@ -126,17 +135,47 @@ class MergePolicyTest(unittest.TestCase):
             d = json.loads(cv.read_text())
             d["variants"][0]["frames"][0]["args"]["self"] = {"__object__": "Backend"}
             cv.write_text(json.dumps(d))
-        d = self.run_policy()
-        (g,) = [g for g in d["branch_groups"] if set(g["members"]) == {"big", "small"}]
-        self.assertEqual(g["tier"], "group_gate")
-        self.assertIn("bound method", g["why"])
+        g = self.group(self.run_policy(), ["big", "small"])
+        # an engineering obstacle changes HOW it is merged, never whether
+        self.assertEqual((g["merged"], g["how"], g["threshold_movable"]), (True, "rebuilt_instance", True))
+        self.assertIn("attribute_manifest", g)
 
-    def test_guard_that_does_not_read_a_size_only_gates(self):
+    def test_condition_not_read_as_a_size_is_still_merged_and_says_so(self):
         Path(self.src).write_text(SRC.replace('"a" in kernels and n <= 8', '"a" in kernels')
                                   .replace('"b" in kernels and n > 8', '"b" in kernels'))
+        g = self.group(self.run_policy(), ["big", "small"])
+        self.assertTrue(g["merged"])
+        self.assertEqual(g["conditions_read_size"], {"big": False, "small": False})
+
+    def test_an_unreplayable_argument_merges_by_scope_equalization(self):
+        for cv in self.g.glob("configs/*/evidence/compile_variants.json"):
+            d = json.loads(cv.read_text())
+            d["variants"][0]["frames"][0]["args"]["fb"] = {"__object__": "pkg.ForwardBatch", "repr": "FB"}
+            cv.write_text(json.dumps(d))
+        g = self.group(self.run_policy(), ["big", "small"])
+        self.assertEqual((g["merged"], g["how"], g["threshold_movable"]), (True, "scope_equalized", False))
+        self.assertIn("scope_region", g)
+
+    def test_unconditional_calls_are_not_a_dispatch(self):
+        # big is called unconditionally: same caller, exclusive in M, but no branch in the source
+        Path(self.src).write_text(SRC.replace('    if "b" in kernels and n > 8:\n        return big_op(x)',
+                                              '    y = big_op(x)'))
         d = self.run_policy()
-        (g,) = [g for g in d["branch_groups"] if set(g["members"]) == {"big", "small"}]
-        self.assertEqual(g["tier"], "group_gate")
+        self.assertFalse([g for g in d["branch_groups"] if "big" in g["members"]])
+        self.assertTrue(any(set(r["pair"]) == {"big", "small"} and "not under any conditional" in r["why"]
+                            for r in d["refused_pairs"]))
+
+
+class PerBranchTimingTest(unittest.TestCase):
+    def test_a_gain_on_one_branch_cannot_hide_a_loss_on_another(self):
+        import harness_lib
+        pc = [{"sig": "a1", "regime": "decode_0", "m": 8, "baseline_ms": 1.0, "optimized_ms": 0.5, "branch": "small"},
+              {"sig": "a2", "regime": "decode_0", "m": 16, "baseline_ms": 1.0, "optimized_ms": 0.6, "branch": "small"},
+              {"sig": "b1", "regime": "decode_0", "m": 64, "baseline_ms": 2.0, "optimized_ms": 2.4, "branch": "big"}]
+        r = harness_lib.serving_weighted_speedup(pc, {})
+        self.assertGreater(r["weighted"], 1.0)
+        self.assertEqual(r["worst_branch"]["branch"], "big")
+        self.assertLess(r["worst_branch"]["weighted"], 1.0)
 
 
 class LiteralReplayTest(unittest.TestCase):

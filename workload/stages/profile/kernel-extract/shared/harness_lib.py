@@ -1308,6 +1308,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             spd = b / o
         rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
                      "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+        if c.get("branch") not in (None, ""):
+            rows[-1]["branch"] = str(c["branch"])
         if observed is not None:
             sig = rows[-1]["sig"]
             if sig in seen or sig not in observed:
@@ -1321,6 +1323,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             rows[-1]["calls"] = mass
             if case.get("config_id") not in (None, ""):
                 rows[-1]["config_id"] = str(case["config_id"])
+            if case.get("branch") not in (None, ""):
+                rows[-1]["branch"] = str(case["branch"])
             seen.add(sig)
 
     if observed is not None:
@@ -1420,6 +1424,20 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     if per_config is not None:
         out["per_config"] = per_config
         out["config_weighting"] = mode
+    # A merged branch group (meta.merge, profile merge_policy.py): one figure per branch, so a
+    # gain on one branch cannot hide a loss on another. Raw baseline time x calls weights each
+    # branch's own cases; `worst_branch` is what a keep decision must look at.
+    branches = sorted({r["branch"] for r in included if r.get("branch")})
+    if branches:
+        per_branch = {}
+        for br in branches:
+            members = [r for r in included if r.get("branch") == br]
+            Wb = sum(r.get("weight_raw", r["weight"]) for r in members)
+            Db = sum(r.get("weight_raw", r["weight"]) / r["speedup"] for r in members)
+            per_branch[br] = {"weighted": (Wb / Db) if Db else None, "cases": len(members)}
+        out["per_branch"] = per_branch
+        worst = min((v["weighted"], k) for k, v in per_branch.items() if v["weighted"] is not None)
+        out["worst_branch"] = {"branch": worst[1], "weighted": worst[0]}
     return out
 
 

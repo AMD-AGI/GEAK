@@ -121,19 +121,32 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
       --source-root <path in the evidence>=<the same tree readable here> --out "$OUT/merge_policy.json"
   ```
 
-  and apply it; record each application in `decisions.json`.
-  1. Same launch group, same entry: **one UT** whose cases pool every config the task runs
-     in. An M-dependent path inside or below the entry is reached by the cases themselves.
+  and apply it; record each application in `decisions.json`. **An operator dispatched by
+  batch size is one UT. Whether it is one is decided strictly by the policy; once it is, it
+  is merged -- the harness being hard to write is never a reason to keep it apart.**
+  1. Same launch group, same entry: one UT whose cases pool every config the task runs in.
   2. `per_task.<t>.decision == split_by_config_value`: the task's own source reads a setting
-     that differs between configs (`launch_diff`); one UT per value of it. A difference the
-     source does not read never splits a task.
-  3. `branch_groups[*].tier == merge_task`: the path is chosen above the entries by a
-     replayable caller whose `if` tests read a size. Declare **one task** with
-     `target_callable` = `common_caller`; the members become its branches.
-  4. `tier == group_gate`: the members stay separate tasks, and every member's kept result
-     must also pass the other members' cases. Never merge a gate group by hand-writing a
-     seam, and never split a `merge_task` group because its caller "takes an object" --
-     the policy already checked the recorded arguments.
+     that differs between configs (`launch_diff`); one UT per value. Nothing else splits.
+  3. `branch_groups[*]` (`merged: true`): different entries chosen above them by batch size.
+     Declare ONE task for the group; `how` says how:
+     - `dispatcher` -- `target_callable` = `seam`; its threshold is part of the task.
+     - `rebuilt_instance` -- `target_callable` = `seam` (a method); `cases.py` builds the
+       instance from `attribute_manifest` (every `self.<attr>` the seam and its helpers read)
+       and fails on an attribute outside it.
+     - `scope_equalized` -- the seam is not callable from a UT (it takes a ForwardBatch...): one
+       entry per member (`member_entries`), each case calls its member's; a member whose path
+       stops earlier also runs the `scope_region` calls the other's path runs, so every case
+       compares the same output. The threshold is not part of the task.
+     Copy the group into `meta.json` as `merge` (members, how, seam, call_lines, conditions,
+     observed_m, boundaries, threshold_movable, expected_kernels, and the manifest or
+     region). Every case carries `branch` (its member, from `case_sources`), its
+     `expected_kernels`, any non-size `context` it fixes (an enabled-kernel set, an optional
+     FP8 input, a layer type), and `boundary: true` with weight 0 for cases placed at each
+     `boundaries` edge. Each branch keeps its own tolerance; the timing gate reports
+     `per_branch` and `worst_branch`, and a kept result needs every branch above the noise
+     band, not only the pooled figure.
+  4. `refused_pairs` say why two tasks are NOT one (launched together, interleaving sizes, a
+     call not under a conditional): keep them separate.
   5. Different launch groups (EP, ...): same entry and same env, one UT with cases tagged by
      group; otherwise separate (`cross_group`).
 - Selected indexer score/top-k is one task covering both served prefill and decode
