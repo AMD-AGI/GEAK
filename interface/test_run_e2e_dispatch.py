@@ -53,6 +53,7 @@ import re
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import types
@@ -2057,6 +2058,10 @@ class TestClassifyError(_RunE2ECase):
         """Hyperloom's session breakdown attributes misses by these exact
         strings; renaming one silently reclassifies every historical miss."""
         self.assertEqual(rx._classify_error(TimeoutError("budget")), "timeout")
+        self.assertEqual(
+            rx._classify_error(subprocess.TimeoutExpired(cmd="claude", timeout=10)),
+            "timeout",
+        )
         self.assertEqual(
             rx._classify_error(rx.WorkflowParseError("no json")), "workflow_parse_error"
         )
