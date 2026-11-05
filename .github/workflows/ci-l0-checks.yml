@@ -76,7 +76,7 @@ jobs:
       # than as trailing output on the test step.
       #
       # test_effective_config / test_bench_replica_lifecycle arrived with the Hyperloom
-      # alignment work and test_roofline_skill / test_vllm_adapter_profiler_config predate
+      # alignment work and test_vllm_adapter_profiler_config predates
       # it; none were ever added here. Because the list is explicit, a test file that is
       # never named is a test file that never runs — the same trap the contract checks
       # below were added to close. They also measure the modules that were dragging the
@@ -156,7 +156,6 @@ jobs:
             e2e_workflow/scripts/tests/test_bench_summarize.py \
             e2e_workflow/scripts/tests/test_inferencex_client_warmup_parity.py \
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
-            e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
@@ -164,6 +163,9 @@ jobs:
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
             geak/test_bootstrap.py
+
+      - name: kernel-roofline unit regressions (stdlib, no GPU or TraceLens install)
+        run: python -m unittest discover -s e2e_workflow/knowledge/analysis_skills/kernel-roofline/tests -v
 
       - name: expert skill static validation
         run: |
@@ -325,6 +327,8 @@ jobs:
       # The Python half is TestTheSharedFixtureHoldsOnThisSide in tests/test_kernel_selection.py.
       - name: kernel canonicalization JS/Python parity
         run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
+      - name: analysis skill selection and disabled behavior
+        run: node e2e_workflow/scripts/test_analysis_skill_off_identical.js
       - name: head entity_kind adopted from the profiled row
         run: node e2e_workflow/scripts/test_head_entity_kind_adoption.js
       # Structural guard on the TuningSkillset phase: the accept bars, the overlay

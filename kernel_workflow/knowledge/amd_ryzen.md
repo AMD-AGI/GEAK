@@ -60,7 +60,7 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   independently of the hardware, so an fp8 regime allocates and executes on a part with no fp8 matrix
   unit, at a fraction of the bf16 rate. A measurement taken that way describes the emulation.
 - **Roofline denominators** are in
-  `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md` (`gfx1151` section).
+  `perf_knowledge/hardware/product_peaks.md` (`gfx1151` section).
 - **Memory-utilization readings include the Infinity Cache.** The 32 MiB tier serves the working set
   before DRAM is reached, so a low DRAM-side reading can reflect cache residency. Compare against the
   working-set size before attributing it to bandwidth.

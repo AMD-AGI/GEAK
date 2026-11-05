@@ -103,7 +103,7 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
-// Products with a `product:` section in roofline/peaks.md; keep in sync with it.
+// Products with a `product:` section in perf_knowledge/hardware/product_peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
 // ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
@@ -182,10 +182,10 @@ function startLiveTracker(expRoot, wfDir) {
 }
 
 // ---- Profile-analysis skill (OPTIONAL, pluggable; see knowledge/analysis_skills/INDEX.md) ----
-// The Profiler may run ONE analysis skill on parse_profile.py's Top-N to add a headroom estimate
-// (default `roofline`: % of hardware ceiling -> attainable e2e gain), so budget goes to headroom, not
-// just size. Advisory only: never prunes or overrides pct_gpu_time. `none`/`false` disables it.
-const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'roofline').trim();
+// The Profiler may run ONE analysis skill after parse_profile.py's Top-N (default `kernel-roofline`:
+// native TraceLens models, call stacks and coverage). Advisory only: never prunes or overrides
+// pct_gpu_time. `none`/`false` disables it; the legacy `roofline` name selects the replacement.
+const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'kernel-roofline').trim().replace(/^roofline$/, 'kernel-roofline');
 const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
 const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
   ANALYSIS_SKILL: ANALYSIS_SKILL,

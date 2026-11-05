@@ -1,0 +1,447 @@
+
+Below is the roofline information of the kernel:
+
+kernel function name:
+- void aiter::kn_entry_2c_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 1, true, false, true, true, 1, true, hip_bfloat16, hip_bfloat16, long>(hip_bfloat16*, hip_bfloat16*, hip_bfloat16 const*, hip_bfloat16 const*, long const*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 6.11 peak: 6857.0 utilization_pct: 0.08910602304214671
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 2.86 peak: 153392.17676432632 utilization_pct: 0.0018645018672589413
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.47 Flops/byte
+- AI L2: value: 0.41 Flops/byte
+- AI L1: value: 0.06 Flops/byte
+- Performance (TFLOPs): value: 0.00286 TFLOPS
+
+kernel function name:
+- void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 259.22 peak: 6857.0 utilization_pct: 3.7803704243838414
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<16, 7, c10::BFloat16> >(HadamardParamsBase)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 24.55 peak: 6857.0 utilization_pct: 0.3580282922560887
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 79.64 peak: 153392.17676432632 utilization_pct: 0.051919205842133595
+ARITHMETIC INTENSITY:
+- AI HBM: value: 3.26 Flops/byte
+- AI L2: value: 6.0 Flops/byte
+- AI L1: value: 4.5 Flops/byte
+- Performance (TFLOPs): value: 0.08104000000000001 TFLOPS
+
+kernel function name:
+- act_quant_kernel__kernel
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 22.34 peak: 6857.0 utilization_pct: 0.3257984541344611
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 67.3 peak: 153392.17676432632 utilization_pct: 0.04387446701626809
+ARITHMETIC INTENSITY:
+- AI HBM: value: 3.01 Flops/byte
+- AI L2: value: 6.8 Flops/byte
+- AI L1: value: 4.32 Flops/byte
+- Performance (TFLOPs): value: 0.06718 TFLOPS
+
+kernel function name:
+- _ZN7ck_tile6kentryILi1ENS_14Layernorm2dFwdINS_29Layernorm2dFwdPipelineOnePassINS_29Layernorm2dFwdPipelineProblemIDF16bDF16bDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi4ELi128EEEENS5_IJLi4ELi16EEEENS5_IJLi1ELi8EEEEEENS_20Layernorm2dFwdTraitsILb1ELb0ELb1ELb1ELb0ELNS_20Layernorm2dXBiasEnumE0ELNS_23Layernorm2dFusedAddEnumE0ELNS_25Layernorm2dFusedQuantEnumE0EEEEENS_35Layernorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb1EEEvEEEEJNSM_5KargsEEEEvDpT1_
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 3.44 peak: 6857.0 utilization_pct: 0.050167711827329736
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 14.65 peak: 153392.17676432632 utilization_pct: 0.009550682641728493
+ARITHMETIC INTENSITY:
+- AI HBM: value: 4.26 Flops/byte
+- AI L2: value: 8.08 Flops/byte
+- AI L1: value: 1.94 Flops/byte
+- Performance (TFLOPs): value: 0.01465 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 328.02 peak: 6857.0 utilization_pct: 4.783724660930436
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 728.89 peak: 153392.17676432632 utilization_pct: 0.4751806874218075
+ARITHMETIC INTENSITY:
+- AI HBM: value: 2.22 Flops/byte
+- AI L2: value: 2.24 Flops/byte
+- AI L1: value: 0.56 Flops/byte
+- Performance (TFLOPs): value: 0.72889 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 7.25 peak: 6857.0 utilization_pct: 0.10573136940352924
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 76.2 peak: 153392.17676432632 utilization_pct: 0.04967658821158438
+ARITHMETIC INTENSITY:
+- AI HBM: value: 11.38 Flops/byte
+- AI L2: value: 25.23 Flops/byte
+- AI L1: value: 12.62 Flops/byte
+- Performance (TFLOPs): value: 0.09947 TFLOPS
+
+kernel function name:
+- void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 92.42 peak: 6857.0 utilization_pct: 1.3478197462447135
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- _ZN5aiter32indexer_k_quant_and_cache_kernelIDF16bDB8_LN4vllm18Fp8KVCacheDataTypeE1ELi8ELi8ELi16EEEvPKT_PT0_PKliiiiibb
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 3.17 peak: 6857.0 utilization_pct: 0.04623012979437072
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 1.04 peak: 153392.17676432632 utilization_pct: 0.0006780006790032514
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.33 Flops/byte
+- AI L2: value: 0.69 Flops/byte
+- AI L1: value: 0.51 Flops/byte
+- Performance (TFLOPs): value: 0.0010400000000000001 TFLOPS
+
+kernel function name:
+- __amd_rocclr_copyBuffer
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 611.98 peak: 6857.0 utilization_pct: 8.924894268630597
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 15.23 peak: 6857.0 utilization_pct: 0.22210879393320695
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 2.06 peak: 153392.17676432632 utilization_pct: 0.0013429628834102864
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.13 Flops/byte
+- AI L2: value: 0.21 Flops/byte
+- AI L1: value: 0.16 Flops/byte
+- Performance (TFLOPs): value: 0.00227 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 86.4 peak: 6857.0 utilization_pct: 1.2600262505468864
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 86.11 peak: 153392.17676432632 utilization_pct: 0.0561371523740096
+ARITHMETIC INTENSITY:
+- AI HBM: value: 1.0 Flops/byte
+- AI L2: value: 1.12 Flops/byte
+- AI L1: value: 0.56 Flops/byte
+- Performance (TFLOPs): value: 0.08611 TFLOPS
+
+kernel function name:
+- void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 189.61 peak: 6857.0 utilization_pct: 2.7652034417383695
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 2.0 peak: 6857.0 utilization_pct: 0.029167274318214965
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 0.24 peak: 153392.17676432632 utilization_pct: 0.00015646169515459645
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.12 Flops/byte
+- AI L2: value: 10.0 Flops/byte
+- AI L1: value: 5.0 Flops/byte
+- Performance (TFLOPs): value: 0.00024 TFLOPS
+
+kernel function name:
+- void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 115.18 peak: 6857.0 utilization_pct: 1.6797433279859997
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void (anonymous namespace)::randperm_handle_duplicate_keys_kernel<long, at::native::(anonymous namespace)::OpaqueType<8> >(long*, at::native::(anonymous namespace)::OpaqueType<8>*, long, int, at::PhiloxCudaState)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 125.04 peak: 6857.0 utilization_pct: 1.8235379903747997
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 240.0 peak: 6857.0 utilization_pct: 3.5000729181857952
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_add<c10::BFloat16>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<c10::BFloat16>, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1.49 peak: 6857.0 utilization_pct: 0.021729619367070147
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 1.16 peak: 153392.17676432632 utilization_pct: 0.0007562315265805496
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.78 Flops/byte
+- AI L2: value: 5.33 Flops/byte
+- AI L1: value: 2.0 Flops/byte
+- Performance (TFLOPs): value: 0.00116 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, 1ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1.42 peak: 6857.0 utilization_pct: 0.020708764765932624
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+=== Roofline efficiency (empirical + datasheet cross-check) ===
+
+kernel: void aiter::kn_entry_2c_sbhd_cached_indirect_inplace<aiter::OpCachedFwd, 1, true, false, true, true, 1, true, hip_bfloat16, hip_bfloat16, long>(hip_bfloat16*, hip_bfloat16*, hip_bfloat16 const*, hip_bfloat16 const*, long const*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int)
+  AI (HBM)            : 0.47 FLOP/byte
+  Perf (achieved)     : 2.86 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 3222.79 GFLOP/s  (min of compute 153392.18 , BW*AI 3222.79)
+  >> Roofline Eff.    : 0.00  (0.09 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.09 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 3.78 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void fast_hadamard_transform_kernel<fast_hadamard_transform_kernel_traits<16, 7, c10::BFloat16> >(HadamardParamsBase)
+  AI (HBM)            : 3.26 FLOP/byte
+  Perf (achieved)     : 81.04 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 22353.82 GFLOP/s  (min of compute 153392.18 , BW*AI 22353.82)
+  >> Roofline Eff.    : 0.00  (0.36 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.36 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: act_quant_kernel__kernel
+  AI (HBM)            : 3.01 FLOP/byte
+  Perf (achieved)     : 67.18 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 20639.57 GFLOP/s  (min of compute 153392.18 , BW*AI 20639.57)
+  >> Roofline Eff.    : 0.00  (0.33 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.33 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: _ZN7ck_tile6kentryILi1ENS_14Layernorm2dFwdINS_29Layernorm2dFwdPipelineOnePassINS_29Layernorm2dFwdPipelineProblemIDF16bDF16bDF16bDF16bfDF16bDF16bDF16bffNS_19Generic2dBlockShapeINS_8sequenceIJLi4ELi128EEEENS5_IJLi4ELi16EEEENS5_IJLi1ELi8EEEEEENS_20Layernorm2dFwdTraitsILb1ELb0ELb1ELb1ELb0ELNS_20Layernorm2dXBiasEnumE0ELNS_23Layernorm2dFusedAddEnumE0ELNS_25Layernorm2dFusedQuantEnumE0EEEEENS_35Layernorm2dFwdPipelineDefaultPolicyEEENS_17Default2DEpilogueINS_24Default2DEpilogueProblemIfDF16bLb0ELb1ELb1EEEvEEEEJNSM_5KargsEEEEvDpT1_
+  AI (HBM)            : 4.26 FLOP/byte
+  Perf (achieved)     : 14.65 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 29210.82 GFLOP/s  (min of compute 153392.18 , BW*AI 29210.82)
+  >> Roofline Eff.    : 0.00  (0.05 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.05 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+  AI (HBM)            : 2.22 FLOP/byte
+  Perf (achieved)     : 728.89 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 15222.54 GFLOP/s  (min of compute 153392.18 , BW*AI 15222.54)
+  >> Roofline Eff.    : 0.05  (4.79 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 4.78 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+  AI (HBM)            : 11.38 FLOP/byte
+  Perf (achieved)     : 99.47 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 78032.66 GFLOP/s  (min of compute 153392.18 , BW*AI 78032.66)
+  >> Roofline Eff.    : 0.00  (0.13 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.11 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 1.35 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: _ZN5aiter32indexer_k_quant_and_cache_kernelIDF16bDB8_LN4vllm18Fp8KVCacheDataTypeE1ELi8ELi8ELi16EEEvPKT_PT0_PKliiiiibb
+  AI (HBM)            : 0.33 FLOP/byte
+  Perf (achieved)     : 1.04 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 2262.81 GFLOP/s  (min of compute 153392.18 , BW*AI 2262.81)
+  >> Roofline Eff.    : 0.00  (0.05 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.05 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: __amd_rocclr_copyBuffer
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 8.92 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)
+  AI (HBM)            : 0.13 FLOP/byte
+  Perf (achieved)     : 2.27 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 891.41 GFLOP/s  (min of compute 153392.18 , BW*AI 891.41)
+  >> Roofline Eff.    : 0.00  (0.25 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.22 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+  AI (HBM)            : 1.00 FLOP/byte
+  Perf (achieved)     : 86.11 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 6857.00 GFLOP/s  (min of compute 153392.18 , BW*AI 6857.00)
+  >> Roofline Eff.    : 0.01  (1.26 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 1.26 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 2.77 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<unsigned int, 4, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<unsigned char, unsigned int, HIP_vector_type<unsigned int, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::random_from_to_kernel<at::CUDAGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#1}::operator()() const::{lambda(unsigned int)#1})::{lambda(int, unsigned int)#1})
+  AI (HBM)            : 0.12 FLOP/byte
+  Perf (achieved)     : 0.24 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 822.84 GFLOP/s  (min of compute 153392.18 , BW*AI 822.84)
+  >> Roofline Eff.    : 0.00  (0.03 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.03 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 1.68 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void (anonymous namespace)::randperm_handle_duplicate_keys_kernel<long, at::native::(anonymous namespace)::OpaqueType<8> >(long*, at::native::(anonymous namespace)::OpaqueType<8>*, long, int, at::PhiloxCudaState)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 1.82 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS::default_config, long, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3}, rocprim::ROCPRIM_400200_NS::detail::merge_oddeven_config_selector>(rocprim::ROCPRIM_400200_NS::detail::merge_sort_block_merge_impl<rocprim::ROCPRIM_400200_NS::default_config, long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer> >(long*, at::cuda::cub::detail::OpaqueType<8>*, unsigned int, unsigned int, rocprim::ROCPRIM_400200_NS::detail::radix_merge_compare<false, true, long, rocprim::ROCPRIM_400200_NS::identity_decomposer>, ihipStream_t*, bool, std::iterator_traits<long*>::value_type*, std::iterator_traits<at::cuda::cub::detail::OpaqueType<8>*>::value_type*, unsigned int*, rocprim::ROCPRIM_400200_NS::detail::vsmem_t)::{lambda(auto:1, auto:2, auto:3, auto:4)#1}::operator()<long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*>(long*, long*, at::cuda::cub::detail::OpaqueType<8>*, at::cuda::cub::detail::OpaqueType<8>*) const::{lambda(auto:1)#3})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 3.50 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctorOnSelf_add<c10::BFloat16>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<c10::BFloat16>, std::array<char*, 2ul>)
+  AI (HBM)            : 0.78 FLOP/byte
+  Perf (achieved)     : 1.16 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 5348.46 GFLOP/s  (min of compute 153392.18 , BW*AI 5348.46)
+  >> Roofline Eff.    : 0.00  (0.02 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.02 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<long>, std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*, 1ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.02 %  [vs fixed 6857.0 GB/s, cross-run only]

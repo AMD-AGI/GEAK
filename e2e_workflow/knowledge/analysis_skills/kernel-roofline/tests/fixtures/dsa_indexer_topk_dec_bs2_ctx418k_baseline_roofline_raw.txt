@@ -1,0 +1,828 @@
+
+                                 __                                       _
+ _ __ ___   ___ _ __  _ __ ___  / _|       ___ ___  _ __ ___  _ __  _   _| |_ ___
+| '__/ _ \ / __| '_ \| '__/ _ \| |_ _____ / __/ _ \| '_ ` _ \| '_ \| | | | __/ _ \
+| | | (_) | (__| |_) | | | (_) |  _|_____| (_| (_) | | | | | | |_) | |_| | ||  __/
+|_|  \___/ \___| .__/|_|  \___/|_|        \___\___/|_| |_| |_| .__/ \__,_|\__\___|
+               |_|                                           |_|
+
+   [32mINFO[0m Analysis mode = cli
+   [32mINFO[0m fatal: not a git repository (or any parent up to mount point /)
+   [32mINFO[0m [analysis] deriving rocprofiler-compute metrics...
+  [31mERROR[0m PC sampling: can not read /tmp/c_glm52unirf_cat2_chuschen/tmp/rocprof_wu5yzo_6/ps_file_kernel_trace.csv
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_COUNT'] / ammolite__num_xcd)
+': 'GRBM_COUNT'.
+[33mWARNING[0m Failed to evaluate expression '
+(raw_pmc_df['pmc_perf']['GRBM_SPI_BUSY'] / ammolite__num_xcd)
+': 'GRBM_SPI_BUSY'.
+[33mWARNING[0m Failed to evaluate expression '
+to_int(to_min((((to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0) / ammolite__max_waves_per_cu) * 8) + to_min(to_mod(to_round(to_avg(((4 * raw_pmc_df['pmc_perf']['SQ_BUSY_CU_CYCLES']) / ammolite__GRBM_GUI_ACTIVE_PER_XCD)), 0), ammolite__max_waves_per_cu), 8)), ammolite__cu_per_gpu))
+': 'SQ_BUSY_CU_CYCLES'.
+[33mWARNING[0m Missing empirical peak data: name 'ammolite__MFMA_FLOPs_F6F4_empirical_peak' is not defined.
+
+--------------------------------------------------------------------------------
+0. Top Stats
+0.1 Top Kernels
+╒═════════╤══════════════════════════════════════════╤═════════╤═══════════╤════════════╤══════════════╤═══════╕
+│   index │ Kernel_Name                              │   Count │   Sum(ns) │   Mean(ns) │   Median(ns) │   Pct │
+╞═════════╪══════════════════════════════════════════╪═════════╪═══════════╪════════════╪══════════════╪═══════╡
+│       0 │ void sglang::topk_main_kernel<true, 2, ( │    4.00 │ 347390.00 │   86847.50 │     86707.50 │ 83.61 │
+│         │ sglang::TopKMode)1>(sglang::TopKPagedPar │         │           │            │              │       │
+│         │ ams)                                     │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       1 │ void rocprim::ROCPRIM_400200_NS::detail: │    4.00 │  20240.25 │    5060.06 │      4993.31 │  4.87 │
+│         │ :trampoline_kernel<rocprim::ROCPRIM_4002 │         │           │            │              │       │
+│         │ 00_NS::detail::wrapped_merge_sort_blo... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       2 │ void at::native::(anonymous namespace):: │    1.00 │  14866.62 │   14866.62 │     14866.62 │  3.58 │
+│         │ distribution_elementwise_grid_stride_ker │         │           │            │              │       │
+│         │ nel<float, 4, at::native::templates::... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       3 │ void rocprim::ROCPRIM_400200_NS::detail: │    1.00 │  10560.00 │   10560.00 │     10560.00 │  2.54 │
+│         │ :trampoline_kernel<rocprim::ROCPRIM_4002 │         │           │            │              │       │
+│         │ 00_NS::detail::wrapped_radix_sort_blo... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       4 │ void at::native::elementwise_kernel_manu │    1.00 │   5560.00 │    5560.00 │      5560.00 │  1.34 │
+│         │ al_unroll<128, 4, at::native::gpu_kernel │         │           │            │              │       │
+│         │ _impl<at::native::direct_copy_kernel_... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       5 │ void at::native::elementwise_kernel_manu │    1.00 │   4333.25 │    4333.25 │      4333.25 │  1.04 │
+│         │ al_unroll<128, 4, at::native::gpu_kernel │         │           │            │              │       │
+│         │ _impl_nocast<at::native::direct_copy_... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       6 │ void at::native::(anonymous namespace):: │    1.00 │   4160.00 │    4160.00 │      4160.00 │  1.00 │
+│         │ distribution_elementwise_grid_stride_ker │         │           │            │              │       │
+│         │ nel<unsigned long, 2, at::native::tem... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       7 │ void (anonymous namespace)::elementwise_ │    1.00 │   2773.25 │    2773.25 │      2773.25 │  0.67 │
+│         │ kernel_with_index<int, at::native::arang │         │           │            │              │       │
+│         │ e_cuda_out(c10::Scalar const&, c10::S... │         │           │            │              │       │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       8 │ __amd_rocclr_copyBuffer                  │    1.00 │   2426.75 │    2426.75 │      2426.75 │  0.58 │
+├─────────┼──────────────────────────────────────────┼─────────┼───────────┼────────────┼──────────────┼───────┤
+│       9 │ void (anonymous namespace)::randperm_han │    1.00 │   1973.25 │    1973.25 │      1973.25 │  0.47 │
+│         │ dle_duplicate_keys_kernel<int, at::nativ │         │           │            │              │       │
+│         │ e::(anonymous namespace)::OpaqueType<... │         │           │            │              │       │
+╘═════════╧══════════════════════════════════════════╧═════════╧═══════════╧════════════╧══════════════╧═══════╛
+0.2 Dispatch List
+╒═════════╤═══════════════╤══════════════════════════════════════════════════════════════════════════════════╤══════════╕
+│   index │   Dispatch_ID │ Kernel_Name                                                                      │   GPU_ID │
+╞═════════╪═══════════════╪══════════════════════════════════════════════════════════════════════════════════╪══════════╡
+│       0 │             0 │ void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_ker │        7 │
+│         │               │ nel<float, 4, at::native::templates::cuda::normal_and_transform<float, float, at │          │
+│         │               │ ::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGenerat │          │
+│         │               │ orImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lam... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       1 │             1 │ __amd_rocclr_copyBuffer                                                          │        7 │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       2 │             2 │ void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<long>, │        7 │
+│         │               │  std::array<char*, 1ul> >(int, at::native::FillFunctor<long>, std::array<char*,  │          │
+│         │               │ 1ul>)                                                                            │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       3 │             3 │ void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arang │        7 │
+│         │               │ e_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tenso │          │
+│         │               │ r&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda │          │
+│         │               │ (long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar c... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       4 │             4 │ void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_ker │        7 │
+│         │               │ nel<unsigned long, 2, at::native::templates::cuda::random_from_to_kernel<at::CUD │          │
+│         │               │ AGeneratorImpl*>(at::TensorIteratorBase&, unsigned long, long, at::CUDAGenerator │          │
+│         │               │ Impl*)::{lambda()#1}::operator()() const::{lambda()#3}::operator()() const::{... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       5 │             5 │ void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002 │        7 │
+│         │               │ 00_NS::detail::wrapped_radix_sort_block_sort_config<rocprim::ROCPRIM_400200_NS:: │          │
+│         │               │ kernel_config<256u, 4u, 4294967295u>, int, at::cuda::cub::detail::OpaqueType<8>  │          │
+│         │               │ >, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       6 │             6 │ void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002 │        7 │
+│         │               │ 00_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS: │          │
+│         │               │ :default_config, int, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_ │          │
+│         │               │ 400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       7 │             7 │ void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002 │        7 │
+│         │               │ 00_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS: │          │
+│         │               │ :default_config, int, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_ │          │
+│         │               │ 400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       8 │             8 │ void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002 │        7 │
+│         │               │ 00_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS: │          │
+│         │               │ :default_config, int, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_ │          │
+│         │               │ 400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge... │          │
+├─────────┼───────────────┼──────────────────────────────────────────────────────────────────────────────────┼──────────┤
+│       9 │             9 │ void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002 │        7 │
+│         │               │ 00_NS::detail::wrapped_merge_sort_block_merge_config<rocprim::ROCPRIM_400200_NS: │          │
+│         │               │ :default_config, int, at::cuda::cub::detail::OpaqueType<8> >, (rocprim::ROCPRIM_ │          │
+│         │               │ 400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::merge... │          │
+╘═════════╧═══════════════╧══════════════════════════════════════════════════════════════════════════════════╧══════════╛
+
+
+================================================================================
+4. Roofline
+================================================================================
+
+(4.1) Per-Kernel Roofline Metrics and (4.2) AI Plot Points
+--------------------------------------------------------------------------------
+
+Kernel 0: void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedPar... (83.6%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.57 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │  237.86 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │  234.32 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │  479.72 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │  417.58 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.57 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 1: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002... (4.9%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   91.36 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   93.03 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │  488.82 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 2: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_ker... (3.6%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │ 6077.27 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │ 1353.85 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │ 1351.61 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │ 1351.61 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    4.49 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    4.50 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    4.50 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │ 6077.27 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 3: void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_4002... (2.5%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   33.91 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   22.34 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │   49.62 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │  259.68 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 4: void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel... (1.3%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   48.35 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   19.13 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │   56.66 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 5: void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel... (1.0%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │  146.78 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │  110.86 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │  178.78 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 6: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_ker... (1.0%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │   28.48 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   21.95 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   12.60 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │   12.60 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    1.30 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    2.26 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    2.26 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │   28.48 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 7: void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arang... (0.7%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   42.20 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   37.80 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │   75.58 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 8: __amd_rocclr_copyBuffer (0.6%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │    1.58 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │    0.05 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │    0.05 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 9: void (anonymous namespace)::randperm_handle_duplicate_keys_kernel<int, at::nativ... (0.5%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │   38.08 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │   14.11 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │  119.49 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+Kernel 10: void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<long>,... (0.3%)
+  |
+  ├─ 4.1 Roofline Rate Metrics:
+  |   ╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+  |   │ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+  |   ╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+  |   │ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48428186326 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.1       │ VALU FLOPs (F32)   │    0.00 │ Gflop/s │ 153392.17676432632 │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17477908789  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.102          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.10      │ HBM Bandwidth      │    1.24 │ Gb/s    │ 6857.0             │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.11      │ L2 Cache Bandwidth │    0.05 │ Gb/s    │ 34529.47251799372  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.12      │ L1 Cache Bandwidth │    0.05 │ Gb/s    │ 37716.41519109492  │
+  |   ├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+  |   │ 4.1.13      │ LDS Bandwidth      │    0.00 │ Gb/s    │ 62480.28913703978  │
+  |   ╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+  ├─ 4.2 Roofline AI Plot Points:
+  |   ╒═════════════╤══════════════════════╤═════════╤════════════╕
+  |   │ Metric_ID   │ Metric               │   Value │ Unit       │
+  |   ╞═════════════╪══════════════════════╪═════════╪════════════╡
+  |   │ 4.2.0       │ AI HBM               │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.1       │ AI L2                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.2       │ AI L1                │    0.00 │ Flops/byte │
+  |   ├─────────────┼──────────────────────┼─────────┼────────────┤
+  |   │ 4.2.3       │ Performance (GFLOPs) │    0.00 │ Gflop/s    │
+  |   ╘═════════════╧══════════════════════╧═════════╧════════════╛
+
+--------------------------------------------------------------------------------
+4. Roofline
+4.3 Roofline Plot
+         Roofline (FP32) - /tmp/c_glm52unirf_cat2_chuschen/tmp/rocprof_wu5yzo_6 [0m
+        ┌──────────────────────────────────────────────────────────────────────┐[0m
+154929.9┤ [0m[38;5;12m⢕⢕[0m HBM-FP32                        [0m[38;5;11m⢀⡠⠔[0m[38;5;13m⠉⠉⠉⠉⠉⠉⠉⠉⠉[0m[48;5;0m[38;5;15m154930 GFLOP/s[0m[38;5;13m⠉⠉⠉⠉⠉⠉⠉⠉[0m│[0m
+        │ [0m[38;5;10m⢕⢕[0m L2-FP32                      [0m[38;5;11m⣀⠔⠊⠁[0m[38;5;9m⠔⠉[0m[38;5;10m⠁[0m    [0m[38;5;12m⣀⠤⠊⠁[0m                      │[0m
+        │ [0m[38;5;9m⢕⢕[0m L1-FP32                  [0m[38;5;11m⢀⠤⠒⠉[0m[38;5;9m⠔⠊⠁[0m    [0m[38;5;12m⢀⡠⠔⠉[0m                          │[0m
+ 19226.9┤ [0m[38;5;11m⢕⢕[0m LDS-FP32             [0m[38;5;11m⢀⡠⠔⠊⠁[0m[38;5;9m⠒⠉[0m[38;5;10m⠁[0m    [0m[38;5;12m⣀⠔⠊⠁[0m                             │[0m
+        │ [0m[38;5;15m⢕⢕[0m Peak VALU-FP32    [0m[38;5;11m⣀⠤⠒⠁[0m[38;5;9m⠔⠊⠁[0m    [0m[38;5;12m⢀⡠⠒⠉[0m     [0m[38;5;9m♰[0m                           │[0m
+        │ [0m[38;5;13m⢕⢕[0m Peak MFMA-FP32 [0m[38;5;11m⡠⠔⠉[0m[38;5;9m⠤⠒⠁[0m[38;5;10m⠁[0m    [0m[38;5;12m⡠⠔⠊⠁[0m                                    │[0m
+  2386.1┤ [0m[38;5;12m❋❋[0m AI_HBM_K0      [0m[38;5;9m⠔⠉[0m[38;5;10m⠉[0m    [0m[38;5;12m⢀⠤⠒⠉[0m                                        │[0m
+        │ [0m[38;5;12m♰♰[0m AI_HBM_[0m[48;5;0m[38;5;15m62480 GB/s[0m  [0m[38;5;12m⡠⠔⠊⠁[0m                                           │[0m
+   296.1┤ [0m[38;5;12m██[0m AI_HBM_[0m[48;5;0m[38;5;15m37716 GB/s[0m[38;5;12m⠒⠉[0m                                               │[0m
+        │ [0m[38;5;10m❋❋[0m AI_L2_K0                                                          │[0m
+        │ [0m[38;5;10m♰♰[0m AI_L2_K[0m[48;5;0m[38;5;15m6857 GB/s[0m                                                  │[0m
+    36.7┤ [0m[38;5;10m██[0m AI_L2_K6                                                          │[0m
+        │ [0m[38;5;9m❋❋[0m AI_L1_K0                       [0m[38;5;12m█[0m  [0m[38;5;9m█[0m                               │[0m
+        │ [0m[38;5;9m♰♰[0m AI_L1_K2                                                          │[0m
+     4.6┤ [0m[38;5;9m██[0m AI_L1_K6                                                          │[0m
+        │                                                                      │[0m
+        │                                                                      │[0m
+     0.6┤[0m[38;5;9m❋[0m   [0m[38;5;10m❋[0m                                                                 │[0m
+        └┬────────────────┬─────────────────┬────────────────┬────────────────┬┘[0m
+       0.001            0.036             1.086           32.957       1000.000 [0m
+Performance (GFLOP/sec)     Arithmetic Intensity (FLOPs/Byte)                   [0m
+
+
+--------------------------------------------------------------------------------
+4. Roofline
+4.1 Roofline Performance Rates
+╒═════════════╤════════════════════╤═════════╤═════════╤════════════════════╕
+│ Metric_ID   │ Metric             │   Value │ Unit    │ Peak (Empirical)   │
+╞═════════════╪════════════════════╪═════════╪═════════╪════════════════════╡
+│ 4.1.0       │ VALU FLOPs (F16)   │    0.00 │ Gflop/s │ 153727.48          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.1       │ VALU FLOPs (F32)   │  359.29 │ Gflop/s │ 153392.18          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.2       │ VALU FLOPs (F64)   │    0.00 │ Gflop/s │ 76497.17           │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.3       │ MFMA FLOPs (F64)   │    0.00 │ Gflop/s │ 77622.1            │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.4       │ MFMA FLOPs (F32)   │    0.00 │ Gflop/s │ 154929.91          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.5       │ MFMA FLOPs (F16)   │    0.00 │ Gflop/s │ 2449443.2          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.6       │ MFMA FLOPs (BF16)  │    0.00 │ Gflop/s │ 2453780.3          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.7       │ MFMA FLOPs (F8)    │    0.00 │ Gflop/s │ 4949468.1          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.8       │ MFMA FLOPs (F6F4)  │    0.00 │ Gflop/s │ N/A                │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.9       │ MFMA IOPs (Int8)   │    0.00 │ Giop/s  │ 4893977.2          │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.10      │ HBM Bandwidth      │  176.75 │ Gb/s    │ 6857.0             │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.11      │ L2 Cache Bandwidth │  169.29 │ Gb/s    │ 34529.47           │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.12      │ L1 Cache Bandwidth │  336.39 │ Gb/s    │ 37716.42           │
+├─────────────┼────────────────────┼─────────┼─────────┼────────────────────┤
+│ 4.1.13      │ LDS Bandwidth      │  113.53 │ Gb/s    │ 62480.29           │
+╘═════════════╧════════════════════╧═════════╧═════════╧════════════════════╛
+4.2 Roofline Plot Points
+╒═════════════╤══════════════════════╤═════════╤════════════╕
+│ Metric_ID   │ Metric               │   Value │ Unit       │
+╞═════════════╪══════════════════════╪═════════╪════════════╡
+│ 4.2.0       │ AI HBM               │    0.85 │ Flops/byte │
+├─────────────┼──────────────────────┼─────────┼────────────┤
+│ 4.2.1       │ AI L2                │    0.87 │ Flops/byte │
+├─────────────┼──────────────────────┼─────────┼────────────┤
+│ 4.2.2       │ AI L1                │    0.46 │ Flops/byte │
+├─────────────┼──────────────────────┼─────────┼────────────┤
+│ 4.2.3       │ Performance (GFLOPs) │  218.21 │ Gflop/s    │
+╘═════════════╧══════════════════════╧═════════╧════════════╛
+

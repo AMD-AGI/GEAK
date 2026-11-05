@@ -1,0 +1,12 @@
+{
+    "name": "MI355X",
+    "mem_bw_gbps": 8000.0,
+    "memory_gb": 288.0,
+    "max_achievable_tflops": {
+        "matrix_bf16": 1686.0,
+        "matrix_fp16": 1686.0,
+        "matrix_fp32": 137.0,
+        "matrix_fp8": 3567.0,
+        "matrix_fp4": 5663.0
+    }
+}

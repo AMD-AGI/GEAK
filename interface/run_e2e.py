@@ -123,7 +123,7 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
-# Products with a `product:` section in roofline/peaks.md; keep in sync with it
+# Products with a `product:` section in perf_knowledge/hardware/product_peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"

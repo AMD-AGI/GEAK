@@ -1,22 +1,16 @@
-# Hardware peaks — roofline denominators
+# Hardware product peak references
 
-Pure data. One section per calibrated product (or per `gfx` when the ISA is the product).
-Client RDNA4 peaks are product-scoped (`r9700`, `r9600d`). A bare `gfx1201` lookup without
-a `product:` must not inherit these numbers — several SKUs share that ISA.
+Product data retained from GEAK's retired roofline skill for the hardware guides and product
+identity checks. These are dense, no-sparsity, theoretical datasheet figures, not a TraceLens
+architecture configuration or evidence of a calibrated peak. Client RDNA4 entries are
+product-scoped (`r9700`, `r9600d`); other products sharing `gfx1201` must not inherit them.
+Numeric entries are preserved from the original table. Validate the relevant source, precision,
+device and partition before quoting a denominator; distinguish documented values from assumptions
+(such as R9600D BF16 equaling FP16). Memory figures are theoretical pin rates.
 
-Peaks are **dense, no-sparsity, datasheet-ceiling** figures. Memory bandwidth is the
-*theoretical pin* rate. `target_eff` in `SKILL.md` is a generic op-class
-implementation prior, the same for every product. Do
-not pre-derate the numbers here. Do not put sparse (2:4)
-rates in the yaml `flops` map.
-
-**Compute peaks need validation; the memory axis is the trustworthy one.** BF16 and FP16 run at the
-same rate on the matrix core of every part below (MFMA on CDNA, WMMA on RDNA), so the two `flops`
-entries in each section must be **equal** — they are, and that equality is the check to keep.
-Empirical matrix-core microbenchmarks (e.g. from rocprof-compute) frequently report a BF16 peak ~2×
-low, which inflates any BF16 compute-axis `roofline_pct` (sometimes above 100%, where `SKILL.md` §6
-L3 flags it `suspect`). At decode, prefer `hbm_util` and only rank on a compute-axis number once its
-dtype peak has been validated against this equality.
+For `kernel-roofline`, follow its engine-specific installation/reference procedure: freeze a
+matching TL arch JSON or verified rocprof peak reference and record provenance. Missing references
+stay unavailable. This table does not supply `target_eff` priors or authorize guessed peaks.
 
 ## r9700 — Radeon AI PRO R9700 (Navi 48, gfx1201, 300 W)
 ```yaml
@@ -112,17 +106,3 @@ flops:                         # dense WMMA peaks, FLOP/s — theoretical
 l2_bytes: 2097152
 mall_bytes: 33554432
 ```
-
-## Unknown gfx — derived fallback (confidence: low)
-
-If the running `gfx` has no section above, DERIVE from `torch.cuda.get_device_properties(0)` and mark
-`peaks.source="derived"`, `peaks.confidence="low"`:
-
-```
-hbm_bw_bytes_s ≈ memory_clock_rate_hz × (memory_bus_width_bits / 8) × 2     # DDR
-flops[dtype]   ≈ multi_processor_count × clock_rate_hz × mfma_flops_per_cycle_per_cu[dtype]
-```
-
-The derived bandwidth is **frequently wrong for HBM3/3E** — the reported memory clock often understates
-the effective pin rate (on gfx950 it derives ~4.1 TB/s against a real ~8 TB/s). Treat any derived-peak
-result as `confidence: low`, which per `SKILL.md` means **display only, do not rank on it**.

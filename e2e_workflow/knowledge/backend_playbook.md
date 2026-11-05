@@ -33,7 +33,12 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 | activation (silu/gelu + mul) | fused act_and_mul (aiter/triton) | collapse into the producing GEMM epilogue if possible |
 | elementwise/fill/cast/copy | fuse away (host_runtime) / cuda-graph | usually shouldn't be its own kernel |
 
-## Roofline prior calibration (predicted vs measured — one line per direction)
+## Roofline observations (model context and measured outcomes)
+
+The entry below records the retired roofline skill's historical prediction. Current
+`kernel-roofline` keeps native reference distance separate from attainable speedup; preserve
+that distinction in new entries and link native model/measurement provenance.
+
 - 2026-08-19 · gfx950 vLLM mxfp4 grouped fused-MoE (`_matmul_ogs...swiglu`, gpt-oss-120b, decode): roofline
   predicted `attainable_speedup=1.0`, `expected_e2e_gain_pct=0.0` (memory-bound, `roofline_pct` 0.95–1.0,
   headroom `saturated`, confidence **low**). MEASURED e2e **+26.9%** via a whole-file Triton rewrite. The

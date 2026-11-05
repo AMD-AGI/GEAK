@@ -1,0 +1,32 @@
+[
+  {
+    "file": "dsa_indexer_topk_dec_bs2_ctx318k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs2_ctx318k_baseline_roofline_raw.txt",
+    "sha256": "938a56cdba5eab486edd142e8006561f0c4cb2d0e3365f5342e57bc351d8c197"
+  },
+  {
+    "file": "dsa_indexer_topk_dec_bs2_ctx418k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs2_ctx418k_baseline_roofline_raw.txt",
+    "sha256": "20027d7560f5c3c55e2e6fc15a555adc459e176192b9c9ad681dd7d94b6afaea"
+  },
+  {
+    "file": "dsa_indexer_topk_dec_bs3_ctx104k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs3_ctx104k_baseline_roofline_raw.txt",
+    "sha256": "8e0656ecf8506b9da8675cb5ef0007d525f1040d2860075f86a8b642cef4a026"
+  },
+  {
+    "file": "dsa_indexer_topk_dec_bs3_ctx173k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs3_ctx173k_baseline_roofline_raw.txt",
+    "sha256": "96b04dc2dd9188e8530fb0a87812ded761bd45c8bee4b138144bd5d94619b0b0"
+  },
+  {
+    "file": "dsa_indexer_topk_dec_bs3_ctx217k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs3_ctx217k_baseline_roofline_raw.txt",
+    "sha256": "f2f45bc421a4087d4a45ac5ee1a216de483b5a08d06247bbc81752a63f6f9b38"
+  },
+  {
+    "file": "dsa_indexer_topk_dec_bs3_ctx261k_baseline_roofline_raw.txt",
+    "source": "/shared_nfs/chuschen/agent-kernel-arena/agentx-glm52/exp_unified_0923g_0927/roofline/results/cat2e_repro/dsa_indexer_topk/rocprof/leg/dsa_indexer_topk_dec_bs3_ctx261k_baseline_roofline_raw.txt",
+    "sha256": "d1f5ad6f4bcf02eab26efa50ac81ad7d0eca9299ffffff28bd53d9ea5060a670"
+  }
+]

@@ -19,7 +19,7 @@ sources:
 > Do **not** duplicate Gluon `hw_constants.json` beyond the cheat sheet — that file is the source.
 > These ISA facts apply to gfx1201 products. GEAK's product validation, serving
 > image, and calibrated peaks exist for **R9700** and **R9600D** (see
-> `roofline/peaks.md`); RX 9070 XT and other gfx1201
+> `hardware/product_peaks.md`); RX 9070 XT and other gfx1201
 > products remain uncalibrated.
 
 ## TL;DR
@@ -51,5 +51,5 @@ sources:
 - **AITER Navi.** Several Instinct custom kernels are disabled on gfx12; hipBLASLt / Triton are the
   default bake-off, not “must beat AITER CDNA cards.”
 - **Roofline peaks.** Public R9700 GDDR6 / WMMA ceilings live in
-  [`e2e_workflow/.../roofline/peaks.md`](../../../e2e_workflow/knowledge/analysis_skills/roofline/peaks.md),
+  [`hardware/product_peaks.md`](../product_peaks.md),
   not here.

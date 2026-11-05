@@ -9,7 +9,7 @@ is not Instinct CDNA. Do **not** apply
 Numeric occupancy / LDS constants below are copied from the Gluon skill
 `perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json`
 (`gfx1201`). Peak TFLOPS and memory bandwidth for roofline math come from the public
-R9700 datasheet in `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`.
+R9700 datasheet in `perf_knowledge/hardware/product_peaks.md`.
 
 ## 0. Detect THIS box first (source of truth > this table)
 
@@ -119,7 +119,7 @@ occupancy 2–3×.
 Radeon AI PRO R9700 / gfx1201 (Navi 48, 300 W, 64 CU): public datasheet GDDR6 pin rate **~640 GB/s**;
 dense matrix **191 TFLOP/s FP16/BF16**, **383 TOPS INT8**. Full table, including
 FP32/FP8/INT4 and sparse 2:4 rates, is in
-`e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`. Do not invent peaks
+`perf_knowledge/hardware/product_peaks.md`. Do not invent peaks
 for a gfx120x SKU that has no `product:` block there, and do not use CDNA MX/`fp4` numbers here.
 
 - **Memory hierarchy:** 8 MiB L2 → 64 MiB Infinity Cache → external GDDR6. A hot working set served

@@ -196,7 +196,7 @@ preserves the product, ISA, device name and CU count in the workflow handoff.
 Product identity selects product data, not separate logic. `r9700` and
 `r9600d` share the gfx1201 ISA path (vLLM-only serving, CDNA knowledge
 isolation) and differ only in the `product:` block of
-`e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
+`perf_knowledge/hardware/product_peaks.md`; the R9600D block
 holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.

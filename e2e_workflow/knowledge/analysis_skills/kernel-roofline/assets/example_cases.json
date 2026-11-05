@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "mode": "extended",
+  "provenance": {
+    "synthetic_example": true,
+    "description": "Demonstrates a fixed GEMM model while executed padding and latency decrease. No GPU was measured.",
+    "tracelens_commit": "No TraceLens execution; conventional GEMM formula equivalent to its no-bias model"
+  },
+  "cases": [
+    {
+      "case_id": "gemm-m128-n4096-k4096",
+      "contract": {
+        "id": "bf16-gemm-v1",
+        "operator": "C = A @ B",
+        "boundary": "Complete GEMM, including any implementation-specific split reduction",
+        "precision": "BF16 inputs/output, FP32 accumulation",
+        "memory_level": "External memory",
+        "cache_policy": "Cold distinct operands; ideal read-once inputs and write-once output",
+        "model_version": "conventional-gemm-v1"
+      },
+      "workload": {"M": 128, "N": 4096, "K": 4096, "bias": false},
+      "model": {
+        "kind": "semantic_reference",
+        "source": "Explicit conventional GEMM: F=2MNK; B=2(MK+KN+MN)",
+        "assumptions": ["Conventional matrix arithmetic, FMA=2 FLOPs", "Ideal operand reuse; no split intermediates in the fixed model"],
+        "flops": 4294967296,
+        "bytes": 35651584,
+        "peak_key": "matrix_bf16"
+      },
+      "measurements": [
+        {
+          "implementation": "baseline",
+          "latency_us": 100,
+          "timing_basis": "Synthetic serial device time per call",
+          "source": "Illustrative value; no GPU execution",
+          "correctness": "not_checked",
+          "counters": {
+            "flops": 8589934592,
+            "bytes": 40000000,
+            "latency_us": 100,
+            "source": "Synthetic padding example; no counters collected",
+            "coverage": "Illustrative executed matrix work and external traffic",
+            "timing_basis": "Synthetic independent counter-run device time"
+          }
+        },
+        {
+          "implementation": "candidate",
+          "latency_us": 80,
+          "timing_basis": "Synthetic serial device time per call",
+          "source": "Illustrative value; no GPU execution",
+          "correctness": "not_checked",
+          "counters": {
+            "flops": 4294967296,
+            "bytes": 36000000,
+            "latency_us": 80,
+            "source": "Synthetic reduced-padding example; no counters collected",
+            "coverage": "Illustrative executed matrix work and external traffic",
+            "timing_basis": "Synthetic independent counter-run device time"
+          }
+        }
+      ]
+    }
+  ]
+}

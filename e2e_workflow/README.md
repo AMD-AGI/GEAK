@@ -141,11 +141,10 @@ Workflow({
                           //   No op budget: the tuning loop is uncapped (tuning ops are cheap and their
                           //   value is cumulative). See "Tuning skillset" below +
                           //   knowledge/tuning_skillset_integration.md.
-    analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
-                          //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
-                          //   expected e2e gain, so budget goes to the kernel with HEADROOM, not merely
-                          //   the biggest one. ADVISORY: annotates + reorders, never prunes a candidate
-                          //   and never overrides the measured pct_gpu_time. See "Roofline" below.
+    analysis_skill: "kernel-roofline", // default; "none" disables; legacy "roofline" is an alias.
+                          //   Adds native TraceLens model results, operation/kernel call stacks and
+                          //   coverage. ADVISORY: never prunes or overrides measured pct_gpu_time.
+                          //   Reference distance does not predict attainable speedup. See "Roofline" below.
     use_expert_skills: "false", // consult perf_knowledge/expert_skills (advisory priors) on/off (default OFF, opt-in);
                           //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
                           //   byte-identical to a run without the feature. Threaded down to the kernel layer too.
@@ -420,39 +419,32 @@ empty queue stops dispatch. Fast/deep modes retain their head-only scheduling.
 Fixed ISL/OSL workloads keep their existing flow. Each optimization still runs its
 existing UT and E2E A/B gate; a UT pass alone does not establish an E2E improvement.
 
-## Roofline-guided routing (`analysis_skill`, default `roofline`)
+## Roofline analysis (`analysis_skill`, default `kernel-roofline`)
 
-`pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is
-*recoverable*. A kernel already running at the memory or compute ceiling has nothing left to give no
-matter how much of the profile it owns. So after the Profiler emits the Top-N it runs one pluggable
-**analysis skill** (`knowledge/analysis_skills/<name>/SKILL.md`) which estimates, per kernel:
-`roofline_pct` → `attainable_speedup` → `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable)`.
-The Architect then reports **both** orderings — by `%GPU` and by expected gain — and says which it
-followed; a disagreement between them is the useful signal, so it is never blended into one number.
+After the Profiler emits the Top-N, it runs the selected skill from
+`knowledge/analysis_skills/<name>/SKILL.md`. The bundled `kernel-roofline` defaults to
+**tl-only**: resolve current upstream TraceLens `main`, freeze its commit for the analysis,
+and preserve native models/reports with `--include_call_stack`. An explicit hardware-counter
+request uses its separate `rocprof` mode.
 
-**Roofline is advisory and can never prune a candidate.** Same doctrine as the TraceLens prior: the
-measured `pct_gpu_time` is the judge. Confidence is staged — profile-time shape estimates are `low`
-(display only, not ranked on), real extracted shapes are `medium`, rocprofv3 counter measurements
-(`FETCH_SIZE`/`WRITE_SIZE`/`MfmaFlops*`) are `high`. Five degradation levels end in "emit nothing and
-behave exactly as before", so a missing peak table, an unmodellable op or a bad number cannot fail a run.
+The native `unified_perf_summary.csv` identifies the modeled operation in `name`, arguments in
+`perf_params`, and device kernels in `kernel_details_summary` next to their call-stack context.
+One operation can launch multiple kernels; its modeled work and roofline cannot be assigned to
+each subkernel. For standalone UTs, missing identity and arguments can be supplemented only from
+actual UT inputs and invoked source, with runtime snapshots or exact citations for every field.
+Shape, dtype, stride, input/output roles and quantization must never be guessed.
 
-**A saturated head is rerouted, not dropped** — the point that matters most for the *largest* kernel.
-Being at the wall means it is done with micro-tuning, not done being optimized; it routes to a
-**byte-reduction track** (fuse an adjacent op away, stop reading unrouted experts, layout/packing,
-lower-precision weights). Those levers must preserve the measurement contract: the user-supplied
-workload (`isl`/`osl`/`conc`/batch) is fixed and speculative decoding is not an optimization.
+The Profiler writes `profile/round_<N>/profile_roofline.{json,md}` as an advisory manifest and
+summary linking native reports, provenance and coverage. See
+[kernel-roofline's GEAK contract](knowledge/analysis_skills/kernel-roofline/references/geak-integration.md).
+The Architect keeps measured `pct_gpu_time` as the ranking basis. Native roofline efficiency and
+reference distance describe the selected model; they do not establish attainable speedup,
+expected e2e gain, or exhaustion of tuning opportunities. Missing models/metadata/peaks remain
+unavailable. Analysis failures never block the Top-N or trigger handwritten substitute models.
 
-Calibrated on a real run (Qwen3.5-35B-A3B-FP8, gfx950, vLLM TP1, 1k/1k, conc 64) — see
-`scripts/tests/test_roofline_skill.py`:
-
-| kernel | %GPU | of roofline | attainable | predicted e2e | measured |
-|---|---|---|---|---|---|
-| `fused_moe_kernel` | **26.45%** | 88% (memory-bound) | 1.02× | +0.6% | 1.047× iso, **−0.064% e2e** |
-| `kernel_paged_attention_2d` | 8.86% | 18% | 2.8× | +5.7% | **1.56× iso** |
-
-Ranking by `%GPU` sends the budget to the MoE, where it was in fact wasted; ranking by headroom sends
-it to attention, where the win was. Add a skill by dropping a directory into
-`knowledge/analysis_skills/`; swap with `analysis_skill=<name>`; disable with `analysis_skill=none`.
+Use `analysis_skill=kernel-roofline` (the old `roofline` name resolves to this replacement), swap
+with `analysis_skill=<name>`, or disable with `analysis_skill=none`. CPU regressions live in the
+skill's `tests/` directory and run in L0; GPU examples and native TL integration checks are separate.
 
 ## Accuracy gate (gsm8k) — OFF by default
 By default the e2e gate accepts a kernel on **throughput delta + greedy output parity**
@@ -508,7 +500,7 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 e2e_workflow.js   orchestration (deterministic; recursively calls ../kernel_workflow/kernel_workflow.js)
 roles/                 director, system_architect, profiler, config_tuner, tuning_specialist, kernel_extractor, op_benchmarker, e2e_integrator
 knowledge/             e2e_optimization, profile_parse, preflight (env self-check), backend_playbook + gemm_attention_backends (persistent), sglang_internals, shape_capture
-knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
+knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `kernel-roofline` ships by default)
 knowledge/tuning_skillset_integration.md  how the VENDORED ../tuning_skillset/ is wired in (+ its manifest)
 scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm,atom}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py
 scripts/adapters/clients/  pluggable BENCH CLIENTS (the timed load): agentx.sh (AgentX trace replay via aiperf) + map_aiperf.py vendored beside it so a standalone run needs no InferenceX checkout

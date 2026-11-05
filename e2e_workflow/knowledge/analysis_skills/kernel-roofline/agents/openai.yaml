@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kernel Roofline"
+  short_description: "Analyze kernel rooflines in tl-only or rocprof mode"
+  default_prompt: "Use $kernel-roofline with mode=tl-only to analyze these cases using latest TraceLens main frozen to a commit, native unified_perf_summary.csv rows, and per-kernel call stacks; preserve operation names, perf_params, and model limitations. Use mode=rocprof for hardware counters."

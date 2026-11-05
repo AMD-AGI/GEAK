@@ -57,18 +57,14 @@ relative_files = true
 # land without moving the number. Naming the dirs forces them in.
 #
 # SCOPE OF THE HEADLINE NUMBER. The reported percentage is over these three trees
-# only, so state it as such rather than as a repo-wide figure. 913 statements of
-# tracked Python sit outside this denominator, all of them untested; counted
-# repo-wide the number would be ~78%. Deliberately excluded, with counts so the
-# choice stays auditable:
+# only, so state it as such rather than as a repo-wide figure. Deliberately excluded:
 #
-#   e2e_workflow/knowledge/  (389)  roofline_tools.py + the flydsl overlay
-#                                   sitecustomize template. THE WEAKEST of these
-#                                   exclusions -- closer to runtime code than the
-#                                   others, and the first candidate to fold in.
-#   perf_knowledge/          (358)  contributor scaffolds and registry generators
-#   examples/                (129)  needs a GPU to execute
-#   setup.py + docs/conf.py   (37)  install-time and Sphinx config
+#   e2e_workflow/knowledge/  vendored skills and overlay templates. kernel-roofline
+#                           has a separate CPU unittest gate; it is not part of
+#                           this headline coverage denominator.
+#   perf_knowledge/         contributor scaffolds and registry generators
+#   examples/               GPU-dependent examples
+#   setup.py + docs/conf.py install-time and Sphinx config
 #
 # geak/bootstrap.py IS measured (it is in the `geak` tree below) even though its
 # hook fires at `pip install` time -- its logic is unit-testable without running

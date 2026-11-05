@@ -1,0 +1,3754 @@
+{
+ "engine": "tracelens-perfmodel",
+ "mode": "tl-only",
+ "arm": "baseline",
+ "generated": "2026-10-12 04:00:37",
+ "arch": {
+  "path": "/shared_nfs/yueliu14/kernel-roofline/assets/arch_variants/MI355X.bw6857_bf1449.json",
+  "md5": "c045ecc958e17ca6062de4970ddd3316",
+  "source": "These are benchmark derived peak flops and bw",
+  "mem_bw_gbps": 6857
+ },
+ "tracelens_root": "/shared_nfs/yueliu14/roofline_ut_adapter_0915/vendor_tracelens",
+ "driver": "/shared_nfs/yueliu14/tl_roofline_glm52_0917/tl_roofline_glm52.py",
+ "ut_root": "/shared_nfs/yueliu14/krf_0927/stage",
+ "ran_on_gpu": true,
+ "contention": {
+  "before": {
+   "gemm8192_ms": 0.7494890093803406,
+   "gemm8192_tflops": 1467.01501158109,
+   "hbm_free_gb": 307.870302208,
+   "hbm_total_gb": 309.220868096
+  },
+  "after": {
+   "gemm8192_ms": 0.7547289729118347,
+   "gemm8192_tflops": 1456.8297590775567,
+   "hbm_free_gb": 304.204480512,
+   "hbm_total_gb": 309.220868096
+  },
+  "peak_bf16_tflops": 1449,
+  "worst_tflops": 1456.8297590775567,
+  "worst_frac": 1.0054035604399978,
+  "min_frac": 0.6,
+  "probe_ok": true,
+  "max_rep_spread": 1.15,
+  "spread_ok": true,
+  "worst_rep_spread": {
+   "spread": 1.0880128096008164,
+   "kernel": "mxfp4_fused_moe",
+   "case": "dec_bs1"
+  },
+  "ok": true,
+  "note": "node was quiet enough"
+ },
+ "unsupported": [
+  {
+   "kernel": "indexer_preamble",
+   "task": "glm52_indexer_preamble_task",
+   "basis": "unsupported",
+   "reason": "five-kernel chain (Layernorm2dFwd + rope cache store + 2x hadamard + act_quant + indexer_k_quant_and_cache) at m<=42 rows. TraceLens has no model for the chain, and at this size the seam is dominated by the ~2.3 us per-node in-graph dispatch floor rather than by its bytes -- a byte roofline would be a confident number about the wrong quantity. Use the rocprof leg (per-kernel) for this one.",
+   "cases": [
+    "dec_bs1",
+    "dec_bs2",
+    "dec_bs3",
+    "dec_bs4",
+    "dec_bs5",
+    "dec_bs6",
+    "dec_bs7"
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "dec_bs3_m18_res",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 18,
+   "ctx": null,
+   "case_weight": 0.6221,
+   "flops_g": 0.000552996,
+   "bytes_mb": 0.897024,
+   "arithmetic_intensity": 0.616478488869863,
+   "bound": "memory",
+   "compute_us": 0.004893769911504425,
+   "memory_us": 0.1308187253901123,
+   "roofline_us": 0.1308187253901123,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 221184,
+    "out_bytes": 221184,
+    "weight_bytes": 12288,
+    "residual_in_bytes": 221184,
+    "residual_out_bytes": 221184
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 9.002166666666659,
+   "measured_us_reps": [
+    9.002166666666659,
+    9.035433333333277,
+    9.054166666666696
+   ],
+   "measured_us_spread": 1.0057763871660568,
+   "roofline_pct": 1.4531915508130904,
+   "attainable_speedup": 68.81405272694295,
+   "per_kernel": [
+    {
+     "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 2, 128, 1>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+     "ms": 0.004596433333333312
+    },
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.004405733333333347
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.08016799999999999
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.008311399999999981
+    }
+   ],
+   "eager_us": 26.72000043094158,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 4.6,
+   "attainable_speedup_floored": 1.9569927536231868,
+   "floor_limited": true
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "dec_bs2_m12_res",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 12,
+   "ctx": null,
+   "case_weight": 0.2302,
+   "flops_g": 0.000368664,
+   "bytes_mb": 0.602112,
+   "arithmetic_intensity": 0.6122847576530612,
+   "bound": "memory",
+   "compute_us": 0.003262513274336283,
+   "memory_us": 0.08780982937144524,
+   "roofline_us": 0.08780982937144524,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 147456,
+    "out_bytes": 147456,
+    "weight_bytes": 12288,
+    "residual_in_bytes": 147456,
+    "residual_out_bytes": 147456
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 8.939533333333356,
+   "measured_us_reps": [
+    8.939533333333356,
+    8.943399999999972,
+    8.947400000000023
+   ],
+   "measured_us_spread": 1.00087998627818,
+   "roofline_pct": 0.9822641305449764,
+   "attainable_speedup": 101.80561102696313,
+   "per_kernel": [
+    {
+     "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 2, 128, 1>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+     "ms": 0.004544399999999988
+    },
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.0043951333333333694
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07985196666666665
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.008146033333333321
+    }
+   ],
+   "eager_us": 26.559999212622643,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 4.6,
+   "attainable_speedup_floored": 1.943376811594208,
+   "floor_limited": true
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "dec_bs3_m18_nores",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 18,
+   "ctx": null,
+   "case_weight": 0.06,
+   "flops_g": 0.000442404,
+   "bytes_mb": 0.454656,
+   "arithmetic_intensity": 0.9730521537162162,
+   "bound": "memory",
+   "compute_us": 0.0039150796460176995,
+   "memory_us": 0.06630538136211171,
+   "roofline_us": 0.06630538136211171,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 221184,
+    "out_bytes": 221184,
+    "weight_bytes": 12288
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4.327066666666681,
+   "measured_us_reps": [
+    4.327066666666681,
+    4.340433333333302,
+    4.344400000000036
+   ],
+   "measured_us_spread": 1.0040057929929485,
+   "roofline_pct": 1.5323401849315508,
+   "attainable_speedup": 65.25966034393791,
+   "per_kernel": [
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.004327066666666681
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07973063333333334
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.0040484000000000275
+    }
+   ],
+   "eager_us": 16.07999950647354,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.3,
+   "attainable_speedup_floored": 1.8813333333333397,
+   "floor_limited": true
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "dec_bs2_m12_nores",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 12,
+   "ctx": null,
+   "case_weight": 0.0221,
+   "flops_g": 0.000294936,
+   "bytes_mb": 0.3072,
+   "arithmetic_intensity": 0.960078125,
+   "bound": "memory",
+   "compute_us": 0.0026100530973451326,
+   "memory_us": 0.04480093335277818,
+   "roofline_us": 0.04480093335277818,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 147456,
+    "out_bytes": 147456,
+    "weight_bytes": 12288
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4.333733333333379,
+   "measured_us_reps": [
+    4.333733333333379,
+    4.340433333333355,
+    4.351066666666639
+   ],
+   "measured_us_spread": 1.0039996308032935,
+   "roofline_pct": 1.0337722676240124,
+   "attainable_speedup": 96.73310373263992,
+   "per_kernel": [
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.004333733333333379
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07881600000000001
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.003944366666666708
+    }
+   ],
+   "eager_us": 15.839999541640282,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.3,
+   "attainable_speedup_floored": 1.884231884057991,
+   "floor_limited": true
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "pre_m10129_res",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 10129,
+   "ctx": null,
+   "case_weight": 0.031,
+   "flops_g": 0.311183138,
+   "bytes_mb": 497.872896,
+   "arithmetic_intensity": 0.625025263476082,
+   "bound": "memory",
+   "compute_us": 2.7538330796460175,
+   "memory_us": 72.60797666618055,
+   "roofline_us": 72.60797666618055,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 124465152,
+    "out_bytes": 124465152,
+    "weight_bytes": 12288,
+    "residual_in_bytes": 124465152,
+    "residual_out_bytes": 124465152
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 293.380266666667,
+   "measured_us_reps": [
+    293.380266666667,
+    303.10983333333337,
+    303.2578333333334
+   ],
+   "measured_us_spread": 1.0336681358255397,
+   "roofline_pct": 24.748759516493426,
+   "attainable_speedup": 4.040606557809758,
+   "per_kernel": [
+    {
+     "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 2, 128, 1>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+     "ms": 0.20930156666666683
+    },
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.08407870000000019
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.12997569999999986
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.0685199333333333
+    }
+   ],
+   "eager_us": 429.2849898338318,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 72.60797666618055,
+   "attainable_speedup_floored": 4.040606557809758,
+   "floor_limited": false
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "pre_m10129_nores",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 10129,
+   "ctx": null,
+   "case_weight": 0.031,
+   "flops_g": 0.248950562,
+   "bytes_mb": 248.942592,
+   "arithmetic_intensity": 1.000032015413417,
+   "bound": "memory",
+   "compute_us": 2.203102318584071,
+   "memory_us": 36.30488435175733,
+   "roofline_us": 36.30488435175733,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 124465152,
+    "out_bytes": 124465152,
+    "weight_bytes": 12288
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 44.21826666666658,
+   "measured_us_reps": [
+    44.21826666666658,
+    44.368900000000004,
+    44.45020000000003
+   ],
+   "measured_us_spread": 1.005245192786091,
+   "roofline_pct": 82.10381611164632,
+   "attainable_speedup": 1.217970183797768,
+   "per_kernel": [
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.04421826666666658
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07396659999999998
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.06200373333333329
+    }
+   ],
+   "eager_us": 114.24200236797333,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 36.30488435175733,
+   "attainable_speedup_floored": 1.217970183797768,
+   "floor_limited": false
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "pre_m1137_res",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 1137,
+   "ctx": null,
+   "case_weight": 0.0018,
+   "flops_g": 0.034930914,
+   "bytes_mb": 55.898112,
+   "arithmetic_intensity": 0.6249032883257309,
+   "bound": "memory",
+   "compute_us": 0.30912313274336284,
+   "memory_us": 8.151977832871518,
+   "roofline_us": 8.151977832871518,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 13971456,
+    "out_bytes": 13971456,
+    "weight_bytes": 12288,
+    "residual_in_bytes": 13971456,
+    "residual_out_bytes": 13971456
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 30.94633333333332,
+   "measured_us_reps": [
+    30.94633333333332,
+    31.071633333333384,
+    31.45039999999997
+   ],
+   "measured_us_spread": 1.016288413274593,
+   "roofline_pct": 26.34230603368688,
+   "attainable_speedup": 3.7961748630556,
+   "per_kernel": [
+    {
+     "kernel": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 2, 128, 1>(at::native::(anonymous namespace)::OpaqueType<4u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<4u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+     "ms": 0.019501899999999982
+    },
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb1ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.01144443333333334
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07526663333333332
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.019334266666666673
+    }
+   ],
+   "eager_us": 57.95999988913536,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 8.151977832871518,
+   "attainable_speedup_floored": 3.7961748630556,
+   "floor_limited": false
+  },
+  {
+   "kernel": "add_rmsnorm_quant",
+   "task": "glm52_add_rmsnorm_quant_task",
+   "case": "pre_m1137_nores",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "bf16 -> bf16",
+   "peak_spec": "vector_bf16",
+   "device_kernel": "aiter::add_rmsnorm_quant_kernel<bf16, bf16, 256, 24, ADD_RESIDUAL, false, true, 1>  [decode + prefill]",
+   "m": 1137,
+   "ctx": null,
+   "case_weight": 0.0018,
+   "flops_g": 0.027945186,
+   "bytes_mb": 27.9552,
+   "arithmetic_intensity": 0.9996417839972528,
+   "bound": "memory",
+   "compute_us": 0.24730253097345134,
+   "memory_us": 4.0768849351028145,
+   "roofline_us": 4.0768849351028145,
+   "peak_tflops": 113,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "input_bytes": 13971456,
+    "out_bytes": 13971456,
+    "weight_bytes": 12288
+   },
+   "diagnostics": {},
+   "model_note": "TraceLens' RMSNorm byte model has no residual_in/residual_out term; this is a hand model (implementation_model), not a TraceLens prediction",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 8.015133333333331,
+   "measured_us_reps": [
+    8.015133333333331,
+    8.0323666666667,
+    8.056333333333349
+   ],
+   "measured_us_spread": 1.0051402763106478,
+   "roofline_pct": 50.864842361983776,
+   "attainable_speedup": 1.965994493570665,
+   "per_kernel": [
+    {
+     "kernel": "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi24ELb0ELb0ELb1ELi1EEEvPT0_PT_PfS4_S4_S4_dbiiiiiiibb",
+     "ms": 0.00801513333333333
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.07950000000000004
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16tofloat32_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+     "ms": 0.007764400000000011
+    }
+   ],
+   "eager_us": 21.479999646544456,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_add_rmsnorm_quant_task/baseline_src/rmsnorm_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 4.0768849351028145,
+   "attainable_speedup_floored": 1.965994493570665,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs3_ctx104k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 18,
+   "ctx": 104239,
+   "case_weight": 0.1669,
+   "flops_g": 15.370665984,
+   "bytes_mb": 48.85758,
+   "arithmetic_intensity": 314.60145967115034,
+   "bound": "memory",
+   "compute_us": 4.890444156538339,
+   "memory_us": 7.125212191920665,
+   "roofline_us": 7.125212191920665,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 40101504.0,
+    "k_scale_bytes": 1250868,
+    "logits_write_bytes": 7505208
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 46.743566666666666,
+   "measured_us_reps": [
+    46.743566666666666,
+    47.1596,
+    47.218266666666665
+   ],
+   "measured_us_spread": 1.0101554081952098,
+   "roofline_pct": 15.243193234977786,
+   "attainable_speedup": 6.560305210232135,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.04674356666666667
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 63.48100304603577,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 7.125212191920665,
+   "attainable_speedup_floored": 6.560305210232135,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs3_ctx173k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 18,
+   "ctx": 173810,
+   "case_weight": 0.1668,
+   "flops_g": 25.62932736,
+   "bytes_mb": 81.416808,
+   "arithmetic_intensity": 314.7916012624813,
+   "bound": "memory",
+   "compute_us": 8.154415322939867,
+   "memory_us": 11.873531865247193,
+   "roofline_us": 11.873531865247193,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 66816768.0,
+    "k_scale_bytes": 2085720,
+    "logits_write_bytes": 12514320
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 76.36130000000001,
+   "measured_us_reps": [
+    76.36130000000001,
+    76.45463333333333,
+    76.96530000000004
+   ],
+   "measured_us_spread": 1.0079097658106924,
+   "roofline_pct": 15.549148410578645,
+   "attainable_speedup": 6.431220370368734,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.07636130000000002
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 94.04099732637405,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 11.873531865247193,
+   "attainable_speedup_floored": 6.431220370368734,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs3_ctx217k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 18,
+   "ctx": 217290,
+   "case_weight": 0.1668,
+   "flops_g": 32.04071424,
+   "bytes_mb": 101.765448,
+   "arithmetic_intensity": 314.8486531499375,
+   "bound": "memory",
+   "compute_us": 10.194309335030226,
+   "memory_us": 14.841103689660201,
+   "roofline_us": 14.841103689660201,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 83513088.0,
+    "k_scale_bytes": 2607480,
+    "logits_write_bytes": 15644880
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 92.94953333333332,
+   "measured_us_reps": [
+    92.94953333333332,
+    93.17349999999999,
+    94.62686666666663
+   ],
+   "measured_us_spread": 1.0180456347996725,
+   "roofline_pct": 15.96684045355817,
+   "attainable_speedup": 6.262979848196282,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.09294953333333332
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 109.60099846124649,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 14.841103689660201,
+   "attainable_speedup_floored": 6.262979848196282,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs3_ctx261k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 18,
+   "ctx": 261885,
+   "case_weight": 0.1669,
+   "flops_g": 38.61651456,
+   "bytes_mb": 122.635908,
+   "arithmetic_intensity": 314.8875006494835,
+   "bound": "memory",
+   "compute_us": 12.286514336621062,
+   "memory_us": 17.884775849496865,
+   "roofline_us": 17.884775849496865,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 100637568.0,
+    "k_scale_bytes": 3142620,
+    "logits_write_bytes": 18855720
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 112.57509999999999,
+   "measured_us_reps": [
+    112.57509999999999,
+    113.68313333333332,
+    114.04043333333333
+   ],
+   "measured_us_spread": 1.0130164959509993,
+   "roofline_pct": 15.886973095735085,
+   "attainable_speedup": 6.294465245040628,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.1125751
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 131.92200660705566,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 17.884775849496865,
+   "attainable_speedup_floored": 6.294465245040628,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs2_ctx318k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 12,
+   "ctx": 318230,
+   "case_weight": 0.1668,
+   "flops_g": 31.28328192,
+   "bytes_mb": 99.336912,
+   "arithmetic_intensity": 314.9210227110744,
+   "bound": "memory",
+   "compute_us": 9.953319096404709,
+   "memory_us": 14.486934811141898,
+   "roofline_us": 14.486934811141898,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 81516032.0,
+    "k_scale_bytes": 2545840,
+    "logits_write_bytes": 15275040
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 83.2787,
+   "measured_us_reps": [
+    83.2787,
+    83.45606666666667,
+    83.45869999999998
+   ],
+   "measured_us_spread": 1.0021614170250013,
+   "roofline_pct": 17.39572641160573,
+   "attainable_speedup": 5.748538326820548,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.0832787
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 100.40099918842316,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 14.486934811141898,
+   "attainable_speedup_floored": 5.748538326820548,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_decode",
+   "task": "glm52_dsa_indexer_decode_task",
+   "case": "dec_bs2_ctx418k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle  [decode]",
+   "m": 12,
+   "ctx": 418577,
+   "case_weight": 0.1659,
+   "flops_g": 41.147793408,
+   "bytes_mb": 130.645176,
+   "arithmetic_intensity": 314.9583832165376,
+   "bound": "memory",
+   "compute_us": 13.091884635062042,
+   "memory_us": 19.05281843371737,
+   "roofline_us": 19.05281843371737,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 107204864.0,
+    "k_scale_bytes": 3348616,
+    "logits_write_bytes": 20091696
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 110.47906666666664,
+   "measured_us_reps": [
+    110.47906666666664,
+    111.0484,
+    111.07640000000002
+   ],
+   "measured_us_spread": 1.0054067557896342,
+   "roofline_pct": 17.24563666997915,
+   "attainable_speedup": 5.79856817777438,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.11047906666666664
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 128.28199565410614,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_decode_task/baseline_src/paged_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 19.05281843371737,
+   "attainable_speedup_floored": 5.79856817777438,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_ch_r1383_ctx387k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 1383,
+   "ctx": 387977,
+   "case_weight": 0.3222,
+   "flops_g": 4395.599388672,
+   "bytes_mb": 4360.96182,
+   "arithmetic_intensity": 1007.9426443297776,
+   "bound": "compute",
+   "compute_us": 1398.536235657652,
+   "memory_us": 635.9868484760099,
+   "roofline_us": 1398.536235657652,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 55502848.0,
+    "k_scale_bytes": 1551908,
+    "logits_write_bytes": 2146288764,
+    "topk_index_write_bytes": 11329536,
+    "topk_score_read_bytes": 2146288764
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 5293.977533333329,
+   "measured_us_reps": [
+    5293.977533333329,
+    5384.7026000000005,
+    5410.5591
+   ],
+   "measured_us_spread": 1.0220215454131831,
+   "roofline_pct": 26.417494725880903,
+   "attainable_speedup": 3.7853703024318657,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 3.866361166666664
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 1.419150233333331
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_config<rocprim::ROCPRIM_400200_NS::default_config, int>, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2}, rocprim::ROCPRIM_400200_NS::detail::default_config_selector>(rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2})",
+     "ms": 0.004256400000000591
+    },
+    {
+     "kernel": "Memcpy DtoD (Device -> Device)",
+     "ms": 0.004209733333332664
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1}>(long, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1})",
+     "ms": 1.0429281000000004
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+     "ms": 0.008746133333330831
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.005813800000000447
+    }
+   ],
+   "eager_us": 6387.401103973389,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 9.2,
+   "roofline_us_eff": 1398.536235657652,
+   "attainable_speedup_floored": 3.7853703024318657,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_ch_r684_ctx784k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 684,
+   "ctx": 784313,
+   "case_weight": 0.1658,
+   "flops_g": 4394.762993664,
+   "bytes_mb": 4403.782596,
+   "arithmetic_intensity": 997.951851132662,
+   "bound": "compute",
+   "compute_us": 1398.2701220693605,
+   "memory_us": 642.2316750765641,
+   "roofline_us": 1398.2701220693605,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 103281280.0,
+    "k_scale_bytes": 3137252,
+    "logits_write_bytes": 2145880368,
+    "topk_index_write_bytes": 5603328,
+    "topk_score_read_bytes": 2145880368
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 7349.750233333333,
+   "measured_us_reps": [
+    7349.750233333333,
+    7355.418299999993,
+    7674.052966666671
+   ],
+   "measured_us_spread": 1.0441243202881272,
+   "roofline_pct": 19.024729789153703,
+   "attainable_speedup": 5.256316442245165,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 5.861791800000001
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 1.4796775999999972
+    },
+    {
+     "kernel": "Memcpy DtoD (Device -> Device)",
+     "ms": 0.004163099999999698
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_config<rocprim::ROCPRIM_400200_NS::default_config, int>, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2}, rocprim::ROCPRIM_400200_NS::detail::default_config_selector>(rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2})",
+     "ms": 0.004117733333336552
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1}>(long, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1})",
+     "ms": 1.0885726999999994
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+     "ms": 0.008559466666665594
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.004196333333333314
+    }
+   ],
+   "eager_us": 8476.786613464355,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 9.2,
+   "roofline_us_eff": 1398.2701220693605,
+   "attainable_speedup_floored": 5.256316442245165,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_ch_r2934_ctx182k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 2934,
+   "ctx": 182944,
+   "case_weight": 0.1558,
+   "flops_g": 4397.119045632,
+   "bytes_mb": 4354.63872,
+   "arithmetic_intensity": 1009.7551894344061,
+   "bound": "compute",
+   "compute_us": 1399.0197408946865,
+   "memory_us": 635.0647105148024,
+   "roofline_us": 1399.0197408946865,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 35810048.0,
+    "k_scale_bytes": 731776,
+    "logits_write_bytes": 2147030784,
+    "topk_index_write_bytes": 24035328,
+    "topk_score_read_bytes": 2147030784
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 5980.3625999999995,
+   "measured_us_reps": [
+    5980.3625999999995,
+    6163.524999999997,
+    6177.739699999996
+   ],
+   "measured_us_spread": 1.0330042027886397,
+   "roofline_pct": 23.393560465626056,
+   "attainable_speedup": 4.274680639013357,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 4.0915374333333325
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 1.3620762333333332
+    },
+    {
+     "kernel": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+     "ms": 0.5179802333333348
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_config<rocprim::ROCPRIM_400200_NS::default_config, int>, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2}, rocprim::ROCPRIM_400200_NS::detail::default_config_selector>(rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#2})",
+     "ms": 0.004427033333332474
+    },
+    {
+     "kernel": "Memcpy DtoD (Device -> Device)",
+     "ms": 0.004341666666666666
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+     "ms": 0.008902066666665936
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.006517699999998755
+    }
+   ],
+   "eager_us": 6034.915924072266,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 11.5,
+   "roofline_us_eff": 1399.0197408946865,
+   "attainable_speedup_floored": 4.274680639013357,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_ch_r14082_ctx38k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 14082,
+   "ctx": 38123,
+   "case_weight": 0.1311,
+   "flops_g": 4397.859520512,
+   "bytes_mb": 4474.659036,
+   "arithmetic_intensity": 982.8367893799003,
+   "bound": "compute",
+   "compute_us": 1399.2553358294624,
+   "memory_us": 652.5680379174566,
+   "roofline_us": 1399.2553358294624,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 64362112.0,
+    "k_scale_bytes": 152492,
+    "logits_write_bytes": 2147392344,
+    "topk_index_write_bytes": 115359744,
+    "topk_score_read_bytes": 2147392344
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4855.039066666669,
+   "measured_us_reps": [
+    4855.039066666669,
+    4867.780633333338,
+    4886.529966666662
+   ],
+   "measured_us_spread": 1.0064862299906505,
+   "roofline_pct": 28.820681288361932,
+   "attainable_speedup": 3.4697306076654395,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 2.781236866666669
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 2.058559666666666
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_config<rocprim::ROCPRIM_400200_NS::default_config, int>, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#1}, rocprim::ROCPRIM_400200_NS::detail::default_config_selector>(rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#1})",
+     "ms": 0.006221700000002814
+    },
+    {
+     "kernel": "Memcpy DtoD (Device -> Device)",
+     "ms": 0.004635099999999678
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::init_lookback_scan_state_kernel<rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>, rocprim::ROCPRIM_400200_NS::detail::block_id_wrapper<unsigned int, true> >(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>, unsigned int, rocprim::ROCPRIM_400200_NS::detail::block_id_wrapper<unsigned int, true>, unsigned int, rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>::value_type*)",
+     "ms": 0.004385733333332292
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1}>(long, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1})",
+     "ms": 1.129913266666667
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+     "ms": 0.009407433333332361
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.006244366666667444
+    }
+   ],
+   "eager_us": 5971.475124359131,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 11.5,
+   "roofline_us_eff": 1399.2553358294624,
+   "attainable_speedup_floored": 3.4697306076654395,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_ch_r5406_ctx99k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 5406,
+   "ctx": 99297,
+   "case_weight": 0.0925,
+   "flops_g": 4397.462175744,
+   "bytes_mb": 4374.624756,
+   "arithmetic_intensity": 1005.2204294123004,
+   "bound": "compute",
+   "compute_us": 1399.1289136951957,
+   "memory_us": 637.9794014875309,
+   "roofline_us": 1399.1289136951957,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 35544960.0,
+    "k_scale_bytes": 397188,
+    "logits_write_bytes": 2147198328,
+    "topk_index_write_bytes": 44285952,
+    "topk_score_read_bytes": 2147198328
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4645.18566666667,
+   "measured_us_reps": [
+    4645.18566666667,
+    4666.71006666667,
+    4675.8432
+   ],
+   "measured_us_spread": 1.0065998510142071,
+   "roofline_pct": 30.119978276329995,
+   "attainable_speedup": 3.320055515398088,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 3.156739000000002
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 1.473997499999999
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::trampoline_kernel<rocprim::ROCPRIM_400200_NS::detail::wrapped_scan_config<rocprim::ROCPRIM_400200_NS::default_config, int>, (rocprim::ROCPRIM_400200_NS::detail::target_arch)950, rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#1}, rocprim::ROCPRIM_400200_NS::detail::default_config_selector>(rocprim::ROCPRIM_400200_NS::detail::scan_impl<(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_determinism)0, false, false, rocprim::ROCPRIM_400200_NS::default_config, int const*, int*, int, std::plus<int>, int>(void*, unsigned long&, int const*, int*, int, unsigned long, std::plus<int>, ihipStream_t*, bool)::{lambda(auto:1, auto:2)#1}::operator()<std::integral_constant<bool, false>, std::integral_constant<bool, true> >(std::integral_constant<bool, false>, std::integral_constant<bool, true>) const::{lambda(auto:1)#1})",
+     "ms": 0.005627066666667542
+    },
+    {
+     "kernel": "Memcpy DtoD (Device -> Device)",
+     "ms": 0.00452573333333465
+    },
+    {
+     "kernel": "void rocprim::ROCPRIM_400200_NS::detail::init_lookback_scan_state_kernel<rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>, rocprim::ROCPRIM_400200_NS::detail::block_id_wrapper<unsigned int, true> >(rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>, unsigned int, rocprim::ROCPRIM_400200_NS::detail::block_id_wrapper<unsigned int, true>, unsigned int, rocprim::ROCPRIM_400200_NS::detail::lookback_scan_state<int, false, true>::value_type*)",
+     "ms": 0.004296366666666457
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1}>(long, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<4> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1})",
+     "ms": 1.0588576999999961
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+     "ms": 0.009148799999999953
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.006963100000000774
+    }
+   ],
+   "eager_us": 5711.071968078613,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 11.5,
+   "roofline_us_eff": 1399.1289136951957,
+   "attainable_speedup_floored": 3.320055515398088,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_un_r2639_ctx97k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 2639,
+   "ctx": 97364,
+   "case_weight": 0.0878,
+   "flops_g": 2104.881938432,
+   "bytes_mb": 2101.16664,
+   "arithmetic_intensity": 1001.7682074145247,
+   "bound": "compute",
+   "compute_us": 669.7047211046771,
+   "memory_us": 306.42651888581014,
+   "roofline_us": 669.7047211046771,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 23609728.0,
+    "k_scale_bytes": 389456,
+    "logits_write_bytes": 1027774384,
+    "topk_index_write_bytes": 21618688,
+    "topk_score_read_bytes": 1027774384
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 2631.3222000000005,
+   "measured_us_reps": [
+    2631.3222000000005,
+    2660.4172333333327,
+    2670.348133333332
+   ],
+   "measured_us_spread": 1.014831301667782,
+   "roofline_pct": 25.451262528955098,
+   "attainable_speedup": 3.9290781699427737,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 1.9433980666666664
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 0.6843597999999999
+    },
+    {
+     "kernel": "Memcpy HtoD (Host -> Device)",
+     "ms": 0.003564333333334025
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 2655.9929847717285,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 669.7047211046771,
+   "attainable_speedup_floored": 3.9290781699427737,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill_score_topk",
+   "task": "glm52_dsa_indexer_prefill_score_topk_task",
+   "case": "pre_un_r1784_ctx185k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> i32 indices",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 12-launch chain: _gluon_fp8_mqa_logits_kernel (score), nine book-keeping launches, at::native::vectorized_gather_kernel<16,long> (the page-table duplication), then sgl::dsa_topk::coop_topk_kernel<2048u,12u,4096u,1024u> (top-k + page transform). A candidate may replace all of it.",
+   "m": 1784,
+   "ctx": 185091,
+   "case_weight": 0.0447,
+   "flops_g": 2705.017602048,
+   "bytes_mb": 2688.200908,
+   "arithmetic_intensity": 1006.2557430130888,
+   "bound": "compute",
+   "compute_us": 860.648298456252,
+   "memory_us": 392.0374665305527,
+   "roofline_us": 860.648298456252,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 31227264.0,
+    "k_scale_bytes": 740364,
+    "logits_write_bytes": 1320809376,
+    "topk_index_write_bytes": 14614528,
+    "topk_score_read_bytes": 1320809376
+   },
+   "diagnostics": {},
+   "model_note": "full rectangle (logits_gib in the case confirms rows*ctx, not causal); score plane counted twice (written then re-read by top-k)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 3228.2909999999997,
+   "measured_us_reps": [
+    3228.2909999999997,
+    3243.2366000000006,
+    3262.294233333336
+   ],
+   "measured_us_spread": 1.0105328897962842,
+   "roofline_pct": 26.659563789517488,
+   "attainable_speedup": 3.7509991082194634,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 2.4108840999999996
+    },
+    {
+     "kernel": "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4096u, 1024u>(sgl::dsa_topk::CoopParams<2048u>)",
+     "ms": 0.8137571999999995
+    },
+    {
+     "kernel": "Memcpy HtoD (Host -> Device)",
+     "ms": 0.003649700000000424
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 3324.36203956604,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_score_topk_task/baseline_src/prefill_score_topk_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 860.648298456252,
+   "attainable_speedup_floored": 3.7509991082194634,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m10129_kv40k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 10129,
+   "ctx": null,
+   "case_weight": 0.167,
+   "flops_g": 2335.38113536,
+   "bytes_mb": 1188.456224,
+   "arithmetic_intensity": 1965.0544026769303,
+   "bound": "compute",
+   "compute_us": 743.0420411581292,
+   "memory_us": 173.32014350298965,
+   "roofline_us": 743.0420411581292,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 47971328.0,
+    "k_scale_bytes": 162076,
+    "logits_write_bytes": 1140322820
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 1575.4175666666665,
+   "measured_us_reps": [
+    1575.4175666666665,
+    1577.9562666666666,
+    1581.4576666666665
+   ],
+   "measured_us_spread": 1.003833967658987,
+   "roofline_pct": 47.164768051322945,
+   "attainable_speedup": 2.1202266889383137,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 1.5754175666666665
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 1618.5009479522705,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 743.0420411581292,
+   "attainable_speedup_floored": 2.1202266889383137,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m3480_kv113k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 3480,
+   "ctx": null,
+   "case_weight": 0.1668,
+   "flops_g": 3091.90950912,
+   "bytes_mb": 1539.457872,
+   "arithmetic_intensity": 2008.4404811306197,
+   "bound": "compute",
+   "compute_us": 983.7446735984728,
+   "memory_us": 224.50895026979728,
+   "roofline_us": 983.7446735984728,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 29280768.0,
+    "k_scale_bytes": 455664,
+    "logits_write_bytes": 1509721440
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 2783.6261666666664,
+   "measured_us_reps": [
+    2783.6261666666664,
+    2792.6422666666676,
+    2801.8570666666674
+   ],
+   "measured_us_spread": 1.0065493348993166,
+   "roofline_pct": 35.340401860659554,
+   "attainable_speedup": 2.8296226057157154,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 2.7836261666666666
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 2809.075117111206,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 983.7446735984728,
+   "attainable_speedup_floored": 2.8296226057157154,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m2457_kv201k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 2457,
+   "ctx": null,
+   "case_weight": 0.1667,
+   "flops_g": 3906.89574912,
+   "bytes_mb": 1944.62658,
+   "arithmetic_intensity": 2009.072481730657,
+   "bound": "compute",
+   "compute_us": 1243.04669077951,
+   "memory_us": 283.597284526761,
+   "roofline_us": 1243.04669077951,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 36157056.0,
+    "k_scale_bytes": 805584,
+    "logits_write_bytes": 1907663940
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 3837.8768000000005,
+   "measured_us_reps": [
+    3837.8768000000005,
+    3867.3905333333337,
+    3874.3093
+   ],
+   "measured_us_spread": 1.0094928789793356,
+   "roofline_pct": 32.388915943823676,
+   "attainable_speedup": 3.0874759801607143,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 3.8378768000000005
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 3910.80904006958,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 1243.04669077951,
+   "attainable_speedup_floored": 3.0874759801607143,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m1591_kv329k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 1591,
+   "ctx": null,
+   "case_weight": 0.1669,
+   "flops_g": 4231.355785216,
+   "bytes_mb": 2116.359272,
+   "arithmetic_intensity": 1999.356083439126,
+   "bound": "compute",
+   "compute_us": 1346.2792826013363,
+   "memory_us": 308.64215721160855,
+   "roofline_us": 1346.2792826013363,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 48947968.0,
+    "k_scale_bytes": 1319612,
+    "logits_write_bytes": 2066091692
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4378.208966666667,
+   "measured_us_reps": [
+    4378.208966666667,
+    4395.375866666665,
+    4448.665866666666
+   ],
+   "measured_us_spread": 1.0160926306936056,
+   "roofline_pct": 30.74954377123578,
+   "attainable_speedup": 3.252080770497271,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 4.378208966666667
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 4426.296234130859,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 1346.2792826013363,
+   "attainable_speedup_floored": 3.252080770497271,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m1137_kv470k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 1137,
+   "ctx": null,
+   "case_weight": 0.167,
+   "flops_g": 4332.865191936,
+   "bytes_mb": 2182.617,
+   "arithmetic_intensity": 1985.1697260380543,
+   "bound": "compute",
+   "compute_us": 1378.5762621495387,
+   "memory_us": 318.3049438529969,
+   "roofline_us": 1378.5762621495387,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 65076608.0,
+    "k_scale_bytes": 1883560,
+    "logits_write_bytes": 2115656832
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 4282.089099999999,
+   "measured_us_reps": [
+    4282.089099999999,
+    4284.947799999999,
+    4302.485333333332
+   ],
+   "measured_us_spread": 1.0047631501486816,
+   "roofline_pct": 32.19401161338607,
+   "attainable_speedup": 3.1061677308465847,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 4.282089099999999
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 4299.375057220459,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 1378.5762621495387,
+   "attainable_speedup_floored": 3.1061677308465847,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_prefill",
+   "task": "glm52_dsa_indexer_prefill_task",
+   "case": "pre_m626_kv857k",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "aiter fp8_mqa_logits (triton/gluon ragged MQA)  [prefill]",
+   "m": 626,
+   "ctx": null,
+   "case_weight": 0.1655,
+   "flops_g": 4353.470906368,
+   "bytes_mb": 2241.50162,
+   "arithmetic_intensity": 1942.2118045883901,
+   "bound": "compute",
+   "compute_us": 1385.1323278294624,
+   "memory_us": 326.8924631763162,
+   "roofline_us": 1385.1323278294624,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 112354944.0,
+    "k_scale_bytes": 3428460,
+    "logits_write_bytes": 2125718216
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0; KV counted once (pre-gathered contiguous buffer, no block table)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 6688.258133333335,
+   "measured_us_reps": [
+    6688.258133333335,
+    6702.203666666667,
+    6708.9971
+   ],
+   "measured_us_spread": 1.0031008023693502,
+   "roofline_pct": 20.709911313472762,
+   "attainable_speedup": 4.828605902090239,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_fp8_mqa_logits_kernel",
+     "ms": 6.688258133333335
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 6726.325035095215,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_prefill_task/baseline_src/fp8_mqa_logits_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 1385.1323278294624,
+   "attainable_speedup_floored": 4.828605902090239,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs3_ctx104k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 104239,
+   "case_weight": 0.1669,
+   "flops_g": 15.370665984,
+   "bytes_mb": 56.510244,
+   "arithmetic_intensity": 271.9978696959794,
+   "bound": "memory",
+   "compute_us": 4.890444156538339,
+   "memory_us": 8.241248942686306,
+   "roofline_us": 8.241248942686306,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 40101504.0,
+    "k_scale_bytes": 1250868,
+    "logits_write_bytes": 7505208,
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 7505208
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 80.08699999999996,
+   "measured_us_reps": [
+    80.08699999999996,
+    80.59899999999998,
+    81.22436666666661
+   ],
+   "measured_us_spread": 1.0142016390508652,
+   "roofline_pct": 10.290370400547292,
+   "attainable_speedup": 9.717823179103592,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.04693036666666661
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.03315663333333335
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 99.60199892520905,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 8.241248942686306,
+   "attainable_speedup_floored": 9.717823179103592,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs3_ctx173k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 173810,
+   "case_weight": 0.1668,
+   "flops_g": 25.62932736,
+   "bytes_mb": 94.078584,
+   "arithmetic_intensity": 272.4246716978648,
+   "bound": "memory",
+   "compute_us": 8.154415322939867,
+   "memory_us": 13.720079334986146,
+   "roofline_us": 13.720079334986146,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 66816768.0,
+    "k_scale_bytes": 2085720,
+    "logits_write_bytes": 12514320,
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 12514320
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 121.83686666666668,
+   "measured_us_reps": [
+    121.83686666666668,
+    122.20219999999999,
+    122.39956666666669
+   ],
+   "measured_us_spread": 1.0046184707091943,
+   "roofline_pct": 11.261024442234625,
+   "attainable_speedup": 8.880186746149723,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.07642933333333334
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.04540753333333334
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 141.6420042514801,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 13.720079334986146,
+   "attainable_speedup_floored": 8.880186746149723,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs3_ctx217k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 217290,
+   "case_weight": 0.1668,
+   "flops_g": 32.04071424,
+   "bytes_mb": 117.557784,
+   "arithmetic_intensity": 272.55289398786215,
+   "bound": "memory",
+   "compute_us": 10.194309335030226,
+   "memory_us": 17.144200670847308,
+   "roofline_us": 17.144200670847308,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 83513088.0,
+    "k_scale_bytes": 2607480,
+    "logits_write_bytes": 15644880,
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 15644880
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 145.8958333333334,
+   "measured_us_reps": [
+    145.8958333333334,
+    146.01316666666665,
+    146.14250000000004
+   ],
+   "measured_us_spread": 1.0016907039840066,
+   "roofline_pct": 11.750987179789668,
+   "attainable_speedup": 8.509923334099826,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.09276820000000005
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.05312763333333334
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 166.0819947719574,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 17.144200670847308,
+   "attainable_speedup_floored": 8.509923334099826,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs3_ctx261k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 261885,
+   "case_weight": 0.1669,
+   "flops_g": 38.61651456,
+   "bytes_mb": 141.639084,
+   "arithmetic_intensity": 272.64024497645016,
+   "bound": "memory",
+   "compute_us": 12.286514336621062,
+   "memory_us": 20.656130086043458,
+   "roofline_us": 20.656130086043458,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 100637568.0,
+    "k_scale_bytes": 3142620,
+    "logits_write_bytes": 18855720,
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 18855720
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 176.28823333333332,
+   "measured_us_reps": [
+    176.28823333333332,
+    176.60023333333345,
+    176.9709333333334
+   ],
+   "measured_us_spread": 1.003872635099299,
+   "roofline_pct": 11.717248335563022,
+   "attainable_speedup": 8.534426952144555,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.11578579999999998
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.06050243333333335
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 196.5620070695877,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 20.656130086043458,
+   "attainable_speedup_floored": 8.534426952144555,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs2_ctx318k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 12,
+   "ctx": 318230,
+   "case_weight": 0.1668,
+   "flops_g": 31.28328192,
+   "bytes_mb": 114.710256,
+   "arithmetic_intensity": 272.71564906977454,
+   "bound": "memory",
+   "compute_us": 9.953319096404709,
+   "memory_us": 16.72892751932332,
+   "roofline_us": 16.72892751932332,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 81516032.0,
+    "k_scale_bytes": 2545840,
+    "logits_write_bytes": 15275040,
+    "topk_index_write_bytes": 98304,
+    "topk_score_read_bytes": 15275040
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 153.06926666666658,
+   "measured_us_reps": [
+    153.06926666666658,
+    153.42260000000007,
+    153.57860000000002
+   ],
+   "measured_us_spread": 1.0033274696117973,
+   "roofline_pct": 10.928991745778271,
+   "attainable_speedup": 9.14997488570972,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.08435073333333333
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.06871853333333326
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 174.3219941854477,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 16.72892751932332,
+   "attainable_speedup_floored": 9.14997488570972,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_score_topk",
+   "task": "glm52_dsa_indexer_score_topk_task",
+   "case": "dec_bs2_ctx418k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model+implementation_model",
+   "dtype": "fp8_e4m3 -> f32 logits",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "JOINT SEAM -- kernel count is NOT fixed. Baseline is the deployed 2-launch chain: _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle then sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 12,
+   "ctx": 418577,
+   "case_weight": 0.1659,
+   "flops_g": 41.147793408,
+   "bytes_mb": 150.835176,
+   "arithmetic_intensity": 272.7997175406883,
+   "bound": "memory",
+   "compute_us": 13.091884635062042,
+   "memory_us": 21.99725477614117,
+   "roofline_us": 21.99725477614117,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 107204864.0,
+    "k_scale_bytes": 3348616,
+    "logits_write_bytes": 20091696,
+    "topk_index_write_bytes": 98304,
+    "topk_score_read_bytes": 20091696
+   },
+   "diagnostics": {},
+   "model_note": "d_h_v=0: the indexer emits logits, there is no PV pass; + top-k half (score plane counted twice: written then re-read)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 197.21380000000002,
+   "measured_us_reps": [
+    197.21380000000002,
+    197.84849999999997,
+    198.46983333333333
+   ],
+   "measured_us_spread": 1.006368891696896,
+   "roofline_pct": 11.154013956498565,
+   "attainable_speedup": 8.96538236279845,
+   "per_kernel": [
+    {
+     "kernel": "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+     "ms": 0.111763
+    },
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.08545080000000002
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 219.76299583911896,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_score_topk_task/baseline_src/score_topk_seam.py",
+   "dispatch_floor_us": 4.6,
+   "roofline_us_eff": 21.99725477614117,
+   "attainable_speedup_floored": 8.96538236279845,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs3_ctx104k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 104239,
+   "case_weight": 0.1669,
+   "flops_g": 0.0,
+   "bytes_mb": 7.652664,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 1.116036750765641,
+   "roofline_us": 1.116036750765641,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 7505208
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 30.29536666666667,
+   "measured_us_reps": [
+    30.29536666666667,
+    30.31139999999999,
+    30.456733333333336
+   ],
+   "measured_us_spread": 1.005326447058461,
+   "roofline_pct": 3.6838529239310773,
+   "attainable_speedup": 27.145491979437924,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.03029536666666667
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 32.51999989151955,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.3,
+   "attainable_speedup_floored": 13.17189855072464,
+   "floor_limited": true
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs3_ctx173k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 173810,
+   "case_weight": 0.1668,
+   "flops_g": 0.0,
+   "bytes_mb": 12.661776,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 1.8465474697389528,
+   "roofline_us": 1.8465474697389528,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 12514320
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 41.62353333333332,
+   "measured_us_reps": [
+    41.62353333333332,
+    41.71286666666668,
+    41.8022
+   ],
+   "measured_us_spread": 1.0042924435375504,
+   "roofline_pct": 4.436306391750228,
+   "attainable_speedup": 22.54127446786822,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.041623533333333324
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 43.63999888300896,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.3,
+   "attainable_speedup_floored": 18.097188405797098,
+   "floor_limited": true
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs3_ctx217k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 217290,
+   "case_weight": 0.1668,
+   "flops_g": 0.0,
+   "bytes_mb": 15.792336,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 2.303096981187108,
+   "roofline_us": 2.303096981187108,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 15644880
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 49.45426666666666,
+   "measured_us_reps": [
+    49.45426666666666,
+    49.54896666666666,
+    49.71963333333331
+   ],
+   "measured_us_spread": 1.005365900346987,
+   "roofline_pct": 4.65702382508373,
+   "attainable_speedup": 21.472941465615556,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.04945426666666666
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 51.440998911857605,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.303096981187108,
+   "attainable_speedup_floored": 21.472941465615556,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs3_ctx261k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 18,
+   "ctx": 261885,
+   "case_weight": 0.1669,
+   "flops_g": 0.0,
+   "bytes_mb": 19.003176,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 2.771354236546595,
+   "roofline_us": 2.771354236546595,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 147456,
+    "topk_score_read_bytes": 18855720
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 55.76103333333336,
+   "measured_us_reps": [
+    55.76103333333336,
+    55.8677,
+    55.94903333333333
+   ],
+   "measured_us_spread": 1.0033715300589237,
+   "roofline_pct": 4.97005537895925,
+   "attainable_speedup": 20.120500150431003,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.055761033333333355
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 57.679999619722366,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.771354236546595,
+   "attainable_speedup_floored": 20.120500150431003,
+   "floor_limited": false
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs2_ctx318k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 12,
+   "ctx": 318230,
+   "case_weight": 0.1668,
+   "flops_g": 0.0,
+   "bytes_mb": 15.373344,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 2.2419927081814204,
+   "roofline_us": 2.2419927081814204,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 98304,
+    "topk_score_read_bytes": 15275040
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 64.1558,
+   "measured_us_reps": [
+    64.1558,
+    64.26513333333334,
+    64.27979999999998
+   ],
+   "measured_us_spread": 1.0019327948525305,
+   "roofline_pct": 3.4946064240199957,
+   "attainable_speedup": 28.615525717761862,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.0641558
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 67.00000166893005,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.3,
+   "attainable_speedup_floored": 27.893826086956523,
+   "floor_limited": true
+  },
+  {
+   "kernel": "dsa_indexer_topk",
+   "task": "glm52_dsa_indexer_topk_task",
+   "case": "dec_bs2_ctx418k",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "implementation_model",
+   "dtype": "f32 scores -> i32 indices",
+   "peak_spec": "vector_fp32",
+   "device_kernel": "sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>  [decode]",
+   "m": 12,
+   "ctx": 418577,
+   "case_weight": 0.1659,
+   "flops_g": 0.0,
+   "bytes_mb": 20.19,
+   "arithmetic_intensity": 0.0,
+   "bound": "memory",
+   "compute_us": 0.0,
+   "memory_us": 2.9444363424238005,
+   "roofline_us": 2.9444363424238005,
+   "peak_tflops": 103,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "topk_index_write_bytes": 98304,
+    "topk_score_read_bytes": 20091696
+   },
+   "diagnostics": {},
+   "model_note": "select, not arithmetic: FLOPs are reported as 0, so this row is memory-bound by construction and `peak_spec` is immaterial (implementation_model)",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 78.81600000000003,
+   "measured_us_reps": [
+    78.81600000000003,
+    78.82396666666664,
+    79.51199999999999
+   ],
+   "measured_us_spread": 1.0088306942752734,
+   "roofline_pct": 3.7358357978377477,
+   "attainable_speedup": 26.767771768202092,
+   "per_kernel": [
+    {
+     "kernel": "void sglang::topk_main_kernel<true, 2, (sglang::TopKMode)1>(sglang::TopKPagedParams)",
+     "ms": 0.07881600000000002
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 81.60100132226944,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_dsa_indexer_topk_task/baseline_src/topk_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 2.9444363424238005,
+   "attainable_speedup_floored": 26.767771768202092,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs1",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 6,
+   "ctx": null,
+   "case_weight": 0.230014,
+   "flops_g": 0.509607936,
+   "bytes_mb": 124.2139231928802,
+   "arithmetic_intensity": 4.102663557358843,
+   "bound": "memory",
+   "compute_us": 0.09972758043052837,
+   "memory_us": 18.114907859542104,
+   "roofline_us": 18.114907859542104,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 77917592.5916111,
+    "gemm2_bytes": 38999116.29580555,
+    "e8m0_scale_bytes": 7297214.305463541
+   },
+   "diagnostics": {
+    "e_active_experts": 49.487401702633605
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 31.330666666666716,
+   "measured_us_reps": [
+    31.330666666666716,
+    33.3735,
+    34.088166666666694
+   ],
+   "measured_us_spread": 1.0880128096008164,
+   "roofline_pct": 57.81845644163995,
+   "attainable_speedup": 1.7295515334439393,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.021908566666666653
+    },
+    {
+     "kernel": "gemm2_a4w4_port_ne257_h6144_i256_bm16_nt_atomic",
+     "ms": 0.006477766666666666
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.002944333333333399
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 138.00199329853058,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 18.114907859542104,
+   "attainable_speedup_floored": 1.7295515334439393,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs2",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 12,
+   "ctx": null,
+   "case_weight": 0.287937,
+   "flops_g": 1.019215872,
+   "bytes_mb": 224.54051959214348,
+   "arithmetic_intensity": 4.539117812015884,
+   "bound": "memory",
+   "compute_us": 0.19945516086105675,
+   "memory_us": 32.74617465249285,
+   "roofline_us": 32.74617465249285,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 140847058.56761944,
+    "gemm2_bytes": 70504169.28380972,
+    "e8m0_scale_bytes": 13189291.740714323
+   },
+   "diagnostics": {
+    "e_active_experts": 89.44560913570369
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 42.46830000000004,
+   "measured_us_reps": [
+    42.46830000000004,
+    42.612133333333354,
+    43.14150000000002
+   ],
+   "measured_us_spread": 1.0158518235954814,
+   "roofline_pct": 77.10733571273825,
+   "attainable_speedup": 1.2968934677311106,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.027094066666666687
+    },
+    {
+     "kernel": "gemm2_a4w4_port_ne257_h6144_i256_bm16_nt_atomic",
+     "ms": 0.012311200000000053
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.003063033333333301
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 143.56200397014618,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 32.74617465249285,
+   "attainable_speedup_floored": 1.2968934677311106,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs3",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 18,
+   "ctx": null,
+   "case_weight": 0.226424,
+   "flops_g": 1.528823808,
+   "bytes_mb": 305.5794846710888,
+   "arithmetic_intensity": 5.003031566878756,
+   "bound": "memory",
+   "compute_us": 0.2991827412915851,
+   "memory_us": 44.56460327710205,
+   "roofline_us": 44.56460327710205,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 191674481.36225176,
+    "gemm2_bytes": 95958200.68112588,
+    "e8m0_scale_bytes": 17946802.627711102
+   },
+   "diagnostics": {
+    "e_active_experts": 121.70954473002864
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 53.48426666666669,
+   "measured_us_reps": [
+    53.48426666666669,
+    53.781699999999965,
+    53.884266666666676
+   ],
+   "measured_us_spread": 1.0074788348972405,
+   "roofline_pct": 83.32282754262069,
+   "attainable_speedup": 1.2001513024608859,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.033882066666666634
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm16_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.015856533333333363
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.0037456666666666936
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 155.04199266433716,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 44.56460327710205,
+   "attainable_speedup_floored": 1.2001513024608859,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs4",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 24,
+   "ctx": null,
+   "case_weight": 0.136668,
+   "flops_g": 2.038431744,
+   "bytes_mb": 371.04480581898,
+   "arithmetic_intensity": 5.493761702176962,
+   "bound": "memory",
+   "compute_us": 0.3989103217221135,
+   "memory_us": 54.11182817835497,
+   "roofline_us": 54.11182817835497,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 232730206.00406593,
+    "gemm2_bytes": 116526383.00203297,
+    "e8m0_scale_bytes": 21788216.812881183
+   },
+   "diagnostics": {
+    "e_active_experts": 147.76080195367555
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 73.59263333333337,
+   "measured_us_reps": [
+    73.59263333333337,
+    74.32983333333333,
+    74.82586666666666
+   ],
+   "measured_us_spread": 1.0167575649555498,
+   "roofline_pct": 73.52886522385839,
+   "attainable_speedup": 1.3600101088946543,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.05127966666666668
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm16_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.018527233333333334
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.0037857333333333495
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 174.88199472427368,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 54.11182817835497,
+   "attainable_speedup_floored": 1.3600101088946543,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs5",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 30,
+   "ctx": null,
+   "case_weight": 0.076352,
+   "flops_g": 2.54803968,
+   "bytes_mb": 423.93531250348235,
+   "arithmetic_intensity": 6.010444529739592,
+   "bound": "memory",
+   "compute_us": 0.49863790215264187,
+   "memory_us": 61.82518776483627,
+   "roofline_us": 61.82518776483627,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 265895850.98257715,
+    "gemm2_bytes": 133149525.49128857,
+    "e8m0_scale_bytes": 24889936.02961661
+   },
+   "diagnostics": {
+    "e_active_experts": 168.7956816244616
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 77.95530000000001,
+   "measured_us_reps": [
+    77.95530000000001,
+    79.11273333333341,
+    79.4140333333333
+   ],
+   "measured_us_spread": 1.018712433065273,
+   "roofline_pct": 79.30851111449287,
+   "attainable_speedup": 1.2608987181165976,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.05246230000000004
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm16_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.021157966666666677
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.0043350333333332875
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 179.52199280261993,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 61.82518776483627,
+   "attainable_speedup_floored": 1.2608987181165976,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs6",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 36,
+   "ctx": null,
+   "case_weight": 0.028961,
+   "flops_g": 3.057647616,
+   "bytes_mb": 466.67238563776976,
+   "arithmetic_intensity": 6.552021739665008,
+   "bound": "memory",
+   "compute_us": 0.5983654825831702,
+   "memory_us": 68.05780744316316,
+   "roofline_us": 68.05780744316316,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 292690714.12565947,
+    "gemm2_bytes": 146587277.06282973,
+    "e8m0_scale_bytes": 27394394.449280575
+   },
+   "diagnostics": {
+    "e_active_experts": 185.7801272873303
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 82.75806666666658,
+   "measured_us_reps": [
+    82.75806666666658,
+    83.72346666666674,
+    86.33813333333329
+   ],
+   "measured_us_spread": 1.0432594284867303,
+   "roofline_pct": 82.23706785863763,
+   "attainable_speedup": 1.2159966618933469,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.05443836666666662
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm16_bn128_bk128_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.023589966666666632
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.004729733333333317
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 183.12199413776398,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 68.05780744316316,
+   "attainable_speedup_floored": 1.2159966618933469,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "dec_bs7",
+   "regime": "decode",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 42,
+   "ctx": null,
+   "case_weight": 0.010053,
+   "flops_g": 3.567255552,
+   "bytes_mb": 501.2111499096265,
+   "arithmetic_intensity": 7.1172709398887335,
+   "bound": "memory",
+   "compute_us": 0.6980930630136987,
+   "memory_us": 73.0948155038102,
+   "roofline_us": 73.0948155038102,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 314341540.3354519,
+    "gemm2_bytes": 157453010.16772595,
+    "e8m0_scale_bytes": 29416599.406448614
+   },
+   "diagnostics": {
+    "e_active_experts": 199.49408234624983
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 84.54880000000001,
+   "measured_us_reps": [
+    84.54880000000001,
+    85.21670000000002,
+    85.24480000000001
+   ],
+   "measured_us_spread": 1.008231932327839,
+   "roofline_pct": 86.45281246311029,
+   "attainable_speedup": 1.1567003681074037,
+   "per_kernel": [
+    {
+     "kernel": "gemm1_a4w4_port_h6144_i256_ne257_bm16_iq_sep",
+     "ms": 0.05572646666666674
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm16_bn128_bk128_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.024149899999999943
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<257, 9, 16, 6144, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+     "ms": 0.004672433333333341
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 184.48199331760406,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 6.8999999999999995,
+   "roofline_us_eff": 73.0948155038102,
+   "attainable_speedup_floored": 1.1567003681074037,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "pre_M1936",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 1936,
+   "ctx": null,
+   "case_weight": 0.1667,
+   "flops_g": 164.433494016,
+   "bytes_mb": 696.274944,
+   "arithmetic_intensity": 236.161728111819,
+   "bound": "memory",
+   "compute_us": 32.17876595225049,
+   "memory_us": 101.5422114627388,
+   "roofline_us": 101.5422114627388,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 430245888.0,
+    "gemm2_bytes": 228132864.0,
+    "e8m0_scale_bytes": 37896192.0
+   },
+   "diagnostics": {
+    "e_active_experts": 257.0
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 277.22050000000024,
+   "measured_us_reps": [
+    277.22050000000024,
+    281.60319999999996,
+    281.6472666666668
+   ],
+   "measured_us_spread": 1.0159683957956447,
+   "roofline_pct": 36.628680585576724,
+   "attainable_speedup": 2.7301010683791054,
+   "per_kernel": [
+    {
+     "kernel": "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1_fp4q_sort_async_xcd4_v2out_v33",
+     "ms": 0.12468600000000005
+    },
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm64_nt_reduce_tk9_persist_cu256_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.08738286666666675
+    },
+    {
+     "kernel": "moe_reduction_kernel_0",
+     "ms": 0.03551943333333331
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.008497666666666792
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+     "ms": 0.007956399999999997
+    },
+    {
+     "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliilPKii",
+     "ms": 0.007595000000000129
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+     "ms": 0.005583133333333278
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 408.0049991607666,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 16.099999999999998,
+   "roofline_us_eff": 101.5422114627388,
+   "attainable_speedup_floored": 2.7301010683791054,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "pre_M5916",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 5916,
+   "ctx": null,
+   "case_weight": 0.1675,
+   "flops_g": 502.473424896,
+   "bytes_mb": 803.257344,
+   "arithmetic_intensity": 625.5447630193096,
+   "bound": "memory",
+   "compute_us": 98.33139430450098,
+   "memory_us": 117.1441365028438,
+   "roofline_us": 117.1441365028438,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 483737088.0,
+    "gemm2_bytes": 281624064.0,
+    "e8m0_scale_bytes": 37896192.0
+   },
+   "diagnostics": {
+    "e_active_experts": 257.0
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 571.3715666666667,
+   "measured_us_reps": [
+    571.3715666666667,
+    572.9542333333338,
+    574.7116
+   ],
+   "measured_us_spread": 1.005845641484785,
+   "roofline_pct": 20.502269160198637,
+   "attainable_speedup": 4.877508885413108,
+   "per_kernel": [
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm64_bn256_bk128_reduce_tk9_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.1965961333333334
+    },
+    {
+     "kernel": "mfma_moe1_silu_mul_afp4_wfp4_fp4_t64x128x256_pm1_fp4q_sort_async_xcd4_v2out_v33",
+     "ms": 0.1633824
+    },
+    {
+     "kernel": "moe_reduction_kernel_0",
+     "ms": 0.15551833333333354
+    },
+    {
+     "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliilPKii",
+     "ms": 0.016920566666666716
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.016844533333333158
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+     "ms": 0.009347133333333365
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+     "ms": 0.004351066666666347
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+     "ms": 0.004275033333333321
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.004136366666666861
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 683.8480234146118,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 20.7,
+   "roofline_us_eff": 117.1441365028438,
+   "attainable_speedup_floored": 4.877508885413108,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "pre_M16955",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 16955,
+   "ctx": null,
+   "case_weight": 0.1679,
+   "flops_g": 1440.06709248,
+   "bytes_mb": 1099.985664,
+   "arithmetic_intensity": 1309.168964296611,
+   "bound": "compute",
+   "compute_us": 281.8135210332681,
+   "memory_us": 160.41791803995918,
+   "roofline_us": 281.8135210332681,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 632101248.0,
+    "gemm2_bytes": 429988224.0,
+    "e8m0_scale_bytes": 37896192.0
+   },
+   "diagnostics": {
+    "e_active_experts": 257.0
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 1465.5454999999988,
+   "measured_us_reps": [
+    1465.5454999999988,
+    1496.5525666666665,
+    1541.2611333333334
+   ],
+   "measured_us_spread": 1.0516637888986282,
+   "roofline_pct": 19.229257708700846,
+   "attainable_speedup": 5.200408747694512,
+   "per_kernel": [
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm128_bn256_bk128_reduce_tk9_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.5394404666666662
+    },
+    {
+     "kernel": "mfma_moe1_silu_mul_afp4_wfp4_fp4_t128x128x256_pm1_fp4q_sort_async_v2out_v33",
+     "ms": 0.3971226999999997
+    },
+    {
+     "kernel": "moe_reduction_kernel_0",
+     "ms": 0.39701343333333317
+    },
+    {
+     "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliilPKii",
+     "ms": 0.043459499999999866
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.03907950000000008
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+     "ms": 0.03477283333333316
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.005316333333333392
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >::Kargs)",
+     "ms": 0.004785699999999591
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+     "ms": 0.004555033333333406
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 1537.1400117874146,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 20.7,
+   "roofline_us_eff": 281.8135210332681,
+   "attainable_speedup_floored": 5.200408747694512,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "pre_M30519",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 30519,
+   "ctx": null,
+   "case_weight": 0.1704,
+   "flops_g": 2592.120766464,
+   "bytes_mb": 1464.585984,
+   "arithmetic_intensity": 1769.865883452289,
+   "bound": "compute",
+   "compute_us": 507.2643378598826,
+   "memory_us": 213.58990578970395,
+   "roofline_us": 507.2643378598826,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 814401408.0,
+    "gemm2_bytes": 612288384.0,
+    "e8m0_scale_bytes": 37896192.0
+   },
+   "diagnostics": {
+    "e_active_experts": 257.0
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 2450.127266666667,
+   "measured_us_reps": [
+    2450.127266666667,
+    2477.510299999998,
+    2520.7388666666666
+   ],
+   "measured_us_spread": 1.0288195641755642,
+   "roofline_pct": 20.703591391397485,
+   "attainable_speedup": 4.830079869212973,
+   "per_kernel": [
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm128_bn256_bk128_reduce_tk9_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 0.9516043666666659
+    },
+    {
+     "kernel": "moe_reduction_kernel_0",
+     "ms": 0.6936411333333332
+    },
+    {
+     "kernel": "mfma_moe1_silu_mul_afp4_wfp4_fp4_t128x128x256_pm1_fp4q_sort_async_v2out_v33",
+     "ms": 0.585774466666667
+    },
+    {
+     "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliilPKii",
+     "ms": 0.07633596666666646
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.06520916666666743
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+     "ms": 0.058356966666666676
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 1, false, false, true> >::Kargs)",
+     "ms": 0.007300433333333593
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.006969733333333307
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+     "ms": 0.004935033333333224
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 2513.1120681762695,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 20.7,
+   "roofline_us_eff": 507.2643378598826,
+   "attainable_speedup_floored": 4.830079869212973,
+   "floor_limited": false
+  },
+  {
+   "kernel": "mxfp4_fused_moe",
+   "task": "glm52_mxfp4_fused_moe_task",
+   "case": "pre_M32768",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "mxfp4 w4a4",
+   "peak_spec": "matrix_fp4",
+   "device_kernel": "aiter fused_moe (MXFP4 w4a4, per_1x32)  [decode + prefill]",
+   "m": 32768,
+   "ctx": null,
+   "case_weight": 0.3276,
+   "flops_g": 2783.138807808,
+   "bytes_mb": 1525.039104,
+   "arithmetic_intensity": 1824.9622586779258,
+   "bound": "compute",
+   "compute_us": 544.6455592579256,
+   "memory_us": 222.40616946186378,
+   "roofline_us": 544.6455592579256,
+   "peak_tflops": 5110,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "gemm1_bytes": 844627968.0,
+    "gemm2_bytes": 642514944.0,
+    "e8m0_scale_bytes": 37896192.0
+   },
+   "diagnostics": {
+    "e_active_experts": 257.0
+   },
+   "model_note": "e8m0 group scales are outside TraceLens' MoE byte model",
+   "bytes_mb_floor": null,
+   "roofline_us_floor": null,
+   "suspect": null,
+   "measured_us": 2584.3903333333346,
+   "measured_us_reps": [
+    2584.3903333333346,
+    2649.7311666666706,
+    2656.847266666666
+   ],
+   "measured_us_spread": 1.028036373762425,
+   "roofline_pct": 21.074431065350886,
+   "attainable_speedup": 4.74508657860819,
+   "per_kernel": [
+    {
+     "kernel": "gemm2_a4w4_port_hmax8192_imax256_bm128_bn256_bk128_reduce_tk9_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi6",
+     "ms": 1.0117010999999996
+    },
+    {
+     "kernel": "moe_reduction_kernel_0",
+     "ms": 0.7388950666666674
+    },
+    {
+     "kernel": "mfma_moe1_silu_mul_afp4_wfp4_fp4_t128x128x256_pm1_fp4q_sort_async_v2out_v33",
+     "ms": 0.6069585666666659
+    },
+    {
+     "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bN4opus5fp4_tELi32ELi32ELb0ELi64ELb1EEEvPT0_PfPKT_PKfliilPKii",
+     "ms": 0.08242936666666661
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.0669811000000009
+    },
+    {
+     "kernel": "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+     "ms": 0.06021319999999952
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+     "ms": 0.006547100000000473
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+     "ms": 0.005681799999999704
+    },
+    {
+     "kernel": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+     "ms": 0.004983033333333939
+    }
+   ],
+   "excluded_kernels": [],
+   "eager_us": 2648.6730575561523,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_mxfp4_fused_moe_task/baseline_src/fused_moe_seam.py",
+   "dispatch_floor_us": 20.7,
+   "roofline_us_eff": 544.6455592579256,
+   "attainable_speedup_floored": 4.74508657860819,
+   "floor_limited": false
+  },
+  {
+   "kernel": "sparse_mla_prefill",
+   "task": "glm52_sparse_mla_prefill_task",
+   "case": "pre_seq1927",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> bf16",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_sparse_mla_fwd_split_dim_kernel (triton), via _triton_sparse_mla_fwd_single, via triton_sparse_mla_fwd  [prefill only]",
+   "m": 1927,
+   "ctx": 181508,
+   "case_weight": 0.1614,
+   "flops_g": 68.700602368,
+   "bytes_mb": 4334.239232,
+   "arithmetic_intensity": 15.850671522877304,
+   "bound": "memory",
+   "compute_us": 21.85828901304486,
+   "memory_us": 632.0897232025667,
+   "roofline_us": 632.0897232025667,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 4318453248.0,
+    "index_read_bytes": 15785984
+   },
+   "diagnostics": {
+    "kv_positions_touched": 3946496
+   },
+   "model_note": "keep=min(topk,ctx)=2048; per-row gather, no cross-row dedup",
+   "bytes_mb_floor": 145.000192,
+   "roofline_us_floor": 21.85828901304486,
+   "suspect": "roofline_pct=206% > 100%: the measured call is FASTER than this model's own roof, so the model's bytes/FLOPs are overcounted. Not a result -- do not quote attainable_speedup for this row.",
+   "measured_us": 306.8868666666667,
+   "measured_us_reps": [
+    306.8868666666667,
+    307.0549000000001,
+    307.8682
+   ],
+   "measured_us_spread": 1.003197703909562,
+   "roofline_pct": 205.968319878976,
+   "attainable_speedup": 0.48551155856764067,
+   "per_kernel": [
+    {
+     "kernel": "_sparse_mla_fwd_split_dim_kernel",
+     "ms": 0.3068868666666667
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.06967586666666666
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.014092866666666827
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul>)",
+     "ms": 0.009767466666666577
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.008407099999999766
+    }
+   ],
+   "eager_us": 402.7259945869446,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_sparse_mla_prefill_task/baseline_src/sparse_mla_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 632.0897232025667,
+   "attainable_speedup_floored": 0.48551155856764067,
+   "floor_limited": false
+  },
+  {
+   "kernel": "sparse_mla_prefill",
+   "task": "glm52_sparse_mla_prefill_task",
+   "case": "pre_seq5609",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> bf16",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_sparse_mla_fwd_split_dim_kernel (triton), via _triton_sparse_mla_fwd_single, via triton_sparse_mla_fwd  [prefill only]",
+   "m": 5609,
+   "ctx": 151854,
+   "case_weight": 0.1621,
+   "flops_g": 199.969734656,
+   "bytes_mb": 12615.852544,
+   "arithmetic_intensity": 15.850671522877304,
+   "bound": "memory",
+   "compute_us": 63.623841761374486,
+   "memory_us": 1839.8501595449904,
+   "roofline_us": 1839.8501595449904,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 12569903616.0,
+    "index_read_bytes": 45948928
+   },
+   "diagnostics": {
+    "kv_positions_touched": 11487232
+   },
+   "model_note": "keep=min(topk,ctx)=2048; per-row gather, no cross-row dedup",
+   "bytes_mb_floor": 205.212032,
+   "roofline_us_floor": 63.623841761374486,
+   "suspect": "roofline_pct=212% > 100%: the measured call is FASTER than this model's own roof, so the model's bytes/FLOPs are overcounted. Not a result -- do not quote attainable_speedup for this row.",
+   "measured_us": 868.794,
+   "measured_us_reps": [
+    868.794,
+    869.8633333333335,
+    870.2060666666664
+   ],
+   "measured_us_spread": 1.0016253181613437,
+   "roofline_pct": 211.770587681889,
+   "attainable_speedup": 0.47220910653662124,
+   "per_kernel": [
+    {
+     "kernel": "_sparse_mla_fwd_split_dim_kernel",
+     "ms": 0.868794
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.06720243333333342
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.023859600000000272
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.019519266666666635
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul>)",
+     "ms": 0.01324356666666688
+    }
+   ],
+   "eager_us": 993.012011051178,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_sparse_mla_prefill_task/baseline_src/sparse_mla_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 1839.8501595449904,
+   "attainable_speedup_floored": 0.47220910653662124,
+   "floor_limited": false
+  },
+  {
+   "kernel": "sparse_mla_prefill",
+   "task": "glm52_sparse_mla_prefill_task",
+   "case": "pre_seq16002",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> bf16",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_sparse_mla_fwd_split_dim_kernel (triton), via _triton_sparse_mla_fwd_single, via triton_sparse_mla_fwd  [prefill only]",
+   "m": 16002,
+   "ctx": 159564,
+   "case_weight": 0.1639,
+   "flops_g": 570.496647168,
+   "bytes_mb": 35991.954432,
+   "arithmetic_intensity": 15.850671522877304,
+   "bound": "memory",
+   "compute_us": 181.5134098530067,
+   "memory_us": 5248.9360408341845,
+   "roofline_us": 5248.9360408341845,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 35860866048.0,
+    "index_read_bytes": 131088384
+   },
+   "diagnostics": {
+    "kv_positions_touched": 32772096
+   },
+   "model_note": "keep=min(topk,ctx)=2048; per-row gather, no cross-row dedup",
+   "bytes_mb_floor": 427.822848,
+   "roofline_us_floor": 181.5134098530067,
+   "suspect": "roofline_pct=220% > 100%: the measured call is FASTER than this model's own roof, so the model's bytes/FLOPs are overcounted. Not a result -- do not quote attainable_speedup for this row.",
+   "measured_us": 2388.645199999999,
+   "measured_us_reps": [
+    2388.645199999999,
+    2388.9477666666667,
+    2391.185299999999
+   ],
+   "measured_us_spread": 1.0010634061517383,
+   "roofline_pct": 219.74532010171234,
+   "attainable_speedup": 0.4550722625342535,
+   "per_kernel": [
+    {
+     "kernel": "_sparse_mla_fwd_split_dim_kernel",
+     "ms": 2.388645199999999
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.06502913333333245
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.050185333333333255
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.04374753333333279
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul>)",
+     "ms": 0.026012966666667484
+    }
+   ],
+   "eager_us": 2544.951915740967,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_sparse_mla_prefill_task/baseline_src/sparse_mla_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 5248.9360408341845,
+   "attainable_speedup_floored": 0.4550722625342535,
+   "floor_limited": false
+  },
+  {
+   "kernel": "sparse_mla_prefill",
+   "task": "glm52_sparse_mla_prefill_task",
+   "case": "pre_seq29556",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> bf16",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_sparse_mla_fwd_split_dim_kernel (triton), via _triton_sparse_mla_fwd_single, via triton_sparse_mla_fwd  [prefill only]",
+   "m": 29556,
+   "ctx": 133142,
+   "case_weight": 0.1579,
+   "flops_g": 1053.718216704,
+   "bytes_mb": 66477.828096,
+   "arithmetic_intensity": 15.850671522877304,
+   "bound": "memory",
+   "compute_us": 335.2587390085905,
+   "memory_us": 9694.88524077585,
+   "roofline_us": 9694.88524077585,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 66235705344.0,
+    "index_read_bytes": 242122752
+   },
+   "diagnostics": {
+    "kv_positions_touched": 60530688
+   },
+   "model_note": "keep=min(topk,ctx)=2048; per-row gather, no cross-row dedup",
+   "bytes_mb_floor": 697.129344,
+   "roofline_us_floor": 335.2587390085905,
+   "suspect": "roofline_pct=220% > 100%: the measured call is FASTER than this model's own roof, so the model's bytes/FLOPs are overcounted. Not a result -- do not quote attainable_speedup for this row.",
+   "measured_us": 4405.770600000001,
+   "measured_us_reps": [
+    4405.770600000001,
+    4412.961333333333,
+    4417.696133333332
+   ],
+   "measured_us_spread": 1.002706798518591,
+   "roofline_pct": 220.04970573764888,
+   "attainable_speedup": 0.4544427799381998,
+   "per_kernel": [
+    {
+     "kernel": "_sparse_mla_fwd_split_dim_kernel",
+     "ms": 4.4057706
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.08752313333333017
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.07569200000000037
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.06836639999999866
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul>)",
+     "ms": 0.04354136666666613
+    }
+   ],
+   "eager_us": 4638.81778717041,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_sparse_mla_prefill_task/baseline_src/sparse_mla_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 9694.88524077585,
+   "attainable_speedup_floored": 0.4544427799381998,
+   "floor_limited": false
+  },
+  {
+   "kernel": "sparse_mla_prefill",
+   "task": "glm52_sparse_mla_prefill_task",
+   "case": "pre_seq32768",
+   "regime": "prefill",
+   "arm": "baseline",
+   "basis": "tracelens_model",
+   "dtype": "fp8_e4m3 -> bf16",
+   "peak_spec": "matrix_fp8",
+   "device_kernel": "_sparse_mla_fwd_split_dim_kernel (triton), via _triton_sparse_mla_fwd_single, via triton_sparse_mla_fwd  [prefill only]",
+   "m": 32768,
+   "ctx": 43202,
+   "case_weight": 0.3546,
+   "flops_g": 1168.231104512,
+   "bytes_mb": 73702.309888,
+   "arithmetic_intensity": 15.850671522877304,
+   "bound": "memory",
+   "compute_us": 371.6930017537385,
+   "memory_us": 10748.477451946916,
+   "roofline_us": 10748.477451946916,
+   "peak_tflops": 3143,
+   "peak_bw_gbps": 6857,
+   "byte_terms": {
+    "attn_bytes": 73433874432.0,
+    "index_read_bytes": 268435456
+   },
+   "diagnostics": {
+    "kv_positions_touched": 67108864
+   },
+   "model_note": "keep=min(topk,ctx)=2048; per-row gather, no cross-row dedup",
+   "bytes_mb_floor": 712.750208,
+   "roofline_us_floor": 371.6930017537385,
+   "suspect": "roofline_pct=235% > 100%: the measured call is FASTER than this model's own roof, so the model's bytes/FLOPs are overcounted. Not a result -- do not quote attainable_speedup for this row.",
+   "measured_us": 4568.750100000001,
+   "measured_us_reps": [
+    4568.750100000001,
+    4570.108633333333,
+    4572.315366666667
+   ],
+   "measured_us_spread": 1.0007803593080449,
+   "roofline_pct": 235.2607872325281,
+   "attainable_speedup": 0.4250602115904746,
+   "per_kernel": [
+    {
+     "kernel": "_sparse_mla_fwd_split_dim_kernel",
+     "ms": 4.568750100000001
+    }
+   ],
+   "excluded_kernels": [
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1}>(at::TensorIteratorBase&, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(c10::Float8_e4m3fn)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.09646716666666569
+    },
+    {
+     "kernel": "void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int, bool)#1})",
+     "ms": 0.0841694000000008
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+     "ms": 0.06702913333333309
+    },
+    {
+     "kernel": "void at::native::vectorized_elementwise_kernel<16, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::Float8_e4m3fn>, std::array<char*, 1ul>)",
+     "ms": 0.04804666666666471
+    }
+   ],
+   "eager_us": 4833.180904388428,
+   "arm_src": "/shared_nfs/yueliu14/krf_0927/stage/glm52_sparse_mla_prefill_task/baseline_src/sparse_mla_seam.py",
+   "dispatch_floor_us": 2.3,
+   "roofline_us_eff": 10748.477451946916,
+   "attainable_speedup_floored": 0.4250602115904746,
+   "floor_limited": false
+  }
+ ]
+}

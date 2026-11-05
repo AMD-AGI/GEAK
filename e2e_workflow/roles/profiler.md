@@ -257,10 +257,13 @@ PY
    "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
 6. **Analysis skill (ONLY if `ANALYSIS_SKILL_DIR` is a non-empty path that EXISTS — else skip entirely
    and return `profile_roofline_json: ""`).** Read `ANALYSIS_SKILL_DIR/SKILL.md` and execute it against
-   the Top-N you just wrote, producing the artifact it specifies (for `roofline`:
-   `profile/round_${ROUND}/profile_roofline.{json,md}`). Report its path as `profile_roofline_json`.
+   the Top-N you just wrote. For `kernel-roofline`, follow its `references/geak-integration.md`:
+   default to `tl-only`, reuse the matching trace and preserve native CSVs/call stacks. Write the
+   advisory manifest + summary at `profile/round_${ROUND}/profile_roofline.{json,md}` and report the
+   JSON path as `profile_roofline_json`. This field is a compatibility handoff name; the manifest
+   links native reports and does not promise the old attainable-speedup/headroom fields.
    This runs **after** the Top-N is final — it enriches, it never edits `profile_topN.json`, and it must
-   never change a `pct_gpu_time`. The skill defines its own degradation ladder: follow it, and **if the
+   never change a `pct_gpu_time`. The skill defines its own degradation behavior: follow it, and **if the
    skill errors out at any point, note it and return the Top-N anyway — a failed analysis skill must
    never fail or block the profile.**
 

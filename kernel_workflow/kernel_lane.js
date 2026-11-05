@@ -875,7 +875,7 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
-// Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+// Products with a `product:` section in perf_knowledge/hardware/product_peaks.md.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`

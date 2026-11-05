@@ -31,7 +31,7 @@ if (m) {
   const probe = (a) => make(a, '/wf');
 
   // OFF, by every spelling a caller might use
-  for (const a of [{ analysis_skill: 'none' }, { analysis_skill: 'false' },
+  for (const a of [{ analysis_skill: 'none' }, { analysis_skill: 'false' }, { analysis_skill: false },
                    { analysis_skill: '' }, { analysis_skill: '   ' }]) {
     const r = probe(a);
     ok(r.ANALYSIS_SKILL_ON === false, `OFF for ${JSON.stringify(a)}`);
@@ -41,9 +41,16 @@ if (m) {
 
   // ON: default, and explicit alternative skill (pluggability)
   const def = probe({});
-  ok(def.ANALYSIS_SKILL === 'roofline' && def.ANALYSIS_SKILL_ON === true, "defaults to 'roofline' (ON)");
-  ok(def.ANALYSIS_SKILL_INPUTS.ANALYSIS_SKILL_DIR === '/wf/knowledge/analysis_skills/roofline',
+  ok(def.ANALYSIS_SKILL === 'kernel-roofline' && def.ANALYSIS_SKILL_ON === true, "defaults to 'kernel-roofline' (ON)");
+  ok(def.ANALYSIS_SKILL_INPUTS.ANALYSIS_SKILL_DIR === '/wf/knowledge/analysis_skills/kernel-roofline',
     'ON -> skill dir resolves under knowledge/analysis_skills/<skill>');
+  for (const name of ['kernel-roofline', 'roofline', ' roofline ']) {
+    const selected = probe({ analysis_skill: name });
+    ok(JSON.stringify(selected.ANALYSIS_SKILL_INPUTS) === JSON.stringify(def.ANALYSIS_SKILL_INPUTS),
+      `${JSON.stringify(name)} selects the installed replacement`);
+  }
+  const installed = make({}, path.join(ROOT, 'e2e_workflow')).ANALYSIS_SKILL_INPUTS.ANALYSIS_SKILL_DIR;
+  ok(fs.existsSync(path.join(installed, 'SKILL.md')), 'default skill is present in the repository');
   const alt = probe({ analysis_skill: 'some-other-skill' });
   ok(alt.ANALYSIS_SKILL_INPUTS.ANALYSIS_SKILL_DIR === '/wf/knowledge/analysis_skills/some-other-skill',
     'ON -> an arbitrary skill name is pluggable (dir swap only)');

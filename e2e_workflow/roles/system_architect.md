@@ -49,13 +49,11 @@ e2e is **Amdahl-dominated**: rank every candidate by `pct_gpu_time × achievable
 2%-of-time kernel is invisible — but a mere **1.15× on a 78% GEMM is ~+10% e2e**. So the head of the
 profile is where the budget goes, even though those kernels are library calls.
 
-**`achievable_speedup` is the half everyone guesses wrong.** A big `pct_gpu_time` is *necessary* but not
-*sufficient*: a kernel already running at the hardware's bandwidth or compute ceiling has no time left to
-recover, no matter how much of the profile it owns. When a roofline prior is available (step 1c) use it
-to ground that factor in a measured ceiling instead of a class prior — but note what it does and does not
-mean: **a saturated kernel is done with micro-tuning, NOT done being optimized.** If it is still the
-largest consumer of GPU time it remains the top target; the lever just moves from "make this kernel
-faster" to "make it move fewer bytes" (step 1d). Never let a headroom estimate drop the biggest kernel.
+**Treat `achievable_speedup` as a hypothesis until measured.** A roofline prior (step 1c) describes
+modeled work, traffic and a selected reference; it does not establish recoverable time or prove that
+micro-tuning is exhausted. Keep measured `pct_gpu_time` as the ranking basis and validate concrete
+opportunities with A/B measurements. Reducing redundant work or traffic (step 1d) is one possible
+lever. Never let a reference-distance estimate drop the biggest kernel.
 
 **`edit=N` (library) does NOT mean "skip" — it means "Tier-C code rewrite is unavailable."** A
 fixed-shape GEMM is one of the most tunable things on the chip. Route by *which optimization the op
@@ -153,39 +151,29 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    If the prior is absent, proceed exactly as before.
 1c. **Roofline prior (ADVISORY — only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
    `profile_roofline_json` that EXISTS; otherwise skip this step entirely and route exactly as before).**
-   Read the artifact. Per entry it gives `roofline_pct` (how much of the hardware ceiling the kernel
-   already reaches), `bound_type`, `attainable_speedup`, `expected_e2e_gain_pct`, `headroom_class` and a
-   `confidence`. Use it to answer the question `pct_gpu_time` alone cannot: **is the time this kernel
-   spends actually recoverable?**
+   Read the artifact's schema, mode, engine, coverage and linked native reports. For
+   `geak.kernel_roofline.v1`, follow the selected skill's `references/geak-integration.md`.
+   TL rows identify an **operation** (`name` / `perf_params`) and its device subkernels + call stacks;
+   match the complete operation and measured scope before using a native roofline field.
 
-   **The doctrine (do not violate).** `roofline_pct` measures how well a kernel executes its *current*
-   byte/FLOP budget; it says NOTHING about whether that budget is necessary. So:
-   - **NEVER prune a candidate on roofline.** Same rule as TraceLens: the measured `pct_gpu_time` is the
-     judge; this prior only ADDs information and REORDERS. `drop_list` decisions stay Amdahl-based.
-   - **A saturated head is NOT dropped — it is REROUTED.** A kernel that is both a large `pct_gpu_time`
-     and `headroom_class: saturated` is done with *micro-tuning*, not done being optimized. It remains a
-     top target; what changes is the class of fix (see 1d).
-   - Honour `confidence`: **`low` (stage A, or derived peaks) = display and annotate ONLY, do not rank on
-     it.** `medium`/`high` may be used as a SECONDARY ranking key. `unknown`/`suspect`/`modeled:false`
-     entries fall back to the ordinary playbook prior for that entry alone.
-   - If a kernel squad later measures an isolated speedup LARGER than `attainable_speedup`, the roofline
-     model was wrong: prefer the measurement, and say so in the report.
+   - Keep measured `pct_gpu_time` as the ranking basis. Roofline may annotate hypotheses and suggest
+     follow-up measurements; it cannot prune, override timing, or supply an expected-gain ranking.
+   - Preserve native units, statistic suffixes, bound labels and provenance. An operation's roofline
+     must not be assigned to each of its subkernels. Keep absent, partial, ambiguous and suspect
+     results visible; fall back to ordinary routing for those entries.
+   - `Pct Roofline` / `distance_to_reference` describes a selected model and reference, not promised
+     `attainable_speedup` or `expected_e2e_gain_pct`. Do not populate those legacy fields from a TL
+     percentage or use old `headroom_class` thresholds. Legacy reports also need their model and
+     scope checked before use; their predicted gains are not measured improvements.
+   - High efficiency does not prove micro-tuning is exhausted; low efficiency does not establish a
+     hardware bottleneck. Values above 100% remain visible and require investigation of model,
+     cache, reference and timing scope. Record the hypothesis and supporting evidence in `strategy.md`.
+   - Use captured metadata, or UT/source-reviewed metadata with field-level evidence. Never invent
+     shape, dtype, stride, input/output roles or quantization to complete a native model mapping.
 
-   **Routing table** (applies only at `confidence` ≥ medium; otherwise use `pct_gpu_time` order):
-
-   | `headroom_class` | `pct_gpu_time` | route |
-   |---|---|---|
-   | underperforming | high | **kernel/head track, top priority** — real headroom exists |
-   | **saturated** | **high** | **byte-reduction track (1d) — NOT dropped, NOT another tuning pass** |
-   | any | low | low priority (ordinary Amdahl) |
-   | unknown / low confidence | any | ignore roofline; order by `pct_gpu_time` |
-
-   Report BOTH orderings in `strategy.md` — the one by `pct_gpu_time` and the one by
-   `expected_e2e_gain_pct` — and state explicitly which you followed and why. When they disagree, that
-   disagreement is the most useful thing in the analysis; do not hide it behind a single blended number.
-
-1d. **Byte-reduction levers (for a `saturated` + high-`pct_gpu_time` head).** The kernel is at the
-   bandwidth/compute wall, so the only remaining win is to make it do the same work moving fewer bytes.
+1d. **Byte-reduction levers (when source/trace evidence suggests redundant work or traffic).**
+   These are hypotheses to validate alongside kernel tuning; a roofline percentage alone neither
+   requires this route nor rules out other opportunities.
    Enumerate concretely: **fuse an adjacent op away** (a separate quant/silu/norm kernel in the Top-N →
    fusing it removes a whole activation round-trip *and* that kernel's own GPU time); **stop reading what
    isn't used** (e.g. streaming all `E` experts when routing only touches a fraction); **layout/packing**
@@ -293,10 +281,9 @@ Return JSON:
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
      "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
-     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
-     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
-     "roofline_confidence": "<low|medium|high|'' if none>",
-     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
+     "roofline": {"status": "<available|partial|unavailable>", "mode": "<tl-only|rocprof|''>",
+                  "engine": "<from the report>", "native_row_ref": "<artifact path + row identity, or ''>"},
+     "byte_reduction_levers": ["source/trace-supported hypotheses, if any; see step 1d"]}
   ],
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
@@ -305,10 +292,9 @@ Return JSON:
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
      "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
-     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
-     "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
-     "roofline_confidence": "<low|medium|high|'' if none>",
-     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
+     "roofline": {"status": "<available|partial|unavailable>", "mode": "<tl-only|rocprof|''>",
+                  "engine": "<from the report>", "native_row_ref": "<artifact path + row identity, or ''>"},
+     "byte_reduction_levers": ["source/trace-supported hypotheses, if any; see step 1d"]}
   ],
   "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
@@ -341,12 +327,10 @@ change), `HISTORY`, `SKILL_DIR`.
 4. **Amdahl stop rule:** estimate remaining headroom = Σ over untouched above-bar editable kernels of
    `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate can't plausibly move
    e2e beyond the noise band, set `stop=true`.
-   **If a roofline prior is available at `confidence` ≥ medium** (`profile_roofline_json`, step 1c),
-   prefer its `expected_e2e_gain_pct` over a guessed `plausible_speedup_fraction` — it is derived from a
-   measured ceiling rather than a class prior. It still may not PRUNE a candidate: use it to ORDER the
-   remaining pool and to justify `stop`. Never stop solely because roofline says headroom is small while
-   a large `pct_gpu_time` kernel remains untouched — such a kernel routes to the byte-reduction track
-   (step 1d) instead.
+   A roofline prior (`profile_roofline_json`, step 1c) supplies model context, not a measured
+   recoverable fraction. Never derive a stopping decision or expected e2e gain from its reference
+   distance. Use measured A/B results and explicit hypotheses to justify `stop`; high roofline
+   efficiency alone cannot close an untouched large-`pct_gpu_time` target.
 5. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
    profile entry + pct_gpu_time. **Use HISTORY only to ORDER/diversify (deprioritize a direction that
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a
@@ -416,15 +400,14 @@ verified e2e throughput delta, verdict), `REPROFILE_SHIFT`, prior `HISTORY`, `SK
      it there. Do NOT copy the kernel card in, and do NOT write into `kernel_workflow/knowledge/learned/`
      (that sink is owned by the lane's own `update_experience` step, gated by the isolated A/B).
 2. Keep the in-run hypothesis ledger (wins AND nulls, for THIS run's report) in `EVAL_DIR/insight_log.md`.
-3. **Calibrate the roofline prior (ONLY if one was used — `ANALYSIS_SKILL_DIR` non-empty and a
-   `profile_roofline_json` exists; else skip).** For each direction this milestone measured, record
-   `predicted vs actual` in `knowledge/backend_playbook.md`: predicted `attainable_speedup` /
-   `expected_e2e_gain_pct` against the measured isolated speedup and measured e2e delta. This is how the
-   `target_eff` priors and byte models in the skill's `SKILL.md` self-correct across runs, so state the
-   *direction* of any error ("attention decode: predicted 1.7×, measured 1.56× — prior slightly
-   optimistic"). **A measured speedup that EXCEEDS the predicted `attainable_speedup` means the byte/FLOP
-   model was wrong** — record that loudly, since it is the failure mode that would otherwise cause the
-   prior to under-rank a real opportunity in a future run. Keep it to one line per direction.
+3. **Review roofline assumptions (ONLY if a prior was used — `ANALYSIS_SKILL_DIR` non-empty and a
+   `profile_roofline_json` exists; else skip).** For each measured direction, record the native
+   operation/scope, mode, TL commit or profiler version, reference provenance and any model limitation
+   alongside the measured isolated speedup and e2e delta in `knowledge/backend_playbook.md`.
+   Keep native reference distance separate from observed improvement. A difference is reason to
+   investigate timing, workload, cache and model assumptions; it does not by itself prove the model
+   wrong. Do not mutate TL's models or add `target_eff` corrections in `tl-only`. Keep one line per
+   direction with links to the evidence.
 
 Return JSON:
 ```json
