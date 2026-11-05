@@ -10,7 +10,7 @@ Four directories, each named after the question it answers.
 
 | | |
 | --- | --- |
-| `core/` | how one campaign walks from stage to stage — the driver (`stage.py`), the agent-mode stage (`agent_stage.py`), the naming/identity gate (`target.py`), the report renderer (`report.py`) and the periodic monitor (`watch.py`) |
+| `core/` | how one campaign walks from stage to stage — the driver (`stage.py`), the agent-mode stage (`agent_stage.py`) with everything it tells the agent in `core/prompt/`, the naming/identity gate (`target.py`), the report renderer (`report.py`) and the periodic monitor (`watch.py`) |
 | `campaign/` | how eight GPUs are held, isolated and dispatched to — the scheduler, the per-GPU worker, container isolation, the durable credit file, the frozen-source bookkeeping, and the task entry point |
 | `evidence/` | how measurement evidence is retained, placed and reused across attempts and resumes |
 | `tools/` | single-purpose utilities: vendored-skill manifest verification, and the CPU-only fixture generator the self-check needs |
@@ -30,6 +30,10 @@ what survived that rule, and they buy exactly three things prose cannot:
    produced numbers.
 
 Anything here that stops serving one of those three belongs in markdown instead.
+`core/prompt/` is the worked example: what an unattended session is told — the contract,
+the continuation, the repair attempt — is text, it is the text most worth rewriting as we
+learn how these sessions fail, and the person best placed to rewrite it does not have to
+be someone who edits Python. `agent_stage.py` keeps only the assembly.
 
 ## The one rule about direction
 
