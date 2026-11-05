@@ -41,6 +41,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+from subprocess import TimeoutExpired as _TimeoutExpired  # survives tests stubbing `subprocess`
 import sys
 import tempfile
 import time
@@ -2798,8 +2799,9 @@ def _classify_error(exc: BaseException) -> str:
     attribute *why* an e2e run missed. Keep these values stable; unknown
     failures fall back to ``runner_error``.
     """
-    # anyio.fail_after raises builtins.TimeoutError on budget expiry.
-    if isinstance(exc, TimeoutError):
+    # anyio.fail_after raises builtins.TimeoutError on budget expiry; the CLI path's
+    # subprocess.run(timeout=...) raises TimeoutExpired, which is not a TimeoutError.
+    if isinstance(exc, (TimeoutError, _TimeoutExpired)):
         return "timeout"
     msg = str(exc)
     # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
