@@ -1502,7 +1502,7 @@ function __routeEikosPick(p, o, scope) {
                         model: tk.model, served_model: 'unverified', capped: false });
     // eikos v2 E1 (bug 4): ONE shadow event per actual dispatch (fresh or repeat), on the dispatched
     // model and the pre-reservation quota snapshot — a faithful dispatch-level disagreement rate.
-    __p1Shadow('eikos', scope, label, tk.model, __p1TopUsedPre);   // never changes the live pick/dispatch above
+    __p1Shadow('eikos', scope, label, tk.model, __p1TopUsedPre, id);   // never changes the live pick/dispatch above
     return { model: tk.model, scope, dispatch_id: id };
   });
 }
@@ -1632,10 +1632,37 @@ function __p1Observe(scope, liveModel, ok, kind) {
   }
   // invalid_measurement / no_result: not worker-attributable — neither excludes a lane nor stagnates.
 }
+// eikos v2 E1 (durable shadow telemetry — ADDITIVE insurance, v8): a best-effort, append-only, WRITE-ONLY
+// durable sink that MIRRORS each per-dispatch P1 shadow verdict to <EVAL_DIR>/reports/trace/p1_shadow.jsonl
+// (the dir the ledger/llm_calls.jsonl live in). The in-memory __routeAudit + __routeReport() ->
+// run_result.json path is UNCHANGED and remains the PRIMARY source; this exists only so a mid-run death that
+// never writes run_result.json (e.g. the SHADOW_FAILURE2 commit-abort) still leaves the dispatch-level shadow
+// events on disk. It NEVER changes a routing decision or the live pick, and ANY fault is swallowed. fs is
+// acquired best-effort: require() when the runtime exposes it, else a ONE-TIME dynamic import() (the workflow
+// runtime runs this script as an async function). Where no fs is reachable it is a silent no-op.
+var __p1ShadowFS = null;
+try { if (typeof require === 'function') { __p1ShadowFS = require('fs'); } } catch (e) { __p1ShadowFS = null; }
+if (!__p1ShadowFS) {
+  try {
+    Promise.resolve().then(function () { return import('node:fs'); })
+      .then(function (m) { if (m) { __p1ShadowFS = m.default || m; } })
+      .catch(function () {});
+  } catch (e) { /* dynamic import unsupported here: the sink stays a no-op; run_result.json is the fallback */ }
+}
+function __p1ShadowFlush(line) {
+  try {
+    var fs = __p1ShadowFS;
+    if (!fs || typeof fs.appendFileSync !== 'function') { return; }        // no fs in this runtime -> no-op
+    if (typeof EVAL_DIR !== 'string' || !EVAL_DIR) { return; }             // eval dir not ready -> skip
+    var dir = EVAL_DIR + '/reports/trace';                                  // co-located with llm_calls.jsonl
+    try { if (typeof fs.mkdirSync === 'function') { fs.mkdirSync(dir, { recursive: true }); } } catch (e) {}
+    fs.appendFileSync(dir + '/p1_shadow.jsonl', JSON.stringify(line) + String.fromCharCode(10));
+  } catch (e) { /* best-effort: a write error NEVER affects the run */ }
+}
 // Shadow emission (observability only). Ensures P1's scope state exists, computes P1's would-be pick on the
 // CURRENT measured signals and records {live_pick, p1_pick, differ, signals} as a 'p1_shadow' audit event
 // WITHOUT changing the live pick. Returns the P1 reduction.
-function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot) {
+function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot, liveDispatchId) {
   if (!__p1Ladder[scope]) __p1Ladder[scope] = __p1NewState(__routeScopeClass(scope));
   const st = __p1Ladder[scope];
   const cls = st.scope_class;
@@ -1653,6 +1680,16 @@ function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot) {
                fails_by_lane: Object.assign({}, st.fails_by_lane), stagnation: x.stagnation,
                excluded: red.excluded, top_quota_left: x.top_quota_left, allowed: red.allowed, feasible: red.feasible },
     p1_reason: red.reason });
+  // eikos v2 E1 (durable shadow telemetry, v8): MIRROR the p1_shadow event just pushed to the durable side
+  // file (additive; the in-memory audit + run_result.json path is UNCHANGED and remains primary). It reuses
+  // the exact event fields so the durable line can never disagree with the audit, threads the live dispatch
+  // id for correlation, and is best-effort — any fault is swallowed and NEVER affects the run or the pick.
+  try {
+    var __p1ev = __routeAudit[__routeAudit.length - 1];
+    __p1ShadowFlush({ ts: new Date().toISOString(),
+      dispatch_id: (liveDispatchId == null ? null : liveDispatchId),
+      live_pick: __p1ev.live_pick, p1_pick: __p1ev.p1_pick, differ: __p1ev.differ, signals: __p1ev.signals });
+  } catch (e) { /* best-effort: never affects the run */ }
   return red;
 }
 // GATED LIVE path (route_decider=p1). NOT the default and NOT reached unless explicitly selected; a later
