@@ -104,6 +104,11 @@ def main():
     ap.add_argument("--decode-eager", action="store_true",
                     help="decode is graph-deployed but this server runs eagerly: decode "
                          "collective wait is excluded from the ranking denominator")
+    ap.add_argument("--decode-on-graph", action="store_true",
+                    help="try DECODE points on this graph-mode server too (old behaviour). "
+                         "Default: when --server-state says the server keeps the decode CUDA "
+                         "graph, it captures PREFILL only and every DECODE point is deferred "
+                         "to the eager server without a capture")
     ap.add_argument("--draft-shares-name", action="store_true",
                     help="passed to point_census.py for PREFILL points")
     ap.add_argument("--observed", default=None,
@@ -134,6 +139,9 @@ def main():
         a.expect_files = a.expect_files or st["expect_files"]
         a.decode_eager = a.decode_eager or bool(st.get("decode_eager"))
         a.vocab_size = a.vocab_size or st.get("vocab_size")
+        server_capture = st.get("decode_capture")
+    else:
+        server_capture = None
     if not (a.base_url and a.trace_root and a.expect_files):
         ap.error("--base-url, --trace-root and --expect-files (or --server-state) are required")
     if a.vocab_size:
@@ -160,6 +168,16 @@ def main():
     timeline = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": {},
                 "server": a.base_url, "decode_eager": a.decode_eager}
     t_all = time.time()
+    # Decode on a graph-mode server: under spec decoding the profiler drops most VERIFY
+    # replays (sglang 0.5.21/ROCm 7.2: 1 of 8 kept on most ranks), so every decode point
+    # was refused as graph-hidden and recaptured eagerly anyway -- after a failed attempt
+    # that cost up to the window timeout. Defer them to the eager server up front.
+    # Only when the server state says the decode graph is on: without --server-state the
+    # server's mode is unknown, and an "as_declared" deployment may not be graph-launched.
+    defer_decode = (server_capture == "profile_cuda_graph" and not a.decode_eager
+                    and not a.decode_on_graph)
+    timeline["decode_deferred_to_eager"] = defer_decode
+    deferred = []
 
     def census_job(pt, trace_dir):
         out = os.path.join(census_dir, pt["point_id"] + ".json")
@@ -192,6 +210,15 @@ def main():
                 censuses[pid] = done
                 continue
             rec = timeline["points"].setdefault(pid, {"phase": pt["phase"], "attempts": []})
+            if defer_decode and pt["phase"] == "DECODE":
+                # graph_hidden is the contract probe_server.py (and any group driver) reads
+                # to restart eagerly and --redo exactly these points.
+                rec["attempts"].append({"tag": pid, "status": "deferred", "graph_hidden": True,
+                                        "reason": "decode is captured on the eager server "
+                                                  "(--decode-on-graph tries it here)",
+                                        "probe_wall_s": 0})
+                deferred.append(pid)
+                continue
             stamp = time.strftime("%H%M%S")
             for attempt in ("", "_r2"):
                 tag = "%s%s_%s" % (pid, attempt, stamp) if pid in a.redo else pid + attempt
@@ -256,6 +283,13 @@ def main():
         finish("server down")
         print("run_points: the server went down after %d/%d point(s) censused; fix the cause "
               "and rerun -- censused points are kept" % (len(censuses), len(points)))
+        return 1
+    if deferred:
+        # A ranking without the decode phase would be thrown away by the eager pass.
+        finish("decode deferred to eager")
+        print("[%s] %d decode point(s) deferred to the eager server: %s; %d/%d censused "
+              "here, no ranking yet" % (now(), len(deferred), ", ".join(deferred),
+                                        len(censuses), len(points)), flush=True)
         return 1
     if not censuses:
         finish("no point produced a census")

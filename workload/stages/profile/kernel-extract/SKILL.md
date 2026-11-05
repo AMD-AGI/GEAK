@@ -64,8 +64,9 @@ with, and spent most of the hour doing it.
        --observed "$EVAL_DIR/evidence/observed_workload.json" --eval-dir "$EVAL_DIR"
    ```
 
-   It starts the server once (falling back to an eager server, and recapturing only the
-   decode points, if graph replay hides decode kernels), captures every point back to
+   It starts the deployment's graph server for the PREFILL points, then an eager server
+   for the DECODE points (decode is not tried under the graph: the profiler drops graph
+   replays of the spec-decoding VERIFY step; `--decode-on-graph` tries it anyway), captures every point back to
    back, censuses each in the background, relabels points to their achieved shapes, and
    writes `coverage.json`, `kernel_ranking.json`, `selection_targets.json`,
    `evidence/{shapes,source_map.json,adjacency.json}` and a draft `task_decls.json`. It

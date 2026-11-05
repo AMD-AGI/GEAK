@@ -92,11 +92,16 @@ Properties of this path worth knowing before you deviate from it:
 - A decode window whose `step[VERIFY|DECODE ...]` span appears only on the CPU timeline
   was captured under the CUDA graph: `serving_probe.py` fails it as `graph_hidden` and
   `run_points.py` does not spend a recapture on it. Restart the server eagerly.
-- `probe_server.py` keeps decode under its CUDA graph and adds
-  `--enable-profile-cuda-graph`, so decode runs as deployed and the profiler sees the
-  replayed kernels. If the server rejects the flag, or a decode window still comes back
-  graph-hidden, it restarts eagerly and `run_points.py` recaptures only those points with
-  `--decode-eager`. probe_server.json records which mode was used.
+- `probe_server.py` keeps the deployment's CUDA graph and adds
+  `--enable-profile-cuda-graph` for the first server, which captures the PREFILL points and
+  records the deployment's compile variants. `run_points.py` does not try DECODE there:
+  it marks every decode point deferred (`graph_hidden`) without a capture, and
+  `probe_server.py` restarts eagerly and recaptures exactly those with `--decode-eager`.
+  Trying decode under the graph first cost a failed attempt per point (up to the window
+  timeout) for nothing: with spec decoding the profiler drops most VERIFY replays (sglang
+  0.5.21 / ROCm 7.2 kept 1 of 8 on most ranks, all 8 on others, from one run), so every
+  point was refused as partly hidden. `run_points.py --decode-on-graph` restores the old
+  order. probe_server.json records which mode was used.
 - Decode kernels replayed from the CUDA graph are visible with `--enable-profile-cuda-graph`
   (verified on sglang 0.5.20: five decode points in ~20 s each, collective wait 4% of
   decode) but carry no launching op and no source frame. Their costs stay from the graph

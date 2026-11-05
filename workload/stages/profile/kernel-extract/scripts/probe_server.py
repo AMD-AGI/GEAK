@@ -40,6 +40,14 @@ command is run_points.py and a decode point comes back graph_hidden, `run` resta
 eagerly and runs the command again; run_points.py resumes and recaptures only what is
 missing. probe_server.json records the mode that was actually used.
 
+With the default "profile_cuda_graph", run_points.py does not try decode on the graph
+server at all: the graph server captures PREFILL (and records the deployment's compile
+variants), every DECODE point is reported deferred (graph_hidden) without a capture, and
+the eager restart above captures them. Under spec decoding the profiler kept 1 of 8
+VERIFY replays on most ranks (sglang 0.5.21, ROCm 7.2), so every decode point was refused
+and recaptured eagerly anyway, after a failed attempt each. run_points.py --decode-on-graph
+restores trying decode on the graph server first.
+
 The first server started is the deployment's; its compile variants are also written to
 <eval-dir>/evidence/compile_variants.json when the command names an --eval-dir. Variants of
 an eager restart are kept beside it (compile_variants.<n>.eager.json) but are not the

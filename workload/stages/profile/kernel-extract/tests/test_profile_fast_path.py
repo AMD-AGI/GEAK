@@ -494,6 +494,38 @@ class RunPointsTest(unittest.TestCase):
         self.assertTrue(att[0]["graph_hidden"])
         self.assertIn("--disable-cuda-graph", att[0]["reason"])
 
+    def test_graph_server_defers_decode_to_eager_without_a_capture(self):
+        graph = FakeServer(graph=True)
+        self.addCleanup(graph.close)
+        state = self.root / "probe_server.json"
+        state.write_text(json.dumps({"base_url": graph.url, "trace_root": str(self.root / "traces"),
+                                     "expect_files": RANKS, "decode_capture": "profile_cuda_graph",
+                                     "decode_eager": False}))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "run_points.py"), "--points", str(self.root / "points.json"),
+             "--server-state", str(state), "--eval-dir", str(self.root / "eval"), *FAST],
+            capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(p.returncode, 0)
+        ev = self.root / "eval"
+        run = json.loads((ev / "profile_run.json").read_text())
+        self.assertEqual(run["status"], "decode deferred to eager")
+        for pid in ("de_1", "de_2"):
+            (att,) = run["points"][pid]["attempts"]
+            self.assertEqual((att["status"], att["graph_hidden"]), ("deferred", True))
+        self.assertEqual(len(graph.profile_bodies), 2)            # the two prefill windows only
+        self.assertFalse((ev / "kernel_ranking.json").exists())   # no ranking without decode
+        sys.path.insert(0, str(SCRIPTS))
+        import probe_server
+        self.assertEqual(sorted(probe_server.graph_hidden_points(["--eval-dir", str(ev)])),
+                         ["de_1", "de_2"])
+        # What probe_server.py does next: the eager server redoes exactly those points.
+        eager = FakeServer()
+        self.addCleanup(eager.close)
+        p = self.run_points(eager, "--decode-eager", "--no-evidence", "--redo", "de_1", "de_2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len(eager.profile_bodies), 2)            # decode only; prefill resumed
+        self.assertTrue((ev / "kernel_ranking.json").exists())
+
     def test_server_rejecting_record_shapes_still_captures(self):
         server = FakeServer(reject_shapes=True)
         self.addCleanup(server.close)
