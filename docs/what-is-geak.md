@@ -41,12 +41,16 @@ against an immutable correctness oracle before it is accepted.
 
 ## Accuracy and measurement
 
+The following principles govern GEAK's measurement approach.
+
 - **Profiling** grounds every decision in measured data — nothing is optimized unless it is first shown
   to matter (Amdahl: `pct_gpu_time × achievable_speedup`).
 - **A curated knowledge base** (`perf_knowledge/`) supplies operator × backend priors as *reference
   only* — the on-box benchmark and end-to-end gate are always the judge.
 
 ## How a run works
+
+A GEAK run proceeds through the following steps.
 
 1. **Preflight** the environment (GPU arch, serving backend, model).
 2. **Profile** a running server on your exact workload and rank hot kernels by Amdahl.
