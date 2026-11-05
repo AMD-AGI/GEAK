@@ -29,7 +29,7 @@ choice and never changes scheduling code.
 Additional `$PARAMS` inputs:
 
 - `task_limit`: how many extracted tasks this campaign holds in flight at once, default 8.
-  It bounds dispatch, not extraction: the head of the roofline order fills the wave and
+  It bounds dispatch, not extraction: the head of the task order (share of profiled GPU time, `order_by`) fills the wave and
   every task beyond it is reported as `capacity_deferred` with its rank and reason. Every
   directory must therefore appear in dispatch or in that deferral list, and in final
   reporting. `max_tasks`/`exclude_tasks` are refused when they would omit any delivered

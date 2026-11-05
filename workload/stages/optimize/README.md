@@ -5,9 +5,11 @@
 spent, then runs each task's own unit test once more from cold and hands on only what
 clears its noise band.
 
-**Input**: `$RUN_ROOT/profile/out/tasks/` and `$RUN_ROOT/roofline/out/roofline.json`
-(order by expected e2e gain; absent, directory order — ranking degrades, correctness
-does not).
+**Input**: `$RUN_ROOT/profile/out/tasks/` and, for the order, `$RUN_ROOT/profile/out/results.json`:
+tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
+`order_by=roofline` orders by `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain
+instead; the roofline stage is no longer in the default order, because its model leaves
+tasks it cannot model unranked, and that once put a 24% task behind eight smaller ones.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
 
@@ -35,14 +37,14 @@ accrete that way, and an agent reading it can tell a crash from a wrong answer.
 
 ### Step 1 — dispatch
 
-**Account for every extracted task.** The profile task plan is the input set; roofline
+**Account for every extracted task.** The profile task plan is the input set; the task order
 orders that set and never removes a task because its predicted gain is small or unknown.
 `params.task_limit` (default 8) is **this stage's in-flight capacity** — how many
 independent tasks the campaign can hold at once, one per GPU — and not a cap on what
 profile may extract. Extraction stops where the evidence stops: the same skill run by
 hand delivered ten complete tasks, and a limit applied upstream would have made that
 delivery a defect. Submit the complete task set to the existing scheduler queues in
-roofline order. Each scheduler fills released slots from its queue; the total simultaneous
+task order (`--order-by $PARAMS.order_by`, default share of profiled GPU time). Each scheduler fills released slots from its queue; the total simultaneous
 slots must respect both `task_limit` and the available physical GPUs. For mixed GPU
 requirements, `geak-kernel-gpu-groups` records all tasks in its groups and expresses later
 work through `slots`, `waves` and disjoint batches. Resume the same group work roots so
@@ -52,7 +54,7 @@ Queue admission is not an optimization attempt. Record actual attempts and remai
 credit for every task, including tasks that have not started when a deadline forces a
 checkpoint. A task already admitted to a scheduler queue is not also
 `capacity_deferred`. If a partial dispatch has not admitted a task, preserve its name,
-roofline rank and continuation reason in `capacity_deferred`; it is unattempted and
+rank in the task order and continuation reason in `capacity_deferred`; it is unattempted and
 prevents a claim that the full delivery is complete. Do not use `max_tasks` or
 `exclude_tasks` to silently optimize only a convenient subset, and do not leave runnable
 queued tasks waiting while their scheduler has an unused slot.
@@ -70,7 +72,7 @@ vanish from the input set or be counted as attempted merely because another task
 
 **Parallel is the default.** Submit all ready tasks to the scheduler together, with one
 task per physically isolated GPU slot. When there are fewer slots than tasks, retain the
-roofline ordering. A collective owns its full required GPU set; use
+task order. A collective owns its full required GPU set; use
 `geak-kernel-gpu-groups` for mixed requirements. Do not serialize independent kernels
 through a shell loop or put two optimization workers on the same GPU to simulate
 parallelism. Record the assigned GPUs and start/end times so progress reports describe
@@ -97,7 +99,7 @@ python3 $WORKLOAD_ROOT/scripts/scheduler.py run \
     --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> --gpus-per-task <n> --target <sec> --backend docker --image <img> \
-    [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
+    [--order-by share|roofline] [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
     [--keep-threshold 1.045] [--keep-threshold-override task=1.35]
 ```
 

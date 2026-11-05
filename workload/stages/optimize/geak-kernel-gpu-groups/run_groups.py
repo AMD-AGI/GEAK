@@ -280,8 +280,10 @@ def main():
         tasks_dir = Path(os.environ.get("TASKS_DIR", str(root / "profile/out/tasks")))
         order_file = root / "roofline/out/roofline.json"
         all_tasks = sorted(p.name for p in tasks_dir.iterdir() if p.is_dir())
+        order_by = params.get("order_by") or "share"
         tasks = scheduler.discover_tasks(str(tasks_dir), str(order_file) if order_file.exists() else None,
-                                         params.get("max_tasks"), params.get("exclude_tasks") or [])
+                                         params.get("max_tasks"), params.get("exclude_tasks") or [],
+                                         order_by)
         # The scheduler drains each complete queue as slots become free. Truncating
         # it here strands the tail on every resume, even after the head is complete.
         limit = valid_limit(params.get("task_limit", 8))
@@ -412,6 +414,7 @@ def main():
                                        ("stale-sec", "heartbeat_stale_sec", 900),
                                        ("bad-node-limit", "bad_node_limit", 2)]:
                 command += ["--" + flag, str(params.get(key, default))]
+            command += ["--order-by", order_by]
             if order_file.exists(): command += ["--order-file", str(order_file)]
             if overrides: command += ["--keep-threshold-override", overrides]
             if full_budget:
