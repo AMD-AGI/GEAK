@@ -10,7 +10,7 @@ file knows no individual skill. Contract in ../stages/CONTRACT.md.
     run.py prepare <stage>   # create OUT, write params.json/env.sh, print the SKILL.md path
     run.py run <stage>       # prepare + execute + validate, script or agent mode
     run.py all [stage ...]   # every stage in order, unattended; resumes by default
-                             #   (reports every 30 min via core/watch.py;
+                             #   (reports every 30 min via engine/core/watch.py;
                              #    --no-report opts out)
     run.py validate <stage>  # validate $OUT/result.json on its own
     run.py status            # print STATE.json
@@ -36,7 +36,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import target  # noqa: E402  -- the naming/identity gate; see target.py for why it exists
 
-WORKLOAD_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKLOAD_ROOT = os.path.dirname(  # engine/core/stage.py -> engine/core -> engine -> workload
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GEAK_ROOT = os.path.dirname(WORKLOAD_ROOT)
 DEFAULT_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "default.json")
 RETIRED_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "RETIRED.json")
@@ -589,7 +590,7 @@ def cmd_all(cfg, args):
     A/B a stack nothing was applied to. The run stops with the reason on screen and in
     STATE.json, and resumes with the same command once the precondition is met.
 
-    It reports while it runs, by default: core/watch.py is started alongside and
+    It reports while it runs, by default: engine/core/watch.py is started alongside and
     writes PROGRESS.md, progress.json and a refreshed REPORT.md every half hour. A day
     and a half of unattended GPU time that reports only at the end is how a stage that
     went wrong in its first ten minutes gets to spend the rest of its window going
@@ -764,7 +765,7 @@ def main(argv=None):
     # --no-watch is the previous spelling, kept because the flag appears in launch
     # scripts and in campaign notes; both names set the same dest.
     p.add_argument("--no-report", "--no-watch", dest="no_report", action="store_true",
-                   help="do not report periodically (core/watch.py is not started)")
+                   help="do not report periodically (engine/core/watch.py is not started)")
     p.add_argument("--report-interval", type=int, default=None, metavar="SEC",
                    help="seconds between progress reports (default from config: 1800)")
     p = sub.add_parser("validate"); p.add_argument("stage")

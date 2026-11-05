@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the prompt for one attempt and write it to $PROMPT_OUT. Called by campaign/worker.sh.
+# Build the prompt for one attempt and write it to $PROMPT_OUT. Called by engine/campaign/worker.sh.
 #
 # Every input arrives through the environment (see the boundary diagram in SKILL.md):
 #   K TASK_DIR KERNEL_SRC ATTEMPT BEST_SPEEDUP KEEP_THRESHOLD RUN_DIR EVAL_DIR

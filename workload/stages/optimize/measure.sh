@@ -8,7 +8,7 @@ RUN="$RUN_DIR"
 # The baseline leg is always the **originally installed module**, not your previous change,
 # so this speedup is always the cumulative figure against the real baseline.
 #
-# The entry is launched through campaign/run_task_entry.py rather than with `cd $TASK_DIR &&
+# The entry is launched through engine/campaign/run_task_entry.py rather than with `cd $TASK_DIR &&
 # python3 unittest.py`: a task directory contains its own `unittest.py`, which lands on
 # sys.path[0] and shadows the standard library package, and the failure surfaces far away
 # ("No module named 'unittest.mock'") as an empty measurement rather than as an error.

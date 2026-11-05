@@ -16,7 +16,7 @@ the target                    headroom       per GPU        measure e2e
 Before anything else, a config must declare what it optimizes, in a `target` block (model,
 image, component commits). The config filename and `run_root` have to carry a recognisable
 token of that model, and every `validate` cross-checks the declaration against the stack
-the stages actually observed. Writing a new scenario config starts there; `core/target.py`
+the stages actually observed. Writing a new scenario config starts there; `engine/core/target.py`
 says why, and refuses the run otherwise.
 
 Changing this pipeline rather than running it: read `PRINCIPLES.md` first. It is the charter — what the pipeline was asked to do, and the rules a change has to leave intact.
@@ -63,12 +63,15 @@ inputs, or use a fresh run root for a changed experiment.
 ### While it runs
 
 **The run reports every 30 minutes without being asked.** `all` starts
-`core/watch.py` alongside it, which each tick appends a block to
+`engine/core/watch.py` alongside it, which each tick appends a block to
 `$RUN_ROOT/PROGRESS.md` — per-stage state and results so far, how much was written, what
 changed in the window, which GPUs are held — keeps the latest snapshot in
 `progress.json`, and **re-renders `$RUN_ROOT/REPORT.md`** from whatever the stages have
 finished. The mid-run report is the same document as the final one, so a campaign that is
 stopped on its fourth stage still leaves a readable report of the first three.
+
+While `optimize` is the live stage, the per-GPU view is
+`python3 workload/engine/campaign/scheduler.py status --work-root $RUN_ROOT/optimize/out/work`.
 
 Turning it off: `--no-report` on the command line, `--report-interval SEC` to change the
 cadence, or `report.enabled: false` in the config. (`--no-watch` is the old spelling of
@@ -119,18 +122,18 @@ of it is code.**
 
 A new implementation is a new directory under `stages/<stage>/` containing a `SKILL.md`
 (plus `run.sh` if it is a script), named in the config. **There is no registry to
-update** — follow `stages/CONTRACT.md`.
+update** — follow `stages/CONTRACT.md`. `stages/roofline/stub-roofline/` is a minimal
+worked example.
 
 Agents work the same way; see `runners/CONTRACT.md`. The repository ships `claude.sh`
-(validated), `codex.sh` and `codex-oob.sh` (written to the contract, not yet validated)
-and `stub.sh` (calls no agent — it exists to prove the scheduler does not depend on one).
+(validated), `codex.sh` (written to the contract, not yet validated) and `stub.sh` (calls
+no agent — it exists to prove the scheduler does not depend on one).
 
 ## Where the code lives
 
-`run.py` is the only entry point. `core/` is how one campaign walks from stage to stage,
-`campaign/` is how eight GPUs are held and dispatched to, `tools/` is the single-purpose
-utilities, `evidence/` retains and reuses measurement evidence, and `stages/` is the five
-slots. `README.md` has the full table.
+`run.py` is the only entry point. `config/`, `stages/` and `runners/` are what you edit;
+everything else sits under `engine/`. `README.md` has the table and `engine/README.md`
+breaks the plumbing down.
 
 ## The two contracts
 
@@ -160,7 +163,7 @@ Modularity rests on two contracts and nothing else:
 ## Self-check
 
 ```bash
-python3 workload/tools/skill_manifest.py verify-all     # vendored skills unchanged
+python3 workload/engine/tools/skill_manifest.py verify-all     # vendored skills unchanged
 python3 workload/run.py --config $CFG --dry-run  # the config resolves
 ```
 

@@ -3,6 +3,11 @@
 *From a serving-level goal, down to kernel-level work, back to a measured end-to-end
 number.*
 
+This file explains **why the pipeline is shaped the way it is**. `SKILL.md` is the
+operator's guide and carries every command; `PRINCIPLES.md` is the charter — the mandate
+this pipeline was built to satisfy and the rules any change to it has to leave intact.
+Read that one before editing anything here.
+
 ## What it optimizes
 
 Inference throughput under a **real agentic workload** — a model serving an actual agent
@@ -25,27 +30,21 @@ Nothing here is bound to one model or one benchmark. A scenario is a JSON file i
 
 ## The five steps
 
-![pipeline](docs/pipeline.svg)
+```
+baseline  ──>  profile  ──>  roofline  ──>  optimize  ──>  applyback
+measure        extract UTs    rank by        one kernel     wire back,
+the target                    headroom       per GPU        measure e2e
+```
 
 Steps 1–3 produce evidence. Step 4 spends the compute budget. Only step 5 may claim an
 end-to-end gain.
 
 Each step is a **slot**, and each slot holds one or more interchangeable **skills** —
 a directory with its own `SKILL.md` and its own code. Steps communicate only through
-files on disk.
-
-| Step | Artifact | Default skill | Swap it for |
-| --- | --- | --- | --- |
-| `baseline` | `baseline.json` | `adopt` | `measure` (re-measure from scratch; with `pins`, reproduce a named CI run and prove every one) |
-| `profile` | `tasks/<kernel>/` | `kernel-extract` | any skill that emits `tasks/` + a ranking |
-| `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
-| `optimize` | `optimized.json` | `geak-kernel-workflow` | `native-frozen` (a task's own collective harness), `subagent-raw` (an agent, no GEAK workflow) |
-| `applyback` | `ab.json` | `overlay-ab` | any skill that applies and re-measures |
+files on disk. What ships in each slot, and what it can be swapped for, is tabulated in
+`SKILL.md`.
 
 ## Design
-
-`PRINCIPLES.md` is the charter: the mandate this pipeline was built to satisfy, and the rules any change to it has to leave intact. This section explains the reasoning; that file states the obligations. Read it before editing anything here.
-
 
 **Two contracts, and nothing else.** Modularity here is not a plugin system, a registry
 or a DSL.
@@ -63,7 +62,8 @@ all, exists as executable proof that the scheduler is genuinely agent-agnostic.
 **The slot owns the criterion; the skill owns the work.** How artifacts map to
 `result.json`, and what counts as ranked or passing, live in the slot — in its
 `finalize.py`, which every slot has and which runs after every stage, and in
-`stages/<stage>/README.md` where that criterion is explained rather than restated. Replacing an implementation therefore never rewrites the mapping — which is
+`stages/<stage>/README.md` where that criterion is explained rather than restated.
+Replacing an implementation therefore never rewrites the mapping — which is
 why the upstream roofline skill is vendored byte-identical, hash-enforced by
 `skill_manifest.py`, and the profile skill — GEAK main's `kernel-extract`, carried here
 with the shared tools it copies into tasks — lists in its `PROVENANCE.json` the origin
@@ -72,9 +72,10 @@ hash of every file and which ones this branch changed.
 **An operator win is not a system win.** This is the failure mode the whole pipeline is
 built around: a kernel that is unambiguously faster in isolation can leave the serving
 number flat, or slightly worse, and on this class of workload that is the normal outcome
-rather than the exception. So kernels are ranked by `pct_gpu_time × (1 − 1/attainable_speedup)` rather than by
-achievable speedup, operator and end-to-end numbers are written side by side so neither
-can stand in for the other, and only `applyback` may claim e2e.
+rather than the exception. So kernels are ranked by expected end-to-end gain rather than
+by achievable speedup, operator and end-to-end numbers are written side by side so
+neither can stand in for the other, and only `applyback` may claim e2e. The ranking
+formula and the measured cases that produced it are in `SKILL.md`.
 
 **No speedup counts until it survives a cold rerun.** Every keep is re-measured from a
 fresh process and scored on the **minimum** of N runs. Hot measurement is not enough: the
@@ -92,79 +93,35 @@ did not demonstrably shadow its targets, or if the two sides used different metr
 "no gain" is otherwise indistinguishable from "the patch never loaded".
 
 **A run must be able to say what it optimizes.** Every scenario config declares a `target`
-block — model, image, component commits — and `core/target.py` enforces two things with
-it. The config filename and `run_root` must carry a recognisable token of the declared
-model, checked at `plan`/`prepare` time, before a GPU hour is spent; and the declaration is
-cross-checked at every `validate` against the image and commits the stages actually
-observed and wrote down, with a contradiction failing the stage. The first campaign ran
-end to end under the name `agentx_dsv4` against a GLM-5.2-MXFP4 stack: every number was
-right and every label was wrong, which is the harder error to catch, because a wrong
-number invites doubt and a wrong name invites confidence. An abbreviation the tokeniser
-cannot derive (`dsv4` for DeepSeek-V4) is still allowed, but only by writing it into
-`target.name_tokens` — a deliberate declaration instead of an accident.
+block — model, image, component commits — and `engine/core/target.py` enforces two things
+with it. The config filename and `run_root` must carry a recognisable token of the
+declared model, checked at `plan`/`prepare` time, before a GPU hour is spent; and the
+declaration is cross-checked at every `validate` against the image and commits the stages
+actually observed and wrote down, with a contradiction failing the stage. The first
+campaign ran end to end under the name `agentx_dsv4` against a GLM-5.2-MXFP4 stack: every
+number was right and every label was wrong, which is the harder error to catch, because a
+wrong number invites doubt and a wrong name invites confidence. An abbreviation the
+tokeniser cannot derive (`dsv4` for DeepSeek-V4) is still allowed, but only by writing it
+into `target.name_tokens` — a deliberate declaration instead of an accident.
 
-**Nothing is bound to a developer's machine.** All paths come from config and resolve
-against the repository root. Credentials stay outside the tree —
-`runners/claude.env.example` is a template; the scenario config points at the filled-in
-copy via `runner_env.env_file`.
+**A run that says nothing until it ends is a run nobody can act on.** So reporting is on
+by default rather than opt-in, and the mid-run report is the same document as the final
+one — a campaign stopped on its fourth stage still leaves a readable report of the first
+three. The monitor describes and acts on nothing, except for one provable condition it
+can be told to intervene in; the reasoning for that, and for every threshold, sits next
+to the knob in `config/default.json`.
 
-## Running it
+**Thresholds are calibrated, not assumed.** The keep threshold, the attempt cap, the
+re-verification repeat count — each is a knob in `config/default.json` with the
+measurement that set it recorded alongside.
 
-```bash
-cd <GEAK repo root>
-CFG=workload/config/agentx_glm52.json
-
-python3 workload/run.py --config $CFG --dry-run    # resolve everything, run nothing
-python3 workload/run.py --config $CFG all          # the whole campaign, unattended
-python3 workload/run.py --config $CFG run optimize # or one stage at a time
-```
-
-`next` reports the stage that is due, `status` shows progress, and an interrupted run
-resumes by re-issuing the same command — `all` skips the stages already recorded `ok`.
-While `optimize` runs:
-`scheduler.py status --work-root $RUN_ROOT/optimize/out/work`.
-
-`all` reports as it goes, by default: it starts `core/watch.py`, which every 30
-minutes appends a block to `$RUN_ROOT/PROGRESS.md` (per-stage state, results so far, what
-was written, which GPUs are held), rewrites `progress.json`, and re-renders
-`$RUN_ROOT/REPORT.md` from the stages that have finished — the same renderer the run ends
-with, so a campaign stopped early still has a report. `--no-report` opts out,
-`--report-interval SEC` changes the cadence, and the knobs live under `report` in
-`config/default.json`.
-
-It acts on nothing unless told to. Setting `report.on_stall` to `"restart-attempt"` lets
-it kill an attempt that is provably stalled — nothing written under `$OUT` for 90 minutes
-*and* no CPU burned — so the dispatcher resumes it from the artifacts on disk. Both
-signals are required: the long stages spend long stretches building images and loading
-weights without touching `$OUT`.
-
-Swapping a module, at the command line or in the config:
-
-```bash
---set stages.roofline.skill=my-roofline      --set stages.optimize.skill=subagent-raw
---set runner=codex                           --set stages.optimize.params.time_budget_sec=7200
-```
-
-To write a new implementation: create `stages/<stage>/<name>/`, add a `SKILL.md` (plus
-`run.sh` if it is a script), name the directory in the config.
-`stages/roofline/stub-roofline/` is a minimal worked example.
-
-Self-check, CPU-only — no GPUs, no tokens:
-`python3 workload/tools/skill_manifest.py verify-all` and
-`python3 workload/run.py --config <scenario> --dry-run`.
-
-`SKILL.md` is the operator's guide and carries the step-by-step procedure.
-
-Thresholds — the keep threshold, the attempt cap, the re-verification repeat count — are
-calibrated against measurement rather than assumed, and every one of them is a knob in
-`config/default.json` with the reasoning recorded next to it.
-
-A knob that is renamed or removed is otherwise silent: the key stays in the scenario
-config, the code that read it is gone, and the run proceeds as though nobody had asked.
-`config/RETIRED.json` is the one place that records them, and `--dry-run` reports every
-match before any GPU time — refusing to start when the lost knob was a *check*, and only
-warning when it is merely inert, so a live campaign config is not blocked over a dead
-word. Add the entry in the same change that removes the knob.
+**A dead knob is silent, so one file has to speak for it.** A parameter that is renamed
+or removed leaves the key sitting in the scenario config, the code that read it gone, and
+the run proceeding as though nobody had asked. `config/RETIRED.json` is the one place
+that records them, and `--dry-run` reports every match before any GPU time — refusing to
+start when the lost knob was a *check*, and only warning when it is merely inert, so a
+live campaign config is not blocked over a dead word. Add the entry in the same change
+that removes the knob.
 
 A skill rename is the same kind of silent breakage one level up, and it is the committed
 configs that pay for it: `--dry-run` is what catches it, so every config in `config/` has
@@ -176,21 +133,25 @@ that campaign, not configuration of this skill; they belong beside it under
 
 ## Where the code lives
 
-`run.py` is the only entry point. Everything behind it sits in a directory named after
-the question it answers, so that where a file belongs is decided by what it is for and
-not by what was convenient the day it was written.
+The top level is the skill: three documents, one entry point, and the three directories a
+reader or an operator actually edits. Everything that merely makes it run sits one level
+down under `engine/`, so that opening `workload/` shows a skill rather than a codebase.
 
 | | |
 | --- | --- |
-| `run.py` | the entry point; it forwards to `core/stage.py` and does nothing else |
-| `core/` | how one campaign walks from stage to stage — the driver, the agent-mode stage, the target gate, the report renderer |
-| `campaign/` | how eight GPUs are held, isolated and dispatched to |
-| `evidence/` | how measurement evidence is retained, placed and reused |
-| `tools/` | single-purpose utilities: manifest verification, fixture generation |
-| `stages/` | the five slots and their interchangeable skills (`stages/CONTRACT.md`); `stages/_shared/` holds the few helpers several slots need in order to judge |
+| `SKILL.md` | the operator's guide: what it is, every command, the two contracts |
+| `README.md` | this file: why it is shaped this way |
+| `PRINCIPLES.md` | the charter a change has to leave intact |
+| `run.py` | the only entry point; it forwards to `engine/core/stage.py` and does nothing else |
 | `config/` | one JSON per scenario, layered over `config/default.json` |
+| `stages/` | the five slots and their interchangeable skills (`stages/CONTRACT.md`); `stages/_shared/` holds the few helpers several slots need in order to judge |
 | `runners/` | agent CLI adapters (`runners/CONTRACT.md`) |
+| `engine/` | the plumbing; `engine/README.md` says what each directory under it answers |
+
+Inside `engine/` the same rule applies one level smaller: each directory is named after
+the question it answers, so that where a file belongs is decided by what it is for and
+not by what was convenient the day it was written.
 
 The split runs one way only. A slot may reach into `stages/_shared/`, because the
-pipeline implements the stage contract; a slot that reached up into `core/` for a tool
+pipeline implements the stage contract; a slot that reached up into `engine/` for a tool
 would tie a replaceable skill to the plumbing it is supposed to be independent of.

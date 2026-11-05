@@ -40,7 +40,7 @@ Everything else it finds is reported, not acted on. A dead driver, a GPU held by
 job, a stage that reported `blocked` -- those need a decision, and a monitor inventing
 one would be worse than a monitor that says clearly what it saw.
 
-    python3 core/watch.py --config <cfg> [--interval 1800] [--once]
+    python3 engine/core/watch.py --config <cfg> [--interval 1800] [--once]
 
 `run.py all` starts one of these itself, so a plain campaign already reports on a
 cadence without being asked; `--no-report` there turns it off.

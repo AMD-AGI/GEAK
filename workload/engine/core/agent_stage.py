@@ -189,8 +189,10 @@ def finalize(env, log_cb=print):
     one is a defect in the slot, reported here and caught before the run by
     `run.py --dry-run`.
     """
-    stages_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "stages")
+    # engine/core/agent_stage.py -> engine/core -> engine -> workload
+    workload_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    stages_root = os.path.join(workload_root, "stages")
     script = os.path.join(stages_root, env.get("STAGE", ""), "finalize.py")
     # The envelope writer belongs to the stage contract, not to the plumbing, so it lives
     # with the contract in stages/_shared (stages/CONTRACT.md 3). The dependency points

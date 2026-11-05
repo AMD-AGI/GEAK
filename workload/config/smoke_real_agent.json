@@ -1,9 +1,9 @@
 {
-  "_comment": "Smoke config: **real agent**, fake tasks. Proves the worker -> runner -> claude -> measure -> KEEP/revert -> verify -> finalize chain holds under real sessions. The fake tasks are CPU-only frozen harnesses (tools/make_fake_tasks.py), so no GPU is occupied; it does spend a small number of tokens. Point TASKS_DIR at them from the command line.",
+  "_comment": "Smoke config: **real agent**, fake tasks. Proves the worker -> runner -> claude -> measure -> KEEP/revert -> verify -> finalize chain holds under real sessions. The fake tasks are CPU-only frozen harnesses (engine/tools/make_fake_tasks.py), so no GPU is occupied; it does spend a small number of tokens. Point TASKS_DIR at them from the command line.",
   "target": {
     "model": null,
     "enforce": false,
-    "_note_enforce": "Smoke config: the tasks are CPU-only fakes from tools/make_fake_tasks.py, so there is no serving stack to declare and nothing for the naming gate to check. Any config that does target a real stack must fill in target.model instead."
+    "_note_enforce": "Smoke config: the tasks are CPU-only fakes from engine/tools/make_fake_tasks.py, so there is no serving stack to declare and nothing for the naming gate to check. Any config that does target a real stack must fill in target.model instead."
   },
   "run_root": "/tmp/wl_smoke_real",
   "runner": "claude",

@@ -127,7 +127,7 @@ python3 "$WORKLOAD_ROOT/stages/_shared/emit_result.py" --status ok \
 the envelope writer above and `task_plan.py`, which reads task ownership out of a
 `task_plan.json` whose key names differ between the standalone skill and older slot
 deliveries. It belongs to this contract, not to the pipeline that runs it: a slot that
-reached up into `core/` for a tool would tie a replaceable skill to the plumbing, and
+reached up into `engine/` for a tool would tie a replaceable skill to the plumbing, and
 the point of the slot is that the plumbing can be swapped out from under it. Criteria
 themselves stay in each slot's own `finalize.py` (section 3.1); nothing scenario-specific
 or stage-specific goes here.
@@ -148,7 +148,7 @@ an `active_stack` key is read only there). `run.py validate` compares whatever i
 against the `target` block of the config and **fails the stage on a contradiction**: if
 the config says one model and the stage observed another, one of them is wrong and every
 label downstream is wrong with it. A stage that observes nothing is reported as
-`unverified`, which is a statement rather than a pass. See `core/target.py` for the
+`unverified`, which is a statement rather than a pass. See `engine/core/target.py` for the
 whole gate, and `README.md` for the naming half of it.
 
 ### 3.1 The slot's verdict: `finalize.py`
