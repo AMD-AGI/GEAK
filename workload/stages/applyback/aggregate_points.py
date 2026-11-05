@@ -2,8 +2,8 @@
 """Per-point A/Bs -> one ab.json + result.json for a multi-config baseline.
 
 The baseline stage marked a few representative configs (adopt-ci-artifacts: each group's
-lowest and highest concurrency). Applyback measures every one of them against its own CI
-number with the slot's finalize.py, in `$OUT/points/<pid>/`. This folds them:
+lowest and highest concurrency). Applyback measures every one of them in `$OUT/points/<pid>/`; the slot's finalize.py
+judges each against its own baseline and then calls this. This folds them:
 
   verdict  regression  if any point regressed beyond its noise band
            gain        if some point gained and none regressed
@@ -20,7 +20,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
+sys.path.insert(0, HERE)
 from emit_result import emit, read_json  # noqa: E402
 
 

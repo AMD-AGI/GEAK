@@ -33,7 +33,9 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-sys.path.insert(0, os.path.join(os.environ.get("WORKLOAD_ROOT", ""), "scripts"))
+# The same rule every slot uses: the stages root, then `_shared`.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 API = "https://api.github.com/repos/%s/actions/runs/%s/artifacts?per_page=100&page=%d"

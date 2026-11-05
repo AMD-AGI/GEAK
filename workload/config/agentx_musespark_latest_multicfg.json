@@ -63,14 +63,16 @@
       }
     },
     "applyback": {
-      "skill": "overlay-e2e-ab",
-      "mode": "script",
+      "skill": "overlay-ab",
+      "mode": "agent",
       "params": {
         "repeats": 3,
         "smoke_required": true,
         "serving_env": null,
         "point_serving_env": {},
-        "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file."
+        "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file.",
+        "agent_budget_sec": 36000,
+        "_note_agent_budget_sec": "overlay-ab is an agent session; 2 representative points x (stock control + candidate) x repeats 3 at ~80 min per leg is ~10 h, so the 4 h agent default would stop it half way."
       }
     },
     "roofline": {

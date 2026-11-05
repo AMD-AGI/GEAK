@@ -21,7 +21,7 @@
   },
   "stages": {
     "baseline": {
-      "skill": "ci-run-replay",
+      "skill": "measure",
       "mode": "agent",
       "params": {
         "ci": {
@@ -147,7 +147,7 @@
       }
     },
     "applyback": {
-      "skill": "reference-replay-ab",
+      "skill": "overlay-ab",
       "mode": "agent",
       "params": {
         "exclusive_node": true,

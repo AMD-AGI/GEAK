@@ -7,6 +7,9 @@ set -euo pipefail
 : "${TASK_DIR:?TASK_DIR}"
 : "${KERNEL_SRC:?KERNEL_SRC}"
 
+GEAK_ROOT="${GEAK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+TASK_ENTRY="$GEAK_ROOT/workload/campaign/run_task_entry.py"
+
 KEEP_THRESHOLD="${KEEP_THRESHOLD:-1.045}"
 BEST_SPEEDUP="${BEST_SPEEDUP:-1.0}"
 ATTEMPT="${ATTEMPT:-1}"
@@ -32,7 +35,7 @@ is ${BEST_SPEEDUP}x (relative to the original implementation).
 
 **The only file you may modify**: $TASK_DIR/kernel_src/$KERNEL_SRC
 
-**Self-check**: cd $TASK_DIR && python3 unittest.py
+**Self-check**: python3 "$TASK_ENTRY" "$TASK_DIR"
 It prints:
   CORRECTNESS: PASS|FAIL
   GEAK_GEOMEAN_SPEEDUP <x>     <- cumulative speedup against the **original**
@@ -45,7 +48,7 @@ $( [ -n "$HINT" ] && printf 'What is known:\n%s\n' "$HINT" )
 
 1. Read kernel_src/$KERNEL_SRC and cases.py first; understand the real shape distribution
    and where the current implementation is losing time.
-2. Run unittest.py once to get the current number — do not guess the state of things by
+2. Run the self-check once to get the current number — do not guess the state of things by
    reading code.
 3. Change one thing, re-measure. One variable at a time, or you will not know which edit
    did the work.

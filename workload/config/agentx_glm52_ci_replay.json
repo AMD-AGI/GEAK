@@ -2,7 +2,6 @@
   "_comment": "agentx_glm52, but with the baseline reproduced from scratch instead of adopted from a receipt. Identical to config/agentx_glm52.json except for stages.baseline. Use this when the question is whether *this machine* can still hit CI run 34783501425 -- before a long campaign, after a node or image change, or when a previous baseline and the CI figure disagree. It costs an hour on eight GPUs; agentx_glm52.json costs nothing and reuses a number that was already reproduced to within 0.07%.",
   "run_root": "workload/runs/agentx_glm52_ci_replay",
   "runner": "claude",
-
   "target": {
     "model": "amd/GLM-5.2-MXFP4",
     "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
@@ -18,7 +17,8 @@
   },
   "stages": {
     "baseline": {
-      "skill": "ci-run-replay",
+      "skill": "measure",
+      "mode": "agent",
       "params": {
         "ci": {
           "run_id": "34783501425",
@@ -57,9 +57,15 @@
           "fresh_container": true,
           "container_name": "wl_ci_replay",
           "cache_dirs": {
-            "TRITON_CACHE_DIR": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/triton"},
-            "XDG_CACHE_HOME": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/user"},
-            "TORCH_EXTENSIONS_DIR": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/torch_extensions"}
+            "TRITON_CACHE_DIR": {
+              "container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/triton"
+            },
+            "XDG_CACHE_HOME": {
+              "container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/user"
+            },
+            "TORCH_EXTENSIONS_DIR": {
+              "container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/torch_extensions"
+            }
           },
           "cache_root": null,
           "ledger": null,
@@ -78,14 +84,23 @@
         "harness": {
           "dir": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916",
           "cmd": "tools/run_tp8_c10.sh",
-          "args": ["CASE", "RUN_TAG", "DURATION"],
+          "args": [
+            "CASE",
+            "RUN_TAG",
+            "DURATION"
+          ],
           "case": "baseline",
           "run_tag": null,
           "result_dir": null,
           "_note": "The site's own CI harness is driven rather than reimplemented, so what is reproduced stays what was measured. It refuses to overwrite an existing RESULT_DIR, so run_tag must be new -- it defaults to the benchmark_id, which preflight has already proven unused."
         },
         "noise_band": 1.045,
-        "config": {"tp": 8, "ep": 1, "gpus": 8, "concurrency": 10}
+        "config": {
+          "tp": 8,
+          "ep": 1,
+          "gpus": 8,
+          "concurrency": 10
+        }
       }
     },
     "profile": {
@@ -122,7 +137,7 @@
       }
     },
     "applyback": {
-      "skill": "reference-replay-ab",
+      "skill": "overlay-ab",
       "params": {
         "exclusive_node": true,
         "harness_dir": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916",
@@ -138,8 +153,9 @@
         "duration_s": 3600,
         "port": 8899,
         "stop_cmd": "tools/stop_owned_server.py",
-        "_note_reference": "null, so the A/B reference is this config's own freshly reproduced baseline rather than a receipt from another node. That is the point of running ci-run-replay: both arms are measured on this machine, by this harness, against the same corpus."
-      }
+        "_note_reference": "null, so the A/B reference is this config's own freshly reproduced baseline rather than a receipt from another node. That is the point of measuring with pins here: both arms are measured on this machine, by this harness, against the same corpus."
+      },
+      "mode": "agent"
     }
   }
 }
