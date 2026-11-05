@@ -62,7 +62,7 @@ async function fixture(t) {
 }
 
 
-import { packStandaloneTasks, readPreparedKernels, reusePreparedUT } from './agentx_kernel_preparation.mjs';
+import { packStandaloneTasks, readPreparedKernels } from './agentx_kernel_preparation.mjs';
 const adapter = fileURLToPath(new URL('./agentx_kernel_preparation.mjs', import.meta.url));
 
 async function delivered(t) {
@@ -97,9 +97,11 @@ test('skill preflight -> workflow packaging -> optimization queue preserves evid
   assert.deepEqual(prepared.failed_tasks, f.manifest.failed_tasks);
   assert.deepEqual(prepared.deferred_tasks, f.manifest.deferred_tasks);
   assert.deepEqual(prepared.coverage_summary, f.manifest.coverage_summary);
-  const reused = await reusePreparedUT(prepared.kernel_candidates[0]);
-  assert.equal(reused.unittest_smoke, 'pass');
-  assert.equal(reused.task_dir, f.task);
+  // The validated RETURN.json rides along with the envelope -- the workflow sandbox has no
+  // filesystem, so a result_path it cannot open would not be evidence it can dispatch on.
+  const carried = prepared.kernel_candidates[0].prepared_ut;
+  assert.equal(carried.result.unittest_smoke, 'pass');
+  assert.equal(carried.result.task_dir, f.task);
   assert.equal(await fs.readFile(path.join(f.task, 'run/RETURN.json'), 'utf8'), before);
 });
 
@@ -110,7 +112,11 @@ test('changed source invalidates handoff and downstream reuse without overwritin
   const prepared = await readPreparedKernels(f.evalDir, 'delivery.json');
   await fs.appendFile(path.join(f.task, 'kernel_src/leaf.cu'), '// changed after validation\n');
   await assert.rejects(f.pack(), /invalid evidence/);
-  assert.equal((await reusePreparedUT(prepared.kernel_candidates[0])).smoke, 'fail');
+  // Re-reading is the ONLY gate now: packing is where changed source is caught, and it refuses to
+  // emit a queue at all rather than emitting one the dispatcher would have to re-verify.
+  const stale = await readPreparedKernels(f.evalDir, 'delivery.json');
+  assert.deepEqual([...stale.head_candidates, ...stale.kernel_candidates], []);
+  assert.equal(prepared.kernel_candidates.length, 1, 'the pre-edit envelope was a real queue');
   assert.equal(await fs.readFile(path.join(f.evalDir, 'delivery.json'), 'utf8'), before);
 });
 
@@ -151,7 +157,10 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
   const prepared = (await readPreparedKernels(f.evalDir, 'delivery.json')).kernel_candidates[0];
   const workflowDir = fileURLToPath(new URL('..', import.meta.url));
   const src = await fs.readFile(path.join(workflowDir, 'e2e_workflow.js'), 'utf8');
-  const helper = src.slice(src.indexOf('async function extractWithBaseline('), src.indexOf('\n// abDone =='));
+  // preparedUtDefect + reusePreparedUT sit immediately above extractWithBaseline and are what the
+  // AgentX branch returns, so the slice starts there: the workflow sandbox has no filesystem, so
+  // reuse is pure JS over the envelope rather than a module the dispatcher could import.
+  const helper = src.slice(src.indexOf('function preparedUtDefect('), src.indexOf('\n// abDone =='));
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const sites = [...src.matchAll(/const ext = await extractWithBaseline\(/g)];
   assert.equal(sites.length, 4, 'three head modes and the milestone path');
@@ -184,8 +193,43 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
     assert.match(missing.ext.smoke_detail, /missing prepared UT/);
   }
   assert.equal(await fs.readFile(path.join(f.task, 'run/RETURN.json'), 'utf8'), before);
+  // An edited UT is caught at PREPARATION, which is the single gate now: the dispatcher cannot
+  // re-hash kernel_src because the workflow sandbox has no filesystem, so readPreparedKernels is
+  // where a mutated task stops being a candidate at all.
   await fs.appendFile(path.join(f.task, 'cases.py'), '# invalidates the frozen UT\n');
-  for (const dispatch of dispatchers) assert.equal((await dispatch(prepared)).ext.smoke, 'fail');
+  const stale = await readPreparedKernels(f.evalDir, 'delivery.json');
+  assert.deepEqual([...stale.head_candidates, ...stale.kernel_candidates], [],
+    'an edited UT cannot be re-prepared into an optimization queue');
+  assert(stale.failed_tasks.some(t => t.short_name === prepared.short_name),
+    'the edited task is reported as failed, not silently dropped');
+});
+
+// The envelope reaches the workflow through an AGENT, not through the file the packer wrote: the
+// sandbox has no filesystem to open it with. So "the packer validated this" is a claim, and the
+// intake re-asserts every invariant it can without reading bytes. Forge the reply and it must
+// THROW -- which is what arms the repair_delivery retry. Dropping the bad candidate instead would
+// shorten the queue silently and the run would end looking like there was nothing to optimize.
+test('a forged or degraded envelope is refused at intake, not taken on trust', async t => {
+  const f = await delivered(t);
+  await f.pack();
+  const good = await readPreparedKernels(f.evalDir, 'delivery.json');
+  const src = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
+  const cut = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  const reader = cut('function preparedUtDefect(', '\n// Hand an optimization lane')
+    + cut('function readAgentXPreparation(', '\nasync function prepareAgentXKernels(');
+  const read = new Function(`${reader}\nreturn readAgentXPreparation;`)();
+  const reply = {delivery_path: '/eval/delivery.json', prepared: good};
+  assert.equal(read(structuredClone(reply)).kernel_candidates.length, 1, 'the real envelope passes');
+  const mutate = (fn) => { const r = structuredClone(reply); fn(r.prepared.kernel_candidates[0]); return r; };
+  for (const [why, fn] of [
+    ['no result at all', (c) => { delete c.prepared_ut.result; }],
+    ['a failing UT copied forward', (c) => { c.prepared_ut.result.unittest_smoke = 'fail'; }],
+    ['no frozen baseline', (c) => { delete c.prepared_ut.result.baseline_frozen; }],
+    ['no task_dir', (c) => { delete c.prepared_ut.result.task_dir; }],
+    ['an invented GPU share', (c) => { c.pct_gpu_time = 420; }],
+    ['an op_kind that contradicts its own result', (c) => { c.op_kind = 'moe'; c.prepared_ut.result.op_kind = 'gemm'; }],
+  ]) assert.throws(() => read(mutate(fn)), /failed re-validation/, why);
+  assert.throws(() => read({delivery_path: '/eval/delivery.json'}), /no prepared envelope/);
 });
 
 test('whole-op metadata routes attention aliases to head and preserves the consumer op kind', async t => {
@@ -197,7 +241,6 @@ test('whole-op metadata routes attention aliases to head and preserves the consu
   const queues = await readPreparedKernels(f.evalDir, 'delivery.json');
   assert.equal(queues.kernel_candidates.length, 0);
   assert.equal(queues.head_candidates[0].op_kind, 'attn');
-  assert.equal((await reusePreparedUT(queues.head_candidates[0])).op_kind, 'attn');
   await f.write('run/RETURN.json', {...f.result, smoke: 'pass', op_kind: 'moe'});
   await assert.rejects(f.pack(), /op_kind differs/);
 });
@@ -212,6 +255,6 @@ test('completed multi-rank UTs retain evidence but do not enter single-GPU optim
     const task = queues.deferred_tasks.at(-1);
     assert.equal(task.task_dir, f.task);
     assert.match(task.reason, /UT validated.*multi-GPU lane/);
-    assert.equal((await reusePreparedUT(task)).unittest_smoke, 'pass');
+    assert.equal(task.prepared_ut.result.unittest_smoke, 'pass', 'deferred tasks keep their evidence');
   }
 });

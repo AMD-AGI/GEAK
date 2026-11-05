@@ -3,9 +3,9 @@
 
 Run:  python3 -m pytest interface/test_run_e2e_margin.py -q
 
-The JS live-path guard (``A.implausible_speedup_margin`` in e2e_workflow.js) and
-THIS runner's recovery path must apply the SAME margin, or a speedup the live
-path accepts could be re-flagged (or vice versa) on recovery. run_e2e.py makes
+The JS live-path review trigger (``A.implausible_speedup_margin`` in e2e_workflow.js)
+and THIS runner's recovery path must apply the SAME margin. Independent confirmation
+can clear the review even above this threshold; it is not a correctness verdict. run_e2e.py makes
 the Python constant the single source of truth: it validates the env-overridable
 value (finite, non-negative -- an accepted nan/inf/negative would silently
 disable the guard) and ``map_args`` forwards THAT value to the workflow

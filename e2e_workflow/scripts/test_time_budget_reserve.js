@@ -125,6 +125,224 @@ console.log('\n# the default reserve is one hour');
     'a junk cap falls back to the 20% default');
 }
 
+console.log('\n# a trace replay reserves what its own final phase costs');
+// Finalize benches one 900s search leg and Validate two canonical 3600s legs, each behind a boot and
+// the replay's own warmup and drain: about four hours, against a one-hour default. The GLM-5.2 HL+GEAK
+// run only had room for it because its operator set an 8h reserve by hand.
+{
+  const rStart = src.indexOf('const FINAL_RESERVE_CAP_FRAC');
+  const rSrc = src.slice(rStart, src.indexOf('const TIME_BUDGET_EFFECTIVE_MS', rStart));
+  const reserve = (TIME_BUDGET_MS, A) => new Function('TIME_BUDGET_MS', 'A',
+    `${rSrc}\nreturn { FINAL_RESERVE_MS, AGENTX_FINAL_PHASE_MS, AGENTX_PRE_FINAL_MIN_MS, AGENTX_MIN_BUDGET_MS,
+      RESERVE_IS_AGENTX };`)(TIME_BUDGET_MS, A);
+  const HR = 3600 * 1000, MN = 60000;
+  const AX = { workload_kind: 'agentx_trace_replay' };
+  const ax12 = reserve(12 * HR, AX);
+  ok(ax12.AGENTX_FINAL_PHASE_MS === 235 * MN && ax12.FINAL_RESERVE_MS === 235 * MN,
+    'a 12h AgentX budget reserves 235min (one 900s and two 3600s legs at +20min each, plus 40min), not 60min');
+  ok(reserve(70920 * 1000, { ...AX, final_reserve_s: 28800, final_reserve_cap_frac: 0.45 }).FINAL_RESERVE_MS === 28800 * 1000,
+    'a wider reserve the operator configured is kept (GEAK_FINAL_RESERVE_S=28800 on a 19h42m budget)');
+  // The run's minimum: Setup's baseline leg (+10min), one A/B on the search window (the KB warm start's)
+  // and the final phase. Any budget that holds it gives the final phase its whole cost.
+  ok(ax12.AGENTX_PRE_FINAL_MIN_MS === (600 + 4800 + 2 * 2100 + 600) * 1000 && ax12.AGENTX_MIN_BUDGET_MS === 405 * MN,
+    "the minimum is Setup's leg (90min), one A/B (80min) and the final phase (235min): 405min, 6h45m");
+  ok(reserve(405 * MN, AX).FINAL_RESERVE_MS === 235 * MN && reserve(7 * HR, AX).FINAL_RESERVE_MS === 235 * MN,
+    'a budget at the minimum, or 7h, still reserves the whole final phase');
+  ok(reserve(6 * HR, AX).FINAL_RESERVE_MS === 190 * MN,
+    'under it, Setup and that A/B keep their 170min and the final phase gets the rest (6h -> 190min)');
+  ok(reserve(3 * HR, AX).FINAL_RESERVE_MS === 36 * MN,
+    'a budget that cannot even hold Setup and one A/B keeps the configured reserve (20% of 3h)');
+  ok(/\(TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS\s*\? ' WARNING: the budget is under it, so this run may not return a validated gain/.test(src),
+    'the startup log warns on a budget under the minimum');
+  ok(reserve(12 * HR, { workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800, geak_loop_duration_s: 600 } })
+    .AGENTX_FINAL_PHASE_MS === (2400 + 1800 + 2 * 3000) * 1000, 'it follows the windows the run declares');
+  ok(reserve(24 * HR, { ...AX, validation_measurement_mode: 'isolated_server', validation_replicas: 3 })
+    .FINAL_RESERVE_MS === (2400 + 2100 + 6 * 4800) * 1000, 'isolated validation counts every fresh server: six legs');
+  ok(reserve(12 * HR, { ...AX, agentx_leg_overhead_s: 600 }).AGENTX_FINAL_PHASE_MS === (2400 + 1500 + 2 * 4200) * 1000,
+    'agentx_leg_overhead_s sizes the boot, warmup and drain of every leg');
+  ok(reserve(null, AX).FINAL_RESERVE_MS === null, 'no time_budget_s => no reserve, as before');
+  const SYNTHETIC = [{}, { workload_kind: 'synthetic' }, { workload_spec: { kind: 'synthetic' } },
+    { workload_kind: 'synthetic', state: { workload_spec: { kind: 'agentx_trace_replay' } } }];
+  ok(SYNTHETIC.every((A) => [3, 5, 12, 24].every((h) => {
+    const r = reserve(h * HR, A);
+    return !r.RESERVE_IS_AGENTX && r.AGENTX_FINAL_PHASE_MS === 0
+      && r.FINAL_RESERVE_MS === Math.min(3600 * 1000, Math.floor(h * HR * 0.2));
+  })), 'every other workload keeps exactly the reserve it had');
+
+  // The declaration is evaluated after the reserve, so the reserve resolves AgentX from the raw args;
+  // run the real declaration beside it so the two can never disagree about what this run is.
+  const dStart = src.indexOf('const WORKLOAD_SPEC =');
+  const dEnd = src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'));
+  const declared = (A) => new Function('A', `${src.slice(dStart, dEnd)}\nreturn { IS_AGENTX, AGENTX };`)(A);
+  const SHAPES = [...SYNTHETIC, AX, { workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } },
+    { state: { workload_spec: { kind: 'agentx_trace_replay', geak_loop_duration_s: 600 } } },
+    { workload_kind: 'agentx_trace_replay', state: { workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } } },
+    { workload_kind: 'agentx_trace_replay', workload_spec: 'junk' }];
+  const disagree = SHAPES.filter((A) => {
+    const d = declared(A), r = reserve(12 * HR, A);
+    if (d.IS_AGENTX !== r.RESERVE_IS_AGENTX) return true;
+    return d.IS_AGENTX && (r.AGENTX_FINAL_PHASE_MS !==
+      1000 * (2400 + (d.AGENTX.geak_loop_duration_s + 1200) + 2 * (d.AGENTX.duration_s + 1200))
+      || r.AGENTX_PRE_FINAL_MIN_MS !==
+      1000 * (600 + (d.AGENTX.duration_s + 1200) + 2 * (d.AGENTX.geak_loop_duration_s + 1200) + 600));
+  });
+  ok(disagree.length === 0,
+    `the reserve resolves AgentX and its windows exactly as the declaration does (${JSON.stringify(disagree)})`);
+}
+
+console.log("\n# a trace replay's Finalize benches only the leg the reserve holds for it");
+// Told nothing, the integrator of a 9h GLM-5.2 run also benched the bundle on the canonical window
+// (+1h08m, past the reserve) so its claim could be held against Validate's canonical legs. The Director
+// is told instead that a search-window claim is not comparable with its own legs.
+{
+  const nStart = src.indexOf('function agentxFinalizeNote()');
+  const nEnd = src.indexOf('function correctnessEnvBlock(', nStart);
+  ok(nStart !== -1 && nEnd > nStart, 'the final-phase notes are located');
+  const dStart = src.indexOf('const WORKLOAD_SPEC =');
+  const dEnd = src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'));
+  const notes = (A) => {
+    const d = new Function('A', `${src.slice(dStart, dEnd)}\nreturn { IS_AGENTX, AGENTX };`)(A);
+    return new Function('IS_AGENTX', 'AGENTX',
+      `${src.slice(nStart, nEnd)}\nreturn { agentxFinalizeNote, agentxClaimNote };`)(d.IS_AGENTX, d.AGENTX);
+  };
+  const ax = notes({ workload_kind: 'agentx_trace_replay' });
+  const fin = ax.agentxFinalizeNote();
+  ok(/ONE leg on the 900s search window/.test(fin) && /Do NOT also bench the bundle on the 3600s canonical window/.test(fin),
+    'Finalize benches one 900s search leg and never the 3600s canonical window');
+  ok(/Omit throughput_speedup/.test(fin), 'and leaves out a speedup taken against the canonical baseline');
+  const claim = ax.agentxClaimNote(104.48, 113.325);
+  ok(/comes from 900s search legs/.test(claim) && /than your 3600s legs/.test(claim) && /drop both claim conditions/.test(claim),
+    'Validate is told a search-window claim is not comparable with its canonical legs');
+  const director = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', 'director.md'), 'utf8');
+  ok(director.includes('within the noise band of the claim') && director.includes('lower than the claim by more than the band'),
+    'the two claim conditions it drops are the ones roles/director.md step 4 states');
+  ok(ax.agentxClaimNote(113.325, 113.325) === '' && ax.agentxClaimNote(0, 113.325) === ''
+    && ax.agentxClaimNote(undefined, 113.325) === '',
+  'a claim that is the canonical baseline itself, or no claim, keeps the usual checks');
+  const declaredWindows = notes({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800, geak_loop_duration_s: 600 } });
+  ok(/ONE leg on the 600s search window/.test(declaredWindows.agentxFinalizeNote())
+    && /than your 1800s legs/.test(declaredWindows.agentxClaimNote(90, 100)), 'both follow the windows the run declares');
+  const fixed = notes({});
+  ok(fixed.agentxFinalizeNote() === '' && fixed.agentxClaimNote(150, 100) === '',
+    'a fixed-ISL/OSL run gets byte-identical Finalize and Validate prompts');
+  const finalBlock = src.slice(src.indexOf("if (want('final')) {"));
+  ok(finalBlock.includes("roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(),"),
+    'the Finalize prompt carries its note');
+  ok(/roleAgent\('director', 'validate', '[^']*' \+\s*agentxClaimNote\(finalTput, BASELINE_TPUT\)/.test(finalBlock),
+    'and the Validate prompt carries the note on the claim it is handed');
+}
+
+console.log('\n# a trace replay skips only a Validate that has nothing to measure or no time to return a number');
+// Validate benches the stock and the final bundle on the canonical window. A run that adopted nothing
+// hands it the stock bundle twice, which Setup already measured there; with less time left than those
+// two timed windows, the run is stopped before it can return a number. Every other Validate runs.
+{
+  const slice = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  const helpersSrc = [
+    slice('const FINAL_RESERVE_CAP_FRAC', 'const TIME_BUDGET_EFFECTIVE_MS'),
+    src.slice(src.indexOf('const WORKLOAD_SPEC ='), src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'))),
+    slice('function agentxFinalizeNote()', 'function correctnessEnvBlock('),
+    'return { agentxAdoptedNothing, agentxValidateSkip, AGENTX_VALIDATE_WINDOWS_MS };',
+  ].join('\n');
+  const helpersFor = (A) => new Function('A', 'TIME_BUDGET_MS', helpersSrc)(A, 12 * 3600 * 1000);
+  const MN = 60000;
+  const AX = { workload_kind: 'agentx_trace_replay' };
+  const ax = helpersFor(AX);
+  const SETUP = { flags: '--max-num-seqs 64', env: 'VLLM_USE_V1=1', overlay: '' };
+  const stock = { setup: SETUP, accepted: 0, tput: 113.325, baseline: 113.325, ...SETUP };
+  ok(ax.agentxAdoptedNothing(stock), "nothing accepted, and the carried number and config still Setup's: the stock bundle");
+  const adoptions = { accepted: 1, tput: 113.9, flags: '--max-num-seqs 128', env: 'VLLM_USE_V1=1 X=1', overlay: '/eval/overlay/kb' };
+  const missed = Object.keys(adoptions).filter((k) => ax.agentxAdoptedNothing({ ...stock, [k]: adoptions[k] }));
+  ok(missed.length === 0, `any single adoption makes it a changed bundle (missed: ${JSON.stringify(missed)})`);
+  ok(!ax.agentxAdoptedNothing({ ...stock, setup: null }) && !ax.agentxAdoptedNothing({ ...stock, tput: 0, baseline: 0 }),
+    'so does a run that did not run Setup itself, or got no baseline from it');
+  ok(!helpersFor({}).agentxAdoptedNothing(stock), 'and a fixed-ISL/OSL run never takes this path');
+  ok(ax.AGENTX_VALIDATE_WINDOWS_MS === 120 * MN, "Validate's two 3600s windows, with no boot at all, take 120min");
+  ok(ax.agentxValidateSkip(true, 600 * MN) === 'final_is_baseline', 'the stock bundle is not re-measured, however much time is left');
+  ok(ax.agentxValidateSkip(false, 121 * MN) === '' && ax.agentxValidateSkip(false, 119 * MN) === 'no_time',
+    'a changed bundle is validated with 121min left; with 119min it is not started');
+  ok(ax.agentxValidateSkip(false, Infinity) === '', 'without time_budget_s it is always attempted');
+  const declared = helpersFor({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } });
+  ok(declared.agentxValidateSkip(false, 61 * MN) === '' && declared.agentxValidateSkip(false, 59 * MN) === 'no_time',
+    'the bar follows the canonical window the run declares (1800s: 60min)');
+  ok(helpersFor({ ...AX, validation_measurement_mode: 'isolated_server', validation_replicas: 3 })
+    .AGENTX_VALIDATE_WINDOWS_MS === 360 * MN, 'an isolated validation counts every fresh server: six windows, 360min');
+  const fixed = helpersFor({});
+  ok(fixed.agentxValidateSkip(true, 0) === '' && fixed.agentxValidateSkip(false, 0) === '',
+    'a fixed-ISL/OSL run always attempts Validate');
+
+  // Wired where it decides: Setup records the config its baseline was measured on; the stock bundle's
+  // number replaces Finalize's search leg before the final-pair gate and Report read it; and a skipped
+  // Validate is neither fenced nor dispatched.
+  const setupAt = src.indexOf('SETUP_CONFIG = {');
+  ok((src.match(/^\s*SETUP_CONFIG = /mg) || []).length === 1
+    && /curOverlay = INIT_BASE_OVERLAY;\s*SETUP_CONFIG = \{ flags: curFlags, env: curEnv, overlay: curOverlay \};/.test(src)
+    && setupAt > src.indexOf("if (want('setup')) {") && setupAt < src.indexOf('// Load carried state from a prior phase invocation'),
+  'SETUP_CONFIG is set in one place: the Setup branch, before any warm start or search');
+  const fb = src.slice(src.indexOf("phase('Finalize');"));
+  const at = (s) => fb.indexOf(s);
+  ok(/agentxAdoptedNothing\(\{ setup: SETUP_CONFIG, accepted: allAccepted\.length, tput: curTput,\s*baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay \}\)/.test(fb)
+    && at('finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;') < at('if (adoptedNothing) finalTput = BASELINE_TPUT;')
+    && at('if (adoptedNothing) finalTput = BASELINE_TPUT;') < at("requireE2EValidationCheckpoint('final/e2e_validation.json'")
+    && at("requireE2EValidationCheckpoint('final/e2e_validation.json'") < at("phase('Report');"),
+  "the stock bundle carries Setup's number into the final-pair gate, Report and Validate's claim");
+  const vb = fb.slice(at("phase('Validate');"), at("label: 'director:validate'"));
+  ok(/^phase\('Validate'\);\s*validateSkip = agentxValidateSkip\(adoptedNothing, remainingMs\(\)\);/.test(vb)
+    && /\} else \{\s*await finalPhaseFence\('validate', 'Validate'\);\s*\}\s*validation = validateSkip \? null : await safeAgent\(\s*roleAgent\('director', 'validate', /.test(vb)
+    && (src.match(/finalPhaseFence\('validate'/g) || []).length === 1,
+  'a skipped Validate is neither fenced nor dispatched; one that runs gets the call it had');
+  ok(/\n  finalFromAb = IS_AGENTX && !validatedOk && allAccepted\.length > 0;/.test(fb)
+    && at('finalFromAb = ') > at('validatedOk = !!(validation'),
+  'a trace replay that accepted a head or kernel and got no Validate number is marked once Validate is over');
+
+  // The return, executed. With no Validate number, a trace replay whose A/B won hands run_e2e.py no
+  // final and no speedup, so it publishes that A/B's own pair, never the search-over-canonical ratio;
+  // its status keeps both KB writers from recording it.
+  const rs = src.indexOf('  final_throughput_tok_s: validatedOk');
+  const re = src.indexOf('  output_parity: validation ? validation.output_parity', rs);
+  const vs = src.indexOf('function validationStatusOf() {');
+  const ve = src.indexOf('\n}\n', vs) + 2;
+  const ret = (b) => new Function('validatedOk', 'validation', 'finalFromAb', 'finalTput', 'finalSpeedup',
+    'want', 'validateSkip', 'IS_AGENTX', `${src.slice(vs, ve)}\nreturn {\n${src.slice(rs, re)}};`)(
+    !!b.validatedOk, b.validation || null, !!b.finalFromAb, b.finalTput, b.finalSpeedup,
+    (p) => p !== 'final' || b.final !== false, b.validateSkip || '', !!b.agentx);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  ok(rs !== -1 && re > rs && vs !== -1, "the return's final and status fields are located");
+  ok(same(ret({ agentx: true, validateSkip: 'final_is_baseline', finalTput: 113.325, finalSpeedup: 1.0 }),
+    { final_throughput_tok_s: 113.325, throughput_speedup: 1.0, validation_status: 'skipped_final_is_baseline' }),
+  "the stock bundle returns Setup's number at 1.0x, so run_e2e.py reports no_gain");
+  const noNumber = { final_throughput_tok_s: 0, throughput_speedup: 0, validation_status: 'flagged_no_number_used_carried_ab' };
+  ok(same(ret({ agentx: true, validateSkip: 'no_time', finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005 }), noNumber)
+    && same(ret({ agentx: true, finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005 }), noNumber),
+  'a Validate skipped for time, or one that returned nothing, hands back no pair and a flagged status');
+  ok(ret({ agentx: true, finalFromAb: true, finalTput: 113.9, finalSpeedup: 1.005,
+    validation: { validation_status: 'final_bench_failed', director_verified_throughput_tok_s: 0 } })
+    .validation_status === 'final_bench_failed_no_number_used_carried_ab',
+  "a Director that answered without a number keeps its own word in the status, as before");
+  ok(same(ret({ agentx: true, finalTput: 108.2, finalSpeedup: 0.955 }),
+    { final_throughput_tok_s: 108.2, throughput_speedup: 0.955, validation_status: 'flagged_no_number_used_carried_ab' }),
+  'a config-only run keeps the number it carried, flagged');
+  const verified = { validation_status: 'validated_win', director_verified_throughput_tok_s: 119.0 };
+  ok(same(ret({ agentx: true, validatedOk: true, validation: verified, finalTput: 113.9, finalSpeedup: 1.0024 }),
+    { final_throughput_tok_s: 119.0, throughput_speedup: 1.0024, validation_status: 'validated_win' }),
+  "a measured Validate is returned exactly as before");
+  const before = (b) => ({
+    final_throughput_tok_s: b.validatedOk ? b.validation.director_verified_throughput_tok_s : b.finalTput,
+    throughput_speedup: b.finalSpeedup,
+    validation_status: b.validatedOk ? b.validation.validation_status
+      : (b.validation ? `${b.validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+        : (b.final !== false ? 'unknown' : 'phase_partial')),
+  });
+  const FIXED = [{ finalTput: 900, finalSpeedup: 1.1 }, { finalTput: 900, finalSpeedup: 1.1, final: false },
+    { finalTput: 900, finalSpeedup: 1.1, validation: { validation_status: 'flagged', director_verified_throughput_tok_s: 0 } },
+    { finalTput: 900, finalSpeedup: 1.1, validation: {} },
+    { validatedOk: true, validation: { validation_status: 'validated_win', director_verified_throughput_tok_s: 950 },
+      finalTput: 900, finalSpeedup: 1.15 }];
+  ok(FIXED.every((b) => same(ret(b), before(b))), 'a fixed-ISL/OSL run returns exactly what it returned before');
+  ok(/log\(`COMPLETE\.[^;]*, status \$\{validationStatusOf\(\)\}/.test(src),
+    'the COMPLETE line prints the status the run returns, so a skipped Validate no longer reads "status ?"');
+}
+
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
 ok(/let TIME_FINAL_DEADLINE_HIT = false;/.test(src), 'TIME_FINAL_DEADLINE_HIT exists');
 ok(/TIME_FINAL_DEADLINE_HIT = true;/.test(src) && /}, TIME_BUDGET_EFFECTIVE_MS\);/.test(src),
@@ -248,8 +466,178 @@ for (const [gateArg, dispatch] of [
   const dispatches = (between.match(/\b(?:safeAgent|runIntegrateBothLegs|runValidation)\(/g) || []).length;
   ok(g !== -1 && d > g && dispatches <= 1 && d - g < 4000, `${dispatch} is gated by searchClosed(${gateArg}...)`);
 }
-ok(/if \(searchClosed\('Profile and Strategize'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
+ok(/if \(searchClosed\('Profile and Strategize'\) \|\| searchWindowShort\('[^']+'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
   'skipping Strategize still leaves both queues arrays (they are declared without a value)');
+
+console.log('\n# a trace replay starts no search work that would run into the reserve');
+// The GLM-5.2 run again: a head's second author lane started 36min before the boundary and ran 4h08m
+// past it, and an A/B was dispatched inside the reserve. The lane was already running when the boundary
+// closed the search, so the checks above could not stop it; these decide before work starts.
+const gStart = src.indexOf('// --- TRACE-REPLAY SEARCH vs THE RESERVE');
+const gEnd = src.indexOf('// GPU semaphore (FAST MODE only', gStart);
+ok(gStart !== -1 && gEnd > gStart, 'the trace-replay search guards located');
+const lineOf = (needle) => src.slice(src.indexOf(needle), src.indexOf('\n', src.indexOf(needle)));
+const guardHarnessSrc = [
+  'let ELAPSED_MS = 0;', lineOf('const remainingMs ='), lineOf('const obj = '),
+  lineOf('const AGENT_TIMEOUT_FLOOR_MS ='),
+  src.slice(src.indexOf('const FINAL_RESERVE_CAP_FRAC'), src.indexOf('const TIME_BUDGET_EFFECTIVE_MS')),
+  src.slice(src.indexOf('const WORKLOAD_SPEC ='), src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'))),
+  src.slice(gStart, gEnd),
+  'ELAPSED_MS = TIME_BUDGET_MS == null ? 0 : TIME_BUDGET_MS - FINAL_RESERVE_MS - WINDOW_MS;',
+  'return { abWindowShort, laneWindowShort, searchWindowShort, laneDeadlineArgs, laneReserveCapMs, agentxAbMs,',
+  '  agentxLaneTailMs, abLegs, advance: (ms) => { ELAPSED_MS += ms; } };',
+].join('\n');
+const EPOCH = 1800000000;
+const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12 * 3600 * 1000, windowMin = 0,
+  finalStarted = false, clock = () => ({ epoch: EPOCH }) } = {}) => {
+  const logs = [], reads = [];
+  const api = new Function('A', 'TIME_BUDGET_MS', 'FINAL_PHASE_STARTED', 'WINDOW_MS', 'safeAgent', 'log',
+    guardHarnessSrc)(A, budgetMs, finalStarted, windowMin * 60000,
+    async (prompt, opts, tries, timeoutFor) => {
+      reads.push({ prompt, opts, tries, timeoutMs: timeoutFor() });
+      return clock(reads.length);
+    }, (m) => logs.push(String(m)));
+  return Object.assign(api, { logs, reads });
+};
+{
+  const g = guardsFor({ windowMin: 300 });
+  ok(g.agentxAbMs(2) === 80 * 60000 && g.agentxAbMs(1) === 45 * 60000 && g.agentxLaneTailMs() === 140 * 60000,
+    'an A/B is two 900s legs at +20min each plus 10min (80min), 45min with its reference reused; a lane tail is that plus a round');
+  ok(g.abLegs({}) === 2 && g.abLegs(undefined) === 2 && g.abLegs({ REUSE_REF: true, SHARED_REF_MED: 1 }) === 1
+    && g.abLegs({ RESUME_AB: true }) === 1, 'a shared or on-disk reference leg is not counted twice');
+  const short = guardsFor({ windowMin: 79 });
+  ok(short.abWindowShort(2, 'head k') && /head k DEFERRED — ~79min left/.test(short.logs.join('\n')),
+    'an A/B with 79min left before the boundary is deferred, and says so by name');
+  ok(!guardsFor({ windowMin: 81 }).abWindowShort(2, 'x'), 'with 81min left it runs');
+  ok(!guardsFor({ windowMin: 50 }).abWindowShort(1, 'x') && guardsFor({ windowMin: 44 }).abWindowShort(1, 'x'),
+    'a one-leg A/B needs 45min');
+  ok(g.agentxAbMs(2, 2) === 150 * 60000,
+    "a speedup review's confirmation (two fresh legs of two timed passes) is costed as four legs: 150min");
+  const review = guardsFor({ windowMin: 120 });
+  ok(review.abWindowShort(2, 'h1: speedup review', 2)
+    && /h1: speedup review DEFERRED — ~120min left .* ~150min a 2-leg trace-replay A\/B with 2 timed passes a leg takes/
+      .test(review.logs.join('\n')) && !guardsFor({ windowMin: 120 }).abWindowShort(2, 'x'),
+  'with 120min left an ordinary A/B runs but a confirmation is deferred, and says so by name');
+  const late = guardsFor({ windowMin: 199 });
+  ok(late.laneWindowShort('author lane k:triton') && /author lane k:triton NOT STARTED/.test(late.logs.join('\n')),
+    'a lane with 199min left is not started: one round plus its A/B tail would not fit');
+  ok(!guardsFor({ windowMin: 201 }).laneWindowShort('x'), 'with 201min left it starts');
+  // After the KB warm start: kernel extraction (70min) and one lane (200min) must both still fit, or
+  // the run goes straight to Finalize and Validate.
+  const kbOnly = guardsFor({ windowMin: 269 });
+  ok(kbOnly.searchWindowShort('Profile, kernel extraction and the kernel search')
+    && /kernel search SKIPPED — ~269min left .* ~270min kernel extraction plus one kernel lane/.test(kbOnly.logs.join('\n'))
+    && /Going straight to Finalize and Validate/.test(kbOnly.logs.join('\n')),
+  'with 269min left after the warm start the search is skipped, and the run says it goes straight to Validate');
+  ok(!guardsFor({ windowMin: 271 }).searchWindowShort('x'), 'with 271min left the search runs');
+  ok(guardsFor({ windowMin: 300 }).laneReserveCapMs() === 300 * 60000
+    && guardsFor({ windowMin: 1 }).laneReserveCapMs() === 120000,
+  'a running lane is never waited for past the boundary (floored at the 2min agent floor)');
+  const off = [guardsFor({ A: {}, windowMin: 1 }), guardsFor({ budgetMs: null }), guardsFor({ windowMin: 1, finalStarted: true })];
+  ok(off.every((o) => !o.abWindowShort(2, 'x') && !o.laneWindowShort('x') && !o.searchWindowShort('x')
+    && o.laneReserveCapMs() === null && o.logs.length === 0),
+  'inert, and silent, for a synthetic run, without time_budget_s, and in the final phase');
+}
+
+// Where they are consulted. The integrate entry point covers every A/B site (head, milestone,
+// Finalize-gate, disk-recovered) and the speedup review the confirmation it adds; the lane wrappers
+// cover every lane the search starts.
+{
+  const ribSrc = src.slice(src.indexOf('async function runIntegrateBothLegs('),
+    src.indexOf('if (integ && integ.short_name)', src.indexOf('async function runIntegrateBothLegs(')));
+  ok(/^async function runIntegrateBothLegs\([^)]*\) \{\s*\/\/[^\n]*\n\s*if \(abWindowShort\(abLegs\(inputs\), label\)\) \{\s*return \{ gate: 'incomplete', ab_complete: false,/.test(ribSrc),
+    'runIntegrateBothLegs defers an A/B that cannot finish before anything is dispatched, as incomplete (kept pending)');
+  const rvSrc = src.slice(src.indexOf('async function reviewSpeedup('), src.indexOf('async function runIntegrateBothLegs('));
+  const rvGate = rvSrc.indexOf('if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {');
+  ok(rvGate > rvSrc.indexOf('REPLICAS: Math.max(2,') && rvGate < rvSrc.indexOf('await safeAgent(')
+    && /^\s*pending\.reason = 'speedup_review_inconclusive: deferred[^']*';\s*return pending;/.test(rvSrc.slice(rvSrc.indexOf('\n', rvGate))),
+  'a speedup review checks its confirmation, counted with its timed passes, before dispatching it');
+  const rx = (name) => new Function(`return ${src.match(new RegExp(`const ${name} = (/.*/[a-z]*);`))[1]};`)();
+  const reason = (ribSrc.match(/reason: '(deferred: [^']+)'/) || [])[1] || '';
+  ok(reason && !rx('FIXABLE_REJECT_RX').test(reason) && !rx('CORRECTNESS_REJECT_RX').test(reason),
+    'its reason reads as neither a fixable nor a correctness reject, so no repair loop starts on a deferral');
+  ok(/if \(searchClosed\(`\$\{label\}: FINISH retry`\)\) break;\s*if \(abWindowShort\(1, `\$\{label\}: FINISH retry`\)\) break;/.test(ribSrc),
+    'nor does a one-leg FINISH retry that cannot finish');
+  const fg = src.indexOf('while (pendingIntegrations.length)', src.indexOf("if (want('final'))"));
+  const fgBody = src.slice(fg, src.indexOf('runIntegrateBothLegs', fg));
+  ok(fgBody.indexOf('abWindowShort(abLegs(pendingIntegrations[0].inputs)') !== -1
+    && fgBody.indexOf('abWindowShort(abLegs(pendingIntegrations[0].inputs)') < fgBody.indexOf('pendingIntegrations.shift()')
+    && /abWindowShort\(abLegs\(pendingIntegrations\[0\]\.inputs\)[\s\S]*?\bbreak;/.test(fgBody),
+  'the Finalize-gate stops, leaving the rest in pending_integrations, at the first A/B that cannot finish');
+  const authorGate = src.indexOf('if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {');
+  ok(authorGate > src.indexOf("const lang = ap.language || 'triton';") && authorGate < src.indexOf('const AUTHOR_TRIES', authorGate)
+    && /verdict: 'paused'[\s\S]{0,200}break;/.test(src.slice(authorGate, authorGate + 400)),
+  "a head's next author language is not started without room for a lane, and is ledgered as paused");
+  const ms = src.indexOf("phase('Milestone');");
+  ok(src.indexOf('await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }', ms) > ms
+    && src.indexOf('workflow({ scriptPath: KERNEL_WF_SCRIPT }', ms) === -1,
+  'every Milestone lane goes through reserveBoundedWorkflow');
+  for (const w of ['fastBoundedWorkflow', 'reserveBoundedWorkflow']) {
+    const body = src.slice(src.indexOf(`async function ${w}(`), src.indexOf('\n}', src.indexOf(`async function ${w}(`)));
+    ok(body.includes('if (laneWindowShort(') && body.includes('await laneDeadlineArgs(label, ')
+      && body.includes('laneReserveCapMs()'), `${w} checks the start window, sets the round deadline and the backstop`);
+  }
+}
+
+console.log('\n# a required checkpoint keeps its own bound at the reserve boundary');
+// The 20261014 GLM run: the accepted-stack checkpoint was dispatched as the reserve began, got the 2min
+// floor and was cut off mid-write. The throw that followed discarded a +36% stack with 6h of reserve left.
+const kStart = src.indexOf('function checkpointTimeoutFor');
+const kEnd = src.indexOf('\n}', kStart) + 2;
+ok(kStart > fEnd, 'checkpointTimeoutFor located after atReserveFloor');
+if (kStart === -1) process.exit(1);
+const COMMIT = 30 * 60000;
+const commitAt = (TIME_BUDGET_MS, leftMs, agentMax = AGENT_MAX) => new Function(
+  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, kEnd)}
+   return { agentTimeoutFor, checkpointTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
+  TIME_BUDGET_MS, agentMax, RESERVE, () => leftMs);
+const kBoundary = commitAt(H, RESERVE);
+ok(kBoundary.agentTimeoutFor() === 120000 && kBoundary.checkpointTimeoutFor() === COMMIT,
+  'at the boundary an optimization agent still floors at 2min, and a required checkpoint gets 30min');
+ok(commitAt(H, 10 * 60000).checkpointTimeoutFor() === COMMIT, 'deep inside the reserve it still gets 30min');
+const kMid = commitAt(H, 2 * 3600 * 1000);
+ok(kMid.checkpointTimeoutFor() === kMid.agentTimeoutFor() && kMid.agentTimeoutFor() === AGENT_MAX - RESERVE,
+  'mid-run it keeps the ordinary bound, which is the longer one there');
+const kFinal = commitAt(H, RESERVE);
+kFinal.enterFinalPhase();
+ok(kFinal.checkpointTimeoutFor() === AGENT_MAX, 'in the final phase it is the plain AGENT_TIMEOUT_MS, as before');
+ok(commitAt(H, RESERVE, 10 * 60000).checkpointTimeoutFor() === 10 * 60000,
+  'an agent_timeout_ms below 30min still caps it');
+ok(new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, kEnd)}\nreturn checkpointTimeoutFor;`)(null, AGENT_MAX, null, () => Infinity)() === AGENT_MAX,
+'no time_budget_s => byte-identical');
+// Granted where the commit happens, not by a label a caller sets, so the round-2 hole stays closed.
+ok((src.match(/\bcheckpointTimeoutFor\b/g) || []).length === 2,
+  'checkpointTimeoutFor is defined once and passed at exactly one call site');
+ok(/async function requireE2EValidationCheckpoint\(relativePath, intent\) \{\s*const written = await persistE2EValidationCheckpoint\(relativePath, intent, checkpointTimeoutFor\);/.test(src),
+  'that call site is requireE2EValidationCheckpoint, so candidate-local diagnostics keep the ordinary cap');
+
+// The whole commit path, executed: requireE2EValidationCheckpoint -> persistE2EValidationCheckpoint ->
+// safeAgent -> agentBounded. Time is scaled (1min -> 4ms) so the writer and the guard really race.
+const persistSrc = src.slice(src.indexOf('let lastCommittedCheckpoint = null;'),
+  src.indexOf('// Expert-skills prompt injection.'));
+const dispatchSrc = src.slice(src.indexOf('function agentBounded('), src.indexOf('// --- FlyDSL provisioning gate'));
+ok(persistSrc.includes('async function requireE2EValidationCheckpoint(') &&
+  dispatchSrc.includes('async function safeAgent('), 'checkpoint writer and dispatch loop located');
+const SCALE = 15000;
+const commitHarness = ({ leftMs = RESERVE, retry = false, writer }) => {
+  const calls = [], logs = [];
+  const api = new Function(
+    'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'AGENT_TIMEOUT_RETRY',
+    'withProcessSafety', 'ablEffortFor', 'ablEvent', 'ABL', 'tlAgent', 'LLM_TL', 'log', 'agent',
+    'EVAL_DIR', 'CHECKPOINT_WRITE_SCHEMA', 'setTimeout',
+    `${src.slice(aStart, kEnd)}\n${dispatchSrc}\n${persistSrc}
+     return { persistE2EValidationCheckpoint, requireE2EValidationCheckpoint, ABANDONED_RUNS };`)(
+    H, AGENT_MAX, RESERVE, () => leftMs, retry,
+    (p) => p, () => null, () => {}, () => false, () => null, { nested: [] }, (m) => logs.push(m),
+    (prompt, opts) => { calls.push(opts.label); return writer(calls.length); },
+    '/eval', {}, (fn, ms) => setTimeout(fn, ms / SCALE));
+  return { ...api, calls, logs };
+};
+const STACK = 'overlay/accepted_stack/e2e_validation.json';
+const WRITTEN = { written: true, path: `/eval/${STACK}`, checkpoint_sha256: 'ab12' };
+const eightMinWrite = () => new Promise((resolve) => setTimeout(() => resolve(WRITTEN), 8 * 60000 / SCALE));
 
 console.log("\n# an integrator abandoned at the reserve boundary keeps its verdict");
 const rib = src.slice(src.indexOf('async function runIntegrateBothLegs('),
@@ -265,12 +653,12 @@ ok(/integ = await adoptAbandonedVerdict\(await safeAgent\([\s\S]*?label: finishL
 const adSrc = src.slice(src.indexOf('const LATE_VERDICT_RESERVE_FRAC'),
   src.indexOf('// Run ONE integrate A/B and GUARANTEE'));
 ok(adSrc.includes('async function adoptAbandonedVerdict('), 'adoptAbandonedVerdict located');
-const adoptHarness = ({ floor = true, leftMs = RESERVE, run, integ = null }) => {
+const adoptHarness = ({ floor = true, leftMs = RESERVE, run, integ = null, reserve = RESERVE, finalPhase = 0 }) => {
   const waits = [];
   const runs = new Map(run ? [['warm_start integrate k', run]] : []);
-  const fn = new Function('ABANDONED_RUNS', 'atReserveFloor', 'remainingMs', 'FINAL_RESERVE_MS', 'log',
-    'LLM_TL', 'setTimeout', `${adSrc}\nreturn adoptAbandonedVerdict;`)(
-    runs, () => floor, () => leftMs, RESERVE, () => {}, { nested: [] },
+  const fn = new Function('ABANDONED_RUNS', 'atReserveFloor', 'remainingMs', 'FINAL_RESERVE_MS',
+    'AGENTX_FINAL_PHASE_MS', 'log', 'LLM_TL', 'setTimeout', `${adSrc}\nreturn adoptAbandonedVerdict;`)(
+    runs, () => floor, () => leftMs, reserve, finalPhase, () => {}, { nested: [] },
     (cb, ms) => { waits.push(ms); if (run === NEVER) cb(); return 0; });
   return { adopt: () => fn(integ, 'warm_start integrate k'), waits, runs };
 };
@@ -301,6 +689,92 @@ const verdict = { gate: 'accepted', ab_complete: true, e2e_delta_pct: 23.99 };
   const got = { gate: 'rejected', ab_complete: true };
   const returned = adoptHarness({ integ: got, run: Promise.resolve(verdict) });
   ok(await returned.adopt() === got && returned.waits.length === 0, 'a verdict already in hand is never replaced');
+
+  // A trace replay's wait stops where its final phase's own cost begins: past that, every minute
+  // waited is a minute Validate's second canonical leg does not get.
+  const AX_PHASE = 235 * 60000;
+  const axTight = adoptHarness({ reserve: AX_PHASE, finalPhase: AX_PHASE, leftMs: AX_PHASE, run: Promise.resolve(verdict) });
+  ok(await axTight.adopt() === null && axTight.waits.length === 0,
+    'a trace replay whose reserve is exactly its final phase awaits nothing: the wait could only cut Validate');
+  const axMid = adoptHarness({ reserve: 300 * 60000, finalPhase: AX_PHASE, leftMs: 300 * 60000, run: Promise.resolve(verdict) });
+  ok(await axMid.adopt() === verdict && axMid.waits.length === 1 && axMid.waits[0] === 65 * 60000,
+    `with a 300min reserve it waits ${axMid.waits[0] / 60000}min, not the quarter (75min): the rest is the final phase's`);
+  const axWide = adoptHarness({ reserve: 480 * 60000, finalPhase: AX_PHASE, leftMs: 480 * 60000, run: Promise.resolve(verdict) });
+  ok(await axWide.adopt() === verdict && axWide.waits[0] === 120 * 60000,
+    'a reserve far wider than the final phase still waits its first quarter (120min of 480min)');
+
+  console.log('\n# the accepted-stack commit at the boundary, end to end (agent_timeout_retry=false, as in the GLM run)');
+  const cut = commitHarness({ writer: eightMinWrite });
+  ok(await cut.persistE2EValidationCheckpoint(STACK, { phase: 'Overlay' }) === null &&
+    cut.logs.some((m) => /exceeded 2min/.test(m)),
+  'through the ordinary cap an 8min write at the boundary is cut off at 2min');
+  const commit = commitHarness({ writer: eightMinWrite });
+  const landed = await commit.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }).catch((e) => e);
+  ok(landed === WRITTEN && commit.calls.length === 1 && !commit.logs.some((m) => /hung-agent guard/.test(m)),
+    'through requireE2EValidationCheckpoint the same write lands, in one dispatch');
+
+  const stuck = commitHarness({ retry: true, writer: () => new Promise(() => {}) });
+  let threw = '';
+  try { await stuck.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }); } catch (e) { threw = String(e); }
+  ok(/checkpoint_write_failed/.test(threw) && stuck.logs.some((m) => /exceeded 30min/.test(m)),
+    'a writer that never returns still fails the commit, after 30min');
+  ok(stuck.calls.length === 1 && stuck.ABANDONED_RUNS.has(`persist-e2e-checkpoint:${STACK}`),
+    'even with agent_timeout_retry on, it is not retried beside itself: one dispatch, the attempt kept');
+
+  const flaky = commitHarness({ writer: (n) => Promise.resolve(n === 1 ? null : WRITTEN) });
+  ok(await flaky.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }).catch((e) => e) === WRITTEN &&
+    flaky.calls.length === 2, 'a writer that returns empty inside the reserve is retried once, and the retry commits');
+
+  console.log("\n# a trace-replay lane's round deadline, and the bound on waiting for it");
+  const dl = guardsFor({ windowMin: 300 });
+  const first = await dl.laneDeadlineArgs('lane k', 'HeadKernel');
+  ok(first.deadline_epoch === EPOCH + 160 * 60 && first.no_stop_s === 160 * 60 + 86400,
+    'with 300min left the lane starts no round after 160min: its last round and its A/B fit before the boundary');
+  ok(dl.reads.length === 1 && /date \+%s/.test(dl.reads[0].prompt) && dl.reads[0].tries === 1
+    && dl.reads[0].timeoutMs === 5 * 60000 && dl.reads[0].opts.phase === 'HeadKernel' && dl.reads[0].opts.label === 'clock',
+  'the wall clock is one `date +%s` read, one try, bounded at 5min');
+  dl.advance(30 * 60000);
+  const second = await dl.laneDeadlineArgs('lane j', 'Milestone');
+  ok(second.deadline_epoch === first.deadline_epoch && dl.reads.length === 1,
+    'a lane started 30min later gets the same absolute stop, from the same read: the boundary does not move');
+  const lateLane = guardsFor({ windowMin: 100 });
+  ok(Object.keys(await lateLane.laneDeadlineArgs('x', 'HeadKernel')).length === 0 && lateLane.reads.length === 0,
+    'no deadline (and no read) once no round fits: the start check refuses such a lane before it gets here');
+  const blind = guardsFor({ windowMin: 300, clock: () => null });
+  ok(Object.keys(await blind.laneDeadlineArgs('x', 'HeadKernel')).length === 0
+    && /wall clock unreadable/.test(blind.logs.join('\n')),
+  'an unreadable clock leaves the lane without a deadline (the backstop still bounds it), and says so');
+  await blind.laneDeadlineArgs('y', 'HeadKernel');
+  ok(blind.reads.length === 2, 'and a failed read is not cached: the next lane tries again');
+  const synth = guardsFor({ A: {}, windowMin: 300 });
+  ok(Object.keys(await synth.laneDeadlineArgs('x', 'HeadKernel')).length === 0 && synth.reads.length === 0,
+    'a synthetic run never reads the clock and passes the lane nothing new');
+
+  const rbwStart = src.indexOf('async function reserveBoundedWorkflow(');
+  const rbwEnd = src.indexOf('\n}', src.indexOf('function logLaneAtReserve(')) + 2;
+  ok(rbwStart !== -1 && rbwEnd > rbwStart, 'reserveBoundedWorkflow and its race located');
+  const laneHarness = ({ short = false, deadline = {}, capMs = null, result }) => {
+    const calls = [], logs = [];
+    const fn = new Function('laneWindowShort', 'laneDeadlineArgs', 'workflow', 'laneArgs', 'noteKernelKB',
+      'laneReserveCapMs', 'setTimeout', 'clearTimeout', 'log',
+      `${src.slice(rbwStart, rbwEnd)}\nreturn reserveBoundedWorkflow;`)(
+      () => short, async () => deadline, (ref, args) => { calls.push(args); return result; },
+      (a) => ({ ...a, lane_defaults: true }), (r) => r, () => capMs,
+      (cb) => { if (result === NEVER) cb(); return 1; }, () => {}, (m) => logs.push(String(m)));
+    return { run: () => fn({ scriptPath: 'kernel_lane.js' }, { kernel_path: '/task' }, 'k'), calls, logs };
+  };
+  const LANE = { final_patch: 'p', final_geomean: 1.2 };
+  const plain = laneHarness({ result: Promise.resolve(LANE) });
+  ok(await plain.run() === LANE && plain.calls[0].lane_defaults && !('deadline_epoch' in plain.calls[0]),
+    'guards off: the plain lane call, lane defaults injected and nothing added');
+  const timed = laneHarness({ deadline: { deadline_epoch: 7, no_stop_s: 9 }, capMs: 60000, result: Promise.resolve(LANE) });
+  ok(await timed.run() === LANE && timed.calls[0].deadline_epoch === 7 && timed.calls[0].no_stop_s === 9
+    && timed.calls[0].lane_defaults, 'a trace replay hands the lane its round deadline beside the lane defaults');
+  const hungLane = laneHarness({ capMs: 60000, result: NEVER });
+  ok(await hungLane.run() === null && /still running at the final reserve/.test(hungLane.logs.join('\n')),
+    'a lane still running at the boundary is abandoned (null) so Finalize starts on time');
+  const refused = laneHarness({ short: true, result: Promise.resolve(LANE) });
+  ok(await refused.run() === null && refused.calls.length === 0, 'a lane refused by the start check never runs');
 
   console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
   process.exit(failures ? 1 : 0);

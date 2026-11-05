@@ -81,7 +81,13 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
         if (selectedOwners.has(id)) throw new Error(`selected kernel already owned by ${selectedOwners.get(id)}: ${id}`);
       }
       for (const id of candidate.selected_device_kernels || [candidate.device_kernel]) selectedOwners.set(id, label);
-      candidate.prepared_ut = { phase: task.phase, result_path: resultPath, sha256: sha256(bytes) };
+      // `result` travels WITH the envelope, not just its path: the workflow script runs in a
+      // sealed sandbox with no filesystem (see e2e_workflow.js "RUNTIME SANDBOX CONTRACT"), so a
+      // path it cannot open is not evidence it can act on. This object is the one this function
+      // just validated through checkPreparedUT, so carrying it forward hands the optimization
+      // lanes exactly what passed the gate instead of a promise to re-read it later.
+      candidate.prepared_ut = { phase: task.phase, result_path: resultPath,
+        sha256: sha256(bytes), result };
       // Existing optimization lanes lease one GPU. A validated multi-rank UT
       // remains a deliverable, but cannot be dispatched to that single-card lane.
       const gpuCount = kernel.required_gpu_count ?? result.required_gpu_count ??
@@ -103,23 +109,12 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
   return output;
 }
 
-// Downstream code consumes a prepared task; it does not invoke the extractor
-// again. Editing candidate code or its recorded result invalidates this reuse.
-export async function reusePreparedUT(kernel) {
-  try {
-    const ref = kernel.prepared_ut;
-    if (!ref) throw new Error('missing prepared UT; complete the extraction stage before optimization');
-    const bytes = await fs.readFile(ref.result_path);
-    if (sha256(bytes) !== ref.sha256) throw new Error('prepared UT result changed after validation');
-    const result = JSON.parse(bytes.toString('utf8'));
-    const checked = await checkPreparedUT({ ...kernel, source_delivery_required: true }, result, ref.phase);
-    if (!checked.ok) throw new Error(JSON.stringify(checked.checks));
-    return { ...result, op_kind: opKind(kernel, result), smoke: 'pass', unittest_smoke: 'pass' };
-  } catch (error) {
-    return { smoke: 'fail', unittest_smoke: 'fail',
-      smoke_detail: `prepared UT is no longer valid: ${error.message}` };
-  }
-}
+// NOTE: there is deliberately no re-reading reuse helper here any more. Dispatch happens inside
+// e2e_workflow.js, which runs in a sandbox with no filesystem (see its "RUNTIME SANDBOX CONTRACT"),
+// so it cannot call one -- it replays this module's verdict via the result carried in
+// prepared_ut.result and re-asserts the filesystem-free invariants itself (preparedUtDefect).
+// A helper here that nothing could call would be an untestable second opinion: readPreparedKernels
+// and packStandaloneTasks are the single gate, and a task edited after validation must fail there.
 
 // Translate the standalone skill's saved task declarations and returns into the
 // existing workflow envelope. Selection and GPU tests remain owned by the skill.
@@ -165,7 +160,9 @@ export async function packStandaloneTasks(evalDir, manifestPath, outputPath) {
   const invalid = prepared.failed_tasks.slice((manifest.failed_tasks || []).length);
   if (invalid.length) throw new Error(`completed tasks have invalid evidence: ${JSON.stringify(invalid)}`);
   await fs.writeFile(destination, JSON.stringify(delivery, null, 2) + '\n');
-  return { delivery_path: destination };
+  // `prepared` is the SAME document the invalid-task gate above was computed from — returning it
+  // costs nothing and is the only way the sandboxed workflow can see it (it cannot read the file).
+  return { delivery_path: destination, prepared };
 }
 
 async function main(argv) {
@@ -173,16 +170,22 @@ async function main(argv) {
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     if (key === '--help') {
-      console.log('node agentx_kernel_preparation.mjs --eval-dir EVAL --manifest workflow_tasks.json --out ut_delivery.json');
+      console.log('node agentx_kernel_preparation.mjs --eval-dir EVAL --manifest workflow_tasks.json --out ut_delivery.json [--emit-prepared]');
       return;
     }
+    // --emit-prepared also prints the workflow envelope this packing already computed. The
+    // workflow script cannot read the delivery file itself, so this is how it receives it.
+    if (key === '--emit-prepared') { options['--emit-prepared'] = true; continue; }
     if (!['--eval-dir', '--manifest', '--out'].includes(key) || !argv[i + 1])
       throw new Error(`unknown or incomplete option: ${key}`);
     options[key] = argv[++i];
   }
   if (!options['--eval-dir'] || !options['--manifest'] || !options['--out'])
     throw new Error('--eval-dir, --manifest and --out are required');
-  console.log(JSON.stringify(await packStandaloneTasks(options['--eval-dir'], options['--manifest'], options['--out'])));
+  const packed = await packStandaloneTasks(options['--eval-dir'], options['--manifest'], options['--out']);
+  console.log(JSON.stringify(options['--emit-prepared']
+    ? packed
+    : { delivery_path: packed.delivery_path }));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

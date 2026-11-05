@@ -336,14 +336,21 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
 
     meta_target = ""
     observed_calls = 0
+    compiled_observed = False
     if isinstance(capture_meta, dict):
         module = str(capture_meta.get("module") or "").strip()
         attr = str(capture_meta.get("attr") or "").strip()
         meta_target = f"{module}:{attr}" if module and attr else ""
         observed_calls = int(capture_meta.get("total_calls_observed") or 0)
+        compiled_observed = bool(capture_meta.get("compiled_passthrough_observed"))
     if meta_target != target_callable:
         failed.append("capture_target_mismatch")
-    if observed_calls <= 0:
+    # A hook that only ran inside torch.compile regions leaves no marker in the trace, so the trace
+    # checks below would fail for that one reason; name it once instead.
+    compiled_only = observed_calls <= 0 and compiled_observed
+    if compiled_only:
+        failed.append("capture_compiled_unobservable")
+    elif observed_calls <= 0:
         failed.append("target_not_observed")
 
     candidates = []
@@ -364,7 +371,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         if _complete_spans(trace_events, INSTALL_PREFIX + candidate)
     ]
     missing_candidate_markers = sorted(set(candidates) - set(installed_candidates))
-    if missing_candidate_markers:
+    if missing_candidate_markers and not compiled_only:
         failed.append("candidate_marker_not_installed")
     selected_evidence = evidence.get(target_callable) or {
         "marker": MARKER_PREFIX + target_callable, "spans": [], "marker_calls": 0,
@@ -372,12 +379,12 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     }
     marker = selected_evidence["marker"]
     spans = selected_evidence["spans"]
-    if not spans:
+    if not spans and not compiled_only:
         failed.append("target_marker_missing")
 
     related_external_ids = selected_evidence["related_external_ids"]
     matched = selected_evidence["matched"]
-    if not matched:
+    if not matched and not compiled_only:
         failed.append("device_kernel_not_under_target")
     deeper = [
         candidate for candidate, candidate_evidence in evidence.items()

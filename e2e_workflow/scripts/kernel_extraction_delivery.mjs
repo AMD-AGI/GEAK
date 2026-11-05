@@ -24,16 +24,61 @@ export async function loadContract(filename = workflowPath) {
     block('const hasFrozenBaseline =', '// Why an extraction failed'),
   ].join('\n');
   return new Function(`${code}\nreturn {
-    EXTRACT_SCHEMA, EXTRACT_OP_SCHEMA, kernelSelectionVerified,
-    hydrateExtractionVerdicts, hasFrozenBaseline
+    EXTRACT_SCHEMA, EXTRACT_OP_SCHEMA, kernelSelectionVerified, hasFrozenBaseline,
+    guardUnhydratedVerdicts
   };`)();
+}
+
+// Opt-in transport: hydrate exact Python verdicts before the selection gate reads them. A file
+// or hash error can NEVER fall back to an inline claim of PASS -- it becomes an explicit
+// selection_evidence_error instead.
+//
+// This lives HERE rather than in e2e_workflow.js because reading and hashing a file needs the
+// filesystem, and the workflow script runs in a sealed sandbox that has none (see the
+// "RUNTIME SANDBOX CONTRACT" comment there). This file is ordinary Node, so it is the one place
+// the check can actually run. The workflow carries only a pure guard that refuses an
+// unhydrated ref.
+export async function hydrateExtractionVerdicts(ext) {
+  if (!ext || typeof ext !== 'object') return ext;
+  const phases = Array.isArray(ext.phase_selection_validations) ? ext.phase_selection_validations : [];
+  if (!ext.selection_validation_ref && !phases.some(p => p && p.selection_validation_ref)) return ext;
+  const out = { ...ext };
+  try {
+    const task = await fs.realpath(ext.task_dir);
+    const readVerdict = async (row) => {
+      if (!row || !row.selection_validation_ref) return row;
+      const ref = row.selection_validation_ref;
+      if (typeof ref.path !== 'string' || !ref.path.trim() ||
+          typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256))
+        throw new Error('selection_validation_ref requires path and lowercase SHA-256');
+      const file = await fs.realpath(path.resolve(task, ref.path));
+      const relative = path.relative(task, file);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+        throw new Error('selection verdict must be a file inside task_dir');
+      const bytes = await fs.readFile(file);
+      if (createHash('sha256').update(bytes).digest('hex') !== ref.sha256)
+        throw new Error(`selection verdict SHA-256 mismatch: ${ref.path}`);
+      const verdict = JSON.parse(bytes.toString('utf8'));
+      if (!verdict || verdict.contract !== 'kernel_selection')
+        throw new Error(`not a kernel_selection verdict: ${ref.path}`);
+      return { ...row, selection_validation: verdict };
+    };
+    Object.assign(out, await readVerdict(out));
+    if (Array.isArray(ext.phase_selection_validations)) {
+      out.phase_selection_validations = [];
+      for (const row of phases) out.phase_selection_validations.push(await readVerdict(row));
+    }
+  } catch (error) {
+    out.selection_evidence_error = `selection evidence file invalid: ${error.message || error}`;
+  }
+  return out;
 }
 
 export async function checkDelivery(kernel, result, phase, contract = null) {
   if (!['extract', 'extract_op'].includes(phase)) throw new Error('phase must be extract or extract_op');
   contract ||= await loadContract();
   const schema = validate(result, phase === 'extract' ? contract.EXTRACT_SCHEMA : contract.EXTRACT_OP_SCHEMA);
-  const hydrated = await contract.hydrateExtractionVerdicts(result);
+  const hydrated = await hydrateExtractionVerdicts(result);
   let selection;
   try { selection = contract.kernelSelectionVerified(kernel, hydrated); }
   catch (e) { selection = { ok: false, why: `malformed selection evidence: ${e.message}` }; }

@@ -106,6 +106,17 @@ _gpu_is_idle() {
     [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
 }
 
+# gpu_busy_percent is a decaying average: our own previous job's tail clears in a few seconds,
+# a foreign tenant does not.
+_gpu_settle_idle() {
+    local id="$1" timeout="$2" t0=$SECONDS
+    while :; do
+        _gpu_is_idle "$id" && return 0
+        [ "$(( SECONDS - t0 ))" -ge "$timeout" ] && return 1
+        sleep 0.25
+    done
+}
+
 case "$GPU_SPEC" in
   *,*)
     # --- pool mode: block until some lane is free AND idle, then hold it for the whole command ---
@@ -123,7 +134,8 @@ case "$GPU_SPEC" in
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
-                if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$_g"; then
+                if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
+                   && ! _gpu_settle_idle "$_g" "${GEAK_GPU_SETTLE_S:-5}"; then
                     flock -u "$_fd"; exec {_fd}>&-   # foreign job on this GPU: try the next lane
                     continue
                 fi
@@ -241,8 +253,12 @@ else
         # was that a single GPU has no alternative to step to, which is true -- but it argues for a
         # loud failure, not for measuring on a contaminated card. Set GEAK_GPU_REQUIRE_IDLE=0 to
         # restore the old behavior for deliberately co-tenanted runs.
-        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$GPU_ID"; then
-            echo "ERROR: GPU $GPU_ID has foreign work running (busy/VRAM above threshold); refusing to measure on it" >&2
+        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
+           && ! _gpu_settle_idle "$GPU_ID" "${GEAK_GPU_SETTLE_S:-30}"; then
+            echo "ERROR: GPU $GPU_ID still shows foreign work after ${GEAK_GPU_SETTLE_S:-30}s" \
+                 "(busy>${GEAK_GPU_MAX_BUSY_PCT:-5}% or VRAM>${GEAK_GPU_MAX_VRAM_MB:-1024}MB); refusing to measure on it." >&2
+            echo "       This is a real co-tenant, not our own decaying tail -- that clears in ~3s." >&2
+            echo "       Raise GEAK_GPU_SETTLE_S, or set GEAK_GPU_REQUIRE_IDLE=0 to measure anyway." >&2
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \

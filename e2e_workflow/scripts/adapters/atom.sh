@@ -40,6 +40,38 @@
 
 adapter_default_port() { echo 8888; }
 
+# Resolved at source time: inside a function BASH_SOURCE is still this file, but resolving once keeps
+# the lookup independent of the caller's cwd.
+_ATOM_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# _atom_server_argv ARGS -> fills the global array _ATOM_EXTRA_ARGV with ARGS split by shell quoting
+# rules. An unquoted $EXTRA_SERVER_ARGS keeps quotes as literal characters and glob-expands `*`/`[..]`,
+# so a recipe's `--online_quant_config '{"exclude_layer":["*.mlp.gate"]}'` reached the server quoted
+# (json parse error) or rewritten by any file the glob matched. Fails closed (returns 2) when the
+# helper is missing or cannot split the string: a server started from mangled flags may come up
+# healthy with a different configuration, so there is no word-splitting fallback.
+_atom_server_argv() {
+  _ATOM_EXTRA_ARGV=()
+  [ -n "${1//[[:space:]]/}" ] || return 0
+  local _helper="$_ATOM_ADAPTER_DIR/split_args.py" _out
+  if [ ! -f "$_helper" ]; then
+    echo "!!! atom adapter: $_helper is missing; refusing to launch with unsplit EXTRA_SERVER_ARGS." >&2
+    return 2
+  fi
+  _out="$(mktemp)" || return 2
+  if ! python3 "$_helper" "$1" > "$_out"; then
+    rm -f "$_out"
+    echo "!!! atom adapter: EXTRA_SERVER_ARGS does not split (see above); refusing to launch." >&2
+    return 2
+  fi
+  mapfile -d '' -t _ATOM_EXTRA_ARGV < "$_out"
+  rm -f "$_out"
+  if [ "${#_ATOM_EXTRA_ARGV[@]}" -eq 0 ]; then
+    echo "!!! atom adapter: EXTRA_SERVER_ARGS split to no arguments; refusing to launch." >&2
+    return 2
+  fi
+}
+
 # ---- ATOM worker-reaping supervisor -------------------------------------------------------------
 # WHY: ATOM starts its per-rank ModelRunners with multiprocessing.spawn. Those workers do NOT die on
 # the SIGTERM that server_teardown.sh sends to the process group -- the leader exits promptly, the
@@ -104,6 +136,8 @@ adapter_launch() {
     _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
   fi
 
+  _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2
+
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
@@ -120,7 +154,7 @@ adapter_launch() {
         -tp "$TP" \
         "${_opt[@]}" \
         "${_prof[@]}" \
-        $EXTRA_SERVER_ARGS \
+        "${_ATOM_EXTRA_ARGV[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }
