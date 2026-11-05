@@ -385,6 +385,28 @@ def test_tuning_recovery_launcher_requires_deploy_and_bench(tmp_path):
     assert rx._write_tuning_recovery_launcher(eval_dir) == ""
 
 
+@pytest.mark.parametrize("gate, passed", [("pass", True), ("fail", False), (None, None)])
+def test_recovered_tuning_op_gate_is_not_reported_as_output_parity(tmp_path, gate, passed):
+    """correctness_gate is an op-level check, not e2e output parity. It stays in
+    tuning_skillset and is still the journey's kernel-level correctness."""
+    _tuning_recovery_runtime(tmp_path)
+    tuning = {"enabled": True, "ran": True, "gate": "accepted",
+              "apply_env": "PYTORCH_TUNABLEOP_ENABLED=1", "apply_flags": ""}
+    if gate is not None:
+        tuning["correctness_gate"] = gate
+    out = rx._tuning_recovery_return(tmp_path, tuning, pre=100.0, post=108.06, source="disk")
+    normalized = rx.normalize_result({}, out)
+
+    assert normalized["status"] == "ok"
+    assert normalized["output_parity"] == "unknown"
+    assert normalized["tuning_skillset"].get("correctness_gate") == gate
+    entries = [k for k in rx.build_kernel_journey(out, normalized)["kernels"]
+               if k.get("source_phase") == "TuningSkillset"]
+    assert entries
+    for k in entries:
+        assert k["backend_result"]["attempts"][0]["correctness_passed"] is passed
+
+
 def test_recovered_tuning_material_uses_deployment_descriptor_when_ops_missing(tmp_path):
     rows = rx._recovered_tuning_material(
         {}, tmp_path / "e2e_interrupted", 1.1, source="markdown_report"
