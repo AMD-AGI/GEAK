@@ -111,6 +111,9 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_smoke.py \
             e2e_workflow/scripts/tests/test_bench_env_channel.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
+            e2e_workflow/scripts/tests/test_extra_env_transport.py \
+            e2e_workflow/scripts/tests/test_server_args.py \
+            e2e_workflow/scripts/tests/test_bench_server_args.py \
             e2e_workflow/scripts/tests/test_magpie_inner_reap.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
@@ -336,6 +339,8 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      - name: complete and legacy returned configuration regression
+        run: node e2e_workflow/scripts/test_return_config_mode.js
       # The final phase measures on GPUs the search may still hold: the tuning window and the
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression

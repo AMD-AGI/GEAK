@@ -21,6 +21,7 @@ const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
   const VALIDATION_REPLICAS = 1;
   const BACKEND = 'sglang', EVAL_DIR = '/eval', MODEL_NAME = 'model', BASELINE_TPUT = 100;
   const NOISE_BAND = 0.5, curFlags = '', curEnv = '', curOverlay = '', curTput = 100;
+  const curUnsetEnvs = [], curRemoveArgs = [], curArgsMode = 'append';
   const profile = null, strategy = null, tuning = null, history = {};
   const headQueue = [], kernelQueue = [], acceptedHeads = [], flaggedHeads = [];
   const acceptedKernels = [], pendingIntegrations = [];

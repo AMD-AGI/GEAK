@@ -43,6 +43,7 @@ adapter_default_port() { echo 8888; }
 # Resolved at source time: inside a function BASH_SOURCE is still this file, but resolving once keeps
 # the lookup independent of the caller's cwd.
 _ATOM_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_ATOM_ADAPTER_DIR/extra_env.sh"
 
 # _atom_server_argv ARGS -> fills the global array _ATOM_EXTRA_ARGV with ARGS split by shell quoting
 # rules. An unquoted $EXTRA_SERVER_ARGS keeps quotes as literal characters and glob-expands `*`/`[..]`,
@@ -101,8 +102,17 @@ true
 '
 
 adapter_launch() {
+  local -a _extra_env=() _config_env_unset=() _default_env=()
+  geak_read_extra_env _extra_env "${EXTRA_ENV:-}" || return $?
+  geak_read_unset_env _config_env_unset "${GEAK_UNSET_ENVS:-}" || return $?
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / vllm.sh).
-  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  local _ga=""
+  if ! geak_env_is_unset GPU_ARCHS "${_config_env_unset[@]}"; then
+    _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  fi
+  if ! geak_env_is_unset OMP_NUM_THREADS "${_config_env_unset[@]}"; then
+    _default_env=(OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}")
+  fi
 
   # Engine-internal port MUST differ from the HTTP port (see header). Derived, not fixed at ATOM's
   # 8006 default, so parallel servers on one box don't fight over the engine socket.
@@ -133,7 +143,9 @@ adapter_launch() {
   if [ -n "${PROFILE_DIR:-}" ]; then
     mkdir -p "$PROFILE_DIR"
     _prof=(--torch-profiler-dir "$PROFILE_DIR")
-    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
+    if ! geak_env_is_unset ATOM_PROFILER_MORE "${_config_env_unset[@]}"; then
+      _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
+    fi
   fi
 
   _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2
@@ -141,11 +153,12 @@ adapter_launch() {
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env "${_config_env_unset[@]}" -- \
     ${_ga:+GPU_ARCHS=$_ga} \
-    HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
-    OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" \
+    "${_default_env[@]}" \
     "${_prof_env[@]}" \
+    "${_extra_env[@]}" \
+    HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     bash -c "$_ATOM_SUPERVISOR" atom-supervisor \
       python3 -m atom.entrypoints.openai_server \

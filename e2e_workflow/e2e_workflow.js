@@ -949,6 +949,10 @@ if (KERNEL_EXTRACT_ON) log(`Kernel extraction skill enabled (workload=${WORKLOAD
 // baseline is measured on that config, not the stack default (TP/GPU: SERVING_TP / SERVING_GPU).
 const INIT_FLAGS = String(A.initial_extra_server_args || '');
 const INIT_ENV = String(A.initial_extra_env || '');
+const INIT_ARGS_MODE = A.initial_args_mode === 'replace' ? 'replace' : 'append';
+const INIT_ENV_COMPLETE = A.initial_env_complete === true || A.initial_env_complete === 'true';
+const INIT_UNSET_ENVS = Array.isArray(A.initial_unset_envs) ? A.initial_unset_envs : [];
+const INIT_REMOVE_ARGS = Array.isArray(A.initial_remove_args) ? A.initial_remove_args : [];
 // Schema-v2 handoffs may carry the overlay stack behind Hyperloom's current best. It is part of the
 // baseline configuration, so it stays underneath every later candidate overlay.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
@@ -1625,6 +1629,24 @@ function roleAgent(role, phase, intro, inputs) {
       CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
     } : {}),
   };
+  const removeArgs = inputs.INIT_REMOVE_ARGS ?? inputs.CURRENT_REMOVE_ARGS
+    ?? inputs.ACCEPTED_REMOVE_ARGS ?? inputs.FINAL_FLAGS?.remove_args;
+  if (Array.isArray(removeArgs)) inall.GEAK_REMOVE_ARGS = JSON.stringify(removeArgs);
+  const unsetEnvs = inputs.INIT_UNSET_ENVS ?? inputs.CURRENT_UNSET_ENVS
+    ?? inputs.ACCEPTED_UNSET_ENVS ?? inputs.FINAL_FLAGS?.unset_envs;
+  if (Array.isArray(unsetEnvs)) inall.GEAK_UNSET_ENVS = JSON.stringify(unsetEnvs);
+  const unsetContract = Object.hasOwn(inall, 'GEAK_UNSET_ENVS')
+    ? '\nPass GEAK_UNSET_ENVS from Inputs verbatim to every bench_e2e.sh launch, including []. ' +
+      'Apply these removals before current assignments in both arms; assignments may re-add a name. ' +
+      'Preserve GEAK_UNSET_ENVS in the final launch bundle.'
+    : '';
+  const removalContract = Object.hasOwn(inall, 'GEAK_REMOVE_ARGS')
+    ? '\nPass GEAK_REMOVE_ARGS from Inputs verbatim to every bench_e2e.sh launch, including []. ' +
+      'Keep these controls for reference and candidate legs; explicit candidate flags may re-enable a removed flag. ' +
+      'A server_args_unverified launch is rejected before measurement: do not bypass it or report throughput. ' +
+      'For REUSE_SERVER=1 with active removals, supply GEAK_SERVER_ARGS_RECEIPT from a verified launch ' +
+      'of that same still-live server. Preserve GEAK_REMOVE_ARGS in the final launch bundle.'
+    : '';
   const instruction = standaloneExtraction
     ? `First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
 Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
@@ -1634,7 +1656,7 @@ Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.`;
   const base = `You are the ${role}. PHASE=${phase}.
 ${instruction}
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-When you invoke bench_e2e.sh, pass BACKEND=${BACKEND} in its env so the correct serving adapter is used.
+When you invoke bench_e2e.sh, pass BACKEND=${BACKEND} in its env so the correct serving adapter is used.${removalContract}${unsetContract}
 
 ## SERVING CONFIG INVARIANT (do not violate — all e2e numbers must be comparable)
 Every e2e SERVING benchmark in this run (baseline, config sweep, integrate ref/cand, validation,
@@ -3026,16 +3048,39 @@ const renderFlagItems = (items) => items.map(
     : it.value == null ? it.name
       : it.eq ? `${it.name}=${it.value}` : `${it.name} ${it.value}`)).join(' ').trim();
 
-/** `K=V K2=V2` -> [{name,value}]. A token that is not an assignment rides along under name=null. */
+/** Split literal assignments without losing quoted/escaped spaces or their original spelling. */
 function parseEnvString(s) {
-  return String(s || '').trim().split(/\s+/).filter(Boolean).map((t) => {
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
-    return m ? { name: m[1], value: m[2] } : { name: null, value: t };
-  });
+  const text = String(s || ''), items = [];
+  let raw = '', value = '', quote = '';
+  const finish = () => {
+    if (!raw) return;
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(value);
+    items.push({ name: m ? m[1] : null, value: m ? m[2] : value, raw });
+    raw = ''; value = '';
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (!quote && /\s/.test(c)) { finish(); continue; }
+    raw += c;
+    if (c === '\\' && quote !== "'") {
+      if (++i === text.length) throw new Error('Unfinished escape in environment assignments');
+      const next = text[i];
+      raw += next;
+      // Match the launch decoder's POSIX shlex rules; never expand shell expressions.
+      value += quote === '"' && next !== '"' && next !== '\\' ? '\\' + next : next;
+    } else if (quote) {
+      if (c === quote) quote = '';
+      else value += c;
+    } else if (c === "'" || c === '"') quote = c;
+    else value += c;
+  }
+  if (quote) throw new Error('Unfinished quote in environment assignments');
+  finish();
+  return items;
 }
 
 const renderEnvItems = (items) => items.map(
-  (it) => (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
+  (it) => it.raw ?? (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
 
 /**
  * Key-by-key merge of a recovered configuration onto this run's baseline. The recovered value wins
@@ -3124,6 +3169,9 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+let curUnsetEnvs = [];
+let curRemoveArgs = [];
+let curArgsMode = 'append';
 let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
 // The envelope arrives in the reply: this script cannot read EVAL_DIR (RUNTIME SANDBOX CONTRACT).
@@ -3162,7 +3210,7 @@ async function prepareAgentXKernels(round, throughput) {
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
     BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
-    CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+    CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), CURRENT_OVERLAY: curOverlay,
     PREVIOUS_WORKLOAD_JSON: profile ? profile.profile_workload_json || '' : '',
     PREVIOUS_RANKING_JSON: profile ? profile.kernel_ranking_json || '' : '',
     PREVIOUS_UT_DELIVERY: profile ? profile.kernel_extraction_delivery_json || '' : '',
@@ -3215,6 +3263,10 @@ if (want('setup')) {
     roleAgent('director', 'setup', 'Build the isolated e2e eval dir and record the baseline throughput.', {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE, MODEL_NAME_HINT, TASK,
       GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY,
+      ...(INIT_ARGS_MODE === 'replace' ? { INIT_ARGS_MODE } : {}),
+      ...(INIT_ENV_COMPLETE ? { INIT_ENV_COMPLETE } : {}),
+      ...(INIT_UNSET_ENVS.length ? { INIT_UNSET_ENVS } : {}),
+      ...(INIT_REMOVE_ARGS.length ? { INIT_REMOVE_ARGS } : {}),
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
       EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
@@ -3258,10 +3310,13 @@ if (want('setup')) {
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
   NOISE_BAND = gateNoiseBand(setup.noise_band_pct);
-  // Seed flags/env win when provided (baseline was measured on them); else fall
-  // back to whatever the director resolved.
-  curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
-  curEnv = INIT_ENV || (setup.server_env || '');
+  // An explicitly complete seed also represents an empty argument list.
+  curArgsMode = INIT_ARGS_MODE;
+  curFlags = curArgsMode === 'replace' ? INIT_FLAGS
+    : INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
+  curEnv = INIT_ENV_COMPLETE ? INIT_ENV : INIT_ENV || (setup.server_env || '');
+  curUnsetEnvs = [...INIT_UNSET_ENVS];
+  curRemoveArgs = [...INIT_REMOVE_ARGS];
   curOverlay = INIT_BASE_OVERLAY;
   SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
@@ -3542,7 +3597,7 @@ print(json.dumps(res))
                     : ''),
               }],
               MERGE_OVERRIDES: overrides, MERGE_ADDED: mf.added.concat(me.added),
-              CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+              CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), CURRENT_OVERLAY: curOverlay,
               MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
               SKILL_DIR: WORKFLOW_DIR,
             }),
@@ -3622,8 +3677,8 @@ print(json.dumps(res))
         const accept = trial.kept === true && measured > BASELINE_TPUT &&
           deltaPct > NOISE_BAND && parity !== 'fail';
         if (accept) {
-          curFlags = sweep.accepted_flags || mf.merged || curFlags;
-          curEnv = sweep.accepted_env || me.merged || curEnv;
+          curFlags = sweep.accepted_flags ?? (mf.merged || curFlags);
+          curEnv = sweep.accepted_env ?? (me.merged || curEnv);
           kbSeedTput = measured;
           await requireE2EValidationCheckpoint('config/e2e_validation.json', {
             phase: 'WarmStart', validation_level: 'config_sweep', gate: 'accepted',
@@ -3631,7 +3686,7 @@ print(json.dumps(res))
             baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: measured,
             throughput_speedup: BASELINE_TPUT ? measured / BASELINE_TPUT : 1,
             baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-            accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+            accepted_config: { flags: curFlags, env: curEnv, remove_args: curRemoveArgs, unset_envs: curUnsetEnvs, args_mode: curArgsMode, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
             accepted_kernels: [], accepted_heads: [], final_patch: [],
             final_overlay: { path: curOverlay },
             final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -3748,7 +3803,7 @@ print(json.dumps(res))
           },
           // Only on the prebuilt-overlay path: unpack the candidate rather than assemble it.
           ...(viaOverlay ? { KB_OVERLAY_TARBALL: k.overlay_tar } : {}),
-          CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+          CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}),
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
         };
         const integ = await runIntegrateBothLegs(
@@ -4089,7 +4144,7 @@ print(json.dumps(res))
       profile = await safeAgent(
         roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON.stringify(curUnsetEnvs), ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { GEAK_REMOVE_ARGS: JSON.stringify(curRemoveArgs) } : {}), SKILL_DIR: WORKFLOW_DIR,
           ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
         }),
         { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
@@ -4120,6 +4175,9 @@ print(json.dumps(res))
   NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
+  curUnsetEnvs = Array.isArray(ST.unset_envs) ? ST.unset_envs : [];
+  curRemoveArgs = Array.isArray(ST.remove_args) ? ST.remove_args : [];
+  curArgsMode = ST.args_mode === 'replace' ? 'replace' : 'append';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
   profile = { profile_topN_json: ST.profile_topn_json || '',
     ...(KERNEL_EXTRACT_ON ? { profile_workload_json: ST.profile_workload_json || '',
@@ -4160,14 +4218,14 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
       NOISE_BAND_PCT: NOISE_BAND, CONFIG_DIRECTIONS: strategy.config_directions,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, ...KB_REF_INPUTS,
     }),
     { phase: 'ConfigSweep', label: 'config_tuner:sweep', schema: SWEEP_SCHEMA });
   if (sweep && sweep.best_throughput_tok_s > curTput) {
-    curFlags = sweep.accepted_flags || curFlags;
-    curEnv = sweep.accepted_env || curEnv;
+    curFlags = sweep.accepted_flags ?? curFlags;
+    curEnv = sweep.accepted_env ?? curEnv;
     curTput = sweep.best_throughput_tok_s;
     await requireE2EValidationCheckpoint('config/e2e_validation.json', {
       phase: 'ConfigSweep', validation_level: 'config_sweep', gate: 'accepted',
@@ -4175,7 +4233,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
       throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, remove_args: curRemoveArgs, unset_envs: curUnsetEnvs, args_mode: curArgsMode, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: [], accepted_heads: [], final_patch: [], final_overlay: { path: curOverlay },
       final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
       bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -4192,7 +4250,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       profile = await safeAgent(
         roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
-          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON.stringify(curUnsetEnvs), ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { GEAK_REMOVE_ARGS: JSON.stringify(curRemoveArgs) } : {}), SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
         { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
@@ -4250,7 +4308,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       'prove engagement, and hand back a deploy bundle that reaches production through EVAL_DIR/final/.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD,
       BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
-      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+      CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE, ...ACCURACY_INPUTS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
@@ -4483,7 +4541,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       throughput_speedup: tuning.tuning_speedup ||
         (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s),
       baseline_config: tuningBaselineConfig,
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, remove_args: curRemoveArgs, unset_envs: curUnsetEnvs, args_mode: curArgsMode, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: tunedOps.map((o) => ({
         kernel_id: o.kernel_id || o.op || o.short_name || '',
         kernel_slot: o.kernel_slot || o.target_callable || o.target_file || o.op || o.short_name || '',
@@ -4513,7 +4571,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
           // curOverlay, not '': without a banked routing overlay the tuned artifact binds to nothing.
-          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON.stringify(curUnsetEnvs), ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { GEAK_REMOVE_ARGS: JSON.stringify(curRemoveArgs) } : {}), SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
         { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
@@ -4622,7 +4680,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
           ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), SKILL_DIR: WORKFLOW_DIR,
           REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
           PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
         },
@@ -4794,7 +4852,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             apply_env: '', apply_flags: '', code_patch: c.patch || (c.lastEval ? `${c.lastEval}/final_patch.diff` : ''), tuning_artifact: '',
             verified_isolated_speedup: c.best, pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close',
           },
-          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+          CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}),
           CURRENT_THROUGHPUT: curTput,
           MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
           SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
@@ -4855,7 +4913,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`[deep] e2e +${((curTput / lastReprofileTput - 1) * 100).toFixed(1)}% since last profile — re-profiling to chase the moving bottleneck.`);
         const rp = await safeAgent(
           roleAgent('profiler', 'reprofile', 'Re-profile the CURRENT overlaid server; return refreshed head pct_gpu_time so EV re-weights toward the new bottleneck.', {
-            EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), SKILL_DIR: WORKFLOW_DIR,
           }),
           { phase: 'HeadKernel', label: `reprofile g${e2eGateCount}`, schema: { type: 'object', additionalProperties: true, properties: { heads: { type: 'array', items: { type: 'object', additionalProperties: true } } } } });
         if (rp && Array.isArray(rp.heads)) {
@@ -4984,7 +5042,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
             ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), SKILL_DIR: WORKFLOW_DIR,
             REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
             PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
           },
@@ -5118,7 +5176,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           // (no_engagement) before a full e2e A/B is spent.
           live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
           parity_note: cand.parity_note || 'expected_close' },
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}),
         CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
         ENGAGEMENT_CHECK: h.engagement_check || '',
       };
@@ -5183,7 +5241,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), SKILL_DIR: WORKFLOW_DIR,
         // The unittest MUST span BOTH regimes (kernel_extractor.md "Shapes must span BOTH regimes"):
         // decode M (running batch ≈ conc) and M=1 are passed explicitly so they are never dropped.
         REQUIRE_DECODE_BUCKET: true,
@@ -5375,7 +5433,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
         verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
         parity_note: cand.parity_note || 'expected_close' },
-      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}),
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
       CAND_TAG: `c${ci}_${cand.source}`,
       ...(sharedRefMed != null ? { REUSE_REF: true, SHARED_REF_MED: sharedRefMed } : {}),
@@ -5478,7 +5536,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON.stringify(curUnsetEnvs), ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { GEAK_REMOVE_ARGS: JSON.stringify(curRemoveArgs) } : {}), SKILL_DIR: WORKFLOW_DIR,
         ...ANALYSIS_SKILL_INPUTS,
       }),
       { phase: 'Profile', label: 'profiler:post-head', schema: PROFILE_SCHEMA });
@@ -5554,7 +5612,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
-        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
@@ -5610,7 +5668,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
         final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time },
-      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}),
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
     const integ = await runIntegrateBothLegs(
@@ -5664,7 +5722,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       profile = await safeAgent(
         roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
-          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON.stringify(curUnsetEnvs), ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { GEAK_REMOVE_ARGS: JSON.stringify(curRemoveArgs) } : {}), SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
         { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
@@ -5806,7 +5864,7 @@ if (want('final')) {
       'Finish the e2e A/B for this verified-isolated win. Run BOTH legs (reference + candidate) to ' +
       'completion, then return accepted/stack/rejected with ab_complete:true.',
       // Measured against the latest accepted baseline (current overlay/flags/env/throughput).
-      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
+      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length || Object.hasOwn(p.inputs, 'CURRENT_REMOVE_ARGS') ? { CURRENT_REMOVE_ARGS: curRemoveArgs } : {}), CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
@@ -5842,7 +5900,7 @@ if (allAccepted.length) {
     baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
     throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
     baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-    accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+    accepted_config: { flags: curFlags, env: curEnv, remove_args: curRemoveArgs, unset_envs: curUnsetEnvs, args_mode: curArgsMode, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
     accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads, final_patch: [],
     final_overlay: { path: curOverlay },
     final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -5897,7 +5955,7 @@ if (want('final')) {
   await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
-      EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
+      EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv, ACCEPTED_UNSET_ENVS: curUnsetEnvs, ...(curRemoveArgs.length || INIT_REMOVE_ARGS.length ? { ACCEPTED_REMOVE_ARGS: curRemoveArgs } : {}),
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
@@ -5914,7 +5972,7 @@ if (want('final')) {
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: finalTput,
       throughput_speedup: BASELINE_TPUT ? finalTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, remove_args: curRemoveArgs, unset_envs: curUnsetEnvs, args_mode: curArgsMode, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads,
       final_patch: [finalize.final_patch].filter(Boolean),
       final_overlay: { path: finalize.final_overlay || curOverlay },
@@ -5946,7 +6004,7 @@ if (want('final')) {
       'same_direction_collapsed/below_min_speedup, and its own read_plane) with both floors.', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       KB_RECALL,
-      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
+      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv, unset_envs: curUnsetEnvs, remove_args: curRemoveArgs, args_mode: curArgsMode }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
@@ -5971,7 +6029,7 @@ if (want('final')) {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
-      FINAL_FLAGS: { flags: curFlags, env: curEnv },
+      FINAL_FLAGS: { flags: curFlags, env: curEnv, unset_envs: curUnsetEnvs, remove_args: curRemoveArgs, args_mode: curArgsMode },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
@@ -5982,6 +6040,9 @@ if (want('final')) {
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+  if (validation?.validation_status === 'server_args_unverified') {
+    throw new Error('Final server launch failed argument verification; carried throughput cannot be accepted.');
+  }
   // Trust the Director's number only when it is a real positive measurement; a Validate with no
   // usable number never erases the accepted A/B win carried in finalTput.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
@@ -6039,6 +6100,9 @@ const carryState = {
         } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
+  ...(curUnsetEnvs.length ? { unset_envs: curUnsetEnvs } : {}),
+  ...(curRemoveArgs.length || curArgsMode === 'replace' ? { remove_args: curRemoveArgs } : {}),
+  ...(curArgsMode === 'replace' ? { args_mode: 'replace' } : {}),
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
   // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
@@ -6142,7 +6206,10 @@ const wfReturn = {
   throughput_speedup: finalFromAb ? 0 : finalSpeedup,
   validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
-  accepted_config: { flags: curFlags, env: curEnv },
+  accepted_config: { flags: curFlags, env: curEnv,
+    ...(curUnsetEnvs.length ? { unset_envs: curUnsetEnvs } : {}),
+    ...(curRemoveArgs.length || curArgsMode === 'replace' ? { remove_args: curRemoveArgs } : {}),
+    ...(curArgsMode === 'replace' ? { args_mode: 'replace' } : {}) },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
   // Tuning phase attribution, reported apart from accepted_heads/accepted_kernels.

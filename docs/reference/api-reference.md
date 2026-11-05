@@ -47,6 +47,9 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `exp_root` | sibling `exp/` | Output root. |
 | `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` (selects `scripts/adapters/<backend>.sh`). |
 | `launch_script` | `""` | Optional custom launch script; else the stack default. |
+| `initial_args_mode` | `append` | `replace` attests that `initial_extra_server_args` is complete, including an empty string; carried state and returned configuration preserve this meaning. |
+| `initial_env_complete` | `false` | Resolved environment assignments seed setup even when empty; omitted keys do not delete inherited settings. |
+| `initial_unset_envs` | `[]` | Explicit environment removals, applied before current assignments and preserved through state and result transport. |
 | `gpu_ids` | `0` | CSV optimization-parallelism pool. |
 | `tp` / `serving_tp` | `1` | Serving tensor-parallel size. |
 | `serving_gpu` | first `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
