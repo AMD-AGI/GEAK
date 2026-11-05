@@ -13,7 +13,7 @@ changes while the workflow evolves internally.
 python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 ```
 
-* Exit code `0` → `result.json.status` is `ok` or `no_gain`.
+* Exit code `0` → `result.json.status` is `ok`, `no_gain` or `timeout`.
 * Exit code `1` → a crash; `result.json.status == "error"` with an `error` field.
 * Exit code `2` → bad usage / unreadable handoff.
 * `--dry-run` → print the mapped `e2e_workflow.js` args + the prompt and
@@ -522,7 +522,8 @@ accepted configuration in both harnesses. It is the numeric compatibility
 metric for the cross-handoff comparison; `handoff_alignment` is the
 authoritative verdict and is `unverified` until actual Setup launch evidence
 matches an upstream observed identity. GEAK reads that evidence from
-`baseline/server.log` (parsed SGLang `ServerArgs` or ATOM `Engine kwargs`) or
+`baseline/server.log` (parsed SGLang `ServerArgs`, ATOM `Engine kwargs` or vLLM
+`non-default args`) or
 `baseline/magpie_launch.log` (an emitted launch identity). When the handoff names
 the orchestrator's own baseline server log
 (`baseline_env_spec.measurement_evidence.actual_server_log_path`), GEAK parses it
@@ -534,7 +535,15 @@ itself (`geak_launched`: profile round 0, validation base and final), because a
 matching Setup says nothing about a later launch. `server_identity.status` is the
 worst of all checks (mismatched > unverified > matched); a launch field logged in a
 form the parser does not know is recorded under `unparsed` and makes that check
-unverified. Every evidence path actually read is recorded in
+unverified. For vLLM, whose `non-default args` line lists every argument that
+differs from its default, every field is compared, including one the parser has
+never seen, except the run-scoped `host`, `port`, `model_tag` and the
+`profiler_config` of GEAK's own profile servers. Two servers that differ in a
+field are `mismatched`; when both sides are complete parsed vLLM records, a field
+logged by only one side is also `mismatched`. Partial caller-supplied identities
+keep their subset comparison. An item that is not a `key: value` pair is recorded
+under `unparsed`. Every evidence path
+actually read is recorded in
 `server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
@@ -569,6 +578,29 @@ case so the number is not read as a measurement problem.
 Set `BENCH_LAUNCHER=native` in the environment to force the adapter launch; it
 outranks every other resolution path and is the escape hatch when the
 orchestrator's script cannot run.
+
+### When there is no result to report
+
+When no workflow return exists and none can be rebuilt from disk (see Handoff
+resilience below), `result.json` reports the failure instead:
+
+```jsonc
+{
+  "schema_version": 2,
+  "status": "timeout | error",
+  "error_class": "timeout | llm_unreachable | workflow_parse_error | cli_failed | sdk_import_failed | interrupted | normalize_failed | runner_error",
+  "error": "no workflow return within the 32400s budget (furthest phase on disk: search)",
+  "phase_reached": "setup | search | finalize | validate"
+}
+```
+
+* `llm_unreachable` → Claude Code could not reach the model API (connection
+  refused or dropped, DNS, no route, proxy or TLS failure). `error` keeps the
+  original message, which contains Claude Code's `API Error: ...` reply.
+* `phase_reached` → the furthest phase the eval dir shows: `setup` until Setup's
+  baseline summary exists, `search` until the final phase fences the GPUs
+  (`.final_phase_fence`), then the fenced stage. Absent when the eval dir does
+  not exist.
 
 ## Handoff resilience (the workflow return is never the single point of failure)
 
