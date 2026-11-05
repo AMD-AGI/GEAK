@@ -3342,7 +3342,11 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
                     continue
                 server_args = _parse_vllm_non_default_args(line)
                 if server_args:
-                    return {"backend": "vllm", "server_args": server_args}, ""
+                    return {
+                        "backend": "vllm",
+                        "server_args": server_args,
+                        "server_args_complete": True,
+                    }, ""
     except OSError:
         return {}, ""
 
@@ -3410,6 +3414,14 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     ]
     if not comparable_keys:
         return None
+    if expected.get("server_args_complete") is True and observed.get("server_args_complete") is True:
+        observed_keys = {
+            key
+            for key in observed_args
+            if key not in {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
+        }
+        if set(comparable_keys) != observed_keys:
+            return False
     if any(key not in observed_args for key in comparable_keys):
         return None
     for key, expected_value in expected_args.items():
@@ -3483,6 +3495,14 @@ def _identity_mismatches(expected: Any, observed: dict[str, Any]) -> list[dict[s
     observed_args = observed.get("server_args")
     if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
         return []
+    if expected.get("server_args_complete") is True and observed.get("server_args_complete") is True:
+        ignored = {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
+        keys = (set(expected_args) | set(observed_args)) - ignored
+        return [
+            {"key": key, "expected": expected_args.get(key), "observed": observed_args.get(key)}
+            for key in sorted(keys)
+            if expected_args.get(key) != observed_args.get(key)
+        ]
     return [
         {"key": key, "expected": value, "observed": observed_args.get(key)}
         for key, value in expected_args.items()
