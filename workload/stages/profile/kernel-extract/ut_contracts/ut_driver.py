@@ -404,19 +404,26 @@ def gate_server_calls(T, a, state):
                "before_ready": call.get("before_ready"), "baseline": rb.get("status"),
                "candidate": rc.get("status")}
         if rb.get("status") != "ok":
-            # Not the candidate's fault; the variant it would have compiled is then checked by
-            # compile_variants, which fails unless another case builds it.
-            row.update(ok=True, note="baseline did not replay it: %s" % rb.get("why"))
+            # An unavailable baseline call is missing qualification, even if a generated
+            # case happened to compile the same variant. Preserve that distinction instead
+            # of calling an empty or partial recorded-call replay a pass.
+            row.update(ok=False, why="baseline did not replay it: %s" %
+                       (rb.get("why") or rb.get("status") or "missing result"))
         elif rc.get("status") != "ok":
             row.update(ok=False, why="candidate: %s" % (rc.get("why") or rc.get("status")))
         else:
             good, outs = cw.compare_call_outputs(rb["outputs"], rc["outputs"], tol, ignore)
             row.update(ok=good, outputs=[o for o in outs if not o["ok"]] or len(outs))
+            if rb.get("postprocessed") and rc.get("postprocessed"):
+                row["postprocessed"] = True
         ok = ok and row["ok"]
         rows.append(row)
     replayed = sum(r["baseline"] == "ok" for r in rows)
-    res = {"status": "pass" if ok else "fail", "tol": tol, "calls": len(rows),
-           "replayed_by_baseline": replayed, "rows": rows}
+    res = {"status": "pass" if ok and rows else "fail", "tol": tol, "calls": len(rows),
+            "replayed_by_baseline": replayed,
+            "replayed_by_candidate": sum(r["candidate"] == "ok" for r in rows),
+            "unreplayed_baseline_calls": len(rows) - replayed, "rows": rows,
+            **({"why": "no recorded calls were selected for replay"} if not rows else {})}
     if T.mc.get("server_call_postprocess"):
         # Both legs reduced their return the same way before the compare. Name it here, so
         # a reader of the report sees what was compared without opening cases.py.

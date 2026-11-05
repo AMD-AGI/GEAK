@@ -16,7 +16,18 @@
   "Multi-config UT (added on this branch): an InferenceX workload is several configs (search-space points), so one task's UT can pool cases from several of them. plan_ut_cases.py plans each config on its own points and phase_summary when the points file carries `configs` (written by the slot's multi_config.py merge) and tags every case with config_id; build_task_plan.manifest prefixes such sigs with '<config_id>/'; scaffold_ut.workload_cases and the ut_contract meta/manifest check carry config_id; harness_lib.serving_weighted_speedup pools the configs per serving_weight_model.config_weighting: `calls` (default; each config's call distribution normalized to 1 and averaged, w(M)=sum_c alpha_c*freq_c(M), the weighting of the 2026-11-02 Muse Spark c8+c32 merge) or `time` (each config's baseline-time mass normalized to alpha_c); alpha equal unless serving_weight_model.config_weights; reports per_config. Cases without config_id take the unchanged single-config path.",
   "Server calls without bulk payload (added on this branch; /shared_nfs/yueliu14/muse_merge_1102/UT_INPUTS_NO_PT_GUIDE.md): compile_watch stores the contents of structural tensors only (index-named, or integer and at most COMPILE_WATCH_STRUCT_CAP = 4 MiB: routing ids, lengths, slots, page tables, small scales). Bulk payloads -- float operands and large integer ones such as packed MXFP4 expert weights and their e8m0 scales -- keep a descriptor plus an evenly spaced sample of COMPILE_WATCH_SAMPLE values: integers are resampled from it on replay (value distribution kept, no NaN exponents), floats drawn from N(mean, std) of it (records without `gen` replay as N(0, 1), as before). One Muse Spark MoE task had stored 0.86 GB a call, 185 GB in all. build_task_plan.server_evidence references a recorded call larger than SERVER_CALL_COPY_MAX (256 MiB) in place by absolute path instead of copying it into the task, so retain/materialize never duplicate it. Recorded calls travel inline: the hook packs a call's structural tensors and samples into the event JSON (tensors_b64) up to COMPILE_WATCH_INLINE_CAP (16 MiB serialized); collect and build_task_plan carry it into run/server_calls.json and leg_runner decodes it (compile_watch.call_data, weights_only) -- so a task directory holds no tensor file. calls/*.pt is written only above the cap.",
   "Live-run fixes (added on this branch, made by the profile agent of the 2026-11-02 Muse Spark campaign on crsuse2-m2m-100, reviewed): source_map.py maps the absolute frame paths of an editable install (/sgl-workspace/sglang/python/sglang/...) to the package-relative form, without which every frame of the image's editable sglang was dropped and its kernels had no operator; ut_wave.py accepts UT_WAVE_ORDER (explicit task priority), UT_WAVE_CONTAINER_PREFIX (campaign container naming) and UT_WAVE_DOCKER_EXTRA (extra mounts, never device options), all defaulting to the previous behaviour; compile_watch._sample builds gather positions in float64 clamped to the span (a float32 linspace over > 2**24 elements indexed past the storage and faulted the GPU) and never samples inside graph capture.",
-  "server_calls postprocess hook (added on this branch, 2026-11-04): meta.ut_contract.server_call_postprocess lets a task reduce the replayed return in BOTH legs through cases.server_call_postprocess(call, args, kwargs, ret) before compare_call_outputs. leg_runner._server_calls invokes the resolved entry directly, so cases.call() does not run; an entry whose return is only partly defined -- a routed MoE expert kernel allocates its output with torch.empty and writes only the rows that land on this rank, and the deployed caller masks the rest by the same routing and never reads them -- then had its uninitialized region compared, which two identical calls of the UNMODIFIED entry do not even match (Muse Spark EP4, op__compact_a4_experts: 168 of 260 replayed calls failed on out.return with nan_match false in both legs). The hook is frozen task source outside the candidate overlay, so it reduces both legs identically; ut_driver reports it and its stated why in the gate result. shared/leg_runner.py and ut_contracts/{ut_driver.py,README.md}."
+  "server_calls postprocess hook (added on this branch, 2026-11-04): meta.ut_contract.server_call_postprocess lets a task reduce the replayed return in BOTH legs through cases.server_call_postprocess(call, args, kwargs, ret) before compare_call_outputs. leg_runner._server_calls invokes the resolved entry directly, so cases.call() does not run; an entry whose return is only partly defined -- a routed MoE expert kernel allocates its output with torch.empty and writes only the rows that land on this rank, and the deployed caller masks the rest by the same routing and never reads them -- then had its uninitialized region compared, which two identical calls of the UNMODIFIED entry do not even match (Muse Spark EP4, op__compact_a4_experts: 168 of 260 replayed calls failed on out.return with nan_match false in both legs). The hook is frozen task source outside the candidate overlay, so it reduces both legs identically; ut_driver reports it and its stated why in the gate result. shared/leg_runner.py and ut_contracts/{ut_driver.py,README.md}.",
+  "CI40714803265 local validation: preserve context-specific UT signatures, allow task-declared custom family scaffolding, preserve server info separately for graph/eager modes; patch in campaign branch_fixes.patch.",
+  "CI40714803265 local validation: PREFILL context from request journals; preserve AITER /ops/triton/ entry frames; stop exhausted decode probes early; track graph/eager capture mode per point and exclude only eager point collective wait; drain live server process-group members including orphan workers without waiting for zombies. CPU regressions are recorded in campaign validation_cpu.json.",
+  "CI40714803265 further local validation: complete-call invocation_anchors prevent branch-dependent leaf-sum weighting; selected-or-anchor ownership excludes unrelated shared companions. Explicit graph-hidden census rejections trigger existing eager fallback even if another rank passed the probe. Decode KV is primed with exact seeded incremental prefixes (<=8192 new tokens per request,max_new_tokens=1) before admitting the resident batch to avoid cold-prefill hidden-state OOM; all original steady-state and census checks remain.",
+  "Local CI40714803265 GPU-wave fixes: canonical full semantic compile-variant matching across config-prefixed evidence IDs; recorded-call gate rejects missing/unreplayable baseline calls; optional object-only cases.make_server_object hook replays bound methods while retaining generic tensor reconstruction.",
+  "Local CI40714803265 delivery integration fix: explicit ut_driver/path_sha256_concat/v1 compatibility verifies the untouched full GPU result/report against current legacy snapshot plus full reuse_key, while preserving canonical source-delivery snapshot and per-leaf source/negative-control checks.21 focused JS checks passed.",
+  "Local CI40714803265 A4W4 replay fix: Float4 E2M1x2 and Float8 E8M0 shell tensor payloads are rebuilt through valid packed byte encodings with unchanged dtype/layout/storage and explicit seeded fallback/projection notes;31 pinned no-device CPU checks passed. Only A4W4 and pending TP4compact task helpers refreshed; previously qualified ordinary-dtype tasks retain their tested helper snapshot.",
+  "Local delivery protocol follow-up: explicit legacy Python evidence compatibility accepts only original positive Infinity tokens in successful negative-control margin fields, after hashing untouchedbytes. Default JSON stays strict; NaN/negativeInfinity/overflow/other nonfinitepositions rejected.25focusedtests and read-only realQKV/router artifact checks passed.",
+  "CI40714803265 validation: leg_runner observes real CUDA registrations before serving imports and resolves AITER torch_compile_guard through its registered body; reused or absent registrations cannot masquerade as a candidate source binding. Six pinned-image CPU tests cover actual dispatch and rejection cases.",
+  "Shared multiconfig sampling revision: the slot multi_config_sampling.py plans a CPU-only observed-point union within pinned compatible deployments; multi_config.py plan/capture/project routes shared captures through GPU leases and reweights each config independently. run_points.py signs resumable measurements and supports full pooled source discovery; relabel_points.py retains discrete shape/sequence/graph coverage gaps. ut_wave.py optionally runs disjoint timing tails after authoring drains; default remains one worker. The multiconfig scenario uses >3% operator selection.",
+  "Profile/UT split: kernel-profile owns sampling and dispatch evidence; kernel-ut consumes the hashed workload/kernel_profile_handoff/v1 and uses this single shared script/contract/template bundle via relative links. run_points --profile-only suppresses UT drafting. Legacy combined extraction is retained.",
+  "Integrate the profile/UT split with geak-x-multiconfig 6a425ef: preserve eager decode capture, batch-size dispatch merge policy and share ordering; document provisional-plan ordering and retain postprocess counts with strict replay accounting."
  ],
  "files": [
   {
@@ -53,7 +64,7 @@
    "file": "references/glm-agentx-example.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/glm-agentx-example.md",
    "source_sha256": "07807cc05789ded7bf20ad83172e46a9b4e529d9efccfc1f04c294d8bbb4f6d5",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/joint-indexer-ut.md",
@@ -62,15 +73,26 @@
    "modified": false
   },
   {
-   "file": "references/pipeline-handoff.md",
+   "file": "references/multi-config-sampling.md",
    "source": null,
    "added_here": true
+  },
+  {
+   "file": "references/multi-config-ut-merge.md",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "references/pipeline-handoff.md",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "references/selection-coverage.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md",
    "source_sha256": "1b8b41c6e269bdddc2109c1a10ebb17c60dd44bba17c9428bfda6a4e545ebe50",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/setup.md",
@@ -82,7 +104,7 @@
    "file": "references/source-delivery-records.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-delivery-records.md",
    "source_sha256": "16f00490c765d0144745192b6325a21f586e2be781048390696aa8c82f0db5d6",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/source-extraction.md",
@@ -97,10 +119,37 @@
    "modified": true
   },
   {
+   "file": "references/ut-lane.md",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/adjacency.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/build_ranking.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/build_task_plan.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "scripts/coverage_ledger.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/coverage_ledger.py",
    "source_sha256": "0f43d2a826f7da1c2e3c831c07ebcfd2c5a50524c599f33ca4d61b926ed10d09",
    "modified": true
+  },
+  {
+   "file": "scripts/draft_task_decls.py",
+   "source": null,
+   "added_here": true
   },
   {
    "file": "scripts/kernel_self_noise.py",
@@ -109,10 +158,20 @@
    "modified": false
   },
   {
+   "file": "scripts/kernel_shapes.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/merge_policy.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "scripts/observed_workload.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/observed_workload.py",
    "source_sha256": "77068a5f8cafbe3bf49d41aab0e5bb22fe0d4bc027e279c04c7bcdcde97fe4d8",
-   "modified": false
+   "modified": true
   },
   {
    "file": "scripts/oracle_power.py",
@@ -121,10 +180,32 @@
    "modified": true
   },
   {
+   "file": "scripts/plan_points_budget.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "scripts/plan_sampling_points.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
    "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
    "modified": false
+  },
+  {
+   "file": "scripts/plan_ut_cases.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/point_census.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/probe_server.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "scripts/regen_reference.py",
@@ -133,10 +214,22 @@
    "modified": true
   },
   {
+   "file": "scripts/relabel_points.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/run_points.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "scripts/select_targets.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/select_targets.py",
    "source_sha256": "edb449b6fc2cfd0ef3b3f2d95cde0a991141ab9c835654c85eae470263eca141",
-   "modified": false
+   "modified": true
   },
   {
    "file": "scripts/selftest_structure_only.py",
@@ -151,10 +244,32 @@
    "modified": true
   },
   {
+   "file": "scripts/source_map.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/trace_scan.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/ut_wave.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "shared/capture_shapes.py",
    "source": "e2e_workflow/scripts/capture_shapes.py",
    "source_sha256": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
    "modified": false
+  },
+  {
+   "file": "shared/compile_watch.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "shared/delivery_contract.mjs",
@@ -196,7 +311,7 @@
    "file": "shared/kernel_source_delivery.mjs",
    "source": "e2e_workflow/scripts/kernel_source_delivery.mjs",
    "source_sha256": "dec54adc26932291472c8a64d9c4b4a911de6a498bb369fa5a04b3ae0646b34d",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/leg_runner.py",
@@ -241,6 +356,22 @@
    "modified": false
   },
   {
+   "file": "shared/tests/test_compile_watch.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "shared/tests/test_compile_watch_bulk.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "shared/tests/test_compile_watch_shell.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "shared/tests/test_harness_lib.py",
    "source": "e2e_workflow/scripts/tests/test_harness_lib.py",
    "source_sha256": "2c1f9a8fe35c4c90afb793d90ecce52d44a3f7dc9f0d511419179324eb9fa799",
@@ -283,6 +414,11 @@
    "modified": false
   },
   {
+   "file": "shared/tests/test_multi_config_weights.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "shared/tests/test_observed_workload_weights.py",
    "source": "e2e_workflow/scripts/tests/test_observed_workload_weights.py",
    "source_sha256": "951f7fa6b1e36d703f9f3567cbc13b21f8f7bcfa31f74fe6751cc14bf0e5df38",
@@ -295,16 +431,72 @@
    "modified": false
   },
   {
+   "file": "shared/tests/test_registered_identity.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "shared/tests/test_server_object_replay.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "shared/workspace_sources.py",
    "source": "kernel_workflow/scripts/workspace_sources.py",
    "source_sha256": "b6809ad323bcce4994a7171629b4925569042e78e07c25535b11693689626139",
    "modified": false
   },
   {
+   "file": "tests/test_decode_prefix_warmup.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_invocation_anchors.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_merge_policy.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_mixed_capture_ranking.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_probe_exhaustion.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_probe_stop.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_profile_fast_path.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_run_points_graph_hidden.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "tests/test_sampling_pipeline.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py",
    "source_sha256": "8e8a8fd966b24113c227419160e1dd6d6b59ff412bc79d9d77a6b8aeea286fb5",
-   "modified": false
+   "modified": true
+  },
+  {
+   "file": "tests/test_ut_wave.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "ut_contracts/README.md",
@@ -417,6 +609,21 @@
    "added_here": true
   },
   {
+   "file": "ut_contracts/tests/test_parallel_gates.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_server_call_accounting.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_server_evidence.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "ut_contracts/tests/test_ut_contracts.py",
    "source": null,
    "added_here": true
@@ -429,118 +636,8 @@
   {
    "file": "ut_contracts/ut_driver.py",
    "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/trace_scan.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/point_census.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/build_ranking.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/run_points.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "tests/test_profile_fast_path.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/probe_server.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/relabel_points.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/kernel_shapes.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/source_map.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/adjacency.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/plan_ut_cases.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/draft_task_decls.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/build_task_plan.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "shared/compile_watch.py",
-   "source": null,
    "added_here": true,
    "modified": true
-  },
-  {
-   "file": "shared/tests/test_compile_watch.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "ut_contracts/tests/test_server_evidence.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/ut_wave.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "references/ut-lane.md",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "tests/test_ut_wave.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "ut_contracts/tests/test_parallel_gates.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "shared/tests/test_multi_config_weights.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "shared/tests/test_compile_watch_bulk.py",
-   "source": null,
-   "added_here": true
   }
  ]
 }

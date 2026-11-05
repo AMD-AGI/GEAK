@@ -297,7 +297,7 @@ def main():
             if not path.is_absolute(): path = geak / path
             declarations.update(read_json(path))
         requirements = {}
-        resource_map = root / "profile/out/task_gpu_requirements.json"
+        resource_map = tasks_dir.parent / "task_gpu_requirements.json"
         upstream_requirements = read_json(resource_map) if resource_map.exists() else {}
         if not isinstance(upstream_requirements, dict):
             raise ValueError("profile task_gpu_requirements.json must be a mapping")

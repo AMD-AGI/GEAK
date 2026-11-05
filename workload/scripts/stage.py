@@ -6,7 +6,7 @@ stage's run environment, and validate the `result.json` the stage hands back bef
 recording it in `STATE.json`. All stage logic lives in `stages/<stage>/<skill>/`; this
 file knows no individual skill. Contract in ../stages/CONTRACT.md.
 
-    stage.py plan                      # resolve and print where all five stages land (= --dry-run)
+    stage.py plan                      # resolve and print configured stages (= --dry-run)
     stage.py prepare <stage>           # create OUT, write params.json/env.sh, print the SKILL.md path
     stage.py run <stage>               # prepare + execute + validate, script or agent mode
     stage.py all [stage ...]           # every stage in order, unattended; resumes by default
@@ -161,6 +161,13 @@ def stage_env(cfg, lay):
         "PARAMS": os.path.join(lay["out"], "params.json"),
         "RUNNER": lay["runner"],
     })
+    # Task consumers resolve a configured artifact producer, independent of which
+    # skill produced the tasks. Legacy configs retain their existing environment.
+    task_source = cfg.get("task_source_stage")
+    if task_source is not None:
+        if not isinstance(task_source, str) or task_source not in cfg["order"]:
+            raise SystemExit("task_source_stage must name a stage in order")
+        env["TASKS_DIR"] = os.path.join(lay["run_root"], task_source, "out", "tasks")
     # runner_env knobs are exported as WORKLOAD_AGENT_* by convention; the runner reads
     # them itself. No credential appears here — only the path to an env file outside the
     # repository.
@@ -290,7 +297,7 @@ def cmd_plan(cfg, args):
         for p in problems:
             print("  - %s" % p)
         return 1
-    print("all five stages resolved successfully.")
+    print("all %d stages resolved successfully." % len(cfg["order"]))
     return 0
 
 

@@ -44,12 +44,13 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "shared"))
 import compile_watch  # noqa: E402
-from plan_ut_cases import plan as plan_cases  # noqa: E402
+from plan_ut_cases import invocation_basis, plan as plan_cases  # noqa: E402
 
 SKILL = os.path.dirname(HERE)
 SCAFFOLD = os.path.join(SKILL, "ut_contracts", "scaffold_ut.py")
@@ -139,6 +140,10 @@ def lint(decls, targets, launched, accept_draft=False):
         if not t.get("target_callable"):
             warns.append("%s: no target_callable; the UT scaffold will carry a FILL marker" % lab)
         members = set(t.get("kernels") or []) | {c.get("kernel") for c in t.get("companions") or []}
+        try:
+            invocation_basis(t)
+        except ValueError as exc:
+            errs.append(str(exc))
         for j in t.get("joint_phases") or []:
             extra = set(j.get("required_kernels") or []) - members
             if extra:
@@ -169,6 +174,11 @@ def lint(decls, targets, launched, accept_draft=False):
 def manifest(task, cases):
     """ut_case_plan cases -> the contract case manifest scaffold_ut.py consumes."""
     out, by_phase = [], {}
+    def base_sig(c):
+        sig = "%s_%s%s" % (c["phase"], c["shape"], "" if c["kind"] == "point" else "_" + c["kind"])
+        return "%s/%s" % (c["config_id"], sig) if c.get("config_id") else sig
+    counts = Counter(base_sig(c) for c in cases)
+    used = set()
     for c in cases:
         expr = (task.get("case_axes") or {}).get(c["phase"])
         if not expr:
@@ -176,16 +186,23 @@ def manifest(task, cases):
         names = {"shape": c["shape"], "context": c.get("context") or c["shape"]}
         axes = {ax: int(round(eval(e, {"__builtins__": {}}, names)))  # noqa: S307
                 for ax, e in expr.items()}
-        sig = "%s_%s%s" % (c["phase"], c["shape"], "" if c["kind"] == "point" else "_" + c["kind"])
-        if c.get("config_id"):
-            # one UT pools several configs; the same shape can occur in more than one
-            sig = "%s/%s" % (c["config_id"], sig)
+        sig = base_sig(c)
+        if counts[sig] > 1:
+            # A shape can have several measured contexts in the same config.
+            # Preserve each point's independent weight and evidence identity.
+            sig += "__" + c["case_id"]
+        if sig in used:
+            raise ValueError("duplicate case identity: %s" % sig)
+        used.add(sig)
         row = {"sig": sig, "regime": c["phase"], "axes": axes,
                "effective_calls": c["effective_calls"], "timed": c["kind"] != "envelope",
                "random": True, "kind": c["kind"],
                "evidence": c.get("shape_manifest") or "ut_case_plan.json#" + c["case_id"]}
         if c.get("config_id"):
             row["config_id"] = c["config_id"]
+        for key in ("invocation_count_basis", "invocations_per_instance", "kernel_launches_per_instance"):
+            if key in c:
+                row[key] = c[key]
         out.append(row)
         by_phase.setdefault(c["phase"], []).append((c["shape"], sig))
     replay = []
@@ -368,7 +385,7 @@ def stamp_meta(tdir, ev, waivers, expected=None):
 
 
 def scaffold(task, tdir, man, force):
-    if task.get("ut_family") in (None, "custom"):
+    if task.get("ut_family") in (None, "custom") and not task.get("family_file"):
         return {"status": "skipped", "why": "custom family: write a contract (--family-file)"}
     if man is None:
         return {"status": "skipped", "why": "case_axes not set for every owned phase"}
@@ -378,7 +395,9 @@ def scaffold(task, tdir, man, force):
     rpath = os.path.join(tdir, "run", "phase_regimes.json")
     json.dump(man, open(mpath, "w"), indent=1)
     json.dump(task.get("phase_regimes") or {}, open(rpath, "w"), indent=1)
-    cmd = [sys.executable, SCAFFOLD, "new", "--family", task["ut_family"], "--task", tdir,
+    family_arg = (["--family-file", task["family_file"]] if task.get("family_file")
+                  else ["--family", task["ut_family"]])
+    cmd = [sys.executable, SCAFFOLD, "new", *family_arg, "--task", tdir,
            "--manifest", mpath, "--phase-regimes", rpath]
     if task.get("target_callable"):
         cmd += ["--target", task["target_callable"]]
@@ -446,6 +465,8 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
             "selected_identities": t["kernels"], "selected_device_kernels": t["kernels"],
             "device_kernel": max(t["kernels"], key=lambda k: rank.get(k, {}).get("mass_us", 0)),
             "required_companions": t.get("companions") or [],
+            "invocation_anchors": t.get("invocation_anchors"),
+            "invocation_count_basis": tc.get("invocation_count_basis"),
             "phases": t.get("phases"), "owned_point_ids": owned,
             "ut_family": t["ut_family"], "ut_family_why": t.get("ut_family_why"),
             "target_callable": t.get("target_callable"), "target_file": t.get("target_file"),
@@ -481,6 +502,8 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
         tasks.append({"label": t["label"], "task_dir": tdir,
                       "selected_identities": t["kernels"],
                       "required_companions": [c["kernel"] for c in t.get("companions") or []],
+                      "invocation_anchors": t.get("invocation_anchors"),
+                      "invocation_count_basis": tc.get("invocation_count_basis"),
                       "phases": t.get("phases"), "owned_point_ids": owned,
                       "ut_family": t["ut_family"], "target_callable": t.get("target_callable"),
                       "planned_cases": dict(kinds, total=len(tc["cases"])),

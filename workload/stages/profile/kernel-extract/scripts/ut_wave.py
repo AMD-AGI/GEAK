@@ -33,7 +33,8 @@ slowest lane, and four of eight GPUs sat idle. So:
   * timing (--timing tail, the default) is not run inside the lanes, where it would time
     one task while seven others compile and run beside it. Lanes finish every other gate;
     the wave then times each task alone with `unittest.py --reuse` (the passed gates are
-    kept, only timing runs) spread over all GPUs.
+    kept, only timing runs) spread over all GPUs. --timing-workers N optionally runs
+    N timing tasks on disjoint GPU sets, after every authoring lane has drained.
 
 Backends: `docker` (production) starts one container per lane with exactly that lane's
 /dev/dri/renderD<128+8*i> nodes mounted, so an agent cannot reach another lane's GPU;
@@ -174,6 +175,27 @@ def allocate(rows, n_gpus, cap):
         if r["need"] > 1:
             share[r["label"]] = r["need"]
     return share
+
+
+def timing_dispatch(ready, free, workers, running_count=0):
+    """Disjoint sets for the timing tail. Multi-rank tasks retain an exclusive tail."""
+    slots = workers - running_count
+    if slots <= 0 or not free or not ready:
+        return []
+    single = [r for r in ready if r["need"] == 1]
+    if not single:
+        if running_count:
+            return []
+        row = ready[0]
+        return [(row, list(free))] if len(free) >= row["need"] else []
+    chosen = single[:min(slots, len(free))]
+    share = allocate(chosen, len(free), cap=len(free))
+    result, cursor = [], 0
+    for row in chosen:
+        count = share[row["label"]]
+        result.append((row, free[cursor:cursor + count]))
+        cursor += count
+    return result
 
 
 # ----------------------------------------------------------------------------- backends
@@ -392,17 +414,20 @@ def controller(a):
                 log(wave, "lane %s <- GPUs %s (cost %s)" % (r["label"], take, r["cost"]))
             else:
                 free = take + free
-        # 3) timing tail: one task at a time, on every GPU, once no lane is left
-        if cfg["timing"] == "tail" and not lanes_left and not running:
-            ready = [r for r in rows if states[r["label"]].get("status") == "timing"]
-            if ready:
-                r = ready[0]
+        # 3) timing tail: authoring/compilation has drained. Tasks own disjoint GPU
+        # sets; the default worker count of one preserves exclusive timing.
+        if cfg["timing"] == "tail" and not lanes_left:
+            active = {j["label"] for j in running.values()}
+            ready = [r for r in rows if states[r["label"]].get("status") == "timing"
+                     and r["label"] not in active]
+            for r, take in timing_dispatch(ready, free, cfg.get("timing_workers", 1), len(running)):
                 name = "timing_" + r["label"]
                 argv = [HERE, "tail", "--wave-dir", wave, "--task", r["label"]]
-                if backend.start(name, gpus, argv, cfg["env"]):
-                    running[name] = {"gpus": list(gpus), "kind": "timing", "label": r["label"],
+                if backend.start(name, take, argv, cfg["env"]):
+                    running[name] = {"gpus": list(take), "kind": "timing", "label": r["label"],
                                      "started": now()}
-                    log(wave, "timing %s <- all GPUs %s" % (r["label"], gpus))
+                    set_status(wave, r["label"], timing_gpus=list(take), timing_started=now())
+                    log(wave, "timing %s <- GPUs %s" % (r["label"], take))
         states = {r["label"]: status_of(wave, r["label"]).get("status") for r in rows}
         if not running and all(s in FINAL for s in states.values()):
             break
@@ -442,7 +467,7 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
         % gpu_ids,
         "DEADLINE        %s (epoch %d)" % (time.strftime("%F %T", time.localtime(deadline)), deadline),
         "TIMING          %s" % ("do NOT run the timing gate: finish with `unittest.py --skip timing`; "
-                                "the wave times every task alone afterwards"
+                                "the wave times tasks afterwards on dedicated GPU sets"
                                 if cfg["timing"] == "tail" else "run every gate, timing included"),
         "",
     ]
@@ -512,7 +537,7 @@ def lane(a):
 
 
 def tail(a):
-    """Time one task alone over every GPU: `unittest.py --reuse` keeps the gates the lane
+    """Time one task on its assigned GPUs: `unittest.py --reuse` keeps the gates the lane
     passed under an unchanged task and runs only what is left (timing)."""
     wave = os.path.abspath(a.wave_dir)
     cfg = load(os.path.join(wave, "wave.json"))
@@ -562,6 +587,10 @@ def cmd_plan(a, quiet=False):
 
 
 def cmd_start(a):
+    if a.timing_workers < 1:
+        raise SystemExit("ut_wave: --timing-workers must be positive")
+    if a.timing != "tail" and a.timing_workers != 1:
+        raise SystemExit("ut_wave: --timing-workers applies to --timing tail")
     eval_dir, gpus, rows, share = cmd_plan(a)
     wave = wave_dir(eval_dir)
     if os.path.exists(os.path.join(wave, "controller.pid")):
@@ -584,6 +613,7 @@ def cmd_start(a):
         "eval_dir": eval_dir, "gpus": gpus, "rows": rows, "share": share,
         "backend": a.backend, "image": a.image, "render_base": a.render_base,
         "render_step": a.render_step, "runner": runner, "timing": a.timing,
+        "timing_workers": a.timing_workers,
         "lane_sec": a.lane_sec, "attempts": a.attempts, "relaunch": a.relaunch,
         "stale_sec": a.stale_sec, "tick_sec": a.tick_sec, "max_wall_sec": a.max_wall_sec,
         "env": lane_env(eval_dir, a.env),
@@ -677,6 +707,8 @@ def main(argv=None):
             p.add_argument("--render-base", type=int, default=128)
             p.add_argument("--render-step", type=int, default=8)
             p.add_argument("--timing", choices=("tail", "lane"), default="tail")
+            p.add_argument("--timing-workers", type=int, default=1,
+                           help="concurrent tail tasks on disjoint GPUs, after authoring drains; default 1")
             p.add_argument("--lane-sec", type=int, default=7200, help="per runner session")
             p.add_argument("--attempts", type=int, default=3, help="runner sessions per lane")
             p.add_argument("--relaunch", type=int, default=1,

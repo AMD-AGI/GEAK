@@ -209,6 +209,172 @@ class MultiConfigProfile(unittest.TestCase):
         self.assertNotIn("configs", plan)
         self.assertTrue(all("config_id" not in c for c in plan["tasks"]["moe"]["cases"]))
 
+    def test_same_shape_different_contexts_keep_distinct_case_weights(self):
+        bt = _load("build_task_plan_context", SKILL / "scripts" / "build_task_plan.py")
+        task = {"case_axes": {"DECODE": {"m": "shape", "context": "context"}}}
+        cases = [{"case_id": "op__c1__de1_ctx%d" % ctx, "config_id": "c1",
+                  "phase": "DECODE", "shape": 1, "context": ctx, "kind": "point",
+                  "effective_calls": calls} for ctx, calls in [(100, 20), (200, 30)]]
+        man = bt.manifest(task, cases)
+        self.assertEqual(len({c["sig"] for c in man["cases"]}), 2)
+        self.assertEqual([c["axes"]["context"] for c in man["cases"]], [100, 200])
+        self.assertEqual(sum(c["effective_calls"] for c in sca.workload_cases(man)), 50)
+
+    def test_finalize_accepts_measured_config_denominators_without_inventing_time(self):
+        final = _load("profile_finalize_mc", SLOT / "finalize.py")
+        rank = {"denominators": {"config_weights": {"c1": .5, "c64": .5},
+                "per_config": {"c1": {"total_device_us": 1000}, "c64": {"total_device_us": 9000}}}}
+        ms, source = final.denominator(self.group, rank)
+        self.assertIsNone(ms)
+        self.assertIn("config-normalized mean", source)
+        rank["denominators"]["per_config"]["c64"]["total_device_us"] = 0
+        self.assertEqual(final.denominator(self.group, rank), (None, None))
+        rank["denominators"]["per_config"]["c64"]["total_device_us"] = float('nan')
+        self.assertEqual(final.denominator(self.group, rank), (None, None))
+
+    def test_custom_family_is_scaffolded_with_the_shared_driver(self):
+        bt = _load("build_task_plan_custom", SKILL / "scripts" / "build_task_plan.py")
+        task_dir = os.path.join(self.tmp.name, "custom_task")
+        os.makedirs(os.path.join(task_dir, "run"))
+        task = {"ut_family": "custom", "family_file": str(SKILL / "ut_contracts/families/gemm.json"),
+                "axes": {"n": 16, "k": 16}, "phase_regimes": {"PREFILL": {"cuda_graph": False}},
+                "target_callable": "example:gemm"}
+        man = {"cases": [{"sig": "c1/PREFILL_4", "config_id": "c1", "regime": "PREFILL",
+                          "axes": {"m": 4}, "effective_calls": 10, "timed": True, "random": True}]}
+        result = bt.scaffold(task, task_dir, man, False)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertTrue(os.path.exists(os.path.join(task_dir, "ut_driver.py")))
+        with open(os.path.join(task_dir, "meta.json")) as fh:
+            meta = json.load(fh)
+        self.assertEqual(meta["workload"]["cases"][0]["config_id"], "c1")
+
+    def test_union_preserves_operator_entry_for_draft(self):
+        entry = {"target_callable": "model:Operator.forward", "frame": "Operator.forward",
+                 "path": "model.py"}
+        configs = []
+        for cid, kernel in [("c1", K), ("c64", "large_m_kernel")]:
+            d = os.path.join(self.group, "configs", cid)
+            configs.append((cid, d))
+            rk = self._j("configs", cid, "kernel_ranking.json")
+            rk["ranking"] = [dict(rk["ranking"][0], id=kernel, name=kernel)]
+            _w(os.path.join(d, "kernel_ranking.json"), rk)
+            launcher = dict(entry, target_callable="model:" + kernel, frame=kernel)
+            _w(os.path.join(d, "evidence", "source_map.json"), {"kernels": {
+                kernel: {"frames": [launcher, entry], "launcher": launcher,
+                         "op": {"key": "operator", "entry": entry, "module_class": "Operator"}}}})
+        _w(os.path.join(self.group, "kernel_ranking.json"), mc.merge_ranking(configs, {c: 1 for c, _ in configs}))
+        _w(os.path.join(self.group, "evidence", "source_map.json"), mc.merge_source_map(configs))
+        params = os.path.join(self.tmp.name, "operator_params.json")
+        _w(params, {"selection_top_k": 10, "selection_overall_pct_gt": 1})
+        r = subprocess.run([sys.executable, str(SLOT / "multi_config.py"), "select",
+                            "--group-dir", self.group, "--params", params], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dd = _load("draft_task_decls_op", SKILL / "scripts" / "draft_task_decls.py")
+        tasks = dd.draft(self.group)["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(set(tasks[0]["kernels"]), {K, "large_m_kernel"})
+        self.assertEqual(tasks[0]["target_callable"], "model:Operator.forward")
+
+
+class SourceMapEvidenceMerge(unittest.TestCase):
+    """Representative c10 graph / c16 eager Cijk Tensile records; no frame-length heuristic."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="source-map merge ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.kernel = "Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT32x32x512"
+
+    @staticmethod
+    def record(graph, frame_count):
+        module = ("sglang.srt.model_executor.runner_backend.full_cuda_graph_backend"
+                  if graph else "sglang.srt.rocm_muse_spark.model")
+        func, line = ("FullCudaGraphBackend.replay", 225) if graph else ("_dense_linear", 436)
+        path = "/sgl-workspace/sglang/python/" + module.replace(".", "/") + ".py"
+        frame = {"frame": "%s(%d): %s" % (path, line, func), "module": module,
+                 "line": line, "resolved": True, "path": path,
+                 "target_callable": module + ":" + func, "sha256": "source-hash"}
+        return {"launching_ops": [] if graph else ["aten::mm"], "stacks_seen": 1,
+                "graph_replayed_only": graph,
+                "frames": [dict(frame, line=line + i) for i in range(frame_count)],
+                "launcher": frame,
+                "op": None if graph else {"key": module + ":_dense_linear@Linear",
+                                          "entry": frame, "module_class": "Linear"},
+                "sources": ["graph.trace" if graph else "eager.trace"],
+                "capture_metadata": {"rank": 0, "mode": "replay" if graph else "eager"}}
+
+    def merge_both_orders(self, entries):
+        configs, originals = [], {}
+        for cid, record in entries:
+            directory = self.root / cid
+            doc = {"packages": ["sglang"], "kernels": {self.kernel: record} if record else {},
+                   "graph_replayed_only": [self.kernel] if record and record["graph_replayed_only"] else [],
+                   "files": {"/shared/source.py": cid + "-hash", "/" + cid + ".py": "unique"},
+                   "unresolved_frames": [cid + " unresolved"]}
+            _w(str(directory / "evidence/source_map.json"), doc)
+            configs.append((cid, str(directory)))
+            originals[cid] = doc
+        forward = mc.merge_source_map(configs)
+        reverse = mc.merge_source_map(list(reversed(configs)))
+        self.assertEqual(forward, reverse)
+        for cid, directory in configs:
+            with open(os.path.join(directory, "evidence/source_map.json")) as fh:
+                self.assertEqual(json.load(fh), originals[cid])
+        return forward
+
+    def test_real_op_replaces_populated_replay_stack_and_retains_config_sources(self):
+        graph, eager = self.record(True, 14), self.record(False, 22)
+        merged = self.merge_both_orders([("c10", graph), ("c16", eager), ("c24", None)])
+        record = merged["kernels"][self.kernel]
+        self.assertEqual(record["from_config"], "c16")
+        self.assertEqual(record["frames"], eager["frames"])
+        self.assertEqual(record["launcher"], eager["launcher"])
+        self.assertEqual(record["op"], eager["op"])
+        self.assertEqual(record["launching_ops"], ["aten::mm"])
+        self.assertFalse(record["graph_replayed_only"])
+        self.assertNotIn(self.kernel, merged["graph_replayed_only"])
+        self.assertEqual(record["per_config"], {"c10": graph, "c16": eager})
+        self.assertEqual(record["from_configs"], ["c10", "c16"])
+        self.assertEqual(record["source_maps"], {cid: merged["configs"][cid] for cid in ["c10", "c16"]})
+        self.assertEqual(record["sources"], ["eager.trace", "graph.trace"])
+        self.assertEqual(merged["files_by_config"]["c10"]["/shared/source.py"], "c10-hash")
+        self.assertEqual(merged["config_metadata"]["c10"]["graph_replayed_only"], [self.kernel])
+        self.assertEqual(merged["config_metadata"]["c16"]["graph_replayed_only"], [])
+        self.assertEqual(merged["file_versions"]["/shared/source.py"],
+                         {"c10": "c10-hash", "c16": "c16-hash", "c24": "c24-hash"})
+        self.assertEqual(merged["unresolved_frames"], ["c10 unresolved", "c16 unresolved", "c24 unresolved"])
+
+    def test_short_real_launch_stack_beats_long_replay_without_an_op(self):
+        graph, eager = self.record(True, 100), self.record(False, 1)
+        eager["op"] = None
+        merged = self.merge_both_orders([("c10", graph), ("c16", eager)])
+        record = merged["kernels"][self.kernel]
+        self.assertEqual(record["from_config"], "c16")
+        self.assertEqual(record["frames"], eager["frames"])
+        self.assertFalse(record["graph_replayed_only"])
+
+    def test_graph_only_with_nonempty_frames_stays_graph_only_if_absent_elsewhere(self):
+        merged = self.merge_both_orders([("c10", self.record(True, 14)),
+                                         ("c16", self.record(True, 30)), ("c24", None)])
+        self.assertEqual(merged["graph_replayed_only"], [self.kernel])
+        record = merged["kernels"][self.kernel]
+        self.assertTrue(record["graph_replayed_only"])
+        self.assertEqual(record["from_config"], "c10")  # deterministic tie, not longest
+
+    def test_equally_real_stacks_keep_all_operator_keys_without_concatenating(self):
+        first, second = self.record(False, 1), self.record(False, 50)
+        second["op"] = dict(second["op"], key="sglang.other:entry@Other")
+        second["op_keys_seen"] = ["sglang.third:entry@Third"]
+        second["launching_ops"] = ["aten::linear"]
+        merged = self.merge_both_orders([("c10", first), ("c16", second)])
+        record = merged["kernels"][self.kernel]
+        self.assertEqual(record["from_config"], "c10")
+        self.assertEqual(record["frames"], first["frames"])
+        self.assertEqual(record["launching_ops"], ["aten::linear", "aten::mm"])
+        self.assertEqual(set(record["op_keys_seen"]),
+                         {first["op"]["key"], second["op"]["key"], "sglang.third:entry@Third"})
+        self.assertEqual(record["per_config"]["c16"], second)
+
 
 if __name__ == "__main__":
     unittest.main()

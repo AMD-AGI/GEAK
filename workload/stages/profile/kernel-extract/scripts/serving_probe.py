@@ -165,7 +165,8 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
                         "wall_s": round(time.time() - t0, 2)})
 
 
-def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
+def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0,
+                       requests_finished=None):
     """Block until the scheduler holds the intended batch AND is past prefill.
 
     Occupancy alone is not steady state: a request with a 234k-token prompt counts as
@@ -180,6 +181,13 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
     t0 = time.time()
     prev, last = None, {}
     while time.time() - t0 < timeout:
+        if requests_finished is not None and requests_finished():
+            journal.append({"event": "batch_finished_before_steady_state",
+                            "want_bs": want_bs,
+                            "note": "all probe requests completed or failed; no future "
+                                    "occupancy is possible. Increase --decode-tokens "
+                                    "if generation ended before batch admission."})
+            break
         cur, err = scrape_metrics(base)
         last = cur or last
         bs, tps = cur.get("num_running_reqs"), cur.get("gen_throughput")
@@ -535,6 +543,30 @@ def drive_decode(base, point, args, journal):
     """
     bs = int(point["batch_size"])
     ctx = int(point.get("context_tokens") or 1024)
+    if not args.no_decode_prefix_warmup:
+        # Decode context represents resident KV, not bs simultaneous cold prefills.
+        # In speculative serving long cold prompts can retain full hidden-state
+        # buffers and exhaust the graph deployment's remaining memory before decode.
+        # max_new_tokens=1 primes the exact stable prefixes without holding that
+        # speculative generation state. Each request is completed before the next.
+        chunk = args.decode_prefix_chunk_tokens
+        if chunk <= 0:
+            raise ValueError("--decode-prefix-chunk-tokens must be positive")
+        for i in range(bs):
+            ids = rand_ids(ctx, args.seed + 100 + i)
+            # Cache successive prefixes so each *request* has bounded new tokens;
+            # server-side chunking alone can still retain all chunks' hidden states.
+            for end in range(chunk, ctx + chunk, chunk):
+                end = min(end, ctx)
+                label = "decode_prefix%d_%d" % (i, end)
+                generate(base, ids[:end], 1, journal, label, args.request_timeout)
+                if any(e.get("event") == "request_failed" and e.get("label") == label
+                       for e in journal):
+                    raise RuntimeError("decode prefix warmup failed for request %d" % i)
+        journal.append({"event": "decode_prefixes_warmed", "sequences": bs,
+                        "context_tokens": ctx,
+                        "max_new_prefix_tokens_per_request": chunk,
+                        "basis": "exact same seeded prefixes as resident decode requests"})
     ex = ThreadPoolExecutor(max_workers=bs)
     tag = "probe-%s-%d" % (point["point_id"], int(time.time()))
     rids = ["%s-%d" % (tag, i) for i in range(bs)]
@@ -575,6 +607,10 @@ def main():
     ap.add_argument("--decode-tokens", type=int, default=4000,
                     help="generation length of each decode request; long enough to outlast "
                          "the steady-state wait and the window (they are aborted afterwards)")
+    ap.add_argument("--no-decode-prefix-warmup", action="store_true",
+                    help="skip sequential max_new_tokens=1 priming of decode KV prefixes")
+    ap.add_argument("--decode-prefix-chunk-tokens", type=int, default=8192,
+                    help="maximum new prompt tokens per sequential decode prefix request")
     ap.add_argument("--prefill-sequences", choices=["single", "split"], default="single",
                     help="single: one request with the batch's new tokens (default); split: "
                          "one request per served sequence, totals divided among them")
@@ -623,7 +659,10 @@ def main():
             ex, rids = drive_decode(args.base_url, point, args, journal)
             want = int(point["batch_size"])
             confirmed, obs_bs, _ = wait_for_occupancy(
-                args.base_url, want, journal, args.steady_timeout)
+                args.base_url, want, journal, args.steady_timeout,
+                requests_finished=lambda: len({e.get("label") for e in journal
+                    if e.get("event") in ("request_done", "request_failed")
+                    and str(e.get("label", "")).startswith("decode_req")}) >= want)
             if not confirmed:
                 raise RuntimeError(
                     "steady state not reached: wanted bs=%s, scheduler reported %s. Not "

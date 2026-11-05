@@ -36,6 +36,11 @@ def digest_tree(skill_dir):
     out = {}
     for root, dirs, files in os.walk(skill_dir):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for name in list(dirs):
+            full = os.path.join(root, name)
+            if os.path.islink(full):
+                out[os.path.relpath(full, skill_dir)] = "symlink:" + os.readlink(full)
+                dirs.remove(name)
         for name in sorted(files):
             if name.endswith(".pyc"):
                 continue

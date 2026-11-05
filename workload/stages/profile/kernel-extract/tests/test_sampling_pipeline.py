@@ -82,6 +82,61 @@ class SamplingPipelineTest(unittest.TestCase):
         self.assertIn('no registered log dialect', proc.stderr)
         self.assertFalse((self.root / 'observed.json').exists())
 
+    def test_relabel_uses_sent_prefill_context_before_prefix_alignment(self):
+        """Request length survives stale context annotations and query-page alignment."""
+        census_dir, probe_dir = self.root / 'census', self.root / 'probe'
+        census_dir.mkdir()
+        probe_dir.mkdir()
+        points = []
+        journal_bytes = {}
+        examples = [
+            # A planned context band can be smaller than the no-prefix request.
+            ('no_prefix', 16384, 0, 5600, 16384, 16384, True, ''),
+            # The prefix's last 13 tokens are re-extended, not added to the prompt.
+            ('aligned_prefix', 651, 100349, 101000, 664, 101000, True, '_r2'),
+            # Missing request completion still has the exact sent prefill plan.
+            ('plan_fallback', 651, 100349, 90000, 664, 101000, False, ''),
+        ]
+        for pid, new, cached, ctx, achieved, total, completed, suffix in examples:
+            points.append(dict(point_id=pid, phase='PREFILL', new_tokens=new,
+                               cached_tokens=cached, context_tokens=ctx, running=1))
+            (census_dir / (pid + '.json')).write_text(json.dumps(
+                dict(achieved_shape=achieved, instances=1)))
+            journal = [dict(event='prefill_plan', sequences=1,
+                            per_sequence_new=[new], per_sequence_cached=[cached]),
+                       dict(event='request_done', label='shape_warm0', prompt_tokens=999)]
+            if completed:
+                journal.append(dict(event='request_done', label='prefill_seq0',
+                                    prompt_tokens=total))
+            path = probe_dir / (pid + suffix + '.json')
+            path.write_text(json.dumps(dict(status='ok', journal=journal)))
+            journal_bytes[path] = path.read_bytes()
+        (self.root / 'points.json').write_text(json.dumps(dict(points=points)))
+        (self.root / 'observed.json').write_text(json.dumps(dict(raw_prefill_rows=[
+            dict(new_token=p['new_tokens'], cached_token=p['cached_tokens'], new_seq=1)
+            for p in points])))
+        proc = self.run_script('relabel_points.py', '--observed', self.root / 'observed.json',
+                               '--points', self.root / 'points.json', '--census-dir', census_dir,
+                               '--probe-dir', probe_dir, '--context-tolerance', '1.25',
+                               '--out', self.root / 'final.json')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        result = json.loads((self.root / 'final.json').read_text())
+        for actual, example, original in zip(result['points'], examples, points):
+            pid, new, cached, ctx, achieved, total, completed, suffix = example
+            self.assertEqual(actual['achieved_context'], total)
+            self.assertEqual(actual['achieved_shape'], achieved)
+            self.assertEqual(actual['planned_shape'], new)
+            self.assertEqual(actual['context_tokens'], ctx)
+            self.assertEqual(actual['cached_tokens'], cached)
+            ev = actual['achieved_context_evidence']
+            self.assertEqual(ev['basis'], 'probe_request_prompt_tokens' if completed
+                             else 'probe_prefill_plan')
+            self.assertEqual(ev['per_sequence_prompt_tokens'], [total])
+            self.assertEqual(ev['journal_entries'], [2] if completed else [0])
+            self.assertEqual(ev['probe_result'], str(probe_dir / (pid + suffix + '.json')))
+        for path, before in journal_bytes.items():
+            self.assertEqual(path.read_bytes(), before)
+
 
 if __name__ == '__main__':
     unittest.main()

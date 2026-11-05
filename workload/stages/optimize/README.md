@@ -5,11 +5,13 @@
 spent, then runs each task's own unit test once more from cold and hands on only what
 clears its noise band.
 
-**Input**: `$RUN_ROOT/profile/out/tasks/` and, for the order, `$RUN_ROOT/profile/out/results.json`:
-tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
-`order_by=roofline` orders by `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain
-instead; the roofline stage is no longer in the default order, because its model leaves
-tasks it cannot model unranked, and that once put a 24% task behind eight smaller ones.
+**Input**: `$TASKS_DIR` and the task producer's sibling `results.json`. Split scenarios
+export `TASKS_DIR=$RUN_ROOT/ut/out/tasks`; legacy invocations set
+`TASKS_DIR=${TASKS_DIR:-$RUN_ROOT/profile/out/tasks}` before the commands below.
+Tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
+`order_by=roofline` uses `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain instead;
+roofline is optional in the default pipeline because unsupported models can leave the
+largest tasks unranked.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
 
@@ -63,7 +65,7 @@ Before dispatch, run the slot's name/count check:
 
 ```
 python3 $WORKLOAD_ROOT/stages/optimize/check_scope.py \
-    --tasks-dir $RUN_ROOT/profile/out/tasks
+    --tasks-dir "$TASKS_DIR"
 ```
 
 An extracted task that cannot run still needs an explicit entry and blocker in the final
@@ -96,7 +98,7 @@ the matching harness version.
 
 ```
 python3 $WORKLOAD_ROOT/scripts/scheduler.py run \
-    --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
+    --work-root $OUT/work --tasks-dir "$TASKS_DIR" \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> --gpus-per-task <n> --target <sec> --backend docker --image <img> \
     [--order-by share|roofline] [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
@@ -196,7 +198,8 @@ retroactively verify it.
 
 A serving integration failure goes back to the owning stage with its failing input or
 dispatch, native error and selected source identity. The optimization agent owns kernel
-implementation fixes; a deficient frozen test or source boundary belongs to profile.
+implementation fixes; a deficient frozen test or source boundary belongs to UT generation
+(the combined profile stage in legacy scenarios). Missing dispatch measurements belong to profile.
 After a source fix, repeat cold qualification for that changed source and publish a new
 snapshot. Prior scores remain attached to their prior source. Compatible extraction and
 unchanged kernels' evidence can be reused; do not restart the entire search or rewrite
@@ -213,7 +216,7 @@ Check the completed report against the original task directories:
 
 ```
 python3 $WORKLOAD_ROOT/stages/optimize/check_scope.py \
-    --tasks-dir $RUN_ROOT/profile/out/tasks --optimized $OUT/optimized.json
+    --tasks-dir "$TASKS_DIR" --optimized $OUT/optimized.json
 ```
 
 This checks names and counts only; it does not re-judge a unit test. Report extracted,

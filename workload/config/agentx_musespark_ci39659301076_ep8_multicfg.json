@@ -1,5 +1,5 @@
 {
-  "_comment": "Muse Spark on MI355X, every TP8/EP8 config of InferenceX CI run 39659301076, as one campaign. The baseline adopts the CI run's own artifacts per config (no local replay); profile extracts each config from its own CI serving log and merges them so each task gets ONE UT in which every config weighs the same; kernel selection is an operator's share of this EP group's workload, >5%; applyback measures the group's lowest- and highest-concurrency configs against their own CI numbers. One EP group per campaign: a TP4/EP4 group is a sibling config with select.ep [4].",
+  "_comment": "Muse Spark on MI355X, TP8/EP8 configs from InferenceX CI run 39659301076. Adopt each config's own CI observations, plan a shared sampling union within identical deployments, then project costs and select operators per config at >3% before taking the union. Each task has one UT retaining per-config weights. Applyback uses the lowest/highest concurrency representatives; profile still accounts for middle configs. One EP group per campaign. Profile and template-based UT generation run as separate stages connected by a hashed evidence handoff.",
   "run_root": "workload/runs/agentx_musespark_ci39659301076_ep8_multicfg",
   "target": {
     "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
@@ -40,12 +40,12 @@
       }
     },
     "profile": {
-      "skill": "kernel-extract",
+      "skill": "kernel-profile",
       "mode": "agent",
       "params": {
-        "selection": "Multi-config, per config then union. In each config (its own workload), by operator: phase Top 10 AND whole-workload share > 1% (rank first, then filter; no backfill); an operator selected in any config is a candidate (multi_config.py select --group-dir $OUT). Each task's seam above the M-dependent path selection; the UT pools only the configs the operator runs in. See stages/profile/README.md 'Several configs'.",
+        "selection": "Per config, phase Top 10 complete operators AND whole-workload GPU-time share strictly >3%, then union. Keep required companions and phase branches. Plan compatible shared sampling before capture; retain each config's observed frequencies and uncovered mass.",
         "selection_top_k": 10,
-        "selection_overall_pct_gt": 1,
+        "selection_overall_pct_gt": 3,
         "selection_phases": [
           "PREFILL",
           "DECODE"
@@ -53,7 +53,14 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
-        "multi_config": true
+        "multi_config": true,
+        "sampling": {
+          "mode": "shared_union",
+          "num_points": 24,
+          "context_tolerance": 1.5,
+          "target_pct": 90
+        },
+        "output_kind": "dispatch_evidence"
       }
     },
     "applyback": {
@@ -66,6 +73,22 @@
         "point_serving_env": {},
         "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file."
       }
+    },
+    "ut": {
+      "skill": "kernel-ut",
+      "mode": "agent",
+      "params": {
+        "timing_workers": 2
+      }
     }
-  }
+  },
+  "order": [
+    "baseline",
+    "profile",
+    "ut",
+    "roofline",
+    "optimize",
+    "applyback"
+  ],
+  "task_source_stage": "ut"
 }

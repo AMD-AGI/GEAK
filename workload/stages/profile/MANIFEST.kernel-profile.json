@@ -1,0 +1,12 @@
+{
+  "file_count": 1,
+  "files": {
+    "SKILL.md": "1891be2410de683f5ba880a04b0aed2ef82f7056a7f42728dfcdb68c4e0193d8"
+  },
+  "modified_from_origin": false,
+  "note": "Intentional profile/UT split with shared multiconfig sampling, integrated with upstream 6a425ef dispatch merging, eager capture and share ordering. Shared templates are verified in MANIFEST.kernel-extract.json; dependency symlinks are recorded. Prior experiment receipts remain unchanged.",
+  "origin": "Local GEAK split profile/UT workflow",
+  "skill": "kernel-profile",
+  "stage": "profile",
+  "tree_sha256": "00a82800eabe04384fc68cb711d2c77f902c18c9761d7d82d18f29e7938e1ef7"
+}

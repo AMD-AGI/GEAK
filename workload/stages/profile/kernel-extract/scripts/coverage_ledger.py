@@ -262,6 +262,7 @@ def main():
         e = phases[phase]
         e["points"].append({"point_id": pid, "shape": shape, "instances": inst,
                             "ut_covered": covered,
+                            "collective_wait_mass_us": c["per_kernel"].get(WAIT_KERNEL, 0.0) * inst,
                             "max_shape_ratio": p["represented"]["max_shape_ratio"]})
         e["instances"] += inst
         for k, us in c["per_kernel"].items():

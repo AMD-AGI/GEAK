@@ -5,13 +5,21 @@ description: End-to-end kernel optimization pipeline for AgentX serving workload
 
 # workload — AgentX optimization scenario
 
-Five stages. Each is a **slot** holding one or more interchangeable **skills**:
+Five stages in legacy scenarios. Split multiconfig scenarios add an independent `ut`
+stage after `profile`. Each is a **slot** holding one or more interchangeable **skills**:
 
 ```
 baseline  ──>  profile  ──>  roofline  ──>  optimize  ──>  applyback
 measure        extract UTs    rank by        one kernel     wire back,
 the target                    headroom       per GPU        measure e2e
 ```
+
+The split path is `baseline → profile → ut → roofline → optimize → applyback`.
+`profile: kernel-profile` locates runtime dispatch and shapes and freezes a
+`profile_handoff.json`; `ut: kernel-ut` consumes it and generates/qualifies the fixed
+template UTs. Set `task_source_stage: "ut"` so consumers use the separate task output.
+Run/retry `ut` independently without repeating captures. See
+[the handoff contract](stages/profile/HANDOFF.md) and [UT stage](stages/ut/README.md).
 
 Before anything else, a config must declare what it optimizes, in a `target` block (model,
 image, component commits). The config filename and `run_root` have to carry a recognisable
@@ -94,6 +102,7 @@ one stage it stops acting and says so. Knobs, with reasons, under `report` in
 | --- | --- | --- | --- |
 | `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead; `ci-run-replay` reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, and refuses a number that does not align | `baseline.json` |
 | `profile` | `kernel-extract` | profile, then extract frozen-harness unit tests | `tasks/<k>/`, `kernel_ranking.json` |
+| `profile` / `ut` in split scenarios | `kernel-profile` / `kernel-ut` | profile dispatch evidence, then separately author/qualify UTs | `profile_handoff.json` → `tasks/<k>/` |
 | `roofline` | `kernel-roofline` | per-kernel roofline; rank by **expected e2e gain** | `roofline.json` |
 | `optimize` | `geak-kernel-workflow` | optimize every extracted task, one per GPU slot in parallel, 48 h by default; plan at most 8 tasks by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
 | `applyback` | `overlay-e2e-ab` | reversible overlay, fresh server, A/B against the baseline | `ab.json` |

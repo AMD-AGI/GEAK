@@ -68,6 +68,24 @@ def run(cmd, log):
     return p.returncode, round(time.time() - t0, 1), (p.stdout + p.stderr).strip()
 
 
+def census_graph_hidden_reason(phase, rc, message):
+    """Only the census's explicit missing-GPU-anchor diagnosis requests eager retry.
+
+    A probe may verify one rank while the all-rank census rejects another. Other
+    census failures (missing files, unequal rank counts, etc.) are not evidence of
+    graph-hidden kernels and must keep their original failure classification.
+    """
+    if phase != "DECODE" or rc == 0:
+        return None
+    for line in message.splitlines():
+        line = line.strip()
+        if (line.startswith("point_census:")
+                and "fewer than 2 decode anchors on the GPU timeline" in line
+                and "replayed kernels are not traced" in line):
+            return line
+    return None
+
+
 def ordered(points, wanted):
     pts = [p for p in points if not wanted or p["point_id"] in wanted]
     missing = set(wanted or ()) - {p["point_id"] for p in pts}
@@ -122,6 +140,10 @@ def main():
                          "(frames, launching ops), then redo the evidence and the draft")
     ap.add_argument("--no-evidence", action="store_true",
                     help="stop after selection: no shapes, source map, adjacency or draft")
+    ap.add_argument("--all-evidence", action="store_true",
+                    help="shared capture pool: resolve every censused kernel before per-config selection")
+    ap.add_argument("--profile-only", action="store_true",
+                    help="stop at dispatch/shape/source evidence; do not draft UT declarations")
     ap.add_argument("--ut-cases", default=None, help="passed to coverage_ledger.py")
     ap.add_argument("--probe-arg", action="append", default=[],
                     help="extra serving_probe.py argument, e.g. --probe-arg=--decode-tokens=20000")
@@ -189,8 +211,12 @@ def main():
         if pt["phase"] == "PREFILL" and a.draft_shares_name:
             cmd.append("--draft-shares-name")
         rc, took, msg = run(cmd, log)
-        return {"rc": rc, "wall_s": took, "out": out if rc == 0 else None,
-                "trace_dir": trace_dir, "message": msg.splitlines()[-1] if msg else ""}
+        result = {"rc": rc, "wall_s": took, "out": out if rc == 0 else None,
+                  "trace_dir": trace_dir, "message": msg.splitlines()[-1] if msg else ""}
+        hidden_reason = census_graph_hidden_reason(pt["phase"], rc, msg)
+        if hidden_reason:
+            result.update(graph_hidden=True, graph_hidden_reason=hidden_reason)
+        return result
 
     if a.evidence_capture:
         eager_evidence(a, ev, plan, py, log, timeline)
@@ -204,12 +230,17 @@ def main():
             pid = pt["point_id"]
             done = os.path.join(census_dir, pid + ".json")
             if os.path.exists(done) and pid not in a.redo:
+                signature = pt.get("measurement_signature")
+                if signature and prev.get(pid, {}).get("measurement_signature") != signature:
+                    raise SystemExit("run_points: incompatible or unsigned shared census for %s; "
+                                     "use --redo %s or a fresh capture pool" % (pid, pid))
                 # Resume: a censused point is evidence already paid for.
                 timeline["points"][pid] = dict(prev.get(pid, {"phase": pt["phase"]}),
                                                resumed=True)
                 censuses[pid] = done
                 continue
-            rec = timeline["points"].setdefault(pid, {"phase": pt["phase"], "attempts": []})
+            rec = timeline["points"].setdefault(pid, {"phase": pt["phase"], "attempts": [],
+                                                     "measurement_signature": pt.get("measurement_signature")})
             if defer_decode and pt["phase"] == "DECODE":
                 # graph_hidden is the contract probe_server.py (and any group driver) reads
                 # to restart eagerly and --redo exactly these points.
@@ -246,6 +277,8 @@ def main():
                 print("[%s]   %s in %.0fs: %s" % (now(), res.get("status"), took,
                                                   res.get("verify_reason")), flush=True)
                 if res.get("status") in ("ok", "partial"):
+                    rec["capture_mode"] = ("eager" if a.decode_eager else "profile_cuda_graph") \
+                        if pt["phase"] == "DECODE" else "eager_prefill"
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
                     break
                 if res.get("server_down"):
@@ -264,7 +297,18 @@ def main():
               flush=True)
         for pid, fut in futures.items():
             c = fut.result()
-            timeline["points"][pid]["census"] = c
+            rec = timeline["points"][pid]
+            if c.get("graph_hidden"):
+                # probe_server.graph_hidden_points treats a `census` entry as a
+                # completed census. Retain the rejected census separately so the
+                # existing fallback sees this point as still needing a capture.
+                rec["census_failure"] = c
+                attempt = next(a for a in reversed(rec["attempts"])
+                               if a["trace_dir"] == c["trace_dir"])
+                attempt.update(graph_hidden=True, graph_hidden_source="point_census",
+                               graph_hidden_reason=c["graph_hidden_reason"])
+            else:
+                rec["census"] = c
             if c["out"]:
                 censuses[pid] = c["out"]
             else:
@@ -314,8 +358,9 @@ def main():
     rank = os.path.join(ev, "kernel_ranking.json")
     cmd = [py, os.path.join(HERE, "build_ranking.py"), "--coverage", cov, "--out", rank,
            "--probe-result", os.path.join(probe_dir, "*.json")]
-    if a.decode_eager:
-        cmd += ["--eager-captured", "DECODE"]
+    for pid in sorted(censuses):
+        if timeline["points"].get(pid, {}).get("capture_mode") == "eager":
+            cmd += ["--eager-point", pid]
     steps.append(("build_ranking", cmd))
     sel = os.path.join(ev, "selection_targets.json")
     steps.append(("select_targets", [py, os.path.join(HERE, "select_targets.py"), rank,
@@ -403,6 +448,17 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
                             "--output", cand] + [x for x in a.select_arg
                                                   if x.split("=")[0] in ("--phases",)])]):
             return False
+    if getattr(a, "all_evidence", False):
+        # A kernel small in the pooled log can dominate one config. Selection happens
+        # after projection, so discovery here must not discard its source evidence.
+        from coverage_ledger import load_census
+        names = set()
+        for pid, path in censuses.items():
+            kernels, _, _ = load_census(path, phase[pid])
+            names.update(k for k in kernels if k not in ("__collective_wait__", "__untracked_tail__"))
+        cand = os.path.join(ev, "attribution_candidates.shared.json")
+        json.dump({"scope": "shared_pool_all_censused_kernels",
+                   "targets": [{"id": k, "name": k} for k in sorted(names)]}, open(cand, "w"), indent=1)
     shapes_dir = os.path.join(ev, "evidence", "shapes")
     os.makedirs(shapes_dir, exist_ok=True)
     trace_dirs = {}
@@ -457,7 +513,8 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
     if not a.select_by_kernel:
         steps.append(("select_operators", [py, os.path.join(HERE, "select_targets.py"), rank,
                                            "--source-map", smap, "--output", sel] + a.select_arg))
-    steps += [("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets", sel,
+    steps += [("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets",
+                            cand if getattr(a, "all_evidence", False) else sel,
                             "--out", os.path.join(ev, "evidence", "adjacency.json")]
               + [x for pid in sorted(trace_dirs) for x in ("--trace-dir", trace_dirs[pid])])]
     decls = os.path.join(ev, "task_decls.json")
@@ -465,7 +522,7 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
     if os.path.exists(decls):
         d = json.load(open(decls))
         unreviewed = all(t.get("needs_review") for t in d.get("tasks", []) + d.get("excluded", []))
-    if not os.path.exists(decls) or unreviewed:
+    if not getattr(a, "profile_only", False) and (not os.path.exists(decls) or unreviewed):
         # A draft nobody has touched is regenerated from the newer evidence; a reviewed
         # declaration is never overwritten.
         steps.append(("draft_task_decls", [py, os.path.join(HERE, "draft_task_decls.py"),

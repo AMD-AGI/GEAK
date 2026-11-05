@@ -5,6 +5,11 @@ description: Extract actual GPU kernel source and workload-weighted standalone t
 
 # AgentX kernel extraction
 
+This is the legacy combined workflow and the shared implementation bundle. New split
+scenarios use [kernel-profile](../kernel-profile/SKILL.md) for runtime evidence and
+[kernel-ut](../../ut/kernel-ut/SKILL.md) for template-based generation/qualification.
+Follow the selected skill's boundary; UT-only invocations do not run the capture stages.
+
 The agent performs the five stages below using this skill's method and the
 shared tools bundled with it. Set `SKILL_ROOT` to this directory and `SHARED_TOOLS`
 to `$SKILL_ROOT/shared`. Read [setup and inputs](references/setup.md) first.
@@ -43,8 +48,9 @@ material phase and disclose achieved coverage, approximations and missing mass. 
 come from the serving log, never from a parametric ISL/OSL model
 (`parse_profile.analytic_regime_calls` only when no log exists at all, and say so).
 
-This stage is a fixed template. **The only inputs you write are `serving.json` (step 1)
-and the review of `task_decls.json` (§3).** Everything else is produced by the scripts
+This stage is a fixed template. **The inputs you write are `serving.json` (step 1),
+the runtime identity for shared multi-config sampling, and the review of
+`task_decls.json` (§3).** Everything else is produced by the scripts
 below; do not hand-write census, rank-merge, ranking, shape-manifest, source-map or
 task-plan scripts -- every run that did produced numbers no other run could compare
 with, and spent most of the hour doing it.
@@ -52,8 +58,16 @@ with, and spent most of the hour doing it.
 1. **Declare the deployment.** `python3 "$SKILL_ROOT/scripts/probe_server.py" init --out
    "$EVAL_DIR/serving.json"`, then copy model, TP, GPUs, flags and environment from the
    baseline's launch exactly. Leave `decode_capture` at `profile_cuda_graph`.
-2. **Observed workload and points.**
+2. **Observed workload and points.** For one ordinary workload, use
    `observed_workload.py` → `plan_sampling_points.py` (commands in the reference).
+   For multi-config input, first read all configs' observations and use the
+   [shared sampling workflow](references/multi-config-sampling.md):
+   `multi_config.py plan` → `capture` → `project --merge` → `select`.
+   This replaces per-config capture loops: profile the compatible point union once,
+   then reweight separately. A single config is also valid on this path. Lowest/highest
+   concurrency can guide the initial budget but cannot replace the other configs'
+   distributions and dispatch evidence. Pass scenario `sampling` parameters to the
+   planner and use the configured operator threshold (the multiconfig example is >3%).
 3. **Capture, census, rank, select, collect evidence** -- one command, one server:
 
    ```bash
@@ -112,43 +126,11 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   `companions` with a reason. Mandatory chains, including split-K plus reduce, are one
   task; mutually exclusive branches are separate `joint_phases` rows, never demanded in
   every invocation. Whole fused MoE keeps routing and the complete operation.
-- **Merging across configs (a multi-config group).** Run, after the draft and before
-  review:
-
-  ```bash
-  python3 "$SKILL_ROOT/scripts/merge_policy.py" --group-dir "$OUT" \
-      --baseline "$RUN_ROOT/baseline/out/baseline.json" \
-      --source-root <path in the evidence>=<the same tree readable here> --out "$OUT/merge_policy.json"
-  ```
-
-  and apply it; record each application in `decisions.json`. **An operator dispatched by
-  batch size is one UT. Whether it is one is decided strictly by the policy; once it is, it
-  is merged -- the harness being hard to write is never a reason to keep it apart.**
-  1. Same launch group, same entry: one UT whose cases pool every config the task runs in.
-  2. `per_task.<t>.decision == split_by_config_value`: the task's own source reads a setting
-     that differs between configs (`launch_diff`); one UT per value. Nothing else splits.
-  3. `branch_groups[*]` (`merged: true`): different entries chosen above them by batch size.
-     Declare ONE task for the group; `how` says how:
-     - `dispatcher` -- `target_callable` = `seam`; its threshold is part of the task.
-     - `rebuilt_instance` -- `target_callable` = `seam` (a method); `cases.py` builds the
-       instance from `attribute_manifest` (every `self.<attr>` the seam and its helpers read)
-       and fails on an attribute outside it.
-     - `scope_equalized` -- the seam is not callable from a UT (it takes a ForwardBatch...): one
-       entry per member (`member_entries`), each case calls its member's; a member whose path
-       stops earlier also runs the `scope_region` calls the other's path runs, so every case
-       compares the same output. The threshold is not part of the task.
-     Copy the group into `meta.json` as `merge` (members, how, seam, call_lines, conditions,
-     observed_m, boundaries, threshold_movable, expected_kernels, and the manifest or
-     region). Every case carries `branch` (its member, from `case_sources`), its
-     `expected_kernels`, any non-size `context` it fixes (an enabled-kernel set, an optional
-     FP8 input, a layer type), and `boundary: true` with weight 0 for cases placed at each
-     `boundaries` edge. Each branch keeps its own tolerance; the timing gate reports
-     `per_branch` and `worst_branch`, and a kept result needs every branch above the noise
-     band, not only the pooled figure.
-  4. `refused_pairs` say why two tasks are NOT one (launched together, interleaving sizes, a
-     call not under a conditional): keep them separate.
-  5. Different launch groups (EP, ...): same entry and same env, one UT with cases tagged by
-     group; otherwise separate (`cross_group`).
+- **Merging across configs (a multi-config group).** After the initial declaration
+  review, follow [the multi-config UT merge procedure](references/multi-config-ut-merge.md)
+  before authoring. It first builds the provisional plan consumed by `merge_policy.py`,
+  then applies the policy and rebuilds the final plan. Preserve every dispatch branch
+  and record each application in `decisions.json`.
 - Selected indexer score/top-k is one task covering both served prefill and decode
   branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
   [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)
@@ -199,8 +181,12 @@ One agent lane per task, each writing, validating and fixing its own task direct
 (`serving.json` `gpus`, free again once the probe server stopped): the most expensive task
 starts first, GPUs left over when there are fewer tasks than GPUs go to the most expensive
 tasks (the UT spreads its legs over every GPU it holds), and a task needing several GPUs at
-once runs after the single-GPU ones. Timing is not run in the lanes: each task is timed
-alone afterwards over all GPUs (`unittest.py --reuse` keeps the gates the lane passed).
+once runs after the single-GPU ones. Timing is not run in the lanes. By default each
+task is timed alone afterwards over all GPUs. `start --timing-workers N` runs up to N
+timing tasks on disjoint GPU sets, after all authoring lanes drain (`unittest.py --reuse`
+keeps the gates the lane passed). Pass the scenario's `ut_timing_workers` when set;
+multi-rank tasks retain an exclusive tail. CPU/I/O contention and node power can still
+affect timing variance even with device isolation.
 `wait` returns 0 when every task is `passed`, `blocked` or `failed`; read `ut_wave/summary.json`
 and the lane logs it names, fix nothing in a task yourself, and carry blocked and failed
 tasks into the report with their reasons. `start` again resumes an interrupted wave.

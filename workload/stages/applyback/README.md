@@ -6,8 +6,11 @@ A/B against the baseline. This is the only stage in the pipeline permitted to cl
 end-to-end gain.
 
 **Input**: `$RUN_ROOT/optimize/out/optimized.json` (the kept list),
-`$RUN_ROOT/profile/out/tasks/<k>/meta.json` (`candidate_bind` — how to wire it back), and
+`$TASKS_DIR/<k>/meta.json` (`candidate_bind` — how to wire it back), and
 `$RUN_ROOT/baseline/out/baseline.json` (the reference).
+
+Split scenarios export `TASKS_DIR` from `task_source_stage: "ut"`; legacy invocations
+fall back to `$RUN_ROOT/profile/out/tasks` in the entry scripts.
 
 **Output**: `$OUT/overlay/`, `$OUT/applied.json`, `$OUT/e2e/`, `$OUT/ab.json`,
 `$OUT/result.json`.

@@ -1,15 +1,23 @@
-# Stage `profile` — decompose an AgentX reproduction into independently runnable kernel unit tests
+# Stage `profile` — locate kernel dispatch and workload shapes
 
 **Input** `$IN` = baseline's out (`baseline.json`: which serving run is being attributed,
 at what throughput, with what noise band).
-**Output** `$OUT`: per-kernel share of GPU time, plus a frozen unit-test task directory
-for each selected kernel.
+**Output** with `kernel-profile`: measured dispatch/shape/source evidence and
+`profile_handoff.json`, consumed by the separate [UT stage](../ut/README.md).
+The legacy `kernel-extract` implementation also generates and validates tasks here.
 
 ## Implementations
 
 | Directory | Notes |
 | --- | --- |
+| `kernel-profile/` | split workflow: sampling, dispatch, shapes and a hashed evidence handoff; set `params.output_kind="dispatch_evidence"` |
 | `kernel-extract/` | default. GEAK main's `kernel-extract` skill (`e2e_workflow/knowledge/kernel_extraction_skills/`) with the shared tools it copies into each task bundled under `shared/`; `PROVENANCE.json` records the origin revision, the origin hash of every file and which ones differ |
+
+The multiconfig scenario uses `profile: kernel-profile` followed by `ut: kernel-ut`.
+See [HANDOFF.md](HANDOFF.md) for their interface. In this mode the profile finalizer
+checks dispatch evidence without requiring UTs; drafting, scaffolding and the UT wave
+described below run under the UT stage's separate output. Existing combined scenarios
+retain their task/source qualification checks.
 
 This skill is **agent-shaped** (contract §2B): it has no `run.sh`, because choosing a
 boundary, identifying the callable and deciding which dispatch branch constitutes a whole
@@ -79,18 +87,23 @@ qualification of the added tasks, not an automatic repeat of the whole serving t
 
 When `baseline.json` has `multi_config: true`, the run covers every config of one group
 (default: one EP) of an InferenceX CI run, and each task still gets **one** UT. `$OUT` is
-the group's eval dir; each config is first extracted on its own under
-`$OUT/configs/<pid>/`, then merged. One group per run: a second EP group is a sibling
+the group's eval dir; each config's observations and deployment live under
+`$OUT/configs/<pid>/`. Plan the shared capture union before starting probe servers,
+then project costs onto each config and merge. One group per run: a second EP group is a sibling
 scenario whose baseline `select` names that EP.
 
 1. **Per config**, for every `points[].point_id` in `baseline.json`
-   (`EVAL_DIR=$OUT/configs/<pid>`): run kernel-extract §2 steps 1-3 as usual, except that
+   (`EVAL_DIR=$OUT/configs/<pid>`): prepare observations and deployment before profiling.
    `observed_workload.py` takes its inputs from the point's
    `$RUN_ROOT/baseline/out/points/<pid>/observed_inputs.json` (the CI's own scheduler log,
    decode interval, measured window and completed tokens) -- or reuse the baseline's
    validated `observed_workload.json` -- and `serving.json` is that config's deployment.
-   Configs that share a launch (only the concurrency differs) can share one probe server.
-2. **Merge**:
+   Follow [shared sampling](kernel-extract/references/multi-config-sampling.md):
+   `multi_config.py plan` groups compatible deployments and deduplicates their observed
+   points, `capture` profiles each pool once, and `project --merge` recomputes each
+   config's own weights. Pass the scenario's global `sampling.num_points` budget,
+   `context_tolerance`, and `target_pct`. Preserve every config's uncovered mass.
+2. **Merge** (already done by `project --merge`; for independently captured legacy inputs):
 
    ```bash
    python3 "$WORKLOAD_ROOT/stages/profile/multi_config.py" merge --group-dir "$OUT" \
@@ -110,7 +123,7 @@ scenario whose baseline `select` names that EP.
 
    An operator is a candidate as soon as it passes the configured rule -- phase Top
    `selection_top_k` AND a share of **that single config's own workload** above
-   `selection_overall_pct_gt` (the multi-config scenario: Top 10 and 1%) -- in any one
+   `selection_overall_pct_gt` (the multi-config scenario: Top 10 and >3%) -- in any one
    config; not on its share averaged over the
    configs, which would bury an operator that dominates some concurrencies and is absent at
    others (Muse Spark: the large-M dense GEMM path is 5.7% of c64, 0.2% of c1, 1.8% on

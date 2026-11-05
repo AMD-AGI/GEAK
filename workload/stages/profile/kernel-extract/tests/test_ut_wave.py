@@ -28,12 +28,18 @@ FAKE_UT = textwrap.dedent('''\
         gates.append("timing")
     with open(os.path.join(here, "run", "ut_calls.log"), "a") as f:
         f.write(" ".join(sys.argv[1:]) + " GPU_IDS=%s\\n" % os.environ.get("GPU_IDS"))
+    if "--skip" not in sys.argv:
+        with open(os.path.join(here, "run", "timing.trace"), "a") as f:
+            f.write("start %s %s\\n" % (time.time(), os.environ.get("ROCR_VISIBLE_DEVICES")))
     verdict = "pass" if "timing" in gates else "partial"
     rep = {"gates": {g: {"status": "pass"} for g in gates}, "verdict": verdict}
-    time.sleep(0.05)
+    time.sleep(0.3)
     json.dump(rep, open(os.path.join(here, "run", "ut_report.json"), "w"))
     json.dump({"verdict": verdict, "exit_code": 0 if verdict == "pass" else 1},
               open(os.path.join(here, "run", "ut_result.json"), "w"))
+    if "--skip" not in sys.argv:
+        with open(os.path.join(here, "run", "timing.trace"), "a") as f:
+            f.write("end %s\\n" % time.time())
     ''')
 
 # The stub agent: behaviour per task label, chosen by a file in the task directory.
@@ -144,6 +150,37 @@ class WaveTest(unittest.TestCase):
         self.assertEqual((res["c"]["status"], res["c"]["attempts"]), ("passed", 2))
         self.assertIn("continuation", self.trace("c"))
         self.assertEqual((res["d"]["status"], res["d"]["attempts"]), ("failed", 2))
+
+    def test_parallel_timing_waits_for_authoring_and_uses_disjoint_gpus(self):
+        self.tasks([("a", "gemm", 10, 1, "ok"), ("b", "gemm", 10, 1, "ok"),
+                    ("c", "gemm", 10, 1, "ok")])
+        res, out = self.wave("--timing-workers", "2")
+        self.assertEqual({v["status"] for v in res.values()}, {"passed"}, out)
+        timing = {}
+        end_of_authoring = max(float(self.trace(t).splitlines()[-1].split()[1]) for t in res)
+        for task in res:
+            with open(os.path.join(self.eval, "tasks", task, "run", "timing.trace")) as f:
+                start, end = [line.split() for line in f]
+            timing[task] = (float(start[1]), float(end[1]), set(start[2].split(",")))
+            self.assertGreater(float(start[1]), end_of_authoring)
+        overlaps = []
+        for a, va in timing.items():
+            for b, vb in timing.items():
+                if a < b and max(va[0], vb[0]) < min(va[1], vb[1]):
+                    overlaps.append((a, b))
+                    self.assertFalse(va[2] & vb[2])
+        self.assertTrue(overlaps, out)
+
+    def test_timing_allocator_respects_multi_rank_and_worker_limits(self):
+        a = {"label": "a", "need": 1, "cost": 100}
+        b = {"label": "b", "need": 1, "cost": 20}
+        ar = {"label": "ar", "need": 4, "cost": 10}
+        self.assertEqual(W.timing_dispatch([ar], [0, 1], 2), [])
+        self.assertEqual(W.timing_dispatch([ar], [0, 1, 2, 3], 2, 1), [])
+        self.assertEqual(W.timing_dispatch([a], [2, 3], 2, 2), [])
+        allocation = W.timing_dispatch([a, b], [0, 1, 2, 3], 2)
+        self.assertEqual(len(allocation), 2)
+        self.assertEqual(sorted(g for _, gs in allocation for g in gs), [0, 1, 2, 3])
 
     def test_a_multi_gpu_task_waits_for_the_single_gpu_lanes(self):
         self.tasks([("ar", "all_reduce", 5, 4, "ok"), ("g1", "gemm", 10, 1, "ok"),
