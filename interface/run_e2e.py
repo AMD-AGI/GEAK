@@ -56,6 +56,19 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from effective_config import _flag_map, _parse_env, resolve_effective_config
 
 try:
+    from interface.source_bundle import stage_source_bundle
+    from interface.source_materialization import (
+        SourceMaterializationError,
+        validate_source_materialization,
+    )
+except ModuleNotFoundError:
+    from source_bundle import stage_source_bundle
+    from source_materialization import (
+        SourceMaterializationError,
+        validate_source_materialization,
+    )
+
+try:
     from interface import claude_trace_mirror
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     import claude_trace_mirror
@@ -66,6 +79,7 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     import geak_outcome_report
 
 SCHEMA_VERSION = 2
+SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
 E2E_CHECKPOINT_FILE = "e2e_validation.json"
@@ -661,6 +675,10 @@ def map_args(
     dry_run: bool = False,
 ) -> dict:
     workload = h.get("workload") or {}
+    baseline = h.get("baseline_env_spec") or {}
+    source = validate_source_materialization(baseline)
+    if source is not None and int(h.get("schema_version", 1) or 1) < 2:
+        raise SourceMaterializationError("source_requires_handoff_schema_v2")
     tp = int(h.get("tp", 1) or 1)
     has_explicit_identity = bool(
         str(h.get("expected_gfx") or "").strip()
@@ -700,18 +718,9 @@ def map_args(
     )
     initial_overlay = ""
     if effective is not None:
-        # Prefer a materialized aggregate overlay.  When Hyperloom only emitted
-        # source snapshots, later accepted snapshots precede earlier ones so
-        # Python resolves the newest current-best source first.
-        overlay_parts = [effective.base_overlay_pythonpath]
-        overlay_parts.extend(
-            str(snapshot.get("snapshot_dir") or "")
-            for snapshot in reversed(effective.source_snapshots)
-            if isinstance(snapshot, dict) and snapshot.get("reproducible")
-        )
-        initial_overlay = ":".join(
-            dict.fromkeys(part for part in overlay_parts if part)
-        )
+        # Complete source roots are a separate baseline dependency, retained by
+        # bench_e2e even when an engineer replaces the candidate overlay.
+        initial_overlay = effective.base_overlay_pythonpath
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
@@ -952,6 +961,13 @@ def map_args(
         run_id = uuid.uuid4().hex[:8]
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
+    if source is not None:
+        ps_args["eval_dir"] = str(Path(eval_dir).resolve())
+        ps_args["baseline_source_request"] = {
+            "schema_version": SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+            "source_snapshots": effective.source_snapshots,
+            "source_materialization": baseline["source_materialization"],
+        }
     # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
     # path on ONE margin: forward the (validated) Python value so the workflow's
     # A.implausible_speedup_margin can never silently drift from the constant the
@@ -7800,6 +7816,23 @@ def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     return positional, flags, budget
 
 
+def prepare_baseline_source(ps_args: dict) -> None:
+    """Bind accepted source to this eval dir before the existing workflow runs."""
+    os.environ.pop("GEAK_SOURCE_REQUEST", None)
+    request = ps_args.get("baseline_source_request")
+    eval_dir = Path(ps_args["eval_dir"])
+    if request is None:
+        if (eval_dir / "source_request.json").exists():
+            raise SourceMaterializationError("source_free_run_reuses_source_eval_dir")
+        return
+    try:
+        staged = stage_source_bundle(request, eval_dir)
+    except OSError as exc:
+        raise SourceMaterializationError("cannot_stage_source_bundle") from exc
+    ps_args["baseline_source_request"] = staged
+    os.environ["GEAK_SOURCE_REQUEST"] = str(eval_dir / "source_request.json")
+
+
 def main(argv: list[str]) -> int:
     args, flags, timeout_s = _resolve_timeout_s(argv)
     if len(args) < 2:
@@ -7820,12 +7853,26 @@ def main(argv: list[str]) -> int:
     except OSError:
         artifact_cutoff_ts = None
     is_dry_run = "--dry-run" in flags
-    ps_args = map_args(
-        h,
-        timeout_s,
-        artifact_cutoff_ts=artifact_cutoff_ts,
-        dry_run=is_dry_run,
-    )
+    try:
+        ps_args = map_args(
+            h,
+            timeout_s,
+            artifact_cutoff_ts=artifact_cutoff_ts,
+            dry_run=is_dry_run,
+        )
+        if ps_args.get("baseline_source_request"):
+            h["eval_dir"] = ps_args["eval_dir"]
+        if not is_dry_run:
+            prepare_baseline_source(ps_args)
+    except SourceMaterializationError as exc:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent, delete=False) as stream:
+            json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
+                       "error_class": "unresolved_baseline_source", "error": str(exc)}, stream)
+            temporary = stream.name
+        os.replace(temporary, result_path)
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]

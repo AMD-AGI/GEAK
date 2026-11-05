@@ -152,6 +152,8 @@ jobs:
             kb/tests/test_store_read_only.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
+            interface/test_source_materialization.py \
+            interface/test_source_consumer.py \
             e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
             e2e_workflow/scripts/tests/test_bench_summarize.py \
             e2e_workflow/scripts/tests/test_inferencex_client_warmup_parity.py \
