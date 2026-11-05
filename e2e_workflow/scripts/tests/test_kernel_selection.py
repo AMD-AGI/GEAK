@@ -385,7 +385,7 @@ class TestSelectionVerdict(unittest.TestCase):
     def meta(self, calls=7, target=TARGET, compiled=0):
         module, attr = target.split(":", 1)
         return {"module": module, "attr": attr, "total_calls_observed": calls,
-                "compiled_passthrough_calls": compiled}
+                "compiled_passthrough_observed": bool(compiled)}
 
     def test_0720_live_inner_launcher_is_selection_success(self):
         verdict = ks.verify(TARGET, KERNEL, self.meta(), trace())
