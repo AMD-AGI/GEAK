@@ -128,7 +128,19 @@ def main():
 
 def _server_calls(a, task, meta):
     """Replay every recorded entry call; per call: outputs (return value + every operand the
-    call wrote) or the error. Progress goes to <out>.progress so a crash names its call."""
+    call wrote) or the error. Progress goes to <out>.progress so a crash names its call.
+
+    `meta.ut_contract.server_call_postprocess` names a function in the task's `cases.py`
+    (`server_call_postprocess(call, args, kwargs, ret)`) applied to the return value before
+    it is snapshotted. It exists for an entry whose return is only partly defined: a routed
+    MoE expert kernel allocates its output with torch.empty and writes only the rows that
+    land on this rank, and the deployed caller masks the rest by the same routing and never
+    reads them. Those elements hold whatever the allocator held, so they differ between two
+    identical calls of the UNMODIFIED entry and no candidate -- including the identity --
+    can match them. The hook is task source, frozen in the snapshot, outside the candidate
+    overlay and therefore byte-identical in both legs: it reduces both legs' returns the
+    same way, from the recorded call's own operands, and cannot hide a difference in the
+    region the caller does read."""
     cw = sys.modules.get("compile_watch") or _load("compile_watch",
                                                    os.path.join(task, "compile_watch.py"))
     torch = importlib.import_module("torch")
@@ -137,6 +149,13 @@ def _server_calls(a, task, meta):
         doc = json.load(fh)
     entry = _resolve(meta["target_callable"])
     budget = float((meta.get("ut_contract") or {}).get("server_call_budget_gib", 16)) * 2**30
+    post = None
+    if (meta.get("ut_contract") or {}).get("server_call_postprocess"):
+        cases = _load("cases", os.path.join(task, "cases.py"))
+        post = getattr(cases, "server_call_postprocess", None)
+        if post is None:
+            raise SystemExit("meta.ut_contract.server_call_postprocess is set but cases.py "
+                             "defines no server_call_postprocess(call, args, kwargs, ret)")
     results = {}
     only = set(a.sigs.split(",")) if a.sigs is not None else None
     for k, call in enumerate(doc["calls"]):
@@ -163,6 +182,15 @@ def _server_calls(a, task, meta):
             continue
         mutated = {n: cw.snapshot_output(t) for n, t in named.items()
                    if cw.storage_fingerprint(t) != before[n]}
+        if post is not None:
+            try:
+                ret = post(call, args, kwargs, ret)
+            except Exception as exc:
+                results[call["id"]] = dict(
+                    row, status="error", notes=notes,
+                    why="server_call_postprocess: %s: %s" % (type(exc).__name__, str(exc)[-1000:]))
+                continue
+            row["postprocessed"] = True
         results[call["id"]] = dict(row, status="ok", notes=notes,
                                    outputs={"return": cw.snapshot_output(ret), "mutated": mutated})
         del args, kwargs, named, ret

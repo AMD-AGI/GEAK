@@ -17,7 +17,10 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
   server_calls       (server evidence) the entry calls the probe server recorded when it first
                      compiled each of the task's Triton variants -- warmup and startup included --
                      replayed in both legs; the candidate must run every call the baseline runs
-                     and match it (meta.ut_contract.server_call_tol, default replay_tol)
+                     and match it (meta.ut_contract.server_call_tol, default replay_tol).
+                     meta.ut_contract.server_call_postprocess lets the task reduce both
+                     legs' return the same way first, for an entry whose output is only
+                     partly defined (a routed expert kernel's unwritten rows)
   compile_variants   (server evidence) every Triton variant the server compiled for the task's
                      kernels must also be compiled by the baseline legs above, and the legs'
                      Triton/torch namespaces must match the server's (meta.server_preimports);
@@ -412,8 +415,15 @@ def gate_server_calls(T, a, state):
         ok = ok and row["ok"]
         rows.append(row)
     replayed = sum(r["baseline"] == "ok" for r in rows)
-    return {"status": "pass" if ok else "fail", "tol": tol, "calls": len(rows),
-            "replayed_by_baseline": replayed, "rows": rows}
+    res = {"status": "pass" if ok else "fail", "tol": tol, "calls": len(rows),
+           "replayed_by_baseline": replayed, "rows": rows}
+    if T.mc.get("server_call_postprocess"):
+        # Both legs reduced their return the same way before the compare. Name it here, so
+        # a reader of the report sees what was compared without opening cases.py.
+        res["postprocess"] = {"hook": "cases.server_call_postprocess",
+                              "why": T.mc.get("server_call_postprocess_why"),
+                              "applied_to": sum(1 for r in rows if r.get("postprocessed"))}
+    return res
 
 
 def gate_compile_variants(T, a, state):
