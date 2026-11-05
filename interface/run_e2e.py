@@ -5910,7 +5910,9 @@ def _tuning_recovery_return(
         "throughput_speedup": speedup,
         "baseline_throughput_tok_s": pre,
         "final_throughput_tok_s": post,
-        "output_parity": tuning.get("correctness_gate") or "unknown",
+        # correctness_gate is an op-level tolerance check, not e2e output parity; it stays in
+        # tuning_skillset.
+        "output_parity": "",
         "final_overlay": overlay,
         "final_launch_script": launcher,
         "accepted_config": {
@@ -7624,8 +7626,12 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         if kid in seen:
             continue
         seen.add(kid)
+        # A recovered tuning return claims no output parity; its op gate is the kernel verdict.
+        parity = (_parity_passed(wf["tuning_skillset"].get("correctness_gate"))
+                  if k.get("from_tuning_skillset") and wf.get("recovered_tuning_source")
+                  else overall_parity)
         kernels.append(_journey_return_entry(
-            eval_dir_str, k, idx, wf, geak_sha, overall_parity,
+            eval_dir_str, k, idx, wf, geak_sha, parity,
             kernel_id_override=kid))
         synth_hot.append({
             "kernel_id": kid, "name": (m["name"] if m else name),
