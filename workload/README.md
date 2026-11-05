@@ -39,6 +39,14 @@ the target                    headroom       per GPU        measure e2e
 Steps 1–3 produce evidence. Step 4 spends the compute budget. Only step 5 may claim an
 end-to-end gain.
 
+![the five slots, the contract they all end on, and the one number that counts](docs/pipeline.svg)
+
+The ASCII line above is the one to read in a terminal; the figure is the same five steps
+with what each hands on, the contract they all leave through, and the deliverable. It is
+hand-written SVG with fixed coordinates, so treat it as a drawing: when a stage is renamed
+or an artifact changes name, the text in it has to be edited by hand, and a figure that
+disagrees with the table below is a defect in the figure.
+
 Each step is a **slot**, and each slot holds one or more interchangeable **skills** —
 a directory with its own `SKILL.md` and its own code. Steps communicate only through
 files on disk. What ships in each slot, and what it can be swapped for, is tabulated in
@@ -146,6 +154,7 @@ down under `engine/`, so that opening `workload/` shows a skill rather than a co
 | `config/` | one JSON per scenario, layered over `config/default.json` |
 | `stages/` | the five slots and their interchangeable skills (`stages/CONTRACT.md`); `stages/_shared/` holds the few helpers several slots need in order to judge |
 | `runners/` | agent CLI adapters (`runners/CONTRACT.md`) |
+| `docs/` | the one figure this file embeds; nothing reads it at runtime |
 | `engine/` | the plumbing; `engine/README.md` says what each directory under it answers |
 
 Inside `engine/` the same rule applies one level smaller: each directory is named after
