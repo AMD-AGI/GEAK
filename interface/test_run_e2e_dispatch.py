@@ -288,6 +288,22 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_head_track_knobs_are_forwarded_and_absent_when_omitted(self):
+        knobs = {"head_threshold_pct": 2.5, "head_budget": 5, "kernel_budget": 2}
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_head_knobs"), **knobs))
+        defaults = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_head_defaults")))
+        for key, value in knobs.items():
+            self.assertEqual(ps[key], str(value), key)
+            self.assertNotIn(key, defaults)
+
+    def test_a_head_track_knob_the_workflow_cannot_parse_is_refused(self):
+        for key, value in (("head_budget", True), ("kernel_budget", "many"), ("head_budget", 2.5),
+                           ("head_threshold_pct", "x")):
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_head_bad"), **{key: value}))
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_head_str"), head_budget="4"))
+        self.assertEqual(ps["head_budget"], "4")
+
     def test_structured_identity_is_forwarded_before_policy(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
         self.assertEqual(ps["expected_gfx"], "gfx950")

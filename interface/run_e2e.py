@@ -928,6 +928,18 @@ def map_args(
     # of deriving it.
     if h.get("tuning_kb") is not None:
         ps_args["tuning_kb"] = "true" if _as_bool(h["tuning_kb"]) else "false"
+    # Head-track bounds: the admission bar, the queue it is sliced to, and the rounds per kernel.
+    # Omitted keys keep the workflow defaults. A value the workflow would parse to NaN, and so
+    # silently skip the head track with, is refused here.
+    for _k, _parse in (("head_threshold_pct", float), ("head_budget", int), ("kernel_budget", int)):
+        if h.get(_k) is not None:
+            try:
+                if isinstance(h[_k], bool):
+                    raise ValueError
+                _parse(str(h[_k]))
+            except ValueError:
+                raise ValueError(f"{_k} must be a number, got {h[_k]!r}") from None
+            ps_args[_k] = str(h[_k])
     # No op budget is forwarded: the tuning loop is uncapped by design (see e2e_workflow.js).
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
