@@ -1051,14 +1051,16 @@ def test_a_malformed_capture_sizes_value_is_unparsed_not_raised() -> None:
     assert facts["compilation_level"] == 3
 
 
-def _vllm_log(path: Path, *, seqs: int = 32, port: int = 30001, mtp: bool = True) -> Path:
+def _vllm_log(
+    path: Path, *, seqs: int = 32, port: int = 30001, mtp: bool = True, extra: str = ""
+) -> Path:
     spec = ", 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 1}" if mtp else ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "INFO 10-27 08:00:00 [api_server.py:1] vLLM API server version 0.27.1.dev5\n"
         f"INFO 10-27 08:00:00 [api_utils.py:273] non-default args: {{'model_tag': '/models/Qwen3.5-9B', "
         f"'host': '0.0.0.0', 'port': {port}, 'model': '/models/Qwen3.5-9B', 'max_num_seqs': {seqs}, "
-        f"'gpu_memory_utilization': 0.9{spec}}}\n",
+        f"'gpu_memory_utilization': 0.9{spec}{extra}}}\n",
         encoding="utf-8",
     )
     return path
@@ -1126,11 +1128,31 @@ def test_servers_that_differ_in_a_field_the_parser_has_never_seen_are_mismatched
     assert rx._identity_value_equal(first, second) is False
 
 
-def test_a_field_logged_by_only_one_server_leaves_the_identity_unverified(tmp_path: Path) -> None:
+def test_a_field_logged_by_only_one_complete_server_is_a_mismatch(tmp_path: Path) -> None:
     with_flag = _vllm_identity(tmp_path, "a.log", "'model': '/m', 'new_scheduler_flag': True")
     without_flag = _vllm_identity(tmp_path, "b.log", "'model': '/m'")
 
-    assert rx._identity_value_equal(with_flag, without_flag) is None
+    assert rx._identity_value_equal(with_flag, without_flag) is False
+    assert rx._identity_value_equal(without_flag, with_flag) is False
+
+
+def test_complete_vllm_records_detect_fields_present_on_either_side(tmp_path: Path) -> None:
+    upstream = _vllm_identity(tmp_path, "upstream.log", "'model': '/m'")
+    setup = _vllm_identity(
+        tmp_path, "setup.log", "'model': '/m', 'enable_prefix_caching': False"
+    )
+
+    assert rx._identity_value_equal(upstream, setup) is False
+    assert rx._identity_value_equal(setup, upstream) is False
+
+
+def test_partial_vllm_identity_keeps_subset_comparison(tmp_path: Path) -> None:
+    partial = {"backend": "vllm", "server_args": {"model": "/m"}}
+    complete = _vllm_identity(
+        tmp_path, "complete.log", "'model': '/m', 'enable_prefix_caching': False"
+    )
+
+    assert rx._identity_value_equal(partial, complete) is True
 
 
 def test_language_model_only_changes_the_verdict(tmp_path: Path) -> None:
@@ -1138,7 +1160,7 @@ def test_language_model_only_changes_the_verdict(tmp_path: Path) -> None:
     full_model = _vllm_identity(tmp_path, "b.log", _VLLM_BASELINE.replace("'language_model_only': True, ", ""))
     flipped = _vllm_identity(tmp_path, "c.log", _VLLM_BASELINE.replace("True, 'max_num", "False, 'max_num"))
 
-    assert rx._identity_value_equal(text_only, full_model) is None
+    assert rx._identity_value_equal(text_only, full_model) is False
     assert rx._identity_value_equal(text_only, flipped) is False
 
 
@@ -1168,7 +1190,26 @@ def test_vllm_non_default_args_are_read_as_launch_identity(tmp_path: Path) -> No
             "gpu_memory_utilization": 0.9,
             "speculative_config": {"method": "mtp", "num_speculative_tokens": 1},
         },
+        "server_args_complete": True,
     }
+
+
+def test_one_sided_field_in_complete_vllm_logs_is_a_mismatch(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _vllm_log(eval_dir / "baseline" / "server.log")
+    _vllm_log(
+        eval_dir / "profile" / "round_0" / "server.log",
+        extra=", 'enable_prefix_caching': False",
+    )
+    handoff = _atom_handoff(_vllm_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "mismatched"
+    assert identity["geak_launched"][0]["status"] == "mismatched"
+    assert identity["geak_launched"][0]["mismatches"] == [
+        {"key": "enable_prefix_caching", "expected": None, "observed": False}
+    ]
 
 
 def test_a_vllm_setup_server_is_judged_against_the_orchestrator_log(tmp_path: Path) -> None:

@@ -539,8 +539,10 @@ unverified. For vLLM, whose `non-default args` line lists every argument that
 differs from its default, every field is compared, including one the parser has
 never seen, except the run-scoped `host`, `port`, `model_tag` and the
 `profiler_config` of GEAK's own profile servers. Two servers that differ in a
-field are `mismatched`; a field logged by only one side is `unverified`; an item
-that is not a `key: value` pair is recorded under `unparsed`. Every evidence path
+field are `mismatched`; when both sides are complete parsed vLLM records, a field
+logged by only one side is also `mismatched`. Partial caller-supplied identities
+keep their subset comparison. An item that is not a `key: value` pair is recorded
+under `unparsed`. Every evidence path
 actually read is recorded in
 `server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing

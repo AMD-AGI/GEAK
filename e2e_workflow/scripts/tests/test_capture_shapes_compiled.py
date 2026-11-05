@@ -125,16 +125,37 @@ class TestCaptureUnderCompile(unittest.TestCase):
         verdict = self.ks.verify(TARGET, DEVICE_KERNEL, meta, self._trace(target_ran=False))
 
         self.assertEqual(meta["total_calls_observed"], 0)
-        self.assertGreaterEqual(meta["compiled_passthrough_calls"], 1)
+        self.assertTrue(meta["compiled_passthrough_observed"])
         self.assertEqual(verdict["failed"], ["capture_compiled_unobservable"])
 
-    def test_every_call_of_a_compiled_region_is_counted_not_only_its_trace(self):
+    def test_compiled_passthrough_observation_is_stable_across_calls(self):
         x, w = torch.randn(4, 8), torch.randn(16, 8)
         compiled = torch.compile(self._forward, fullgraph=True, backend="eager")
         for _ in range(3):
             compiled(x, w)
 
-        self.assertEqual(self.cs._STATE["compiled_passthrough_calls"], 3)
+        self.assertTrue(self.cs._STATE["compiled_passthrough_observed"])
+
+    def test_repeated_compiled_calls_reuse_one_graph_and_record_stable_metadata(self):
+        x, w = torch.randn(4, 8), torch.randn(16, 8)
+        compiled_graphs = []
+
+        def backend(graph, _example_inputs):
+            compiled_graphs.append(graph)
+            return graph.forward
+
+        compiled = torch.compile(self._forward, fullgraph=True, backend=backend)
+        compiled(x, w)
+        compiled(x, w)
+        graphs_after_warmup = len(compiled_graphs)
+        for _ in range(10):
+            compiled(x, w)
+
+        self.assertLessEqual(graphs_after_warmup, 2)
+        self.assertEqual(len(compiled_graphs), graphs_after_warmup)
+        meta = self._flush()
+        self.assertTrue(meta["compiled_passthrough_observed"])
+        self.assertNotIn("compiled_passthrough_calls", meta)
 
     def test_an_eager_call_beside_a_compiled_one_is_selected_and_the_capture_states_its_scope(self):
         x, w = torch.randn(4, 8), torch.randn(16, 8)
