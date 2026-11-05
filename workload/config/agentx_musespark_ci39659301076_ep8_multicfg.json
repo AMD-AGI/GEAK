@@ -57,8 +57,8 @@
       }
     },
     "applyback": {
-      "skill": "overlay-e2e-ab",
-      "mode": "script",
+      "skill": "overlay-ab",
+      "mode": "agent",
       "params": {
         "repeats": 3,
         "smoke_required": true,
