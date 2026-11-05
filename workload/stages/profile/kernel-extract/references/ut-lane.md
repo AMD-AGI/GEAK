@@ -46,9 +46,13 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
    few server calls, one draw, and writes `run/ut_report.quick.json`. It never passes;
    it is how you find a wrong `call()`, a hook, a bound or a control in minutes instead of
    an hour. Fix and rerun until every gate it runs passes.
-6. **Full run:** `python3 unittest.py --skip timing` when the prompt says TIMING is done by
-   the wave (the default), otherwise `python3 unittest.py`. Fix what fails and rerun; add
-   `--reuse` to keep the gates that already passed when nothing they read changed.
+6. **Qualify the UT:** by default run `python3 unittest.py --validation-mode correctness --reuse`.
+   Every non-timing gate must pass. Preserve weighted shapes and the timing API, but
+   perform no timing measurements and report `performance_measured: false`.
+   If the wave explicitly requests a performance tail, use `python3 unittest.py --skip timing`
+   and let the tail finish it; an explicit in-lane performance request uses
+   `python3 unittest.py --validation-mode performance`. Fix failures and reuse unchanged
+   passing gates. A quick run never substitutes for qualification.
 
 The lane ends by itself once the receipt (`run/ut_result.json`, written by the UT, newer
 than every file it reads) shows every required gate passing. Do not write the receipt, do

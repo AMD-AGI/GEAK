@@ -27,7 +27,8 @@
   "CI40714803265 validation: leg_runner observes real CUDA registrations before serving imports and resolves AITER torch_compile_guard through its registered body; reused or absent registrations cannot masquerade as a candidate source binding. Six pinned-image CPU tests cover actual dispatch and rejection cases.",
   "Shared multiconfig sampling revision: the slot multi_config_sampling.py plans a CPU-only observed-point union within pinned compatible deployments; multi_config.py plan/capture/project routes shared captures through GPU leases and reweights each config independently. run_points.py signs resumable measurements and supports full pooled source discovery; relabel_points.py retains discrete shape/sequence/graph coverage gaps. ut_wave.py optionally runs disjoint timing tails after authoring drains; default remains one worker. The multiconfig scenario uses >3% operator selection.",
   "Profile/UT split: kernel-profile owns sampling and dispatch evidence; kernel-ut consumes the hashed workload/kernel_profile_handoff/v1 and uses this single shared script/contract/template bundle via relative links. run_points --profile-only suppresses UT drafting. Legacy combined extraction is retained.",
-  "Integrate the profile/UT split with geak-x-multiconfig 6a425ef: preserve eager decode capture, batch-size dispatch merge policy and share ordering; document provisional-plan ordering and retain postprocess counts with strict replay accounting."
+  "Integrate the profile/UT split with geak-x-multiconfig 6a425ef: preserve eager decode capture, batch-size dispatch merge policy and share ordering; document provisional-plan ordering and retain postprocess counts with strict replay accounting.",
+  "UT extraction now defaults to correctness qualification without timing. Explicit kernel_ut_validation/v1 receipts preserve all non-timing gates and mark performance unmeasured; optimization retains full timing and can reuse unchanged correctness results."
  ],
  "files": [
   {
@@ -625,6 +626,11 @@
   },
   {
    "file": "ut_contracts/tests/test_ut_contracts.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_validation_mode.py",
    "source": null,
    "added_here": true
   },

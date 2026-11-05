@@ -182,6 +182,8 @@ export async function utDriverSnapshot(taskDir) {
 
 async function verifyUtSnapshot(task, manifest, ut) {
   if (manifest.ut_snapshot === undefined) {
+    if (ut.validation_contract !== undefined || ut.validation_mode !== undefined)
+      throw new Error('scoped UT validation requires the hashed UT driver report');
     if (!(ut.ok === true || ut.smoke === 'pass') || ut.exit_code !== 0 ||
         ut.snapshot_sha256 !== manifest.snapshot_sha256 || ut.target_callable !== manifest.target_callable)
       throw new Error('full GPU UT result must pass and identify the current entry and source snapshot');
@@ -205,10 +207,26 @@ async function verifyUtSnapshot(task, manifest, ut) {
       !hexDigest(report.contract_sha256) || report.contract_sha256 !== ut.contract_sha256)
     throw new Error('UT result and full report do not identify the same validation run and contract');
   const passed = r => r && ['pass', 'not_required'].includes(r.status);
-  if (!fullUtGates.every(g => passed(report.gates?.[g]) && passed(ut.gates?.[g]) &&
+  let required = fullUtGates;
+  const scoped = [report, ut].some(d => d.validation_contract !== undefined || d.validation_mode !== undefined);
+  if (scoped) {
+    const mode = report.validation_mode;
+    if (!['correctness', 'performance'].includes(mode) || ut.validation_mode !== mode ||
+        [report, ut].some(d => d.validation_contract !== 'kernel_ut_validation/v1'))
+      throw new Error('UT result/report must declare the same supported validation mode');
+    required = mode === 'correctness' ? fullUtGates.filter(g => g !== 'timing') : fullUtGates;
+    const sameGates = a => Array.isArray(a) && a.length === required.length &&
+      new Set(a).size === required.length && required.every(g => a.includes(g));
+    if ([report, ut].some(d => !sameGates(d.required_gates) || !sameGates(Object.keys(d.gates || {})) ||
+        d.performance_measured !== (mode === 'performance') ||
+        mode === 'performance' && d.gates?.timing?.status !== 'pass'))
+      throw new Error('UT validation scope or performance claim is inconsistent with its required gates');
+  }
+  if (!required.every(g => passed(report.gates?.[g]) && passed(ut.gates?.[g]) &&
       ut.gates[g].ok === true && ut.gates[g].status === report.gates[g].status) ||
       !Object.values(report.gates || {}).every(passed) || !Object.values(ut.gates || {}).every(passed))
-    throw new Error('UT driver compatibility requires every full UT gate, including timing, to pass');
+    throw new Error(scoped ? 'UT validation requires every gate in its declared mode to pass' :
+      'UT driver compatibility requires every full UT gate, including timing, to pass');
 }
 export async function verifySourceDelivery(kernel, result) {
   if (kernel?.source_delivery_required !== true && !result?.source_delivery_ref)
@@ -254,7 +272,9 @@ export async function verifySourceDelivery(kernel, result) {
       }
     }
     return { ok: true, why: `source and recorded GPU evidence match ${required.length} requested kernels`,
-      snapshot_sha256: m.snapshot_sha256 };
+      snapshot_sha256: m.snapshot_sha256,
+      ...(ut.validation_contract ? { validation_mode: ut.validation_mode,
+        performance_measured: ut.performance_measured } : {}) };
   } catch (e) { return { ok: false, why: e.message }; }
 }
 

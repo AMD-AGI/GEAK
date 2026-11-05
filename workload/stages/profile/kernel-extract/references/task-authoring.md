@@ -133,6 +133,10 @@ state through nondeterministic routing while pretending the inputs are unchanged
 
 ## Correctness and timing
 
+UT generation runs steps 0–6 with `--validation-mode correctness`; step 7 is
+performance validation for optimization. Keep its weighted case interface ready
+without measuring timing or reporting a speedup during extraction.
+
 Use separate subprocesses for baseline and candidate. Import task helpers by
 explicit file path and remove the task directory from `sys.path` before importing
 torch: a file named `unittest.py` otherwise shadows Python's standard library.
@@ -220,7 +224,8 @@ Write a single `python3 unittest.py` entry that orchestrates and combines these
 checks, emits per-gate and per-case evidence and exits nonzero on failure or
 incompleteness. The scaffolded `unittest.py` does this through `ut_driver.py`: steps 0-1
 are its `contract`/`inputs` gates, 2 `binding`, 3-4 `correctness` and `isolation`, 5
-`replay`, 6 `negative_controls` and `restore`, 7 `timing`; the controls you declare in
+`replay`, 6 `negative_controls` and `restore`, 7 `timing` only in performance mode; extraction uses `--validation-mode correctness`
+and retains the weighted timing interface for optimization. The controls you declare in
 `meta.ut_contract.negative_controls` must name the exact source fragment and the deviation
 you expect, and the gate requires the compare to fail by at least 10x its bound. A prototype with only replay or timing is not a completed UT.
 The collective case requires the real rank harness described in

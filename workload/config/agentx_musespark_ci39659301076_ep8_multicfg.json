@@ -78,7 +78,7 @@
       "skill": "kernel-ut",
       "mode": "agent",
       "params": {
-        "timing_workers": 2
+        "timing": "none"
       }
     }
   },
@@ -86,7 +86,6 @@
     "baseline",
     "profile",
     "ut",
-    "roofline",
     "optimize",
     "applyback"
   ],

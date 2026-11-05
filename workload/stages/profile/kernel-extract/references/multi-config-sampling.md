@@ -39,13 +39,13 @@ The pipeline scenario can specify:
     "num_points": 24,
     "context_tolerance": 1.5,
     "target_pct": 90
-  },
-  "ut_timing_workers": 2
+  }
 }
 ```
 
 The profile stage is agent-shaped: pass the numeric `sampling` fields to the command
-below and `ut_timing_workers` to `ut_wave.py start --timing-workers`. `num_points` is
+below. UT generation uses `ut_wave.py start --timing none`; performance measurements
+belong to optimization. `num_points` is
 one global initial budget, **not** points per config and not a fixed skill constant;
 24 above is an example. Choose it from the number of distinct deployment/phase domains
 and the available capture budget, then inspect the reported gaps. The >3% cutoff is
@@ -132,18 +132,16 @@ loosening compatibility to manufacture a saving.
 
 ## UT parallelism
 
-UT authoring and non-timing GPU gates already use independent task lanes. After all
-authoring lanes drain, `ut_wave.py start --timing tail --timing-workers N` can run up to
-N timing tasks on disjoint GPU sets. Run the wave under the campaign's established
-allocation/whole-pool lease; the controller divides that held pool, and container
-device isolation limits each worker's visibility. Baseline/candidate pairs still stay
-on the same device. Multi-rank
-tasks keep an exclusive tail. Default N=1 preserves the existing exclusive timing;
-increase it when throughput matters and validate self-noise on the actual machine.
-Concurrent tasks still share CPU, storage and possibly node power limits, so the option
-is not a claim of unchanged variance or N-fold acceleration.
+UT authoring and GPU correctness gates use independent task lanes. The default
+`ut_wave.py start --timing none` finishes with `unittest.py --validation-mode correctness
+--reuse`; it runs no timing tail. Preserve all weighted shapes for optimization and
+report `performance_measured: false`.
 
-Keep the numerical gates and draws unchanged when changing concurrency. Use `--quick`
-to debug, then the full suite; reuse compatible passing gates. Large inline tensor
-bundles, full-suite temporary oracle storage and non-checkpointed timing can still
-dominate runtime; this scheduling change does not solve those separate driver costs.
+For an explicitly requested performance wave, `--timing tail --timing-workers N`
+times tasks on disjoint GPU sets after authoring drains. Each B/C pair stays on one
+device, multi-rank tasks retain an exclusive tail, and measurements retain their cache
+and noise policy. This optional mode does not change the extraction default.
+
+Keep numerical gates and draws unchanged. Use `--quick` for debugging, then correctness
+qualification; reuse compatible passing gates. Large inline tensor bundles and full-suite
+temporary oracle storage can still consume time independently of timing.

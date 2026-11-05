@@ -38,7 +38,7 @@ is merged -- the harness being hard to write is never a reason to keep it apart.
    region). Every case carries `branch` (its member, from `case_sources`), its
    `expected_kernels`, any non-size `context` it fixes (an enabled-kernel set, an optional
    FP8 input, a layer type), and `boundary: true` with weight 0 for cases placed at each
-   `boundaries` edge. Each branch keeps its own tolerance; the timing gate reports
+   `boundaries` edge. Each branch keeps its own tolerance; during optimization the timing gate reports
    `per_branch` and `worst_branch`, and a kept result needs every branch above the noise
    band, not only the pooled figure.
 4. `refused_pairs` say why two tasks are NOT one (launched together, interleaving sizes, a

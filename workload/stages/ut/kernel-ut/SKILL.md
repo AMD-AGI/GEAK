@@ -1,6 +1,6 @@
 ---
 name: kernel-ut
-description: Generate source-backed standalone GPU unit tests from a verified kernel-profile handoff, using the shared fixed family contracts, templates and driver. Author and validate tasks in parallel without running serving or collecting new profiles.
+description: Generate source-backed standalone GPU unit tests from a verified kernel-profile handoff, using the shared fixed family contracts, templates and driver. Author and validate tasks in parallel without serving, profiling or timing; performance measurements belong to optimization.
 ---
 
 # Template-based kernel UT generation
@@ -78,19 +78,22 @@ agent lane per task. A task directory has one writer:
 python3 "$SKILL_ROOT/scripts/ut_wave.py" plan --eval-dir "$OUT" --gpus <allocated-ids>
 python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$OUT" --runner "$RUNNER" \
   --backend docker --image <pinned-image> --gpus <allocated-ids> \
-  --timing tail --timing-workers <params.timing_workers>
+  --timing none
 ```
 
-Use one timing worker when the parameter is absent. Lanes follow
-[the UT lane procedure](references/ut-lane.md), author and fix in parallel, and run CPU
-lint, quick iterations, then full non-timing gates. After lanes drain, timing workers
-use disjoint GPU sets; each baseline/candidate pair stays on one device. Multi-rank
-tasks retain an exclusive tail. Reuse unchanged passing gates; never reduce draws or
-drop cases to make the wave faster. Wait/status the wave and retain each failure.
+Lanes follow [the UT lane procedure](references/ut-lane.md), author and fix in parallel,
+and run CPU lint, quick iterations, then `unittest.py --validation-mode correctness --reuse`.
+This runs every non-timing gate and emits a passing UT qualification without starting
+any timing workers. Reuse unchanged passing gates; preserve the cases, draws and
+per-config weights for later optimization. Wait/status the wave and retain each failure.
 
 Every accepted task needs full correctness, binding/launch, server-call/variant,
-isolation/replay, per-leaf negative controls, restore and positive-weight timing
-evidence as required by its family. Use the real source-delivery verifier to create
+isolation/replay, per-leaf negative controls and restored-source evidence as required
+by its family. Timing is not required for UT generation. The driver records
+`validation_contract: "kernel_ut_validation/v1"`, `validation_mode: "correctness"`,
+all eleven `required_gates`, and `performance_measured: false` in both UT receipts;
+there is no timing gate or fabricated 1.0 ratio. Keep the weighted timing interface
+executable for the optimizer. Use the real source-delivery verifier to create
 `run/RETURN.json`. A quick pass, missing GPU access or a numerical control that only
 breaks compilation is not a full UT pass.
 
@@ -101,7 +104,8 @@ per-task case/gate results and coverage limitations. Preserve each reviewed task
 `selection_pct_gpu_time` from `task_plan.json` as `results.tasks[].selection_pct_gpu_time`
 (with its `task` label); the optimizer uses this measured share for its default order.
 Merged tasks retain branch cases, boundary cases, expected kernels, branch tolerances
-and per-branch timing results. Then:
+and per-branch weights. Report performance as unmeasured; optimization later supplies
+per-branch timings. Then:
 
 ```bash
 python3 "$WORKLOAD_ROOT/stages/ut/prepare.py" --check
@@ -112,5 +116,7 @@ The finalizer rechecks immutable inputs and uses the existing task/UT/source-del
 acceptance checks. It does not require inventing an exact whole-serving coverage
 percentage to qualify a valid UT; unknown serving coverage remains unknown. The
 profile stage reports measured sampling evidence, while this stage reports tested
-case/source coverage. Downstream roofline receives this stage's output containing
-`tasks/`, `task_plan.json`, selection and ranking. No optimization or E2E gain is claimed.
+case/source coverage. Downstream optimization receives this stage's output containing
+`tasks/`, `task_plan.json`, selection and ranking, and performs its own timing. An optional
+roofline stage must collect any missing performance inputs. No optimization or E2E gain
+is claimed.

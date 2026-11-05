@@ -15,6 +15,13 @@ largest tasks unranked.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
 
+UT generation can deliver a correctness-qualified task with
+`validation_mode: "correctness"` and `performance_measured: false`. Its weighted shapes
+and timing implementation are ready, but no baseline latency or 1.0 ratio was measured.
+For the shared driver, evaluate with `unittest.py --validation-mode performance --reuse`
+(the bare command also defaults to performance). Reuse unchanged correctness gates;
+measure the baseline/candidate pair before reporting speedup or keeping an optimization.
+
 ## Implementations
 
 | Skill | Notes |

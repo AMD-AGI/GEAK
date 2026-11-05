@@ -1,6 +1,6 @@
 ---
 name: kernel-extract
-description: Extract actual GPU kernel source and workload-weighted standalone tests from AgentX replay evidence. Use with serving logs, traces and an accessible deployed GPU environment; covers phase selection, live dispatch, source binding, correctness and timing. Excludes fixed ISL/OSL benchmarking and kernel optimization unless explicitly requested.
+description: Extract actual GPU kernel source and workload-weighted standalone tests from AgentX replay evidence. Use with serving logs, traces and an accessible deployed GPU environment; covers phase selection, live dispatch, source binding and correctness qualification without timing. Excludes fixed ISL/OSL benchmarking and kernel optimization unless explicitly requested.
 ---
 
 # AgentX kernel extraction
@@ -181,12 +181,11 @@ One agent lane per task, each writing, validating and fixing its own task direct
 (`serving.json` `gpus`, free again once the probe server stopped): the most expensive task
 starts first, GPUs left over when there are fewer tasks than GPUs go to the most expensive
 tasks (the UT spreads its legs over every GPU it holds), and a task needing several GPUs at
-once runs after the single-GPU ones. Timing is not run in the lanes. By default each
-task is timed alone afterwards over all GPUs. `start --timing-workers N` runs up to N
-timing tasks on disjoint GPU sets, after all authoring lanes drain (`unittest.py --reuse`
-keeps the gates the lane passed). Pass the scenario's `ut_timing_workers` when set;
-multi-rank tasks retain an exclusive tail. CPU/I/O contention and node power can still
-affect timing variance even with device isolation.
+once runs after the single-GPU ones. The default `--timing none` qualifies all non-timing
+gates with `unittest.py --validation-mode correctness --reuse`; no timing tail runs.
+Preserve weighted shapes and timing support for the optimizer. An explicitly requested
+performance wave can use `--timing tail --timing-workers N` on disjoint GPU sets after
+authoring drains; multi-rank tasks retain an exclusive tail.
 `wait` returns 0 when every task is `passed`, `blocked` or `failed`; read `ut_wave/summary.json`
 and the lane logs it names, fix nothing in a task yourself, and carry blocked and failed
 tasks into the report with their reasons. `start` again resumes an interrupted wave.
@@ -227,7 +226,9 @@ GPUs through its container; inside it, `GPU_IDS` is the lease.)
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input
 refresh, each editable leaf's numerical negative control, restored-source
-integrity, and both timing legs for every positive-mass signature. Compilation
+integrity. UT extraction does not measure timing: use the explicit correctness
+validation mode, retain every weighted signature, and report performance as unmeasured.
+Optimization later measures both timing legs for every positive-mass signature. Compilation
 failure is not a successful numerical negative control. Report missing cases
 and mass; do not renormalize survivors into full coverage.
 

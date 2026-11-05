@@ -116,6 +116,64 @@ async function driverFixture(t) {
   return f;
 }
 
+async function correctnessFixture(t) {
+  const f = await driverFixture(t);
+  for (const doc of [f.report, f.ut]) {
+    doc.validation_contract = 'kernel_ut_validation/v1';
+    doc.validation_mode = 'correctness';
+    doc.required_gates = gates.filter(g => g !== 'timing');
+    doc.performance_measured = false;
+    delete doc.gates.timing;
+  }
+  await f.persist();
+  return f;
+}
+
+test('correctness-qualified source delivery does not require or claim timing', async t => {
+  const f = await correctnessFixture(t);
+  const result = await verifySourceDelivery(f.kernel, await f.pack());
+  assert.equal(result.ok, true, result.why);
+  assert.equal(result.validation_mode, 'correctness');
+  assert.equal(result.performance_measured, false);
+  delete f.m.ut_snapshot;
+  assert.match((await verifySourceDelivery(f.kernel, await f.pack())).why, /hashed UT driver report/);
+});
+
+test('correctness qualification keeps every non-timing gate and matching scope', async t => {
+  for (const alter of [
+    f => { delete f.report.gates.replay; },
+    f => { f.report.gates.correctness.status = 'fail'; },
+    f => { f.ut.validation_mode = 'performance'; },
+    f => { f.report.required_gates = ['correctness']; },
+    f => { f.ut.performance_measured = true; },
+    f => { f.report.quick = { cases: ['one'] }; },
+    f => { f.report.gates.timing = { status: 'not_required' }; },
+  ]) {
+    const f = await correctnessFixture(t);
+    alter(f);
+    await f.persist();
+    assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
+  }
+});
+
+test('performance validation still needs timing after correctness-only extraction', async t => {
+  const f = await correctnessFixture(t);
+  for (const doc of [f.report, f.ut]) {
+    doc.validation_mode = 'performance';
+    doc.required_gates = [...gates];
+    doc.performance_measured = true;
+  }
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
+  f.report.gates.timing = { status: 'pass' };
+  f.ut.gates.timing = { status: 'pass', ok: true };
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, true);
+  f.report.gates.timing.status = f.ut.gates.timing.status = 'not_required';
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
+});
+
 test('UT driver hashes match the independent Python _snapshot and _reuse_key implementations', async t => {
   const f = await driverFixture(t);
   await fs.mkdir(path.join(f.task, 'kernel_src/nested'));

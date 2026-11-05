@@ -30,7 +30,7 @@ slowest lane, and four of eight GPUs sat idle. So:
   * a task whose harness needs several GPUs at once (requested_kernel required_gpu_count,
     e.g. a TP8 collective) starts once no single-GPU task is waiting and that many GPUs
     are free;
-  * timing (--timing tail, the default) is not run inside the lanes, where it would time
+  * optional performance timing (--timing tail) is not run inside the lanes, where it would time
     one task while seven others compile and run beside it. Lanes finish every other gate;
     the wave then times each task alone with `unittest.py --reuse` (the passed gates are
     kept, only timing runs) spread over all GPUs. --timing-workers N optionally runs
@@ -44,6 +44,9 @@ single-lane runs. Inside a lane the GPUs are always 0..k-1 (GPU_IDS).
 `start` detaches the controller (it outlives the calling agent's tool timeout); `wait`
 blocks up to --timeout seconds. All state lives in <eval-dir>/ut_wave/, so a restarted
 controller resumes: passed and blocked tasks stay so, others are dispatched again.
+Default --timing none qualifies all non-timing gates with
+unittest.py --validation-mode correctness --reuse, without a timing tail. The
+performance scheduling described above applies only to explicit --timing tail/lane.
 Stdlib only.
 """
 import argparse
@@ -110,9 +113,15 @@ def receipt(tdir):
     return res.get("verdict"), fresh, load(os.path.join(tdir, "run", "ut_report.json"), {})
 
 
-def passed(tdir):
-    verdict, fresh, _ = receipt(tdir)
-    return verdict == "pass" and fresh
+def passed(tdir, require_timing=True):
+    verdict, fresh, rep = receipt(tdir)
+    if verdict != "pass" or not fresh:
+        return False
+    # A correctness-qualified task is complete for extraction, but still needs
+    # measurements when explicitly resumed as a performance wave.
+    if require_timing and rep and rep.get("validation_mode") == "correctness":
+        return False
+    return True
 
 
 def timing_ready(tdir):
@@ -359,7 +368,9 @@ def controller(a):
     running = {}                          # job name -> {"gpus", "kind", "label", "started"}
     for r in rows:                        # resume: a lane that was running is dispatched again
         st = status_of(wave, r["label"])
-        if st.get("status") not in FINAL + ("timing",):
+        if (st.get("status") not in FINAL + ("timing",)
+                or st.get("status") == "passed" and not passed(r["task_dir"], cfg["timing"] != "none")
+                or st.get("status") == "timing" and cfg["timing"] != "tail"):
             set_status(wave, r["label"], status="pending")
     t0 = now()
     log(wave, "wave: %d task(s) on GPUs %s, backend %s, timing %s; order %s"
@@ -453,6 +464,14 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
     tdir = row["task_dir"]
     req = os.path.join(tdir, "run", "requested_kernel.json")
     gpu_ids = os.environ.get("GPU_IDS", "0")
+    timing = {
+        "none": "do NOT measure timing: finish with `unittest.py --validation-mode correctness --reuse`; "
+                "this qualifies every non-timing gate. No timing tail is scheduled. "
+                "Preserve weighted cases for optimization; report performance_measured=false.",
+        "tail": "do NOT run the timing gate: finish with `unittest.py --skip timing`; "
+                "the wave times tasks afterwards on dedicated GPU sets",
+        "lane": "run every gate, timing included",
+    }[cfg["timing"]]
     lines = [
         "You are one lane of a parallel UT wave. You own exactly one task directory and the "
         "GPU(s) of this lane; other agents own the other tasks, at the same time. Nobody will "
@@ -466,9 +485,7 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
         "GPUS            logical %s (GPU_IDS; the UT driver spreads its legs over all of them)"
         % gpu_ids,
         "DEADLINE        %s (epoch %d)" % (time.strftime("%F %T", time.localtime(deadline)), deadline),
-        "TIMING          %s" % ("do NOT run the timing gate: finish with `unittest.py --skip timing`; "
-                                "the wave times tasks afterwards on dedicated GPU sets"
-                                if cfg["timing"] == "tail" else "run every gate, timing included"),
+        "TIMING          %s" % timing,
         "",
     ]
     if attempt > 1:
@@ -520,7 +537,7 @@ def lane(a):
             if blocker:
                 set_status(wave, row["label"], status="blocked", why=blocker.get("reason"))
                 return 0
-            if passed(tdir):
+            if passed(tdir, require_timing=cfg["timing"] != "none"):
                 set_status(wave, row["label"], status="passed", ended=now(), why=None)
                 return 0
             if cfg["timing"] == "tail" and timing_ready(tdir):
@@ -570,7 +587,8 @@ def cmd_plan(a, quiet=False):
         raise SystemExit("ut_wave: no --gpus and no `gpus` in serving.json")
     only = set(a.tasks.split(",")) if a.tasks else None
     rows = task_rows(eval_dir, only)
-    rows = [r for r in rows if a.force or not passed(r["task_dir"])]
+    rows = [r for r in rows if a.force or not passed(r["task_dir"],
+                                                   require_timing=a.timing != "none")]
     big = [r for r in rows if r["need"] > len(gpus)]
     if big:
         raise SystemExit("ut_wave: %s need more GPUs than the wave has (%d)"
@@ -700,13 +718,15 @@ def main(argv=None):
         p.add_argument("--tasks", default=None, help="comma list of task labels (default all)")
         p.add_argument("--force", action="store_true", help="include tasks that already pass")
         p.add_argument("--max-gpus-per-task", type=int, default=4)
+        p.add_argument("--timing", choices=("none", "tail", "lane"), default="none",
+                       help="none qualifies UTs without performance measurements (default); "
+                            "tail/lane explicitly request performance validation")
         if name == "start":
             p.add_argument("--runner", required=True, help="runners/CONTRACT.md runner script")
             p.add_argument("--backend", choices=("docker", "local"), default="docker")
             p.add_argument("--image", default=None)
             p.add_argument("--render-base", type=int, default=128)
             p.add_argument("--render-step", type=int, default=8)
-            p.add_argument("--timing", choices=("tail", "lane"), default="tail")
             p.add_argument("--timing-workers", type=int, default=1,
                            help="concurrent tail tasks on disjoint GPUs, after authoring drains; default 1")
             p.add_argument("--lane-sec", type=int, default=7200, help="per runner session")

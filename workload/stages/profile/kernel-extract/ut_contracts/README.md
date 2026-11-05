@@ -36,7 +36,7 @@ python3 "$UTC/scaffold_ut.py" new --family gemm_a8w8_blockscale --task "$EVAL_DI
 # meta.json evidence_path and negative_controls, run/ut_cases.json if no --manifest
 python3 "$UTC/scaffold_ut.py" sync-meta --task "$EVAL_DIR/tasks/<name>"
 python3 "$EVAL_DIR/tasks/<name>/ut_contract.py" "$EVAL_DIR/tasks/<name>"     # CPU lint, exit 0/1
-cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py
+cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py --validation-mode correctness
 ```
 
 With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the driver shards
@@ -44,12 +44,20 @@ its correctness legs by case and spreads timing buckets over them. `--quick` run
 but timing on the smallest, middle and largest case of each phase (one draw, a few server
 calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
 `--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
-e.g. `--skip timing` in a lane, then `--reuse` alone to time it.
+including correctness receipts reused later by performance validation.
+
+UT extraction runs `--validation-mode correctness`: all eleven non-timing gates are
+required, and no timing gate executes. Reports explicitly name the validation contract,
+mode, required gates and `performance_measured: false`; a pass certifies the UT.
+Optimization runs `--validation-mode performance --reuse` (performance remains the
+bare command's default for existing optimizer callers). It requires all twelve gates,
+measures timing, and only then reports a weighted speedup. Preserve `timed: true` cases
+and their workload weights even when extraction does not measure them.
 
 The lint needs no GPU and no torch; run it before every GPU session. `unittest.py` writes
 `run/ut_report.json` (every gate's measures) and `run/ut_result.json` (verdict, exit code,
 snapshot hash, gate statuses), prints `UT_GATE <gate> <status>` lines and, when timing ran,
-`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate passed; 1 = a gate failed or did not
+`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate required by the validation mode passed; 1 = a required gate failed or did not
 run (`--skip` makes the verdict `partial`, never `pass`); 3 = `UT_HARNESS_INCOMPLETE`, the UT
 itself is missing something (a graph phase without a replay bundle) — fix the UT, do not
 blame the candidate.

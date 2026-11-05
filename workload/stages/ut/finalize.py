@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UT acceptance: immutable profile inputs, full GPU gates and source delivery."""
+"""UT acceptance: immutable profile inputs, GPU correctness gates and source delivery."""
 import importlib.util
 import os
 from pathlib import Path
@@ -34,6 +34,13 @@ def main():
     receipt = read_json(str(Path(out) / "profile_input.json"))
     result.setdefault("artifacts", {})["profile_input"] = "profile_input.json"
     result.setdefault("metrics", {})["profile_handoff_sha256"] = receipt["handoff_sha256"]
+    result["metrics"]["required_ut_validation"] = "correctness"
+    tasks = Path(out) / "tasks"
+    results = [read_json(str(p / "run/ut_result.json")) or {} for p in tasks.iterdir()
+               if p.is_dir()] if tasks.is_dir() else []
+    result["metrics"]["tasks_with_performance_measurements"] = sum(
+        r.get("performance_measured") is True or
+        (r.get("gates") or {}).get("timing", {}).get("status") == "pass" for r in results)
     return emit(result["status"], artifacts=result["artifacts"], metrics=result["metrics"],
                 notes=result.get("notes", ""))
 

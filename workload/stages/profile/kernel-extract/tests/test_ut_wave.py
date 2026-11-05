@@ -24,20 +24,22 @@ FAKE_UT = textwrap.dedent('''\
     import json, os, sys, time
     here = os.path.dirname(os.path.abspath(__file__))
     gates = ["contract", "correctness", "negative_controls", "restore"]
-    if "--skip" not in sys.argv:
+    measuring = "--skip" not in sys.argv and "correctness" not in sys.argv
+    if measuring:
         gates.append("timing")
     with open(os.path.join(here, "run", "ut_calls.log"), "a") as f:
         f.write(" ".join(sys.argv[1:]) + " GPU_IDS=%s\\n" % os.environ.get("GPU_IDS"))
-    if "--skip" not in sys.argv:
+    if measuring:
         with open(os.path.join(here, "run", "timing.trace"), "a") as f:
             f.write("start %s %s\\n" % (time.time(), os.environ.get("ROCR_VISIBLE_DEVICES")))
-    verdict = "pass" if "timing" in gates else "partial"
-    rep = {"gates": {g: {"status": "pass"} for g in gates}, "verdict": verdict}
+    verdict = "pass" if "timing" in gates or "correctness" in sys.argv else "partial"
+    rep = {"gates": {g: {"status": "pass"} for g in gates}, "verdict": verdict,
+           "validation_mode": "performance" if measuring else "correctness" if "correctness" in sys.argv else "performance"}
     time.sleep(0.3)
     json.dump(rep, open(os.path.join(here, "run", "ut_report.json"), "w"))
     json.dump({"verdict": verdict, "exit_code": 0 if verdict == "pass" else 1},
               open(os.path.join(here, "run", "ut_result.json"), "w"))
-    if "--skip" not in sys.argv:
+    if measuring:
         with open(os.path.join(here, "run", "timing.trace"), "a") as f:
             f.write("end %s\\n" % time.time())
     ''')
@@ -50,6 +52,7 @@ STUB_RUNNER = textwrap.dedent('''\
     echo "start $(date +%s.%N) ROCR=$ROCR_VISIBLE_DEVICES GPU_IDS=$GPU_IDS" >> "$T/run/lane.trace"
     mode="$(cat "$T/mode")"
     SKIP="--skip timing"; grep -q "run every gate, timing included" "$PROMPT" && SKIP=""
+    grep -q "validation-mode correctness" "$PROMPT" && SKIP="--validation-mode correctness --reuse"
     grep -q "THIS IS ATTEMPT" "$PROMPT" && echo continuation >> "$T/run/lane.trace"
     sleep 1
     case "$mode" in
@@ -97,7 +100,7 @@ class WaveTest(unittest.TestCase):
     def wave(self, *extra):
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ut_wave.py"), "start",
                             "--eval-dir", self.eval, "--runner", self.runner, "--backend", "local",
-                            "--foreground", "--tick-sec", "1", "--lane-sec", "120", *extra],
+                            "--foreground", "--tick-sec", "1", "--lane-sec", "120", "--timing", "tail", *extra],
                            capture_output=True, text=True, timeout=300)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         with open(os.path.join(self.eval, "ut_wave", "summary.json")) as f:
@@ -106,6 +109,20 @@ class WaveTest(unittest.TestCase):
     def trace(self, label):
         with open(os.path.join(self.eval, "tasks", label, "run", "lane.trace")) as f:
             return f.read()
+
+    def test_correctness_wave_finishes_without_any_timing_and_can_upgrade(self):
+        self.tasks([("gemm", "gemm", 3, 1, "ok"), ("norm", "rmsnorm", 2, 1, "ok")])
+        res, out = self.wave("--timing", "none")
+        self.assertEqual({r["status"] for r in res.values()}, {"passed"}, out)
+        for name in res:
+            td = os.path.join(self.eval, "tasks", name)
+            self.assertFalse(os.path.exists(os.path.join(td, "run", "timing.trace")))
+            self.assertTrue(W.passed(td, require_timing=False))
+            self.assertFalse(W.passed(td, require_timing=True))
+        res, out = self.wave("--timing", "tail")
+        self.assertEqual({r["status"] for r in res.values()}, {"passed"}, out)
+        for name in res:
+            self.assertTrue(W.passed(os.path.join(self.eval, "tasks", name)))
 
     def test_allocation_gives_spare_gpus_to_the_costliest_task(self):
         rows = [{"label": "moe", "need": 1, "cost": 300.0}, {"label": "gemm", "need": 1, "cost": 50.0},

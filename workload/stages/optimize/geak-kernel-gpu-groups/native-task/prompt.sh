@@ -18,9 +18,11 @@ Optimize the GPU task in $TASK_DIR using your native coding tools. This is attem
 measured whole-task speedup so far is ${BEST_SPEEDUP}x against the original implementation.
 Your attempt has ${ATTEMPT_CAP} seconds; keep useful source changes on disk before it ends.
 
-The profile stage has already qualified this task's frozen harness and recorded baseline
-case timings. Read that evidence; focus this attempt on kernel changes instead of building
-a new harness. Work directly with the existing build path and editable device sources.
+The task producer has qualified this task's frozen harness. Its receipt may be
+correctness-only, with performance_measured=false; baseline case timings may be absent.
+Use the existing weighted timing interface to measure baseline/candidate performance
+before claiming a gain (shared ut_driver: --validation-mode performance --reuse).
+Read the qualification evidence and work on kernel changes with this harness. Work directly with the existing build path and editable device sources.
 This method requires no Workflow tool or kernel_workflow.js runtime. Keep the work in this
 one runner, and serialize GPU experiments. The container exposes the assigned logical GPU
 set [$GPU_IDS]; preserve that visibility. For a multi-rank task, launch the real collective

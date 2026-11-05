@@ -73,9 +73,14 @@ contract is accepted only when all of the following hold:
 - The result is `ok:true`, both result and report have `verdict:"pass"` and
   `exit_code:0`, and they identify the same `started`, `target_callable`,
   `family` and `contract_sha256`. The full report must not be a quick run.
-  All twelve standard gates, including timing, must appear and pass (or be
-  explicitly `not_required`) in both records. Missing/skipped/failed gates,
-  altered report hashes, and unknown compatibility contracts are rejected.
+  New receipts explicitly carry `validation_contract: "kernel_ut_validation/v1"`,
+  matching `validation_mode` and `required_gates`. In `correctness` mode all eleven
+  non-timing gates must appear and pass (or be `not_required`), the timing gate is
+  absent, and `performance_measured` is false. In `performance` mode all twelve gates
+  including timing must pass and `performance_measured` is true. Legacy receipts
+  without a validation mode still require all twelve gates. Missing/skipped/failed
+  required gates, mismatched modes, altered hashes and unknown contracts are rejected.
+  A correctness pass never supplies a speedup or an invented baseline time.
 
 Inspect the current Python-compatible hashes without running Python or a GPU:
 

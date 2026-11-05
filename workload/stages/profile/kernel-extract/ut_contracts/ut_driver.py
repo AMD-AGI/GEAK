@@ -43,6 +43,11 @@ Exit status: 0 every required gate passed; 1 a gate failed or could not run (inc
 3 the UT itself is incomplete (UT_HARNESS_INCOMPLETE printed) — regenerate the UT, do not
 blame the candidate. The task's cases.py supplies only operand construction (via the contract),
 `call`, and for graph phases `replay_bundle`; nothing here is operator specific.
+
+Extraction: --validation-mode correctness requires all non-timing gates and emits an
+explicit kernel_ut_validation/v1 receipt with performance_measured=false. Performance
+mode remains the bare-command default for optimizer callers and also requires timing.
+
 """
 
 import argparse
@@ -788,9 +793,13 @@ def _replay_doc(T, tol):
 def run_gates(T, a):
     state = {"scratch": tempfile.mkdtemp(prefix="ut_%s_" % os.path.basename(T.dir)),
              "hashes": _tree_hashes(T)}
-    wanted = [g for g in GATES if g in a.gates]
+    mode = getattr(a, "validation_mode", "performance")
+    required = [g for g in GATES if mode != "correctness" or g != "timing"]
+    wanted = [g for g in required if g in a.gates]
     report = {"task": T.dir, "family": T.doc["family"],
-              "contract_sha256": T.U.contract_sha256(T.doc), "started": time.time(), "gates": {}}
+              "contract_sha256": T.U.contract_sha256(T.doc), "started": time.time(), "gates": {},
+              "validation_contract": "kernel_ut_validation/v1", "validation_mode": mode,
+              "required_gates": required}
     report["reuse_key"] = state["reuse_key"] = _reuse_key(T)
     prev = _reusable(T, a, state["reuse_key"])
     stop = None
@@ -827,13 +836,14 @@ def run_gates(T, a):
         verdict, code = "harness_incomplete", 3
     elif a.quick:
         verdict, code = "quick", 1        # a subset of cases: an iteration aid, never a pass
-    elif all(s in ("pass", "not_required") for s in statuses) and set(wanted) == set(GATES):
+    elif all(s in ("pass", "not_required") for s in statuses) and set(wanted) == set(required):
         verdict, code = "pass", 0
     elif all(s in ("pass", "not_required") for s in statuses):
         verdict, code = "partial", 1      # a subset of gates was asked for: never a full pass
     else:
         verdict, code = "fail", 1
-    report.update(verdict=verdict, exit_code=code, seconds=round(time.time() - report["started"], 1))
+    report.update(verdict=verdict, exit_code=code, seconds=round(time.time() - report["started"], 1),
+                  performance_measured=report["gates"].get("timing", {}).get("status") == "pass")
     return report, code
 
 
@@ -916,6 +926,9 @@ def _snapshot(T):
 def main(task=None, argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--task", default=task)
+    ap.add_argument("--validation-mode", choices=("correctness", "performance"), default="performance",
+                    help="correctness qualifies the complete UT without timing; performance also "
+                         "requires measured timings (default, used by optimization)")
     ap.add_argument("--gates", default=",".join(GATES))
     ap.add_argument("--skip", default="", help="comma list of gates to leave out (the verdict is then partial)")
     ap.add_argument("--seed", type=int, default=0)
@@ -974,7 +987,9 @@ def main(task=None, argv=None):
     # scripts/worker.sh): `started`, `ok`, `exit_code`, a dict per gate with `ok`, and the
     # timing aggregate under gates.timing.aggregate.primary.
     summary = {k: report[k] for k in ("started", "verdict", "exit_code", "snapshot_sha256",
-                                      "target_callable", "family", "contract_sha256")}
+                                      "target_callable", "family", "contract_sha256",
+                                      "validation_contract", "validation_mode", "required_gates",
+                                      "performance_measured")}
     summary["ok"] = code == 0
     summary["gates"] = {g: {"ok": r["status"] in ("pass", "not_required"), "status": r["status"]}
                         for g, r in report["gates"].items()}

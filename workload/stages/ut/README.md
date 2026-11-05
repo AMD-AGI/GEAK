@@ -14,16 +14,25 @@ references in a separate workspace. `kernel-ut/scripts`, `shared`, `ut_contracts
 copied and hashed by the normal scaffold.
 
 `finalize.py` checks the handoff and input hashes, then delegates to the existing
-extraction finalizer's task ownership, full GPU UT and source-delivery checks. It uses
+extraction finalizer's task ownership, all non-timing GPU UT and source-delivery checks. It uses
 the profile's frozen selection policy. Exact whole-serving coverage is reported
 separately and may remain unknown; missing task gates or source-delivery receipts
 still block UT completion. Do not turn a quick or CPU-only test into full qualification.
+
+The default wave uses `--timing none`; tasks finish with
+`unittest.py --validation-mode correctness --reuse`. This is a complete correctness
+qualification, not a partial performance run. Receipts carry the explicit
+`kernel_ut_validation/v1` contract and `performance_measured: false`. Keep all weighted
+shapes and the timing implementation for optimization, which runs
+`unittest.py --validation-mode performance --reuse` and must obtain real timings.
+The unqualified `unittest.py` command retains performance mode for existing optimizer
+callers. Plain `--skip timing` in performance mode remains a partial result.
 
 For split scenarios:
 
 ```json
 {
-  "order": ["baseline", "profile", "ut", "roofline", "optimize", "applyback"],
+  "order": ["baseline", "profile", "ut", "optimize", "applyback"],
   "task_source_stage": "ut",
   "stages": {
     "profile": {
@@ -31,14 +40,14 @@ For split scenarios:
       "mode": "agent",
       "params": {"output_kind": "dispatch_evidence"}
     },
-    "ut": {"skill": "kernel-ut", "mode": "agent", "params": {"timing_workers": 2}}
+    "ut": {"skill": "kernel-ut", "mode": "agent", "params": {"timing": "none"}}
   }
 }
 ```
 
 The driver exports `TASKS_DIR` from `task_source_stage`; consumers use the declared
-producer instead of assuming tasks live under profile. Roofline's ordinary `$IN`
-points to UT output and reads the same ranking/task files as before. Legacy five-stage
+producer instead of assuming tasks live under profile. An optional roofline stage can
+read UT output but must collect missing performance inputs itself. Legacy five-stage
 scenarios keep `profile: kernel-extract` and their previous combined contract.
 
 Run only profiling with `stage.py run profile`, and generate/retry UTs later with

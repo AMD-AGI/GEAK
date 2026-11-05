@@ -172,6 +172,8 @@ class HandoffTests(unittest.TestCase):
         result=self.finalize('ut',self.ut)
         self.assertEqual(result['status'],'ok',result)
         self.assertFalse(result['metrics']['serving_coverage_known'])
+        self.assertEqual(result['metrics']['required_ut_validation'], 'correctness')
+        self.assertEqual(result['metrics']['tasks_with_performance_measurements'], 0)
 
     def test_ut_workspace_must_not_be_inside_profile(self):
         self.export()
@@ -254,13 +256,15 @@ class HandoffTests(unittest.TestCase):
         H.write(self.ut/'task_plan.json',{'tasks':rows})
         p=subprocess.run([sys.executable,str(UT/'kernel-ut/scripts/ut_wave.py'),'start',
             '--eval-dir',str(self.ut),'--runner',str(runner),'--backend','local','--gpus','0,1',
-            '--foreground','--tick-sec','1','--lane-sec','120','--timing-workers','2'],
+            '--foreground','--tick-sec','1','--lane-sec','120'],
             capture_output=True,text=True,timeout=30)
         self.assertEqual(p.returncode,0,p.stdout+p.stderr)
         summary=H.read(self.ut/'ut_wave/summary.json')['tasks']
         self.assertEqual({r['status'] for r in summary.values()},{'passed'},p.stdout)
         prompt=(self.ut/'ut_wave/prompts/a.1.txt').read_text()
         self.assertIn(str(UT/'kernel-ut'),prompt)
+        self.assertIn('--validation-mode correctness',prompt)
+        self.assertFalse((self.ut/'tasks/a/run/timing.trace').exists())
 
 
 if __name__ == '__main__':

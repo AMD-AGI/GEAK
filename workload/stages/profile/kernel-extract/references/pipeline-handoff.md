@@ -24,9 +24,10 @@ first N by overall share); it never widens it or backfills rank 6.
 
 For multi-config baselines, use [shared sampling](multi-config-sampling.md) before
 capturing. Pass `params.sampling` to `multi_config.py plan` and use
-`capture` → `project --merge` → `select`. Pass `params.ut_timing_workers` to
-`ut_wave.py start --timing-workers`; authoring stays parallel and the timing tail
-starts only after the authoring lanes drain. Legacy independently captured config
+`capture` → `project --merge` → `select`. UT generation defaults to
+`ut_wave.py start --timing none`, with no timing measurements. For an explicitly
+requested performance wave, pass `params.ut_timing_workers` alongside `--timing tail`;
+the timing tail starts only after authoring lanes drain. Legacy independently captured config
 directories remain valid inputs to `multi_config.py merge`.
 
 ## Outputs
