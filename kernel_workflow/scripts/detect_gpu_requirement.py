@@ -10,7 +10,9 @@ Prints JSON: {"kind", "gpus_per_job", "evidence"} where kind is
   unknown   distributed code without a readable rank count: the caller must decide
 This is a static hint: the Director confirms it against the code (e.g. a rank count passed as a
 positional argument) before the workflow sizes its GPU leases. Directories are scanned two levels
-deep; pass the task's own test/bench files for a large repo.
+deep; pass the task's own test/bench files for a large repo. What an e2e extraction captured from
+the serving process (selection traces, shape captures) is skipped: its rank counts are the
+server's (e.g. a TP8 world_size), not the test's.
 """
 
 from __future__ import annotations
@@ -23,8 +25,14 @@ from pathlib import Path
 
 MAX_FILES = 400
 MAX_BYTES = 1 << 20
-SKIP_DIRS = {".git", "__pycache__", "build", "node_modules", "third_party", "3rdparty", ".torch_ext"}
+SKIP_DIRS = {".git", "__pycache__", "build", "node_modules", "third_party", "3rdparty", ".torch_ext",
+             "_capture"}
 SUFFIXES = {".py", ".sh", ".json", ".yaml", ".yml"}
+# e2e capture output: selection_trace*.json, capture_*.json, capture.pid-<pid>.rank-<rank>/
+CAPTURE_PREFIXES = ("selection_trace", "capture_", "capture.")
+# Task metadata: its numbers count without a collective in the same file. Other JSON is data.
+METADATA_NAMES = {"meta.json"}
+METADATA_SUFFIXES = {".yaml", ".yml"}
 
 _RANK_KEYS = r"(?:world[_-]?size|nproc(?:s|[_-]per[_-]node)?|num[_-]?gpus|n[_-]?gpus|gpus[_-]per[_-]job)"
 FIXED = [
@@ -52,14 +60,17 @@ def _files(paths):
     for raw in paths:
         p = Path(raw)
         if p.is_file():
-            out.append(p)
+            if not p.name.startswith(CAPTURE_PREFIXES):
+                out.append(p)
             continue
         if not p.is_dir():
             continue
         base = len(p.parts)
         for root, dirs, files in os.walk(p):
-            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and len(Path(root).parts) - base < 2)
-            out.extend(Path(root) / f for f in sorted(files) if Path(f).suffix in SUFFIXES)
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(CAPTURE_PREFIXES)
+                             and len(Path(root).parts) - base < 2)
+            out.extend(Path(root) / f for f in sorted(files)
+                       if Path(f).suffix in SUFFIXES and not f.startswith(CAPTURE_PREFIXES))
     return out[:MAX_FILES]
 
 
@@ -74,7 +85,8 @@ def detect(paths):
             continue
         # A number only counts as a rank count in a file that is itself multi-process
         # (a collective, a launcher) or in task metadata; elsewhere it is unrelated.
-        ranked = f.suffix in {".json", ".yaml", ".yml"} or any(DISTRIBUTED.search(line) for line in lines)
+        ranked = (f.name in METADATA_NAMES or f.suffix in METADATA_SUFFIXES
+                  or any(DISTRIBUTED.search(line) for line in lines))
         for no, line in enumerate(lines, 1):
             where = f"{f}:{no}: {line.strip()[:120]}"
             if DISTRIBUTED.search(line):

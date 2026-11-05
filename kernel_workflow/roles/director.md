@@ -232,9 +232,10 @@ command leases that many together. Skip this if `OP_SPEC.resource` already sets 
 2. `single` → return it as is. Otherwise read the code it cites and find the rank count the test runs
    with as written: torchrun `--nproc_per_node`, a `mp.spawn`/`Pool` process count, a count passed in
    code (e.g. `run_test(8, ...)`), or a fixed parallel layout (e.g. EP8). Several counts → the largest.
-   A count that follows the visible GPUs → `scalable`.
-3. If the code does not say, return `unknown` — never guess; the run then stops and asks for
-   `gpus_per_job`.
+   A count that follows the visible GPUs → `scalable`. Ignore counts in capture files
+   (`selection_trace*`, `capture*`, `_capture/`): they describe the server the task was captured from.
+3. If the code does not say, return `unknown` — never guess; the lane then stays single-GPU and
+   warns that it needs `gpus_per_job`.
 
 Return it as `"gpu_requirement": {"kind": "single|fixed|scalable|unknown", "gpus_per_job": <N>,
 "evidence": "<file:line and why>"}`.

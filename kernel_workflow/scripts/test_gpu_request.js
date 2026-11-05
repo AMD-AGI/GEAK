@@ -31,7 +31,8 @@ const resolve = (A, detected) => resolveGpuRequest(A, String(A.gpu_ids != null ?
   .split(',').map(s => s.trim()).filter(Boolean), detected);
 
 console.log('\n# resolution');
-equal(resolve({}), { gpusPerJob: 1, fixedIds: [], jobSpec: '', explicit: false }, 'default: one GPU, no group spec');
+equal(resolve({}), { gpusPerJob: 1, fixedIds: [], jobSpec: '', explicit: false, warning: '' },
+  'default: one GPU, no group spec');
 equal(resolve({ gpu_ids: '0,1' }).jobSpec, '', 'a plain pool is not a multi-GPU job');
 equal(resolve({ gpu_ids: '0,1,2,3', gpus_per_job: 2 }).jobSpec, 'pool:2:0,1,2,3', 'any N of the pool');
 const fixed = resolve({ gpu_ids: '0,1,2,3', job_gpu_ids: '3,1' });
@@ -54,14 +55,25 @@ equal(resolve({ ...POOL8, gpus_per_job: 4 }, { kind: 'fixed', gpus_per_job: 8 })
   'pool:4:0,1,2,3,4,5,6,7', 'an explicit gpus_per_job wins over detection');
 equal(resolve({ ...POOL8, op_spec: { resource: { gpus_per_job: 2 } } }, { kind: 'unknown' }).jobSpec,
   'pool:2:0,1,2,3,4,5,6,7', 'op_spec.resource wins and skips an unknown finding');
+// A finding that cannot run in gpu_ids stays single-GPU and warns. An e2e head lane gets one GPU and
+// an extracted task keeps the serving process's traces, so a TP8 server's world_size must not drop it.
+const trace = 'selection_trace.pid-1.rank-unknown.call-1.json:72: "world_size": 8';
 for (const [label, A, d, re] of [
-  ['unknown stops with a request for gpus_per_job', POOL8, { kind: 'unknown', evidence: ev }, /could not tell how many GPUs/],
-  ['more than the pool stops and cites the evidence', { gpu_ids: '0,1' }, { kind: 'fixed', gpus_per_job: 8, evidence: ev }, /detected: unittest\.py:12.*exceeds gpu_ids pool size 2/],
+  ['unknown', POOL8, { kind: 'unknown', evidence: ev }, /could not tell how many GPUs.*\(unittest\.py:12/],
+  ['more than the pool', { gpu_ids: '0,1' }, { kind: 'fixed', gpus_per_job: 8, evidence: ev },
+    /found 8 GPUs per run but gpu_ids holds 2 \(unittest\.py:12/],
+  ['a TP8 trace on the one GPU of an e2e head lane', { gpu_ids: '3' },
+    { kind: 'fixed', gpus_per_job: 8, evidence: trace }, /found 8 GPUs per run but gpu_ids holds 1/],
+  ['fixed without a count', POOL8, { kind: 'fixed' }, /no usable GPU count/],
+  ['a fractional count', POOL8, { kind: 'fixed', gpus_per_job: 2.5 }, /no usable GPU count/],
 ]) {
+  let r = null;
   let msg = '';
-  try { resolve(A, d); } catch (e) { msg = e.message; }
-  ok(re.test(msg), `${label} (${msg})`);
+  try { r = resolve(A, d); } catch (e) { msg = `threw: ${e.message}`; }
+  ok(r && r.gpusPerJob === 1 && r.jobSpec === '' && re.test(r.warning) && /running single-GPU/.test(r.warning),
+    `${label} runs single-GPU with a warning (${msg || r.warning})`);
 }
+equal(resolve(POOL8, { kind: 'fixed', gpus_per_job: 8 }).warning, '', 'a finding that fits does not warn');
 
 console.log('\n# invalid requests throw');
 for (const bad of [
@@ -69,6 +81,7 @@ for (const bad of [
   { gpu_ids: '0,0' },
   { gpu_ids: '0,00' },
   { gpu_ids: '0,1', gpus_per_job: 3 },
+  { gpu_ids: '0', op_spec: { resource: { gpus_per_job: 2 } } },
   { gpu_ids: '0,1', gpus_per_job: '2x' },
   { gpu_ids: '0,1', gpus_per_job: 1.5 },
   { gpu_ids: '0,1', gpus_per_job: 0 },
@@ -85,6 +98,8 @@ ok(!/GPU_ID: GPU_LIST\[0\]/.test(lane), 'no phase takes GPU_LIST[0] directly');
 ok(/GPU_POOL = GPU_JOB \|\|/.test(lane), 'GPU_POOL is the group spec for multi-GPU jobs');
 ok(/if \(!GPU_RESOURCE\.explicit && setup\.gpu_requirement\) \{\n  applyGpuResource\(resolveGpuRequest\(A, GPU_LIST, setup\.gpu_requirement\)\)/.test(lane),
   'an implicit request is re-sized from Setup before any GPU phase');
+ok(/setup\.gpu_requirement\)\);\n  if \(GPU_RESOURCE\.warning\) log\(/.test(lane),
+  'a detected requirement that cannot run is logged as a warning');
 ok(lane.indexOf('applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement))') <
    lane.indexOf("phase('Author')"), 'resizing happens before the first GPU phase');
 ok(/GPU_MODE === 'pin' && !GPU_JOB/.test(lane), 'pinned placement does not split a group');

@@ -81,3 +81,34 @@ def test_largest_count_wins_and_scan_is_shallow(tmp_path):
     (deep / "c.sh").write_text("torchrun --nproc_per_node=64 t.py\n")
     result = load().detect([str(tmp_path)])
     assert (result["kind"], result["gpus_per_job"]) == ("fixed", 8)
+
+
+def test_e2e_capture_artifacts_are_skipped(tmp_path):
+    # An extracted task keeps what was captured from the serving process; a TP8 server records 8.
+    trace = json.dumps({"distributedInfo": {"backend": "nccl", "rank": 0, "world_size": 8}})
+    (tmp_path / "unittest.py").write_text("import torch\nout = a @ b\n")
+    (tmp_path / "meta.json").write_text(json.dumps({"baseline_callable": "pkg.mod:fn"}))
+    (tmp_path / "selection_trace.pid-1.rank-unknown.call-0.json").write_text(trace)
+    (tmp_path / "capture_meta.promoted.json").write_text(trace)
+    for sub in ("_capture", "capture.pid-1.rank-0"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "meta.json").write_text(trace)
+    module = load()
+    assert module.detect([str(tmp_path)])["kind"] == "single"
+    explicit = tmp_path / "selection_trace.pid-1.rank-unknown.call-0.json"
+    assert module.detect([str(explicit)])["kind"] == "single"
+
+
+def test_capture_traces_do_not_crowd_the_test_out_of_the_scan(tmp_path):
+    module = load()
+    for i in range(module.MAX_FILES + 1):
+        (tmp_path / f"selection_trace.pid-1.rank-unknown.call-{i}.json").write_text("{}")
+    (tmp_path / "unittest.py").write_text("import torch.multiprocessing as mp\nmp.spawn(run, nprocs=2)\n")
+    assert module.detect([str(tmp_path)])["gpus_per_job"] == 2
+
+
+def test_only_meta_json_counts_as_json_metadata(tmp_path):
+    (tmp_path / "workload.json").write_text(json.dumps({"world_size": 8}))
+    assert load().detect([str(tmp_path)])["kind"] == "single"
+    (tmp_path / "meta.json").write_text(json.dumps({"world_size": 4}))
+    assert load().detect([str(tmp_path)])["gpus_per_job"] == 4

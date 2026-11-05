@@ -1335,3 +1335,39 @@ def test_concurrent_pool_leases_get_distinct_ports(tmp_path):
         assert proc.wait(timeout=10) == 0
     ports = {json.loads(out.read_text())["MASTER_PORT"] for out in outs}
     assert len(ports) == 2
+
+
+def test_sweep_matches_its_eval_dir_as_a_whole_path(tmp_path):
+    # A sibling run whose eval dir only starts with the same name is not this run's, and a narrow
+    # COLUMNS must not cut the eval dir off the command lines it reads.
+    ours, sibling = tmp_path / "team_a", tmp_path / "team_ab"
+    jobs = [
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "gpu_lock.sh", f"{d}/round_1"],
+            start_new_session=True,
+        )
+        for d in (ours, sibling)
+    ]
+    try:
+        deadline = time.monotonic() + 10
+        while any(b"gpu_lock.sh" not in Path(f"/proc/{job.pid}/cmdline").read_bytes() for job in jobs):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        results = [
+            subprocess.run(
+                ["bash", str(SCRIPTS / "sweep_orphan_leases.sh"), "--eval-dir", eval_dir],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env={**os.environ, "COLUMNS": "80"},
+            )
+            for eval_dir in (str(ours), f"{ours}/")
+        ]
+    finally:
+        for job in jobs:
+            job.kill()
+            job.wait()
+    for result in results:
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert f"pid={jobs[0].pid} " in result.stdout
+        assert f"pid={jobs[1].pid} " not in result.stdout

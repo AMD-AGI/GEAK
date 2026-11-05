@@ -10,7 +10,7 @@
 #
 #   (default)         report only, exit 0 if clean, exit 3 if orphans found
 #   --kill            terminate what it finds (TERM to the process group, then KILL after a grace)
-#   --eval-dir <dir>  only consider leases whose command line mentions <dir> (this run's jobs)
+#   --eval-dir <dir>  only consider leases whose command line names <dir> or a path under it
 #
 # Reporting is the default on purpose: killing a lease job that a HUMAN started, from an automated
 # closeout, would be worse than the leak. Only pass --kill when you know the pool is yours.
@@ -28,6 +28,20 @@ while [ $# -gt 0 ]; do
         *) echo "sweep_orphan_leases.sh: unknown arg '$1'" >&2; exit 2 ;;
     esac
 done
+EVAL_DIR="${EVAL_DIR%/}"
+
+# True if the command line names EVAL_DIR as a whole path (the dir itself or a path under it), so a
+# sibling run whose dir merely starts with the same name (team_a vs team_ab) is not counted as ours.
+names_eval_dir() {
+    local rest="$1"
+    while [[ "$rest" == *"$EVAL_DIR"* ]]; do
+        rest="${rest#*"$EVAL_DIR"}"
+        case "${rest:0:1}" in
+            ""|/|[[:space:]]|\"|\'|:|\;) return 0 ;;
+        esac
+    done
+    return 1
+}
 
 # Match on ownership, not lineage: the leaked process is usually the backgrounded wrapper shell,
 # whose child (gpu_lease.py) still has a live parent, so a PPID==1 filter would miss it. A lease
@@ -39,8 +53,9 @@ if [ "$DO_KILL" = "1" ] && [ -z "$EVAL_DIR" ]; then
 fi
 
 SELF=$$
+# -ww: with COLUMNS set (or a narrow terminal) ps cuts args to that width, dropping the eval dir.
 mapfile -t CANDIDATES < <(
-    ps -eo pid=,ppid=,etimes=,args= \
+    ps -ww -eo pid=,ppid=,etimes=,args= \
     | grep -E 'gpu_lease\.py|gpu_lock\.sh' \
     | grep -v -e 'grep -E' -e 'sweep_orphan_leases'
 )
@@ -52,7 +67,7 @@ for line in "${CANDIDATES[@]}"; do
     [ "$pid" = "$SELF" ] && continue
     [ "$ppid" = "$SELF" ] && continue
 
-    if [ -n "$EVAL_DIR" ] && ! grep -qF -- "$EVAL_DIR" <<<"$cmd"; then
+    if [ -n "$EVAL_DIR" ] && ! names_eval_dir "$cmd"; then
         continue
     fi
 

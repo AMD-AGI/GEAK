@@ -109,6 +109,8 @@ const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
 // from op_spec.resource. Without any of them the count is what Setup found in the task's own
 // test/benchmark (`detected`, see scripts/detect_gpu_requirement.py). Every GPU consumer then gets
 // that one spec, so each command holds the whole group. One GPU per job leaves everything unchanged.
+// Setup's finding is a static hint: one that cannot run in gpu_ids (unknown, no usable count, more
+// GPUs than the pool) keeps the lane single-GPU with a warning. Only an explicit request throws.
 function resolveGpuRequest(A, gpuList, detected) {
   const resource = (A.op_spec && A.op_spec.resource) || {};
   const parseIds = (name, value) => {
@@ -124,13 +126,22 @@ function resolveGpuRequest(A, gpuList, detected) {
   const fixedIds = String(fixedValue || '').trim() ? parseIds('job_gpu_ids', fixedValue) : [];
   const explicit = A.gpus_per_job != null || resource.gpus_per_job != null || fixedIds.length > 0;
   const found = (!explicit && detected) || {};
-  const why = `${found.evidence || 'no evidence'}`;
+  let foundCount = found.kind === 'scalable' ? pool.length : 1;
+  let problem = '';
   if (found.kind === 'unknown') {
-    throw new Error('Setup found multi-GPU code in this task but could not tell how many GPUs one ' +
-      `run needs (${why}). Pass gpus_per_job=<N> (or job_gpu_ids).`);
+    problem = 'Setup found multi-GPU code in this task but could not tell how many GPUs one run needs';
+  } else if (found.kind === 'fixed') {
+    const n = Number(found.gpus_per_job);
+    if (!Number.isSafeInteger(n) || n < 1) {
+      problem = `Setup reported no usable GPU count (${found.gpus_per_job})`;
+    } else if (n > pool.length) {
+      problem = `Setup found ${n} GPUs per run but gpu_ids holds ${pool.length}`;
+    } else {
+      foundCount = n;
+    }
   }
-  const foundCount = found.kind === 'scalable' ? pool.length
-    : (found.kind === 'fixed' ? found.gpus_per_job : 1);
+  const warning = problem ? `${problem} (${found.evidence || 'no evidence'}); running single-GPU. ` +
+    'Pass gpus_per_job=<N> (or job_gpu_ids) with enough gpu_ids to run it on N GPUs.' : '';
   const countValue = A.gpus_per_job != null ? A.gpus_per_job
     : (resource.gpus_per_job != null ? resource.gpus_per_job : (fixedIds.length || foundCount));
   const countText = String(countValue).trim();
@@ -141,13 +152,13 @@ function resolveGpuRequest(A, gpuList, detected) {
     throw new Error(`gpus_per_job=${gpusPerJob} does not match job_gpu_ids size ${fixedIds.length}`);
   }
   if (!fixedIds.length && gpusPerJob > pool.length) {
-    throw new Error(`gpus_per_job=${gpusPerJob}${found.kind ? ` (detected: ${why})` : ''} ` +
-      `exceeds gpu_ids pool size ${pool.length}; pass gpu_ids with at least ${gpusPerJob} GPUs`);
+    throw new Error(`gpus_per_job=${gpusPerJob} exceeds gpu_ids pool size ${pool.length}; ` +
+      `pass gpu_ids with at least ${gpusPerJob} GPUs`);
   }
   if (fixedIds.some(id => !pool.includes(id))) throw new Error('job_gpu_ids must be a subset of gpu_ids');
   const jobSpec = fixedIds.length ? `group:${fixedIds.join(',')}`
     : (gpusPerJob > 1 ? `pool:${gpusPerJob}:${pool.join(',')}` : '');
-  return { gpusPerJob, fixedIds, jobSpec, explicit };
+  return { gpusPerJob, fixedIds, jobSpec, explicit, warning };
 }
 // Validated now so a bad request fails before Setup; re-resolved from Setup's finding when implicit.
 let GPU_RESOURCE = null;
@@ -964,16 +975,17 @@ if (RDNA4_ISOLATE) {
   USE_LEARNED_READ = false;
   WARM_START_ON = false;
 }
-// `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
-// would otherwise ride into the session id and the stored record. The canonical id is folded store-
-// side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
 if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
   applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement));
+  if (GPU_RESOURCE.warning) log(`GPU requirement WARNING: ${GPU_RESOURCE.warning}`);
   if (GPU_JOB) {
     log(`GPU requirement: ${GPU_RESOURCE.gpusPerJob} GPUs per job (${setup.gpu_requirement.kind}: ` +
       `${setup.gpu_requirement.evidence || 'no evidence'}) -> ${GPU_JOB}`);
   }
 }
+// `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
+// would otherwise ride into the session id and the stored record. The canonical id is folded store-
+// side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
 const KERNEL_NAME = String(setup.kernel_name || '').replace(/_task$/, '') || setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);

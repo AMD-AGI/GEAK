@@ -156,7 +156,7 @@ budget-controlled, each patch independently verified.
 | `min_improve` | `0.02` | Minimum accepted improvement (2%). |
 | `deep_cost` | `2` | Budget cost of a deep-explore engineer. |
 | `gpu_ids` | `0` | CSV GPU pool. |
-| `gpus_per_job` | detected | GPUs each GPU command needs (multi-rank ops). Unset: Setup detects it from the task's test/benchmark (`scripts/detect_gpu_requirement.py`). `>1` leases any N of `gpu_ids` per command (`pool:N:<ids>`). Also read from `op_spec.resource`. Not supported by `mode=bakeoff`. |
+| `gpus_per_job` | detected | GPUs each GPU command needs (multi-rank ops). Unset: Setup detects it from the task's test/benchmark (`scripts/detect_gpu_requirement.py`); a detected count that is unreadable or larger than `gpu_ids` runs single-GPU with a warning. `>1` leases any N of `gpu_ids` per command (`pool:N:<ids>`). Also read from `op_spec.resource`. Not supported by `mode=bakeoff`. |
 | `job_gpu_ids` | — | Fixed GPU group for every command (`group:<ids>`); must be a subset of `gpu_ids`. Also read from `op_spec.resource`. |
 | `task` | `""` | Natural-language steer. |
 | `exp_root` | Sibling `exp/` | Output root. |

@@ -140,10 +140,12 @@ Some ops need several GPUs for every run (collectives, EP MoE, anything launched
 task's test and benchmark, the Director confirms the rank count from the code, and every role then
 gets the group spec `pool:N:<gpu_ids>` as `GPU_ID`, so each `gpu_lock.sh $GPU_ID <cmd>` holds N GPUs
 for the whole command. Single-GPU tasks are unchanged. If the code is multi-GPU but the count cannot
-be read, or `gpu_ids` holds fewer than N GPUs, the run stops with the evidence and asks for
-`gpus_per_job` / more `gpu_ids`.
+be read, or `gpu_ids` holds fewer than N GPUs, the lane logs a warning with the evidence and stays
+single-GPU; pass `gpus_per_job` and enough `gpu_ids` to run it on N GPUs. What an e2e extraction
+captured from the server (selection traces, shape captures) is not scanned.
 
-`gpus_per_job`, `job_gpu_ids` (one fixed group) or `op_spec.resource` override the detection. Group
+`gpus_per_job`, `job_gpu_ids` (one fixed group) or `op_spec.resource` override the detection; an
+override that `gpu_ids` cannot hold stops the run. Group
 leases share the per-GPU lock files with single-GPU jobs, are acquired all-or-nothing, and are killed
 after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and `author` modes;
 `bakeoff` rejects multi-GPU jobs.
