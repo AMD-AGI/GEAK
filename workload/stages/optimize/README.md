@@ -5,16 +5,25 @@
 spent, then runs each task's own unit test once more from cold and hands on only what
 clears its noise band.
 
-**Input**: `$RUN_ROOT/profile/out/tasks/` and, for the order, `$RUN_ROOT/profile/out/results.json`:
-tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
-`order_by=roofline` orders by `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain
-instead; the roofline stage is no longer in the default order, because its model leaves
-tasks it cannot model unranked, and that once put a 24% task behind eight smaller ones.
+**Input**: `$TASKS_DIR` and the task producer's sibling `results.json`. Split scenarios
+export `TASKS_DIR=$RUN_ROOT/ut/out/tasks`; legacy invocations set
+`TASKS_DIR=${TASKS_DIR:-$RUN_ROOT/profile/out/tasks}` before the commands below.
+Tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
+`order_by=roofline` uses `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain instead;
+roofline is optional in the default pipeline because unsupported models can leave the
+largest tasks unranked.
 
 The slot resolves tasks from profile, independently of `$IN`. For a standalone smoke run, set `TASKS_DIR` to the fixture task directory;
 `finalize.py --tasks-dir` remains available for inspecting a delivery directly.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
+
+UT generation can deliver a correctness-qualified task with
+`validation_mode: "correctness"` and `performance_measured: false`. Its weighted shapes
+and timing implementation are ready, but no baseline latency or 1.0 ratio was measured.
+For the shared driver, evaluate with `unittest.py --validation-mode performance --reuse`
+(the bare command also defaults to performance). Reuse unchanged correctness gates;
+measure the baseline/candidate pair before reporting speedup or keeping an optimization.
 
 ## Implementations
 
@@ -67,7 +76,7 @@ Before dispatch, ask the slot's verdict what it will require:
 
 ```
 python3 $WORKLOAD_ROOT/stages/optimize/finalize.py \
-    --tasks-dir $RUN_ROOT/profile/out/tasks
+    --tasks-dir "$TASKS_DIR"
 ```
 
 An extracted task that cannot run still needs an explicit entry and blocker in the final
@@ -106,7 +115,7 @@ the matching harness version.
 
 ```
 python3 $WORKLOAD_ROOT/campaign/scheduler.py run \
-    --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
+    --work-root $OUT/work --tasks-dir "$TASKS_DIR" \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> [--gpus-per-task <n>] --target <sec> --backend docker --image <img> \
     [--order-by share|roofline] [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
@@ -220,7 +229,8 @@ retroactively verify it.
 
 A serving integration failure goes back to the owning stage with its failing input or
 dispatch, native error and selected source identity. The optimization agent owns kernel
-implementation fixes; a deficient frozen test or source boundary belongs to profile.
+implementation fixes; a deficient frozen test or source boundary belongs to UT generation
+(the combined profile stage in legacy scenarios). Missing dispatch measurements belong to profile.
 After a source fix, repeat cold qualification for that changed source and publish a new
 snapshot. Prior scores remain attached to their prior source. Compatible extraction and
 unchanged kernels' evidence can be reused; do not restart the entire search or rewrite
@@ -232,10 +242,11 @@ only there — read the file, or run it early with the command in step 1, rather
 looking for a second copy of its rules in this document. It checks names, counts and
 budget; it never re-judges a unit test.
 
-Report extracted, attempted and kept counts separately, and explain every unattempted
-task and its continuation. Distinguish device kernel identities from task boundaries: two
-attention dispatch branches or a real fused chain can belong to one optimization task,
-with their mapping recorded in `task_plan.json`.
+Report extracted, attempted and kept counts separately. `all_tasks_attempted=false`
+means the work is partial; explain every unattempted task and its continuation.
+Distinguish device kernel identities from task boundaries: two attention dispatch
+branches or a real fused chain can belong to one optimization task, with their
+mapping recorded in `task_plan.json`.
 
 Report three distinct time quantities: elapsed wall time (with concurrent intervals
 counted once), summed worker credited seconds, and GPU-slot hours (worker duration times

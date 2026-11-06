@@ -1,7 +1,7 @@
 # Stage-skill contract
 
-Each of the five stages in `workload/` (`baseline`, `profile`, `roofline`, `optimize`,
-`applyback`) is a **directory slot**. Every subdirectory of a slot is one interchangeable
+Each configured stage in `workload/` (`baseline`, `profile`, optional `ut`, `roofline`,
+`optimize`, `applyback`) is a **directory slot**. Every subdirectory of a slot is one interchangeable
 **implementation**, and each implementation is itself a skill: it has its own `SKILL.md`
 and its own code, and can be read or executed on its own, outside this pipeline.
 
@@ -213,6 +213,8 @@ you happened to read.
 | --- | --- | --- |
 | `baseline` | `baseline.json` | `throughput`, `unit`, `metric`, `noise_band`, `provenance` |
 | `profile` | `kernel_ranking.json`, `selection_targets.json`, `tasks/<name>/` | per-kernel `pct_gpu_time`, `phase`, plus independently runnable unit-test task directories. The census denominator resolves from `kernel_workload.json` or from `kernel_ranking.json.denominators` |
+| `profile` with `output_kind=dispatch_evidence` | `profile_handoff.json`, ranking, selection, sampling and referenced shape/census evidence | hashed `workload/kernel_profile_handoff/v1`; dispatch/shape/source locations and explicit gaps; no UT requirement |
+| `ut` | `tasks/<name>/`, `task_plan.json`, `profile_input.json`, copied selection/ranking | verified profile handoff, fixed family contracts, all non-timing GPU UT gates and source-delivery receipts; performance is measured in optimize |
 | `roofline` | `roofline.json` | per-kernel `roofline_pct`, `attainable_speedup`, `bound_type`, `expected_e2e_gain_pct` |
 | `optimize` | `optimized.json` | cold-verified kernels with `verified_speedup`, selected `kernel_src` directory, `kernel_src_hashes` and frozen `task_meta_sha256`; task-local binding adapters also carry `binding_file_sha256` |
 | `applyback` | `ab.json` | `baseline`, `candidate`, `e2e_delta_pct`, `verdict` |
@@ -221,6 +223,13 @@ you happened to read.
 not operator speedup.** This scenario has twice produced an operator win of 1.8× / 1.34×
 against a whole-machine change of +0.24% / −0.09%. Operator speedup and end-to-end delta
 must be stated separately, and only `applyback` may claim an end-to-end gain.
+
+Split scenarios insert `ut` after `profile` and set root config `task_source_stage: "ut"`.
+The driver exports `TASKS_DIR=$RUN_ROOT/<task_source_stage>/out/tasks` so optimize and
+applyback consume the configured task producer. Roofline's normal `$IN` becomes UT
+output. Existing combined scenarios retain their five-stage order and profile task path.
+See [profile/HANDOFF.md](profile/HANDOFF.md) for the evidence contract and independent
+acceptance criteria; changing the stage boundary does not relax any GPU UT gate.
 
 ## 5. Writing a new implementation
 

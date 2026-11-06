@@ -25,6 +25,12 @@ Nothing here is bound to one model or one benchmark. A scenario is a JSON file i
 
 ## The five steps
 
+The diagram shows the legacy combined profile/UT workflow. Multiconfig scenarios now
+split it into `baseline → profile → ut → roofline → optimize → applyback`: profiling
+finishes with a hashed dispatch/shape handoff, and UT generation can run or resume
+separately using the fixed templates. See [profile/HANDOFF.md](stages/profile/HANDOFF.md)
+and [the UT stage](stages/ut/README.md). Existing five-stage configs remain supported.
+
 ![pipeline](docs/pipeline.svg)
 
 Steps 1–3 produce evidence. Step 4 spends the compute budget. Only step 5 may claim an

@@ -126,6 +126,7 @@ def cmd_new(a):
         with open(a.override) as f:
             overrides = json.load(f)
     doc = U.freeze_task_contract(family, attrs=_kv(a.attr), const_axes=_kv(a.axis), overrides=overrides)
+    doc.setdefault("input_generation", {"protocol": "weight_substreams/v1", "weight_cache_bytes": 2 << 30})
     task = os.path.abspath(a.task)
     name = os.path.basename(task)
     os.makedirs(os.path.join(task, "run"), exist_ok=True)

@@ -20,7 +20,24 @@
   "decode on the eager server (added on this branch, 2026-11-05): with --server-state decode_capture=profile_cuda_graph, run_points.py captures PREFILL only and marks every DECODE point deferred (graph_hidden, no capture); probe_server.py restarts eagerly and redoes exactly those. Under spec decoding the profiler kept 1 of 8 VERIFY graph replays on most ranks (sglang 0.5.21 / ROCm 7.2), so every decode point of the Muse Spark EP4 group was refused and recaptured eagerly after a failed attempt each. --decode-on-graph restores the old order.",
   "merge_policy.py (added on this branch, 2026-11-05): decides which tasks of a multi-config group are one UT. Same launch group + same entry pools every config; a launch_diff setting splits a task only if its own source reads it; entries chosen above them by batch size (one common caller, different call lines, each under a conditional, never launched at one sampled point, non-interleaving sizes) are ONE task, merged as dispatcher / rebuilt_instance / scope_equalized by what the seam's recorded arguments allow. The reviewer had split aiter_backend._muse_verify_attention's branches on the wrong premise that it takes a ForwardBatch.",
   "compile_watch.literal_object (2026-11-05): a recorded builtin container of literals (frozenset/set/dict/tuple, repr not truncated) is a replayable value; plan_call used to refuse _muse_verify_attention for its enabled-kernel frozenset.",
-  "harness_lib.serving_weighted_speedup per_branch / worst_branch (2026-11-05): when cases carry `branch` (a merged branch group), one figure per branch, so a gain on one branch cannot hide a loss on another."
+  "harness_lib.serving_weighted_speedup per_branch / worst_branch (2026-11-05): when cases carry `branch` (a merged branch group), one figure per branch, so a gain on one branch cannot hide a loss on another.",
+  "CI40714803265 local validation: preserve context-specific UT signatures, allow task-declared custom family scaffolding, preserve server info separately for graph/eager modes; patch in campaign branch_fixes.patch.",
+  "CI40714803265 local validation: PREFILL context from request journals; preserve AITER /ops/triton/ entry frames; stop exhausted decode probes early; track graph/eager capture mode per point and exclude only eager point collective wait; drain live server process-group members including orphan workers without waiting for zombies. CPU regressions are recorded in campaign validation_cpu.json.",
+  "CI40714803265 further local validation: complete-call invocation_anchors prevent branch-dependent leaf-sum weighting; selected-or-anchor ownership excludes unrelated shared companions. Explicit graph-hidden census rejections trigger existing eager fallback even if another rank passed the probe. Decode KV is primed with exact seeded incremental prefixes (<=8192 new tokens per request,max_new_tokens=1) before admitting the resident batch to avoid cold-prefill hidden-state OOM; all original steady-state and census checks remain.",
+  "Local CI40714803265 GPU-wave fixes: canonical full semantic compile-variant matching across config-prefixed evidence IDs; recorded-call gate rejects missing/unreplayable baseline calls; optional object-only cases.make_server_object hook replays bound methods while retaining generic tensor reconstruction.",
+  "Local CI40714803265 delivery integration fix: explicit ut_driver/path_sha256_concat/v1 compatibility verifies the untouched full GPU result/report against current legacy snapshot plus full reuse_key, while preserving canonical source-delivery snapshot and per-leaf source/negative-control checks.21 focused JS checks passed.",
+  "Local CI40714803265 A4W4 replay fix: Float4 E2M1x2 and Float8 E8M0 shell tensor payloads are rebuilt through valid packed byte encodings with unchanged dtype/layout/storage and explicit seeded fallback/projection notes;31 pinned no-device CPU checks passed. Only A4W4 and pending TP4compact task helpers refreshed; previously qualified ordinary-dtype tasks retain their tested helper snapshot.",
+  "Local delivery protocol follow-up: explicit legacy Python evidence compatibility accepts only original positive Infinity tokens in successful negative-control margin fields, after hashing untouchedbytes. Default JSON stays strict; NaN/negativeInfinity/overflow/other nonfinitepositions rejected.25focusedtests and read-only realQKV/router artifact checks passed.",
+  "CI40714803265 validation: leg_runner observes real CUDA registrations before serving imports and resolves AITER torch_compile_guard through its registered body; reused or absent registrations cannot masquerade as a candidate source binding. Six pinned-image CPU tests cover actual dispatch and rejection cases.",
+  "Shared multiconfig sampling revision: the slot multi_config_sampling.py plans a CPU-only observed-point union within pinned compatible deployments; multi_config.py plan/capture/project routes shared captures through GPU leases and reweights each config independently. run_points.py signs resumable measurements and supports full pooled source discovery; relabel_points.py retains discrete shape/sequence/graph coverage gaps. ut_wave.py optionally runs disjoint timing tails after authoring drains; default remains one worker. The multiconfig scenario uses >3% operator selection.",
+  "Profile/UT split: kernel-profile owns sampling and dispatch evidence; kernel-ut consumes the hashed workload/kernel_profile_handoff/v1 and uses this single shared script/contract/template bundle via relative links. run_points --profile-only suppresses UT drafting. Legacy combined extraction is retained.",
+  "Integrate the profile/UT split with geak-x-multiconfig 6a425ef: preserve eager decode capture, batch-size dispatch merge policy and share ordering; document provisional-plan ordering and retain postprocess counts with strict replay accounting.",
+  "UT extraction now defaults to correctness qualification without timing. Explicit kernel_ut_validation/v1 receipts preserve all non-timing gates and mark performance unmeasured; optimization retains full timing and can reuse unchanged correctness results.",
+  "Bound UT tensor lifetime: new scaffolds freeze named weight RNG substreams with bounded pristine caches and private copies; input checks reuse construction/execution and compare exact bytes with bounded device snapshots; isolated oracle workers stream bounded output batches and clean files, preserving case/draw coverage, control margins and source restoration. Existing frozen task inputs/helpers are not rewritten.",
+  "Negative controls search representative probes before the remaining cases and stop only the current control after a completed numerical rejection reaches the existing margin. Reports retain witness and checked/available counts; malformed hints, shape-only failures and execution errors cannot qualify a control. Full correctness coverage, per-leaf controls and source restoration remain required.",
+  "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
+  "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
+  "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain."
  ],
  "files": [
   {
@@ -57,7 +74,7 @@
    "file": "references/glm-agentx-example.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/glm-agentx-example.md",
    "source_sha256": "07807cc05789ded7bf20ad83172e46a9b4e529d9efccfc1f04c294d8bbb4f6d5",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/joint-indexer-ut.md",
@@ -66,15 +83,26 @@
    "modified": false
   },
   {
-   "file": "references/pipeline-handoff.md",
+   "file": "references/multi-config-sampling.md",
    "source": null,
    "added_here": true
+  },
+  {
+   "file": "references/multi-config-ut-merge.md",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "references/pipeline-handoff.md",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "references/selection-coverage.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md",
    "source_sha256": "1b8b41c6e269bdddc2109c1a10ebb17c60dd44bba17c9428bfda6a4e545ebe50",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/setup.md",
@@ -86,7 +114,7 @@
    "file": "references/source-delivery-records.md",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-delivery-records.md",
    "source_sha256": "16f00490c765d0144745192b6325a21f586e2be781048390696aa8c82f0db5d6",
-   "modified": false
+   "modified": true
   },
   {
    "file": "references/source-extraction.md",
@@ -101,10 +129,37 @@
    "modified": true
   },
   {
+   "file": "references/ut-lane.md",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/adjacency.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/build_ranking.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/build_task_plan.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "scripts/coverage_ledger.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/coverage_ledger.py",
    "source_sha256": "0f43d2a826f7da1c2e3c831c07ebcfd2c5a50524c599f33ca4d61b926ed10d09",
    "modified": true
+  },
+  {
+   "file": "scripts/draft_task_decls.py",
+   "source": null,
+   "added_here": true
   },
   {
    "file": "scripts/kernel_self_noise.py",
@@ -113,10 +168,20 @@
    "modified": false
   },
   {
+   "file": "scripts/kernel_shapes.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/merge_policy.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "scripts/observed_workload.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/observed_workload.py",
    "source_sha256": "77068a5f8cafbe3bf49d41aab0e5bb22fe0d4bc027e279c04c7bcdcde97fe4d8",
-   "modified": false
+   "modified": true
   },
   {
    "file": "scripts/oracle_power.py",
@@ -125,10 +190,21 @@
    "modified": true
   },
   {
-   "file": "scripts/plan_sampling_points.py",
-   "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
-   "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
-   "modified": false
+   "file": "scripts/plan_ut_cases.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/point_census.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/probe_server.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "scripts/regen_reference.py",
@@ -137,10 +213,22 @@
    "modified": true
   },
   {
+   "file": "scripts/relabel_points.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "scripts/run_points.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "scripts/select_targets.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/select_targets.py",
    "source_sha256": "edb449b6fc2cfd0ef3b3f2d95cde0a991141ab9c835654c85eae470263eca141",
-   "modified": false
+   "modified": true
   },
   {
    "file": "scripts/selftest_structure_only.py",
@@ -155,10 +243,37 @@
    "modified": true
   },
   {
+   "file": "scripts/source_map.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/trace_scan.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/ut_gpu_queue.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/ut_wave.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
    "file": "shared/capture_shapes.py",
    "source": "e2e_workflow/scripts/capture_shapes.py",
    "source_sha256": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
    "modified": false
+  },
+  {
+   "file": "shared/compile_watch.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "shared/delivery_contract.mjs",
@@ -194,13 +309,13 @@
    "file": "shared/kernel_selection.py",
    "source": "e2e_workflow/scripts/kernel_selection.py",
    "source_sha256": "ebc24e05faf44585c7e7e224df6cdf9f02097009403ddb577f96a4f6d254ee1b",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/kernel_source_delivery.mjs",
    "source": "e2e_workflow/scripts/kernel_source_delivery.mjs",
    "source_sha256": "dec54adc26932291472c8a64d9c4b4a911de6a498bb369fa5a04b3ae0646b34d",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/leg_runner.py",
@@ -213,12 +328,6 @@
    "source": "e2e_workflow/scripts/overlay_setup.py",
    "source_sha256": "e14c2d644c2a8785462fa8b22a7c6f54409f5379309846adca10a19cbc97bdd8",
    "modified": false
-  },
-  {
-   "file": "shared/parse_profile.py",
-   "source": "e2e_workflow/scripts/parse_profile.py",
-   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
-   "modified": true
   },
   {
    "file": "shared/schema.mjs",
@@ -243,6 +352,22 @@
    "source": "e2e_workflow/scripts/tests/test_capture_shapes.py",
    "source_sha256": "0ba60e2e25fc965806a967b42c498edab29021f7fb842b53ec9f8ae290a9a0ed",
    "modified": false
+  },
+  {
+   "file": "shared/tests/test_compile_watch.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
+  },
+  {
+   "file": "shared/tests/test_compile_watch_bulk.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "shared/tests/test_compile_watch_shell.py",
+   "source": null,
+   "added_here": true
   },
   {
    "file": "shared/tests/test_harness_lib.py",
@@ -272,7 +397,7 @@
    "file": "shared/tests/test_kernel_selection.py",
    "source": "e2e_workflow/scripts/tests/test_kernel_selection.py",
    "source_sha256": "fab137b13c70a867357c98cb930d088d9f0b7b7e064f6b917838cab3b23bc378",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/tests/test_kernel_source_delivery.mjs",
@@ -287,6 +412,11 @@
    "modified": false
   },
   {
+   "file": "shared/tests/test_multi_config_weights.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "shared/tests/test_observed_workload_weights.py",
    "source": "e2e_workflow/scripts/tests/test_observed_workload_weights.py",
    "source_sha256": "951f7fa6b1e36d703f9f3567cbc13b21f8f7bcfa31f74fe6751cc14bf0e5df38",
@@ -299,16 +429,83 @@
    "modified": false
   },
   {
+   "file": "shared/tests/test_registered_identity.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "shared/tests/test_server_object_replay.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "shared/trace_names.py",
+   "source": "e2e_workflow/scripts/parse_profile.py",
+   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
+   "modified": true
+  },
+  {
    "file": "shared/workspace_sources.py",
    "source": "kernel_workflow/scripts/workspace_sources.py",
    "source_sha256": "b6809ad323bcce4994a7171629b4925569042e78e07c25535b11693689626139",
    "modified": false
   },
   {
+   "file": "tests/test_decode_prefix_warmup.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_invocation_anchors.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_merge_policy.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_mixed_capture_ranking.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_probe_exhaustion.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_probe_stop.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_profile_fast_path.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_run_points_graph_hidden.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "tests/test_sampling_pipeline.py",
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py",
    "source_sha256": "8e8a8fd966b24113c227419160e1dd6d6b59ff412bc79d9d77a6b8aeea286fb5",
-   "modified": false
+   "modified": true
+  },
+  {
+   "file": "tests/test_ut_gpu_queue.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "tests/test_ut_wave.py",
+   "source": null,
+   "added_here": true,
+   "modified": true
   },
   {
    "file": "ut_contracts/README.md",
@@ -421,7 +618,37 @@
    "added_here": true
   },
   {
+   "file": "ut_contracts/tests/test_negative_control_search.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_parallel_gates.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_server_call_accounting.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_server_evidence.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_tensor_lifecycle.py",
+   "source": null,
+   "added_here": true
+  },
+  {
    "file": "ut_contracts/tests/test_ut_contracts.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_validation_mode.py",
    "source": null,
    "added_here": true
   },
@@ -433,88 +660,21 @@
   {
    "file": "ut_contracts/ut_driver.py",
    "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/trace_scan.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/point_census.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/build_ranking.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/run_points.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "tests/test_profile_fast_path.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/probe_server.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/relabel_points.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/kernel_shapes.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/source_map.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/adjacency.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/plan_ut_cases.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/draft_task_decls.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/build_task_plan.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "shared/compile_watch.py",
-   "source": null,
    "added_here": true,
    "modified": true
-  },
+  }
+ ],
+ "removed_files": [
   {
-   "file": "shared/tests/test_compile_watch.py",
+   "file": "scripts/plan_points_budget.py",
    "source": null,
    "added_here": true
   },
   {
-   "file": "ut_contracts/tests/test_server_evidence.py",
-   "source": null,
-   "added_here": true
+   "file": "scripts/plan_sampling_points.py",
+   "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
+   "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
+   "modified": false
   },
   {
    "file": "scripts/ut_wave.py",
@@ -555,6 +715,12 @@
    "file": "tests/test_merge_policy.py",
    "source": null,
    "added_here": true
+  },
+  {
+   "file": "shared/parse_profile.py",
+   "source": "e2e_workflow/scripts/parse_profile.py",
+   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
+   "modified": true
   }
  ]
 }

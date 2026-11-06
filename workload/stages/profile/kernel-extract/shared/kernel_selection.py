@@ -67,7 +67,7 @@ def merge_process_traces(paths):
     return merged
 
 
-# parse_profile.short_name truncates display names here. A declared name that hit the limit is our
+# Legacy profiles truncated display names here. A declared name that hit the limit is our
 # own doing, so the matcher accepts a prefix at it rather than reading the truncation as a mismatch.
 SHORT_NAME_LIMIT = 60
 
@@ -106,7 +106,7 @@ def canonical_kernel_name(value):
     ``Memcpy DtoD (Device -> Device)``.
 
     The return type is then dropped by name and the FIRST identifier is taken, exactly as
-    ``parse_profile.short_name`` does. Taking the last whitespace token instead also drops ``void``,
+    the legacy display formatter did. Taking the last whitespace token instead also drops ``void``,
     but on any of the annotated spellings above it answers with the annotation -- ``DtoD``,
     ``sliding_attention``, ``qkv_proj`` -- and a head then fails to match its own kernel.
     """

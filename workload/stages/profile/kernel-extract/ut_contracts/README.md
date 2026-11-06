@@ -36,7 +36,7 @@ python3 "$UTC/scaffold_ut.py" new --family gemm_a8w8_blockscale --task "$EVAL_DI
 # meta.json evidence_path and negative_controls, run/ut_cases.json if no --manifest
 python3 "$UTC/scaffold_ut.py" sync-meta --task "$EVAL_DIR/tasks/<name>"
 python3 "$EVAL_DIR/tasks/<name>/ut_contract.py" "$EVAL_DIR/tasks/<name>"     # CPU lint, exit 0/1
-cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py
+cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py --validation-mode correctness
 ```
 
 With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the driver shards
@@ -44,15 +44,93 @@ its correctness legs by case and spreads timing buckets over them. `--quick` run
 but timing on the smallest, middle and largest case of each phase (one draw, a few server
 calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
 `--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
-e.g. `--skip timing` in a lane, then `--reuse` alone to time it.
+including correctness receipts reused later by performance validation.
+
+UT extraction runs `--validation-mode correctness`: all eleven non-timing gates are
+required, and no timing gate executes. Reports explicitly name the validation contract,
+mode, required gates and `performance_measured: false`; a pass certifies the UT.
+Optimization runs `--validation-mode performance --reuse` (performance remains the
+bare command's default for existing optimizer callers). It requires all twelve gates,
+measures timing, and only then reports a weighted speedup. Preserve `timed: true` cases
+and their workload weights even when extraction does not measure them.
 
 The lint needs no GPU and no torch; run it before every GPU session. `unittest.py` writes
 `run/ut_report.json` (every gate's measures) and `run/ut_result.json` (verdict, exit code,
 snapshot hash, gate statuses), prints `UT_GATE <gate> <status>` lines and, when timing ran,
-`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate passed; 1 = a gate failed or did not
+`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate required by the validation mode passed; 1 = a required gate failed or did not
 run (`--skip` makes the verdict `partial`, never `pass`); 3 = `UT_HARNESS_INCOMPLETE`, the UT
 itself is missing something (a graph phase without a replay bundle) — fix the UT, do not
 blame the candidate.
+
+## Temporary tensor lifecycle
+
+New scaffolds freeze `input_generation.protocol: "weight_substreams/v1"` in
+`run/ut_contract.json`. Built-in read-only `lifetime: "weight"` operands use a named
+random stream keyed by round seed, input name, resolved shape/dtype/distribution.
+Changing activation shape does not redraw the same weight. A per-process LRU cache
+holds at most `input_generation.weight_cache_bytes` (default 2 GiB). Every caller
+receives a private copy, so kernel writes cannot poison the cached original. Writable
+state, active layout hooks and custom/produced distributions remain independently
+constructed. Different draw seeds still produce different weights. A zero cache budget
+retains exactly the same random-stream recipe while disabling retention.
+
+This explicit generation recipe applies to newly scaffolded tests. Existing frozen
+contracts/helpers keep their previous inputs; do not retrofit completed experiments.
+After deliberately changing a contract, sync metadata and qualify it again.
+
+Input reproducibility builds twice and returns the second set for layout/value checks.
+Checks compare exact tensor bytes on-device where possible, including NaN payloads and
+signed zero. Snapshots use at most 256 MiB of GPU storage; larger operands fall back to
+CPU snapshots with chunked comparison. Isolation reuses its first execution for the
+output-independence check instead of invoking the kernel again.
+
+Correctness compares all cases/draws in bounded batches, controlled
+by `meta.ut_contract.oracle_batch_cases` (default 32) and `oracle_batch_bytes` (default
+256 MiB of estimated output across the legs). A single larger case stays whole and is
+reported; the output budget is not a total host/GPU-memory guarantee. Baseline/candidate
+workers keep separate, unchanged overlays across batches, so batching does not pay a new
+Torch import for every case. Controls get their own worker lifetime; workers stop before
+source restoration. Each batch's temporary `.pt` files are loaded and removed before
+the next batch. Negative controls regenerate bounded baseline batches instead of retaining
+suite-wide oracles. Each negative control searches for a numerical witness as described
+below; its rejection margin is unchanged.
+
+`ut_report.json.data_handling` records worker starts, batches, peak temporary oracle-file
+bytes and weight-cache statistics. Unneeded input copies are omitted from comparisons;
+reference operands and top-k score inputs retain their original comparison semantics.
+Only completed batches contribute results; missing case/draw outputs fail validation.
+
+## Negative-control witness search
+
+A mutation needs a completed numerical comparison that fails by at least the configured
+`min_control_margin`. It does not need to fail every case. The driver first tries a small
+case, then bounded batches of every remaining random case until it finds that witness.
+Stop applies only to the current control; every other declared control still runs.
+Correctness, input checks and replay keep their existing coverage.
+
+An author can optionally order known leaf/branch probes in the control declaration:
+
+```json
+{"leaf": "kernel_src/op.py", "find": "...", "replace": "...",
+ "expect": "...", "probe_sigs": ["DECODE_m4", "PREFILL_m200"]}
+```
+
+These must be unique random-case signatures from the manifest. They are tried one at a
+time, followed by the remaining cases if needed; they never narrow the fallback scope.
+Without a hint, the first probe has the smallest estimated output. A quick run stays
+within its own selected cases and still cannot qualify a UT. A hint is not proof of leaf
+execution: retain the normal source/binding and per-leaf delivery evidence.
+
+Weak numerical deviations continue the search. Import/build/launch failure, missing
+batch outputs and missing/incorrectly shaped returns cannot themselves qualify a
+control. If no sufficiently strong numerical witness exists, all eligible cases are
+checked and the control fails. Workers stop and the original source is restored and
+hashed on both success and failure.
+
+Each control reports `available_cases`, `checked_cases`, `early_stopped` and
+`witness_case`, alongside the existing margin and completed case comparisons. Early
+stopping happens after a completed batch; cases already executed in that batch remain
+in the report. The full UT manifest and workload weights are never reduced.
 
 ## The case manifest (`run/ut_cases.json`)
 

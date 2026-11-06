@@ -1,8 +1,12 @@
 # Principles
 
-This is a **skill**, not a product and not a framework: five named stages that an agent
+This is a **skill**, not a product and not a framework: configured stages that an agent
 executes, held together by as little machinery as possible. `README.md` says how it works.
 This file says how it is designed and maintained, and is what a PR here is read against.
+
+Profiling and UT generation may be separate stages (`profile` → `ut`) so completed
+dispatch evidence can be reused without repeating GPU captures. Their boundary is a
+versioned artifact contract; the original combined profile skill remains compatible.
 If a rule is wrong, change *it* here, with the reason.
 
 ## Design

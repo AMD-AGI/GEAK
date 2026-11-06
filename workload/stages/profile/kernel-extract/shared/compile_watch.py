@@ -41,11 +41,13 @@ sitecustomize once made FlyDSL's JIT abort). Stdlib at import time; torch lazily
 """
 import argparse
 import base64
+import copy
 import hashlib
 import io
 import importlib.abc
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -54,8 +56,9 @@ import time
 
 _STATE = {"installed": False, "bound": False, "events": [], "seen": set(), "lock": threading.Lock(),
           "dir": None, "frames": 0, "fh": None, "t0": time.time(), "n": 0, "prev": None}
-# Frames that are plumbing, not a caller: Triton itself, torch's op/module/decorator wrappers.
-_SKIP_FILES = re.compile(r"[/\\](triton|_dynamo|_inductor|_library)[/\\]|compile_watch\.py$|"
+# Torch's op/module/decorator wrappers and the recorder itself are plumbing.
+# Triton is filtered by module namespace below: AITER caller paths also contain /triton/.
+_SKIP_FILES = re.compile(r"[/\\](_dynamo|_inductor|_library)[/\\]|compile_watch\.py$|"
                          r"[/\\]torch[/\\](_ops\.py|utils[/\\]_contextlib\.py|"
                          r"nn[/\\]modules[/\\]module\.py)")
 INT_DATA_CAP = int(os.environ.get("COMPILE_WATCH_INT_CAP", str(512 << 20)))
@@ -119,9 +122,12 @@ def variant_identity(fn, compile_info):
             "num_stages": compile_info.get("num_stages")}
 
 
+def _identity_json(ident):
+    return json.dumps({k: ident.get(k) for k in IDENTITY_FIELDS}, sort_keys=True)
+
+
 def variant_id(ident):
-    blob = json.dumps({k: ident.get(k) for k in IDENTITY_FIELDS}, sort_keys=True)
-    return hashlib.sha1(blob.encode()).hexdigest()[:16]
+    return hashlib.sha1(_identity_json(ident).encode()).hexdigest()[:16]
 
 
 def short_name(fn):
@@ -261,7 +267,9 @@ def _record_frames(frames, k, tensors, in_capture):
     for f in frames:
         if len(rows) >= k:
             break
-        if _SKIP_FILES.search(f.f_code.co_filename) or f.f_code.co_name == "<lambda>":
+        module = f.f_globals.get("__name__", "")
+        if (module == "triton" or module.startswith("triton.")
+                or _SKIP_FILES.search(f.f_code.co_filename) or f.f_code.co_name == "<lambda>"):
             continue
         names, npos, extra = _frame_args(f)
         loc = f.f_locals
@@ -545,7 +553,7 @@ def belongs(rec, kernel_names, target_callable=None):
 
 
 def _fields(rec):
-    out = {}
+    out = {"fn": rec.get("fn")}
     for k in ("signature", "constexprs", "attrs"):
         for name, v in (rec.get(k) or {}).items():
             out["%s[%s]" % (k, name)] = v
@@ -561,11 +569,17 @@ def diff_fields(server_rec, ut_rec):
 
 def coverage(server_recs, ut_events, waived=None):
     """Which of the server's variants the UT baseline compiled; for each one it did not, the
-    nearest variant of the same kernel the UT did compile and the fields that differ."""
+    nearest variant of the same kernel the UT did compile and the fields that differ.
+
+    Stored IDs identify evidence records: multiconfig prefixes them with the config ID.
+    Match the full canonical compile identity instead, retaining the source IDs for
+    per-config accounting and waivers. A matching stored ID alone is never evidence of
+    equivalent compilation, and incompatible events sharing one ID must both survive.
+    """
     waived = {w["id"]: w for w in (waived or []) if w.get("id") and (w.get("why") or "").strip()}
     have = {}
     for e in ut_events:
-        have.setdefault(e["id"], e)
+        have.setdefault(_identity_json(e), e)
     by_name = {}
     for e in have.values():
         by_name.setdefault(e["name"], []).append(e)
@@ -574,7 +588,7 @@ def coverage(server_recs, ut_events, waived=None):
         row = {"id": r["id"], "kernel": r["name"], "eager": r.get("eager"),
                "in_graph_capture": r.get("in_graph_capture"),
                "before_ready": r.get("before_ready")}
-        if r["id"] in have:
+        if _identity_json(r) in have:
             covered.append(row)
             continue
         cands = by_name.get(r["name"]) or []
@@ -662,18 +676,29 @@ def literal_object(d):
         return False, None
 
 
-def plan_call(call, data):
+def plan_call(call, data, *, make_server_object=None):
     """Check a recorded call can be rebuilt; returns the per-tensor plan and its notes."""
     torch = __import__("torch")
     notes = []
-    for name, d in call["args"].items():
-        if isinstance(d, dict) and "__object__" in d and name != "self" \
-                and not literal_object(d)[0]:
-            raise Unreplayable("argument %s is a %s" % (name, d["__object__"]))
+    if make_server_object is not None and not callable(make_server_object):
+        raise Unreplayable("cases.make_server_object must be callable")
+
+    def check(name, d):
+        if isinstance(d, dict) and "__object__" in d:
+            if make_server_object is None and not literal_object(d)[0]:
+                raise Unreplayable("argument %s is a %s; replay needs cases.make_server_object"
+                                   % (name, d["__object__"]))
         if isinstance(d, dict) and "__missing__" in d:
             raise Unreplayable("argument %s was not bound when the kernel compiled" % name)
-    if call["args"].get("self") is not None and "self" in call.get("positional", []):
-        raise Unreplayable("the entry is a bound method; replay needs its instance")
+        if isinstance(d, dict) and "__seq__" in d:
+            for i, v in enumerate(d["items"]):
+                check("%s[%d]" % (name, i), v)
+        elif isinstance(d, dict) and name.startswith("**"):
+            for key, v in d.items():
+                check(key, v)
+
+    for name, d in call["args"].items():
+        check(name, d)
     leaves = _tensor_leaves(call["args"])
     plan = {}
     for name, d in leaves:
@@ -753,14 +778,100 @@ def _bytes(p):
     return _elems(p) * _itemsize(torch, p["dtype"])
 
 
-def materialize_call(call, data, seed=0, budget=16 << 30):
+SHELL_BYTE_DTYPES = ("float4_e2m1fn_x2", "float8_e8m0fnu")
+
+
+def _shell_payload_bytes(values, dtype_name):
+    """Encode ordinary FP32 values; never execute arithmetic/copy on shell dtypes.
+
+    E2M1 finite magnitudes are0,.5,1,1.5,2,3,4,6, with sign in bit3. Adjacent
+    values occupy the low/high nibbles of one byte. E8M0 stores exponent+127;
+    code255 is NaN and is never generated. These are synthetic encodings, not
+    a claim to reproduce the original quantizer's missing input distribution.
+    """
+    torch = __import__("torch")
+    if dtype_name == "float4_e2m1fn_x2":
+        values = values.reshape(-1, 2)
+        magnitude = values.abs()
+        boundaries = torch.tensor((.25, .75, 1.25, 1.75, 2.5, 3.5, 5.),
+                                  device=values.device, dtype=torch.float32)
+        code = torch.bucketize(magnitude, boundaries)
+        # At exact midpoints choose the even E2M1 mantissa code (round-to-nearest-even).
+        tie = magnitude == boundaries[code.clamp(max=6)]
+        code += (tie & ((code & 1) != 0)).to(code.dtype)
+        code = code.to(torch.uint8) | ((values < 0).to(torch.uint8) << 3)
+        return code[:, 0] | (code[:, 1] << 4)
+    if dtype_name == "float8_e8m0fnu":
+        # Scale has no sign or zero representation. Project sampled magnitude to
+        # a finite positive power of two, including tails of a fitted normal.
+        exponent = values.abs().clamp(min=2.0 ** -127, max=2.0 ** 127).log2().round()
+        return (exponent.clamp(-127, 127) + 127).to(torch.uint8)
+    raise ValueError("unsupported shell dtype " + str(dtype_name))
+
+
+def _materialize_shell(name, p, data, seed, device, notes):
+    """Restore/generate one byte-sized shell tensor with its exact recorded layout."""
+    torch = __import__("torch")
+    dtype_name = str(p["dtype"]).replace("torch.", "")
+    raw = torch.empty(_elems(p), dtype=torch.uint8, device=device)
+    view = raw.as_strided(p["shape"], p["stride"], p["offset"])
+    if p.get("data") is not None:
+        src = data[p["data"]].view(torch.uint8).to(device).reshape(p["shape"])
+        target = view
+        # Copy each broadcast address once, retaining its recorded stride0 view.
+        for dim in reversed(range(len(p["shape"]))):
+            if int(p["stride"][dim]) == 0 and int(p["shape"][dim]) > 1:
+                target, src = target.select(dim, 0), src.select(dim, 0)
+        target.copy_(src)
+        notes.append("%s: recorded %s contents restored through byte views" % (name, dtype_name))
+    else:
+        gen = p.get("gen") or {}
+        generator = torch.Generator(device=device).manual_seed(int(seed))
+        sample = None
+        if gen.get("kind") == "resample":
+            sample = data[gen["sample"]].view(torch.uint8).reshape(-1).to(device)
+            if not sample.numel():
+                raise Unreplayable("shell operand %s has an empty recorded sample" % name)
+            if dtype_name == "float8_e8m0fnu" and bool((sample == 255).any()):
+                raise Unreplayable("shell operand %s recorded sample includes E8M0 NaN bytes" % name)
+            notes.append("%s: %s bytes resampled from %d recorded values"
+                         % (name, dtype_name, sample.numel()))
+        elif gen and gen.get("kind") != "normal":
+            raise Unreplayable("shell operand %s has unsupported generation kind %s"
+                               % (name, gen.get("kind")))
+        else:
+            mean, std = float(gen.get("mean", 0.0)), float(gen.get("std", 1.0))
+            if not math.isfinite(mean) or not math.isfinite(std) or std < 0:
+                raise Unreplayable("shell operand %s has an invalid normal summary" % name)
+            basis = ("recorded normal summary projected to valid shell codes" if gen else
+                     "synthetic seeded N(0,1) fallback; no recorded generation distribution")
+            notes.append("%s: %s encoded through packed bytes (%s)" % (name, dtype_name, basis))
+        for lo in range(0, raw.numel(), 1 << 20):
+            hi = min(raw.numel(), lo + (1 << 20))
+            if sample is not None:
+                indices = torch.randint(sample.numel(), (hi - lo,), generator=generator, device=device)
+                packed = sample.index_select(0, indices)
+            else:
+                count = (hi - lo) * (2 if dtype_name == "float4_e2m1fn_x2" else 1)
+                values = torch.randn(count, generator=generator, device=device, dtype=torch.float32)
+                values = values * std + mean
+                packed = _shell_payload_bytes(values, dtype_name)
+            raw[lo:hi].copy_(packed)
+    return raw.view(_dtype(torch, p["dtype"])).as_strided(p["shape"], p["stride"], p["offset"])
+
+
+def materialize_call(call, data, seed=0, budget=16 << 30, *, make_server_object=None):
     """(args, kwargs, named_tensors, notes) rebuilding a recorded call on this process's
     device. Recorded contents are restored exactly, with the recorded strides and storage
     offset; bulk float operands are drawn from N(0, 1) with a per-operand seed, so both legs
-    of a replay see identical operands."""
+    of a replay see identical operands. The optional task hook
+    make_server_object(name, descriptor, *, call, seed) rebuilds only __object__
+    descriptors, including a method's self. It receives isolated metadata copies;
+    tensors, scalars, containers and the recorded argument order stay harness-owned.
+    A hook may raise Unreplayable when its object cannot be reconstructed."""
     torch = __import__("torch")
     data = [t.to_dense() if getattr(t, "is_sparse", False) else t for t in data]
-    plan, notes = plan_call(call, data)
+    plan, notes = plan_call(call, data, make_server_object=make_server_object)
     if sum(_bytes(p) for p in plan.values()) > budget:
         _compact(plan, data, budget, notes)
         if sum(_bytes(p) for p in plan.values()) > budget:
@@ -770,6 +881,9 @@ def materialize_call(call, data, seed=0, budget=16 << 30):
     for i, (name, p) in enumerate(sorted(plan.items())):
         dt = _dtype(torch, p["dtype"])
         dev = "cuda" if p["device"].startswith("cuda") and torch.cuda.is_available() else p["device"]
+        if str(p["dtype"]).replace("torch.", "") in SHELL_BYTE_DTYPES:
+            built[name] = _materialize_shell(name, p, data, int(seed) * 1000003 + i, dev, notes)
+            continue
         n = _elems(p)
         buf = torch.empty(n, dtype=dt, device=dev)
         if p.get("data") is None:
@@ -806,6 +920,16 @@ def materialize_call(call, data, seed=0, budget=16 << 30):
     def value(name, d):
         if isinstance(d, dict) and d.get("__tensor__"):
             return built[name]
+        if isinstance(d, dict) and "__object__" in d:
+            literal_ok, literal_value = literal_object(d)
+            if literal_ok:
+                return literal_value
+            obj = make_server_object(name, copy.deepcopy(d), call=copy.deepcopy(call), seed=int(seed))
+            if obj is None or obj is NotImplemented:
+                raise Unreplayable("cases.make_server_object did not rebuild argument %s (%s)"
+                                   % (name, d["__object__"]))
+            notes.append("%s: object %s rebuilt by cases.make_server_object" % (name, d["__object__"]))
+            return obj
         if isinstance(d, dict) and "__dtype__" in d:
             return _dtype(torch, d["__dtype__"])
         if isinstance(d, dict) and "__float__" in d:
@@ -813,16 +937,12 @@ def materialize_call(call, data, seed=0, budget=16 << 30):
         if isinstance(d, dict) and "__seq__" in d:
             items = [value("%s[%d]" % (name, i), v) for i, v in enumerate(d["items"])]
             return tuple(items) if d["__seq__"] == "tuple" else items
-        ok, lit = literal_object(d)
-        if ok:
-            return lit
         return d
     args, kwargs = [], {}
     for name in call.get("positional") or []:
-        if name != "self":
-            args.append(value(name, call["args"][name]))
+        args.append(value(name, call["args"][name]))
     for name, d in call["args"].items():
-        if name in (call.get("positional") or []) or name == "self":
+        if name in (call.get("positional") or []):
             continue
         if name.startswith("**"):
             kwargs.update({k: value(k, v) for k, v in d.items()})

@@ -257,6 +257,27 @@ def healthy(url):
         return False
 
 
+def process_group_active(pgid, proc_root="/proc"):
+    """Zombies have released their GPU resources and cannot handle a signal."""
+    if os.path.isdir(proc_root):
+        for name in os.listdir(proc_root):
+            if not name.isdigit():
+                continue
+            try:
+                with open(os.path.join(proc_root, name, "stat")) as f:
+                    fields = f.read().rsplit(") ", 1)[1].split()
+                if int(fields[2]) == pgid and fields[0] not in ("Z", "X"):
+                    return True
+            except (OSError, ValueError, IndexError):
+                continue
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 class Server:
     def __init__(self, cfg, run_dir):
         self.cfg, self.run_dir = cfg, os.path.abspath(run_dir)
@@ -299,6 +320,7 @@ class Server:
             pass
         if info is not None:
             json.dump(info, open(os.path.join(self.run_dir, "server_info.json"), "w"), indent=1)
+            json.dump(info, open(os.path.join(self.run_dir, "server_info.%s.json" % mode), "w"), indent=1)
         self.starts[-1][2] = time.time()
         if self.primary is None:
             self.primary = len(self.starts) - 1
@@ -312,7 +334,7 @@ class Server:
                  "trace_root": self.trace_root, "expect_files": int(self.cfg["tp"]),
                  "log": logp, "command": cmd, "startup_s": round(time.time() - t0, 1),
                  "ready_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "server_info": os.path.join(self.run_dir, "server_info.json") if info else None}
+                 "server_info": os.path.join(self.run_dir, "server_info.%s.json" % mode) if info else None}
         json.dump(state, open(self.state_path, "w"), indent=1)
         log("ready in %.0fs at %s (decode_capture=%s)" % (state["startup_s"], url, mode))
         return {"ok": True, "log": logp, "state": state}
@@ -342,27 +364,27 @@ class Server:
         return out
 
     def stop(self, wait=120):
-        if self.proc is None or self.proc.poll() is not None:
+        if self.proc is None:
             return
-        pg = os.getpgid(self.proc.pid)
+        # start_new_session=True makes the initial PID the stable process-group ID,
+        # including when the leader has died but TP workers remain alive.
+        pg = self.proc.pid
         for sig, grace in ((signal.SIGTERM, wait), (signal.SIGKILL, 30)):
+            if not process_group_active(pg):
+                break
             try:
                 os.killpg(pg, sig)
             except ProcessLookupError:
-                return
-            try:
-                self.proc.wait(grace)
                 break
-            except subprocess.TimeoutExpired:
-                continue
-        # The group can outlive its leader (TP workers); wait for every member.
-        t0 = time.time()
-        while time.time() - t0 < wait:
-            try:
-                os.killpg(pg, 0)
-            except ProcessLookupError:
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline and process_group_active(pg):
+                self.proc.poll()
+                time.sleep(0.2)
+            if not process_group_active(pg):
                 break
-            time.sleep(1)
+        self.proc.poll()
+        if process_group_active(pg):
+            raise RuntimeError("probe server process group %d still has live workers" % pg)
         log("stopped")
 
 

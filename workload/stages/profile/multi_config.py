@@ -180,28 +180,75 @@ def merge_ranking(configs, weights):
 
 
 # --------------------------------------------------------------------------- evidence
+def _source_quality(record, graph_only):
+    """Prefer actual op/launch evidence, never the length of a replay stack."""
+    if graph_only:
+        return (0, 0, 0, int(bool(record.get("frames") or record.get("launcher"))))
+    op = record.get("op") or {}
+    entry = op.get("entry") or {}
+    has_op = bool(op.get("key") and entry)
+    has_launch = bool(record.get("launcher") or record.get("frames"))
+    has_host_op = bool(record.get("launching_ops"))
+    return (int(has_op or has_launch or has_host_op), int(has_op),
+            int(bool(entry.get("resolved"))), int(has_launch))
+
+
 def merge_source_map(configs):
     out = {"contract": "kernel_extract/source_map/v1", "packages": [], "graph_replayed_only": [],
-           "kernels": {}, "files": {}, "unresolved_frames": [], "configs": {}}
-    replayed = None
-    for cid, d in configs:
+           "kernels": {}, "files": {}, "files_by_config": {}, "unresolved_frames": [],
+           "configs": {}, "config_metadata": {}}
+    records, replayed, file_versions = {}, {}, {}
+    # Stable config order breaks ties between equally useful real sources; all
+    # alternatives remain available below instead of inventing a longer stack.
+    for cid, d in sorted(configs):
         sm = load(os.path.join(d, "evidence", "source_map.json"))
         if not sm:
             continue
         out["configs"][cid] = os.path.abspath(os.path.join(d, "evidence", "source_map.json"))
+        out["config_metadata"][cid] = {key: value for key, value in sm.items()
+                                       if key not in ("kernels", "files")}
         out["packages"] = sorted(set(out["packages"]) | set(sm.get("packages") or []))
-        # replayed-only only if it never launched eagerly anywhere
         g = set(sm.get("graph_replayed_only") or [])
-        replayed = g if replayed is None else (replayed & g) | (g - set(out["kernels"]))
         for name, k in (sm.get("kernels") or {}).items():
-            have = out["kernels"].get(name)
-            if have is None or (not have.get("frames") and k.get("frames")):
-                out["kernels"][name] = dict(k, from_config=cid)
+            records.setdefault(name, {})[cid] = k
+            replayed.setdefault(name, {})[cid] = bool(k.get("graph_replayed_only", name in g))
+        out["files_by_config"][cid] = sm.get("files") or {}
         out["files"].update(sm.get("files") or {})
+        for path, digest in (sm.get("files") or {}).items():
+            file_versions.setdefault(path, {})[cid] = digest
         out["unresolved_frames"] = sorted(set(out["unresolved_frames"])
                                           | set(sm.get("unresolved_frames") or []))
-    out["graph_replayed_only"] = sorted(n for n in (replayed or set())
-                                        if not out["kernels"].get(n, {}).get("frames"))
+    for name, per_config in sorted(records.items()):
+        quality = {cid: _source_quality(k, replayed[name][cid]) for cid, k in per_config.items()}
+        chosen = max(per_config, key=quality.get)
+        # Frames/launcher/op stay one coherent source record; concatenating stacks
+        # would invent a call chain. Preserve every original record and its path.
+        merged = dict(per_config[chosen], from_config=chosen,
+                      from_configs=sorted(per_config), per_config=per_config,
+                      source_maps={cid: out["configs"][cid] for cid in per_config})
+        merged["launching_ops"] = sorted({op for k in per_config.values()
+                                          for op in k.get("launching_ops") or []})
+        op_keys = {key for cid, k in per_config.items() if not replayed[name][cid]
+                   for key in (list(k.get("op_keys_seen") or [])
+                               + ([k["op"]["key"]] if (k.get("op") or {}).get("key") else []))}
+        if op_keys:
+            merged["op_keys_seen"] = sorted(op_keys)
+        if any(k.get("sources") for k in per_config.values()):
+            sources = {}
+            for k in per_config.values():
+                values = k.get("sources") or []
+                for source in values if isinstance(values, list) else [values]:
+                    sources[json.dumps(source, sort_keys=True)] = source
+            merged["sources"] = [sources[key] for key in sorted(sources)]
+        graph_only = any(replayed[name].values()) and not any(q[0] for q in quality.values())
+        merged["graph_replayed_only"] = graph_only
+        if graph_only:
+            out["graph_replayed_only"].append(name)
+        out["kernels"][name] = merged
+    # Keep the compatible flat files view, but never discard conflicting per-config
+    # hashes. Frame records also retain the hash of their own selected source.
+    out["file_versions"] = {path: versions for path, versions in sorted(file_versions.items())
+                            if len(set(versions.values())) > 1}
     return out
 
 
@@ -251,10 +298,63 @@ def parse_kv(items, what, cast=str):
         if "=" not in it:
             raise SystemExit("multi_config: --%s expects cid=value, got %r" % (what, it))
         k, v = it.split("=", 1)
-        if not k or SEP in k or "/" in k:
+        if not k or k in (".", "..") or SEP in k or "/" in k or "\\" in k:
             raise SystemExit("multi_config: config id %r must be nonempty without %r or '/'" % (k, SEP))
         out.append((k, cast(v)))
     return out
+
+
+def cmd_plan_sampling(a):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import multi_config_sampling as sampling
+    try:
+        identity = sampling.read(a.runtime_identity) if a.runtime_identity else None
+        configs = sampling.load_configs(parse_kv(a.config, "config"), identity)
+        if a.runtime_identity:
+            for cfg in configs:
+                cfg["inputs"].setdefault("runtime_identity", sampling.file_ref(a.runtime_identity))
+        doc = sampling.plan(configs, a.num_points, a.context_tolerance, a.target_pct)
+        sampling.write_plan(a.group_dir, doc, configs)
+    except (ValueError, OSError) as exc:
+        raise SystemExit("multi_config plan: " + str(exc))
+    print("%d configs, %d compatible deployment pools; candidates %d -> %d; %d captures (%s)" % (
+        doc["config_count"], len(doc["groups"]), doc["candidate_points_before_union"],
+        doc["candidate_points_after_union"], doc["capture_count"], doc["status"]))
+    print("Plan: " + os.path.join(os.path.abspath(a.group_dir), "sampling_plan.json"))
+    return 0
+
+
+def cmd_project_sampling(a):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import multi_config_sampling as sampling
+    try:
+        doc = sampling.project(a.group_dir)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit("multi_config project: " + str(exc))
+    print("Projection: %s (%d configs); sampling_projection.json lists merge inputs" % (
+        doc["status"], len(doc["configs"])))
+    if a.merge and doc["status"] == "projected":
+        return cmd_merge(argparse.Namespace(group_dir=a.group_dir, config=doc["merge_configs"]))
+    return 0 if doc["status"] == "projected" else 1
+
+
+def cmd_capture_sampling(a):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import multi_config_sampling as sampling
+    try:
+        commands = sampling.capture_commands(a.group_dir)
+    except (ValueError, OSError) as exc:
+        raise SystemExit("multi_config capture: " + str(exc))
+    if a.dry_run:
+        print(json.dumps([{"group_id": gid, "argv": cmd} for gid, cmd in commands], indent=2))
+        return 0
+    results = []
+    for gid, cmd in commands:
+        print("Capturing shared pool " + gid, flush=True)
+        rc = subprocess.run(cmd, cwd=os.path.join(os.path.abspath(a.group_dir), "sampling", gid)).returncode
+        results.append({"group_id": gid, "returncode": rc})
+    sampling.write(os.path.join(a.group_dir, "sampling_capture.json"), {"groups": results})
+    return 0 if all(r["returncode"] == 0 for r in results) else 1
 
 
 def cmd_merge(a):
@@ -306,7 +406,7 @@ def cmd_select(a):
     smap = os.path.join(g, "evidence", "source_map.json")
     merged = {r["id"]: r for r in (load(os.path.join(g, "kernel_ranking.json"), {}) or {}).get("ranking", [])}
     out = os.path.abspath(a.output or os.path.join(g, "selection_targets.json"))
-    per_config, union, policy, denoms = {}, {}, None, {}
+    per_config, union, policy, denoms, ops = {}, {}, None, {}, {}
     for c in mc["configs"]:
         cid, d = c["config_id"], c["eval_dir"]
         ranking = os.path.join(d, "kernel_ranking.json")
@@ -322,10 +422,20 @@ def cmd_select(a):
         policy = policy or doc.get("policy")
         denoms[cid] = doc.get("denominators")
         per_config[cid] = {"targets": len(doc.get("targets") or []), "file": os.path.relpath(dest, g)}
+        for op in doc.get("ops") or []:
+            u = ops.setdefault(op["id"], dict(op, members=[], selected_phases=[],
+                                             selected_in_configs=[], config_pct={}))
+            u["members"] = sorted(set(u["members"]) | set(op.get("members") or []))
+            u["selected_phases"] = sorted(set(u["selected_phases"]) |
+                                           set(op.get("selected_phases") or []))
+            u["selected_in_configs"].append(cid)
+            u["config_pct"][cid] = op.get("overall_pct")
         for t in doc.get("targets") or []:
             u = union.setdefault(t["id"], dict(t, selected_in_configs=[], config_pct={}))
             u["selected_in_configs"].append(cid)
             u["config_pct"][cid] = t.get("overall_pct")
+            u["selected_phases"] = sorted(set(u.get("selected_phases") or []) |
+                                           set(t.get("selected_phases") or []))
     # Kinds that are listed, not extracted (default: collectives). A communication kernel's
     # time depends on the interconnect, rank skew and overlap with compute, none of which a
     # standalone UT reproduces, and its real levers (fusing the all-reduce with the following
@@ -356,12 +466,27 @@ def cmd_select(a):
         t["overall_pct"] = (merged.get(tid) or {}).get("selection_pct_gpu_time", t["max_config_pct"])
         targets.append(t)
     targets.sort(key=lambda t: (-t["max_config_pct"], t["id"]))
+    # draft_task_decls enters its operator path only when this table is present.
+    # Retain the entry and phase-branch relation across the per-config selections.
+    op_rows = []
+    for op in ops.values():
+        op["members"] = [k for k in op["members"] if k in union]
+        if not op["members"]:
+            continue
+        op["overall_pct"] = round(sum(union[k]["overall_pct"] for k in op["members"]), 4)
+        op["share_of_phase_pct"] = {
+            ph: round(sum((merged.get(k, {}).get("share_of_phase_pct") or {}).get(ph, 0.0)
+                          for k in op["members"]), 4)
+            for ph in (policy or {}).get("phases", [])}
+        op_rows.append(op)
     doc = {"scope": "extraction_target_selection_only",
            "policy": dict(policy or {}, combination="per_config_then_union",
                           rule="an operator is selected when its share of any single config's "
                                "own workload exceeds overall_pct_gt"),
            "denominators": {"basis": "per config (each config's own workload)", "per_config": denoms},
            "per_config": per_config, "targets": targets, "target_count": len(targets),
+           "ops": sorted(op_rows, key=lambda r: (-r["overall_pct"], r["id"])),
+           "op_count": len(op_rows),
            "listed_only": sorted(listed.values(), key=lambda r: r["id"]),
            "list_only_kinds": sorted(list_only),
            "selection_invocation": {
@@ -382,6 +507,22 @@ def cmd_select(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("plan", help="CPU-only union of observed points before shared captures")
+    p.add_argument("--group-dir", required=True)
+    p.add_argument("--config", action="append", required=True, help="cid=<input eval dir>")
+    p.add_argument("--runtime-identity", help="JSON pinning image, model/source revision and GPU arch")
+    p.add_argument("--num-points", type=int, required=True, help="global capture budget across all configs")
+    p.add_argument("--context-tolerance", type=float, default=1.5)
+    p.add_argument("--target-pct", type=float, default=90.0, help="per-config, per-phase planning proxy target")
+    p.set_defaults(fn=cmd_plan_sampling)
+    p = sub.add_parser("capture", help="profile each shared deployment pool once (uses GPUs)")
+    p.add_argument("--group-dir", required=True)
+    p.add_argument("--dry-run", action="store_true", help="print commands without starting servers")
+    p.set_defaults(fn=cmd_capture_sampling)
+    p = sub.add_parser("project", help="reweight shared captures using each config's own observations")
+    p.add_argument("--group-dir", required=True)
+    p.add_argument("--merge", action="store_true", help="also write the usual multiconfig merged artifacts")
+    p.set_defaults(fn=cmd_project_sampling)
     p = sub.add_parser("merge")
     p.add_argument("--group-dir", required=True)
     p.add_argument("--config", action="append", required=True, help="cid=<config eval dir>")

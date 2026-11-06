@@ -62,7 +62,8 @@ def stage_rows(root, state=None):
     """
     state = (rj(root, "STATE.json") or {}) if state is None else state
     stages = state.get("stages") or state
-    order = ["baseline", "profile", "roofline", "optimize", "applyback"]
+    order = (rj(root, "config.resolved.json") or {}).get("order") or [
+        "baseline", "profile", "ut", "roofline", "optimize", "applyback"]
     rows = []
     for name in order + [k for k in stages if k not in order]:
         st = stages.get(name)

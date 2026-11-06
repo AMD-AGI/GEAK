@@ -791,7 +791,10 @@ def _correct_one_nonfinite(out, ref, tol):
         return False, float("inf")
 
 
-def assert_independent_outputs(call, args_a, args_b):
+_NO_OUTPUT = object()
+
+
+def assert_independent_outputs(call, args_a, args_b, *, first_output=_NO_OUTPUT):
     """Catch a candidate that returns a shared/persistent buffer (the graph-replay `static_out`
     shortcut). Call with two DIFFERENT inputs and verify:
       1. the first output is NOT mutated by the second call (snapshot compare), and
@@ -803,7 +806,7 @@ def assert_independent_outputs(call, args_a, args_b):
     raise AttributeError here and fail an otherwise-correct multi-output op."""
     torch = _torch()
     try:
-        parts_a = flatten_outputs(call(args_a))
+        parts_a = flatten_outputs(call(args_a) if first_output is _NO_OUTPUT else first_output)
         if not parts_a:
             return False, "no_tensor_output: the launcher returned no tensor to check"
         snap = [t.detach().clone() for t in parts_a]

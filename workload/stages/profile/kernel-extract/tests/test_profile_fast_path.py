@@ -381,6 +381,9 @@ class RunPointsTest(unittest.TestCase):
         mla = sh["kernels"]["sparse_mla_attn"]["variants"][0]["samples"][0]
         self.assertEqual(mla["resolved_by"], "launch_correlation")
         self.assertEqual(mla["py_frames"][0], MLA_FRAME)
+        self.assertFalse((ev / "task_decls.json").exists())
+        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         decls = json.loads((ev / "task_decls.json").read_text())
         groups = {tuple(sorted(t["kernels"])): t for t in decls["tasks"]}
         moe = groups[("gemm_a4w4_moe", "moe_sort_kernel")]
@@ -549,6 +552,7 @@ class RunPointsTest(unittest.TestCase):
 class EagerEvidenceTest(unittest.TestCase):
     setUp = RunPointsTest.setUp
     run_points = RunPointsTest.run_points
+    script = RunPointsTest.script
 
     def test_graph_replayed_decode_gets_one_eager_evidence_window(self):
         graph = FakeServer(replay=True)
@@ -572,6 +576,9 @@ class EagerEvidenceTest(unittest.TestCase):
         sm = json.loads((ev / "evidence" / "source_map.json").read_text())
         self.assertFalse(sm["kernels"]["sparse_mla_attn"]["graph_replayed_only"])
         self.assertEqual(sm["kernels"]["sparse_mla_attn"]["frames"][0]["frame"], MLA_FRAME)
+        self.assertFalse((ev / "task_decls.json").exists())
+        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         decls = json.loads((ev / "task_decls.json").read_text())
         groups = {tuple(sorted(t["kernels"])) for t in decls["tasks"]}
         self.assertIn(("gemm_a4w4_moe", "moe_sort_kernel"), groups)
@@ -580,7 +587,7 @@ class EagerEvidenceTest(unittest.TestCase):
         self.assertEqual({p["point_id"] for p in cov["phases"]["DECODE"]["points"]}, {"de_1", "de_2"})
 
 
-class BudgetPlannerTest(unittest.TestCase):
+class SharedPlannerContextTest(unittest.TestCase):
     """Prefill coverage is two-dimensional: the same extend on a short and on a long
     cached prefix are different workloads."""
 
@@ -592,15 +599,17 @@ class BudgetPlannerTest(unittest.TestCase):
             (d / "obs.json").write_text(json.dumps({
                 "decode_log_interval": 10, "raw_prefill_rows": pre,
                 "raw_decode_rows": [{"running": 2, "token": 200000, "iterations": 10}] * 5}))
-            p = subprocess.run([sys.executable, str(SCRIPTS / "plan_points_budget.py"),
-                                "--observed", str(d / "obs.json"), "--time-budget-s", "300",
-                                "--out", str(d / "pts.json")], capture_output=True, text=True)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            plan = json.loads((d / "pts.json").read_text())
-            pre_pts = [x for x in plan["points"] if x["phase"] == "PREFILL"]
+            sys.path.insert(0, str(SCRIPTS.parents[1]))
+            import multi_config_sampling as sampling
+            cfg = {"config_id": "only", "serving": {"model": "test", "tp": 1},
+                   "runtime_identity": {"image": "test", "model_revision": "test",
+                                        "source_revision": "test", "gpu_arch": "test"},
+                   "observed": json.loads((d / "obs.json").read_text())}
+            plan = sampling.plan([cfg], 3, target_pct=100)
+            pre_pts = [x["point"] for x in plan["captures"] if x["point"]["phase"] == "PREFILL"]
             self.assertEqual(sorted(x["context_tokens"] for x in pre_pts), [4000, 121000])
             self.assertTrue(all(x["new_tokens"] == 1000 and x["running"] == 1 for x in pre_pts))
-            self.assertEqual(plan["phase_summary"]["PREFILL"]["mass_outside_tolerance_pct"], 0.0)
+            self.assertEqual(plan["configs"]["only"]["phases"]["PREFILL"]["planned_proxy_coverage_pct"], 100)
             # Relabel with only the short-context point measured: the long-context half of
             # the workload is outside tolerance in 2-D, though its token count matches.
             sys.path.insert(0, str(SCRIPTS))
