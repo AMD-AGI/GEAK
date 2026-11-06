@@ -15,8 +15,10 @@ a failed or empty stage leaves its args exactly as they were.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,10 @@ from typing import Any
 KF_HOME = Path(__file__).resolve().parent
 KF_SCRIPT = KF_HOME / "kf_workflow.js"
 DEFAULT_BUDGET_S = 12 * 3600
+# The stage may hold at most this share of the run, hard stop included; the main workflow keeps the rest.
+MAX_RUN_SHARE = 0.4
+# Below this the stage cannot fit a baseline, a trace, the agents and one A/B: it is skipped, not squeezed.
+MIN_BUDGET_S = 2 * 3600
 SCHEMA = "geak.kernel_fusion/1"
 
 # handoff key / env var -> kf_workflow.js arg
@@ -79,10 +85,17 @@ def config(h: dict, flags: set[str] | frozenset = frozenset()) -> dict | None:
     return cfg if cfg["enabled"] else None
 
 
+def hard_timeout_s(budget_s: int) -> int:
+    """The stage's hard stop: the JS stops starting work at 85% of its budget; the slack lets in-flight legs land."""
+    return int(budget_s * 1.1) + 900
+
+
 def stage_budget_s(cfg: dict, timeout_s: int) -> int:
-    if cfg.get("budget_s"):
-        return int(cfg["budget_s"])
-    return int(min(DEFAULT_BUDGET_S, max(timeout_s // 3, 1)))
+    """min(12 h, 1/3 of the run), or the configured budget; either way capped so the stage's HARD stop stays
+    within MAX_RUN_SHARE of the run."""
+    budget = int(cfg["budget_s"]) if cfg.get("budget_s") else int(min(DEFAULT_BUDGET_S, max(timeout_s // 3, 1)))
+    cap = int((MAX_RUN_SHARE * int(timeout_s) - 900) / 1.1)
+    return max(min(budget, cap), 0)
 
 
 def kf_dir_for(cfg: dict, ps_args: dict) -> Path:
@@ -247,7 +260,7 @@ def _invoke(G: dict, args: dict, budget_s: int) -> dict:
     G["E2E_SCRIPT"] = KF_SCRIPT     # the standalone-runtime path launches run_e2e's global E2E_SCRIPT
     try:
         # The JS stops starting work at 85% of time_budget_s; the slack lets in-flight A/B legs land.
-        return G["invoke_workflow"](build_prompt(G, args), int(budget_s * 1.1) + 900, args["kf_dir"], ps_args=args)
+        return G["invoke_workflow"](build_prompt(G, args), hard_timeout_s(budget_s), args["kf_dir"], ps_args=args)
     finally:
         G["E2E_SCRIPT"] = saved
 
@@ -295,6 +308,106 @@ def _unwrap(d: dict | None) -> dict | None:
     return d
 
 
+# Benchmark / correctness output the integrator writes next to the overlay sources; not part of the overlay.
+_OVERLAY_OUTPUT_DIRS = {"__pycache__", "cand", "ref", "correctness"}
+_ABS_PATH = re.compile(r"""["'](/[^"'\s]+)["']""")
+
+
+def _overlay_files(root: Path) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _OVERLAY_OUTPUT_DIRS]
+        for f in filenames:
+            if f.endswith((".pyc", ".log", ".out")) or f == "integrate_result.json":
+                continue
+            p = Path(dirpath) / f
+            out[str(p.relative_to(root))] = p
+    return out
+
+
+def _ab_record(overlay: Path, kf_dir: Path) -> tuple[dict | None, Path | None]:
+    """The integrate_result.json whose A/B accepted exactly this overlay directory."""
+    for p in sorted(kf_dir.rglob("integrate_result.json")):
+        d = _read_json(p) or {}
+        acc = d.get("accepted_overlay")
+        if acc and Path(acc).resolve() == overlay:
+            return d, p
+    return None, None
+
+
+def validate_overlay(kf_overlay: str, initial_overlay: str, kf_dir: Path) -> dict:
+    """Checks the stage's accepted overlay before it replaces the main workflow's initial overlay.
+
+    1. it is a directory inside the stage dir with a sitecustomize.py;
+    2. every .py in it compiles (compiled only, never imported or run here);
+    3. every absolute path it names under the stage dir (the fused kernels it loads) exists;
+    4. existing optimizations are kept: every file of the initial overlay is present and byte-identical,
+       and the initial sitecustomize.py is either kept as is or copied under another name that the new
+       sitecustomize.py imports;
+    5. it is the overlay the A/B measured: an integrate_result.json accepted exactly this directory with a
+       complete A/B, and no overlay source changed after that A/B's candidate leg finished.
+    Returns {"ok", "problems", "manifest_sha256", "files"}."""
+    problems: list[str] = []
+    kf_dir = Path(kf_dir).resolve()
+    overlay = Path(kf_overlay).resolve() if kf_overlay else Path()
+    if not kf_overlay or not overlay.is_dir():
+        return {"ok": False, "problems": [f"overlay {kf_overlay!r} is not a directory"]}
+    if kf_dir not in overlay.parents:
+        problems.append(f"overlay {overlay} is outside the stage dir {kf_dir}")
+    files = _overlay_files(overlay)
+    site = overlay / "sitecustomize.py"
+    if not site.is_file():
+        problems.append("no sitecustomize.py at the overlay root")
+    for rel, p in sorted(files.items()):
+        if not rel.endswith(".py"):
+            continue
+        try:
+            src = p.read_text(encoding="utf-8")
+            compile(src, str(p), "exec")
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as e:
+            problems.append(f"{rel} does not compile: {type(e).__name__}: {e}"[:300])
+            continue
+        for ref in _ABS_PATH.findall(src):
+            if ref.startswith(str(kf_dir.parent) + os.sep) and not Path(ref).exists():
+                problems.append(f"{rel} names {ref}, which does not exist")
+    site_src = site.read_text(encoding="utf-8", errors="replace") if site.is_file() else ""
+    for root in [Path(x) for x in str(initial_overlay or "").split(os.pathsep) if x.strip()]:
+        if not root.is_dir():
+            continue
+        for rel, p in sorted(_overlay_files(root).items()):
+            want = p.read_bytes()
+            if rel == "sitecustomize.py":
+                if site.is_file() and site.read_bytes() == want:
+                    continue
+                kept = [r for r, q in files.items() if r != "sitecustomize.py" and q.read_bytes() == want]
+                imported = [r for r in kept if re.search(
+                    r"\b" + re.escape(Path(r).with_suffix("").as_posix().replace("/", ".")) + r"\b", site_src)]
+                if not kept:
+                    problems.append(f"the initial overlay's sitecustomize.py ({root}) is not kept")
+                elif not imported:
+                    problems.append(f"the initial overlay's sitecustomize.py is kept as {kept[0]} "
+                                    "but the new sitecustomize.py does not import it")
+            elif rel not in files:
+                problems.append(f"initial overlay file {rel} ({root}) is missing")
+            elif files[rel].read_bytes() != want:
+                problems.append(f"initial overlay file {rel} ({root}) was changed")
+    rec, rec_path = _ab_record(overlay, kf_dir)
+    if rec is None:
+        problems.append("no integrate_result.json accepted this overlay directory")
+    elif not rec.get("ab_complete"):
+        problems.append(f"{rec_path}: the A/B is not complete")
+    else:
+        leg = Path(((rec.get("measurement_evidence") or {}).get("cand_summary")) or "")
+        stamp = (leg if leg.is_file() else rec_path).stat().st_mtime
+        changed = [r for r, p in files.items() if p.stat().st_mtime > stamp + 2]
+        if changed:
+            problems.append(f"overlay sources changed after the A/B measured it: {', '.join(sorted(changed)[:5])}")
+    h = hashlib.sha256()
+    for rel, p in sorted(files.items()):
+        h.update(rel.encode() + b"\0" + hashlib.sha256(p.read_bytes()).digest())
+    return {"ok": not problems, "problems": problems, "manifest_sha256": h.hexdigest(), "files": len(files)}
+
+
 def fold_overlay(ps_args: dict, kf_overlay: str) -> str:
     """The fused overlay REPLACES the initial one: the integrator built it as a copy of the initial
     overlay plus the fused kernels, and roles copy CURRENT_OVERLAY as one directory."""
@@ -302,15 +415,43 @@ def fold_overlay(ps_args: dict, kf_overlay: str) -> str:
     return kf_overlay
 
 
+def _passes_through(e: BaseException) -> bool:
+    """run_e2e's SIGTERM self-stop and an operator's Ctrl-C/exit must keep propagating; nothing else may."""
+    return (isinstance(e, (KeyboardInterrupt, SystemExit))
+            or (isinstance(e, TimeoutError) and str(e).startswith("signal ")))
+
+
 def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()) -> dict | None:
     """Run the stage if switched on; fold an accepted overlay into ps_args. G is run_e2e's globals()
     (its invoke_workflow, PROCESS_SAFETY and the E2E_SCRIPT it launches). Returns the summary
-    recorded under result.json["kernel_fusion"], or None when the switch is off. Never raises except
-    for run_e2e's own SIGTERM self-stop, which must keep propagating."""
+    recorded under result.json["kernel_fusion"], or None when the switch is off.
+
+    A failure anywhere in the stage -- config, args, the workflow, the leftover reaper, the overlay check,
+    writing its record -- ends the stage as status "error": the main workflow then runs with its args exactly
+    as they were and the run budget minus the seconds the stage used. Never raises except for run_e2e's own
+    SIGTERM self-stop (and Ctrl-C/exit), which must keep propagating."""
+    t0 = time.time()
+    snapshot = dict(ps_args)
+    try:
+        return _run_stage(h, ps_args, timeout_s, G, flags, t0)
+    except BaseException as e:
+        if _passes_through(e):
+            raise
+        ps_args.clear()
+        ps_args.update(snapshot)          # whatever the stage had folded in is undone
+        elapsed = int(time.time() - t0)
+        remaining = max(int(timeout_s) - elapsed, 60)
+        if "time_budget_s" in ps_args:
+            ps_args["time_budget_s"] = remaining
+        return {"schema": SCHEMA, "enabled": True, "status": "error",
+                "error": f"stage driver: {type(e).__name__}: {e}"[:2000],
+                "elapsed_s": elapsed, "main_timeout_s": remaining}
+
+
+def _run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags, t0: float) -> dict | None:
     cfg = config(h, flags)
     if not cfg:
         return None
-    t0 = time.time()
     budget = stage_budget_s(cfg, timeout_s)
     args = build_args(cfg, ps_args, budget)
     kf_dir = Path(args["kf_dir"])
@@ -325,6 +466,10 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
         summary["reused"] = True
     elif problems:
         summary.update(status="error", error="; ".join(problems))
+    elif budget < MIN_BUDGET_S:
+        summary.update(status="skipped", reason=(
+            f"stage budget {budget}s < {MIN_BUDGET_S}s: the run ({int(timeout_s)}s) is too short to fit a baseline, "
+            f"a trace and an A/B within {int(MAX_RUN_SHARE * 100)}% of it"))
     else:
         kf_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -334,10 +479,8 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
                 # 40 KB return as one stdout line was the step that failed: WorkflowParseError.)
                 wf = _unwrap(_read_json(kf_dir / "workflow_return.json")) or wf
         except BaseException as e:  # the stage must never take the main run down
-            if isinstance(e, TimeoutError) and str(e).startswith("signal "):
+            if _passes_through(e):
                 raise               # run_e2e's SIGTERM handler: flush and exit, do not start the main run
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
             wf = _unwrap(_read_json(kf_dir / "workflow_return.json"))
             if type(e).__name__ == "WorkflowParseError" and isinstance(wf, dict) and wf.get("status"):
                 # The driver wrote the full return to disk and its session ended before the pointer line reached
@@ -363,8 +506,16 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
     summary.setdefault("status", "error")
     summary["elapsed_s"] = elapsed
     if summary["status"] == "accepted" and summary.get("final_overlay"):
-        summary["main_initial_overlay"] = fold_overlay(ps_args, summary["final_overlay"])
-    remaining = max(int(timeout_s) - elapsed, 600)
+        check = validate_overlay(summary["final_overlay"], ps_args.get("initial_overlay_pythonpath") or "", kf_dir)
+        summary["overlay_check"] = check
+        if check["ok"]:
+            summary["main_initial_overlay"] = fold_overlay(ps_args, summary["final_overlay"])
+        else:
+            # The A/B accepted it, but it cannot be handed on as is: the main workflow keeps its own overlay.
+            summary["status"] = "rejected_overlay"
+            summary["reason"] = "accepted overlay failed validation: " + "; ".join(check["problems"])[:1500]
+    elapsed = summary["elapsed_s"] = int(time.time() - t0)
+    remaining = max(int(timeout_s) - elapsed, 60)
     if "time_budget_s" in ps_args:
         ps_args["time_budget_s"] = remaining
     summary["main_timeout_s"] = remaining
@@ -397,5 +548,7 @@ def dry_run_info(h: dict, ps_args: dict, timeout_s: int, flags=frozenset()) -> d
     cfg = config(h, flags)
     if not cfg:
         return {"enabled": False}
-    args = build_args(cfg, ps_args, stage_budget_s(cfg, timeout_s))
-    return {"enabled": True, "script": str(KF_SCRIPT), "args": args, "problems": validate(args)}
+    budget = stage_budget_s(cfg, timeout_s)
+    args = build_args(cfg, ps_args, budget)
+    return {"enabled": True, "script": str(KF_SCRIPT), "args": args, "problems": validate(args),
+            "budget_s": budget, "hard_timeout_s": hard_timeout_s(budget), "skipped": budget < MIN_BUDGET_S}

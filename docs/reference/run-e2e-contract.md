@@ -135,16 +135,24 @@ The stage is on by default. Precedence, highest first: the CLI flags, the
   // or a settings object (on unless "enabled": false):
   "kernel_fusion": {
     "prompt": "/path/deployment_notes.txt",   // run-specific prompt(s), comma-separated
-    "budget_s": 14400,                        // default: min(12 h, 1/3 of the run)
+    "budget_s": 14400,                        // default: min(12 h, 1/3 of the run); hard stop <= 40% of the run
     "steps": "trace,topk,author,apply",
     "task": "operator constraints for every stage agent"
   }
 }
 ```
 
-The stage budget is taken from the run's timeout; the main workflow gets the
-rest. Processes the stage leaves running are stopped before the main workflow
-starts. Every settings key also has a `GEAK_KF_*` environment variable; the full
+The stage budget is taken from the run's timeout and capped so the stage's hard
+stop stays within 40% of the run; a run too short for a 2 h stage budget skips
+the stage (`status: skipped`). The main workflow gets the run's timeout minus
+the seconds the stage used. A failure anywhere in the stage ends it as
+`status: error` and the main workflow runs with its original arguments.
+Processes the stage leaves running are stopped before the main workflow starts.
+An accepted overlay is handed on only after `validate_overlay` passes (inside
+the stage dir, compiles, every initial-overlay file kept byte-identical with its
+sitecustomize still imported, and unchanged since the A/B that accepted it);
+otherwise the status is `rejected_overlay` and the main workflow keeps its
+initial overlay. Every settings key also has a `GEAK_KF_*` environment variable; the full
 list is in `e2e_workflow/kernel_fusion/README.md`.
 
 ### TraceLens prior autodiscovery
@@ -217,12 +225,13 @@ The workflow writes the following fields to the result file.
   "kernel_journey_path": ".../kernel_journey.json",
   "recovered_from_disk": true,
   "kernel_fusion": {                     // present only when the KF stage ran
-    "status": "accepted | no_gain | analysis_only | error",
+    "status": "accepted | no_gain | analysis_only | skipped | rejected_overlay | error",
     "kf_dir": "/work/experiment/geak/kf_<model>_<ts>",
     "throughput_speedup": 1.018,         // the stage's own A/B
     "final_overlay": ".../overlay/cand_kf_stack",
     "accepted": [ /* fused kernels */ ],
     "rejected": [ /* with stage and reason */ ],
+    "overlay_check": {"ok": true, "problems": [], "manifest_sha256": "..."},  // accepted only
     "main_timeout_s": 28800,             // budget left for the main workflow
     "combined_speedup_vs_original": 1.05 // stage A/B x main-workflow A/B
   }
