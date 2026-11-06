@@ -22,6 +22,14 @@ LOG="${3:?log_file}"
 mkdir -p "$(dirname "$LOG")" "$WORKDIR" 2>/dev/null
 blocked() { echo "[runner:codex] BLOCKED $*" | tee -a "$LOG" >&2; exit 78; }
 
+# Credentials and any private PATH live outside the repository, in the file
+# runner_env.env_file names. Sourced here, before the checks below, because that file is
+# allowed to supply CODEX_BIN or the PATH the binary is on. Same rule as claude.sh.
+if [ -n "${WORKLOAD_AGENT_ENV_FILE:-}" ]; then
+  [ -f "$WORKLOAD_AGENT_ENV_FILE" ] || blocked "WORKLOAD_AGENT_ENV_FILE points at a file that does not exist: $WORKLOAD_AGENT_ENV_FILE"
+  set -a; . "$WORKLOAD_AGENT_ENV_FILE"; set +a
+fi
+
 # ---- 1. Precondition self-check.
 BIN="${CODEX_BIN:-}"
 if [ -z "$BIN" ]; then BIN="$(command -v codex 2>/dev/null)"; fi

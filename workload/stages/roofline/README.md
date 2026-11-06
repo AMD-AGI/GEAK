@@ -38,26 +38,44 @@ roughly half a percent. The kernel with a third of its share had 2.8× of headro
 
 ## Artifacts → `result.json`
 
-The slot's `rank.py` performs this mapping (it belongs to the slot, not to any
-implementation):
+The slot's `finalize.py` performs this mapping and is the stage's verdict (it belongs to
+the slot, not to any implementation, and the driver runs it after every session —
+`stages/CONTRACT.md` section 3.1):
 
 ```bash
-python3 "$WORKLOAD_ROOT/stages/roofline/rank.py"
+python3 "$WORKLOAD_ROOT/stages/roofline/finalize.py"
 ```
+
+What it accepts is written only there: read the file, or run it early with the command
+above, rather than looking for a second copy of its thresholds in this document. What
+follows is its interface and the reasoning behind it, not a restatement of its rules.
 
 It requires the skill to leave **`rows.json`** in `$OUT` — the raw per-case table, with
 fields `kernel`, `regime`, `case`, `measured_us`, `roofline_us` (or whichever column
 `--roof-key` names), and optionally `case_weight` and `bound`. That is `kernel-roofline`'s
-own `fold.py` input format; any other roofline implementation plugs in by emitting the
-same `rows.json`.
+own `fold.py` input format. Each implementation also supplies **`folded.json`**, a map
+keyed by `kernel/regime` whose records contain `pct`, `speedup`, `suspect`, `coverage`,
+and `n`. These two files describe the same case set and roof column. A replacement can
+produce them with its own tools; the finalizer never invokes implementation code.
 
-What `rank.py` does:
+For the vendored `kernel-roofline` skill, complete its analysis, then run its existing
+folding tool. Set `ROOF_KEY` from `params.roof_key` when configured:
 
-1. **Folding calls the skill's own `fold.py`** rather than reimplementing a sum. Folding
-   multiple shapes into one number has exactly one correct algorithm — stay in the time
-   domain, sum numerator and denominator separately, divide once, normalize weights
-   within a regime — and `mean(roofline_pct)` is not it. So this is a `subprocess` call to
-   `$SKILL_ROOT/scripts/fold.py`; swap the implementation and it calls that one instead.
+```bash
+python3 "$SKILL_ROOT/scripts/fold.py" --rows "$OUT/rows.json" \
+    --roof-key "${ROOF_KEY:-roofline_us}" --out "$OUT/folded.json" \
+    --label roof > "$OUT/fold.log" 2>&1
+```
+
+Stop on a failed fold and keep its log. Regenerate the fold whenever its rows or roof
+column change; an earlier fold is not evidence for a new analysis. This call belongs to
+the skill's work, before the finalizer runs.
+
+What `finalize.py` does:
+
+1. Reads the supplied fold. Folding stays in the time domain: sum numerator and
+   denominator separately and divide once, with weights normalized within a regime.
+   The implementation performs that work; the finalizer does not duplicate its sum.
 2. Maps task-keyed or leaf-keyed rows to the declared task boundary and its selected
    whole-workload share. It checks that every positive-mass task case has an analysis
    row before distributing the share across regimes by measured time. Incomplete model
@@ -66,8 +84,8 @@ What `rank.py` does:
 3. Writes `roofline.json` (all kernels, descending by `expected_e2e_gain_pct`) and
    `result.json`.
 
-Artifacts: `roofline.json`, `folded.json` (raw `fold.py` output) and `fold.log` (its
-table, with coverage and suspect markers).
+Artifacts: `roofline.json`, `rows.json`, `folded.json`, and `fold.log` when the
+implementation provides a diagnostic log.
 
 Every delivered task remains in the output. Completed analysis with an explicitly
 unsupported model may finish with unknown bounds; missing cases, stale qualification
@@ -79,7 +97,7 @@ predicted performance ranking. A partial ranked subset cannot imply a known tota
 
 - **An efficiency above 1 falsifies the denominator; it does not mean 100% saturation.**
   Such rows are marked `suspect`, must **not** be clamped to 100%, and no speedup may be
-  derived from them. `rank.py` sets their `attainable_speedup` and
+  derived from them. `finalize.py` sets their `attainable_speedup` and
   `expected_e2e_gain_pct` to null — listed, but excluded from the ranking.
 - **`bound_type` is a model classification, not proof of a measured bottleneck.** Low
   efficiency on its own does not establish a bandwidth, occupancy or issue limit.

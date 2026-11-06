@@ -12,10 +12,10 @@ extracted by the UT stage (or legacy combined profile) under `$TASKS_DIR`
 `kernel_src/<mod>.py`.
 
 This skill supplies the **optimization method** only; parallelism, timing, fault
-tolerance and KEEP/revert belong to the stage-shared `scripts/worker.sh` and
-`scripts/scheduler.py`. `prompt.sh` is the boundary between them:
+tolerance and KEEP/revert belong to the stage-shared `campaign/worker.sh` and
+`campaign/scheduler.py`. `prompt.sh` is the boundary between them:
 
-    scripts/worker.sh  ──(env: K / TASK_DIR / KERNEL_SRC / ATTEMPT / BEST_SPEEDUP /
+    campaign/worker.sh  ──(env: K / TASK_DIR / KERNEL_SRC / ATTEMPT / BEST_SPEEDUP /
                             EVAL_DIR / ATTEMPT_CAP / PROMPT_OUT)──>  prompt.sh
                        <──────────────── $PROMPT_OUT ────────────────┘
 
@@ -61,7 +61,7 @@ actually violated:
 ## Output
 
 This skill does not write `result.json`. Per-kernel results are recorded by
-`scripts/worker.sh` in `$WORK_ROOT/state/<kernel>.status.json` (`best_speedup`,
+`campaign/worker.sh` in `$WORK_ROOT/state/<kernel>.status.json` (`best_speedup`,
 `credited_seconds`, `attempts`, `history`), with the best source in
 `$WORK_ROOT/runs/<kernel>/best_kernel_src`. Cold re-verification and the stage summary are
 steps 2 and 3 of [the slot's README](../README.md) — they belong to the slot, not to this

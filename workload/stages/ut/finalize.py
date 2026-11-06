@@ -11,8 +11,7 @@ from prepare import verify_input
 
 
 def main():
-    scripts = HERE.parents[1] / "scripts"
-    sys.path.insert(0, str(scripts))
+    sys.path.insert(0, str(HERE.parent / "_shared"))
     from emit_result import emit, read_json
     out = os.environ.get("OUT")
     if not out:

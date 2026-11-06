@@ -1,11 +1,9 @@
 {
   "_comment": "Default knobs for workload/. A scenario config (e.g. agentx_glm52.json) layers on top of this, and command-line --set layers on top of that. Every path is either absolute or resolved relative to the GEAK repository root.",
-
   "run_root": "workload/runs/default",
   "runner": "claude",
-
   "target": {
-    "_comment": "What this run optimizes. A scenario config MUST fill in `model`: scripts/target.py refuses to start a run whose config filename or run_root does not carry a recognisable token of it, and cross-checks `image`/`commits` against what the stages observed and recorded. This exists because a run once carried a planning-phase label (`agentx_dsv4`) for a GLM-5.2 stack from end to end -- every number was right and every label was wrong. `name_tokens` whitelists a deliberate abbreviation the tokeniser cannot derive (e.g. \"dsv4\" for DeepSeek-V4). Set `enforce` to false only with a written reason.",
+    "_comment": "What this run optimizes. A scenario config MUST fill in `model`: core/target.py refuses to start a run whose config filename or run_root does not carry a recognisable token of it, and cross-checks `image`/`commits` against what the stages observed and recorded. This exists because a run once carried a planning-phase label (`agentx_dsv4`) for a GLM-5.2 stack from end to end -- every number was right and every label was wrong. `name_tokens` whitelists a deliberate abbreviation the tokeniser cannot derive (e.g. \"dsv4\" for DeepSeek-V4). Set `enforce` to false only with a written reason.",
     "model": null,
     "image": null,
     "commits": {},
@@ -18,16 +16,17 @@
 
   "stages": {
     "baseline": {
-      "skill": "adopt-measured-receipt",
+      "skill": "adopt",
       "mode": "script",
       "params": {
         "receipt": null,
+        "throughput_key": null,
+        "valid_flags": ["submission_valid", "power_valid"],
         "metric": "output_token_throughput",
         "unit": "tok/s",
         "noise_band": 1.045
       }
     },
-
     "profile": {
       "skill": "kernel-extract",
       "mode": "agent",
@@ -36,13 +35,15 @@
         "_note_selection": "Top 10 and overall >0.5% are heuristic discovery cutoffs requested to explore beyond Muse's former three UTs, not calibrated performance thresholds. The unchanged skill selector takes these explicit arguments; kernel KEEP and E2E bands are unchanged.",
         "selection_top_k": 10,
         "selection_overall_pct_gt": 0.5,
-        "selection_phases": ["PREFILL", "DECODE"],
+        "selection_phases": [
+          "PREFILL",
+          "DECODE"
+        ],
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null
       }
     },
-
     "roofline": {
       "skill": "kernel-roofline",
       "mode": "agent",
@@ -52,7 +53,6 @@
         "rank_key": "expected_e2e_gain_pct"
       }
     },
-
     "optimize": {
       "skill": "geak-kernel-workflow",
       "mode": "agent",
@@ -80,10 +80,9 @@
         "max_tasks": null
       }
     },
-
     "applyback": {
-      "skill": "overlay-e2e-ab",
-      "mode": "script",
+      "skill": "overlay-ab",
+      "mode": "agent",
       "params": {
         "exclusive_node": true,
         "repeats": 3,
@@ -92,19 +91,20 @@
       }
     }
   },
-
   "report": {
-    "_comment": "Periodic reporting, on by default: `stage.py all` starts scripts/watch.py, which every interval_sec appends a block to <run_root>/PROGRESS.md, rewrites progress.json, and re-renders <run_root>/REPORT.md from whatever the stages have finished. A run that reports only at the end is one nobody can act on, and a run killed before its last stage would otherwise leave no report at all. Turn it off with `stage.py all --no-report` or enabled:false. interval_sec is 1800 because the stages that take hours write something every few minutes, so a half-hourly block is one screen of real movement rather than a log. --- on_stall is separate and defaults to \"report\": the monitor describes what it sees and acts on nothing. Setting it to \"restart-attempt\" lets it kill one specific, provable condition -- a live stage that has written nothing under $OUT for stall_sec AND whose process tree used less than min_cpu_sec of CPU over that window. One signal alone lies (the long stages legitimately spend forty minutes building an image or loading 892 GB of weights without touching $OUT), so both are required; stall_sec 5400 is chosen well clear of that longest observed legitimate silence. Killing the attempt is how it resumes -- the dispatcher's next attempt opens with a continuation prompt listing the artifacts already on disk -- and nothing is deleted. After max_interventions on one stage it stops acting and says so, because a stage that wedges that often needs a person. The old key name \"watch\" is still read if present.",
+    "_comment": "Periodic reporting, on by default: `run.py all` starts core/watch.py, which every interval_sec appends a block to <run_root>/PROGRESS.md, rewrites progress.json, and re-renders <run_root>/REPORT.md from whatever the stages have finished. A run that reports only at the end is one nobody can act on, and a run killed before its last stage would otherwise leave no report at all. Turn it off with `run.py all --no-report` or enabled:false. interval_sec is 1800 because the stages that take hours write something every few minutes, so a half-hourly block is one screen of real movement rather than a log. --- on_stall is separate and defaults to \"report\": the monitor describes what it sees and acts on nothing. Setting it to \"restart-attempt\" lets it kill one specific, provable condition -- a live stage that has written nothing under $OUT for stall_sec AND whose process tree used less than min_cpu_sec of CPU over that window. One signal alone lies (the long stages legitimately spend forty minutes building an image or loading 892 GB of weights without touching $OUT), so both are required; stall_sec 5400 is chosen well clear of that longest observed legitimate silence. Killing the attempt is how it resumes -- the dispatcher's next attempt opens with a continuation prompt listing the artifacts already on disk -- and nothing is deleted. After max_interventions on one stage it stops acting and says so, because a stage that wedges that often needs a person. The old key name \"watch\" is still read if present.",
     "enabled": true,
     "interval_sec": 1800,
     "stall_sec": 5400,
     "min_cpu_sec": 5,
     "on_stall": "report",
-    "max_interventions": 3
+    "max_interventions": 3,
+    "scan_max_entries": 10000,
+    "scan_max_sec": 5.0,
+    "_scan_budget_note": "Operational estimates, not calibrated throughput thresholds: inspect at most 10000 directory entries or 5 seconds per stage, whichever is reached first. Five stage scans therefore budget about 25 seconds of filesystem work per tick. Streaming scandir avoids materializing a whole directory and the same observations supply totals and recent writes. Time limits are cooperative between filesystem calls; a blocked stat/readdir can overrun them. Partial totals and recent writes are explicitly marked, file-count deltas become unavailable, and partial observations never trigger stall intervention. A current campaign reported 8,741,276 optimize files with a 3502.6-second gap between its snapshot start and file publication, motivating a bounded default rather than another full-tree traversal."
   },
-
   "runner_env": {
-    "_comment": "state_dir_base must sit on local disk, never on NFS (the agent's sqlite gets poisoned there). env_file points at a credential/gateway file kept **outside the repo**; see runners/claude.env.example for the template — keys are never committed. Leaving model null uses the CLI's own default rather than inheriting an ANTHROPIC_MODEL that may already be exported in the environment.",
+    "_comment": "state_dir_base must sit on local disk, never on NFS (the agent's sqlite gets poisoned there). env_file points at a credential/gateway file kept **outside the repo**; see runners/claude.env.example for the template \u2014 keys are never committed. Leaving model null uses the CLI's own default rather than inheriting an ANTHROPIC_MODEL that may already be exported in the environment.",
     "state_dir_base": "/dev/shm/workload_agent_state",
     "env_file": null,
     "model": null

@@ -22,14 +22,14 @@
   },
   "stages": {
     "baseline": {
-      "skill": "adopt-measured-receipt",
+      "skill": "adopt",
       "mode": "script",
       "params": {
         "receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness/runs/musespark_38947852942_025_20261020T025409Z/musespark_38947852942_025_20261020T025409Z.json",
         "throughput_key": "request_metrics.throughput.output.tokens_per_second",
         "reference_receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness/runs/musespark_38947852942_025_20261020T025409Z_repeat1/musespark_38947852942_025_20261020T025409Z_repeat1.json",
         "reference_key": "request_metrics.throughput.output.tokens_per_second",
-        "max_reference_drift": 0.005,
+        "max_drift_pct": 0.5,
         "require_valid": true,
         "node": "crsuse2-m2m-025",
         "metric": "output_token_throughput",
@@ -71,7 +71,7 @@
       }
     },
     "optimize": {
-      "skill": "geak-kernel-gpu-groups",
+      "skill": "geak-kernel-workflow",
       "mode": "agent",
       "params": {
         "time_budget_sec": 172800,
@@ -109,7 +109,7 @@
       }
     },
     "applyback": {
-      "skill": "reference-replay-ab",
+      "skill": "overlay-ab",
       "mode": "agent",
       "params": {
         "exclusive_node": true,
@@ -126,7 +126,7 @@
         "duration_s": 3600,
         "port": 8000,
         "stop_cmd": "tools/stop_owned_server.py",
-        "agent_brief": "Use only crsuse2-m2m-025. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Run inside the same pinned serving environment. Use the harness created by baseline and the reference-replay-ab procedure. Build a reversible overlay from only the cold-reverified winners, prove every replacement loaded in the server, and compare against the local baseline aggregate metric. All three candidate legs need fresh servers, empty compile caches and unique benchmark ids. The existing summarizer supports the nested reference metric path. Report operator and end-to-end results separately. A failed/missing overlay check or unequal metric basis cannot produce an A/B claim. USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget. REFERENCE SCOPE: reference_run is the first actual local stock aggregate (343.62428 tok/s), independently repeated at 344.41922. Compare candidate arms against that local stock reference using identical pinned harness/runtime. Report the unresolved historical-CI difference separately. Do not compare a candidate directly against 353.88446 and call that an optimization gain. The local baseline is adopted through the measured-receipt skill; the original strict CI alignment result remains failed in the qualification archive. FRESH STOCK CONTROL: If there are cold-verified winners, first run one fresh unchanged baseline leg with the existing harness, a unique tag and the same 3600-second metric window. Stop only that leg's owned server afterward. Record its raw receipt and its drift from the primary 343.62428 tok/s reference; the two earlier stock runs agreed within 0.5%. Use this control to check for elapsed-time/environment drift before attributing candidate gains. Keep the first receipt as the declared primary reference and report the fresh-control comparison explicitly; do not count a changed stock throughput as kernel improvement. The protected E2E budget is five hours, so keep all four launches bounded and reuse the provisioned model/client setup.",
+        "agent_brief": "Use only crsuse2-m2m-025. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Run inside the same pinned serving environment. Use the harness created by baseline and the overlay-ab procedure. Build a reversible overlay from only the cold-reverified winners, prove every replacement loaded in the server, and compare against the local baseline aggregate metric. All three candidate legs need fresh servers, empty compile caches and unique benchmark ids. The existing summarizer supports the nested reference metric path. Report operator and end-to-end results separately. A failed/missing overlay check or unequal metric basis cannot produce an A/B claim. USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget. REFERENCE SCOPE: reference_run is the first actual local stock aggregate (343.62428 tok/s), independently repeated at 344.41922. Compare candidate arms against that local stock reference using identical pinned harness/runtime. Report the unresolved historical-CI difference separately. Do not compare a candidate directly against 353.88446 and call that an optimization gain. The local baseline is adopted through the measured-receipt skill; the original strict CI alignment result remains failed in the qualification archive. FRESH STOCK CONTROL: If there are cold-verified winners, first run one fresh unchanged baseline leg with the existing harness, a unique tag and the same 3600-second metric window. Stop only that leg's owned server afterward. Record its raw receipt and its drift from the primary 343.62428 tok/s reference; the two earlier stock runs agreed within 0.5%. Use this control to check for elapsed-time/environment drift before attributing candidate gains. Keep the first receipt as the declared primary reference and report the fresh-control comparison explicitly; do not count a changed stock throughput as kernel improvement. The protected E2E budget is five hours, so keep all four launches bounded and reuse the provisioned model/client setup.",
         "agent_budget_sec": 28800
       }
     }

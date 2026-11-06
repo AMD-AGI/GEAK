@@ -57,6 +57,6 @@ producer instead of assuming tasks live under profile. An optional roofline stag
 read UT output but must collect missing performance inputs itself. Legacy five-stage
 scenarios keep `profile: kernel-extract` and their previous combined contract.
 
-Run only profiling with `stage.py run profile`, and generate/retry UTs later with
-`stage.py run ut`. Resume revalidates stage input receipts. A UT-only retry uses the
+Run only profiling with `run.py run profile`, and generate/retry UTs later with
+`run.py run ut`. Resume revalidates stage input receipts. A UT-only retry uses the
 same handoff and does not invoke baseline/profile again.

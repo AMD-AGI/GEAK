@@ -1,7 +1,7 @@
 {
   "file_count": 108,
   "files": {
-    "PROVENANCE.json": "33367dd58749224d42ab9b593237e22b343da62f983656c6c6cf9d4d64cf33dd",
+    "PROVENANCE.json": "a701f5091ef0332991735398e4d83aa80e772d46d56bfbecc01db28ff2771c2b",
     "SKILL.md": "fecf7f8a1f8065a13a62c4b251f5d86ef8a40bd87b631d604657e6f079d12485",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -111,9 +111,9 @@
     "ut_contracts/ut_driver.py": "44c0022e8c2a2ab4447521e9afb56d67503eb4b7ac1e19f9095e23d0ca4d1d25"
   },
   "modified_from_origin": true,
-  "note": "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
+  "note": "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge. Integrated the upstream directory/stage reorganization at 480b52b without restoring retired UT paths.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "62d67d12009faf8dc3ac3b1f214ec11d3574cb0c6d9f98f6467c82c816dda4db"
+  "tree_sha256": "5601d697bac7511856aa270df0a92e3a18e9e0c2a1513c44b9c3d13cfd404bcb"
 }

@@ -230,7 +230,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(H.read(task/'run/ut_contract.json')['family'],'gemm')
 
     def test_stage_order_and_task_source_are_configurable(self):
-        scripts=WORKLOAD/'scripts';sys.path.insert(0,str(scripts))
+        sys.path.insert(0,str(WORKLOAD/'core'))
         import stage
         cfg=H.read(WORKLOAD/'config/default.json')
         cfg['order']=['baseline','profile','ut','roofline','optimize','applyback']

@@ -42,11 +42,11 @@ files on disk.
 
 | Step | Artifact | Default skill | Swap it for |
 | --- | --- | --- | --- |
-| `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch), `ci-run-replay` (reproduce a named CI run and prove every pin) |
+| `baseline` | `baseline.json` | `adopt` | `measure` (re-measure from scratch; with `pins`, reproduce a named CI run and prove every one) |
 | `profile` | `tasks/<kernel>/` | `kernel-extract` | any skill that emits `tasks/` + a ranking |
 | `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
-| `optimize` | `optimized.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |
-| `applyback` | `ab.json` | `overlay-e2e-ab` | any skill that applies and re-measures |
+| `optimize` | `optimized.json` | `geak-kernel-workflow` | `native-frozen` (a task's own collective harness), `subagent-raw` (an agent, no GEAK workflow) |
+| `applyback` | `ab.json` | `overlay-ab` | any skill that applies and re-measures |
 
 ## Design
 
@@ -67,9 +67,9 @@ change — no code edit, nothing to register. `runners/stub.sh`, which calls no 
 all, exists as executable proof that the scheduler is genuinely agent-agnostic.
 
 **The slot owns the criterion; the skill owns the work.** How artifacts map to
-`result.json`, and what counts as ranked or passing, live in the slot — in a `finalize.py`
-or a `rank.py` where that is mechanism, and in `stages/<stage>/README.md` where it is
-judgement. Replacing an implementation therefore never rewrites the mapping — which is
+`result.json`, and what counts as ranked or passing, live in the slot — in its
+`finalize.py`, which every slot has and which runs after every stage, and in
+`stages/<stage>/README.md` where that criterion is explained rather than restated. Replacing an implementation therefore never rewrites the mapping — which is
 why the upstream roofline skill is vendored byte-identical, hash-enforced by
 `skill_manifest.py`, and the profile skill — GEAK main's `kernel-extract`, carried here
 with the shared tools it copies into tasks — lists in its `PROVENANCE.json` the origin
@@ -98,7 +98,7 @@ did not demonstrably shadow its targets, or if the two sides used different metr
 "no gain" is otherwise indistinguishable from "the patch never loaded".
 
 **A run must be able to say what it optimizes.** Every scenario config declares a `target`
-block — model, image, component commits — and `scripts/target.py` enforces two things with
+block — model, image, component commits — and `core/target.py` enforces two things with
 it. The config filename and `run_root` must carry a recognisable token of the declared
 model, checked at `plan`/`prepare` time, before a GPU hour is spent; and the declaration is
 cross-checked at every `validate` against the image and commits the stages actually
@@ -120,9 +120,9 @@ copy via `runner_env.env_file`.
 cd <GEAK repo root>
 CFG=workload/config/agentx_glm52.json
 
-python3 workload/scripts/stage.py --config $CFG --dry-run    # resolve everything, run nothing
-python3 workload/scripts/stage.py --config $CFG all          # the whole campaign, unattended
-python3 workload/scripts/stage.py --config $CFG run optimize # or one stage at a time
+python3 workload/run.py --config $CFG --dry-run    # resolve everything, run nothing
+python3 workload/run.py --config $CFG all          # the whole campaign, unattended
+python3 workload/run.py --config $CFG run optimize # or one stage at a time
 ```
 
 `next` reports the stage that is due, `status` shows progress, and an interrupted run
@@ -130,7 +130,7 @@ resumes by re-issuing the same command — `all` skips the stages already record
 While `optimize` runs:
 `scheduler.py status --work-root $RUN_ROOT/optimize/out/work`.
 
-`all` reports as it goes, by default: it starts `scripts/watch.py`, which every 30
+`all` reports as it goes, by default: it starts `core/watch.py`, which every 30
 minutes appends a block to `$RUN_ROOT/PROGRESS.md` (per-stage state, results so far, what
 was written, which GPUs are held), rewrites `progress.json`, and re-renders
 `$RUN_ROOT/REPORT.md` from the stages that have finished — the same renderer the run ends
@@ -156,11 +156,47 @@ To write a new implementation: create `stages/<stage>/<name>/`, add a `SKILL.md`
 `stages/roofline/stub-roofline/` is a minimal worked example.
 
 Self-check, CPU-only — no GPUs, no tokens:
-`python3 workload/scripts/skill_manifest.py verify-all` and
-`python3 workload/scripts/stage.py --config <scenario> --dry-run`.
+`python3 workload/tools/skill_manifest.py verify-all` and
+`python3 workload/run.py --config <scenario> --dry-run`.
 
 `SKILL.md` is the operator's guide and carries the step-by-step procedure.
 
 Thresholds — the keep threshold, the attempt cap, the re-verification repeat count — are
 calibrated against measurement rather than assumed, and every one of them is a knob in
 `config/default.json` with the reasoning recorded next to it.
+
+A knob that is renamed or removed is otherwise silent: the key stays in the scenario
+config, the code that read it is gone, and the run proceeds as though nobody had asked.
+`config/RETIRED.json` is the one place that records them, and `--dry-run` reports every
+match before any GPU time — refusing to start when the lost knob was a *check*, and only
+warning when it is merely inert, so a live campaign config is not blocked over a dead
+word. Add the entry in the same change that removes the knob.
+
+A skill rename is the same kind of silent breakage one level up, and it is the committed
+configs that pay for it: `--dry-run` is what catches it, so every config in `config/` has
+to stay in the sweep. Which means `config/` holds only the scenarios we are prepared to
+keep working — one per target, plus the two smoke configs. The variants a campaign throws
+off while it runs (one per epoch, per resume, per contention experiment) are evidence of
+that campaign, not configuration of this skill; they belong beside it under
+`campaigns/<name>/`, which is gitignored for the same reason `runs/` is.
+
+## Where the code lives
+
+`run.py` is the only entry point. Everything behind it sits in a directory named after
+the question it answers, so that where a file belongs is decided by what it is for and
+not by what was convenient the day it was written.
+
+| | |
+| --- | --- |
+| `run.py` | the entry point; it forwards to `core/stage.py` and does nothing else |
+| `core/` | how one campaign walks from stage to stage — the driver, the agent-mode stage, the target gate, the report renderer |
+| `campaign/` | how eight GPUs are held, isolated and dispatched to |
+| `evidence/` | how measurement evidence is retained, placed and reused |
+| `tools/` | single-purpose utilities: manifest verification, fixture generation |
+| `stages/` | the five slots and their interchangeable skills (`stages/CONTRACT.md`); `stages/_shared/` holds the few helpers several slots need in order to judge |
+| `config/` | one JSON per scenario, layered over `config/default.json` |
+| `runners/` | agent CLI adapters (`runners/CONTRACT.md`) |
+
+The split runs one way only. A slot may reach into `stages/_shared/`, because the
+pipeline implements the stage contract; a slot that reached up into `core/` for a tool
+would tie a replaceable skill to the plumbing it is supposed to be independent of.

@@ -1,0 +1,29 @@
+{
+  "_comment": "Knobs that a config may still carry but that nothing reads any more. A renamed or deleted parameter is silent by construction: the key sits in the JSON, the code that consulted it is gone, and the run proceeds as if the operator had never asked for anything. This file is the one place that says so. `core/stage.py` reads it before any GPU time and prints each match; severity `error` refuses to start, `warn` reports and continues. Use `error` when the lost knob was a check -- a config that asked for a gate and silently got none is worse than one that never asked -- and `warn` when the knob is merely inert, so that a live campaign config is not blocked over a dead word. The key is a dotted path from the merged config root. Add an entry in the same commit that removes the knob; delete the entry once no config carries it.",
+  "retired": [
+    {
+      "key": "stages.baseline.params.max_reference_drift",
+      "severity": "error",
+      "replacement": "max_drift_pct",
+      "note": "renamed, and the units changed: it is now a percentage, not a fraction, so 0.05 became 5.0. Carrying the old name means the drift gate in stages/baseline/finalize.py never runs, and a baseline outside the band is adopted as the denominator of every later A/B."
+    },
+    {
+      "key": "stages.baseline.params.require_valid",
+      "severity": "warn",
+      "replacement": "valid_flags",
+      "note": "the adopt step no longer decides validity. stages/baseline/finalize.py blocks on a false validity flag unconditionally, and which flags the receipt uses is `valid_flags`. Nothing is lost by removing the key."
+    },
+    {
+      "key": "stages.optimize.params.task_gpu_requirements",
+      "severity": "warn",
+      "replacement": "tasks/<name>/meta.json: required_gpus",
+      "note": "the scheduler reads each task's own declared width, so a campaign-level table of widths is no longer consulted. It was the input of a second scheduler that grouped tasks before dispatch; that scheduler is gone."
+    },
+    {
+      "key": "stages.optimize.params.task_gpu_requirements_file",
+      "severity": "warn",
+      "replacement": "tasks/<name>/meta.json: required_gpus",
+      "note": "same as task_gpu_requirements, read from a file instead of inline."
+    }
+  ]
+}

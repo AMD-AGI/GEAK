@@ -63,6 +63,12 @@ retries, and retrying the former ten thousand times produces the same result.
 | `codex.sh` | written to the contract, **not yet validated** (no codex binary in the development container); returns 78 when pieces are missing, as specified |
 | `stub.sh` | calls no agent at all; exists to prove the scheduler is agent-independent |
 
+**Every runner sources `runner_env.env_file` itself**, before its own precondition
+checks, because that file is allowed to supply the binary's path as well as its
+credentials. A variant runner whose only difference is that it sources the env file is a
+missing line in the original, not a second implementation; `codex-oob.sh` was exactly
+that and is gone.
+
 ## Credentials
 
 Credentials never enter the repository. `claude.env.example` is a template: copy it

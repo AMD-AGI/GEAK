@@ -30,7 +30,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)) + "/scripts")
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 sys.path.insert(0, HERE)
 from emit_result import emit, read_json  # noqa: E402
 from select_candidates import selector_args  # noqa: E402
@@ -55,7 +55,7 @@ def worse(a, b):
 def stage_params(out):
     """What was actually asked of this stage.
 
-    `$PARAMS` is the merged parameter file `stage.py prepare` wrote; `$CONFIG` is the
+    `$PARAMS` is the merged parameter file `run.py prepare` wrote; `$CONFIG` is the
     fallback so this script can be run against a finished `$OUT` from anywhere."""
     params = read_json(os.environ.get("PARAMS") or os.path.join(out, "params.json"),
                        default={})
@@ -339,7 +339,7 @@ def reported_coverage(out):
 def main(params_override=None, require_serving_coverage=True):
     out = os.environ.get("OUT")
     if not out:
-        print("OUT is not set; run stage.py prepare profile first", file=sys.stderr)
+        print("OUT is not set; run run.py prepare profile first", file=sys.stderr)
         return 2
 
     params = stage_params(out) if params_override is None else params_override
@@ -396,6 +396,16 @@ def main(params_override=None, require_serving_coverage=True):
     broken = [e for e in evidence if e["lack"]]
     ut_green = [e for e in evidence if not e["lack"] and not e["ut"]]
     gate_green = [e for e in evidence if not e["lack"] and not e["gate"]]
+    qualified = [e for e in evidence if not e["lack"] and not e["ut"] and not e["gate"]]
+    minimum = params.get("minimum_qualified_tasks", 0)
+    if type(minimum) is not int or minimum < 0:
+        return emit(status="fail", artifacts={},
+                    notes="minimum_qualified_tasks must be a nonnegative integer")
+    if len(qualified) < minimum:
+        status = worse(status, "blocked")
+        notes.append("configured minimum_qualified_tasks=%d, observed fully qualified tasks=%d; "
+                     "complete the supported nonoverlapping delivery before optimization"
+                     % (minimum, len(qualified)))
 
     if broken:
         status = worse(status, "blocked")
@@ -506,6 +516,8 @@ def main(params_override=None, require_serving_coverage=True):
         "tasks_capacity_deferred": deferred,
         "tasks_ut_passed_all_gates": len(ut_green),
         "tasks_delivery_gate_passed": len(gate_green),
+        "minimum_qualified_tasks": minimum,
+        "tasks_fully_qualified": len(qualified),
         # SKILL.md §5: four outcomes, reported separately. A subset of passing tasks is
         # not full acceptance, and none of these four may stand in for another.
         "acceptance_inventory_completion": not unaccounted and not lacking,
