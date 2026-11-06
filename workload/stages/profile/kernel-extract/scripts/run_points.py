@@ -127,6 +127,7 @@ def main():
                          "operator aggregation")
     ap.add_argument("--eval-dir", required=True)
     a = ap.parse_args()
+    st = {}
     if a.server_state:
         st = json.load(open(a.server_state))
         a.base_url = a.base_url or st["base_url"]
@@ -134,6 +135,10 @@ def main():
         a.expect_files = a.expect_files or st["expect_files"]
         a.decode_eager = a.decode_eager or bool(st.get("decode_eager"))
         a.vocab_size = a.vocab_size or st.get("vocab_size")
+        if st.get("framework") == "vllm":
+            a.probe_arg += ["--framework", "vllm", "--served-model", st["model"]]
+            if st.get("iteration_log_dir"):
+                a.probe_arg += ["--iteration-log-dir", st["iteration_log_dir"]]
     if not (a.base_url and a.trace_root and a.expect_files):
         ap.error("--base-url, --trace-root and --expect-files (or --server-state) are required")
     if a.vocab_size:

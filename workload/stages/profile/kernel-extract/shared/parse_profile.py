@@ -194,7 +194,11 @@ def _parse_vllm_detailed(name):
         return None
     ctx = _seg(name, "context")
     gen = _seg(name, "generation")
-    return (ctx[1] > 0, ctx[1], gen[0] or gen[1], gen[2])
+    total = re.match(r"execute_(\d+)_", name)
+    # Mixed context/generation steps run one shared M across the model. Own
+    # their device work once, under PREFILL, at total scheduled M.
+    tokens = int(total.group(1)) if total and ctx[1] > 0 else ctx[1]
+    return (ctx[1] > 0, tokens, gen[0] or gen[1], gen[2])
 
 
 STEP_DIALECTS = [
