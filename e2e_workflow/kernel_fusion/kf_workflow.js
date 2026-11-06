@@ -1,13 +1,13 @@
 export const meta = {
   name: 'kernel-fusion',
-  description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), pick the Top-K fusion patterns with a user-supplied analysis prompt, build a region UT and have an agent write each fused kernel against it, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
+  description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), rank the fusion opportunities (Opportunity Analysis) with a user-supplied analysis prompt, build a region UT and have an agent write each fused kernel against it, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
   whenToUse: 'Started by interface/run_e2e.py before the e2e workflow unless switched off (handoff "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput, one fresh server and one timed round, no warmup round (roles/director.md PHASE=setup)' },
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
-    { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
-    { title: 'Author', detail: 'a triage agent picks the Top-K patterns worth authoring (no cap, no gain floor); each: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
-    { title: 'ApplyBack', detail: 'a select agent picks from the UT results which kernels go on; they go in as one combined overlay on one e2e_integrator A/B (gsm8k on the whole stack first); only if the stack fails accuracy is each kernel checked alone and the A/B re-run without the failing ones' },
+    { title: 'OpportunityAnalysis', detail: 'Opportunity Analysis: kf_trace_digest.py + the user prompt -> ranked fusion opportunities (topk.json)' },
+    { title: 'Author', detail: 'the Feasibility Review agent picks the opportunities worth authoring (no cap, no gain floor); each: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
+    { title: 'ApplyBack', detail: 'the Integration Review agent picks from the UT results which kernels go on; they go in as one combined overlay on one e2e_integrator A/B (gsm8k on the whole stack first); only if the stack fails accuracy is each kernel checked alone and the A/B re-run without the failing ones' },
   ],
 };
 
@@ -71,7 +71,7 @@ const PROMPT = String(A.kf_prompt || `${WORKFLOW_DIR}/knowledge/kernel_fusion_sk
 // The fusion levels the author/apply steps implement; the analysis may recommend only these (the skill ranks all).
 const IMPLEMENTABLE_LEVELS = String(A.kf_implementable_levels || 'L1,L2,L3');
 // Patterns inside those levels the author/apply steps do not implement yet; the analysis ranks them but does not
-// recommend them, and the triage does not author them.
+// recommend them, and the Feasibility Review does not author them.
 const UNSUPPORTED_PATTERNS = String(A.kf_unsupported_patterns || 'L3 MegaKernel (one persistent kernel that absorbs a heavy expert/GEMM or attention stage together with its dispatch, combine or communication, e.g. MegaMoE); L4 (whole-layer MonoKernel)');
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
@@ -107,7 +107,7 @@ const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/k
 const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy || 'structure_only');
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${A.capture_byte_budget || '8GiB'} ` +
   `CAPTURE_CASE_BYTE_LIMIT=${A.capture_case_byte_limit || '2GiB'} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
-const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 0, 10);   // 0 = no cap: the triage agent decides
+const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 0, 10);   // 0 = no cap: the Feasibility Review decides
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
 
 // Stop STARTING author/apply work once 85% of the stage budget is gone; in-flight work finishes and the
@@ -277,7 +277,7 @@ const CANDIDATE_SCHEMA = obj({
   fallback: { type: ['string', 'null'] },
   kernels: arrStr, phases: arrStr,
 }, ['id']);
-const TOPK_SCHEMA = obj({
+const OPPORTUNITY_SCHEMA = obj({
   topk_json: { type: 'string' }, report_path: { type: 'string' }, digest_md: { type: 'string' },
   candidates: { type: 'array', items: CANDIDATE_SCHEMA }, recommended: arrStr, notes: { type: 'string' },
   report_md: { type: 'string' }, model_notes_md: { type: 'string' },
@@ -289,7 +289,7 @@ const EXTRACT_SCHEMA = obj({ short_name: { type: 'string' }, editable: { type: '
 const SCREEN_SCHEMA = obj({ members: { type: 'array', items: obj({ short_name: { type: 'string' },
   correctness: { type: 'string' }, engaged: { type: 'boolean' }, reason: { type: 'string' } }, ['short_name', 'correctness']) },
   notes: { type: 'string' } }, ['members']);
-const PICK_SCHEMA = obj({ selected: { type: 'array', items: obj({ id: { type: 'string' }, reason: { type: 'string' } }, ['id']) },
+const REVIEW_SCHEMA = obj({ selected: { type: 'array', items: obj({ id: { type: 'string' }, reason: { type: 'string' } }, ['id']) },
   skipped: { type: 'array', items: obj({ id: { type: 'string' }, reason: { type: 'string' } }, ['id']) },
   notes: { type: 'string' } }, ['selected']);
 const AUTHOR_SCHEMA = obj({ final_patch: { type: 'string' }, work_dir: { type: 'string' },
@@ -420,7 +420,7 @@ if (want('trace') && !TRACE_DIR_IN && IS_AGENTX) {
     }), { phase: 'Trace', label: 'kf:profiler', schema: PROFILE_SCHEMA });
   let got = prof && prof.profile_topN_json && (prof.top_kernels || []).length;
   if (!got) {
-    // A profiler that returned without a trace (killed capture, unfinished wait) must not hand TopK an
+    // A profiler that returned without a trace (killed capture, unfinished wait) must not hand the Opportunity Analysis an
     // empty dir: retry once, then stop the stage -- the e2e workflow still runs on the original stack.
     log('[kf] profiler returned no Top-N; retrying the capture once.');
     prof = await safeAgent(roleAgent('profiler', 'baseline',
@@ -440,11 +440,11 @@ if (want('trace') && !TRACE_DIR_IN && IS_AGENTX) {
 }
 
 // ---------------------------------------------------------------------------
-// TopK: deterministic digest + the user's analysis prompt.
+// Opportunity Analysis: deterministic digest + the user's analysis prompt.
 // ---------------------------------------------------------------------------
 let topk = null;
 if (want('topk')) {
-  phase('TopK');
+  phase('OpportunityAnalysis');
   if (!TRACE_DIR) {
     return { eval_dir: KF_DIR, kf_dir: KF_DIR, status: 'error', reason: 'no trace: pass kf_trace_dir or enable the trace step',
       accepted: [], final_overlay: INIT_OVERLAY };
@@ -514,8 +514,8 @@ ${cfg({ EVAL_DIR, TRACE_DIR, WORKLOAD_SUMMARY: workloadJson || '(none)', PROFILE
 ${KF_TASK ? `## Operator constraints\n${KF_TASK}\n\n` : ''}Return JSON: {"topk_json": "${OUT}/topk.json", "report_path": "${OUT}/REPORT.md", "report_md": "<full report>",
 "model_notes_md": "<model notes>", "digest_md": "${OUT}/digest/digest.md", "candidates": <topk.json candidates>,
 "recommended": <ids>, "notes": "..."}`,
-  { phase: 'TopK', label: 'kf:analyst', schema: TOPK_SCHEMA });
-  log(`[kf] topk: ${topk ? topk.candidates.length : 0} candidates, recommended ${topk ? JSON.stringify(topk.recommended) : '[]'}`);
+  { phase: 'OpportunityAnalysis', label: 'kf:opportunity-analysis', schema: OPPORTUNITY_SCHEMA });
+  log(`[kf] opportunity analysis: ${topk ? topk.candidates.length : 0} candidates, recommended ${topk ? JSON.stringify(topk.recommended) : '[]'}`);
 }
 
 const result = {
@@ -528,22 +528,22 @@ const result = {
   accepted: [], rejected: [], status: 'analysis_only',
 };
 if (!topk || !(want('author') || want('apply'))) {
-  if (!topk && want('topk')) { result.status = 'error'; result.reason = 'analyst returned nothing'; }
+  if (!topk && want('topk')) { result.status = 'error'; result.reason = 'opportunity analysis returned nothing'; }
   return result;
 }
 // ---------------------------------------------------------------------------
-// Author: an agent reads the whole Top-K and decides, by its own judgement, which patterns are worth a
+// Author: the Feasibility Review agent reads the whole opportunity list and decides, by its own judgement, which patterns are worth a
 // fused kernel and a region UT -- no cap on how many, no gain threshold. Each chosen pattern: region
 // unittest (GEAK kernel-extract skill / kernel_extractor) -> fused kernel (one author agent).
 // ---------------------------------------------------------------------------
 phase('Author');
 // The analyst's structured result may give a seam as the bare "pkg.mod:fn" (topk.json on disk keeps the object):
-// normalise it once here, or every pattern the triage picks is dropped for having no seam.
+// normalise it once here, or every pattern the Feasibility Review picks is dropped for having no seam.
 topk.candidates = (topk.candidates || []).map((c) =>
   (c && typeof c.seam === 'string' ? { ...c, seam: { target_callable: c.seam } } : c));
 const byId = new Map(topk.candidates.map((c) => [String(c.id), c]));
 const seamOf = (c) => (c && c.seam && c.seam.target_callable) || '';
-const triage = await safeAgent(`You decide which fusion patterns of a Top-K analysis go on to the next step: writing a
+const feasibility = await safeAgent(`Feasibility Review. You decide which fusion opportunities of the analysis go on to the next step: writing a
 fused kernel and a region unit test for each. Judge each candidate yourself from the analysis (its numbers, the
 report's reasoning, the trace digest, the source) -- there is no limit on how many you pick and no minimum gain;
 pick what you judge worth the effort and say why, and say why for each one you leave out.
@@ -562,19 +562,19 @@ ${JSON.stringify(topk.candidates || [])}
 ${JSON.stringify(topk.recommended || [])}
 ${topk.report_md ? `\n## Report\n${topk.report_md}\n` : ''}
 ${KF_TASK ? `## Operator constraints\n${KF_TASK}\n\n` : ''}Return JSON {"selected": [{"id", "reason"}], "skipped": [{"id", "reason"}]}.`,
-  { phase: 'Author', label: 'kf:triage', schema: PICK_SCHEMA });
-let jobs = ((triage && triage.selected) ? triage.selected.map((x) => x && x.id) : (topk.recommended || []))
+  { phase: 'Author', label: 'kf:feasibility-review', schema: REVIEW_SCHEMA });
+let jobs = ((feasibility && feasibility.selected) ? feasibility.selected.map((x) => x && x.id) : (topk.recommended || []))
   .map((id) => byId.get(String(id))).filter((c, i, a) => c && seamOf(c) && a.indexOf(c) === i);
 if (AUTHOR_K > 0) jobs = jobs.slice(0, AUTHOR_K);
-for (const x of (triage && triage.skipped) || []) {
-  if (x && byId.has(String(x.id))) result.rejected.push({ id: String(x.id), stage: 'triage', reason: String(x.reason || '').slice(0, 600) });
+for (const x of (feasibility && feasibility.skipped) || []) {
+  if (x && byId.has(String(x.id))) result.rejected.push({ id: String(x.id), stage: 'feasibility_review', reason: String(x.reason || '').slice(0, 600) });
 }
-log(`[kf] triage: authoring ${jobs.length} pattern(s): ${jobs.map((c) => c.id).join(', ')}`);
+log(`[kf] feasibility review: authoring ${jobs.length} pattern(s): ${jobs.map((c) => c.id).join(', ')}`);
 // Picks that all vanish here are a broken hand-off, not a measured "no gain": say so.
-const picked = ((triage && triage.selected) || []).length;
+const picked = ((feasibility && feasibility.selected) || []).length;
 if (picked && !jobs.length) {
   result.status = 'error';
-  result.reason = `triage selected ${picked} pattern(s) but none has a usable seam.target_callable`;
+  result.reason = `feasibility review selected ${picked} pattern(s) but none has a usable seam.target_callable`;
   return result;
 }
 
@@ -746,7 +746,7 @@ whether or not it beats stock -- the next step judges it) or "" if you have no c
 }
 const authored = await parallel(jobs.map((c, i) => () => authorOne(c, i)));
 const authoredById = new Map(authored.filter(Boolean).map((r) => [String(r.c.id), r]));
-// A kernel can go on only if it exists, passed its UT and has an overlay: everything else is the selector's call.
+// A kernel can go on only if it exists, passed its UT and has an overlay: everything else is the Integration Review's call.
 const usable = (r) => r && !r.skip && r.kl && r.kl.authored !== false && r.kl.final_patch && r.kl.overlay_dir;
 for (const r of authored) {
   if (r && !usable(r)) {
@@ -772,7 +772,7 @@ const utView = (r) => ({ id: r.c.id, level: r.c.level, region: r.c.region, phase
   final_patch: r.kl.final_patch, author_notes: String(r.kl.reason || '').slice(0, 3000) });
 let winners = [];
 if (ready.length && want('apply') && !DEADLINE_HIT) {
-  const sel = await safeAgent(`You decide which fused kernels go on to the e2e accuracy check and the e2e A/B of a
+  const sel = await safeAgent(`Integration Review. You decide which fused kernels go on to the e2e accuracy check and the e2e A/B of a
 live LLM serving stack. Each one below passed its region unit test; the A/B puts all you pick into the server
 together. Judge from the UT results (speedup on the served shapes, per-shape notes, how much of the step the region
 is, which phases it runs in) and anything else you want to read -- no minimum speedup, no limit on how many; say
@@ -784,7 +784,7 @@ together -- pick at most one of them.
 ${JSON.stringify(ready.map(utView))}
 ${KF_TASK ? `\n## Operator constraints\n${KF_TASK}\n` : ''}
 Return JSON {"selected": [{"id", "reason"}], "skipped": [{"id", "reason"}]}.`,
-    { phase: 'ApplyBack', label: 'kf:select', schema: PICK_SCHEMA });
+    { phase: 'ApplyBack', label: 'kf:integration-review', schema: REVIEW_SCHEMA });
   const readyById = new Map(ready.map((r) => [String(r.c.id), r]));
   if (sel && sel.selected) {
     winners = sel.selected.map((x) => x && readyById.get(String(x.id))).filter((r, i, a) => r && a.indexOf(r) === i);
@@ -796,10 +796,10 @@ Return JSON {"selected": [{"id", "reason"}], "skipped": [{"id", "reason"}]}.`,
     (q.c.exclusive_with || []).map(String).includes(String(r.c.id)) || (r.c.exclusive_with || []).map(String).includes(String(q.c.id))));
   const why = new Map(((sel && sel.skipped) || []).map((x) => [String(x && x.id), String((x && x.reason) || '')]));
   for (const r of ready) {
-    if (!winners.includes(r)) result.rejected.push({ id: r.c.id, stage: 'select', isolated_speedup: r.iso,
+    if (!winners.includes(r)) result.rejected.push({ id: r.c.id, stage: 'integration_review', isolated_speedup: r.iso,
       reason: (why.get(String(r.c.id)) || 'not selected').slice(0, 600) });
   }
-  log(`[kf] select: ${winners.map((r) => `${r.c.id} (${r.iso}x)`).join(', ') || 'none'}`);
+  log(`[kf] integration review: ${winners.map((r) => `${r.c.id} (${r.iso}x)`).join(', ') || 'none'}`);
 }
 const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
   winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang, authored_kernel_eval_dir: r.kl.eval_dir || '',

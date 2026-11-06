@@ -56,15 +56,15 @@ const answers = {
   'kf:profiler (retry)': () => (scenario === 'no_trace' ? null
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   // string_seam: the analyst's structured result gives seam as the bare "pkg.mod:fn" (topk.json on disk keeps the dict)
-  'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
+  'kf:opportunity-analysis': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: scenario.includes('string_seam')
       ? CANDS.map((c) => (c.seam && c.seam.target_callable ? { ...c, seam: c.seam.target_callable } : c)) : CANDS,
     recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
   // which patterns get a kernel + UT: the agent's call (c3 has no seam, the script drops it)
-  'kf:triage': () => (scenario === 'triage_none' ? null
+  'kf:feasibility-review': () => (scenario === 'triage_none' ? null
     : scenario === 'no_seam' ? { selected: [{ id: 'c3' }], skipped: [] }
     : { selected: [{ id: 'c1' }, { id: 'c1s' }, { id: 'c2' }, { id: 'c3' }], skipped: [] }),
-  'kf:select': (prompt) => {
+  'kf:integration-review': (prompt) => {
     const ut = JSON.parse(prompt.split('## UT results\n')[1].split('\n')[0]);
     const ids = SELECT || ut.filter((u) => u.isolated_speedup > 1).map((u) => u.id);
     return { selected: ids.map((id) => ({ id, reason: 'mock' })), skipped: [{ id: 'c1s', reason: 'overlaps c1' }] };
@@ -92,7 +92,7 @@ for (const id of Object.keys(ISO)) {
 
 async function agent(prompt, opts) {
   if ('timeoutMs' in opts) throw new Error('timeoutMs must not reach the agent() call');
-  calls.push({ label: opts.label, phase: opts.phase, prompt, ...(opts.label === 'kf:analyst' ? { schema: opts.schema } : {}) });
+  calls.push({ label: opts.label, phase: opts.phase, prompt, ...(opts.label === 'kf:opportunity-analysis' ? { schema: opts.schema } : {}) });
   if (opts.label.startsWith('kf:author ')) {
     // the fused kernel is written by one author agent against the region UT
     const kernel_path = prompt.match(/TASK_DIR=(\S+)/)[1];
