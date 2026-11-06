@@ -176,6 +176,7 @@ def test_check_term_index_resolves_pack():
 
 
 def test_ab_bench_times_through_harness_lib():
+    import importlib.util
     spec = importlib.util.spec_from_file_location("ab_bench_t", PACK_SCRIPTS / "ab_bench.py")
     ab = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ab)
