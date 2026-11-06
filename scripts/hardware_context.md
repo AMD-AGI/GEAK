@@ -31,7 +31,9 @@ free memory. GPU UUID/BDF/chip/node observations are retained in `observed.agent
 they are not guessed PCI-to-product mappings. Grid/split-K planning uses visible
 CUs. Serving must still query free memory before selecting batch/KV allocation.
 Unknown memory, partition, cache or clock facts must not be filled from another
-SKU. A smaller CU count alone does not identify MI308X. Mixed visible identities
+SKU. The existing Gluon container entry forwards `GEAK_HARDWARE_CONTEXT`, mapping it
+from `TILE_KERNEL_HOST_WORKDIR` to `TILE_KERNEL_CONTAINER_WORKDIR` when configured.
+A smaller CU count alone does not identify MI308X. Mixed visible identities
 are refused; use an appropriately isolated workload environment.
 The probe reflects rocminfo/ROCR visibility; a HIP-only device mask does not
 necessarily filter rocminfo. Partition mode is retained when explicitly supplied

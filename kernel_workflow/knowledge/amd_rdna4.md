@@ -67,7 +67,7 @@ products remain `unknown-device-not-r9700`.
 
 Regenerated on 2026-09-21 with AMD clang 23.0.0git from the pinned ROCm 10
 R9700 image using
-`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
+`python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`. The breakpoints matched the prior LLVM 22
 sweep.
 
@@ -85,7 +85,7 @@ sweep.
 | 256        | 5              |
 
 Re-derive on a new ROCm with
-`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
+`python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`.
 Dividing 256 by a kernel's VGPR count (the old CDNA-style file budget) **under-reports** RDNA
 occupancy 2–3×.

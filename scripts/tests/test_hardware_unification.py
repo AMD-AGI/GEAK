@@ -95,3 +95,16 @@ def test_combined_check_rejects_stale_generated_docs(tmp_path):
                  f"e.doc_files=lambda: iter([{str(page)!r}]); "
                  "sys.argv=['extract_sku.py','--check','--check-docs']; e.main()")
     assert result.returncode == 1 and 'stale' in result.stdout
+
+
+def test_legacy_container_entry_maps_hardware_context(tmp_path):
+    host = tmp_path / 'host root'
+    host.mkdir()
+    env = {**os.environ, 'TILE_KERNEL_HOST_WORKDIR': str(host),
+           'TILE_KERNEL_CONTAINER_WORKDIR': '/work/run',
+           'GEAK_HARDWARE_CONTEXT': str(host / 'hardware context.json'),
+           'LOCUS_ENV': 'GEAK_HARDWARE_CONTEXT'}
+    result = subprocess.run(['bash', '-c', 'source "$1"; _locus_env_args', 'bash',
+                             str(PACK / 'scripts/locus.sh')], env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split(b'\0') == [b'-e', b'GEAK_HARDWARE_CONTEXT=/work/run/hardware context.json', b'']
