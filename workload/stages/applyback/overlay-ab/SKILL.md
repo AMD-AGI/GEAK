@@ -179,14 +179,21 @@ image optimize built and cold-verified the kernels in -- never on the host's Pyt
    (`../ci_config.py align`) and stops unless it is ALIGNED, checks a correctness probe, runs the
    CI's `aiperf profile` argv through the AgentX harness, and turns the export into the CI row
    with InferenceX's own `process_agentic_result` (`../ci_result.py`) -> `e2e/bench_summary.json`.
+   The CI run's pins come from its own records through `../../_shared/ci_pins.py` -- the same
+   rule `baseline/measure` states: the leg refuses before GPU time unless the hub's `refs/main`
+   of every repo the CI loaded is the commit the CI loaded (the server is offline; `main` moves
+   upstream), gives the client a private hub and `--tokenizer-revision <that commit>`, and after
+   the run proves from its own logs that the server loaded those commits and the client ran the
+   CI's recorded argv -> `pins.json`. Never point a networked client at a shared hub: resolving
+   `main` online rewrote another user's `refs/main` to a newer, partial snapshot (2026-11-06).
    Its inputs are `params.ci` (`hf_hub`, `model_mounts`, `agentx_bin`, `inferencex_path`),
    exported as `CI_HF_HUB`, `CI_MODEL_MOUNTS`, `AGENTX_BIN`, `INFERENCEX_PATH`.
 3. Copy `applied.json` and `shadow_check.json` into each `$OUT/points/<pid>/`. Points measured
    by an earlier session (`result.json` `ok`) are kept, not re-measured.
 
 The finalizer judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
-row's own metric key, refuses a point without an ALIGNED `alignment.json` or with a shortened
-duration, and folds them (`../aggregate_points.py`): any regression makes the verdict
+row's own metric key, refuses a point without an ALIGNED `alignment.json`, a PROVEN `pins.json` or with a
+shortened duration, and folds them (`../aggregate_points.py`): any regression makes the verdict
 `regression`, a gain needs a gain somewhere and no regression, a point without an A/B makes it
 `incomplete`. Each point's `ab.json` also carries p90 interactivity and per-GPU total throughput
 from the same row. What remains different from the CI is the node itself (CPU count and host

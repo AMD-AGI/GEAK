@@ -220,6 +220,12 @@ def main():
             return fail("reference=ci needs alignment.json with aligned=true: the leg must "
                         "launch the CI config exactly (image, args, env), or the delta "
                         "measures the configuration difference", status="blocked")
+        pinned = read_json(os.path.join(out, "pins.json"))
+        if pinned.get("proven") is not True:
+            return fail("reference=ci needs pins.json with proven=true (stages/_shared/"
+                        "ci_pins.py): the leg's own records must show the CI's model and "
+                        "draft commits and the CI's client argv; `main` moves upstream",
+                        status="blocked")
         if summary.get("duration_s") and summary.get("ci_duration_s") \
                 and summary["duration_s"] != summary["ci_duration_s"]:
             return fail("the leg ran %ss against the CI's %ss; a shortened leg is a smoke, "
@@ -309,7 +315,7 @@ def main():
             "native_p90_interactivity_delta_pct": native_p90["delta_pct"]})
     artifacts = {"ab": "ab.json", "applied": "applied.json"}
     # a per-point leg of a multi-config A/B shares the stage's one overlay
-    for name in ("overlay", "shadow_check.json", "alignment.json", "REPORT.md"):
+    for name in ("overlay", "shadow_check.json", "alignment.json", "pins.json", "REPORT.md"):
         if os.path.exists(os.path.join(out, name)):
             artifacts[name.split(".")[0].lower()] = name
     return emit("ok", artifacts=artifacts, metrics=metrics, notes=" ".join(notes))

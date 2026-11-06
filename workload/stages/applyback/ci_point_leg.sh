@@ -29,6 +29,7 @@
 set -uo pipefail
 PD=${1:?point dir}; OUT=${2:?out dir}; OV=${3:-}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PINS="$HERE/../_shared/ci_pins.py"
 : "${CI_HF_HUB:?CI_HF_HUB}"; : "${AGENTX_BIN:?AGENTX_BIN}"; : "${INFERENCEX_PATH:?INFERENCEX_PATH}"
 PORT=${PORT:-8000}
 mkdir -p "$OUT/e2e"
@@ -37,6 +38,13 @@ NAME="ci_point_${PID}_$$"
 st() { printf '{"point":"%s","phase":"%s","time":"%s"%s}\n' "$PID" "$1" "$(date -u +%FT%TZ)" "${2:+,$2}" | tee "$OUT/status.json"; }
 
 python3 "$HERE/ci_config.py" launch "$PD" > "$OUT/launch.json" || { st failed '"error":"no CI config for this point"'; exit 1; }
+# The CI run's pins, from its own records (baseline/measure's rule, stages/_shared/ci_pins.py).
+# Refuse before any GPU time: the server is offline, so the hub's refs/main of every repo the CI
+# loaded must be the commit the CI loaded -- `main` moves upstream, a commit does not.
+python3 "$PINS" pins "$PD" > "$OUT/ci_pins.json"
+python3 "$PINS" hub "$PD" "$CI_HF_HUB" 2> "$OUT/pin_check.log" \
+  || { st failed '"error":"the hub does not hold the CI revisions (pin_check.log)"'; exit 1; }
+MODEL_REV=$(python3 -c "import json; d=json.load(open('$OUT/ci_pins.json')); print(d['revisions'][d['model']])")
 J() { python3 -c "import json,sys; v=json.load(open('$OUT/launch.json'))$1; print(v if isinstance(v,(str,int)) else json.dumps(v))"; }
 IMAGE=$(J "['image']"); MODEL=$(J "['model']"); CONC=$(J "['conc']")
 DUR=$(J "['duration']"); [ -n "${DURATION:-}" ] && DUR=$DURATION
@@ -89,7 +97,7 @@ TMP=$(mktemp -d "/tmp/ci_point_${PID}.XXXX")
 CHUB=${CI_CLIENT_HF_HUB:-}
 if [ -z "$CHUB" ]; then
   CHUB="$OUT/client_hub"; MDIR="models--${MODEL//\//--}"
-  SNAP=$(cat "$CI_HF_HUB/$MDIR/refs/main" 2>/dev/null || ls "$CI_HF_HUB/$MDIR/snapshots" | head -1)
+  SNAP=$MODEL_REV
   mkdir -p "$CHUB/$MDIR/snapshots" "$CHUB/$MDIR/refs"
   ln -sfn "$CI_HF_HUB/$MDIR/snapshots/$SNAP" "$CHUB/$MDIR/snapshots/$SNAP"
   printf %s "$SNAP" > "$CHUB/$MDIR/refs/main"
@@ -102,11 +110,18 @@ print('\n'.join('export %s=%s' % (k, shlex.quote(v)) for k, v in d['client_env']
   cd "$TMP"
   "$AGENTX_BIN" profile --url "http://127.0.0.1:$PORT" --model "$MODEL" --tokenizer "$MODEL" \
     --concurrency "$CONC" --benchmark-duration "$DUR" --tokenizer-trust-remote-code \
+    --tokenizer-revision "$MODEL_REV" \
     --server-metrics "http://127.0.0.1:$PORT/metrics" --output-artifact-dir "$OUT/aiperf_artifacts" \
     --public-dataset semianalysis_cc_traces_weka_062126
   echo "client_exit=$?"
 ) > "$OUT/benchmark.log" 2>&1
 CE=$(grep -o 'client_exit=[0-9]*' "$OUT/benchmark.log" | tail -1)
+docker logs "$NAME" > "$OUT/server.log" 2>&1
+# Prove the pins from this leg's own records: the server loaded the CI's commit of every repo,
+# and the client ran the CI's recorded argv (plus --tokenizer-revision, which states the commit
+# the CI's `main` resolved to then).
+python3 "$PINS" prove "$PD" "$OUT/server.log" "$OUT/benchmark.log" "$OUT/pins.json" \
+  || { st failed '"error":"the leg did not hold the CI pins (pins.json)"'; exit 1; }
 [ "$CE" = client_exit=0 ] && [ -f "$OUT/aiperf_artifacts/profile_export_aiperf.json" ] \
   || { st failed "\"error\":\"benchmark client failed ($CE)\""; exit 1; }
 rm -f "$OUT/aiperf_artifacts/server_metrics_export.json"
