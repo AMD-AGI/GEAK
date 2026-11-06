@@ -19,7 +19,7 @@ the profile's frozen selection policy. Exact whole-serving coverage is reported
 separately and may remain unknown; missing task gates or source-delivery receipts
 still block UT completion. Do not turn a quick or CPU-only test into full qualification.
 
-The default wave uses `--timing none`; tasks finish with
+The UT wave performs correctness qualification; tasks finish with
 `unittest.py --validation-mode correctness --reuse`. This is a complete correctness
 qualification, not a partial performance run. Receipts carry the explicit
 `kernel_ut_validation/v1` contract and `performance_measured: false`. Keep all weighted
@@ -28,13 +28,12 @@ shapes and the timing implementation for optimization, which runs
 The unqualified `unittest.py` command retains performance mode for existing optimizer
 callers. Plain `--skip timing` in performance mode remains a partial result.
 
-GPU scheduling defaults to `--gpu-mode on-demand`: up to `--author-workers` CPU-only
-authors (default 8), one writer per task, submit `ut_wave.py gpu -- <command>` when
-validation needs a device. The host broker leases the required cards together, runs a
-short-lived GPU worker in the pinned image, drains workers and returns the cards.
-There is no GPU reservation during authoring/lint and no outer full-wave pool lock.
-See [setup](kernel-ut/references/setup.md) for host locks, mounts and command environment.
-`--gpu-mode lane` retains the previous fixed allocation for compatible older runners.
+GPU scheduling uses command-scoped leases: up to `--author-workers` CPU-only authors
+(default 8), one writer per task, submit `ut_wave.py gpu -- <command>` for validation.
+The host broker leases all required cards together and drains workers before returning
+them. See [setup](kernel-ut/references/setup.md) for locks, mounts and environment.
+Existing frozen tasks keep their own helpers; new tasks use the fixed contract driver.
+The retired fixed-lane and timing-tail wave modes are no longer accepted.
 
 For split scenarios:
 

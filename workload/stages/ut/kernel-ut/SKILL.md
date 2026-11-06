@@ -74,8 +74,8 @@ one oversized case and inline recorded tensors can still be large.
 
 ## Parallel authoring and validation
 
-Use one CPU author lane per task, with one writer per task directory. The default
-`--gpu-mode on-demand` borrows GPUs only for validation commands. Start the wave on
+Use one CPU author lane per task, with one writer per task directory. The wave borrows
+GPUs only for validation commands. Start the wave on
 the allocated host without holding an outer `gpu_lock_set.py`/campaign pool lock:
 the host broker uses those same lock files for each command.
 The GPU pool inherits the workload's `serving.json:gpus`. `--gpus` may narrow this
@@ -86,7 +86,7 @@ not available to UT agents; `gpu --count N` only requests devices from this pool
 python3 "$SKILL_ROOT/scripts/ut_wave.py" plan --eval-dir "$OUT" --gpus <allocated-ids>
 python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$OUT" --runner "$RUNNER" \
   --backend docker --image <pinned-image> --gpus <allocated-ids> \
-  --gpu-mode on-demand --author-workers 8 --timing none
+  --author-workers 8
 ```
 
 Lanes follow [the UT lane procedure](references/ut-lane.md), author and fix in parallel,

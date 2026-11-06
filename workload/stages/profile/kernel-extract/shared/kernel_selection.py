@@ -2,7 +2,7 @@
 """Verify that an extracted callable is the live seam for a profiled GPU kernel.
 
 The extractor marks every structured candidate with ``seam_trace`` and captures
-the selected callable with ``capture_shapes``. ``seam_trace`` profiles a bounded
+the selected callable with ``seam_trace``. ``seam_trace`` profiles a bounded
 warmup/call window and emits install proof plus nested live-call markers. This tool
 verifies, from machine evidence, that:
 
@@ -219,7 +219,7 @@ def _complete_spans(events, name):
 def _outermost_spans(spans):
     """Return one logical call for same-thread spans nested inside an identical marker.
 
-    ``capture_shapes`` and ``seam_trace`` can both wrap the selected callable with
+    Nested ``seam_trace`` hooks can wrap the selected callable with
     ``GEAK_TARGET::<target>``. One real invocation then produces the same marker nested inside itself.
     Keep every raw span for launch-causality analysis, but count only the outermost copy when reporting
     calls. Different threads and non-nested calls remain distinct.
@@ -477,18 +477,6 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
     return result
 
 
-def infer_task_dir(meta_paths):
-    """If all metas live in capture.pid-* dirs under one parent, that parent is the task dir."""
-    parents = []
-    for path in meta_paths:
-        capture_dir = os.path.dirname(os.path.abspath(path))
-        if not os.path.basename(capture_dir).startswith("capture.pid-"):
-            return ""
-        parents.append(os.path.dirname(capture_dir))
-    uniq = sorted(set(parents))
-    return uniq[0] if len(uniq) == 1 else ""
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="exact module:attr selected seam")
@@ -498,16 +486,12 @@ def main(argv=None):
     parser.add_argument("--required-device-kernel", action="append", default=[],
                         help="additional mandatory joint-chain member; repeat for this phase")
     parser.add_argument("--capture-meta", required=True, nargs="+",
-                        help="one or more process-local capture_shapes meta.json files")
+                        help="one or more process-local selection metadata JSON files")
     parser.add_argument("--torch-trace", required=True, nargs="+",
                         help="one or more process-local capture traces (.json or .json.gz)")
     parser.add_argument("--candidate-target", action="append", default=[],
                         help="exact module:attr candidate marked in the same trace; repeat for all candidates")
     parser.add_argument("--out", default="", help="optional verdict JSON path")
-    parser.add_argument("--task-dir", default="",
-                        help="task root for oracle promote + capture.pid-* reclaim (issue #429)")
-    parser.add_argument("--no-reclaim-captures", action="store_true",
-                        help="skip promote/reclaim of process-local capture artifacts")
     args = parser.parse_args(argv)
 
     trace_paths = list(args.torch_trace)
@@ -623,29 +607,6 @@ def main(argv=None):
     verdict["trace_file"] = all_paths[0] if len(all_paths) == 1 else ""
     verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths
-
-    # Issue #429: after selection, keep one authoritative oracle and reclaim process-local giants.
-    task_dir = args.task_dir or infer_task_dir(args.capture_meta)
-    if task_dir and not args.no_reclaim_captures:
-        try:
-            try:
-                import capture_shapes as _cs
-            except ImportError:
-                scripts_dir = os.path.dirname(os.path.abspath(__file__))
-                if scripts_dir not in sys.path:
-                    sys.path.insert(0, scripts_dir)
-                import capture_shapes as _cs
-            telemetry = _cs.promote_and_reclaim(
-                task_dir,
-                keep_meta_path=best_process_meta_file if verdict["ok"] else None,
-                promote=bool(verdict["ok"]),
-            )
-            verdict["capture_storage"] = telemetry
-        except Exception as exc:
-            verdict["capture_storage"] = {
-                "task_dir": task_dir,
-                "errors": [str(exc)],
-            }
 
     payload = json.dumps(verdict, indent=2)
     if args.out:

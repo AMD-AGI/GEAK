@@ -18,8 +18,7 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
   includes imports/compilation that need GPU access. The host broker leases the task's
   `required_gpu_count` devices (default 1); use `gpu --count N -- ...` to request more
   for sharding. Inside that command, `GPU_IDS` is logical 0..k-1. Never nest `gpu_lock`
-  or override device masks. Legacy `--gpu-mode lane` alone runs commands directly on
-  its fixed lane devices, with the caller holding the outer campaign lease.
+  or override device masks.
 - **Keep validation files in the task.** GPU commands start in `TASK_DIR` in a new
   container with the pinned image. Author-container `/tmp`, pip installs and shell
   exports do not carry over. Use `gpu --env K=V -- ...` for explicit command environment,
@@ -59,10 +58,9 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
 6. **Qualify the UT:** by default run `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse`.
    Every non-timing gate must pass. Preserve weighted shapes and the timing API, but
    perform no timing measurements and report `performance_measured: false`.
-   If the wave explicitly requests a performance tail, use the same wrapper with `python3 unittest.py --skip timing`
-   and let the tail finish it; an explicit in-lane performance request uses
-   `python3 unittest.py --validation-mode performance`. Fix failures and reuse unchanged
-   passing gates. A quick run never substitutes for qualification.
+   Fix failures and reuse unchanged passing gates. A quick run never substitutes for
+   qualification. Performance measurements belong to the optimizer.
+
 
 The lane ends by itself once the receipt (`run/ut_result.json`, written by the UT, newer
 than every file it reads) shows every required gate passing. Do not write the receipt, do

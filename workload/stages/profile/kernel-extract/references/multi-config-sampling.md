@@ -45,7 +45,7 @@ The pipeline scenario can specify:
 ```
 
 The profile stage is agent-shaped: pass the numeric `sampling` fields to the command
-below. UT generation uses `ut_wave.py start --timing none`; performance measurements
+below. UT generation uses `ut_wave.py start`; performance measurements
 belong to optimization. `num_points` is
 one global initial budget, **not** points per config and not a fixed skill constant;
 24 above is an example. Choose it from the number of distinct deployment/phase domains
@@ -133,19 +133,14 @@ loosening compatibility to manufacture a saving.
 
 ## UT parallelism
 
-UT authors run in CPU-only task lanes (`--author-workers`, default 8). Default
-`--gpu-mode on-demand` routes each GPU command through `ut_wave.py gpu -- ...`, leasing
-only its required device count from the campaign pool and releasing it after workers
-drain. Multi-GPU requests wait without holding partial sets. Do not hold an outer pool
-lease around this wave; its host broker shares the existing GPU lock files. The default
-`ut_wave.py start --timing none` finishes with `unittest.py --validation-mode correctness
---reuse`; it runs no timing tail. Preserve all weighted shapes for optimization and
-report `performance_measured: false`.
+UT authors run in CPU-only task lanes (`--author-workers`, default 8). Each GPU
+command uses `ut_wave.py gpu -- ...`, leasing the required device count and returning
+it after workers drain. Multi-GPU requests wait without holding partial sets. Do not
+hold an outer pool lease around the wave; its broker shares the existing GPU lock files.
 
-For an explicitly requested performance wave, `--timing tail --timing-workers N`
-times tasks on disjoint GPU sets after authoring drains. Each B/C pair stays on one
-device, multi-rank tasks retain an exclusive tail, and measurements retain their cache
-and noise policy. This optional mode does not change the extraction default.
+The wave qualifies tasks with `unittest.py --validation-mode correctness --reuse`.
+Preserve all weighted shapes and report `performance_measured:false`. The optimizer
+later performs weighted baseline/candidate timing through the same frozen task driver.
 
 Keep numerical gates and draws unchanged. Use `--quick` for debugging, then correctness
 qualification; reuse compatible passing gates. Large inline tensor bundles and full-suite

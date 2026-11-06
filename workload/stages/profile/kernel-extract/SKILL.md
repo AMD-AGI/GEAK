@@ -165,15 +165,13 @@ python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 
 
 One CPU agent lane per task writes and fixes its own task directory
 ([UT lane](references/ut-lane.md)); `--author-workers` controls author concurrency.
-Default `--gpu-mode on-demand` leases GPUs only for each `ut_wave.py gpu -- <command>`.
+The wave leases GPUs only for each `ut_wave.py gpu -- <command>`.
 The pool is the deployment's physical GPUs (`serving.json` `gpus`); release the probe
 server and any outer campaign GPU lock first. Each command leases `required_gpu_count`
 cards together (normally 1), drains its workers, then returns them to the pool. CPU
-writing/lint holds no GPU. The default `--timing none` qualifies all non-timing
+writing/lint holds no GPU. The wave qualifies all non-timing
 gates with `unittest.py --validation-mode correctness --reuse`; no timing tail runs.
-Preserve weighted shapes and timing support for the optimizer. An explicitly requested
-performance wave can use `--timing tail --timing-workers N` on disjoint GPU sets after
-authoring drains; multi-rank tasks retain an exclusive tail.
+Preserve weighted shapes and timing support for the optimizer.
 `wait` returns 0 when every task is `passed`, `blocked` or `failed`; read `ut_wave/summary.json`
 and the lane logs it names, fix nothing in a task yourself, and carry blocked and failed
 tasks into the report with their reasons. `start` again resumes an interrupted wave.
@@ -186,8 +184,7 @@ at shapes/dtypes/layouts established from existing workload evidence. Run one su
 baseline case per phase, then expand cases and editable leaves. The UT reads its
 frozen case manifest; it never launches serving, profiles, or captures shapes.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
-`unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
-optional; preserve minimal structural fixtures only where needed.
+`unittest.py`, baseline manifest/overlay and `run/` evidence. Preserve minimal structural fixtures only where needed.
 Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
 
 Build each task from its UT contract family: read [UT contracts](ut_contracts/README.md),
@@ -244,17 +241,15 @@ Before reporting a verdict, verify deterministic input construction, baseline
 self-noise and that numerical bad-source controls actually fail. For generated
 cases, obtain reference outputs from the frozen baseline in a separate process
 using the same seeds; never use the candidate to generate its own expected output.
-Do not create a serving capture merely to obtain a golden file. With persisted
-capture oracles, also run `oracle_power.py`; regenerate `structure_only` placeholders
-before checking them. See [task authoring](references/task-authoring.md).
+Use the fixed driver's bounded temporary output batches. See
+[task authoring](references/task-authoring.md).
 
 Randomize ordinary numerical payloads, not the workload definition. Keep observed
 shape/layout/quantization, phase and call weights. Routing, indices, page tables and
 sequence metadata must retain valid semantics and the observed work/access pattern:
 reuse or reconstruct them from existing metadata where reliable; capture only the
 missing structural state. Synthetic structural cases may extend correctness coverage,
-but do not claim they reproduce serving performance without evidence. Any necessary
-capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
+but do not claim they reproduce serving performance without evidence. Missing structural evidence goes back to the profile stage.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness (the driver's timing gate does). Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and

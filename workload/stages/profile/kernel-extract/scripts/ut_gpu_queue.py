@@ -89,7 +89,7 @@ def submit(a):
         raise SystemExit('ut_wave gpu must run inside an on-demand wave lane')
     cfg = load(os.path.join(wave, 'wave.json'))
     row = next(r for r in cfg['rows'] if r['label'] == os.environ['UT_WAVE_TASK'])
-    count = a.count if a.count is not None else int(os.environ.get('UT_WAVE_GPU_COUNT', row['need']))
+    count = a.count if a.count is not None else row['need']
     if count < row['need'] or count > len(cfg['gpus']):
         raise SystemExit('GPU count must cover required_gpu_count and fit the allocated pool')
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
@@ -206,10 +206,10 @@ def broker(wave, controller_pid):
                 try:
                     backend.stop(job['name'])
                     break
-                except Exception as error:
+                except Exception as exc:
                     # Losing contact with Docker is not proof the GPU is free.
                     # Retain leases and retry, so no writer/new GPU job overlaps it.
-                    log(wave, 'GPU drain pending; retaining locks: %s' % error)
+                    log(wave, 'GPU drain pending; retaining locks: %s' % exc)
                     time.sleep(2)
             release(job['fds'])
             active.pop(path, None)
@@ -275,7 +275,6 @@ def broker(wave, controller_pid):
         if identity(controller_pid) != parent_id:
             for row in cfg['rows']:
                 backend.stop(row['label'])
-                backend.stop('timing_' + row['label'])
 
 
 def descendants():

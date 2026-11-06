@@ -6,7 +6,7 @@
     ut_wave.py status/wait/stop --eval-dir DIR
     ut_wave.py gpu [--count N] [--timeout SEC] [--env K=V] -- <foreground-command>
 
-Default --gpu-mode on-demand starts up to --author-workers CPU-only lanes, one
+The wave starts up to --author-workers CPU-only lanes, one
 writer per task. Every GPU operation goes through `gpu`: a host broker acquires
 required_gpu_count devices together from the allowed pool, launches a short-lived
 validation container/process, drains its workers and returns the devices. CPU
@@ -15,11 +15,8 @@ do not hold an outer pool lease around this wave. Queue metadata and logs live i
 <eval-dir>/ut_wave/gpu_queue; input tensors are created by the UT, never transported
 through the queue. Host/container task and skill paths must match.
 
-Default --timing none qualifies every non-timing gate via
-unittest.py --validation-mode correctness --reuse. An explicit --timing tail
-waits for all authors to drain and leases disjoint sets for --timing-workers tasks.
---gpu-mode lane retains legacy fixed allocation (including authoring); callers of
-that mode retain responsibility for a full-wave outer lease.
+Every task qualifies via unittest.py --validation-mode correctness --reuse.
+Performance measurements run later through the optimizer's task entrypoint.
 
 Docker CPU lanes mount no GPU devices; GPU jobs mount only their leased render
 nodes in the pinned image. Local mode uses physical ROCR and logical HIP/GPU_IDS
@@ -95,25 +92,9 @@ def receipt(tdir):
     return res.get("verdict"), fresh, load(os.path.join(tdir, "run", "ut_report.json"), {})
 
 
-def passed(tdir, require_timing=True):
-    verdict, fresh, rep = receipt(tdir)
-    if verdict != "pass" or not fresh:
-        return False
-    # A correctness-qualified task is complete for extraction, but still needs
-    # measurements when explicitly resumed as a performance wave.
-    if require_timing and rep and rep.get("validation_mode") == "correctness":
-        return False
-    return True
-
-
-def timing_ready(tdir):
-    """Every gate but timing passed on the current task (what a lane owes under --timing tail)."""
-    verdict, fresh, rep = receipt(tdir)
-    if not fresh or not rep:
-        return False
-    gates = rep.get("gates") or {}
-    return all(r.get("status") in ("pass", "not_required")
-               for g, r in gates.items() if g != "timing") and "correctness" in gates
+def passed(tdir):
+    verdict, fresh, _ = receipt(tdir)
+    return verdict == "pass" and fresh
 
 
 # ----------------------------------------------------------------------------- planning
@@ -161,46 +142,6 @@ def deployment_gpus(eval_dir):
         if 'gpus' in cfg:
             return parse_gpu_ids(cfg['gpus'], path + ':gpus')
     return None
-
-
-def allocate(rows, n_gpus, cap):
-    """GPUs per single-GPU task: one each, and when tasks < GPUs the rest go one at a time
-    to the task with the most cost per GPU (at most `cap` each)."""
-    single = [r for r in rows if r["need"] == 1]
-    share = {r["label"]: 1 for r in single}
-    spare = n_gpus - len(single)
-    while spare > 0 and single:
-        r = max(single, key=lambda r: (r["cost"] / share[r["label"]]
-                                       if share[r["label"]] < cap else -1))
-        if share[r["label"]] >= cap:
-            break
-        share[r["label"]] += 1
-        spare -= 1
-    for r in rows:
-        if r["need"] > 1:
-            share[r["label"]] = r["need"]
-    return share
-
-
-def timing_dispatch(ready, free, workers, running_count=0):
-    """Disjoint sets for the timing tail. Multi-rank tasks retain an exclusive tail."""
-    slots = workers - running_count
-    if slots <= 0 or not free or not ready:
-        return []
-    single = [r for r in ready if r["need"] == 1]
-    if not single:
-        if running_count:
-            return []
-        row = ready[0]
-        return [(row, list(free))] if len(free) >= row["need"] else []
-    chosen = single[:min(slots, len(free))]
-    share = allocate(chosen, len(free), cap=len(free))
-    result, cursor = [], 0
-    for row in chosen:
-        count = share[row["label"]]
-        result.append((row, free[cursor:cursor + count]))
-        cursor += count
-    return result
 
 
 # ----------------------------------------------------------------------------- backends
@@ -418,29 +359,26 @@ def controller(a):
     """The independent broker retains leases and drains GPU jobs if we disappear."""
     wave = wave_dir(a.eval_dir)
     cfg = load(os.path.join(wave, 'wave.json'))
-    demand = cfg.get('gpu_mode', 'lane') == 'on-demand'
     broker = None
     backend = GPU.backend_for(wave, cfg)
     try:
-        if demand:
-            os.makedirs(os.path.join(wave, 'gpu_queue'), exist_ok=True)
-            try:
-                os.unlink(os.path.join(wave, 'broker.json'))
-            except FileNotFoundError:
-                pass
-            with open(os.path.join(wave, 'broker.log'), 'a') as out:
-                broker = subprocess.Popen([sys.executable, GPU.__file__, 'broker', wave, str(os.getpid())],
-                                          stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
-            while not load(os.path.join(wave, 'broker.json')):
-                if broker.poll() is not None:
-                    raise RuntimeError('GPU broker failed to start; see broker.log')
-                time.sleep(.05)
+        os.makedirs(os.path.join(wave, 'gpu_queue'), exist_ok=True)
+        try:
+            os.unlink(os.path.join(wave, 'broker.json'))
+        except FileNotFoundError:
+            pass
+        with open(os.path.join(wave, 'broker.log'), 'a') as out:
+            broker = subprocess.Popen([sys.executable, GPU.__file__, 'broker', wave, str(os.getpid())],
+                                      stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        while not load(os.path.join(wave, 'broker.json')):
+            if broker.poll() is not None:
+                raise RuntimeError('GPU broker failed to start; see broker.log')
+            time.sleep(.05)
         return controller_run(a)
     finally:
         try:
             for row in cfg['rows']:
                 backend.stop(row['label'])
-                backend.stop('timing_' + row['label'])
         finally:
             if broker is not None:
                 if broker.poll() is None:
@@ -455,12 +393,8 @@ def controller(a):
 def controller_run(a):
     eval_dir = os.path.abspath(a.eval_dir)
     wave = wave_dir(eval_dir)
-    for d in ("state", "logs", "prompts"):
-        os.makedirs(os.path.join(wave, d), exist_ok=True)
     cfg = load(os.path.join(wave, "wave.json"))
-    demand = cfg.get('gpu_mode', 'lane') == 'on-demand'
     rows = cfg["rows"]
-    gpus = cfg["gpus"]
     backend = GPU.backend_for(wave, cfg)
     with open(os.path.join(wave, "controller.pid"), "w") as f:
         f.write(str(os.getpid()))
@@ -468,89 +402,47 @@ def controller_run(a):
          {'pid': os.getpid(), 'identity': GPU.identity(os.getpid())})
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
-    running = {}                          # job name -> {"gpus", "kind", "label", "started"}
-    for r in rows:                        # resume: a lane that was running is dispatched again
-        st = status_of(wave, r["label"])
-        if (st.get("status") not in FINAL + ("timing",)
-                or st.get("status") == "passed" and not passed(r["task_dir"], cfg["timing"] != "none")
-                or st.get("status") == "timing" and cfg["timing"] != "tail"):
-            set_status(wave, r["label"], status="pending")
+    running = {}
+    for row in rows:
+        st = status_of(wave, row["label"])
+        if st.get("status") not in FINAL or st.get("status") == "passed" and not passed(row["task_dir"]):
+            set_status(wave, row["label"], status="pending")
     t0 = now()
-    log(wave, "wave: %d task(s) on GPUs %s, backend %s, timing %s; order %s"
-        % (len(rows), gpus, cfg["backend"], cfg["timing"], [r["label"] for r in rows]))
+    log(wave, "wave: %d CPU authors, GPU pool %s, backend %s" %
+        (len(rows), cfg["gpus"], cfg["backend"]))
     while not stop["flag"]:
-        if demand:
-            broker_state = load(os.path.join(wave, 'broker.json'), {})
-            if GPU.identity(broker_state.get('pid', -1)) != broker_state.get('identity'):
-                raise RuntimeError('GPU broker exited; stopping author lanes')
-        # 1) reap
-        for name, job in list(running.items()):
-            hb = load(os.path.join(wave, "state", name + ".hb"), {}).get("t", job["started"])
-            alive = backend.alive(name)
-            stale = now() - max(hb, job["started"]) > cfg["stale_sec"]
-            if alive and not stale:
+        broker = load(os.path.join(wave, 'broker.json'), {})
+        if GPU.identity(broker.get('pid', -1)) != broker.get('identity'):
+            raise RuntimeError('GPU broker exited; stopping author lanes')
+        for name, started in list(running.items()):
+            hb = load(os.path.join(wave, "state", name + ".hb"), {}).get("t", started)
+            stale = now() - max(hb, started) > cfg["stale_sec"]
+            if backend.alive(name) and not stale:
                 continue
             backend.stop(name)
-            if demand:
-                GPU.drain_owner(wave, name)
+            GPU.drain_owner(wave, name)
             del running[name]
-            st = status_of(wave, job["label"])
-            if job["kind"] == "lane" and st.get("status") not in FINAL + ("timing",):
+            st = status_of(wave, name)
+            if st.get("status") not in FINAL:
                 lost = int(st.get("lost") or 0) + 1
-                set_status(wave, job["label"], status="pending" if lost <= cfg["relaunch"] else "failed",
-                           lost=lost, why="lane %s (%s)" % ("went stale" if stale else "exited",
-                                                             "relaunching" if lost <= cfg["relaunch"]
-                                                             else "out of relaunches"))
-            elif job["kind"] == "timing" and st.get("status") == "timing":
-                ok = passed(st["task_dir"]) and (not demand or GPU.last_command_passed(wave, job['label']))
-                set_status(wave, job["label"], status="passed" if ok else "failed",
-                           why=None if ok else "the timing tail did not produce a passing receipt",
-                           ended=now())
-            log(wave, "%s %s finished on %s -> %s" % (job["kind"], job["label"], job["gpus"],
-                                                      status_of(wave, job["label"]).get("status")))
-        busy = {g for j in running.values() for g in j["gpus"]}
-        free = [g for g in gpus if g not in busy]
-        states = {r["label"]: status_of(wave, r["label"]) for r in rows}
-        pending = [r for r in rows if states[r["label"]].get("status") == "pending"
-                   and r["label"] not in {j["label"] for j in running.values()}]
-        lanes_left = any(j["kind"] == "lane" for j in running.values()) or pending
-        # 2) dispatch lanes: single-GPU tasks first, most expensive first
-        for r in [p for p in pending if p["need"] == 1] + [p for p in pending if p["need"] > 1]:
-            if demand and sum(j['kind'] == 'lane' for j in running.values()) >= cfg['author_workers']:
-                break
-            if not demand and r["need"] > 1 and any(p["need"] == 1 for p in pending if p is not r):
+                set_status(wave, name, status="pending" if lost <= cfg["relaunch"] else "failed",
+                           lost=lost, why="lane %s; %s" %
+                           ("went stale" if stale else "exited",
+                            "relaunching" if lost <= cfg["relaunch"] else "out of relaunches"))
+            log(wave, "lane %s finished -> %s" % (name, status_of(wave, name).get("status")))
+        for row in rows:
+            name = row["label"]
+            st = status_of(wave, name)
+            if name in running or st.get("status") != "pending":
                 continue
-            want = cfg["share"].get(r["label"], 1)
-            if not demand and r["need"] > 1 and len(free) < r["need"]:
-                continue
-            if not demand and not free:
+            if len(running) >= cfg["author_workers"]:
                 break
-            take = [] if demand else free[:max(r["need"], min(want, len(free)))]
-            free = free[len(take):]
-            argv = [HERE, "lane", "--wave-dir", wave, "--task", r["label"]]
-            if backend.start(r["label"], take, argv, cfg["env"]):
-                running[r["label"]] = {"gpus": take, "kind": "lane", "label": r["label"],
-                                       "started": now()}
-                set_status(wave, r["label"], status="running", gpus=take, task_dir=r["task_dir"],
-                           started=states[r["label"]].get("started") or now())
-                log(wave, "lane %s <- %s (cost %s)" % (r["label"], 'CPU; GPU on demand' if demand else take, r["cost"]))
-            else:
-                free = take + free
-        # 3) timing tail: authoring/compilation has drained. Tasks own disjoint GPU
-        # sets; the default worker count of one preserves exclusive timing.
-        if cfg["timing"] == "tail" and not lanes_left:
-            active = {j["label"] for j in running.values()}
-            ready = [r for r in rows if states[r["label"]].get("status") == "timing"
-                     and r["label"] not in active]
-            for r, take in timing_dispatch(ready, free, cfg.get("timing_workers", 1), len(running)):
-                name = "timing_" + r["label"]
-                argv = [HERE, "tail", "--wave-dir", wave, "--task", r["label"]]
-                env = dict(cfg['env'], UT_WAVE_GPU_COUNT=str(len(take)))
-                if backend.start(name, [] if demand else take, argv, env):
-                    running[name] = {"gpus": list(take), "kind": "timing", "label": r["label"],
-                                     "started": now()}
-                    set_status(wave, r["label"], timing_gpus=list(take), timing_started=now())
-                    log(wave, "timing %s <- GPUs %s" % (r["label"], take))
+            argv = [HERE, "lane", "--wave-dir", wave, "--task", name]
+            if backend.start(name, [], argv, cfg["env"]):
+                running[name] = now()
+                set_status(wave, name, status="running", gpus=[], task_dir=row["task_dir"],
+                           started=st.get("started") or now())
+                log(wave, "lane %s <- CPU; GPU on demand (cost %s)" % (name, row["cost"]))
         states = {r["label"]: status_of(wave, r["label"]).get("status") for r in rows}
         if not running and all(s in FINAL for s in states.values()):
             break
@@ -558,11 +450,12 @@ def controller_run(a):
             log(wave, "wall-clock ceiling reached; stopping lanes (state is resumable)")
             break
         time.sleep(cfg["tick_sec"])
-    for name in list(running):
+    for name in running:
         backend.stop(name)
+        GPU.drain_owner(wave, name)
     summary = {r["label"]: status_of(wave, r["label"]) for r in rows}
     save(os.path.join(wave, "summary.json"), {"finished": now(), "seconds": round(now() - t0),
-                                              "tasks": summary})
+                                             "tasks": summary})
     log(wave, "wave done in %ds: %s" % (now() - t0, {k: v.get("status") for k, v in summary.items()}))
     return 0
 
@@ -571,16 +464,6 @@ def controller_run(a):
 def lane_prompt(wave, row, st, attempt, cfg, deadline):
     tdir = row["task_dir"]
     req = os.path.join(tdir, "run", "requested_kernel.json")
-    gpu_ids = os.environ.get("GPU_IDS", "0")
-    timing = {
-        "none": "do NOT measure timing: finish with `unittest.py --validation-mode correctness --reuse`; "
-                "this qualifies every non-timing gate. No timing tail is scheduled. "
-                "Preserve weighted cases for optimization; report performance_measured=false.",
-        "tail": "do NOT run the timing gate: finish with `unittest.py --skip timing`; "
-                "the wave times tasks afterwards on dedicated GPU sets",
-        "lane": "run every gate, timing included",
-    }[cfg["timing"]]
-    demand = cfg.get('gpu_mode', 'lane') == 'on-demand'
     lines = [
         "You are one lane of a parallel UT wave. You own exactly one task directory and the "
         "writing session for it; other agents own the other tasks, at the same time. Nobody will "
@@ -591,20 +474,18 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
         "EVAL_DIR        %s" % cfg["eval_dir"],
         "SKILL_ROOT      %s" % SKILL,
         "SHARED_TOOLS    %s" % os.path.join(SKILL, "shared"),
-        "GPUS            logical %s (GPU_IDS; the UT driver spreads its legs over all of them)"
-        % gpu_ids,
+        "GPUS            allocated only inside GPU commands; authoring is CPU-only",
         "DEADLINE        %s (epoch %d)" % (time.strftime("%F %T", time.localtime(deadline)), deadline),
-        "TIMING          %s" % timing,
+        "VALIDATION      unittest.py --validation-mode correctness --reuse; no timing measurements",
         "",
     ]
-    if demand:
-        lines += ["GPU MODE: on-demand. This author container is CPU-only and holds no GPU lease.",
-                  "For EVERY GPU operation (imports needing GPU, compile, quick, full validation), use:",
-                  'python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" <flags>',
-                  "The default request is required_gpu_count=%d; --count N may request more for sharding."
-                  % row['need'],
-                  "Use --env K=V for command-specific environment; cwd defaults to TASK_DIR.",
-                  "Do not nest gpu_lock wrappers; the host broker holds the locks until workers drain.", ""]
+    lines += ["GPU MODE: on-demand. This author container is CPU-only and holds no GPU lease.",
+              "For EVERY GPU operation (imports needing GPU, compile, quick, full validation), use:",
+              'python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" <flags>',
+              "The default request is required_gpu_count=%d; --count N may request more for sharding."
+              % row['need'],
+              "Use --env K=V for command-specific environment; cwd defaults to TASK_DIR.",
+              "Do not nest gpu_lock wrappers; the host broker holds the locks until workers drain.", ""]
     if attempt > 1:
         verdict, fresh, rep = receipt(tdir)
         quick = load(os.path.join(tdir, "run", "ut_report.quick.json"), {})
@@ -657,17 +538,14 @@ def lane_run(a):
             set_status(wave, row["label"], attempts=attempt, last_prompt=prompt, last_log=logf)
             env = dict(os.environ, TASK_DIR=tdir, SKILL_ROOT=SKILL, EVAL_DIR=cfg["eval_dir"],
                        SHARED_TOOLS=os.path.join(SKILL, "shared"))
-            demand = cfg.get('gpu_mode', 'lane') == 'on-demand'
-            if demand:
-                token = uuid.uuid4().hex
-                save(os.path.join(wave, 'state', row['label'] + '.token'), {'token': token, 'task': row['label']})
-                env.update(UT_WAVE_DIR=wave, UT_WAVE_OWNER=row['label'], UT_WAVE_TASK=row['label'], UT_WAVE_TOKEN=token)
+            token = uuid.uuid4().hex
+            save(os.path.join(wave, 'state', row['label'] + '.token'), {'token': token, 'task': row['label']})
+            env.update(UT_WAVE_DIR=wave, UT_WAVE_OWNER=row['label'], UT_WAVE_TASK=row['label'], UT_WAVE_TOKEN=token)
             try:
                 rc = subprocess.call(["timeout", str(left), "bash", cfg["runner"], prompt, tdir, logf],
                                      env=env)
             finally:
-                if demand:
-                    GPU.drain_owner(wave, row['label'])
+                GPU.drain_owner(wave, row['label'])
             blocker = load(os.path.join(tdir, "run", "lane_blocked.json"))
             if rc == 78:
                 set_status(wave, row["label"], status="blocked",
@@ -676,12 +554,9 @@ def lane_run(a):
             if blocker:
                 set_status(wave, row["label"], status="blocked", why=blocker.get("reason"))
                 return 0
-            gpu_ok = not demand or GPU.last_command_passed(wave, row['label'])
-            if gpu_ok and passed(tdir, require_timing=cfg["timing"] != "none"):
+            gpu_ok = GPU.last_command_passed(wave, row['label'])
+            if gpu_ok and passed(tdir):
                 set_status(wave, row["label"], status="passed", ended=now(), why=None)
-                return 0
-            if gpu_ok and cfg["timing"] == "tail" and timing_ready(tdir):
-                set_status(wave, row["label"], status="timing", why=None)
                 return 0
             verdict, fresh, _ = receipt(tdir)
             st = set_status(wave, row["label"],
@@ -691,39 +566,6 @@ def lane_run(a):
         return 1
     finally:
         done.set()
-
-
-def tail(a):
-    """Time one task on its assigned GPUs: `unittest.py --reuse` keeps the gates the lane
-    passed under an unchanged task and runs only what is left (timing)."""
-    wave = os.path.abspath(a.wave_dir)
-    cfg = load(os.path.join(wave, "wave.json"))
-    row = next(r for r in cfg["rows"] if r["label"] == a.task)
-    logf = os.path.join(wave, "logs", "%s.timing.log" % row["label"])
-    done = heartbeat(wave, "timing_" + row["label"])
-    cmd = [sys.executable, os.path.join(row["task_dir"], "unittest.py"), "--reuse"]
-    if row.get("need", 1) > 1:
-        # Each leg of a multi-rank harness spans every GPU itself (collective-ut.md's rank
-        # pool); the driver spreading buckets over the GPUs would run up to one pool per GPU
-        # at once on the same devices, and spinning collectives of different pools contend
-        # or wait on each other. One device for the driver: buckets run one at a time.
-        cmd += ["--gpus", "0"]
-    try:
-        if cfg.get('gpu_mode', 'lane') == 'on-demand':
-            owner, token = 'timing_' + row['label'], uuid.uuid4().hex
-            save(os.path.join(wave, 'state', owner + '.token'), {'token': token, 'task': row['label']})
-            os.environ.update(UT_WAVE_DIR=wave, UT_WAVE_OWNER=owner, UT_WAVE_TASK=row['label'], UT_WAVE_TOKEN=token)
-            # GPU worker uses the pinned environment's Python, not the host interpreter.
-            cmd = [sys.executable, HERE, 'gpu', '--', 'python3'] + cmd[1:]
-        with open(logf, "a") as out:
-            rc = subprocess.call(cmd, cwd=row["task_dir"], stdout=out, stderr=subprocess.STDOUT)
-    finally:
-        if cfg.get('gpu_mode', 'lane') == 'on-demand':
-            GPU.drain_owner(wave, 'timing_' + row['label'])
-        done.set()
-    set_status(wave, row["label"], status="passed" if rc == 0 and passed(row["task_dir"]) else "failed",
-               ended=now(), why=None if rc == 0 else "timing tail exited %d; see %s" % (rc, logf))
-    return 0
 
 
 # ----------------------------------------------------------------------------- CLI
@@ -740,7 +582,7 @@ def cmd_plan(a, quiet=False):
     if allowed and not set(gpus).issubset(parse_gpu_ids(allowed, 'GEAK_GPU_ALLOWED')):
         raise SystemExit('ut_wave: --gpus exceeds GEAK_GPU_ALLOWED')
     mask = os.environ.get('ROCR_VISIBLE_DEVICES')
-    if a.gpu_mode == 'on-demand' and mask:
+    if mask:
         try:
             permitted = {int(x) for x in mask.split(',')}
         except ValueError:
@@ -750,36 +592,27 @@ def cmd_plan(a, quiet=False):
     only = set(a.tasks.split(",")) if a.tasks else None
     rows = task_rows(eval_dir, only)
     previous = load(os.path.join(wave_dir(eval_dir), 'wave.json'), {})
-    rows = [r for r in rows if a.force or not passed(r["task_dir"],
-                                                   require_timing=a.timing != "none")
+    rows = [r for r in rows if a.force or not passed(r["task_dir"])
             or previous.get('gpu_mode') == 'on-demand'
             and not GPU.last_command_passed(wave_dir(eval_dir), r['label'])]
     big = [r for r in rows if r["need"] > len(gpus)]
     if big:
         raise SystemExit("ut_wave: %s need more GPUs than the wave has (%d)"
                          % ([(r["label"], r["need"]) for r in big], len(gpus)))
-    share = ({r['label']: r['need'] for r in rows} if a.gpu_mode == 'on-demand'
-             else allocate(rows, len(gpus), a.max_gpus_per_task))
     if not quiet:
         print("%d GPU(s): %s" % (len(gpus), gpus))
-        for r in rows:
-            print("  %-48s %-22s cost %8.1f  gpus %d%s" % (r["label"], r["family"], r["cost"],
-                                                           share[r["label"]],
-                                                           "  (per command; CPU author holds no GPU)"
-                                                           if a.gpu_mode == 'on-demand' else ""))
-    return eval_dir, gpus, rows, share
+        for row in rows:
+            print("  %-48s %-22s cost %8.1f  GPUs per command %d" %
+                  (row["label"], row["family"], row["cost"], row["need"]))
+    return eval_dir, gpus, rows
 
 
 def cmd_start(a):
     if a.author_workers < 1:
         raise SystemExit('ut_wave: --author-workers must be positive')
-    if a.gpu_mode == 'on-demand' and os.environ.get('GEAK_GPU_LOCKED_SET'):
+    if os.environ.get('GEAK_GPU_LOCKED_SET'):
         raise SystemExit('ut_wave: release the outer pool lease before starting an on-demand wave')
-    if a.timing_workers < 1:
-        raise SystemExit("ut_wave: --timing-workers must be positive")
-    if a.timing != "tail" and a.timing_workers != 1:
-        raise SystemExit("ut_wave: --timing-workers applies to --timing tail")
-    eval_dir, gpus, rows, share = cmd_plan(a)
+    eval_dir, gpus, rows = cmd_plan(a)
     wave = wave_dir(eval_dir)
     os.makedirs(wave, exist_ok=True)
     guard = open(os.path.join(wave, 'controller.lock'), 'a')
@@ -815,11 +648,10 @@ def cmd_start(a):
         for row in rows:
             set_status(wave, row['label'], status='pending', attempts=0, lost=0, started=None, why=None)
     save(os.path.join(wave, "wave.json"), {
-        "eval_dir": eval_dir, "gpus": gpus, "rows": rows, "share": share,
+        "eval_dir": eval_dir, "gpus": gpus, "rows": rows,
         "backend": a.backend, "image": a.image, "render_base": a.render_base,
-        "render_step": a.render_step, "runner": runner, "timing": a.timing,
-        "timing_workers": a.timing_workers,
-        "gpu_mode": a.gpu_mode, "author_workers": a.author_workers,
+        "render_step": a.render_step, "runner": runner, "validation_mode": "correctness",
+        "gpu_mode": "on-demand", "author_workers": a.author_workers,
         "container_prefix": default_container_prefix(wave),
         "lock_dir": os.path.abspath(os.environ.get('KERNEL_EXTRACT_LOCK_DIR', '/tmp/team_gpu_locks')),
         "lane_sec": a.lane_sec, "attempts": a.attempts, "relaunch": a.relaunch,
@@ -914,12 +746,6 @@ def main(argv=None):
         p.add_argument("--gpus", default=None, help="physical GPU IDs; default workload serving.json `gpus`; may only narrow that set")
         p.add_argument("--tasks", default=None, help="comma list of task labels (default all)")
         p.add_argument("--force", action="store_true", help="include tasks that already pass")
-        p.add_argument("--max-gpus-per-task", type=int, default=4, help='spare GPU cap in legacy --gpu-mode lane')
-        p.add_argument('--gpu-mode', choices=('on-demand', 'lane'), default='on-demand',
-                       help='on-demand: CPU authors borrow GPUs per command; lane: legacy fixed allocation')
-        p.add_argument("--timing", choices=("none", "tail", "lane"), default="none",
-                       help="none qualifies UTs without performance measurements (default); "
-                            "tail/lane explicitly request performance validation")
         if name == "start":
             p.add_argument("--runner", required=True, help="runners/CONTRACT.md runner script")
             p.add_argument('--author-workers', type=int, default=8, help='maximum concurrent CPU authors')
@@ -927,8 +753,6 @@ def main(argv=None):
             p.add_argument("--image", default=None)
             p.add_argument("--render-base", type=int, default=128)
             p.add_argument("--render-step", type=int, default=8)
-            p.add_argument("--timing-workers", type=int, default=1,
-                           help="concurrent tail tasks on disjoint GPUs, after authoring drains; default 1")
             p.add_argument("--lane-sec", type=int, default=7200, help="per runner session")
             p.add_argument("--attempts", type=int, default=3, help="runner sessions per lane")
             p.add_argument("--relaunch", type=int, default=1,
@@ -946,10 +770,9 @@ def main(argv=None):
         p.add_argument("--eval-dir", required=True)
         if name == "wait":
             p.add_argument("--timeout", type=float, default=540)
-    for name in ("lane", "tail"):
-        p = sub.add_parser(name)
-        p.add_argument("--wave-dir", required=True)
-        p.add_argument("--task", required=True)
+    p = sub.add_parser("lane")
+    p.add_argument("--wave-dir", required=True)
+    p.add_argument("--task", required=True)
     p = sub.add_parser("block")
     p.add_argument("--task-dir", required=True)
     p.add_argument("--reason", required=True)
@@ -964,7 +787,7 @@ def main(argv=None):
         cmd_plan(a)
         return 0
     return {"start": cmd_start, "_controller": controller, "status": lambda a: cmd_status(a)[0],
-            "stop": cmd_stop, "wait": cmd_wait, "lane": lane, "tail": tail,
+            "stop": cmd_stop, "wait": cmd_wait, "lane": lane,
             "block": cmd_block, 'gpu': GPU.submit}[a.cmd](a)
 
 

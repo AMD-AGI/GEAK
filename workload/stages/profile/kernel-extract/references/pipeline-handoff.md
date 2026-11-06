@@ -11,7 +11,7 @@ authoring and validation; the pipeline supplies inputs and consumes `$OUT`.
 | `SKILL_ROOT` | this directory; `SHARED_TOOLS="$SKILL_ROOT/shared"` |
 | `OUT` | `EVAL_DIR`. Everything this skill writes goes here, never under `SKILL_ROOT` |
 | `IN` / `$RUN_ROOT/baseline/out/baseline.json` | the completed measured baseline: `throughput`, `noise_band`, `config` (TP/EP/GPUs/concurrency) and `provenance` (receipt, logs, node). Use its logs and exports; do not re-measure |
-| `PARAMS` | numeric `selection_top_k`, `selection_overall_pct_gt`, `selection_phases`; explanatory `selection`; `max_targets`, `trace_dir`, `serving_env`; `multi_config`, `sampling`, `ut_timing_workers`; any `agent_brief` facts |
+| `PARAMS` | numeric `selection_top_k`, `selection_overall_pct_gt`, `selection_phases`; explanatory `selection`; `max_targets`, `trace_dir`, `serving_env`; `multi_config`, `sampling`; any `agent_brief` facts |
 | `CONFIG` | `target` (model, image, framework commits) the stage must agree with; `target.image` is the `--image` of the UT wave |
 | `RUNNER` | the runner script (`runners/CONTRACT.md`) the UT wave starts one lane session with per task: `ut_wave.py start --runner "$RUNNER"`. Its credential pointers (`WORKLOAD_AGENT_*`) are already in the environment and are passed to every lane |
 
@@ -25,12 +25,10 @@ first N by overall share); it never widens it or backfills rank 6.
 For multi-config baselines, use [shared sampling](multi-config-sampling.md) before
 capturing. Pass `params.sampling` to `multi_config.py plan` and use
 `capture` → `project --merge` → `select`. UT generation defaults to
-`ut_wave.py start --timing none`, with no timing measurements. Its default on-demand
+`ut_wave.py start`, with no timing measurements. Its default on-demand
 mode runs CPU authors and leases GPUs only around each `ut_wave.py gpu -- ...` command;
-start it on the allocated host without an outer campaign GPU lock. For an explicitly
-requested performance wave, pass `params.ut_timing_workers` alongside `--timing tail`;
-the timing tail starts only after authoring lanes drain. Legacy independently captured config
-directories remain valid inputs to `multi_config.py merge`.
+start it on the allocated host without an outer campaign GPU lock. Performance validation runs through the optimizer's task entrypoint.
+Independently captured config directories remain valid inputs to `multi_config.py merge`.
 
 ## Outputs
 
