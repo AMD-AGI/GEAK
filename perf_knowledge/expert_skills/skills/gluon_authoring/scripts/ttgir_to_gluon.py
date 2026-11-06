@@ -156,7 +156,7 @@ class Layout:
         # exposes no rotating-shared constructor, so this is a LANGUAGE-SURFACE gap, not an unfinished
         # converter -- do not read it as a tool TODO to fill. A faithful transcription of a kernel the
         # plain backend lowered with such a layout is not fully expressible in Gluon today. (See
-        # references/gluon-negative-patterns.md.) Other unknown kinds land here too.
+        # references/pitfalls/negative-patterns.md.) Other unknown kinds land here too.
         return (f"None  # UNSUPPORTED: layout kind {self.kind!r} has no gluon.language constructor "
                 f"(language-surface gap, not a tool TODO)")
 
@@ -315,7 +315,7 @@ def emit_layout_factory(layouts: list[Layout], source: str = "") -> str:
 # prefetch / manual interleave). So this emitter is the standard pipeline-layer
 # start (recover_gluon.py --with-pipeline), not a discouraged opt-in -- just keep it
 # out of the transcription step so gains stay attributable.
-# See references/tile-programming/pipeline.md ## Auto-recovering the pipeline structure.
+# See references/tile-programming/pipeline.md ## Recovering the structure, then improving on it.
 
 
 @dataclass

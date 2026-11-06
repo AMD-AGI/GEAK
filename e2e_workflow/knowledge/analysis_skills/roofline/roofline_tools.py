@@ -171,11 +171,14 @@ def load_peaks(peaks_md_path, gfx, product=None):
                 out[key] = val
         block_product = str(out.get("product") or "").strip().lower()
         if block_product:
-            if want_product != block_product:
+            if want_product != block_product and not (not want_product and out.get("default_for_gfx") == "true"):
                 continue
         elif want_product:
             continue
         if out.get("hbm_bw_bytes_s"):
+            if out.get("basis") not in (None, "datasheet"):
+                out["confidence"] = "low"
+            out.update(analysis_role="planning", may_gate=False)
             return out
     return None
 
@@ -215,21 +218,37 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
-def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+def resolve_peaks(peaks_md_path, gfx, device=0, product=None, *,
+                  hardware_context=None, identity=None):
+    """Resolve the exact observed product/scope, never a full-device arch default.
 
-    Navi 48 reports properties that are insufficient to derive WMMA throughput,
-    and its GDDR clock interpretation is toolchain-dependent. An absent table
-    entry on gfx120x is therefore a hard unknown rather than a low-confidence
-    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
-    is not in that family and may derive.
+    Old product-only calls remain readable reference lookups (low confidence).
+    Old arch-only calls now return unknown. The local workload math is unchanged;
+    native TraceLens models and calibration do not call this specification reader.
     """
-    peaks = load_peaks(peaks_md_path, gfx, product=product)
-    if peaks:
-        return peaks
-    if is_client_rdna4(gfx):
-        return None
-    return derive_peaks_from_props(device)
+    context = hardware_context or os.environ.get("GEAK_HARDWARE_CONTEXT")
+    if context is not None or identity is not None:
+        try:
+            import sys
+            from pathlib import Path
+            shared = Path(__file__).resolve().parents[4] / "scripts"
+            if str(shared) not in sys.path:
+                sys.path.insert(0, str(shared))
+            import hardware_context as hc
+            c = hc.load(context) if context is not None else hc.build(identity)
+            if c["observed"]["gfx"] != gfx:
+                return None
+            if product not in (None, "", "unknown", c["sku"]):
+                return None
+            return hc.planning_peaks(c)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+    if product and product != "unknown":
+        peaks = load_peaks(peaks_md_path, gfx, product=product)
+        if peaks:
+            return {**peaks, "confidence": "low", "analysis_role": "planning",
+                    "may_gate": False, "scope": "explicit_product_reference_only"}
+    return None
 
 
 _FLOP_KEYS = {
@@ -459,12 +478,12 @@ def _selftest():
     print("peaks: gfx950 %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
           % (peaks["hbm_bw_bytes_s"] / 1e12, peak_flops_for(peaks, "fp8") / 1e15))
 
-    E, M, tk, H, I, L = 256, 64, 8, 2048, 512, 40
+    E, M, tk, H, intermediate = 256, 64, 8, 2048, 512
     hit = experts_hit(E, M * tk)
     assert 215 <= hit <= 225, hit
-    wbytes = hit * (2 * I * H + H * I) * dtype_bytes("fp8")
+    wbytes = hit * (2 * intermediate * H + H * intermediate) * dtype_bytes("fp8")
     t_layer = 2 * 49.471e-6                                   # 80 launches/step over 40 layers
-    moe = roofline_metrics(wbytes, 2 * M * tk * (2 * I * H + H * I), t_layer,
+    moe = roofline_metrics(wbytes, 2 * M * tk * (2 * intermediate * H + H * intermediate), t_layer,
                            peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "fp8"),
                            TARGET_EFF["moe"], pct_gpu_time=26.45)
     print("MoE   : hit %.0f/%d, %.0f MB/layer -> %.0f%% of roofline, %s, %.3fx, +%.2f%% e2e (%s)"
@@ -494,7 +513,7 @@ def _selftest():
           "Attn 1.56x isolated)  OK")
 
     # L3 sanity band: all-expert bytes overshoot the roofline -> clamped + suspect, not discarded
-    allx = roofline_metrics(E * (2 * I * H + H * I) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
+    allx = roofline_metrics(E * (2 * intermediate * H + H * intermediate) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
                             peak_flops_for(peaks, "fp8"), TARGET_EFF["moe"], pct_gpu_time=26.45)
     assert allx["suspect"] and allx["roofline_pct"] <= 1.0, allx
     print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True  OK"

@@ -127,6 +127,10 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
+if str(GEAK_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(GEAK_ROOT / "scripts"))
+import hardware_context as _hardware_context  # noqa: E402 (repository-local module)
+
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
 RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
@@ -599,6 +603,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
         "target": target,
         "marketing_name": str(identity.get("marketing_name") or ""),
         "physical_cu_count": int(identity.get("physical_cu_count") or 0),
+        **{key: identity[key] for key in ("sku", "visible_gpu_agents", "compute_partition",
+            "memory_partition", "memory_bytes", "agents") if identity.get(key) is not None},
     }
 
 
@@ -784,6 +790,24 @@ def map_args(
             "expected_device_name": gpu_identity["marketing_name"],
             "expected_physical_cu_count": gpu_identity["physical_cu_count"],
         })
+        # Old explicit pins can omit CU/name; keep them as expectations, not facts.
+        context = None
+        if gpu_identity["physical_cu_count"] > 0:
+            context = _hardware_context.build(gpu_identity)
+        supplied = h.get("hardware_context") or (h.get("state") or {}).get("hardware_context")
+        if supplied is not None:
+            supplied = _hardware_context.load(supplied)
+            observed = supplied["observed"]
+            if (observed["gfx"] != gpu_identity["gfx"] or
+                    (gpu_identity["marketing_name"] and observed["marketing_name"] != gpu_identity["marketing_name"]) or
+                    (context and not _hardware_context.same_device_scope(context, supplied, allow_enrichment=True))):
+                raise ValueError("hardware_context disagrees with expected GPU identity")
+            context = supplied
+        if context is not None:
+            ps_args["hardware_context"] = context
+            ps_args["expected_sku"] = context["sku"]
+        if h.get("hardware_context_path"):
+            ps_args["hardware_context_path"] = h["hardware_context_path"]
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
     # Launch identity for the execution tracker. A nonce allocated HERE -- before
@@ -908,6 +932,11 @@ def map_args(
     # (per-op tuners -> tuned artifacts -> engagement proof), which upstream did
     # not do. So it stays enabled by default and is only overridden on request.
     # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
+    if h.get("use_gluon_skill") is not None:
+        gluon_mode = str(h["use_gluon_skill"]).strip().lower()
+        if gluon_mode not in {"auto", "true", "false"}:
+            raise ValueError("use_gluon_skill must be auto, true or false")
+        ps_args["use_gluon_skill"] = gluon_mode
     if h.get("tuning_skillset") is not None:
         ps_args["tuning_skillset"] = "true" if _as_bool(h["tuning_skillset"]) else "false"
     # tuning-kb is the skillset's per-model ANSWER KEY: right for production, but it

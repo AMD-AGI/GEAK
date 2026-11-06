@@ -15,6 +15,23 @@ The orchestration script provides all paths/values in your prompt. Read them car
 filesystem and shell work yourself with Bash/Read/Write. Return ONLY the requested structured JSON
 (the script forces a StructuredOutput tool).
 
+
+### Shared hardware context (Setup / Freeze)
+
+Read `scripts/hardware_context.md` at the GEAK root. After creating `EVAL_DIR`, run:
+
+```bash
+python3 "$WORKFLOW_DIR/../scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
+```
+
+Return the complete CLI JSON as `hardware_context`, its `sku` as `device_sku`,
+and the absolute filename as `hardware_context_path`. Check any supplied
+`HARDWARE_CONTEXT` against this fresh observation. Preserve unknown/conflicting
+SKU status; do not use gfx942 as an MI300X identity. Include the same object in
+`env_report.json` when producing that artifact. All downstream roles receive it
+independently of expert-skill settings.
+
+
 ## Isolation contract (non-negotiable)
 - The user's `KERNEL_PATH_ORIG` is **READ-ONLY** for the whole run unless `APPLY_TO_ORIGINAL=true`
   at validate time. Never `cd` into it to edit. Never run benchmarks that write into it.
@@ -90,7 +107,7 @@ Do this instead of the optimize-mode steps below:
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '.tile-runtime/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -140,7 +157,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '.tile-runtime/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -251,6 +268,9 @@ Return JSON:
   "device_target": "r9700|r9600d|unknown",
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
+  "device_sku": "<sku from hardware_context.py>",
+  "hardware_context": {"...": "complete CLI result"},
+  "hardware_context_path": "<EVAL_DIR>/hardware_context.json",
   "source_files": ["<relative paths under workspace>"],
   "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
   "baseline_frozen": true,

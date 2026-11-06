@@ -1,0 +1,1817 @@
+{
+  "_doc": "Lever cards (gluon), keyed bound_class -> lever. Read them yourself: the profile ranks the bucket, keep only levers whose gate holds and whose arch/isa/version availability is satisfied. Numeric cutoffs live in thresholds.json (not here); this file = availability + applicability + the gating laws. version_gate/probe resolve at RUNTIME (probe-per-build; never baked to a container). Recipe cards additionally carry api_ref (the L2 <dsl>/*-reference.md#section whose API the lever code calls); read it before applying the lever and cite it in your round record; references_read before a recipe edit. onboarding[] = the intro/basic-writing docs the gate (A0) requires be read ONCE before the first authoring round (the pack entry `skill.md ## Mechanism` names the onboarding layer); everything after stays lazy-loaded. Layout-sensitive matrix-core cards carry layout_gen (a scripts/layout_facts.py command that GENERATES the MFMA operand layout/dims/GPR facts up front, replacing a compile-and-see probe).",
+  "_arch_policy": "arch_availability values: yes | no | tier-b | partial | probe. An arch NOT listed in a card defaults to 'probe' (NOT 'yes') \u2014 an unverified arch must be probed, never silently recommended. gfx1250 (CDNA5/MI450) and gfx1201/gfx1100 (RDNA) are WMMA/TDM, NOT MFMA: any card with isa_gate MFMA/scaled-MFMA does not apply there -- check isa.mfma/scaled_mfma is false, so MFMA-only levers do not leak onto a WMMA arch. WMMA equivalents are probe/author (capability-matrix.md gfx1250/gfx1201 rows).",
+  "dsl": "gluon",
+  "onboarding": [
+    "gluon/index.md",
+    "gluon/imports-and-launching.md",
+    "gluon/gfx950-minimal-examples.md",
+    "pitfalls/negative-patterns.md"
+  ],
+  "gating_laws": [
+    {
+      "id": "occupancy_gates_latency",
+      "when": "dependency-stall/latency AND occupancy already high (2+ resident waves)",
+      "effect": "latency-removing levers become neutral-to-negative; pay only at low occupancy",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "tri_lemma",
+      "when": "any register-buffered prefetch/overlap",
+      "effect": "overlap trades against waves/CU (occupancy) and ILP - cannot have all three",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "cut_idle_unit_neutral",
+      "when": "reducing ops of a unit whose *Busy << 100%",
+      "effect": "only shortens slack of an already-idle unit = neutral",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "launch_fusion_eager_only",
+      "when": "launch/host-work reduction under a CUDA graph",
+      "effect": "inert (launch already amortized); can regress T_CTA",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "resource_cliff_retry",
+      "when": "a structurally-sound step regressed by crossing a VGPR/occupancy cliff",
+      "effect": "retry combined with a register-relief layer before recording negative",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "in_region_sched_needs_clean_region",
+      "when": "in-band scheduling hints (sched_group_barrier / reorder) applied to a fused multi-purpose loop body",
+      "effect": "the hints only reorder WITHIN one scheduling region, so on a fused matmul1 + epilogue-reduction + matmul2 body they cannot reach the reference schedule density (they stall on the cross-region operand/sync drains); split the body into separate scheduling regions and defer the epilogue one tile FIRST, then the in-region hints pay",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    },
+    {
+      "id": "compiler_lever_needs_paired_structure",
+      "when": "a compiler-realized lever (instruction-interleave / register-allocation / post-asm peephole) is applied WITHOUT the paired source structure already written",
+      "effect": "the pass EXPLOITS author-engineered independence + register headroom, it does not CREATE them; without independent AC/LR/DOT + a fitting register budget the knob is neutral (or asserts / regresses). A compiler ceiling is valid ONLY after IR shows the structure IS correct yet the pass still clumps/spills \u2014 else it is a kernel-structure bug, not a compiler miss. A source enabler + its paired compiler lever are ONE coupled win (the enabling-step exception): the source step (3-stage prefetch / N-slice) may be flat/negative alone and only nets out once the compiler lever (scheduling / the AGPR hint) lands.",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws (single source of truth)"
+    }
+  ],
+  "levers": {
+    "async_buffer_load_to_shared": {
+      "layer": 2,
+      "direction_class": "structural",
+      "arch_availability": {
+        "gfx942": "partial",
+        "gfx950": "yes"
+      },
+      "isa_gate": "MFMA",
+      "cost": "prefetch regs/LDS (tri-lemma)",
+      "verify": "BW vs cap; boundary timing",
+      "version_gate": "version-sensitive offset layouts (Triton minor)",
+      "probe": "compile a tiny gl kernel using cdna4.buffer_load_to_shared; DistributedLinearLayout offset",
+      "note": "NCU cp.async analog \u2014 the SIMPLE direct-to-shared form only: stage global->shared asynchronously to overlap the load with compute. This is NOT TMA / cp.async.bulk / tensor-memory (NV Hopper/Blackwell bulk async DMA, no CDNA counterpart \u2014 do not port); the CDNA analog is exactly this simpler buffer_load_to_shared.",
+      "authoring_ref": "tile-programming/memory-path.md ## Async copy: smoke-test before wiring (mandatory)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/memory-reference.md ## Async Copy To Shared",
+      "native_group": "memory",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "in-flight < TCP cap (32KiB/CU); MemUnitStalled high / achieved BW < ceiling",
+          "direction": "achieved BW up, MemUnitStalled down",
+          "expected_move": "achieved BW up, MemUnitStalled down",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "in-flight < TCP cap (32KiB/CU); MemUnitStalled high / achieved BW < ceiling",
+          "direction": "achieved BW up, MemUnitStalled down",
+          "expected_move": "achieved BW up, MemUnitStalled down",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "gmem-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "wider_buffer_load": {
+      "layer": 2,
+      "direction_class": "knob",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "coalescing% up; timing",
+      "note": "NCU vectorized-access analog: wider per-thread loads = fewer memory transactions for the same bytes.",
+      "authoring_ref": "tile-programming/memory-path.md ## The memory-path ladder",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/memory-reference.md ## Buffer Pointer And Offset Rules",
+      "native_group": "memory",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "coalescable; per-thread chunk >= async granularity",
+          "direction": "fewer transactions, BW up",
+          "expected_move": "fewer transactions, BW up",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "coalescable; per-thread chunk >= async granularity",
+          "direction": "fewer transactions, BW up",
+          "expected_move": "fewer transactions, BW up",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "gmem-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "coalesce_access": {
+      "layer": 2,
+      "direction_class": "knob",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "layout change",
+      "verify": "16.1.3 up; timing",
+      "note": "NCU uncoalesced-access analog: combine per-lane accesses into fewer, wider transactions.",
+      "authoring_ref": "tile-programming/layout-recipes.md ## Standard GEMM chain (gfx950, FP16)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/memory-reference.md ## Buffer Pointer And Offset Rules",
+      "native_group": "memory",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "coalescing% low (rocprof-compute 16.1.3)",
+          "direction": "coalescing% up, sectors/req down",
+          "expected_move": "coalescing% up, sectors/req down",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "coalescing% low (rocprof-compute 16.1.3)",
+          "direction": "coalescing% up, sectors/req down",
+          "expected_move": "coalescing% up, sectors/req down",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "gmem-feed"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "cut_hbm_bytes": {
+      "layer": 2,
+      "direction_class": "knob",
+      "sub_resource": "bandwidth",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "restructure: narrow HBM dtype / fuse a streaming read-write pass / reuse instead of re-read",
+      "verify": "bytes model + achieved-BW vs peak; boundary timing",
+      "gating_law": "cut_idle_unit_neutral",
+      "note": "arch_scope=U-mechanism (NCU Max-Bandwidth branch). When the HBM pipe is saturated, adding in-flight is inert; the only win is fewer bytes. The PEAK BW it is measured against is A-number (sku.json per-SKU: MI355 HBM3E 8TB/s != MI300X 5.3). Distinct from hide_mem_latency (opposite lever).",
+      "authoring_kind": "recipe",
+      "authoring_ref": "tile-programming/memory-path.md ## Cut HBM bytes (narrow / cache / fuse)",
+      "api_ref": "gluon/memory-reference.md ## Buffer Dtype Rules",
+      "native_group": "memory",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "cuttable_bytes",
+        "reads": [
+          "sol.vmem_pct"
+        ],
+        "gate": "HBM pipe near saturation (vmem %-of-peak high) OR a bytes-model overage -> cuttable bytes is self-evident, narrow the dtype / fuse the streaming pass regardless of bound-class"
+      },
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "bandwidth",
+          "gate": "memory sub=bandwidth: memory pipe (vmem %-of-peak) at/above hbm_bw_saturated_pct AND not L2-locality/latency limited",
+          "direction": "achieved HBM bytes down (vmem %-of-peak down); time moves iff truly BW-bound",
+          "expected_move": "achieved HBM bytes down (vmem %-of-peak down); time moves iff truly BW-bound",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": "bandwidth",
+          "gate": "memory sub=bandwidth: memory pipe (vmem %-of-peak) at/above hbm_bw_saturated_pct AND not L2-locality/latency limited",
+          "direction": "achieved HBM bytes down (vmem %-of-peak down); time moves iff truly BW-bound",
+          "expected_move": "achieved HBM bytes down (vmem %-of-peak down); time moves iff truly BW-bound",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "gmem-feed"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "hide_mem_latency": {
+      "layer": 4,
+      "direction_class": "structural",
+      "sub_resource": "latency",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "more outstanding buffer_load / deeper prefetch (prefetch regs/LDS, tri-lemma)",
+      "verify": "in-flight vs TCP cap; floor probe (full-floor headroom); boundary timing",
+      "gating_law": "occupancy_gates_latency",
+      "note": "arch_scope=U-mechanism, but the in-flight CAP is A-number (hw_constants.tcp_inflight_cap_kib) and the latency-high threshold is A-number (per-arch Infinity-Fabric). OPPOSITE of cut_hbm_bytes: here the pipe is NOT saturated, latency is exposed -> add in-flight/prefetch to hide it. Gated by occupancy (pays only at low occupancy). NCU long_scoreboard analog: improve locality/coalescing, raise in-flight, stage to shared.",
+      "authoring_ref": "tile-programming/pipeline.md ## Stages",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/pipeline/loop-knobs-and-targets.md ## gfx950 CDNA4 path",
+      "native_group": "memory",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "latency",
+          "gate": "memory sub=latency: L2-Fabric latency high (hw_constants.l2_fabric_latency_high_cyc) AND BW NOT saturated AND low occupancy",
+          "direction": "in-flight up, L2-Fabric-latency-exposed bubble down, MFMA cadence -> ideal",
+          "expected_move": "in-flight up, L2-Fabric-latency-exposed bubble down, MFMA cadence -> ideal",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": "latency",
+          "gate": "memory sub=latency: L2-Fabric latency high (hw_constants.l2_fabric_latency_high_cyc) AND BW NOT saturated AND low occupancy",
+          "direction": "in-flight up, L2-Fabric-latency-exposed bubble down, MFMA cadence -> ideal",
+          "expected_move": "in-flight up, L2-Fabric-latency-exposed bubble down, MFMA cadence -> ideal",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "wait"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "swizzle_padding": {
+      "layer": 3,
+      "direction_class": "knob",
+      "sub_resource": "shared-bank-conflict",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "cycles down at boundary (timing is arbiter, not the rate)",
+      "probe": "SwizzledSharedLayout construct + compile",
+      "note": "NCU shared-memory bank-conflict analog: swizzle/pad the shared layout to spread accesses across banks.",
+      "authoring_ref": "tile-programming/layout-recipes.md ## Padding vs swizzle (LDS bank conflicts)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/layout-reference.md ## Layout Derivation",
+      "native_group": "shared",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "bank_conflict",
+        "reads": [
+          "memory.lds_bank_conflict_frac"
+        ],
+        "gate": "LDS bank-conflict fraction elevated -> swizzle is the self-evident fix; surfaced on-signal regardless of whether the round classified memory/shared"
+      },
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "shared-bank-conflict",
+          "gate": "ds_read_b128 interval > 16cyc OR LDSBankConflict elevated -- SKIP when occupancy (not LDS) is the ceiling: if the LDS-bank-conflict is not the binding bubble, LDS-swizzle is low-EV",
+          "direction": "ds_read interval -> 16cyc (rate may stay flat)",
+          "expected_move": "ds_read interval -> 16cyc (rate may stay flat)",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": "shared-bank-conflict",
+          "gate": "ds_read_b128 interval > 16cyc OR LDSBankConflict elevated -- SKIP when occupancy (not LDS) is the ceiling: if the LDS-bank-conflict is not the binding bubble, LDS-swizzle is low-EV",
+          "direction": "ds_read interval -> 16cyc (rate may stay flat)",
+          "expected_move": "ds_read interval -> 16cyc (rate may stay flat)",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "lds-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "ds_read_tr_transpose": {
+      "layer": 3,
+      "direction_class": "knob",
+      "arch_availability": {
+        "gfx942": "no",
+        "gfx950": "tier-b",
+        "gfx1250": "probe"
+      },
+      "isa_gate": "MFMA",
+      "cost": "none",
+      "verify": "asm shows ds_read_tr",
+      "version_gate": "no Gluon source API -> Tier-B",
+      "default_off": true,
+      "note": "Tier-B: no gluon source API; sanctioned co-design only. Arch gate: on gfx942/CDNA3 (no ds_read_tr / v_cvt_pk_bf16 intrinsics) the bf16-pack/transpose lowers to v_perm VALU; this lever only applies where the intrinsic exists (gfx950+).",
+      "authoring_ref": "tile-programming/layout-recipes.md ## Transpose-read + dual-orientation conflict",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/atoms-reference.md ## `ds_read_tr` (gfx950)",
+      "layout_gen": "scripts/layout_facts.py <arch> <mfma_scaled_instr> --layout  # scale mapping + A/B elems/lane + dims BEFORE authoring. Run `hw_sources.sh preflight` once first: it says which source answers for your arch (cdna1/2/3 + rdna3/4 layout = Matrix Calculator, which must be installed; gfx950 = in-pack DB, no install). Opcode/operand-field/pseudo-code questions are in-pack for gfx950/cdna3/rdna3/rdna4: layout_facts.py <arch> encoding <instr>. The #1 'compiles but wrong numbers' cause is a scale/operand LAYOUT mismatch this generates, not a thing to try.",
+      "native_group": "shared",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "shared",
+          "gate": "transpose-on-read needed",
+          "direction": "removes transpose VALU",
+          "expected_move": "removes transpose VALU",
+          "priority": "high"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "transpose-on-read needed",
+          "direction": "removes transpose VALU",
+          "expected_move": "removes transpose VALU",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "lds-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "raise_occupancy": {
+      "layer": 5,
+      "direction_class": "knob",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "frees regs/LDS",
+      "verify": "SPI limiter clears; timing",
+      "gating_law": "occupancy_gates_latency",
+      "note": "NCU Occupancy analog: higher occupancy hides latency but is not always faster; low occupancy always hurts latency-hiding. Free the limiting resource (regs/LDS) that caps resident waves.",
+      "authoring_ref": "tile-programming/slicing.md ## Occupancy budget (P8)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Reduce accumulator traffic (keep one fragment, convert once)",
+      "native_group": "latency",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "wave-capped by VGPR/LDS (SPI limiter) AND latency/memory-bound -- STOP at the tile geometric floor: the block cannot shrink below the MFMA tile granularity or the MFMA starves \u2014 occupancy is then floored, not liftable, so switch to split-K / more-in-flight-loads instead",
+          "direction": "waves/CU up then bubble down",
+          "expected_move": "waves/CU up then bubble down",
+          "priority": "high"
+        },
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "memory-bound AND occupancy VGPR/LDS-capped (few waves to hide HBM latency)",
+          "direction": "free regs/LDS -> more waves -> hide memory latency",
+          "expected_move": "waves up, mem-latency bubble down",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "wait"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "manual_pipeline_prefetch": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "structural",
+      "arch_availability": {
+        "gfx942": "partial",
+        "gfx950": "yes"
+      },
+      "cost": "prefetch regs (tri-lemma)",
+      "verify": "floor probe (full-floor headroom); timing",
+      "gating_law": "tri_lemma",
+      "route": 2,
+      "note": "THE CLIMB DEFAULT on the Gluon path, and the base the other scheduling models sit on: hand-build the CROSS-ITERATION double-buffer (store-next at loop bottom / load-current at top). Decide groups_per_stage FIRST -- wait_group(N) counts COMMIT GROUPS, N = groups_per_stage * stages_in_flight -- and note N is a static attribute that must reduce to a Python int at trace time, which is why a dynamic loop branches between two literals. Production (429 gfx950 Gluon kernels, triton 3.8): 228 files / 797 commit_group sites; instruction scheduling layers on top in 91, hand-rolled wave priority in 13 of 13. NEVER take the disableSched path (occupancy cliff), and an IN-ITERATION store->barrier->read staging REGRESSES on a 2-wave kernel. gfx942 is 'partial': async_copy lowers there only at 32-bit per thread with a contiguous-tiling BlockedLayout. EXCLUSIVE with reinject_ttgir_pipeliner in the SAME loop. COUNTER-WEIGHT: in a measured gfx950 campaign every overlap mechanism lost to a plain synchronous retiling -- read a pipeline regression as a layout question first.",
+      "authoring_ref": "tile-programming/pipeline.md ## Vetted double-buffer skeleton (copy, then specialize)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/pipeline/loop-knobs-and-targets.md ## gfx950 CDNA4 path",
+      "native_group": "latency",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "latency exposed AND low occupancy AND schedulable slack (WAIT high + independent ready ops)",
+          "direction": "WAIT bucket down, MFMA cadence -> ideal",
+          "expected_move": "WAIT bucket down, MFMA cadence -> ideal",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "wait"
+      ],
+      "expressible_in": [
+        "gluon"
+      ],
+      "scheduling_model": "authored_stage",
+      "stage_role": "climb default on the Gluon path: the only route that expresses per-tensor depth, staggered async chains and sub-buffer splitting, none of which the auto-pipeliner can.",
+      "source": "tile-programming/pipeline.md ## Authoring the overlap yourself (the climb default on the Gluon path)"
+    },
+    "shorten_critical_path": {
+      "layer": 7,
+      "direction_class": "structural",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "floor probe; boundary timing",
+      "gating_law": "occupancy_gates_latency",
+      "note": "fold critical-path scalars off the chain: pre-scale Q, exp2(x*log2e), seed -bias into acc. Issue-bound sibling relief: when a loop is issue-bound (not occupancy-capped, VGPR not the limiter), raising num_warps/waves adds issuable work. num_warps is a universal launch knob (gluon/tilelang expose it directly; flydsl via the launch config). NCU wait-stall analog: hide fixed-latency deps via more active warps / unroll / restructure the dependency chain; prefer lower-latency instructions; occupancy first. Typically a top contributor only in already-optimized kernels.",
+      "authoring_ref": "gluon/matrix-reference.md ## Shorten the critical path (fast exp2 / hoist rescale)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Shorten the critical path (fast exp2 / hoist rescale)",
+      "native_group": "latency",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "dependency-stall (VALUUtil~100 but VALUBusy AND MfmaUtil both low) at LOW occupancy",
+          "direction": "bubble down, VALUBusy/MfmaUtil up",
+          "expected_move": "bubble down, VALUBusy/MfmaUtil up",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "wait"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "reduce_icache_pressure": {
+      "layer": 7,
+      "direction_class": "knob",
+      "sub_resource": "ifetch",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "reduce unroll factor / collapse duplicated code paths / shrink hot-region code footprint",
+      "verify": "L1I hit up + boundary timing",
+      "note": "arch_scope=U-mechanism (L1I capacity is A-number, hw_constants). Low-frequency; relevant for heavily unrolled attention bodies or many-branch kernels. NCU no_instructions / i-cache-miss analog.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "gluon/pipeline/loop-knobs-and-targets.md ## Roll the loop (cut i-cache pressure)",
+      "api_ref": "gluon/pipeline/loop-knobs-and-targets.md ## Roll the loop (cut i-cache pressure)",
+      "native_group": "latency",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": "ifetch",
+          "gate": "latency sub=ifetch: Instr Cache Hit Rate < instr_cache_hit_min_pct OR Instr Fetch Latency high \u2014 big unrolled body / short kernel thrashing the L1I (NCU no_instructions stall)",
+          "direction": "Instr Cache Hit Rate up; fetch-latency bubble down",
+          "expected_move": "Instr Cache Hit Rate up; fetch-latency bubble down",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "sync"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "tile_slicing": {
+      "layer": 5,
+      "direction_class": "structural",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "may lower per-tile reuse",
+      "verify": "occ from KD next_free_vgpr; timing",
+      "note": "NCU register-pressure/spills analog: cut per-thread registers / tile to lift occupancy and eliminate spills.",
+      "authoring_ref": "tile-programming/slicing.md ## Slice recipe (ttgl.amd.slice)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/layout-reference.md ## Slice And Broadcast Recipe",
+      "native_group": "register",
+      "applies_to": [
+        {
+          "bound": "register",
+          "sub": null,
+          "gate": "spill in .amdgcn / next_free_vgpr crosses a wave cliff",
+          "direction": "spill -> 0, waves/CU up",
+          "expected_move": "spill -> 0, waves/CU up",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "spill in .amdgcn / next_free_vgpr crosses a wave cliff",
+          "direction": "spill -> 0, waves/CU up",
+          "expected_move": "spill -> 0, waves/CU up",
+          "priority": "med"
+        },
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "uncoalesced loads OR high atomic fan-in from a large tile",
+          "direction": "slice the tile -> smaller/better-coalesced access, lower reduction fan-in",
+          "expected_move": "coalescing up / fan-in down",
+          "priority": "med"
+        }
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "lds_dedup": {
+      "layer": 5,
+      "direction_class": "structural",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "SPI limiter clears",
+      "note": "NCU Occupancy shared-mem-limiter analog: free the shared-memory resource that caps resident waves so occupancy can rise.",
+      "authoring_ref": "tile-programming/slicing.md ## LDS dedup (carve reuse from one allocation)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/layout-reference.md ## Slice And Broadcast Recipe",
+      "native_group": "register",
+      "applies_to": [
+        {
+          "bound": "register",
+          "sub": null,
+          "gate": "LDS the wave-capping resource (SPI 6.2.7)",
+          "direction": "LDS/wg down, waves/CU up",
+          "expected_move": "LDS/wg down, waves/CU up",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "LDS the wave-capping resource (SPI 6.2.7)",
+          "direction": "LDS/wg down, waves/CU up",
+          "expected_move": "LDS/wg down, waves/CU up",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "lds-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "reduce_accumulator_traffic": {
+      "layer": 6,
+      "direction_class": "structural",
+      "sub_resource": "agpr-shuffle",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "restructure accumulation (dtype/liveness/tiling of the accumulator)",
+      "verify": "ATT AGPR-shuffle bucket down + timing; correctness under oracle",
+      "gating_law": "",
+      "note": "When occupancy is walled, attack the accumulator TRAFFIC itself (tighter accumulator dtype, fewer live AGPRs, or accumulation-order restructure so the per-iter read-modify shrinks) rather than trying to raise waves. Distinct from raise_occupancy. General. Tested on gfx942 / triton-3.7.",
+      "authoring_ref": "gluon/matrix-reference.md ## Reduce accumulator traffic (keep one fragment, convert once)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Reduce accumulator traffic (keep one fragment, convert once)",
+      "layout_gen": "scripts/layout_facts.py <arch> <mfma_scaled_instr> --layout  # scale mapping + A/B elems/lane + dims BEFORE authoring. Run `hw_sources.sh preflight` once first: it says which source answers for your arch (cdna1/2/3 + rdna3/4 layout = Matrix Calculator, which must be installed; gfx950 = in-pack DB, no install). Opcode/operand-field/pseudo-code questions are in-pack for gfx950/cdna3/rdna3/rdna4: layout_facts.py <arch> encoding <instr>. The #1 'compiles but wrong numbers' cause is a scale/operand LAYOUT mismatch this generates, not a thing to try.",
+      "native_group": "register",
+      "applies_to": [
+        {
+          "bound": "register",
+          "sub": "agpr-shuffle",
+          "gate": "AGPR read-modify / AGPR<->VGPR round-trip is a top inter-MFMA bubble owner AND occupancy is register-walled (cannot be fixed by raising waves) -- also a WALL signal: if VGPR is already at the arch ceiling with spill present, the convert/AGPR direction is register-live-set-bound and cannot be freed by shedding one operand \u2014 record the ceiling, stop splitting",
+          "direction": "AGPR-shuffle bubble share down; fewer v_accvgpr read/write/mov; may free registers",
+          "expected_move": "AGPR-shuffle bubble share down; fewer v_accvgpr read/write/mov; may free registers",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": "agpr-shuffle",
+          "gate": "AGPR read-modify / AGPR<->VGPR round-trip is a top inter-MFMA bubble owner AND occupancy is register-walled (cannot be fixed by raising waves) -- also a WALL signal: if VGPR is already at the arch ceiling with spill present, the convert/AGPR direction is register-live-set-bound and cannot be freed by shedding one operand \u2014 record the ceiling, stop splitting",
+          "direction": "AGPR-shuffle bubble share down; fewer v_accvgpr read/write/mov; may free registers",
+          "expected_move": "AGPR-shuffle bubble share down; fewer v_accvgpr read/write/mov; may free registers",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "cvt-mov"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "mfma_tile_shape": {
+      "layer": 7,
+      "direction_class": "knob",
+      "sub_resource": "mfma-issue",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "probe"
+      },
+      "isa_gate": "MFMA",
+      "cost": "tile grows regs",
+      "verify": "MFMA-eff; timing",
+      "note": "instr_shape [32,32,16]/[16,16,16]. arch_scope=A-mechanism: gfx942/gfx950 are MFMA (isa_gate MFMA). gfx1250 (CDNA5/MI450) is WMMA+TDM, NOT MFMA \u2014 the isa_gate drops this card when isa.mfma is false; the equivalent there is a WMMA tile-shape lever (probe/author, capability-matrix.md gfx1250 rows). NCU Compute-Workload pipe-util / Tensor-Core tile analog: raise work-per-issue by filling the matrix-core tile.",
+      "authoring_ref": "gluon/matrix-reference.md ## CDNA MFMA Shape",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## CDNA MFMA Shape",
+      "layout_gen": "scripts/layout_facts.py <arch> <mfma_scaled_instr> --layout  # scale mapping + A/B elems/lane + dims BEFORE authoring. Run `hw_sources.sh preflight` once first: it says which source answers for your arch (cdna1/2/3 + rdna3/4 layout = Matrix Calculator, which must be installed; gfx950 = in-pack DB, no install). Opcode/operand-field/pseudo-code questions are in-pack for gfx950/cdna3/rdna3/rdna4: layout_facts.py <arch> encoding <instr>. The #1 'compiles but wrong numbers' cause is a scale/operand LAYOUT mismatch this generates, not a thing to try.",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "mfma-issue",
+          "gate": "MfmaUtil high AND tile filled AND cadence ~ ideal",
+          "direction": "MfmaUtil -> ~98%",
+          "expected_move": "MfmaUtil -> ~98%",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "grow_tile_underfill": {
+      "plain_autotune_absorbable": true,
+      "layer": 7,
+      "direction_class": "structural",
+      "search_class": "divergent",
+      "sub_resource": "mfma-issue",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "regs",
+      "verify": "geometry + MfmaUtil",
+      "note": "NCU Compute-Workload / Tensor-Core-tile analog: an under-filled matrix tile wastes issue slots \u2014 grow the tile to fill the matrix-core geometry.",
+      "authoring_ref": "gluon/matrix-reference.md ## Matrix-Family Details",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Matrix-Family Details",
+      "native_group": "compute",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "tile_underfill",
+        "reads": [
+          "sol.mfma_pct",
+          "occupancy.limiter",
+          "static.longest_valu_run"
+        ],
+        "gate": "MfmaUtil low AND occupancy not the limiter (room to grow) AND a long exposed VALU-only run (asm_loop_audit) -> the tile is too small; grow it regardless of the bound-class label"
+      },
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "mfma-issue",
+          "gate": "MfmaUtil low AND tile_dim < warps*instr_extent (under-FILLED)",
+          "direction": "MfmaUtil up",
+          "expected_move": "MfmaUtil up",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": "dependency-stall",
+          "gate": "MfmaUtil low AND waves>=2 AND NOT occ-limited AND tile under-filled (exposed VALU-only run) -- a small-tile kernel mis-reads as latency; the fix is a BIGGER tile, not occupancy relief",
+          "direction": "MfmaUtil up (raise arithmetic intensity, accept lower occupancy)",
+          "expected_move": "MfmaUtil up",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "amortize_parallel_axis": {
+      "plain_autotune_absorbable": true,
+      "layer": 7,
+      "direction_class": "structural",
+      "search_class": "divergent",
+      "sub_resource": "mfma-issue",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "regs/occupancy",
+      "verify": "VALUBusy + geometry",
+      "note": "Grow the parallel/M tile so per-tile epilogue + address overhead amortizes across more MFMAs, raising MfmaUtil. Costs regs/occupancy \u2014 gate on MfmaUtil low AND tile filled AND a serial (under-amortized) epilogue. NCU Compute-Workload analog: amortize fixed per-tile overhead across more matrix-core work to raise pipe utilization.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "gluon/matrix-reference.md ## Amortize the epilogue (grow M)",
+      "api_ref": "gluon/matrix-reference.md ## Amortize the epilogue (grow M)",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "mfma-issue",
+          "gate": "MfmaUtil low AND tile filled AND serial epilogue (under-AMORTIZED)",
+          "direction": "MfmaUtil up via bigger M",
+          "expected_move": "MfmaUtil up via bigger M",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": "dependency-stall",
+          "gate": "MfmaUtil low AND waves>=2 AND NOT occ-limited AND tile filled AND serial epilogue -- a per-tile-overhead-bound kernel mis-reads as latency; amortize across a bigger M, not occupancy relief",
+          "direction": "MfmaUtil up via bigger M (raise arithmetic intensity, accept lower occupancy)",
+          "expected_move": "MfmaUtil up via bigger M",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "fold_scalars_valu": {
+      "layer": 7,
+      "direction_class": "knob",
+      "sub_resource": "valu",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "A/B removes work -> time moves",
+      "gating_law": "cut_idle_unit_neutral",
+      "note": "Fold a runtime per-element scalar multiply into one exp2-arg / MFMA-input multiply. TWO caveats: (1) RUNTIME scalars can win, COMPILE-TIME constants do not (the compiler already FMA'd them -> neutral, don't retry); (2) DTYPE-GATED \u2014 a fold can win on one MFMA input dtype and regress on another, so gate behind a dtype check and keep the separate scale on the regressing dtype.",
+      "authoring_ref": "gluon/matrix-reference.md ## Fold scalars off the VALU chain",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Fold scalars off the VALU chain",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "valu",
+          "gate": "softmax/epilogue folds a per-element scalar multiply into an exp2 arg or MFMA input AND the scalar is a RUNTIME value (compile-time constants are already FMA'd/DCE'd by the compiler -> neutral)",
+          "direction": "VALUBusy down",
+          "expected_move": "VALUBusy down",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "fp-compute"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "cut_address_arith_iops": {
+      "layer": 5,
+      "direction_class": "knob",
+      "sub_resource": "valu",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "may free regs",
+      "verify": "asm confirms address math hoisted",
+      "note": "Hoist per-iteration address arithmetic (index/stride int math) out of the hot loop into loop-invariant precompute so the inter-MFMA VALU-IOP bubble shrinks. Gate on VALU IOPs dominating FLOPs. NCU integer/ALU-pressure analog: reduce address/index math on the binding ALU pipe; hoist loop-invariant computation.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "tile-programming/slicing.md ## Hoist address arithmetic (cut IOPs)",
+      "api_ref": "gluon/layout-reference.md ## Slice And Broadcast Recipe",
+      "native_group": "compute",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "hot_addr_math",
+        "reads": [
+          "static.op_class_pct.iops"
+        ],
+        "gate": "loop-invariant integer/address IOPs share high in the hot loop -> hoist/coalesce the address math regardless of bound-class"
+      },
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "valu",
+          "gate": "VALU IOPs (2.1.1) >> VALU FLOPs (2.1.0)",
+          "direction": "IOPs down, scalar% down",
+          "expected_move": "IOPs down, scalar% down",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "addressing"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "reduce_divergence": {
+      "layer": 7,
+      "direction_class": "knob",
+      "sub_resource": "divergence",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "cost": "restructure control flow (uniform-ize / predicate / block-align the divergent axis)",
+      "verify": "active-threads/wave up (rocprof) or predicated-off share down; boundary timing",
+      "note": "arch_scope=U-mechanism, but the per-wave lane count (max active-threads) is A-number = wave_size (hw_constants; CDNA=64, RDNA/gfx1250=32) \u2014 a wave64 arch wastes more per divergent lane. NCU Branch-Efficiency / predicated-off analog. Distinct from grid-level LPT remap (that balances the GRID; this fixes WITHIN a wave). Mask-branch elimination / uniform control / pow2-align the ragged axis.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "gluon/memory-reference.md ## Reduce divergence (predicate, not branch)",
+      "api_ref": "gluon/memory-reference.md ## Reduce divergence (predicate, not branch)",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "divergence",
+          "gate": "compute sub=divergence: VALU active-threads/wave < valu_active_threads_min_frac * wave_size OR Branch Util (2.1.12) high \u2014 wave-internal predication wasting lanes (causal-mask / MoE-routing / ragged tails)",
+          "direction": "VALU active-threads/wave -> wave_size; Branch Util down; effective FLOP/wave up",
+          "expected_move": "VALU active-threads/wave -> wave_size; Branch Util down; effective FLOP/wave up",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "fp-compute"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "scaled_mfma_lowprec": {
+      "layer": 7,
+      "direction_class": "knob",
+      "sub_resource": "valu",
+      "arch_availability": {
+        "gfx942": "no",
+        "gfx950": "yes",
+        "gfx1250": "probe"
+      },
+      "isa_gate": "scaled-MFMA",
+      "cost": "scale side path",
+      "verify": "correctness (cosine) + timing",
+      "probe": "compile gl.amd.cdna4.mfma_scaled(a,None,'e4m3',b,None,'e4m3',acc) tiny kernel",
+      "authoring_ref": "tile-programming/low-precision.md ## When scaled MFMA is required here, and when it is not",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/atoms-reference.md ## CDNA4 gfx950 \u2014 MFMA + scaled",
+      "layout_gen": "scripts/layout_facts.py <arch> <mfma_scaled_instr> --layout  # scale mapping + A/B elems/lane + dims BEFORE authoring. Run `hw_sources.sh preflight` once first: it says which source answers for your arch (cdna1/2/3 + rdna3/4 layout = Matrix Calculator, which must be installed; gfx950 = in-pack DB, no install). Opcode/operand-field/pseudo-code questions are in-pack for gfx950/cdna3/rdna3/rdna4: layout_facts.py <arch> encoding <instr>. The #1 'compiles but wrong numbers' cause is a scale/operand LAYOUT mismatch this generates, not a thing to try.",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "valu",
+          "gate": "fp4 at any shape, or fp8 at an (M,N,K) with no regular MFMA intrinsic",
+          "direction": "MFMA dtype -> fp8/fp4 peak",
+          "expected_move": "MFMA dtype -> fp8/fp4 peak",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "fp-compute"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "attn_intra_loop_schedule": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "structural",
+      "sub_resource": "dependency-stall",
+      "arch_availability": {
+        "gfx942": "probe",
+        "gfx950": "probe"
+      },
+      "isa_gate": "MFMA",
+      "cost": "none",
+      "verify": "floor probe + structural-vs-schedulable; sweep + A/B; confirm the schedule actually moved (ISA waitcnt-per-MFMA / interleave toward the reference), not just that it compiled",
+      "version_gate": "a throughput-pairing GEMM scheduler asserts on VALU-between-matmul; amdgpu-sched-strategy version-sensitive",
+      "default_off": true,
+      "gating_law": "in_region_sched_needs_clean_region",
+      "route": 3,
+      "probe": "FIRST compute the per-region budget on paper (no GPU needed); then llc --amdgpu-sched-strategy=<s> presence; sweep max-occupancy/max-ilp/max-memory-clause + metric-bias + relaxed-occupancy + wave-priority; and separately probe whether a region-classifying scheduler can be loaded as a pass plugin (three build states, two fail quietly: tile-programming/llir-codesign.md ## The plugin tier)",
+      "note": "LAST tier, and only once the overlap STRUCTURE already exists -- this schedules within a structure, it does not create one (so either the authored ring or a re-injected pipeline has to be in place first): DEFERRED/OFF-BY-DEFAULT (plan 4c). Two rungs at very different cost -- a plugin-loaded pass needs no LLVM rebuild (see llir_declarative_schedule, the stronger DECLARE form), authoring one under Scenario B does; default-off here is not because every form requires a rebuild. In-band knobs exist in some LLVM but availability + valid strings are probe-per-build; manual AC/LR/DOT interleave is the portable fallback. PREREQUISITE is the gating_law above: satisfy it BEFORE sweeping. The WALL, and the exit for when the schedule is NOT the problem, are both computable before any sweep -- tile-programming/llir-codesign.md ## Attention: the co-execution budget and ## When the schedule is not the problem. EXPERIENCE: for 2-warpgroup ping-pong try the STOCK BlockPingpong first -- on the Gluon path it does fire after the pipeliner + a two-loop mask-split, but was net-negative here on an occupancy/MFMA-fill cliff.",
+      "authoring_ref": "tile-programming/llir-codesign.md ## Attention: the co-execution budget",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Matrix Lowering Order",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "dependency-stall",
+          "gate": "attention/VALU-between-matmul AND ILP-starved (reorderable slack) AND the loop body is split into clean per-purpose scheduling regions (gating_law in_region_sched_needs_clean_region)",
+          "direction": "WAIT bucket down / schedule density toward the reference (only if schedulable AND the region is clean)",
+          "expected_move": "WAIT bucket down / schedule density toward the reference (only if schedulable AND the region is clean)",
+          "priority": "high"
+        },
+        {
+          "bound": "latency",
+          "sub": "dependency-stall",
+          "gate": "attention/VALU-between-matmul AND ILP-starved (reorderable slack) AND the loop body is split into clean per-purpose scheduling regions (gating_law in_region_sched_needs_clean_region)",
+          "direction": "WAIT bucket down / schedule density toward the reference (only if schedulable AND the region is clean)",
+          "expected_move": "WAIT bucket down / schedule density toward the reference (only if schedulable AND the region is clean)",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "downcast_rounding_rtz": {
+      "layer": 5,
+      "direction_class": "knob",
+      "sub_resource": "valu-convert",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none (may free VGPR). SAFE member = round-half-up; RTZ member is biased -- see note.",
+      "verify": "ATT convert-bucket share drops + timing; correctness MUST stay under oracle tol. Round-half-up is bit-identical to RTNE on non-tie/non-NaN inputs (verify on the real tensor). RTZ shifts every cast -> re-check the oracle, it can blow a tight tol.",
+      "gating_law": "cut_idle_unit_neutral",
+      "note": "Cut the fp32->bf16 cast cost on MFMA-input downcasts (gfx942/gfx950 have no native convert; LLVM's RTNE-with-NaN-guard is ~5-6 VALU/elem). TWO members, pick by tolerance: (1) DEFAULT = round-half-up ((bits + 0x8000) >> 16): ~2 VALU/elem AND bit-identical to RTNE for all non-tie/non-NaN inputs, so it is a free win with no accuracy cost -- use this unless you have a reason not to. (2) FALLBACK = round-to-zero (fp_downcast_rounding='rtz' / truncation): also ~2 VALU/elem but BIASED (rel err ~2^-8 vs RTNE 2^-9) and the bias ACCUMULATES over a long reduction axis -- only when a measured tol margin proves it safe, never on a kernel already near its oracle tol. General AMD-CDNA lever.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "tile-programming/low-precision.md ## Cheap fp32->bf16 downcast (cut the convert bubble)",
+      "api_ref": "gluon/memory-reference.md ## Buffer Dtype Rules",
+      "native_group": "compute",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "fp32_cast_present",
+        "reads": [
+          "static.op_class_pct.layout_convert"
+        ],
+        "gate": "an fp32->bf16 cast / convert VALU share in the hot loop with rtz unset -> the rtz downcast is cost-neutral and self-evident regardless of bound-class"
+      },
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "valu-convert",
+          "gate": "convert/cvt-mov VALU is a top inter-MFMA bubble owner (ATT rollup) AND the kernel down-casts fp32->bf16/fp16 for MFMA inputs each iter",
+          "direction": "convert-bubble share down; VALU:MFMA down; can free VGPR. Prefer round-half-up (bit-identical to RTNE); use RTZ only with a proven tol margin.",
+          "expected_move": "convert-bubble share down; VALU:MFMA down; can free VGPR. Prefer round-half-up (bit-identical to RTNE); use RTZ only with a proven tol margin.",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "cvt-mov"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "eliminate_inloop_transpose": {
+      "layer": 6,
+      "direction_class": "structural",
+      "sub_resource": "valu-convert",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "restructure operand production (trans-free variant)",
+      "verify": "ATT/ISA shows the convert_layout/v_perm removed between the chained dots + timing",
+      "gating_law": "cut_idle_unit_neutral",
+      "note": "Produce the operand already in the layout the next MFMA needs (non-transposed variant) so no in-loop transpose convert is emitted. GENERALIZE across EVERY chained-MFMA operand-transpose site in the op, not just the first one found \u2014 the same trick usually applies to each sibling loop/operand. Mechanism differs by DSL (layout hint vs explicit tile layout). On an arch lacking ds_read_tr the transpose lowers to v_perm VALU \u2014 this lever removes it.",
+      "authoring_ref": "gluon/matrix-reference.md ## Hot-Loop Conversion Counting",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Hot-Loop Conversion Counting",
+      "layout_gen": "scripts/layout_facts.py <arch> <mfma_scaled_instr> --layout  # scale mapping + A/B elems/lane + dims BEFORE authoring. Run `hw_sources.sh preflight` once first: it says which source answers for your arch (cdna1/2/3 + rdna3/4 layout = Matrix Calculator, which must be installed; gfx950 = in-pack DB, no install). Opcode/operand-field/pseudo-code questions are in-pack for gfx950/cdna3/rdna3/rdna4: layout_facts.py <arch> encoding <instr>. The #1 'compiles but wrong numbers' cause is a scale/operand LAYOUT mismatch this generates, not a thing to try.",
+      "native_group": "compute",
+      "tier": "universal",
+      "coarse_signal": {
+        "id": "dead_transpose",
+        "reads": [
+          "static.op_class_pct.layout_convert"
+        ],
+        "gate": "a layout-convert / transpose VALU share in the hot loop (asm_loop_audit op-class histogram) -> a dead in-loop transpose is self-evident, eliminate it regardless of bound-class"
+      },
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "valu-convert",
+          "gate": "hot loop inserts convert_layout / v_perm to transpose an operand between chained MFMAs (e.g. qkT->pT, dsT->dk) AND gfx942 has no ds_read_tr LDS-transpose",
+          "direction": "convert/v_perm bubble down; fewer chained-MFMA layout converts",
+          "expected_move": "convert/v_perm bubble down; fewer chained-MFMA layout converts",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "cvt-mov"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "gemm_compiler_stack": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "structural",
+      "sub_resource": "schedule-interleave",
+      "route": "compiler-stack",
+      "scheduling_model": "compiler_interleave",
+      "arch_availability": {
+        "gfx942": "partial",
+        "gfx950": "yes"
+      },
+      "isa_gate": "MFMA",
+      "cost": "NO Gluon source edit and NO libtriton rebuild. On upstream 3.8.0 the AGPR rung is a per-compile option (llvm_fn_attrs); the interleave rung needs a pass you author plus a qualifying host build (llir_declarative_schedule; llir-codesign.md ## The plugin tier). Probe-per-build, never baked to a container.",
+      "config_ladder": [
+        {
+          "rung": "base",
+          "knob": null,
+          "expected_move": "clustered-MFMA baseline (the default LLVM scheduler clumps like instructions)",
+          "verify": "asm_loop_audit: MFMA clustered + full-drain lgkmcnt(0) before each consumer"
+        },
+        {
+          "rung": "+scheduling",
+          "knob": "no upstream toggle exists -- author the structure (warp_pipeline_stage / authored ring), or author a pass; compiler-contract.md ## What upstream 3.8.0 actually gives you",
+          "gate": "structure independent + prefetched (else nothing to interleave); an authored-pass route is additionally host-build-gated (llir_declarative_schedule)",
+          "expected_move": "MFMA interleaved between buffer_load/ds_read at the hardware throughput rate (ratio = mfma_cycles vs load-issue interval; hw_constants); MfmaUtil rises toward the arch cadence",
+          "verify": "asm: MFMA no longer clustered, next-iter loads issue before this DOT. The pinning style is readable here: a pass that DISABLES misched/post-misched globally gives up scheduling outside the hot loop, where one that pins with sched.barrier(0) after each memory anchor leaves them enabled."
+        },
+        {
+          "rung": "+agpr_hint",
+          "knob": "llvm_fn_attrs=\"amdgpu-agpr-alloc=256,amdgpu-mfma-vgpr-form=0\"  (3.8.0 only; LLVM function attributes, no env var and no fork needed)",
+          "gate": "compute-bound LARGE K (epilogue a small share of runtime) AND VGPR headroom exists (e.g. after slicing dropped pressure below the arch ceiling)",
+          "expected_move": "accumulators pinned in AGPR; in-loop v_accvgpr_* copies eliminated; frees VGPR",
+          "verify": "asm: no in-loop v_accvgpr_*, accumulator in AGPR",
+          "risk": "small-K / epilogue-heavy REGRESSES \u2014 forcing AGPR pushes v_accvgpr_read into the epilogue (the v_cvt downcast needs VGPR inputs). NOT safe as a default; gate by bound class."
+        },
+        {
+          "rung": "+source_scalar_reduction",
+          "knob": "none -- upstream has no post-assembly stage; reduce loop-invariant address math and in-loop scalar work at SOURCE level instead",
+          "gate": "residual scattered SALU / misplaced waits at iteration boundaries; SINGLE-BB self-loop only (a hot loop with internal branches \u2014 last-iter prefetch guard, conditional store \u2014 is multi-BB and outside the loop detector)",
+          "expected_move": "fewer loop-invariant address ops inside the loop body; less in-loop scalar work for any later stage to have to recover",
+          "verify": "asm: fewer address-arithmetic ops inside the loop body; budget and correctness unchanged"
+        }
+      ],
+      "verify": "three-evidence: asm_loop_audit shows the interleave/AGPR/peephole landed + rocprof MfmaUtil up + occupancy unchanged + correctness under oracle; TIMING at the contract boundary is the keep/revert arbiter, the counter only localizes. Record the ACTIVE config, not the intended one.",
+      "gating_law": "compiler_lever_needs_paired_structure",
+      "version_gate": "UPSTREAM 3.8.0 SPLITS THIS CARD: +agpr_hint is fully reachable per compile (amdgpu-agpr-alloc / amdgpu-mfma-vgpr-form are LLVM FUNCTION ATTRIBUTES, carried by llvm_fn_attrs, 3.8.0 only); +scheduling has NO upstream toggle and needs a pass you author -- but CHECK THE STOCK coexec STRATEGY FIRST for matrix+VALU regions (TRITON_HIP_USE_COEXEC_SCHEDULER); there is NO post-assembly stage upstream at all. Env names for an in-tree scheduler/RA/post-asm toggle are ABSENT upstream and inert if set -- never plan on them. Detail + fallback order: compiler-contract.md ## What upstream 3.8.0 actually gives you.",
+      "probe": "scripts/probe_levers.py: probe the MECHANISM, never a variable name (an env name no installed code reads is inert, not an error): for the agpr rung that is llvm_fn_attrs presence plus an assembly diff, for the interleave rung the host build states. Absent -> record ceiling, do not recommend. Presence of a symbol/knob is NOT the pass biting: confirm in the IR.",
+      "default_off": true,
+      "authoring_ref": "tile-programming/compiler-contract.md",
+      "note": "route=compiler-stack: the compiler_interleave GEMM co-design ladder \u2014 the first-class card form of the capability split documented in compiler-contract.md ## What upstream 3.8.0 actually gives you. VALU-between-matmul kernels (attention / MLA / softmax / gate / dequant) BREAK the assumption: a throughput-pairing GEMM scheduler ASSERTS here (invalid IR, not a slowdown) and the AGPR hint regresses -> use attn_intra_loop_schedule (route 3), manual interleave (pipeline.md), or reinject_ttgir_pipeliner (route 1) instead. The source-side companion of the +agpr_hint rung is reduce_accumulator_traffic (restructure accumulation) \u2014 use it when the AGPR hint is unavailable or contraindicated. The inter_wave ALTERNATIVE to this whole card is warp_pipeline_schedule. NCU instruction-scheduling / RA analog \u2014 but AMDGPU-backend-specific (open backend + AGPR/VGPR duality); no ptxas equivalent.",
+      "source": "tile-programming/compiler-contract.md",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Lowering Ladders",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "schedule-interleave",
+          "gate": "GEMM-class PURE MFMA->MFMA accumulator chain (accumulator written-only-until-epilogue, only copies between MFMAs \u2014 NOT VALU-between-matmul); compute/mfma-issue bound with MfmaUtil below the arch cadence AND clustered MFMA in asm (an all-MFMA run then an all-ds_read run); the explicit independent AC/LR/DOT + prefetched multi-buffer pipeline is ALREADY written (the knobs EXPLOIT structure, they do not create it); constexpr K (hard prerequisite)",
+          "direction": "MfmaUtil climbs toward the arch cadence as the rungs land (base -> +scheduling -> +agpr_hint)",
+          "expected_move": "MfmaUtil climbs toward the arch cadence as the rungs land (base -> +scheduling -> +agpr_hint)",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "coexec_budget_balance": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "convergent",
+      "direction_class": "structural",
+      "sub_resource": "schedule-interleave",
+      "arch_availability": {
+        "gfx942": "probe",
+        "gfx950": "yes"
+      },
+      "isa_gate": "MFMA",
+      "cost": "none in instructions when the move is a register-only view (the compiler must PROVE the slice is layout-preserving); otherwise a cross-lane shuffle that eats the imbalance being recovered. Carries no register cost: the moved slices hold the same element count.",
+      "verify": "per-region window fill moves toward capacity on BOTH regions (not just the one that was over); in-loop matrix-issue efficiency up; interleaved A/B timing at the pinned boundary as arbiter; numerics unchanged (the move is elementwise-exact)",
+      "default_off": false,
+      "gating_law": "occupancy_gates_latency",
+      "probe": "compute capacity vs demand per compute region on paper first -- no GPU needed; then sweep the moved fraction at the slice granularity the tile allows",
+      "note": "KERNEL-SIDE half of the co-execution model, and the one the compiler cannot do: only per-region TOTALS matter, so elementwise work can be MOVED between two regions sharing a shadow budget to level them. Two rules make the move safe and free (the move must emit no instructions; a producer travels WITH its consumer) -- tile-programming/llir-codesign.md ## Attention: the co-execution budget. APPLICABILITY: the balance ratio is per (head-dim, block-N, dtype) and NEVER transfers across shapes, because capacity and demand move with the tile at different rates; slice granularity is what makes a new ratio reachable at all. PREREQUISITE: two resident waves per SIMD, else the premise is gone. Kernel-side half of a PAIR: llir_declarative_schedule is the compiler-side half, and it has nothing to place until this budget fits (tile-programming/llir-codesign.md ## When the schedule is not the problem).",
+      "authoring_kind": "recipe",
+      "authoring_ref": "tile-programming/llir-codesign.md ## Attention: the co-execution budget",
+      "api_ref": "tile-programming/slicing.md ## Slice recipe (ttgl.amd.slice)",
+      "native_group": "compute",
+      "workload": [
+        "attention",
+        "mla"
+      ],
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "schedule-interleave",
+          "gate": "compute/mfma-issue bound AND two resident waves per SIMD AND the paper budget shows one compute region over capacity while another has slack (an unbalanced pair, not a uniformly-over one -- uniformly over means REDUCE the work, not move it)",
+          "direction": "both regions land inside their window with margin; the over-region's exposed cycles go to zero",
+          "expected_move": "both regions land inside their window with margin; the over-region's exposed cycles go to zero",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence",
+        "fp-compute"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "llir_declarative_schedule": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "knob",
+      "sub_resource": "schedule-interleave",
+      "arch_availability": {
+        "gfx942": "target-specific-blocker",
+        "gfx950": "probe"
+      },
+      "isa_gate": "MFMA",
+      "cost": "a default-visibility host build (NOT an LLVM rebuild); the plugin binary is ABI-locked to the host's compiler revision and a mismatch CRASHES rather than degrades",
+      "verify": "prove-fires FIRST (a pass that never loaded and a pass that did nothing are indistinguishable from the boundary), then a literal diff of the emitted hot loop, then a positive control; timing LAST. Landed = the declared groups all placed and each region's vector ops sitting between its MFMAs; a region that fell back to instruction-selection order is the signature of an UNSATISFIABLE declaration, not of a lazy scheduler",
+      "default_off": true,
+      "requires_compiler_path_edit": true,
+      "requires_llvm_rebuild": false,
+      "gating_law": "in_region_sched_needs_clean_region",
+      "route": 3,
+      "version_gate": "HOST-BUILD gated, not version gated: four gates and only one fails loudly, so 'the plugin did nothing' is not a finding until all four are green. Gate list, failure modes and probe order: tile-programming/llir-codesign.md ## The plugin tier.",
+      "probe": "check the host exports compiler symbols; record the host's compiler revision and match the plugin to it; confirm a target machine is kept when a plugin loads; then confirm the loop's matrix shape is in your pass's cost model (an unpriced shape drops the region silently)",
+      "note": "DECLARE the interleave (let the backend solver BUILD the requested pipeline) instead of reordering and pinning it -- a bare do-not-cross marker is only advisory. Stronger form, but it has three authoring disciplines and two kernel-side preconditions, EACH with a silent failure mode: tile-programming/llir-codesign.md ## Declaring the interleave and ## Two preconditions the kernel must protect. Applicability is per TARGET, not per arch family: a matrix shape your pass cannot price drops its region without a word (## Applicability gate: shapes the tool does not model). PAIRS WITH coexec_budget_balance (the kernel-side half): declaring an interleave cannot rescue a region whose demand exceeds capacity.",
+      "authoring_kind": "recipe",
+      "authoring_ref": "tile-programming/llvm-codesign-handbook.md ## Out-of-tree pass plugin skeleton",
+      "api_ref": "gluon/pipeline/authored-overlap.md ## Authored overlap (no compiler patch)",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "schedule-interleave",
+          "gate": "compute/mfma-issue bound AND the paper budget FITS (demand <= capacity) AND measured window fill still sits far under it AND the region boundaries exist (stage markers, or an inferrable memory/MFMA order) AND the host build admits a plugin",
+          "direction": "declared groups placed; window fill toward capacity; in-loop matrix-issue efficiency up at unchanged occupancy",
+          "expected_move": "declared groups placed; window fill toward capacity; in-loop matrix-issue efficiency up at unchanged occupancy",
+          "priority": "med"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "mem_stage_phase_pacing": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "convergent",
+      "direction_class": "knob",
+      "sub_resource": "schedule-interleave",
+      "arch_availability": {
+        "gfx942": "probe",
+        "gfx950": "probe"
+      },
+      "isa_gate": "MFMA",
+      "cost": "a few idle scalar cycles per memory stage; removes no work and adds no register or LDS pressure",
+      "verify": "in-loop matrix-issue efficiency per SIMD up while the instruction inventory is UNCHANGED (that is the tell it is a phase effect); the region head's 3-source vector block no longer coincides with the other wave's LDS-return burst in an instruction trace",
+      "default_off": false,
+      "probe": "sweep the small integer count exhaustively (0..4) -- the response is NOT monotone, so bisection misleads; keep the winner per kernel, and re-sweep after any change to the stage split",
+      "note": "A PHASE lever, not a quantity lever, and the only one on this list that deliberately ADDS idle cycles. Issuing in the same cycle is necessary for two instructions to overlap but not sufficient: the register file sits behind both issue ports, so a 3-source vector op (fused-multiply-add, a 3-input max) and an arriving LDS return contend for ports. A compute region puts its 3-source work exactly where the collision is worst, because a reduction is first in dependency order and the scheduler has nowhere else to put it. Padding the head of the MEMORY stage shifts that wave's reads later so they arrive past the 3-source block and land on cheaper work instead -- the kernel is unchanged, only the phase relationship between the two waves moves. COMPANION LEVER from the opposite end: remove the third source (fold a scale into an operand loaded once upstream so a fused op becomes a plain subtract), verified by counting 3-source vector ops in the loop body. DO NOT confuse with the compiler-inserted hazard nop: that one reads as exposed fixed-latency and is answered with unroll/occupancy, and reorder cannot create slack there (hardware/bound-class-signals.md ## Stall-reason \u2192 lever).",
+      "authoring_kind": "knob",
+      "authoring_ref": "tile-programming/llir-codesign.md ## Phase pacing: moving a burst instead of removing work",
+      "api_ref": "gluon/pipeline/authored-overlap.md ## Authored overlap (no compiler patch)",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "schedule-interleave",
+          "gate": "compute/mfma-issue bound AND two resident waves per SIMD in a stage ping-pong AND the compute region's head carries 3-source vector work AND the budget already FITS (this recovers a pairing the budget assumed, it does not create capacity)",
+          "direction": "in-loop matrix-issue efficiency up by a small amount at an unchanged instruction count",
+          "expected_move": "in-loop matrix-issue efficiency up by a small amount at an unchanged instruction count",
+          "priority": "cheap-first"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence",
+        "lds-feed"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    },
+    "warp_pipeline_schedule": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "structural",
+      "sub_resource": "schedule-interleave",
+      "route": "wave-pingpong",
+      "scheduling_model": "inter_wave",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "isa_gate": "MFMA",
+      "cost": "restructure the loop into two warp_pipeline_stage clusters; running 2 waves/SIMD lowers the per-wave VGPR budget and keeps accumulators in VGPR (llvm_fn_attrs amdgpu-agpr-alloc=0,0). Trades ILP for occupancy (tri-lemma).",
+      "kernel_rules": "launch enough warps and CONFIRM 2 waves/SIMD (else one issue stream, the schedule degenerates); the mem stage gets the HIGHER priority (warp_pipeline_stage('mem', priority=1) vs ('mfma', priority=0)) so its address VALU keeps issuing under the compute group; keep wait_group / fences OUT of the compute stage \u2014 resolve LDS hazards a full stage early (S-1 -> S+1, because one group runs a stage behind); a redundant lgkmcnt(0)+s_barrier landing inside the compute stage fragments MFMA issue \u2014 elide it (load_shared_relaxed or per-quadrant LDS allocs), gated by the determinism race-test",
+      "verify": "three-evidence: asm/ATT shows two phase-offset groups with the mem stage issuing under the other group's compute; rocprof MfmaUtil up; TIMING at boundary is arbiter; correctness under oracle",
+      "default_off": false,
+      "authoring_ref": "tile-programming/warp-pipeline.md",
+      "note": "route=wave-pingpong: the inter_wave scheduling MODEL -- the intelligence is in the KERNEL wave structure, not the compiler. Runs on STOCK Triton (no plugins, no env, no rebuild; only llvm_fn_attrs=amdgpu-agpr-alloc=0,0). GLUON-ONLY BY CONSTRUCTION: add_warp_pipeline appears exactly once in the AMD backend, inside gluon_to_ttgir, so a marker from plain Triton is never grouped -- plain's analog is the automatic add_block_pingpong, which you do not place. THREE COMPILE-TIME CONSTRAINTS: a stage region may contain NO barrier, NO wait and NO loop, and the markers must produce at least TWO stages (barriers are legal BETWEEN stages). The no-wait rule is what makes layering this over an authored ring hard, and why 5 of the 8 production files that use it carry no commit_group at all; for priority control inside a body that has waits, bare s_setprio via inline asm is the route (13 production files, usually but not always on top of a ring). NOT tagged occupancy_gates_latency: it REQUIRES 2 waves/SIMD as a precondition. NVIDIA analog = warp specialization, which gfx950 cannot reach (warp_specialize hard-errors: gfx1250 only).",
+      "source": "tile-programming/scheduling-model.md",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/pipeline/loop-knobs-and-targets.md ## gfx950 CDNA4 path",
+      "native_group": "compute",
+      "applies_to": [
+        {
+          "bound": "compute",
+          "sub": "schedule-interleave",
+          "gate": "compute/mfma-issue bound AND occupancy can REACH 2 waves/SIMD (launch enough warps; VGPR/LDS budget admits 2 resident waves) AND the accumulator is read-once-at-epilogue (a read-modify-every-iter acc stays VGPR in this model anyway). The inter_wave ALTERNATIVE to gemm_compiler_stack: choose it at the scheduling-model node when 2 waves/SIMD is reachable.",
+          "direction": "the OTHER wave group's compute hides this group's memory phase; per-SIMD MFMA cadence approaches ideal WITHOUT any compiler interleave pass",
+          "expected_move": "the OTHER wave group's compute hides this group's memory phase; per-SIMD MFMA cadence approaches ideal WITHOUT any compiler interleave pass",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "mfma-cadence"
+      ],
+      "expressible_in": [
+        "gluon"
+      ],
+      "stage_role": "layers ON TOP of an authored ring, or stands alone where there is no ring to build (all 5 of the production files that use it without commit_group are small-M).",
+      "probe": "hasattr on gl.amd.warp_pipeline_stage (ABSENT on 3.6.0, present 3.7.0+). priority= is a keyword-only parameter validated to 0..3 at trace time and IS present on 3.8.0. Note production uses priority= in exactly 1 file out of 8."
+    },
+    "reinject_ttgir_pipeliner": {
+      "requires_anchor": true,
+      "layer": 4,
+      "search_class": "divergent",
+      "direction_class": "structural",
+      "requires_compiler_path_edit": false,
+      "requires_llvm_rebuild": false,
+      "compiler_scope": "python-wrapper-no-file-edit",
+      "sub_resource": "schedule-overlap",
+      "route": 1,
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "yes"
+      },
+      "isa_gate": "MFMA",
+      "cost": "Python-only compiler.py edit, NO libtriton rebuild; default-OFF + cache-key-safe (num_stages in the JIT key); prologue/epilogue overhead loses at small S (<2048)",
+      "kernel_rules": "load K/V IN-BODY (no hand register-prefetch - the pipeliner IS the prefetcher); split causal mask into TWO loops (branch-free hot region); launch num_stages=2 (ns3 worse; ns4 chained-dot regresses)",
+      "verify": "3-layer: TTGIR ttg.memdesc_index appears + local_alloc/store/load counts jump toward plain (armed vs unarmed dump); asm ds_read / full-drain lgkmcnt(0) down with relaxed lgkmcnt(N>0) appearing (asm_loop_audit); ATT cadence down (mfma_efficiency); rocprof MfmaUtil up + occupancy unchanged; correctness under the oracle.",
+      "version_gate": "add_schedule_loops/add_pipeline/add_optimize_dot_operands/... already compiled in libtriton.so; splice into gluon_to_ttgir after add_combine_tensor_select_and_if, gated num_stages>1",
+      "probe": "python3 scripts/gluon_swp.py --selftest (structural, no GPU, no triton needed), then arm it and diff the dumped TTGIR: ttg.memdesc_index must APPEAR and local_alloc/store/load counts must rise. probe_levers.py --all answers a DIFFERENT question (do the pass symbols exist in this libtriton) and those two hypotheses come apart here.",
+      "note": "PARITY-RECOVERY route, not a first-try lever. Runs plain's add_schedule_loops+add_pipeline over the module gluon_to_ttgir returns: no libtriton rebuild AND no installed-file edit (upstream knobs.runtime.add_stages_inspection_hook, or the pack's in-process gluon_swp.py). CEILING IS PLAIN PARITY, so above the parity gate use manual_pipeline_prefetch instead. GATE: compare the PLAIN kernel's own num_stages=1 vs num_stages=2 first -- where plain gains nothing there, recovering the pipeline for a transcription did not pay off either. Production (429 gfx950 Gluon kernels, triton 3.8) uses this ZERO times and sets num_stages=1 in 34 files; the 19 files that do run the pipeliner are plain-Triton. EXCLUSIVE with manual_pipeline_prefetch in the SAME loop, and de-staging + injecting are ONE change measured together. Two caveats in the page: no upstream test covers the pipeliner consuming Gluon TTGIR, and the byte-identical-TTGIR equivalence was verified across MINORS but not across ARCHES (gfx950 takes the async path, gfx942 does not).",
+      "source": "tile-programming/pipeline.md ## Reproduce plain's software pipeline on the Gluon path (the parity-recovery route)",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/pipeline/loop-knobs-and-targets.md ## gfx950 CDNA4 path",
+      "native_group": "pipeline",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": "schedule-overlap",
+          "gate": "schedule/overlap gap: equal VGPR+AGPR & occupancy vs plain, LOWER MfmaUtil, MORE full-drain s_waitcnt lgkmcnt(0); loop has tt.load->(convert_layout)->tt.dot; currently num_stages=1; NOT memory-bandwidth (MemUnitStalled/stalled_on_l2 not dominant)",
+          "direction": "MfmaUtil up toward/above plain; full-drain lgkmcnt(0) -> relaxed lgkmcnt(N>0); ATT cadence down; occupancy unchanged",
+          "expected_move": "MfmaUtil up toward/above plain; full-drain lgkmcnt(0) -> relaxed lgkmcnt(N>0); ATT cadence down; occupancy unchanged",
+          "priority": "high"
+        },
+        {
+          "bound": "memory",
+          "sub": "schedule-overlap",
+          "gate": "operand-feed bubble (lds-gmem-feed top / full-drain lgkmcnt(0)) at unchanged occupancy, MFMA below confirm, NOT bandwidth-bound (MemUnitStalled/stalled_on_l2 not dominant) -> a schedule bubble surfacing on the memory path, not true bandwidth",
+          "direction": "re-inject the TTGIR pipeliner to multibuffer the K/V feed; MfmaUtil up, full-drain lgkmcnt(0) -> relaxed lgkmcnt(N>0), occupancy unchanged",
+          "expected_move": "MfmaUtil up toward/above plain; full-drain lgkmcnt(0) -> relaxed lgkmcnt(N>0); ATT cadence down; occupancy unchanged",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "wait"
+      ],
+      "expressible_in": [
+        "gluon"
+      ],
+      "scheduling_model": "compiler_pipeliner",
+      "stage_role": "parity-recovery: repays a named lost_pipeline transcription debt. Its ceiling is PLAIN PARITY, so above the parity gate it has nothing to offer -- the climb needs manual_pipeline_prefetch, which expresses what the auto-pipeliner cannot."
+    },
+    "grid_remap_split_k": {
+      "dependent_data_rebuild": true,
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "grid ~ CU multiple; timing",
+      "note": "Raise the split / KV-split count so the grid fills a CU multiple (tail_efficiency -> 1). Gate on small grid AND tail_efficiency well below 1. gluon-only tactic: a deleted/compiled Triton split kernel can be recovered from its .pyc via pycdc decompile \u2014 Triton/TTGIR-specific, do not port to flydsl/tilelang. NCU Launch-Statistics grid-too-small analog: grow the grid to fill the device. Executable tactic (no source_predicate) -> classify emits closure_policy=measure-or-probe: close only by measuring the variant or a probe-backed walled verdict, never a source-grep N/A.",
+      "authoring_ref": "workloads/gemm.md ## Small-M (decode / GEMV) regime \u2014 memory/occupancy-bound",
+      "authoring_kind": "knob",
+      "native_group": "wave_quantization",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "small grid AND tail_efficiency << 1",
+          "direction": "tail_efficiency up (grid ~ CU multiple)",
+          "expected_move": "tail_efficiency up (grid ~ CU multiple)",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "small grid AND tail_efficiency << 1",
+          "direction": "tail_efficiency up (grid ~ CU multiple)",
+          "expected_move": "tail_efficiency up (grid ~ CU multiple)",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "attention_lpt_causal_remap": {
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "workload": [
+        "attention",
+        "attention_bwd"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none (zero-body pid->worktile reversal)",
+      "verify": "timing; re-sweep dispatch after",
+      "note": "TOP EARLY lever - try right after the anchor, NOT derivable from bound-class alone (workloads/attention.md) CONFLICTS with a pid-swizzle / rasterization remap -- both reorder the same mapping, so A/B them three ways rather than stacking blindly (workloads/attention.md ## Scheduling (load-imbalanced grids)).",
+      "authoring_ref": "workloads/attention.md ## Scheduling (load-imbalanced grids)",
+      "authoring_kind": "knob",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "causal attention (load-imbalanced grid)",
+          "direction": "tail balance; large early win",
+          "expected_move": "tail balance; large early win",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "causal attention (load-imbalanced grid)",
+          "direction": "tail balance; large early win",
+          "expected_move": "tail balance; large early win",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "gemm_xcd_pid_remap": {
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "workload": [
+        "gemm",
+        "moe"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "L2 hit; timing",
+      "note": "XCD-aware PID remap + workgroup grouping (workloads/gemm.md)",
+      "authoring_ref": "workloads/gemm.md ## Beyond hot loop (L2 / XCD locality)",
+      "authoring_kind": "knob",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "L2 reuse across workgroups on XCD",
+          "direction": "L2 hit up",
+          "expected_move": "L2 hit up",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "L2 reuse across workgroups on XCD",
+          "direction": "L2 hit up",
+          "expected_move": "L2 hit up",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "reduction_structure": {
+      "layer": 0,
+      "direction_class": "structural",
+      "search_class": "divergent",
+      "workload": [
+        "reduction",
+        "norm",
+        "attention_bwd"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "structural",
+      "verify": "bytes model; timing",
+      "note": "clean/recompute/atomic/materialize/defuse + Welford 1-pass vs 2-pass (mental-model.md). The fused<->split call is symmetric: floor-probe both sides. For the atomic/RMW write-out method see sibling cards packed_atomic_writeout (two-pass / packed-atomic) and grid_axis_defuse (split by parallel axis). NCU algorithmic analog: fewer HBM passes / reuse loaded data \u2014 structural byte reduction, not a counter lever.",
+      "authoring_ref": "tile-programming/mental-model.md ## Reduction & parallelization structure (decide before tiles)",
+      "authoring_kind": "knob",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "reduction axis / pass count decision",
+          "direction": "fewer HBM streams (kappa down)",
+          "expected_move": "fewer HBM streams (kappa down)",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "reduction axis / pass count decision",
+          "direction": "fewer HBM streams (kappa down)",
+          "expected_move": "fewer HBM streams (kappa down)",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "packed_atomic_writeout": {
+      "layer": 0,
+      "direction_class": "structural",
+      "search_class": "divergent",
+      "workload": [
+        "attention_bwd",
+        "moe",
+        "reduction",
+        "norm"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "structural (rewrite the reduction write-out path; keep the fused kernel)",
+      "verify": "bytes model; bf16 write-out error vs oracle tol; timing",
+      "note": "In-band method for a dominant atomic/RMW reduction write-out, keeping ONE fused kernel. Two options: (a) atomic-free two-pass (write partials, combine in a bounded second pass); (b) bf16 packed-atomic via raw llvm.AtomicRMWOp (global_atomic_pk_add) \u2014 packs two bf16 lanes per atomic so the write-out moves fewer bytes and eases a bandwidth-bound tail. bf16 accumulation is LOSSY: verify the result against the oracle tol before keeping. Both are Tier-A (no compiler rebuild). MoE precedent: global_atomic_pk_add_bf16 in moe_gemm_2stage.py. Sibling of grid_axis_defuse (that one SPLITS the kernel; this one keeps it fused and fixes the write-out). NCU algorithmic analog: shrink reduction-combine traffic.",
+      "authoring_ref": "tile-programming/mental-model.md ## Reduction & parallelization structure (decide before tiles)",
+      "authoring_kind": "recipe",
+      "authoring_gap": "packed-atomic / atomic-free two-pass write-out has no code recipe in the reference docs yet; card carries the method + MoE precedent pointer until one is authored",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "bandwidth",
+          "gate": "atomic/RMW reduction write-out is a top bubble owner / dominant byte cost (floor-probe)",
+          "direction": "packed/atomic-free write-out moves fewer bytes on the reduction combine",
+          "expected_move": "reduction write-out bytes down",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "reduction write-out and compute both material (neither negligible) AND the write-out uses atomic/RMW",
+          "direction": "packed/atomic-free write-out moves fewer bytes on the reduction combine",
+          "expected_move": "reduction write-out bytes down",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "grid_axis_defuse": {
+      "layer": 0,
+      "direction_class": "structural",
+      "search_class": "divergent",
+      "workload": [
+        "attention_bwd",
+        "moe",
+        "reduction",
+        "norm"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "extra kernel launch(es) + possible recompute / re-read of shared intermediates; TIME ALL kernels",
+      "verify": "bytes model (atomic write-out bytes down vs added re-read bytes); SUM timing of all defused kernels; correctness vs oracle",
+      "note": "Reverse of kernel fusion: split a fused kernel by output / parallel axis into separate dispatches so each output's reduction becomes CLEAN and the atomic/RMW combine disappears (e.g. attention-bwd fused -> separate dkdv and dq kernels). See also the `P0 (defuse-by-parallel-axis)` section of the host-dispatch-strategies page in the hip / flydsl / cuda / cutedsl packs (an external pack page: the Triton-family packs, this one included, do not ship it, so treat this note as the whole account here). Distinct from split_k / materialize (those SPLIT ONE reduction into partials + a combine kernel); defuse re-picks the parallel axis so DIFFERENT outputs each land clean. The fused<->split call is symmetric \u2014 floor-probe both sides before committing; do not blindly defuse (you lose the fused form's data reuse) nor blindly fuse (you take on atomic contention).",
+      "authoring_ref": "tile-programming/mental-model.md ## Reduction & parallelization structure (decide before tiles)",
+      "authoring_kind": "recipe",
+      "authoring_gap": "defuse-by-axis has no code recipe in the reference docs yet; card carries the method + P0 cross-ref until one is authored",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": "bandwidth",
+          "gate": "an output is forced onto a dominant atomic/RMW combine by the current parallel axis (floor-probe) AND another axis makes that output's reduction clean",
+          "direction": "defuse by axis -> the atomic combine for that output is eliminated",
+          "expected_move": "atomic/RMW write-out bytes down (traded for added re-read bytes)",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "an output is forced onto a dominant atomic/RMW combine by the current parallel axis (floor-probe) AND another axis makes that output's reduction clean",
+          "direction": "defuse by axis -> the atomic combine for that output is eliminated",
+          "expected_move": "atomic/RMW write-out bytes down (traded for added re-read bytes)",
+          "priority": "cheap-first"
+        }
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "reuse_shared_operand_load": {
+      "layer": 2,
+      "direction_class": "structural",
+      "workload": [
+        "attention_decode",
+        "mla",
+        "attention"
+      ],
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "restructure the load so the shared region is fetched once and reused from registers/LDS",
+      "verify": "achieved-BW / transaction count down + timing; correctness under oracle",
+      "note": "First-principles NOVEL lever (not a base card): when memory-bound with a provably duplicated per-iter load of a shared operand, try fetching it once and reusing it. SITUATIONAL \u2014 the cache may already serve the second load, so propose + measure before committing rather than assuming a win. Illustrates the card-is-a-floor-not-a-ceiling principle: reason from the profile and probe an off-card direction. NCU register-vs-shared / data-reuse analog: reuse a loaded operand from registers/shared instead of re-fetching it.",
+      "authoring_ref": "tile-programming/memory-path.md ## Reuse a shared operand (load once, reuse)",
+      "authoring_kind": "recipe",
+      "native_group": "workload_top_levers",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "the kernel loads the SAME operand region more than once per iteration (e.g. a shared latent reused as two operands) AND the load path is memory/latency-bound",
+          "direction": "situational -- fewer HBM transactions if the reuse is real; can be flat if the cache already serves the second load",
+          "expected_move": "situational -- fewer HBM transactions if the reuse is real; can be flat if the cache already serves the second load",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "the kernel loads the SAME operand region more than once per iteration (e.g. a shared latent reused as two operands) AND the load path is memory/latency-bound",
+          "direction": "situational -- fewer HBM transactions if the reuse is real; can be flat if the cache already serves the second load",
+          "expected_move": "situational -- fewer HBM transactions if the reuse is real; can be flat if the cache already serves the second load",
+          "priority": "cheap-first"
+        }
+      ],
+      "bubble_bucket": [
+        "lds-feed"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "split_k": {
+      "dependent_data_rebuild": true,
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "source_predicate": "SPLIT_K|split_k|SPLITK|NUM_KSPLIT|num_ksplit|split_k_iters",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "extra reduce kernel / atomic - TIME THE REDUCE TOO",
+      "verify": "dispatched-WG/occupancy delta (grid ~ CU multiple) + MFMA% up; time BOTH the main and the reduce kernel (run_round --timing)",
+      "note": "NCU Launch-Statistics grid-too-small analog: split the reduction to grow the grid and fill the device when the M/N grid is under-filled.",
+      "authoring_ref": "tile-programming/mental-model.md ## Reduction & parallelization structure (decide before tiles)",
+      "authoring_kind": "knob",
+      "native_group": "dispatch",
+      "applies_to": [
+        {
+          "bound": "wave_quantization",
+          "sub": null,
+          "gate": "small grid / tail_efficiency<<1 AND reduction splittable",
+          "direction": "split the reduction -> more WG, fill CUs",
+          "expected_move": "dispatched WG up, tail_eff up",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "memory",
+          "sub": "bandwidth",
+          "gate": "reduction fan-in high (atomic/partial RMW volume dominates)",
+          "direction": "split-K cuts per-program reduction fan-in -> fewer atomic bytes",
+          "expected_move": "atomic RMW volume down",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "few resident waves AND reduction splittable",
+          "direction": "more independent programs -> more waves to hide latency",
+          "expected_move": "waves up",
+          "priority": "cheap-first"
+        }
+      ],
+      "aliases": [
+        "gemm_split_k"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "block_m_shrink": {
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "source_predicate": "BLOCK_M|block_m|BLK_M|BLOCK_SIZE_M",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "less per-tile reuse",
+      "verify": "dispatched-WG up + MFMA% up; timing",
+      "note": "NCU Launch-Statistics grid-too-small analog: shrink the block so more workgroups dispatch and the grid fills the device. INTENDED workload-agnostic dispatch bet (no workload filter): it is scoped by applies_to[].bound=wave_quantization, so it only surfaces when the grid is genuinely under-dispatched -- it does NOT leak into every attention_bwd fan-out, only a wave-quantization-bound one.",
+      "authoring_ref": "workloads/gemm.md ## Small-M (decode / GEMV) regime \u2014 memory/occupancy-bound",
+      "authoring_kind": "knob",
+      "native_group": "dispatch",
+      "applies_to": [
+        {
+          "bound": "wave_quantization",
+          "sub": null,
+          "gate": "BLOCK_M too large for M -> few WG / tail_eff<<1",
+          "direction": "shrink the row tile -> more WG",
+          "expected_move": "more WG, tail_eff up",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "register",
+          "sub": null,
+          "gate": "tile too large -> VGPR/accumulator spill",
+          "direction": "shrink tile -> smaller working set -> higher occupancy",
+          "expected_move": "spill down, waves up",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "latency",
+          "sub": null,
+          "gate": "occupancy VGPR/LDS-capped by tile size",
+          "direction": "smaller tile frees regs -> more resident waves",
+          "expected_move": "waves up",
+          "priority": "cheap-first"
+        }
+      ],
+      "aliases": [
+        "gemm_block_m_shrink"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "group_size_m": {
+      "layer": 6,
+      "direction_class": "knob",
+      "search_class": "divergent",
+      "source_predicate": "GROUP_SIZE_M|group_size_m|GROUP_M|group_m",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes"
+      },
+      "cost": "none",
+      "verify": "L2 hit; timing",
+      "note": "NCU L2-hit-rate / threadblock-swizzle analog: rasterize the workgroup->tile mapping so co-scheduled tiles reuse L2.",
+      "authoring_ref": "workloads/gemm.md ## Beyond hot loop (L2 / XCD locality)",
+      "authoring_kind": "knob",
+      "native_group": "dispatch",
+      "applies_to": [
+        {
+          "bound": "memory",
+          "sub": null,
+          "gate": "L2 reuse under-tuned (GROUP_SIZE_M)",
+          "direction": "L2 hit up",
+          "expected_move": "L2 hit up",
+          "priority": "cheap-first"
+        },
+        {
+          "bound": "balanced",
+          "sub": null,
+          "gate": "L2 reuse under-tuned (GROUP_SIZE_M)",
+          "direction": "L2 hit up",
+          "expected_move": "L2 hit up",
+          "priority": "cheap-first"
+        }
+      ],
+      "aliases": [
+        "gemm_group_size_m"
+      ],
+      "expressible_in": [
+        "plain",
+        "gluon"
+      ]
+    },
+    "single_barrier_double_buffer": {
+      "layer": 4,
+      "direction_class": "structural",
+      "sub_resource": "over-sync",
+      "arch_availability": {
+        "gfx942": "yes",
+        "gfx950": "yes",
+        "gfx1250": "probe"
+      },
+      "cost": "none (register-neutral)",
+      "verify": "barrier count per K-tile down + WAIT/BUSY down + boundary timing; parity bit-exact",
+      "authoring_ref": "tile-programming/pipeline.md ## Vetted double-buffer skeleton (copy, then specialize)",
+      "note": "Fold the redundant end-of-loop barrier into the top barrier so ONE full sync per K-tile guarantees both current-data-ready and prev-reads-done (2 -> 1 barrier/tile). Register-neutral. GATE ON criticality: a barrier-removal floor probe must show the barrier is on the critical path; if removing it leaves the time unchanged the bound is issue-rate (reduce_lds_read_issue_rate) or elsewhere, not over-sync. NCU barrier-stall analog: avoid unnecessary barriers; divergence before a barrier inflates the wait.",
+      "authoring_kind": "recipe",
+      "api_ref": "gluon/matrix-reference.md ## Reduce accumulator traffic (keep one fragment, convert once)",
+      "native_group": "latency",
+      "applies_to": [
+        {
+          "bound": "latency",
+          "sub": "over-sync",
+          "gate": "double-buffered hot loop with >1 barrier per K-tile AND the barrier is ON the critical path (WAIT/BUSY drops when barriers are folded -- confirm by a barrier-removal floor probe; if removing the barrier leaves time unchanged the bound is issue-rate, not barrier)",
+          "direction": "barriers per K-tile down; WAIT/BUSY down",
+          "expected_move": "barriers per K-tile down; WAIT/BUSY down",
+          "priority": "high"
+        }
+      ],
+      "bubble_bucket": [
+        "wait",
+        "sync"
+      ],
+      "expressible_in": [
+        "gluon"
+      ]
+    }
+  },
+  "dsl_caps": {
+    "auto_pipeliner": true,
+    "note": "B4: Gluon has an auto software-pipeliner (Route-1 / TTGIR pipeliner). A frontend manual interleave is often undone by the prebuilt-LLVM scheduler -> prefer tuning the auto-pipeliner (num_stages); a manual pipeline usually needs Tier-B/LLVM co-design and MUST be profile-verified (MFMA util/bubble), not wall-time."
+  },
+  "_tier_filter": {
+    "kept_tier": "gluon",
+    "shipped": 41,
+    "dropped": [],
+    "why": "cards whose expressible_in excludes 'gluon' are not shippable here: this DSL has no syntax for them. The per-card evidence is the `expressible_in` list itself."
+  },
+  "_search_policy": {
+    "breadth_enabled": false,
+    "source": "scripts/pack_facts.json breadth_enabled (stamped at compose time)",
+    "effect": "CLIMB only: the round engine must not suggest or require a structural fan-out, and the same-stage T0 buckets are never eligible"
+  }
+}

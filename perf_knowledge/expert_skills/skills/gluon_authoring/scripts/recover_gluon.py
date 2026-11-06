@@ -125,7 +125,7 @@ _INTEGRATION_NOTE = """\
 #   * If a pipeline scaffold is included, it is the pipeline-layer STARTING POINT:
 #     reproduce plain's double-buffer/async structure here, then IMPROVE on it
 #     (deeper buffering / operand prefetch / manual interleave) -- see pipeline.md
-#     ## Auto-recovering the pipeline structure. Keep it out of the transcription
+#     ## Recovering the structure, then improving on it. Keep it out of the transcription
 #     step (the faithful layouts-only anchor stays the attribution baseline).
 #   * Register allocation / spills are NOT recovered (not in TTGIR); use slicing +
 #     RA hints. Then run --verify to confirm layout-equivalence vs plain.
@@ -227,7 +227,7 @@ def verify_equivalence(plain_ttgir: str, anchor_ttgir: str) -> tuple[bool, str]:
 def emit_transcribe_record(layouts, *, layout_equiv: str = "not-checked",
                            correctness: str = "not-run", source: str = "",
                            sched: dict | None = None) -> str:
-    """Auto-fill the experiment-records.md ## 3 Transcribe / Anchor record."""
+    """Auto-fill the references/method/records.md ## 3. Transcribe / Anchor + Calibration Record."""
     ref_to_var = {f"#{l.name}": l.var for l in layouts if l.kind != "dot_op"}
     sched = sched or {}
     nw = sched.get("num_warps")
@@ -246,7 +246,7 @@ def emit_transcribe_record(layouts, *, layout_equiv: str = "not-checked",
         "plain_schedule_targets:   # the config the pipeline + slicing layers must reach",
         f"  num_warps  -> {nw_str}   # occupancy / slicing target",
         f"  num_stages -> {ns_str}   # starting pipeline depth (reproduce, then improve "
-        "-- pipeline.md ## Auto-recovering the pipeline structure)",
+        "-- pipeline.md ## Recovering the structure, then improving on it)",
         f"layout_equivalence_vs_plain: {layout_equiv}",
         f"correctness == plain: {correctness}",
         "perf_delta_vs_plain: <fill>   # regression expected, NOT a reject",
@@ -342,7 +342,7 @@ def main() -> None:
                     help="layout-equivalence check between --ttgir (plain) and --anchor-ttgir")
     ap.add_argument("--anchor-ttgir", help="recompiled anchor .ttgir (for --verify)")
     ap.add_argument("--record", action="store_true",
-                    help="emit the auto-filled experiment-records transcribe record")
+                    help="emit the auto-filled transcribe record (references/method/records.md ## 3)")
     ap.add_argument("--harness", help="correctness harness command to run (looks for CORRECTNESS PASS)")
     ap.add_argument("--selftest", action="store_true",
                     help="run the bundled layout-equivalence self-tests (offline)")

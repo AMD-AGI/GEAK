@@ -15,7 +15,7 @@ const role = src.match(/function roleAgent\(role, phase, intro, inputs\) \{[\s\S
 const legacyRole = role.replace('function roleAgent(', 'function legacyRoleAgent(')
   .replace(' + kernelExtractBlock(role)', '');
 const carry = src.match(/const carryState = \{[\s\S]*?\n\};/)[0];
-const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
+const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', 'HARDWARE_CONTEXT = null', 'HARDWARE_CONTEXT_PATH = ""', `
   const KERNEL_EXTRACT_ON = WORKLOAD_KIND === 'agentx_trace_replay';
   const MEASUREMENT_MODE = 'isolated_server', VALIDATION_MEASUREMENT_MODE = 'isolated_server';
   const VALIDATION_REPLICAS = 1;
@@ -27,6 +27,10 @@ const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
   ${carry}
   return carryState;
 `);
+const hardwareContext = { sku: 'mi308x', observed: { gfx: 'gfx942', physical_cu_count: 80 } };
+const carriedHardware = carryFor('agentx_trace_replay', {}, hardwareContext, '/eval/hardware_context.json');
+assert.strictEqual(carriedHardware.hardware_context, hardwareContext);
+assert.equal(carriedHardware.hardware_context_path, '/eval/hardware_context.json');
 const make = new Function('A', 'process', `
   const WORKFLOW_DIR = ${JSON.stringify(root)};
   const MODEL_PATH = A.kernel_path && !A.model_path ? '' : (A.model_path || '/models/test');

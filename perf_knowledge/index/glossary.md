@@ -3,7 +3,7 @@
 - **MFMA / SMFMAC** — Matrix Fused Multiply-Add (and sparse variant); the Matrix-Core ISA op `D=A*B+C`.
 - **XCD** — Accelerator Complex Die (chiplet); MI300X has 8 XCDs × 38 CUs = 304 CUs. Clock varies 3–10% across XCDs.
 - **CU / SIMD / wavefront** — Compute Unit; 4 SIMD/CU; wavefront (warp) = 64 lanes.
-- **VGPR/SGPR/AGPR** — vector / scalar / accumulation registers; 512 VGPR/EU, allocated in 16-granules; MFMA accumulators live in AGPR.
+- **VGPR/SGPR/AGPR** — vector / scalar / accumulation registers; 512 VGPR/EU (ArchVGPR + AGPR combined on gfx90a+), allocated in 8-granules; MFMA accumulators live in AGPR.
 - **LDS** — Local Data Share (shared memory); watch bank conflicts; CDNA4 = 160 KB, 256 B/clk.
 - **mfma_16x16 vs 32x32** — MFMA tile shape; 16x16 usually faster on MI300X even for big tiles.
 - **OPTIMIZE_EPILOGUE** — store MFMA result in MFMA layout (skip reblock); usually set 1.

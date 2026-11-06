@@ -1,5 +1,8 @@
 # kernel_workflow — Dynamic Workflow for Kernel / Model Inference Optimization
 
+Optional shared AMD hardware queries: see [dependency preparation](scripts/kernel_tools/dependencies.md) for pinned calculator assets, isolated Python and offline setup.
+Profiler/ATT environment checks and version pairing: [profiling dependencies](scripts/kernel_tools/profiling-dependencies.md).
+
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
@@ -324,3 +327,14 @@ scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), 
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).
+
+
+### Triton/Gluon method discovery
+
+On gfx942/gfx950, Triton and Gluon lanes automatically receive the in-tree
+[Gluon method](../perf_knowledge/expert_skills/skills/gluon_authoring/skill.md) as language guidance.
+`use_gluon_skill=auto` is the default; `false` disables it through nested and bakeoff calls.
+Triton remains Triton unless a Gluon direction is explicitly selected. Draft status remains visible;
+validated expert recipes still require `use_expert_skills=true`. See the
+[integration contract](../perf_knowledge/expert_skills/skills/gluon_authoring/references/method/geak-integration.md)
+for Claude Code invocation, role routing, scripts and native TraceLens analysis.

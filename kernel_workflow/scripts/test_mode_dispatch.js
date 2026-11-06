@@ -93,7 +93,8 @@ const healthy = (liveBackend, authorPlan, identity = {
 
 const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().join(', ');
 
-(async () => {
+module.exports = {build, healthy};
+if (require.main === module) (async () => {
   // -------------------------------------------------------------------------
   console.log('\n# A. mode -> route (worker pass-through vs bake-off)');
   const ROUTES = [
@@ -397,6 +398,16 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
     ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
       JSON.stringify(trace.agentLabels));
+  }
+
+  for (const mode of ['optimize', 'bakeoff']) {
+    for (const setting of ['auto', 'false']) {
+      const {run, trace} = build({...BASE, mode, use_gluon_skill:setting, backends:['triton','gluon']}, {
+        agent:healthy('triton', [{language:'gluon',route:'author'}])});
+      await run();
+      ok(trace.workflowCalls.length > 0 && trace.workflowCalls.every(c => c.args.use_gluon_skill === setting),
+        `Gluon method ${setting} reaches every ${mode} lane`);
+    }
   }
 
   console.log(failures === 0

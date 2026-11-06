@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
   description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Triton/Gluon lanes on gfx942/gfx950 load the Gluon method as a language reference by default; args.use_gluon_skill=false disables it. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -18,6 +18,78 @@ export const meta = {
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
+// BEGIN GENERATED hardware_context_workflow.js
+// Shared pure workflow contract. Embedded because GEAK workflow JS has no FS/import API.
+// Edit here, then run scripts/sync_hardware_context_workflow.py.
+function parseHardwareContext(value) {
+  if (!value) return null;
+  const c = typeof value === 'string' ? JSON.parse(value) : value;
+  const o = c.observed || {};
+  if (c.schema_version !== 1 || !/^gfx[0-9a-f]+$/.test(o.gfx || '') ||
+      !Number.isInteger(o.physical_cu_count) || o.physical_cu_count <= 0 ||
+      !['matched', 'conflict', 'unknown'].includes(c.status) ||
+      !/^[a-f0-9]{64}$/.test(c.catalog_sha256 || '') ||
+      c.may_gate !== false || c.analysis_role !== 'planning') {
+    throw new Error('invalid hardware_context: use scripts/hardware_context.py');
+  }
+  if (c.status === 'matched') {
+    const s = c.specification || {};
+    if (!c.sku || c.sku === 'unknown' || c.sku !== c.candidate_sku ||
+        s.arch !== o.gfx || s.cus !== o.physical_cu_count || s.product !== o.marketing_name) {
+      throw new Error('hardware_context SKU/resource mismatch');
+    }
+  } else if (c.sku !== 'unknown' || c.specification !== null) {
+    throw new Error('unresolved hardware_context must not provide product peaks');
+  }
+  return c;
+}
+let HARDWARE_CONTEXT = parseHardwareContext((A.state || {}).hardware_context);
+let HARDWARE_CONTEXT_PATH = String(A.hardware_context_path || (A.state || {}).hardware_context_path || '');
+function adoptHardwareContext(value, gfx, name, cu, path, declaredSku) {
+  const next = parseHardwareContext(value) || HARDWARE_CONTEXT;
+  if (next) {
+    const o = next.observed;
+    if (o.gfx !== gfx || o.physical_cu_count !== cu || (name && o.marketing_name !== name)) {
+      throw new Error('hardware_context disagrees with setup GPU identity');
+    }
+    if (HARDWARE_CONTEXT) {
+      const previous = HARDWARE_CONTEXT.observed;
+      for (const k of ['gfx', 'marketing_name', 'physical_cu_count', 'compute_partition', 'memory_partition', 'memory_bytes']) {
+        if (previous[k] != null && previous[k] !== o[k]) throw new Error('hardware_context changed across workflow handoff: ' + k);
+      }
+      if (HARDWARE_CONTEXT.catalog_sha256 !== next.catalog_sha256 || HARDWARE_CONTEXT.sku !== next.sku) {
+        throw new Error('hardware_context catalog or SKU changed across workflow handoff');
+      }
+    }
+  }
+  if (A.expected_sku && A.expected_sku !== 'unknown' && (!next || next.sku !== A.expected_sku)) {
+    throw new Error('expected_sku disagrees with hardware_context');
+  }
+  if (declaredSku && (!next || declaredSku !== next.sku)) {
+    throw new Error('setup device_sku disagrees with hardware_context');
+  }
+  HARDWARE_CONTEXT = next;
+  HARDWARE_CONTEXT_PATH = String(path || HARDWARE_CONTEXT_PATH);
+}
+function hardwareInputs() {
+  return { DEVICE_SKU: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown',
+    HARDWARE_CONTEXT, HARDWARE_CONTEXT_PATH };
+}
+const initialHardwareContext = parseHardwareContext(A.hardware_context) || HARDWARE_CONTEXT;
+if (initialHardwareContext) {
+  const o = initialHardwareContext.observed;
+  adoptHardwareContext(initialHardwareContext, A.expected_gfx || o.gfx,
+    A.expected_device_name || o.marketing_name, Number(A.expected_physical_cu_count || o.physical_cu_count));
+}
+function hardwarePrelude() {
+  return '\n## Shared GEAK hardware context\n' + JSON.stringify(hardwareInputs()) + '\n' +
+    'Read scripts/hardware_context.md under the GEAK repository root. This applies to every language and optimization role, independently of expert-skill switches. ' +
+    'Setup/Freeze must run scripts/hardware_context.py in the workload environment, write EVAL_DIR/hardware_context.json, and return hardware_context plus hardware_context_path. ' +
+    'Before numerical planning, validate that file with scripts/hardware_context.py --check FILE. ' +
+    'Use observed visible CUs for grid sizing; use verified resource scope for memory/cache planning. Missing facts stay unknown; never promote an ISA default to a product. ' +
+    'Export GEAK_HARDWARE_CONTEXT to that file for local and native roofline tools. TraceLens retains native models/calibration; local specification values are planning-only.\n\n';
+}
+// END GENERATED hardware_context_workflow.js
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
@@ -174,6 +246,8 @@ const BACKENDS = (Array.isArray(A.backends) ? A.backends
   .map(s => String(s == null ? '' : s).trim().toLowerCase()).filter(Boolean);
 // Expert-skills passthrough (advisory; OFF by default -> nothing injected).
 let USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_GLUON_SKILL = String(A.use_gluon_skill != null ? A.use_gluon_skill : 'auto').toLowerCase();
+if (!['auto', 'true', 'false'].includes(USE_GLUON_SKILL)) throw new Error('use_gluon_skill must be auto, true or false');
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
@@ -212,6 +286,8 @@ const FREEZE_SCHEMA = obj({
   device_gfx: { type: 'string' },
   device_target: { type: 'string' },
   device_name: { type: 'string' },
+  device_sku: { type: 'string' }, hardware_context: { type: 'object', additionalProperties: true },
+  hardware_context_path: { type: 'string' },
   physical_cu_count: { type: 'number' },
   // Always "" from oracle_freezer — a freezer-built task dir records NO golden tensors (correctness is
   // live parity vs baseline_src/). Kept in the schema because an e2e kernel_extractor task dir, which
@@ -287,6 +363,7 @@ function tlAgent(prompt, o, attempt) {
   return e;
 }
 async function agentT(p, o) {
+  p = hardwarePrelude() + p;
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
@@ -435,6 +512,8 @@ if (DETECTED_GFX === 'gfx1201') {
   WARM_START = 'off';
 }
 const EVAL_DIR = oracle.eval_dir || `${EXP_ROOT}/bakeoff_${KERNEL_NAME_HINT}`;
+adoptHardwareContext(oracle.hardware_context, LANE_GFX, LANE_DEVICE_NAME, LANE_PHYSICAL_CU_COUNT,
+  oracle.hardware_context_path || `${EVAL_DIR}/hardware_context.json`, oracle.device_sku);
 log(`Freeze done. op_kind=${oracle.op_kind}, task_dir=${oracle.task_dir}, live_backend=${oracle.live_backend || '?'}`);
 
 // ===========================================================================
@@ -572,11 +651,14 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       expected_gfx: LANE_GFX, expected_target: LANE_TARGET,
       expected_device_name: LANE_DEVICE_NAME,
       expected_physical_cu_count: LANE_PHYSICAL_CU_COUNT,
+      hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
+      expected_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : "unknown",
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+          use_gluon_skill: USE_GLUON_SKILL,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
       // Forward the KB switch. This arg object is explicit (the optimize/author path spreads {...A},
       // this one does not), so anything omitted here silently reverts to the lane's default — a
@@ -753,6 +835,7 @@ if (EVAL_DIR && LLM_STATS) {
 }
 
 return {
+  hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
   mode: MODE,
   // `instance` = this run's eval dir: a stable identity so the parser dedupes a timeline reached
   // twice without collapsing two distinct same-shape lanes.

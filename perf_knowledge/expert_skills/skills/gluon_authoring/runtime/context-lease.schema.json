@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/context-lease-v1.json",
+  "title": "Context lease",
+  "description": "A bounded, renewable capability tied to one policy and one exact derived context.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "lease_id",
+    "run_id",
+    "generation",
+    "role",
+    "stage",
+    "acquired_at",
+    "policy_ref",
+    "context_ref",
+    "context_sha256",
+    "remaining",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.context_lease/1"
+    },
+    "lease_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "acquired_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "policy_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "context_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "context_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "remaining": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_events",
+        "returned_bytes"
+      ],
+      "properties": {
+        "stage_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "returned_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "active",
+        "rotation_required",
+        "settled"
+      ]
+    }
+  }
+}
