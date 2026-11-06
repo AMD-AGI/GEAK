@@ -109,21 +109,21 @@ _FAMILY_PREFIXES = [
 
 _ARCH_RE = re.compile(r"\bgfx(?:9[0-9a-f]{2}|1[0-9]{3})\b")
 _TARGET_RE = re.compile(r"^\s*(?:\.amdgcn_target|amdhsa\.target:)\s*\"?[^\"]*?"
-                        r"(gfx\w+)", re.M)
-_WAVE32_RE = re.compile(r"^\s*\.amdhsa_wavefront_size32\s+1\s*$", re.M)
-_LLVM_OCC_RE = re.compile(r"^;\s*Occupancy:\s*(\d+)\s*$", re.M)
-_LLVM_NUM_VGPR_RE = re.compile(r"^;\s*NumVgprs:\s*(\d+)\s*$", re.M)
+                        r"(gfx\w+)", re.MULTILINE)
+_WAVE32_RE = re.compile(r"^\s*\.amdhsa_wavefront_size32\s+1\s*$", re.MULTILINE)
+_LLVM_OCC_RE = re.compile(r"^;\s*Occupancy:\s*(\d+)\s*$", re.MULTILINE)
+_LLVM_NUM_VGPR_RE = re.compile(r"^;\s*NumVgprs:\s*(\d+)\s*$", re.MULTILINE)
 
 # LDS per workgroup, in the three places a dump can carry it. Order matters: the KD directive
 # and the metadata field are the ALLOCATION; the `; LDSByteSize:` comment is the compiler's own
 # accounting and carries its own disclaimer suffix, which is why it is read last and its
 # "(compile time only)" tail is preserved into the label rather than dropped.
-_LDS_KD_RE = re.compile(r"^\s*\.amdhsa_group_segment_fixed_size\s+(\d+)", re.M)
-_LDS_META_RE = re.compile(r"^\s*\.group_segment_fixed_size:\s*(\d+)", re.M)
-_LDS_COMMENT_RE = re.compile(r"^;\s*LDSByteSize:\s*(\d+)\s*bytes/workgroup(.*)$", re.M)
+_LDS_KD_RE = re.compile(r"^\s*\.amdhsa_group_segment_fixed_size\s+(\d+)", re.MULTILINE)
+_LDS_META_RE = re.compile(r"^\s*\.group_segment_fixed_size:\s*(\d+)", re.MULTILINE)
+_LDS_COMMENT_RE = re.compile(r"^;\s*LDSByteSize:\s*(\d+)\s*bytes/workgroup(.*)$", re.MULTILINE)
 # The compile-time BOUND on workgroup size, not the launch geometry. It is what the backend
 # itself reasons with, so it is the right default and the wrong thing to state as fact.
-_MAXFLAT_RE = re.compile(r"^\s*\.max_flat_workgroup_size:\s*(\d+)", re.M)
+_MAXFLAT_RE = re.compile(r"^\s*\.max_flat_workgroup_size:\s*(\d+)", re.MULTILINE)
 
 
 def family_for(arch):
@@ -399,7 +399,7 @@ def compiler_sweep(arch, compiler=None, max_clobbered_vgprs=256):
 def _load_hwdata():
     """The sibling `_hwdata` locator (kernel_workflow/scripts/kernel_tools/_hwdata.py), or None."""
     try:
-        import _hwdata  # noqa: PLC0415
+        import _hwdata
         return _hwdata
     except ImportError:
         pass
@@ -623,7 +623,8 @@ def _selftest():
     # pack), it must agree with the table above -- otherwise the two drift silently.
     p = _find_hw_constants()
     if p:
-        archs = json.load(open(p)).get("arch", {})
+        with open(p) as stream:
+            archs = json.load(stream).get("arch", {})
         checked = 0
         for arch, facts in archs.items():
             table = facts.get("vgpr_wave_steps")
@@ -697,10 +698,11 @@ def main():
             print("# compiler_version=" + json.dumps(result["compiler_version"]))
         return 0
     if a.asm:
-        text = open(a.asm, errors="ignore").read()
+        with open(a.asm, errors="ignore") as stream:
+            text = stream.read()
         vgpr = a.vgpr
         if vgpr is None:
-            m = re.search(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)", text, re.M)
+            m = re.search(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)", text, re.MULTILINE)
             vgpr = int(m.group(1)) if m else None
         arch = arch_from_asm(text)
         if context and arch != a.arch:

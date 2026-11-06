@@ -1,9 +1,8 @@
 """Dependency failures must precede queries/install mutation; no network or GPU."""
 import json
-import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 

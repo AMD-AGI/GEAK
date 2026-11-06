@@ -4,9 +4,9 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / 'dependencies/matrix-calculator.json'
@@ -34,7 +34,7 @@ def inspect(calc=None):
     try:
         for args in (['--version'], ['-a', 'cdna3', '-i', 'v_mfma_f32_16x16x16_f16', '-d'],
                      ['-a', 'rdna4', '-i', 'v_wmma_f32_16x16x16_f16', '-d']):
-            proc = subprocess.run([result['python'], str(calc), *args], capture_output=True,
+            proc = subprocess.run([result['python'], str(calc), *args], check=False, capture_output=True,
                                   text=True, timeout=15)
             checks.append({'argv': args, 'exit_code': proc.returncode,
                            'output': (proc.stdout + proc.stderr)[-3000:]})

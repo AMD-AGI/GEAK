@@ -1,9 +1,8 @@
 """Cross-entry-point contracts for the shared AMD tools (no GPU required)."""
-import importlib
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -11,12 +10,12 @@ ROOT = Path(__file__).resolve().parents[3]
 KT = ROOT / 'kernel_workflow/scripts/kernel_tools'
 PACK = ROOT / 'perf_knowledge/expert_skills/skills/gluon_authoring/scripts'
 sys.path.insert(0, str(KT))
-from amd_resources import analyze
 import amd_occupancy
+from amd_resources import analyze
 
 
 def call(path, *args):
-    return subprocess.run([sys.executable, str(path), *args], text=True,
+    return subprocess.run([sys.executable, str(path), *args], check=False, text=True,
                           capture_output=True, timeout=30)
 
 
@@ -75,7 +74,7 @@ def test_agpr_total_is_not_readded_and_arch_count_stays_distinct():
 def test_partial_ir_is_not_a_successful_capture(tmp_path):
     cmd = "import os; from pathlib import Path; p=Path(os.environ['TRITON_CACHE_DIR'])/'h'; p.mkdir(); (p/'k.ttgir').write_text('module {}')"
     r = subprocess.run(['bash', str(KT/'dump_ir.sh'), '--arch', 'gfx942', '--out', str(tmp_path),
-                        '--', sys.executable, '-c', cmd], capture_output=True, text=True)
+                        '--', sys.executable, '-c', cmd], check=False, capture_output=True, text=True)
     assert r.returncode == 3 and 'incomplete compilation' in r.stderr
     assert not (tmp_path/'variant/ir_manifest.json').exists()
 
@@ -91,3 +90,38 @@ def test_assembly_audit_uses_shared_register_record():
     r = analyze(asm)
     assert asm_loop_audit.kd_regs(asm.splitlines()) == {
         'vgpr': r['vgpr_combined'], 'sgpr': r['sgpr'], 'accum_vgpr': r['agpr']}
+
+
+def test_amdhsa_identity_ignores_argument_names():
+    asm = ('amdhsa.kernels:\n  - .args:\n      - .name: input\n'
+           '        .offset: 0\n    .name: kernel\n    .vgpr_count: 64\n')
+    assert analyze(asm)['kernel_name'] == 'kernel'
+    assert analyze(asm.replace('    .name: kernel\n', ''))['kernel_name'] is None
+    with pytest.raises(ValueError, match='mismatch'):
+        analyze('.amdhsa_kernel other\n' + asm)
+    with pytest.raises(ValueError, match='one kernel'):
+        analyze(asm + '  - .name: second\n    .vgpr_count: 128\n')
+
+
+def test_metadata_only_multiple_kernels_with_missing_name_are_rejected():
+    with pytest.raises(ValueError, match='one kernel'):
+        analyze('amdhsa.kernels:\n  - .vgpr_count: 64\n  - .name: second\n    .vgpr_count: 128\n')
+
+
+@pytest.mark.parametrize('name', [None, 'kernel', 'prefix_kernel_suffix'])
+def test_assembly_audit_rejects_unverified_or_partial_kernel_match(name, capsys):
+    import asm_loop_audit
+    asm_loop_audit.print_lds_budget(None, 163840, 'gfx950', name,
+                                   records=[('prefix_kernel', 81920)])
+    output = capsys.readouterr().out
+    assert 'UNAVAILABLE' in output and 'WGs/CU by LDS <=' not in output
+
+
+def test_assembly_audit_retains_full_metadata_identity(tmp_path, capsys):
+    import asm_loop_audit
+    name = 'kernel_' + 'x' * 70
+    path = tmp_path/'k.json'
+    path.write_text(json.dumps({'name': name, 'shared': 81920}))
+    assert asm_loop_audit.lds_from_meta(str(path)) == [(name, 81920)]
+    asm_loop_audit.print_lds_budget(str(path), 163840, 'gfx950', name)
+    assert 'WGs/CU by LDS <= 2' in capsys.readouterr().out
