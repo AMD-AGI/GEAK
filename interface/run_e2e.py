@@ -531,6 +531,21 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
+_RDNA35_ISA_RE = re.compile(r"^gfx115\d$")
+
+
+def _defaults_to_vllm(gpu_identity: dict) -> bool:
+    """Identities whose default serving backend is vllm rather than sglang.
+
+    The RDNA4 serving products are a product match (the ISA gfx1201 alone proves
+    nothing); the RDNA 3.5 APUs are an ISA match, since gfx1151 has no product key.
+    Same boundary as VLLM_DEFAULT / RDNA35_ISA (`/^gfx115\\d$/`) in e2e_workflow.js.
+    """
+    return gpu_identity.get("target") in RDNA4_SERVING_PRODUCTS or bool(
+        _RDNA35_ISA_RE.match(str(gpu_identity.get("gfx", "")))
+    )
+
+
 def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     """Resolve policy identity before the workflow chooses backend or knowledge.
 
@@ -719,8 +734,10 @@ def map_args(
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
+        # The workflow defaults these identities to vllm and rejects sglang on
+        # gfx115x, so defaulting to sglang here would only move the failure later.
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
+            "vllm" if gpu_identity and _defaults_to_vllm(gpu_identity) else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
@@ -1839,7 +1856,7 @@ def _magpie_script_from_recipe(h: dict) -> str:
     return ""
 
 
-def apply_bench_launcher(h: dict) -> str:
+def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
     """Align the SERVER LAUNCH recipe with the external orchestrator (Magpie).
 
     A "completely-aligned" throughput number needs the SERVER launched the SAME
@@ -1869,12 +1886,16 @@ def apply_bench_launcher(h: dict) -> str:
     When nothing is discoverable the native backend launch is kept, so the
     standalone / unaligned path is byte-identical to before.
 
+    ``backend`` is the backend ``map_args`` resolved; pass it so an identity-derived
+    default (vllm on R9700 and gfx115x) picks that backend's script. Without it the
+    handoff's ``framework`` is used, defaulting to sglang.
+
     Returns the resolved launcher name (for --dry-run / logging).
     """
     requested = str(
         h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or ""
     ).strip().lower()
-    backend = str(h.get("framework", "sglang") or "sglang").strip().lower()
+    backend = str(backend or h.get("framework") or "sglang").strip().lower()
     # Discover the Magpie launch script, most explicit source first: handoff,
     # generic env, per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT),
     # then derived from the launch recipe the handoff points at. The recipe is
@@ -7864,7 +7885,7 @@ def main(argv: list[str]) -> int:
     # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
     # until then; _kb_write_back handles successful runs too when Module B left no receipt.
     ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
-    bench_launcher = apply_bench_launcher(h)
+    bench_launcher = apply_bench_launcher(h, ps_args["backend"])
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
     bench_protocol = apply_bench_protocol(h)

@@ -1,8 +1,8 @@
 export const meta = {
   name: 'e2e-workflow',
 
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
-  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only), and RDNA 3.5 gfx1151 (Strix Halo, vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 and gfx115x are vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700 and on gfx115x) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
 
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
@@ -229,10 +229,18 @@ if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang')).trim()
-  || (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang');  // serving adapter
+// The global default is sglang. The RDNA4 serving products and gfx115x default to vllm: the only
+// backend validated on R9700 and on gfx1151 (the other gfx115x parts follow gfx1151). Which
+// backends each one ACCEPTS is decided by the guards below.
+const VLLM_DEFAULT = RDNA4_PRODUCT_E2E || RDNA35_ISA;
+const BACKEND = String(A.backend != null ? A.backend : (VLLM_DEFAULT ? 'vllm' : 'sglang')).trim()
+  || (VLLM_DEFAULT ? 'vllm' : 'sglang');  // serving adapter
 if (RDNA4_PRODUCT_E2E && BACKEND !== 'vllm') {
   throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
+}
+// Model mode only: a single-kernel pass-through never starts a server, so its backend is moot.
+if (MODEL_PATH && RDNA35_ISA && BACKEND !== 'vllm') {
+  throw new Error(`${EXPECTED_GFX} E2E is vLLM-only (got backend=${BACKEND}): no other serving backend is validated on the RDNA 3.5 APUs; pass args.backend=vllm (framework=vllm in a run_e2e.py handoff)`);
 }
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);

@@ -134,6 +134,58 @@ const R9700 = {
     ok(a.expected_target === 'r9700', 'R9700 product key preserved', JSON.stringify(a.expected_target));
   }
 
+  console.log('\n# serving backend policy (no other backend is validated on gfx1151)');
+  const firstPhaseError = async (args) => {
+    const { run } = build(args, { stopAtPhase: 1 });
+    try { await run(); } catch (e) { return e.message; }
+    return '';
+  };
+  const directorBackend = async (identity) => {
+    const { run, trace } = build({ model_path: '/models/m', ...identity }, {
+      stopAtPhase: 2,
+      setupIdentity: {
+        gfx: identity.expected_gfx, target: identity.expected_target,
+        name: identity.expected_device_name, cu: identity.expected_physical_cu_count,
+      },
+    });
+    try { await run(); } catch (e) { /* probe stop */ }
+    const prompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
+    return (prompt.match(/BACKEND=(\w+)/) || [])[1];
+  };
+  for (const backend of ['sglang', 'atom']) {
+    const msg = await firstPhaseError({ model_path: '/models/m', backend, ...HALO });
+    ok(new RegExp(`^gfx1151 E2E is vLLM-only \\(got backend=${backend}\\)`).test(msg),
+      `explicit backend=${backend} fails closed`, msg || 'no throw');
+  }
+  {
+    const msg = await firstPhaseError({
+      model_path: '/models/m', backend: 'sglang', expected_gfx: 'gfx1150', expected_target: 'unknown',
+    });
+    ok(/^gfx1150 E2E is vLLM-only/.test(msg) && /RDNA 3\.5 APUs/.test(msg),
+      'the refusal names the ISA it saw', msg || 'no throw');
+  }
+  {
+    // The default case does not throw either way, so read the backend the Director is told to use.
+    const halo = await directorBackend(HALO);
+    ok(halo === 'vllm', 'gfx1151 default backend is vllm', String(halo));
+    const mi = await directorBackend(MI355X);
+    ok(mi === 'sglang', 'gfx950 default backend is still sglang', String(mi));
+  }
+  {
+    // atom rather than sglang: which backends R9700 accepts is the R9700 policy's business.
+    const msg = await firstPhaseError({ model_path: '/models/m', backend: 'atom', ...R9700 });
+    ok(/^R9700 E2E is vLLM/.test(msg) && /got backend=atom/.test(msg),
+      'the R9700 guard fires with its own message', msg || 'no throw');
+  }
+  {
+    // A single-kernel pass-through never serves, so an explicit backend must not stop it.
+    const { run, trace } = build({ kernel_path: '/tmp/k', backend: 'sglang', ...HALO });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(!msg && trace.workflowCalls.length === 1, 'kernel pass-through ignores the serving backend',
+      msg || `${trace.workflowCalls.length} lane call(s)`);
+  }
+
   console.log('\n# effective role inputs: the E2E learned KB');
   for (const [name, identity, want] of [['gfx1151', HALO, 'off'], ['gfx950', MI355X, 'on']]) {
     const { run, trace } = build(
@@ -158,6 +210,8 @@ const R9700 = {
   {
     ok(/const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE \|\| RDNA35_ISA/.test(BODY),
       'client-RDNA isolation is a union, not a rename of RDNA4_ISOLATE');
+    ok(/const VLLM_DEFAULT = RDNA4_PRODUCT_E2E \|\| RDNA35_ISA/.test(BODY),
+      'the vllm-default set is one named predicate');
     // The head-kernel deep-dive offers the WMMA layout direction instead of the MFMA-only
     // matrix_instr_nonkdim / kpack knobs on every isolated ISA.
     ok(/CLIENT_RDNA_ISOLATE\n\s+\? ' DIRECTION=wmma-layout:/.test(BODY),
