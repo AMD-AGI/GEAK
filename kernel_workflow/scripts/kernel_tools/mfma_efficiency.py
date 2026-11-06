@@ -3,15 +3,15 @@
 
 Solidifies the "what dilutes the MFMA stream" question by attributing REAL CYCLES
 (not instruction counts) to what happens between consecutive MFMA instructions --
-this IS the ground-truth ranked bubble-ownership that feeds the classify -> prioritize
--> verify spine (re-run each round; confirm the #1 bucket shrank).
+These measurements are evidence for the agent to interpret alongside SKU/roofline,
+profile and ISA/IR context; this tool does not select a bound class or optimization.
 
 For a decoded ATT wave (se*_wv0.json) + code.json it reports:
   * MFMA cadence: cycles between consecutive MFMA. Judged REFERENCE-FREE against
     (a) a p10-cadence self-reference floor (robust "achievable back-to-back" for THIS
     kernel's MFMA shape) and (b) the theoretical cadence (--ideal-cadence; fp16 16 cyc /
-    fp8 32 cyc, planning-constants.md). median ~ ideal => genuine MFMA-issue-bound
-    (attack tile/ILP); median >> ideal => bubble (attack the dominant inter-MFMA bucket).
+    fp8 32 cyc, planning-constants.md). Ratios are reported without a fixed
+    cadence threshold selecting an optimization.
   * inter-MFMA CYCLE attribution + rollup (softmax / lds / addressing / WAIT / SYNC):
     which class actually steals MFMA cycles. Each op is charged the gap to the NEXT
     issued instruction (real elapsed, includes its stall), so a cheap-but-stalling op
@@ -28,7 +28,6 @@ import json
 import os
 import statistics
 import sys
-import collections
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -92,31 +91,6 @@ def resolve_ideal_cadence(override, arch, dtype):
     if cyc is None:
         return None, f"UNRESOLVED (no mfma_cadence_cyc.{dtype} for {arch})"
     return int(cyc), f"hw_constants.json {arch}.mfma_cadence_cyc.{dtype}"
-
-
-def _cards_by_bucket():
-    """bubble slug -> [card ids], read from the Gluon pack's lever-cards.json if present.
-
-    The cards stay in the pack (they point at the pack's references), so they resolve through
-    `_hwdata.pack_file('references/hardware/lever-cards.json')` -- `$GEAK_GLUON_PACK_DIR`, else
-    this checkout's gluon_authoring. No glob: a miss degrades to no pointers rather than failing
-    or walking the filesystem. Order preserved from each card's bubble_bucket list."""
-    try:
-        import _hwdata
-        c = _hwdata.pack_file("references/hardware/lever-cards.json")
-    except ImportError:
-        c = None
-    if c is None:
-        return {}
-    try:
-        levers = json.load(open(c)).get("levers", {})
-    except Exception:  # noqa: BLE001
-        return {}
-    out = collections.defaultdict(list)
-    for cid, card in levers.items():
-        for b in (card.get("bubble_bucket") or []):
-            out[b].append(cid)
-    return out
 
 
 def _pct(xs, p):
@@ -187,14 +161,12 @@ def report(r, label, ideal, ideal_src="", dtype=None):
     if med and ideal:
         eff_self = 100.0 * p10 / med if med else 0        # how close to THIS kernel's own best
         eff_ideal = 100.0 * ideal / med if med else 0     # how close to the hardware cadence
-        verdict = ("issue-bound (cadence ~ ideal -> attack tile/ILP)" if med <= 1.3 * ideal
-                   else "bubble-diluted (cadence >> ideal -> attack the #1 inter-MFMA bucket)")
-        print(f"  MFMA efficiency: vs-p10-self={eff_self:.0f}%  vs-ideal={eff_ideal:.0f}%  -> {verdict}")
+        print(f"  MFMA efficiency: vs-p10-self={eff_self:.0f}%  vs-ideal={eff_ideal:.0f}%")
     elif med:
-        # The self-reference still stands without a hardware cadence; the verdict does not, and
-        # printing one anyway is how a guessed constant becomes a direction.
         print(f"  MFMA efficiency: vs-p10-self={100.0 * p10 / med:.0f}%  vs-ideal=UNKNOWN "
-              f"-> NO VERDICT ({ideal_src}). Pass --arch, or --ideal-cadence to assert one.")
+              f"({ideal_src})")
+    print("  Bound classification and optimization choices require agent analysis of "
+          "SKU/roofline, profile and ISA/IR evidence, followed by validation.")
     tot = sum(r["cyc_by_cls"].values()) or 1
     print(f"  inter-MFMA CYCLES stolen by ({tot} cyc total between MFMA):")
     for sc, cyc in r["cyc_by_cls"].most_common():
@@ -202,9 +174,7 @@ def report(r, label, ideal, ideal_src="", dtype=None):
         print(f"      {sc:16s} {cyc:8d} cyc ({100*cyc/tot:4.1f}%)   {cnt:5d} instr  "
               f"{cyc/cnt if cnt else 0:5.1f} cyc/instr")
     cb = r["cyc_by_cls"]
-    # (human label, canonical bubble slug) -- the slug is the join key into lever-cards.json
-    # `bubble_bucket`. cadence-diluted MFMA is reported separately (see cadence verdict above),
-    # so the 'mfma-cadence' cards are surfaced there, not in this inter-MFMA rollup.
+    # Display measured instruction groups; their order does not select an optimization.
     roll = [
         ("softmax/fp-compute (fp_math+exp+pack)", "fp-compute", cb["valu_fp_math"] + cb["exp"] + cb["valu_fp_pack"]),
         ("lds feed (lgkmcnt-waited)",             "lds-feed",   cb["lds"]),
@@ -214,20 +184,11 @@ def report(r, label, ideal, ideal_src="", dtype=None):
         ("WAIT (waitcnt=unhidden latency)",       "wait",       cb["waitcnt"]),
         ("SYNC (barrier+nop)",                    "sync",       cb["barrier"] + cb["nop"]),
     ]
-    cards = _cards_by_bucket()
-    print("  rollup of inter-MFMA cycles (ranked bubble-ownership -> AMD lever cards for each bucket):")
-    for label, slug, v in sorted(roll, key=lambda x: -x[2]):
-        tac = cards.get(slug)
-        ptr = f"   -> cards: {', '.join(tac)}" if tac else ""
-        print(f"      {label:40s} {100*v/tot:5.1f}%{ptr}")
-    if cards:
-        print("  (a card is a candidate, not a verdict; one that does not fit is a named N/A. "
-              "A ranked bucket with NO card is a catalogue gap -- report it.)")
-    # 'lds/gmem feed' merges two DIFFERENT resources whose fixes are OPPOSITE: LDS traffic
-    # (lgkmcnt-waited -> layout/swizzle/fewer-wider ds_read) and global traffic (vmcnt-waited
-    # -> coalescing/async copy/prefetch). Published split, same denominator as the rollup, so a
-    # large feed bucket is actionable instead of merely large.
-    print("  feed-bucket split (resolves 'lds/gmem feed'; the two halves have opposite fixes):")
+    print("  rollup of inter-MFMA cycles by instruction group:")
+    for label, _slug, v in sorted(roll, key=lambda x: -x[2]):
+        print(f"      {label:40s} {100*v/tot:5.1f}%")
+    # Keep LDS and global traffic separate, with the same denominator as the rollup.
+    print("  feed-bucket split (LDS and global):")
     print(f"      {'lds feed (lgkmcnt-waited)':40s} {100*cb['lds']/tot:5.1f}%")
     print(f"      {'gmem feed (vmcnt-waited)':40s} {100*cb['gmem']/tot:5.1f}%")
 
@@ -244,8 +205,8 @@ def main():
                          "the MFMA mnemonic -- pass this instead of hand-supplying a cadence.")
     ap.add_argument("--ideal-cadence", type=int, default=None,
                     help="OVERRIDE the resolved theoretical cadence (cyc). Only needed when --arch "
-                         "cannot be given or the dtype is not inferable; a wrong value INVERTS the "
-                         "issue-bound vs bubble-diluted verdict, so state why you set it.")
+                         "cannot be given or the dtype is not inferable; state the source and "
+                         "applicable instruction shape for this reference.")
     ap.add_argument("--compare", nargs="+",
                     help="wave,code,LABEL entries (OPTIONAL peer/vendor diagnostic upper-bound)")
     a = ap.parse_args()
@@ -301,22 +262,8 @@ def _selftest():
         f8, s8 = resolve_ideal_cadence(None, "gfx942", "fp8")
         chk(f16 == 16 and "hw_constants" in s16, f"gfx942 fp16 -> 16, got {f16}")
         chk(f8 == 32 and "hw_constants" in s8, f"gfx942 fp8 -> 32, got {f8}")
-        # THE REGRESSION THIS FILE EXISTS TO PREVENT: at fp8's real cadence of 32 a kernel sitting
-        # exactly at the hardware rate must read issue-bound. Under the old default of 16 the same
-        # kernel read "bubble-diluted", which points the round at the opposite lever.
-        chk(32 <= 1.3 * f8, "fp8 kernel at cadence 32 must be issue-bound against its own ideal")
-        chk(not (32 <= 1.3 * 16), "the old default 16 would have inverted that verdict")
     else:
         print("  -- hw_constants.json not reachable in this layout; table lookup not asserted")
-
-    # lever-cards.json resolves from the pack, never by globbing; when the pack is reachable
-    # the bubble buckets must map to at least one card.
-    try:
-        import _hwdata
-        if _hwdata.pack_file("references/hardware/lever-cards.json"):
-            chk(bool(_cards_by_bucket()), "lever-cards.json reachable but no bubble_bucket cards")
-    except ImportError:
-        pass
 
     print("MFMA_EFFICIENCY SELFTEST " + ("PASS" if not fail else "FAIL"))
     return fail

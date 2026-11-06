@@ -19,6 +19,26 @@ REPO = Path(__file__).resolve().parents[3]
 KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
 HW_DATA = REPO / "perf_knowledge" / "hardware" / "data"
 
+
+@pytest.mark.parametrize("cadence", [16, 32])
+def test_mfma_report_preserves_measurements_without_decision_dispatch(tmp_path, cadence):
+    wave = tmp_path / "wave.json"
+    code = tmp_path / "code.json"
+    code.write_text(json.dumps({"code": [
+        ["v_mfma_f32_16x16x16_f16"], ["ds_read_b128"],
+    ]}))
+    wave.write_text(json.dumps({"wave": {"begin": 0, "instructions": [
+        [0, 0, 0, 0, 0], [4, 0, 0, 0, 1], [cadence, 0, 0, 0, 0],
+    ]}}))
+    result = run(sys.executable, KT / "mfma_efficiency.py", wave, code,
+                 "--ideal-cadence", "16")
+    assert result.returncode == 0, result.stderr
+    assert f"median={cadence}" in result.stdout
+    assert f"vs-ideal={100 * 16 / cadence:.0f}%" in result.stdout
+    assert "lds" in result.stdout and "agent analysis" in result.stdout
+    for decision in ("attack", "issue-bound", "bubble-diluted", "-> cards:", "catalogue gap"):
+        assert decision not in result.stdout
+
 PY_TOOLS = ["asm_loop_audit", "asm_schedule_viz", "mfma_efficiency", "deep_mfma_analysis",
             "gfx950_isa", "layout_facts", "amd_occupancy", "probe"]
 SH_TOOLS = ["hw_sources.sh", "dump_ir.sh"]
