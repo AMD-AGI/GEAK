@@ -11,10 +11,11 @@
 #   - EVAL_DIR/workspace (CANONICAL)
 #   - EVAL_DIR/baseline (when present)
 #   - patches / metrics / STATE / COMMANDMENT / reports
+#   - complete verify output trees, including their measurement workspaces
 #   - round_K for K >= keep-round (default: keep only the latest round dir)
 # Removes / lightens:
 #   - older round_*/engineer_*/workspace trees
-#   - verify ws*/ctl_* copies under older (and optionally current) rounds
+#   - disposable ws*/ctl_* copies outside verify output trees
 #   - nested *.so under round_* (never under CANONICAL kernel_src edits — those use .torch_ext)
 #   - wave*_archive_* when --force-heavy (GEAK-side cleanup if AKA left them under eval)
 #
@@ -41,10 +42,31 @@ EVAL_DIR="$(cd "$EVAL_DIR" && pwd)"
 bytes_before=$(du -sb "$EVAL_DIR" 2>/dev/null | awk '{print $1}')
 removed=0
 bytes_reclaimed=0
+skipped_protected=0
+
+# VERIFY_DIR contains the measurements as well as rebuildable clones. Preserve
+# its whole tree: archive evidence_refs have no defined filesystem path contract.
+# Keep both the named boundary and its target when a verifier used a symlink.
+# An incomplete scan or unresolved/root alias conservatively protects the eval tree.
+mapfile -d '' -t VERIFY_TREES < <(find "$EVAL_DIR" -name verify \( -type d -o -type l \) -print0 || printf '%s\0' "$EVAL_DIR")
+for tree in "${VERIFY_TREES[@]}"; do
+  resolved=$(realpath -e -- "$tree" 2>/dev/null) || resolved="$EVAL_DIR"
+  [[ "$resolved" != / ]] || resolved="$EVAL_DIR"
+  VERIFY_TREES+=("$resolved")
+done
 
 reclaim_path() {
   local p="$1"
   [[ -e "$p" || -L "$p" ]] || return 0
+  local tree physical
+  physical=$(realpath -m -- "$p" 2>/dev/null) || physical="$EVAL_DIR"
+  for tree in "${VERIFY_TREES[@]}"; do
+    if [[ "$p" == "$tree" || "$p" == "$tree/"* || "$tree" == "$p/"* ||
+          "$physical" == "$tree" || "$physical" == "$tree/"* || "$tree" == "$physical/"* ]]; then
+      skipped_protected=$((skipped_protected + 1))
+      return 0
+    fi
+  done
   local b
   b=$(du -sb "$p" 2>/dev/null | awk '{print $1}')
   rm -rf "$p"
@@ -73,11 +95,11 @@ for rd in "${ROUND_DIRS[@]+"${ROUND_DIRS[@]}"}"; do
       reclaim_path "$so"
     done < <(find "$rd" -type f -name '*.so' -print0 2>/dev/null)
   else
-    # Current/kept round: remove verify clones and stray *.so, keep active engineer workspaces
+    # Current/kept round: remove disposable clones and stray *.so outside verify trees; keep active engineer workspaces
     # unless --force-heavy (disk pressure path).
     while IFS= read -r -d '' ws; do
       reclaim_path "$ws"
-    done < <(find "$rd" -type d \( -path '*/verify/*' -o -name 'ws2_*' -o -name 'ctl_*' \) -print0 2>/dev/null)
+    done < <(find "$rd" -type d \( -name 'ws2_*' -o -name 'ctl_*' \) -print0 2>/dev/null)
     while IFS= read -r -d '' so; do
       reclaim_path "$so"
     done < <(find "$rd" -type f -name '*.so' -print0 2>/dev/null)
@@ -113,8 +135,8 @@ done < <(find "$EVAL_DIR" -maxdepth 1 -type d -name 'wave*_archive_*' -print0 2>
 bytes_after=$(du -sb "$EVAL_DIR" 2>/dev/null | awk '{print $1}')
 n_so=$(find "$EVAL_DIR" -type f -name '*.so' 2>/dev/null | wc -l | tr -d ' ')
 
-summary=$(printf '{"ok":true,"eval_dir":"%s","bytes_before":%s,"bytes_after":%s,"bytes_reclaimed":%s,"removed_paths":%s,"n_so_remaining":%s,"keep_round":%s,"force_heavy":%s}' \
-  "$EVAL_DIR" "${bytes_before:-0}" "${bytes_after:-0}" "${bytes_reclaimed:-0}" "$removed" "${n_so:-0}" "$KEEP_ROUND" "$FORCE_HEAVY")
+summary=$(printf '{"ok":true,"eval_dir":"%s","bytes_before":%s,"bytes_after":%s,"bytes_reclaimed":%s,"removed_paths":%s,"skipped_protected_paths":%s,"n_so_remaining":%s,"keep_round":%s,"force_heavy":%s}' \
+  "$EVAL_DIR" "${bytes_before:-0}" "${bytes_after:-0}" "${bytes_reclaimed:-0}" "$removed" "$skipped_protected" "${n_so:-0}" "$KEEP_ROUND" "$FORCE_HEAVY")
 echo "$summary"
 echo "$summary" >> "$EVAL_DIR/storage_telemetry.jsonl" 2>/dev/null || true
 exit 0
