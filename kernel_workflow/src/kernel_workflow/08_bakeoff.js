@@ -31,6 +31,8 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
       // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+      // The explicit bakeoff argument object must preserve the caller's role allowance too.
+      ...(A.agent_timeout_ms != null ? { agent_timeout_ms: A.agent_timeout_ms } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
@@ -44,7 +46,10 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
     return { lane: l, r, speedup };
   } catch (e) {
     log(`lane ${l.key} failed: ${e && e.message ? e.message : e}`);
-    return { lane: l, r: null, speedup: 0 };
+    const failure = {lane: l.key, eval_dir: `${EVAL_DIR}/bakeoff/${l.key}`,
+      code: e && e.code || 'lane_execution_failed', message: String(e && e.message || e)};
+    return {lane: l, r: {eval_dir: failure.eval_dir, validation_status: 'unavailable', process_validated: false,
+      final_speedup: null, final_patch: '', delivery_incomplete: [failure]}, speedup: null,
+      failure};
   }
 })));
-

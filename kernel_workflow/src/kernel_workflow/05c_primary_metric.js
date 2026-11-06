@@ -1,8 +1,11 @@
 
 // PRIMARY metric of a worker (kernel_lane.js) result: its final_speedup is already the weighted number
-// when the run was workload-aligned, else the geomean. Fall back defensively.
+// when the run was workload-aligned, else the geomean. Declared weighting must remain available.
 const primSpeedup = (r) => {
   if (!r) return 0;
+  if (r.workload_aligned === true) {
+    return Number.isFinite(r.final_weighted) && r.final_weighted > 0 ? r.final_weighted : null;
+  }
   const g = r.final_speedup != null ? r.final_speedup
           : (r.final_weighted != null ? r.final_weighted
              : (r.final_geomean != null ? r.final_geomean : 0));

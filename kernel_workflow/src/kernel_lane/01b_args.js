@@ -61,8 +61,31 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // replaced; leaving it out would make the "before" arm unreachable and force the comparison to be
 // made across two different scripts, where any other drift would be indistinguishable from the
 // scheduler's effect. Default 'pool'.
-const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
-const GPU_POOL = GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+const REQUIRED_GPU_COUNT = A.required_gpu_count ?? 1;
+if (!Number.isSafeInteger(REQUIRED_GPU_COUNT) || REQUIRED_GPU_COUNT < 1)
+  throw new Error('required_gpu_count must be a positive safe integer');
+if (REQUIRED_GPU_COUNT > 1 && (GPU_LIST.length !== REQUIRED_GPU_COUNT
+    || GPU_LIST.some(id => !/^(0|[1-9][0-9]*)$/.test(id))
+    || new Set(GPU_LIST).size !== GPU_LIST.length))
+  throw new Error('multi-GPU lane requires its exact, distinct allocated GPU IDs');
+// Own key: deadline_epoch would also arm the fixed-window stopping policy (07_deadline.js).
+const GPU_PROCESS_SETTLEMENT = REQUIRED_GPU_COUNT > 1 || A.wait_for_process_settlement === true;
+if (GPU_PROCESS_SETTLEMENT && (!agent.processTimeoutSupported
+    || !Number.isFinite(Number(A.settlement_deadline_epoch)) || Number(A.settlement_deadline_epoch) <= 0))
+  throw new Error('GPU group requires native process settlement and its original absolute deadline');
+const GPU_MODE = REQUIRED_GPU_COUNT > 1 ? 'set'
+  : String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
+const GPU_POOL = GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
+  : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+const GPU_GROUP_INSTRUCTIONS = REQUIRED_GPU_COUNT > 1 ? `
+This task requires ${REQUIRED_GPU_COUNT} GPUs together. Its assigned raw IDs are ${GPU_IDS}.
+GPU_ID=${GPU_POOL} is a lock argument: pass it unchanged to gpu_lock.sh or profile_kernel.sh
+for EVERY compile, correctness, benchmark, verification and diagnostic command. Never place
+set: in a HIP/CUDA/ROCR mask, choose one device from the group, or rewrite inherited ROCR.
+Run the immutable task's native multi-rank command in the foreground and wait for every rank.
+The wrapper sets numeric HIP visibility only after all device locks are held. Preserve the
+caller's ordinal-to-physical mapping and the frozen rank count; do not substitute a single-rank test.
+` : '';
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -110,6 +133,10 @@ const externalArgv = (value) => Array.isArray(value) && value.length
 if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
     || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
   throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+if (!EXTERNAL_OBJECTIVE && typeof runProcess !== 'function') {
+  throw Object.assign(new Error('Native kernel delivery requires the host runProcess runtime before Setup'),
+    {code: 'GEAK_HOST_RUNTIME_REQUIRED'});
 }
 const EXTERNAL_FINAL_COMMANDS = A.external_final_measurement_command != null
   || A.external_final_result_command != null;
@@ -193,8 +220,14 @@ async function captureFinalEvaluation(workspace) {
 
 async function writeFrozenFinalPatch() {
   const path = `${EVAL_DIR}/host_final_patch.diff`;
-  if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null) {
-    throw new Error('could not write the captured final source patch');
+  try {
+    if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null
+        || await hostRun('cat', ['--', path]) !== frozenFinalPatch) {
+      throw new Error('could not write the captured final source patch');
+    }
+  } catch (error) {
+    if (!EXTERNAL_OBJECTIVE) throw nativeDeliveryError(`final source export failed: ${String(error)}`);
+    throw error;
   }
   return path;
 }
@@ -308,16 +341,16 @@ const checkedExternal = (o, key) => o && o.external_measurement_valid === true
   && Number.isFinite(o[key]) ? o[key] : null;
 // The declared native primary is shared by external development and report/export.
 const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_speedup') : primSpeedup(o);
-// PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
-// agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+// PRIMARY-metric selector: declared workload weighting requires its measured weighted result.
+// A missing, nonfinite or nonpositive weighted result is unavailable, never an unweighted gain or a measured loss.
 // External mode uses the checked task primary, matching its declared final objective.
 // The checked all-case geomean remains a secondary diagnostic.
 const primSpeedup = (o) => {
-  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (!o) return EXTERNAL_OBJECTIVE || HAS_WORKLOAD ? null : 0;
   if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
-  if (HAS_WORKLOAD && Number.isFinite(w)) return w;
+  if (HAS_WORKLOAD) return Number.isFinite(w) && w > 0 ? w : null;
   const g = o.verified_geomean != null ? o.verified_geomean : o.speedup_geomean;
   return Number.isFinite(g) ? g : 0;
 };

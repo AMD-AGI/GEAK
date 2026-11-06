@@ -4,6 +4,13 @@
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
+  throw new Error('prepare_only must be a boolean');
+if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
+    || A.state_dir || A.prepared_original_ref !== undefined || A.population_lineage
+    || A.objective?.kind === 'external_primary'
+    || A.search_duration_s != null || A.preparation_allowance_s != null))
+  throw new Error('prepare_only needs a fresh ORIGINAL lane, without author/resume/import/population or relative search controls');
 if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
   throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }

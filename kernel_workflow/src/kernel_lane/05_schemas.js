@@ -174,7 +174,17 @@ const PLAN_SCHEMA = obj({
   },
 }, ['stop', 'directions']);
 
+// Optional author interpretation; never a score, eligibility gate or verification record.
+const evidenceContext = obj({
+  tested_applicability: {type: 'string'},
+  observations: {type: 'array', items: {type: 'string'}},
+  unresolved: {type: 'array', items: {type: 'string'}},
+  rival_explanations: {type: 'array', items: {type: 'string'}},
+  next_separating_observation: {type: 'string'},
+  evidence_refs: {type: 'array', items: {type: 'string'}},
+}, []);
 const ENG_SCHEMA = obj({
+  evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
@@ -187,6 +197,7 @@ const ENG_SCHEMA = obj({
 }, metricRequired(['status', 'speedup_geomean', 'measurement_valid']));
 
 const VERIFY_SCHEMA = obj({
+  evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
@@ -199,6 +210,7 @@ const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
   combos_tried: { type: 'array', items: { type: 'object', additionalProperties: true } },
   best: obj({
+    evidence_context: evidenceContext,
     patch_file: { type: 'string' },
     ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   }, EXTERNAL_OBJECTIVE ? ['patch_file', 'external_evaluation'] : ['patch_file']),

@@ -19,7 +19,7 @@ profile_detect_arch() {
         if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] || [ -z "${GPU_ID:-}" ]; then
             identity="$(python3 "$identity_script")" || return 1
         else
-            identity="$(ROCR_VISIBLE_DEVICES="$GPU_ID" python3 "$identity_script")" || return 1
+            identity="$(ROCR_VISIBLE_DEVICES="${GPU_ID#set:}" python3 "$identity_script")" || return 1
         fi
         python3 -c 'import json,sys; print(json.loads(sys.argv[1])["gfx"])' "$identity"
         return

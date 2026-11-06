@@ -14,6 +14,7 @@ const kbVerdict = (ver, sp) => {
     return /outside_editable_set/i.test(String(ver.notes || '')) ? 'inapplicable' : 'not_reproduced';
   }
   if (!says(ver.status, 'verified')) return 'not_reproduced';
+  if (!Number.isFinite(sp)) return 'not_reproduced';
   if (!(sp > 1.0)) return 'failed';              // applied, ran, correct, just did not go faster
   return says(ver.correctness, 'pass') ? 'inapplicable' : 'not_reproduced';   // fast but never adopted
 };
@@ -158,7 +159,7 @@ ${resolveScript}
             CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
-            GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
             ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
@@ -215,7 +216,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
               { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
@@ -227,7 +228,10 @@ correctness check; only report committed=true if it still passes. Return JSON {c
         if (rec && rec.status !== 'adopted') {
           rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
           rec.outcome = kbVerdict(ver, sp);
-          rec.verified_speedup = spReported || 0;
+          rec.verified_speedup = Number.isFinite(spReported) ? spReported : null;
+          if (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE && rec.verified_speedup === null) {
+            rec.measurement_reason = 'weighted_result_missing_or_invalid';
+          }
         }
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
       }
@@ -244,8 +248,8 @@ correctness check; only report committed=true if it still passes. Return JSON {c
           (planeFlags && x.session_id ? `--session-id ${JSON.stringify(x.session_id)} ` : '') +
           `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} ` +
           `--gfx ${GFX}${KB_VERSION_FLAG} --outcome ${x.outcome} ` +
-          `--measured-speedup ${Number(x.verified_speedup) || 0} ` +
-          `--note ${JSON.stringify(`kernel_lane warm-start c${x.rank}: ${x.status}`.slice(0, 200))} ` +
+          (Number.isFinite(x.verified_speedup) ? `--measured-speedup ${x.verified_speedup} ` : '') +
+          `--note ${JSON.stringify(`kernel_lane warm-start c${x.rank}: ${x.status}${x.measurement_reason ? '; ' + x.measurement_reason : ''}`.slice(0, 200))} ` +
           `--measured-by ${JSON.stringify('kernel_lane:' + GFX)} --apply || true`);
         await agentT(
           `You are the kernel knowledge-base attestor. Run EXACTLY these commands in order and ` +

@@ -9,6 +9,8 @@ phase('Report');
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
+  delivery_incomplete: x.r && x.r.delivery_incomplete || [],
+  ...(x.failure ? {failure: x.failure} : {}),
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
@@ -41,7 +43,8 @@ if (rejectedByGate.length) {
 }
 const winner = ranked[0] || null;
 const laneRows = cands;
-const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
+const bestSpeedup = cands.reduce((m, c) => Number.isFinite(c.speedup)
+  ? (m === null ? c.speedup : Math.max(m, c.speedup)) : m, null);
 
 // Apply instruction depends on the winner class: a lane winner is a source patch (git apply); an
 // env-tune winner is a config/env deploy (no source change — record apply_env + tuning_artifact).
@@ -68,10 +71,10 @@ const rep = await agentT(
    - The WINNER (fastest verified) and a one-paragraph rationale. All speedups are directly comparable
      because every candidate — the input-language optimize lane, each authored language, AND the tuned
      env backend — was scored against the SAME frozen input kernel.
-     NOTE: WINNER may be null — this means NO candidate beat the frozen baseline (every speedup <= 1.0x,
-     e.g. all lanes failed or were slower than the original). In that case state clearly that no
-     candidate beat the baseline and the ORIGINAL kernel is RETAINED (do not present a slower-than-1.0x
-     candidate as a "winner by default"); still list every candidate in the table for transparency.
+     WINNER may be null because results are unavailable, validation rejected a candidate, or no
+     measured candidate improved the baseline. Report the actual reason from the candidate records;
+     unavailable speedup is not a measured loss. The ORIGINAL kernel is retained when no candidate
+     is eligible; still list every candidate, including unavailable results.
 2. ${applyStep}
 
 ## Inputs
@@ -89,5 +92,4 @@ Return ONLY {report_path, applied_to_original, note} as StructuredOutput.`,
 
 log(winner
   ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
-  : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
-
+  : `Bake-off COMPLETE. No eligible measured win (best reported ${bestSpeedup === null ? "unavailable" : bestSpeedup.toFixed(2) + "x"} across ${cands.length} candidate(s)); keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);

@@ -53,7 +53,7 @@ When choosing what to try next, follow this order based on the profiling data:
 
 ## Patch Save Rules
 
-1. **ALWAYS save a patch when speedup > 1.0x**. Run `git diff` and save to `best_patch.diff`.
+1. **ALWAYS save a patch when speedup > 1.0x**. Use `scripts/save_candidate_patch.sh` as specified by the engineer role to save `best_patch.diff`, including new editable source files.
 2. **Update patch when you beat your previous best**. Overwrite `best_patch.diff`.
 3. **Never submit without a patch file** if you achieved any speedup.
 4. Before saving: verify correctness passes. A fast-but-wrong kernel is worth 0x.

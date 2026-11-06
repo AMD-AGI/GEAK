@@ -6,7 +6,11 @@
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+// A process cutoff can leave a report and cumulative gain without final validation.
+// Keep those diagnostics, but do not offer that patch to the parent's A/B gate or learn it.
+const processValidated = !!(validation && validation.validation_status === 'accepted'
+    && Number.isFinite(finalPrimary) && finalPrimary > 0);
+if (KB_WRITE_OK && GFX && externalPromotion && processValidated && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
   // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
@@ -92,9 +96,14 @@ return {
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
+  process_validated: processValidated,
+  delivered_patch: finalPatch,
+    delivery: history.delivery || {candidates: [], delivered: null, incomplete: []},
+    delivery_incomplete: history.delivery?.incomplete || [],
+  ...(history.search_timing ? {search_timing: history.search_timing} : {}),
   kernel_name: KERNEL_NAME,
   workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
-  final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  final_speedup: processValidated ? finalPrimary : null, // PRIMARY metric when final validation accepted
   ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
   ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
   ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
@@ -113,7 +122,7 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+  final_patch: !processValidated || (EXTERNAL_OBJECTIVE && !externalPromotion) ? ''
     : finalPatch,
   ...(EXTERNAL_OBJECTIVE ? {final_patch_sha256: externalPromotion ? validation.patch_sha256 : null} : {}),
   // null when the step was off, or the run earned nothing worth a card.
@@ -131,14 +140,17 @@ return {
   // Rounds where the planner overran the KB budget. A KB that binds every round is one that has taken
   // over planning, which is the regression this budget exists to catch.
   kb_cap_bound_rounds: kbCapBound,
-  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
-  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
-  // a KB that cages lowers this without raising that. Reported on KB-less runs too — those are the
-  // baseline it has to be read against.
+  // Count distinct issued (specialty, focus_files) labels, not semantic diversity or completed work.
+  // Missing historical label metadata leaves this diagnostic unavailable.
   direction_entropy: (() => {
     const seen = new Set(); let n = 0;
-    for (const r of history.rounds) for (const d of (r.directions || [])) {
-      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    for (const r of history.rounds) {
+      if (!Array.isArray(r.directions)) return null;
+      for (const d of r.directions) {
+        if (!d || typeof d.specialty !== 'string' || !d.specialty.trim() ||
+            !Array.isArray(d.focus_files) || !d.focus_files.every(f => typeof f === 'string')) return null;
+        n++; seen.add(JSON.stringify([d.specialty, d.focus_files.slice().sort()]));
+      }
     }
     return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
   })(),

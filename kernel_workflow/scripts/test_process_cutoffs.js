@@ -20,7 +20,8 @@ const perCase = [{name: 'c1', baseline_ms: 8, optimized_ms: 4, speedup: 2}];
 
 async function lane({bounded, commitResult = {committed: true}, planExpired = false,
     successfulRounds = 0, commitAdvanced = false, pinExpired = false, commitAtDeadline = true,
-    failThenSucceed = false, dirtyBeforeCommit = false, repeatedFailures = false}) {
+    failThenSucceed = false, dirtyBeforeCommit = false, repeatedFailures = false, retained = false,
+    directorNull = false, directorFlagged = false, directorChanged = false}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-cutoff-'));
   try {
   const canonical = path.join(temp, 'canonical'), evalDir = path.join(temp, 'eval');
@@ -35,9 +36,9 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   fs.mkdirSync(path.join(canonical, 'cache'));
   fs.writeFileSync(path.join(canonical, 'cache/result'), 'retained ignored cache\n');
   let previousHead = git('rev-parse', 'HEAD'), unfinishedHead = previousHead;
-  const deadlines = [], calls = [], reports = [];
+  const deadlines = [], calls = [], reports = [], cleanSnapshots = [], failedCommits = [];
   let activeDeadline = null;
-  let currentEpoch = total - 7200, reportedSpeedup, roundNumber = 0;
+  let currentEpoch = total - 7200, reportedSpeedup, roundNumber = 0, retainedPatch = null;
   const setProcessDeadline = epoch => {activeDeadline = epoch; deadlines.push(epoch);};
   setProcessDeadline.secondsLeft = () => activeDeadline - currentEpoch;
   const g = {
@@ -46,7 +47,8 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
       agent_timeout_ms: 45000, agent_retries: 1,
       warm_start: 'off', update_experience: 'off', llm_stats: 'false',
       ...(bounded ? {deadline_epoch: total, search_reserve_s: 5100,
-        final_validation_reserve_s: 1800, final_cleanup_reserve_s: 300} : {})},
+        final_validation_reserve_s: 1800, final_cleanup_reserve_s: 300} : {}),
+      ...(retained ? {delivery_reserve_s: 1000} : {})},
     phase: () => {}, log: () => {}, setProcessDeadline,
     workflow: async () => {throw new Error('unexpected nested workflow');},
     budget: {total: null, spent: () => 0, remaining: () => Infinity},
@@ -56,14 +58,20 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
       return item;
     })),
     runProcess: async options => {
-      if (pinExpired && activeDeadline === cutoffs.search) {
+      if (pinExpired && activeDeadline === cutoffs.search && options.cmd === 'git'
+          && options.args.includes('--show-toplevel')) {
         currentEpoch = activeDeadline;
         throw Object.assign(new Error('expired before read-only git command'), {code: 'GEAK_PROCESS_DEADLINE'});
       }
-      assert.ok(currentEpoch < activeDeadline, 'host recovery must run inside its reserved process window');
+      if (bounded) assert.ok(currentEpoch < activeDeadline, 'host recovery must run inside its reserved process window');
       assert.ok(options.timeoutMs > 0, 'host operations remain finite');
-      const r = spawnSync(options.cmd, options.args, {input: options.input, encoding: 'utf8', timeout: 5000});
+      const r = spawnSync(options.cmd, options.args, {input: options.input, cwd: options.cwd,
+        env: options.env ? {...process.env, ...options.env} : process.env, encoding: 'utf8', timeout: 5000});
       if (r.error) throw r.error;
+      if (options.cmd === 'git' && options.args.includes('status') && r.status === 0 && !r.stdout.trim()) {
+        cleanSnapshots.push({head: git('rev-parse', 'HEAD'), source: fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'),
+          afterCommit: calls.filter(c => c.label.startsWith('commit ')).length});
+      }
       return {status: 'completed', code: r.status, stdout: r.stdout, stderr: r.stderr,
         strays_killed: false, group_cleared: true, stdio_held: false};
     },
@@ -92,8 +100,25 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         }
         return {stop: false, directions: [{id: 'a', title: 'a', specialty: 'memory', prompt: 'a'}]};
       }
-      if (label.startsWith('eng ')) return {status: 'ok', measurement_valid: true, speedup_geomean: 2};
+      if (label.startsWith('eng ')) {
+        // Every claimed candidate has real bytes against this round's canonical base.
+        const out = prompt.match(/- OUTPUT_DIR: (\S+)/)[1], before = fs.readFileSync(path.join(canonical, 'k.py'), 'utf8');
+        fs.mkdirSync(out, {recursive: true});
+        const patch = path.join(out, 'best_patch.diff');
+        const cutSource = retained && roundNumber > successfulRounds;
+        fs.writeFileSync(patch, `diff --git a/k.py b/k.py\n--- a/k.py\n+++ b/k.py\n@@ -1 +1 @@\n-${before}+${cutSource ? 'retained' : `candidate ${roundNumber}`}\n`);
+        if (cutSource) retainedPatch = patch;
+        return {status: 'ok', measurement_valid: true, speedup_geomean: retained === 'reuse' ? 5 : 2};
+      }
       if (label.startsWith('verify ')) {
+        if (retained && label.endsWith('(delivery)')) {
+          const measured = prompt.match(/- PATCH: (\S+)/)[1];
+          assert.match(fs.readFileSync(measured, 'utf8'), /^\+retained$/m, 'the pinned bytes are qualified');
+          if (retained === 'changed') fs.writeFileSync(measured, 'changed during qualification\n');
+          return retained === 'rejected' ? {status: 'correctness_failed', correctness: 'fail', verified_geomean: 0}
+            : {status: 'verified', correctness: 'pass', verified_geomean: retained === 'reuse' ? 5 : 1.9, per_case: perCase};
+        }
+        if (retained && roundNumber > successfulRounds) return null; // Cut before it finished.
         if (dirtyBeforeCommit) {
           fs.writeFileSync(path.join(canonical, 'k.py'), 'dirty tracked bytes\n');
           fs.writeFileSync(path.join(canonical, 'dirty_added.py'), 'dirty staged new source\n');
@@ -105,7 +130,7 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         const result = roundNumber <= successfulRounds || (failThenSucceed && roundNumber === 2)
           ? {committed: true} : commitResult;
         const completed = result && result.committed === true;
-        if (bounded) {
+        {
           if (dirtyBeforeCommit) {
             assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'baseline\n');
             assert.equal(fs.existsSync(path.join(canonical, 'dirty_added.py')), false);
@@ -122,17 +147,21 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
             fs.writeFileSync(path.join(canonical, '*'), 'unfinished wildcard source\n');
           }
           if (completed || commitAdvanced) {
-            git('add', '-A');
+            git('--literal-pathspecs', 'add', '--', 'k.py', ...(!completed ? ['new.py', '*'] : []));
             git('-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', 'commit', '-qm', `round ${roundNumber}`);
             unfinishedHead = git('rev-parse', 'HEAD');
           } else {
             git('add', 'k.py'); // Interrupted after staging, with a new untracked source still present.
           }
+          if (!completed) failedCommits.push({round: roundNumber, previousHead, unfinishedHead,
+            previousSource: git('show', `${previousHead}:k.py`) + '\n',
+            callNumber: calls.filter(c => c.label.startsWith('commit ')).length});
           if (!completed && commitAtDeadline) currentEpoch = cutoffs.search;
         }
         return result;
       }
       if (label.startsWith('tech_lead:memory')) {
+        if (retained === 'mutated') fs.writeFileSync(retainedPatch, 'mutated after capture\n');
         if (repeatedFailures) assert.match(prompt, /- IMPROVED: false(?:\n|$)/);
         return {insights: [], ledger: []};
       }
@@ -142,7 +171,11 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         reportedSpeedup = Number(prompt.match(/- CUMULATIVE_SPEEDUP: (\S+)/)[1]);
         return {final_speedup_geomean: reportedSpeedup, final_patch: '/final.diff', report_path: '/report', rounds: 1};
       }
-      if (label === 'director:validate') return {validation_status: 'accepted',
+      if (label === 'director:validate' && directorNull) return null; // Final validation unavailable.
+      if (label === 'director:validate' && directorChanged) {
+        fs.writeFileSync(prompt.match(/- FINAL_PATCH: (\S+)/)[1], 'changed by final validator\n');
+      }
+      if (label === 'director:validate') return {validation_status: directorFlagged ? 'flagged' : 'accepted',
         director_verified_speedup_geomean: reportedSpeedup};
       throw new Error('unhandled agent ' + label);
     },
@@ -155,9 +188,31 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   const failedCommit = bounded && (pinExpired || !commitResult || commitResult.committed !== true);
   const uncommitted = failedCommit && !failThenSucceed;
   const deadlineFailure = uncommitted && (pinExpired || commitAtDeadline);
-  const expectedSpeedup = failThenSucceed ? 3 : expired || (uncommitted && !successfulRounds) ? 1 : 2;
-  assert.equal(value.final_speedup, expectedSpeedup);
-  assert.equal(value.warm_start.rounds_committed, expired ? 0 : uncommitted ? successfulRounds : 1);
+  const delivered = retained === true || retained === 'reuse' || retained === 'mutated';
+  const expectedSpeedup = retained === 'reuse' ? 5 : delivered ? 1.9 : retained ? 1
+    : failThenSucceed ? 3 : expired ? 1 : successfulRounds + 2;
+  const unvalidated = directorNull || directorFlagged || directorChanged;
+  assert.equal(value.final_speedup, unvalidated ? null : expectedSpeedup);
+  assert.equal(value.process_validated, !unvalidated);
+  assert.equal(value.validation_status, directorNull ? 'unknown' : directorChanged ? 'source_changed'
+    : directorFlagged ? 'flagged' : 'accepted');
+  assert.equal(value.final_patch, unvalidated ? '' : value.delivered_patch);
+  assert.equal(fs.readFileSync(value.delivered_patch, 'utf8').trim(),
+    git('diff', '--binary', git('rev-list', '--max-parents=0', 'HEAD'), 'HEAD', '--', '.'),
+    'host bytes remain exported even when final validation is unavailable or flagged');
+  assert.equal(value.warm_start.rounds_committed, retained ? successfulRounds + (delivered ? 1 : 0)
+    : expired ? 0 : uncommitted ? successfulRounds + 1 : 1);
+  // A bounded run learns only an accepted final validation.
+  if (bounded && expectedSpeedup > 1) {
+    assert.equal(calls.some(c => c.label === 'kb:write'), !unvalidated, 'KB write requires accepted final validation');
+  }
+  if (retained) {
+    assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), delivered ? 'retained\n'
+      : 'baseline\n', 'Report and validation see the delivered canonical source, else the incumbent bytes');
+    assert.equal(calls.filter(c => c.label === 'verify a (delivery)').length, 1, 'qualified once');
+    assert.match(reports[0], delivered ? /"delivered":"round_\d+_engineer_0"/
+      : new RegExp(`"status":"${retained === 'rejected' ? 'correctness_failed' : 'source_changed'}"`));
+  }
   assert.equal(value.stopped_by, deadlineFailure ? 'deadline_uncommitted' : expired ? 'deadline' : repeatedFailures ? 'no_improve' : 'budget');
   assert.equal(value.deadline_hit, deadlineFailure || expired);
   assert.equal(reports.length, 1);
@@ -167,6 +222,9 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
     ? [cutoffs.search,
       ...(failedCommit ? Array.from({length: repeatedFailures ? 2 : 1}, () =>
         [cutoffs.report, ...(!deadlineFailure ? [cutoffs.search] : [])]).flat() : []),
+      ...(!expired ? [cutoffs.report] : []),
+      ...(retained ? [total - 4100, cutoffs.report] : []),
+      ...(!expired ? [cutoffs.report] : []),
       cutoffs.report, cutoffs.validate] : []);
   if (repeatedFailures) {
     assert.equal(roundNumber, 2, 'repeated failed commits count toward plateau stopping');
@@ -181,9 +239,15 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
     assert.doesNotMatch(reports[0], /deadline_uncommitted/);
   }
   if (uncommitted) {
-    assert.equal(git('rev-parse', 'HEAD'), previousHead, 'Report receives the exact pre-commit winner');
+    // Recovery must restore the incumbent first; the always-on host delivery then exports
+    // the qualified source by its pin instead of dropping a winner after a commit interruption.
+    for (const failed of failedCommits) {
+      assert.ok(cleanSnapshots.some(row => row.afterCommit === failed.callNumber
+        && row.head === failed.previousHead && row.source === failed.previousSource),
+      `round ${failed.round} restores the exact previous committed tree before delivery`);
+    }
     assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'),
-      successfulRounds ? 'candidate 1\n' : 'baseline\n');
+      `candidate ${repeatedFailures ? 1 : successfulRounds + 1}\n`);
     assert.equal(fs.existsSync(path.join(canonical, 'new.py')), false);
     assert.equal(fs.existsSync(path.join(canonical, '*')), false);
     assert.equal(fs.readFileSync(path.join(canonical, 'retained.txt'), 'utf8'), 'pre-existing untracked input\n');
@@ -199,14 +263,16 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         /unfinished new source/, 'new source bytes survive cleanup in the retained partial diff');
       assert.match(fs.readFileSync(path.join(evalDir, `uncommitted_round_${roundNumber}.diff`), 'utf8'),
         /unfinished wildcard source/, 'enumerated new paths are literal');
-      const baseline = git('rev-list', '--max-parents=0', previousHead);
       assert.equal(fs.readFileSync(path.join(evalDir, 'current_best.diff'), 'utf8').trim(),
-        git('diff', '--binary', baseline, previousHead, '--', '.'));
+        git('diff', '--binary', git('rev-list', '--max-parents=0', 'HEAD'), 'HEAD', '--', '.'));
     }
     assert.equal(calls.some(c => c.label === `reprofile r${successfulRounds + 1}`), false);
+    assert.ok(value.delivery.delivered, 'a verified interrupted winner is delivered');
+    assert.deepEqual(value.delivery_incomplete, []);
   }
   let expected = cutoffs.search;
   for (const call of calls) {
+    if (call.label.endsWith('(delivery)')) { assert.equal(call.cutoff, total - 4100); continue; }
     if (call.label === 'tech_lead:report') expected = cutoffs.report;
     if (call.label === 'director:validate') expected = cutoffs.validate;
     assert.equal(call.cutoff, bounded ? expected : null, call.label);
@@ -218,27 +284,54 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
 }
 
 (async () => {
-  await lane({bounded: false});
-  await lane({bounded: true});
-  await lane({bounded: true, commitResult: null});
-  await lane({bounded: true, commitResult: {committed: false}});
-  await lane({bounded: true, successfulRounds: 1, commitResult: null});
-  await lane({bounded: true, successfulRounds: 1, commitResult: {committed: false}, commitAdvanced: true});
-  await lane({bounded: true, commitResult: null, commitAtDeadline: false});
-  await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false,
-    failThenSucceed: true, commitAdvanced: true});
-  await lane({bounded: true, commitResult: null, commitAtDeadline: false, failThenSucceed: true});
-  await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false, repeatedFailures: true});
-  await lane({bounded: true, dirtyBeforeCommit: true});
-  await lane({bounded: true, pinExpired: true});
-  await lane({bounded: true, planExpired: true});
+  const scenarios = [
+    {bounded: false},
+    {bounded: true},
+    {bounded: true, commitResult: null},
+    {bounded: true, commitResult: {committed: false}},
+    {bounded: true, successfulRounds: 1, commitResult: null},
+    {bounded: true, successfulRounds: 1, commitResult: {committed: false}, commitAdvanced: true},
+    {bounded: true, commitResult: null, commitAtDeadline: false},
+    {bounded: true, commitResult: {committed: false}, commitAtDeadline: false,
+      failThenSucceed: true, commitAdvanced: true},
+    {bounded: true, commitResult: null, commitAtDeadline: false, failThenSucceed: true},
+    {bounded: true, commitResult: {committed: false}, commitAtDeadline: false, repeatedFailures: true},
+    {bounded: true, dirtyBeforeCommit: true},
+    {bounded: true, pinExpired: true},
+    {bounded: true, planExpired: true},
+    ...[true, 'rejected', 'changed', 'mutated'].map(retained => ({bounded: true, retained})),
+    {bounded: true, retained: 'reuse', successfulRounds: 1},
+    {bounded: true, directorNull: true},
+    {bounded: true, directorFlagged: true},
+    {bounded: true, directorChanged: true},
+  ];
+  let failed = 0;
+  for (const scenario of scenarios) {
+    try {
+      await lane(scenario);
+      console.log(`  ok: ${JSON.stringify(scenario)}`);
+    } catch (error) {
+      failed++;
+      console.error(`  FAIL: ${JSON.stringify(scenario)}: ${error.stack || error}`);
+    }
+  }
   const deadline = fs.readFileSync(path.join(root, 'kernel_workflow/src/kernel_lane/07_deadline.js'), 'utf8');
-  const guard = new Function('A', 'agent', 'setProcessDeadline', deadline);
+  const guard = new Function('A', 'agent', 'setProcessDeadline', 'EXTERNAL_OBJECTIVE', 'says', deadline);
   const args = {deadline_epoch: total, search_reserve_s: 5700, final_validation_reserve_s: 2100,
     final_cleanup_reserve_s: 300};
   // Both policies share the ordinary loop and its process reserves.
   for (const optimizer of ['greedy', 'evo']) {
     guard({...args, optimizer}, {processDeadlineActive: true}, () => {});
   }
-  console.log('process cutoffs: prior winners survive unfinished commits; final reserves remain ordered');
+  // Zero disables additional qualification, while always-on custody and delivery remain active.
+  guard({...args, delivery_reserve_s: 0}, {processDeadlineActive: true}, () => {});
+  // A positive reserve must fit inside the Report allowance (3600 s here).
+  guard({...args, delivery_reserve_s: 600}, {processDeadlineActive: true}, () => {});
+  for (const bad of ['NaN', 'abc', '', '600', -5, 1.5, 3600, Infinity, true, false]) {
+    assert.throws(() => guard({...args, delivery_reserve_s: bad}, {processDeadlineActive: true}, () => {}),
+      /delivery_reserve_s/, `malformed delivery_reserve_s ${JSON.stringify(bad)} is refused`);
+  }
+  assert.throws(() => guard({delivery_reserve_s: 600}, {processDeadlineActive: false}, () => {}), /delivery_reserve_s/);
+  assert.equal(failed, 0, `${failed}/${scenarios.length} process cutoff scenarios failed`);
+  console.log(`PASS: ${scenarios.length} process cutoff cases and reserve guards; prior trees recover, verified sources export, final reserves stay ordered. CPU fixture only.`);
 })().catch(error => {console.error(error); process.exitCode = 1;});

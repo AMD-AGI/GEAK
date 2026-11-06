@@ -6,6 +6,9 @@
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.preparation_allowance_s != null || A.search_duration_s != null) {
+  throw new Error('preparation_allowance_s/search_duration_s are supported only by direct kernel_lane.js; dispatcher clock semantics are not supported');
+}
 if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
   throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }

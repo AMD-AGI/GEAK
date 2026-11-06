@@ -185,7 +185,9 @@ function trackGroup(pgid) {
 export async function spawnAgent({ cmd, args = [], prompt = '', cwd, env, timeoutMs = 3600000, promptOnStdin = true }) {
   const r = await runProcess({ cmd, args, cwd, env, input: promptOnStdin ? prompt : '', timeoutMs });
   if (r.status === 'spawn_error') throw new Error(`${cmd} spawn error: ${r.error}`);
-  if (r.status === 'timeout') throw new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s`);
+  if (r.status === 'timeout') throw Object.assign(
+    new Error(`${cmd} timed out after ${Math.round(timeoutMs / 1000)}s`),
+    { code: 'GEAK_BACKEND_TIMEOUT' });
   if (!r.group_cleared || r.stdio_held) {
     throw new Error(`${cmd} left processes that could not be stopped (${r.group_cleared ? 'pipes held' : 'group not cleared'})`);
   }

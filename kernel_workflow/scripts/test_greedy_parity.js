@@ -60,18 +60,20 @@ function instrument(src) {
     .replace(REPORT_LINE, () => probe('after_loop') + REPORT_LINE);
 }
 
-function build(body, argsObj, answer, observeCall) {
+function build(body, argsObj, answer, observeCall, host = {}) {
   const rec = { calls: [], phases: [], logs: [], loop_entry: null, after_loop: null };
+  const norm = host.normalize || (v => v);
   const g = {
+    ...(host.runProcess ? {runProcess: host.runProcess} : {}),
     args: argsObj,
     phase: (t) => rec.phases.push(t),
-    log: (m) => rec.logs.push(String(m)),
+    log: (m) => rec.logs.push(norm(String(m))),
     workflow: async () => { throw new Error('kernel_lane must not nest workflows'); },
     agent: async (p, o) => {
       const label = (o && o.label) || '';
-      rec.calls.push({ label, phase: (o && o.phase) || '', prompt_sha256: sha(p), opts_sha256: sha(JSON.stringify(o)) });
-      if (observeCall) observeCall(label, String(p), clone(o));
-      return clone(answer(label, String(p)));
+      rec.calls.push({ label, phase: (o && o.phase) || '', prompt_sha256: sha(norm(String(p))), opts_sha256: sha(JSON.stringify(norm(o))) });
+      if (observeCall) observeCall(label, norm(String(p)), norm(clone(o)));
+      return clone(await answer(label, String(p)));
     },
     parallel: async (thunks) => Promise.all(thunks.map((t) => t().catch(() => null))),
     pipeline: async (items, ...stages) => Promise.all(items.map(async (it, i) => {
@@ -82,7 +84,7 @@ function build(body, argsObj, answer, observeCall) {
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
     __probe: (tag, state) => {
       if (rec[tag]) throw new Error(`probe ${tag} hit twice`);
-      rec[tag] = clone(state);
+      rec[tag] = norm(clone(state));
     },
   };
   const fn = new Function(...Object.keys(g), `return (async () => { ${body} })();`);
@@ -90,8 +92,8 @@ function build(body, argsObj, answer, observeCall) {
 }
 
 // --- fixture --------------------------------------------------------------------------------------
-// Paths are fixed strings (the lane never touches the filesystem), so prompt hashes do not depend on
-// where the repository is checked out.
+// Public fixture paths are normalized names. Each scenario now has a real temporary Git workspace
+// and host runtime because native delivery requires custody and an independently exported patch.
 const EVAL = '/cpu-fixture/eval';
 const BASE_ARGS = { kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
   agent_timeout_ms: 0, agent_retries: 1 };
@@ -229,12 +231,93 @@ const SCENARIOS = [
 ];
 
 async function runScenario(body, sc, observeCall) {
-  const { run, rec } = build(body, { ...BASE_ARGS, ...sc.args }, answers(sc), observeCall);
-  const ret = await run();
-  if (!rec.loop_entry || !rec.after_loop) throw new Error(`${sc.name}: a probe was not reached`);
-  const result = { ...ret, llm_timeline: ret.llm_timeline ? sha(JSON.stringify(ret.llm_timeline)) : null };
-  const changed = PROBE_KEYS.filter((k) => JSON.stringify(rec.loop_entry[k]) !== JSON.stringify(rec.after_loop[k]));
-  return { stop_reason: ret.stopped_by, globals_changed_by_loop: changed, ...rec, result };
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-parity-host-'));
+  const task = path.join(temp, 'task'), evalDir = path.join(temp, 'eval');
+  const canonical = path.join(evalDir, 'workspace'), workflow = path.join(ROOT, 'kernel_workflow');
+  const mapStrings = (value, transform) => typeof value === 'string' ? transform(value)
+    : Array.isArray(value) ? value.map(v => mapStrings(v, transform))
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, transform)])) : value;
+  const normalize = value => mapStrings(value, s => s.split(workflow).join(BASE_ARGS.workflow_dir)
+    .split(temp).join('/cpu-fixture'));
+  const actual = value => mapStrings(value, s => s.split(BASE_ARGS.workflow_dir).join(workflow)
+    .split('/cpu-fixture').join(temp));
+  // Git objects and receipts are reproducible; normalization only removes scratch/check-out paths.
+  const env = {...process.env, GIT_AUTHOR_NAME: 'Saptarshi Majumder',
+    GIT_COMMITTER_NAME: 'Saptarshi Majumder',
+    GIT_AUTHOR_EMAIL: '32464366+iraj465@users.noreply.github.com',
+    GIT_COMMITTER_EMAIL: '32464366+iraj465@users.noreply.github.com',
+    GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z'};
+  const command = (cmd, args, opts = {}) => {
+    const r = spawnSync(cmd, args, {encoding: 'utf8', timeout: 10000, env, ...opts});
+    assert.equal(r.status, 0, `${cmd} failed: ${r.error || r.stderr}`);
+    return r.stdout;
+  };
+  const git = (cwd, ...args) => command('git', ['-C', cwd, ...args]);
+  const commit = (cwd, label) => { git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', label); };
+  fs.mkdirSync(task); fs.mkdirSync(evalDir);
+  fs.writeFileSync(path.join(task, 'k.py'), 'VALUE = "ORIGINAL"\n');
+  git(task, 'init', '-q'); commit(task, 'parity ORIGINAL');
+  command('git', ['clone', '-q', task, canonical]);
+  const originalCommit = git(task, 'rev-parse', 'HEAD').trim();
+  const candidatePatch = (workspace, patch, label) => {
+    fs.mkdirSync(path.dirname(workspace), {recursive: true});
+    command('git', ['clone', '-q', canonical, workspace]);
+    fs.writeFileSync(path.join(workspace, 'k.py'), `VALUE = ${JSON.stringify(label)}\n`);
+    fs.mkdirSync(path.dirname(patch), {recursive: true});
+    fs.writeFileSync(patch, git(workspace, 'diff', '--binary'));
+  };
+  const fallback = answers(sc);
+  const answer = (label, prompt) => {
+    const response = actual(fallback(label, normalize(prompt)));
+    if (label.startsWith('eng ') || label.startsWith('deep ')) {
+      candidatePatch(field(prompt, 'KERNEL_PATH'), path.join(field(prompt, 'OUTPUT_DIR'), 'best_patch.diff'), label);
+    } else if (label.startsWith('integrate ') && response.best) {
+      candidatePatch(path.join(field(prompt, 'INTEGRATE_DIR'), 'workspace'), response.best.patch_file, label);
+    } else if (label.startsWith('warm_start:adopt')) {
+      fs.writeFileSync(path.join(canonical, 'k.py'), 'VALUE = "warm_start"\n');
+      commit(canonical, 'parity warm start');
+    } else if (label.startsWith('verify ') && response?.status === 'verified') {
+      const patch = field(prompt, 'PATCH');
+      if (body.includes('async function verificationCopy('))
+        assert.equal(path.basename(patch), 'verification_input.diff', 'verifier receives a disposable copy');
+      git(canonical, 'apply', '--check', '--', patch);
+    } else if (label.startsWith('commit ')) {
+      const block = prompt.match(/```bash\n([\s\S]*?)\n```/);
+      assert.ok(block, 'commit role supplies real Git commands');
+      command('bash', ['-e', '-c', block[1]]);
+    } else if (label === 'tech_lead:report') {
+      fs.writeFileSync(response.final_patch, git(canonical, 'diff', '--binary', originalCommit, 'HEAD', '--', '.'));
+    } else if (label === 'director:validate') {
+      const patch = field(prompt, 'FINAL_PATCH');
+      assert.equal(fs.readFileSync(patch, 'utf8'), git(canonical, 'diff', '--binary', originalCommit, 'HEAD', '--', '.'),
+        'Director receives the host export of the actual canonical tree');
+    }
+    return response;
+  };
+  let passed = false;
+  try {
+    const { run, rec } = build(body, {...actual(BASE_ARGS), ...sc.args}, answer, observeCall, {
+      normalize,
+      runProcess: async request => {
+        assert.ok(Number.isFinite(request.timeoutMs) && request.timeoutMs > 0, 'host command is bounded');
+        const r = spawnSync(request.cmd, request.args, {encoding: 'utf8', timeout: 10000,
+          cwd: request.cwd, input: request.input, env: {...env, ...(request.env || {})}});
+        return {status: r.error ? 'failed' : 'completed', code: r.status, stdout: r.stdout || '',
+          stderr: r.stderr || '', group_cleared: true, strays_killed: false, stdio_held: false};
+      },
+    });
+    const ret = normalize(await run());
+    if (!rec.loop_entry || !rec.after_loop) throw new Error(`${sc.name}: a probe was not reached`);
+    assert.equal(fs.readFileSync(path.join(task, 'k.py'), 'utf8'), 'VALUE = "ORIGINAL"\n', 'ORIGINAL stays immutable');
+    const result = { ...ret, llm_timeline: ret.llm_timeline ? sha(JSON.stringify(ret.llm_timeline)) : null };
+    const changed = PROBE_KEYS.filter((k) => JSON.stringify(rec.loop_entry[k]) !== JSON.stringify(rec.after_loop[k]));
+    passed = true;
+    return { stop_reason: ret.stopped_by, globals_changed_by_loop: changed, ...rec, result };
+  } finally {
+    if (passed) fs.rmSync(temp, {recursive: true, force: true});
+    else console.error(`retained failed parity fixture: ${temp}`);
+  }
 }
 
 // Reuse the citation scenario without changing its golden record. These are prompt-contract checks:

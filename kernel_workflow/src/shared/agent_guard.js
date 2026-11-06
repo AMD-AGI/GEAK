@@ -1,13 +1,17 @@
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
+  if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
-      if (agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const opts = agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+      if (groupTask || agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
+          processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
+          : agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
         const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
@@ -25,7 +29,7 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      if (agent.processDeadlineActive && e
+      if ((groupTask || agent.processDeadlineActive) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
         return null;

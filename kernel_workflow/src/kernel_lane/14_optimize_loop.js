@@ -3,7 +3,7 @@
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start, evo = null) {
+async function greedyOptimize(start, evo = null, population = null) {
 const planSchema = evo ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
@@ -19,12 +19,23 @@ let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy. Choose an affordable direction count from the supplied evidence and service facts.` : '';
 const citations = [];
+const contextRef = (id, outDir) => {
+  if (evo) return {path: evo.path, entry_id: id, field: 'reported_context'};
+  const retained = retainedSources.find(row => row.id === id);
+  return retained?.source && !retained.retention_error
+    ? {path: `${retained.source.path}.json`, field: 'reported_context'}
+    : {unavailable: 'no complete retained context artifact', related_report: `${outDir}/report.md`};
+};
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
 await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
   ? 'resume_unknown' : 'initial', 0, finalWinner);
+if (population) await population.publishCheckpoint(0, finalWinner || bench,
+  await population.checkpointTree(null, 0));
+const searchTiming = beginSearchWindow();
+if (searchTiming) history.search_timing = searchTiming;
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -36,14 +47,24 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         `starting no further rounds; going straight to report + validation.`);
     break;
   }
+  if (engineerCutoffReached(left)) {
+    deadlineHit = true;
+    log(`ENGINEER CUTOFF reached after ${round} round(s): no new round starts; delivery keeps the search cutoff.`);
+    break;
+  }
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+
+  // Peers are deliberate planner references; refresh preserves this lineage's local best and budget.
+  if (population && evo) await population.refreshPeers();
 
   round++;
   const remaining = BUDGET - dispatched;
   phase('Optimize');
+  // Retained delivery needs each GEAK source's actual base; EVO sources share the archive base.
+  const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planInputs = (forbidStop) => ({
+  const planInputs = (forbidStop, facts = {}) => ({
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
@@ -74,6 +95,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `not on what you may look at.` } : {}),
     // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
     ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
+    ...facts,
     ...(forbidStop ? { STOP_NOT_PERMITTED:
       `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
       `unspent. This run is a FIXED-WINDOW measurement: ending early is an invalid data point no ` +
@@ -89,8 +112,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
       evolutionInstructions,
-      planInputs(false)),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema });
+      planInputs(false, await deliveryFactsInput())),
+    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema, ...ENGINEER_CALL });
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
@@ -100,15 +123,22 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // rule is "must keep optimizing until the budget is spent", so the refusal has to be as long-lived
   // as the window. Bounded by MAX_FORCED_REPLANS so a role that cannot produce a direction at all
   // degrades to stopping instead of spinning the window away on planning.
-  while (DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS &&
+  // With an engineer reserve, refuse a stop only while engineering time above the 7 s floor remains.
+  while (DEADLINE_EPOCH && (ENGINEER_RESERVE_S ? left - ENGINEER_RESERVE_S > Math.max(NO_STOP_S, 7) : left > NO_STOP_S)
+         && forcedReplans < MAX_FORCED_REPLANS &&
          (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions,
-        planInputs(true)),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema });
+        planInputs(true, await deliveryFactsInput())),
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema, ...ENGINEER_CALL });
     left = await secondsLeft(`replan-r${round}`);
+  }
+  if (engineerCutoffReached(left)) {
+    deadlineHit = true;   // Planning reached the engineer cutoff: dispatch nothing.
+    log(`Round ${round}: the engineer cutoff was reached while planning; no engineer starts.`);
+    break;
   }
 
   if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
@@ -162,6 +192,44 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
+  // Preserve issued direction labels even when an engineer returns no result or the round hits its cutoff.
+  // learned_refs here records issued references; later citation-cap accounting uses the working directions and may strip their attribution.
+  const directionHistory = directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty,
+    focus_files: Array.isArray(d.focus_files) ? d.focus_files : [], parent_id: d.parent_id || null, learned_refs: d.learned_refs || []}));
+
+  // Individual and newly integrated native sources use the same verifier and custody path.
+  const verifyCandidate = async (d, eng, patch, recovered = false,
+    engineerWorkspace = `${d.out_dir}/workspace`) => {
+    // The verifier gets a disposable copy. Custody files remain inputs to host promotion only.
+    const verification = !EXTERNAL_OBJECTIVE
+      ? await verificationCopy(patch, `${d.out_dir}/verification_input.diff`) : null;
+    if (!EXTERNAL_OBJECTIVE && !verification) {
+      return {d, eng, ver: null, patch, verification_input_error: 'source copy unavailable'};
+    }
+    const measured = verification ? verification.path : patch;
+    return observeRole('verify', d.id, () => agentT(
+      roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
+        CANONICAL: evo ? evo.base : CANONICAL, PATCH: measured, VERIFY_DIR: `${d.out_dir}/verify`,
+        ...(engineerWorkspace ? { ENGINEER_WORKSPACE: engineerWorkspace } : {}),
+        EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+        ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+      }),
+      { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
+    )).then(async (ver) => {
+      ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, measured);
+      const verificationStatus = verification ? await verificationIntact(verification, patch) : true;
+      if (verificationStatus === false) {
+        ver = {...ver, status: 'source_changed', correctness: 'unknown', measurement_valid: false};
+      }
+      const retained = evo ? await evo.record(d, eng, verificationStatus === null ? null : ver, patch) : null;
+      // Register every settled result before another direction or the round can hit its cutoff.
+      // Keep failed custody of an authoritative win visible; it must fail delivery explicitly.
+      const pendingVerification = verificationStatus === null ? verification : null;
+      await retainResult(d, eng, ver, patch, evo, roundBase, retained, pendingVerification);
+      return {d, eng, ver, patch, retained, verification: pendingVerification, verification_status: verificationStatus};
+    });
+  };
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
@@ -203,12 +271,13 @@ git -C ${d.out_dir}/workspace add -A
 git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost commit -qm 'Candidate baseline'
 \`\`\`
 `;
+      const facts = await deliveryFactsInput();   // after workspace preparation, at dispatch
       return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.
 
 ## Inputs
 ${cfg({
@@ -229,28 +298,36 @@ ${cfg({
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
         ...KB_INPUTS,
+        ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
+        ...facts,
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA,
+        ...ENGINEER_CALL }   // stopped at the engineer cutoff; its saved patch then goes to recovered verify
     ).then(async (eng) => {
       eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
-      if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
-      return {d, eng};
+      const patch = `${d.out_dir}/best_patch.diff`;
+      const retained = evo ? await evo.record(d, eng, null, patch) : null;
+      const measured = !EXTERNAL_OBJECTIVE
+        ? (evo ? retained?.patch_ref?.path : await pinSource(patch, d.out_dir)) || patch : patch;
+      await retainResult(d, eng, null, measured, evo, roundBase, retained);
+      return {d, eng, patch: measured};
     });
     },
 
-    (prev) => {
+    async (prev) => {
       const { d, eng } = prev;
       if (prev.initialization_failed) return {...prev, ver: null, patch: null};
-      const patch = `${d.out_dir}/best_patch.diff`;
+      const patch = prev.patch || `${d.out_dir}/best_patch.diff`;
       // A failed or missing response can still leave a valid patch. Skip verification
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
         eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!HAS_WORKLOAD || Number.isFinite(primSpeedup(eng))) &&
         (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
       if (trustworthyBelowBaseline && !evo) {
         return { d, eng, ver: null };
@@ -258,23 +335,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
-      return agentT(
-        roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
-          CANONICAL: evo ? evo.base : CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
-          ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
-          EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
-          ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
-          ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
-        }),
-        { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then(async (ver) => {
-        ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, patch);
-        if (evo) {
-          const retained = await evo.record(d, eng, ver, patch);
-          if (retained.retention_error || retained.last_record_error) ver = null;
-        }
-        return {d, eng, ver, patch};
-      });
+      return verifyCandidate(d, eng, patch, recovered);
     }
   );
 
@@ -284,34 +345,40 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // retain completed work; no new engineer or GPU evaluation starts here.
     setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
     for (const r of clean) {
-      await evo.record(r.d, r.eng, r.ver, r.patch || `${r.d.out_dir}/best_patch.diff`);
+      const patch = r.patch || `${r.d.out_dir}/best_patch.diff`;
+      const binding = r.verification ? await verificationIntact(r.verification, patch) : true;
+      const retained = await evo.record(r.d, r.eng, binding === true ? r.ver : null, patch);
+      await retainResult(r.d, r.eng, r.ver, patch, evo, roundBase, retained, r.verification);
     }
     history.rounds.push({round, status: 'deadline', improved: false, cumulative,
-      directions: clean.map(r => ({id: r.d.id, parent_id: r.d.parent_id}))});
+      directions: directionHistory});
     deadlineHit = true;
     break;
   }
-  const verified = clean.filter(r => r.ver &&
+  const isQualified = r => r.ver && (!r.verification || r.verification_status === true) &&
     (says(r.ver.status, 'verified') || (evo && says(r.ver.status, 'regression'))) &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR));
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR);
+  const verified = clean.filter(isQualified);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
   // ratio-of-sums when a workload spec is active, else the unweighted geomean (unchanged behavior).
   // The raw unweighted geomean is retained separately for the report.
-  let candidates = verified.map(r => ({
+  const candidate = r => ({
     source: `engineer ${r.d.id}`, id: r.d.id, title: r.d.title, specialty: r.d.specialty,
     geomean: primSpeedup(r.ver), geomean_unweighted: r.ver.verified_geomean,
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
-  }));
+  });
+  let candidates = verified.map(candidate);
 
   let integrate = null;
   if (verified.length >= 2) {
     phase('Merge');
-    integrate = await agentT(
+    integrate = await observeRole('integrate', `r${round}`, () => agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -319,18 +386,47 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           ...externalFields(r.ver),
-          files: r.d.focus_files || [], patch: r.patch })),
+          files: r.d.focus_files || [], patch: r.patch,
+          reported_context: boundedContext(candidates.find(c => c.id === r.d.id).reported_context,
+            contextRef(r.d.id, r.d.out_dir), 8192) })),
         INSIGHTS: history.insights,
       }),
-      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
-    if (integrate && integrate.conclusion === 'improved' && integrate.best &&
+    if (!EXTERNAL_OBJECTIVE && integrate && integrate.best) {
+      const d = {id: `r${round}_integrated`, parent_id: 'ORIGINAL', out_dir: `${EVAL_DIR}/round_${round}/integrate`,
+        donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate', gpu_id: GPU_POOL};
+      // Preserve the complete integrator report as provisional evidence, before any verifier runs.
+      d.reported_context = {...reportedEvidence(d, null, null, integrate.best.patch_file,
+        candidates.map(c => c.reported_context)),
+        integrator: {...integrate.best, reported_by: 'integrator', notes: integrate.notes}};
+      integrate.best.reported_context = d.reported_context;
+      const retained = evo ? await evo.record(d, null, null, integrate.best.patch_file) : null;
+      const patch = (evo ? retained?.patch_ref?.path : await pinSource(integrate.best.patch_file, d.out_dir))
+        || integrate.best.patch_file;
+      await retainResult(d, null, null, patch, evo, roundBase, retained);
+      if (integrate.conclusion === 'improved' && integPrim > Math.max(...candidates.map(c => c.geomean))) {
+        // No new allowance: this independent measurement shares the ordinary search cutoff.
+        const r = await verifyCandidate(d, null, patch, false, null);
+        integrate.verification = {result: r.ver, patch: r.patch,
+          custody: r.verification_status ?? null, input_error: r.verification_input_error || null};
+        if (isQualified(r) && !(r.retained?.retention_error || r.retained?.last_record_error))
+          candidates.push({...candidate(r), source: 'integrated'});
+      }
+    }
+    // External integration keeps the existing host-checked measurement and identity route.
+    if (EXTERNAL_OBJECTIVE && integrate && integrate.conclusion === 'improved' && integrate.best &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
+      integrate.best.reported_context = {...reportedEvidence({id: `r${round}_integrated`},
+        null, null, integrate.best.patch_file, candidates.map(c => c.reported_context)),
+        integrator: {...reportedDetails(integrate.best), notes: integrate.notes,
+          reported_included_ids: integrate.best.patches || null}};
       candidates.push({
+        reported_context: integrate.best.reported_context,
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
         geomean: integPrim, geomean_unweighted: integrate.best.geomean,
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
@@ -341,13 +437,15 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   }
 
-  if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
-    const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
-      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
-      {...integrate.best, status: 'verified', correctness: 'pass',
-        verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
-      integrate.best.patch_file);
-    if (retained.retention_error || retained.last_record_error) {
+  if (EXTERNAL_OBJECTIVE && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
+    const d = {id: `r${round}_integrated`, parent_id: 'ORIGINAL', out_dir: `${EVAL_DIR}/round_${round}/integrate`,
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate',
+      reported_context: integrate.best.reported_context};
+    const ver = {...integrate.best, reported_by: 'integrator', status: 'verified', correctness: 'pass',
+      verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted};
+    const retained = evo ? await evo.record(d, null, ver, integrate.best.patch_file) : null;
+    await retainResult(d, null, ver, integrate.best.patch_file, evo, roundBase, retained);
+    if (retained && (retained.retention_error || retained.last_record_error)) {
       candidates = candidates.filter(c => c.id !== `r${round}_integrated`);
     }
   }
@@ -373,11 +471,21 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       winner = {...winner, archive_patch: winner.patch, patch: promotion.patch, source_tree: promotion.tree};
     }
   }
+  if (improved && !evo && !EXTERNAL_OBJECTIVE) {
+    let promotion = null;
+    try {
+      promotion = await promotionPatch(roundBase, pinned(winner.patch),
+        `${EVAL_DIR}/delivery/round_${round}.index`, `${EVAL_DIR}/delivery/round_${round}.diff`);
+    } catch (error) { log(`Round ${round}: could not bind the GEAK winner tree: ${String(error)}`); }
+    if (!promotion) improved = false;
+    else winner = {...winner, source_tree: promotion.tree};
+  }
   if (improved) {
+    const checkpointTree = population ? await population.checkpointTree(winner, round) : null;
     await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
     let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
-      if (PROCESS_BOUNDED || evo) {
+      if (!EXTERNAL_OBJECTIVE || PROCESS_BOUNDED || evo) {
         const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
         if (top !== CANONICAL.replace(/\/+$/, '')) {
           throw new Error('bounded commit requires an isolated canonical repository');
@@ -403,37 +511,46 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           log(`Round ${round}: retained tracked changes in ${dirtyPath} before restoring the committed source.`);
         }
       }
-      commitResult = await agentT(
+      await preservePatchObstructions(winner.patch, `round_${round}`);
+      commitResult = await observeRole('commit', `r${round}`, () => agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
+set -e
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
 git checkout -- .
-# Try a plain apply first, then a 3-way apply (auto-reconciles context-line drift against the blobs)
-# before falling back to a manual reconstruction. --3way resolves most "patch does not apply" cases
-# that are just context offsets, so the manual path is only hit on a genuine semantic conflict.
-git apply ${winner.patch} || git apply --3way ${winner.patch}
-git -c user.email=team@workflow -c user.name=team add -A
+# Stage only the selected patch, preserving unrelated untracked harnesses and caches.
+# This is the same exact-index apply used by host delivery; do not hand-merge measured bytes.
+git apply --index -- ${winner.patch}
 git -c user.email=team@workflow -c user.name=team commit -q -m "round ${round} winner: ${winner.source} (${winner.geomean.toFixed(2)}x)"
 git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
 \`\`\`
-If BOTH \`git apply\` and \`git apply --3way\` fail, inspect the patch and apply it manually (edit the
-files to match the patch's intent), then \`add -A\` + commit. The applied source is NOT guaranteed to
-match the patch verbatim after a hand-merge, so after committing, RE-RUN the COMMANDMENT correctness
-check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only report committed=true if
-it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
-re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
-      { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+Run the block with fail-fast shell behavior. If the exact apply or commit fails, return committed=false
+and explain the error; do not reconstruct, remeasure or add unrelated files. Correctness belongs to the
+already verified source, and the host checks the resulting tree. Return JSON {committed, current_best_diff, note}.`,
+      { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA }));
     } catch (error) {
-      if (!evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
+      if (EXTERNAL_OBJECTIVE && !evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
       commitDeadline = error.code === 'GEAK_PROCESS_DEADLINE';
       if (evo) log(`Round ${round}: commit attempt failed; retaining the previous validated source.`);
     }
-    if (evo && commitResult && commitResult.committed === true
+    if ((!EXTERNAL_OBJECTIVE || evo) && commitResult && commitResult.committed === true
         && await git(CANONICAL, 'diff', '--exit-code', winner.source_tree, 'HEAD', '--', '.') !== '') {
       commitResult = null;
     }
-    if ((PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+    // GEAK delivery: a commit stands only while its snapshot holds the bytes pinned before verification. Checked
+    // after the commit, so a change by the verifier, integrator or commit agent restores the incumbent.
+    if (!EXTERNAL_OBJECTIVE && !evo && commitResult && commitResult.committed === true
+        && !await pinIntact(winner.patch)) commitResult = null;
+    if ((!EXTERNAL_OBJECTIVE || PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+      // A qualified winner (individual or integrated) whose commit did not finish stays deliverable,
+      // by its pinned bytes (EVO archive row or GEAK snapshot), never by the current promotion file.
+      if (!EXTERNAL_OBJECTIVE) keepForDelivery({key: `round_${round}_winner`, id: winner.id, d: null, eng: null,
+        reported_context: winner.reported_context,
+        ver: {status: 'verified', correctness: 'pass', verified_geomean: winner.geomean_unweighted,
+          verified_weighted: winner.weighted, per_case: winner.per_case},
+        evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
+        base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
       // Search has settled. Only host recovery may use the existing Report allowance.
       if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
@@ -446,7 +563,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
       if (atDeadline) {
         history.rounds.push({round, status, cumulative, improved: false,
-          directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+          directions: directionHistory,
           winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
         plannerStopReason = status;
         log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
@@ -462,7 +579,13 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;
       roundsCommitted += 1;
-      if (evo) await evo.selectBest(winner.id);
+      if (evo) {
+        const selected = await evo.selectBest(winner.id);
+        if (!selected && !EXTERNAL_OBJECTIVE) deliveryIncomplete.push({id: winner.id,
+          key: `round_${round}_winner`, status: 'archive_selection_failed', evidence: cumulative});
+      }
+
+      if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
       profileSummary = await agentT(
@@ -485,10 +608,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
-        notes: r.eng ? r.eng.notes : '' })),
+        notes: r.eng ? r.eng.notes : '', reported_context: boundedContext(
+          reportedEvidence(r.d, r.eng, r.ver, r.patch), contextRef(r.d.id, r.d.out_dir), 2048) })),
       ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
         engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
-      INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
+      INTEGRATE: integrate ? {...integrate, ...(integrate.best ? {best: {...integrate.best,
+        reported_context: boundedContext(integrate.best.reported_context,
+          contextRef(`r${round}_integrated`, `${EVAL_DIR}/round_${round}/integrate`), 8192)}} : {})} : null,
+      WINNER: winner ? {source: winner.source, geomean: winner.geomean,
+        reported_context: boundedContext(winner.reported_context, contextRef(winner.id, `${EVAL_DIR}/round_${round}`), 2048)} : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
       ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative, BEST_PER_CASE: bestPerCase } : {}),
@@ -550,12 +678,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   history.rounds.push({
     round,
     ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
-      learned_refs: d.learned_refs || [] })),
+    directions: directionHistory,
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
       ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
-    integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
+    integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0,
+      ...(!EXTERNAL_OBJECTIVE ? {verification: integrate.verification || null} : {}) } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
   });
@@ -584,6 +712,124 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
 }
+// --- Retained delivery. Retained sources are taken in evidence order. An engineer-local source
+// is verified once by the ordinary verifier on its pinned bytes; any source qualifies only through the
+// ordinary commit gate (primary > cumulative × (1+MIN_IMPROVE)). The best one is committed with its exact
+// bytes, so Report, final validation, the archive and KB all describe one source. Verification runs only
+// inside the declared reserve; unfinished checks stay unmeasured and the incumbent stays committed.
+if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
+  // Qualified custody and host promotion use the existing Report allowance, even with no optional
+  // verification allocation. This does not extend the run or the final-validation cutoff.
+  if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+  const dir = `${EVAL_DIR}/delivery`, rows = [];
+  const digest = async (file) => ((await hostRun('sha256sum', ['--', file])) || '').slice(0, 64);
+  let best = null;
+  for (const c of [...retainedSources].sort((a, b) => b.evidence - a.evidence)) {
+    if (!(c.evidence > Math.max(cumulative * (1 + MIN_IMPROVE), best ? best.primary : 0))) continue;
+    const row = {key: c.key, id: c.id, basis: c.ver ? 'verifier' : 'engineer_local', evidence: c.evidence,
+      status: 'unmeasured', source: c.source, base_commit: c.base, original_patch: c.original_patch,
+      archive: c.archived ? evo.path : null};
+    rows.push(row);
+    if (!c.ver && !DELIVERY_RESERVE_S) continue;
+    if (PROCESS_BOUNDED && setProcessDeadline.secondsLeft() <= 7) {
+      row.status = 'incomplete'; continue;
+    }
+    // A successful cutoff checkpoint supersedes an earlier failed registration.
+    const latest = c.archived ? evo.entries.find(r => r.id === c.id && !r.retention_error
+      && !r.last_record_error) : null;
+    const src = latest?.patch_ref || c.source || null;
+    let promo = null, frozen = null;
+    try {
+      if (!src || !/^[0-9a-f]{40,64}$/.test(c.base || '')) {
+        row.status = 'unpinned'; row.error = c.retention_error || 'missing source or base'; continue;
+      }
+      row.source = src;
+      if (await digest(src.path) !== src.sha256) { row.status = 'source_changed'; continue; }
+      if (c.ver && c.verification) {
+        const binding = await verificationIntact(c.verification, src.path);
+        if (binding !== true) {
+          row.status = binding === false ? 'source_changed' : 'incomplete'; continue;
+        }
+      }
+      promo = await hostRun('mkdir', ['-p', dir]) === null ? null
+        : await promotionPatch(c.base, src, `${dir}/${c.key}.index`, `${dir}/${c.key}.diff`);
+      frozen = promo && evo ? `${dir}/${c.key}.source.diff` : promo && promo.patch;
+      if (promo && evo && (await hostRun('cp', ['--', src.path, frozen]) === null
+          || await digest(frozen) !== src.sha256)) promo = null;
+    } catch (error) { log(`[delivery] ${c.key}: ${String(error)}`); promo = null; }
+    if (!promo) { row.status = 'assembly_failed'; continue; }
+    if (promo.tree === ((await git(CANONICAL, 'rev-parse', 'HEAD^{tree}')) || '').trim()) {
+      row.status = 'already_committed'; continue;
+    }
+    let ver = c.ver;
+    if (!ver) {
+      // Only additional verification spends the optional allocation. An exhausted allocation cannot
+      // prevent promotion of a result whose authoritative verification has already settled.
+      setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S + DELIVERY_RESERVE_S);
+      if (setProcessDeadline.secondsLeft() <= 7) {
+        setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); continue;
+      }
+      const frozenSha = await digest(frozen);
+      try { ver = await agentT(
+        roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
+          CANONICAL: evo ? evo.base : CANONICAL, PATCH: frozen, VERIFY_DIR: `${dir}/${c.key}/verify`,
+          ENGINEER_WORKSPACE: `${c.d.out_dir}/workspace`,
+          EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+          ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+        }),
+        { phase: 'Verify', label: `verify ${c.id} (delivery)`, schema: VERIFY_SCHEMA }); }
+      finally { setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); }
+      // The result binds only to the bytes it measured.
+      if (ver && (await digest(frozen) !== frozenSha || await digest(src.path) !== src.sha256)) {
+        row.status = 'source_changed'; continue;
+      }
+    }
+    const ok = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && primSpeedup(ver) > 0;
+    if (ok && evo && c.d) {
+      const kept = await evo.record(c.d, c.eng, ver, src.path);
+      if (kept && (kept.retention_error || kept.last_record_error)) row.archive_record_status = 'failed';
+    }
+    Object.assign(row, {status: !ver ? 'unmeasured' : ok ? 'qualified' : String(ver.status || 'unknown'),
+      primary: ok ? primSpeedup(ver) : null, source_sha256: src.sha256, tree: promo.tree});
+    if (ok && row.primary > cumulative * (1 + MIN_IMPROVE) && (!best || row.primary > best.primary)) {
+      best = {c, ver, promo, primary: row.primary, row};
+    }
+  }
+  // Qualification has settled; only the host commit uses the existing Report allowance.
+  if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+  if (best && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
+    best.row.status = 'delivered';
+    cumulative = best.primary;
+    bestPerCase = best.ver.per_case && best.ver.per_case.length ? best.ver.per_case : bestPerCase;
+    finalWinner = {source: `delivery ${best.c.key}`, id: best.c.id, title: best.c.d ? best.c.d.title : 'delivery',
+      geomean: best.primary, geomean_unweighted: best.ver.verified_geomean,
+      weighted: best.ver.verified_weighted != null ? best.ver.verified_weighted : null,
+      per_case: best.ver.per_case || [], patch: best.promo.patch, source_tree: best.promo.tree,
+      reported_context: reportedEvidence({...best.c.d, id: best.c.id, reported_context: best.c.reported_context},
+        best.c.eng, best.ver, best.promo.patch)};
+    roundsCommitted += 1;
+    if (evo && !await evo.selectBest(best.c.id)) best.row.archive_selection_status = 'failed';
+  } else if (best) best.row.status = 'commit_failed';
+  history.delivery = {reserve_s: DELIVERY_RESERVE_S, candidates: rows,
+    delivered: rows.find(row => row.status === 'delivered')?.key || null};
+  const unresolved = [...deliveryIncomplete, ...rows.filter(row => row.basis === 'verifier'
+    && row.evidence > cumulative && !['delivered', 'already_committed'].includes(row.status))];
+  if (best && best.row.archive_selection_status === 'failed') unresolved.push(best.row);
+  history.delivery.incomplete = unresolved;
+  const receipt = `${dir}/outcome.json`;
+  try {
+    if (await hostRun('mkdir', ['-p', dir]) === null
+        || await writeFile(`${receipt}.tmp`, JSON.stringify(history.delivery)) === null
+        || await hostRun('mv', ['--', `${receipt}.tmp`, receipt]) === null) {
+      throw new Error('receipt write unavailable');
+    }
+  } catch (error) {
+    unresolved.push({status: 'receipt_write_failed', path: receipt, error: String(error)});
+  }
+  if (unresolved.length) log(`[delivery] ${unresolved.length} incomplete source(s); retained evidence ${receipt}.`);
+  log(`[delivery] ${rows.length} retained source(s); delivered ${history.delivery.delivered || 'none (incumbent kept)'}.`);
+}
 return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
@@ -599,18 +845,20 @@ return {
 // proposed tree in a private Git index, then diff it against the current winner.
 // This avoids applying an old parent's patch to a different canonical source.
 async function evolutionPromotionPatch(evo, winner, round) {
-  const index = `${EVAL_DIR}/evolution/promotion-${round}.index`;
+  return promotionPatch(evo.baseCommit, evo.entries.find(row => row.id === winner.id)?.patch_ref,
+    `${EVAL_DIR}/evolution/promotion-${round}.index`, `${EVAL_DIR}/evolution/promotion-${round}.diff`);
+}
+// The same construction for any pinned source {path, sha256} on its recorded base commit.
+async function promotionPatch(base, source, index, patch) {
   const indexed = (...args) => hostRun('env', [`GIT_INDEX_FILE=${index}`, 'git', '-C', CANONICAL, ...args]);
-  const source = evo.entries.find(row => row.id === winner.id)?.patch_ref;
   const sourceMatches = async () => source &&
     ((await hostRun('sha256sum', ['--', source.path])) || '').split(/\s/)[0] === source.sha256;
   if (!await sourceMatches()) return null;
-  if (await indexed('read-tree', evo.baseCommit) === null
+  if (await indexed('read-tree', base) === null
       || await indexed('apply', '--cached', '--', source.path) === null || !await sourceMatches()) return null;
   const tree = ((await indexed('write-tree')) || '').trim();
   if (!/^[0-9a-f]{40,64}$/.test(tree)) return null;
   const diff = await indexed('diff', '--cached', '--binary', 'HEAD', '--', '.');
-  const patch = `${EVAL_DIR}/evolution/promotion-${round}.diff`;
   if (diff === null || await writeFile(patch, diff) === null) return null;
   return {tree, patch};
 }
@@ -651,6 +899,130 @@ async function restoreUncommittedRound(previous, priorUntracked, round) {
   }
   return {previous_commit: previous, unfinished_commit: unfinished, retained_ref: retainedRef,
     partial_patch: diffPath};
+}
+
+// Retained delivery state. Each entry references existing outputs: an EVO archive row (pinned copy) or a
+// GEAK snapshot taken before its verification, plus the base commit it was written against.
+async function nativeDeliveryBoundary(call) {
+  // Only an explicit host capture/export failure has the delivery error class.
+  return await call();
+}
+function nativeDeliveryError(reason) {
+  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archive ${EVAL_DIR}/evolution/archive.json`),
+    {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
+}
+const retainedSources = [], deliveryIncomplete = [], PINS = new Map();
+function keepForDelivery(entry) {
+  const index = retainedSources.findIndex(c => c.key === entry.key);
+  if (index >= 0) retainedSources[index] = entry;
+  else retainedSources.push(entry);
+}
+async function retainResult(d, eng, ver, patch, evo, base, retained, verification = null) {
+  if (EXTERNAL_OBJECTIVE) return; // External measurements retain their own authority and contract.
+  const qualified = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass');
+  const local = !ver && eng && eng.measurement_valid === true
+    && !says(eng.status, 'failed') && !says(eng.status, 'invalid');
+  const entry = {key: d.out_dir.slice(EVAL_DIR.length + 1).replace(/\//g, '_'), id: d.id, d, eng,
+    ver: qualified ? ver : null, evidence: qualified ? primSpeedup(ver) : local ? primSpeedup(eng) : null,
+    archived: !!evo, source: evo ? retained?.patch_ref || null : pinned(patch),
+    original_patch: patch, base: evo ? evo.baseCommit : base, verification,
+    reported_context: retained?.reported_context || reportedEvidence(d, eng, ver, patch),
+    retention_error: retained && (retained.retention_error || retained.last_record_error) || null};
+  keepForDelivery(entry);
+  // EVO record() already checkpoints source and evidence atomically. GEAK keeps the same evidence
+  // beside its immutable source snapshot so a partial round leaves reviewable custody.
+  if (!evo && entry.source) {
+    try {
+      const receipt = `${entry.source.path}.json`;
+      if (await writeFile(`${receipt}.tmp`, JSON.stringify(entry)) === null
+          || await hostRun('mv', ['--', `${receipt}.tmp`, receipt]) === null)
+        entry.retention_error = 'could not retain source evidence';
+    } catch (error) { entry.retention_error = String(error); }
+  }
+}
+const pinned = (path) => PINS.has(path) ? {path, sha256: PINS.get(path)} : null;
+async function verificationCopy(source, target) {
+  try {
+    const sha = ((await hostRun('sha256sum', ['--', source])) || '').slice(0, 64);
+    if (!/^[0-9a-f]{64}$/.test(sha)
+        || await hostRun('cp', ['--no-clobber', '--', source, target]) === null
+        || await hostRun('chmod', ['u+w', '--', target]) === null) return null;
+    const copy = {path: target, sha256: sha};
+    return await verificationIntact(copy, source) ? copy : null;
+  } catch (error) { return null; }
+}
+async function verificationIntact(copy, source) {
+  try {
+    const measured = await hostRun('sha256sum', ['--', copy.path]);
+    const retained = await hostRun('sha256sum', ['--', source]);
+    if (measured === null || retained === null) return null;
+    return measured.slice(0, 64) === copy.sha256 && retained.slice(0, 64) === copy.sha256;
+  } catch (error) { return null; }
+}
+// True for an unpinned path; false once a pinned snapshot's bytes differ from their pin (or cannot be read).
+async function pinIntact(path) {
+  try { return !PINS.has(path) || ((await hostRun('sha256sum', ['--', path])) || '').slice(0, 64) === PINS.get(path); }
+  catch (error) { return false; }
+}
+// Copy a GEAK source once into an immutable snapshot; null when it cannot be pinned.
+async function pinSource(path, owner) {
+  const pin = `${EVAL_DIR}/delivery/sources/${owner.slice(EVAL_DIR.length + 1).replace(/\//g, '_')}.diff`;
+  try {
+    if (await hostRun('mkdir', ['-p', `${EVAL_DIR}/delivery/sources`]) === null
+        || await hostRun('cp', ['--no-clobber', '--', path, pin]) === null
+        || await hostRun('chmod', ['a-w', '--', pin]) === null) return null;
+    const sha = ((await hostRun('sha256sum', ['--', pin])) || '').slice(0, 64);
+    if (!/^[0-9a-f]{64}$/.test(sha) || ((await hostRun('sha256sum', ['--', path])) || '').slice(0, 64) !== sha) return null;
+    PINS.set(pin, sha);
+    return pin;
+  } catch (error) { return null; }
+}
+async function headCommit() {
+  try {
+    const head = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+    return /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+  } catch (error) { return null; }
+}
+// An added source path may already exist untracked in CANONICAL. Preserve only
+// paths named by this patch before exact apply; never clean unrelated workspace files.
+async function preservePatchObstructions(patch, tag) {
+  const pending = await git(CANONICAL, 'ls-files', '--others', '-z'); // includes ignored obstructions
+  const changes = await git(CANONICAL, 'apply', '--numstat', '-z', '--', patch);
+  if (pending === null || changes === null) throw new Error('cannot inspect patch obstructions');
+  const touched = new Set(changes.split('\0').filter(Boolean).map(row => row.split('\t').slice(2).join('\t')));
+  const paths = pending.split('\0').filter(name => name && touched.has(name));
+  if (!paths.length) return;
+  const dir = `${EVAL_DIR}/delivery/obstructions/${tag}`;
+  if (await hostRun('mkdir', ['-p', `${EVAL_DIR}/delivery/obstructions`]) === null
+      || await hostRun('mkdir', ['--', dir]) === null) throw new Error('cannot create obstruction retention directory');
+  for (const name of paths) {
+    if (name.startsWith('/') || name.split('/').includes('..')) throw new Error('invalid obstruction path');
+    const parent = name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '';
+    if ((parent && await hostRun('mkdir', ['-p', '--', `${dir}/${parent}`]) === null)
+        || await hostRun('mv', ['--', `${CANONICAL}/${name}`, `${dir}/${name}`]) === null) {
+      throw new Error(`could not preserve obstruction ${name}; retained files ${dir}`);
+    }
+    log(`[delivery] preserved pre-existing untracked ${name} at ${dir}/${name} before exact apply.`);
+  }
+}
+
+// Commit exactly the qualified tree; on any mismatch restore the previous commit (incumbent bytes).
+async function commitExactTree(promo, message) {
+  const previous = await headCommit();
+  const untracked = previous ? await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z') : null;
+  if (!previous || untracked === null) return false;
+  let ok = false;
+  try {
+    const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim();
+    await preservePatchObstructions(promo.patch, 'final');
+    ok = /^[0-9a-f]{40,64}$/.test(root) && await git(CANONICAL, 'apply', '--index', '--', promo.patch) !== null
+      && await git(CANONICAL, '-c', 'user.email=team@workflow', '-c', 'user.name=team', 'commit', '-q', '-m', message) !== null
+      && await git(CANONICAL, 'diff', '--exit-code', promo.tree, 'HEAD', '--', '.') === '';
+    const best = ok ? await git(CANONICAL, 'diff', '--binary', root, 'HEAD', '--', '.') : null;
+    ok = ok && best !== null && await writeFile(`${EVAL_DIR}/current_best.diff`, best) !== null;
+  } catch (error) { log(`[delivery] commit failed: ${String(error)}`); ok = false; }
+  if (!ok) await restoreUncommittedRound(previous, untracked.split('\0').filter(Boolean), 'delivery');
+  return ok;
 }
 
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.

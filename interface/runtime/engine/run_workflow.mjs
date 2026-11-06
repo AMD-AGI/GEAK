@@ -159,7 +159,8 @@ export function createRuntime({
   async function callBackend(options, agentCallId, schemaAttempt, ph) {
     if (!state.backendTrace) return backend.runAgent(options);
     const call = { backend_call_id: ++backendCallSeq, agent_call_id: agentCallId,
-      schema_attempt: schemaAttempt, backend: backend.name, phase: ph, label: options.label };
+      schema_attempt: schemaAttempt, backend: backend.name, phase: ph, label: options.label,
+      timeout_ms: Number.isFinite(options.timeoutMs) ? options.timeoutMs : null };
     state.backendTrace.open_calls++;
     backendEvent('start', call);
     let outcome = 'returned', error_name = null, error_code = null;
@@ -356,17 +357,54 @@ export function createRuntime({
           ? {report_cutoff_epoch: total - validation} : {}),
         validation_cutoff_epoch: maximumDeadlineEpoch,
       };
+      if (scriptArgs.search_duration_s != null || scriptArgs.preparation_allowance_s != null) {
+        workflowTiming = {...workflowTiming, outer_deadline_epoch: total, search_window_state: 'pending',
+          search_duration_s: scriptArgs.search_duration_s,
+          preparation_allowance_s: scriptArgs.preparation_allowance_s,
+          full_deadline_epoch: null, search_cutoff_epoch: null,
+          report_cutoff_epoch: null, validation_cutoff_epoch: null};
+        state.searchTiming = workflowTiming;
+      }
     }
-    const setProcessDeadline = (epoch) => {
+    const setProcessDeadline = (epoch, timing = null) => {
       if (maximumDeadlineEpoch == null || !Number.isFinite(epoch) || epoch <= 0
           || epoch > maximumDeadlineEpoch) throw new Error('process deadline exceeds original workflow allowance');
+      if (timing) {
+        const {search_started_epoch: start, search_cutoff_epoch: search, report_cutoff_epoch: report,
+          validation_cutoff_epoch: validation, full_deadline_epoch: full} = timing;
+        if (![start, search, report, validation, full].every(Number.isFinite)
+            || workflowTiming?.search_window_state !== 'pending' || timing.search_window_state !== 'started'
+            || timing.outer_deadline_epoch !== Number(scriptArgs.deadline_epoch)
+            || timing.search_duration_s !== scriptArgs.search_duration_s
+            || search !== start + scriptArgs.search_duration_s || search !== epoch
+            || timing.preparation_cutoff_epoch !== workflowTiming.preparation_cutoff_epoch
+            || !Number.isFinite(timing.preparation_started_epoch)
+            || timing.preparation_started_epoch > start || start >= timing.preparation_cutoff_epoch
+            || full !== search + Number(scriptArgs.search_reserve_s)
+            || report !== full - Number(scriptArgs.final_validation_reserve_s || 0)
+            || !(start < search && search <= report && report <= validation)
+            || validation > maximumDeadlineEpoch || full > Number(scriptArgs.deadline_epoch)
+            || validation !== full - Number(scriptArgs.final_cleanup_reserve_s || 0)) {
+          throw new Error('search timing exceeds the original workflow allowance or has unordered cutoffs');
+        }
+        // Replace, never mutate: earlier role records keep their original pending/preparation timing.
+        workflowTiming = {...workflowTiming, ...timing};
+      } else if (workflowTiming?.search_window_state === 'pending') {
+        workflowTiming = {...workflowTiming, preparation_cutoff_epoch: epoch};
+      }
       processDeadlineEpoch = epoch;
+      if (workflowTiming?.search_window_state) state.searchTiming = workflowTiming;
+      if (timing) log('WORKFLOW_SEARCH_TIMING ' + JSON.stringify(workflowTiming));
     };
     setProcessDeadline.secondsLeft = () => processDeadlineEpoch == null ? Infinity : msUntil(processDeadlineEpoch) / 1000;
     const scriptAgent = (prompt, options = {}) => agent(prompt, processDeadlineEpoch == null ? options : {
-      ...options, processDeadlineEpoch, workflowTiming,
+      ...options, workflowTiming,
+      // A per-call deadline may shorten, never extend, the shared process deadline.
+      processDeadlineEpoch: Number.isFinite(options.processDeadlineEpoch)
+        ? Math.min(options.processDeadlineEpoch, processDeadlineEpoch) : processDeadlineEpoch,
       processTimeoutMs: options.processTimeoutMs ?? Number(scriptArgs.agent_timeout_ms || 0),
     });
+    Object.defineProperty(scriptAgent, 'processTimeoutSupported', { value: true });
     Object.defineProperty(scriptAgent, 'processDeadlineActive', { get: () => processDeadlineEpoch != null });
     const scriptRunProcess = (options) => {
       if (processDeadlineEpoch == null) return runProcess(options);
@@ -377,6 +415,11 @@ export function createRuntime({
     try {
       return await fn(scriptAgent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget,
         scriptRunProcess, scriptSetTimeout, scriptClearTimeout, setProcessDeadline);
+    } catch (error) {
+      if (workflowTiming?.search_window_state === 'pending') {
+        throw new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: search not admitted during preparation: ${String(error)}; retained preparation ${scriptArgs.eval_dir || scriptArgs.exp_root || ''}`);
+      }
+      throw error;
     } finally {
       closed = true;
       for (const timer of timers) clearTimeout(timer);
@@ -498,6 +541,7 @@ async function main() {
     schema_failures: rt.state.schemaFails,
     script: scriptPath,
     ...(backendTraceAtReturn ? { backend_call_trace: backendTraceAtReturn } : {}),
+    ...(rt.state.searchTiming ? { search_timing: rt.state.searchTiming } : {}),
   };
   if (opts['metrics-file'] && opts['metrics-file'] !== true) {
     await writeFile(opts['metrics-file'], JSON.stringify(metrics, null, 2));

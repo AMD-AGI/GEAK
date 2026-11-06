@@ -16,6 +16,10 @@ const git = (dir, ...args) => hostRun('git', ['-C', dir, ...args]);
 const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { input: text });
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
-applyOptimizeResult(OPTIMIZER === 'evo'
-  ? await greedyOptimize(optimizeStart, await createEvolution(optimizeStart))
-  : await greedyOptimize(optimizeStart));
+applyOptimizeResult(await nativeDeliveryBoundary(async () => {
+  // Publication owns an archive; only EVO receives archive planning inputs.
+  const populationArchive = A.population_lineage ? await createEvolution(optimizeStart) : null;
+  return OPTIMIZER === 'evo'
+    ? await greedyOptimize(optimizeStart, populationArchive || await createEvolution(optimizeStart), populationArchive)
+    : await greedyOptimize(optimizeStart, null, populationArchive);
+}));

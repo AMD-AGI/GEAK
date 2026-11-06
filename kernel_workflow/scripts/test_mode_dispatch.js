@@ -43,6 +43,11 @@ function build(argsObj, stubs) {
     workflow: async (ref, a) => {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
+      if (s.laneError && s.laneError[a.target_language]) {
+        throw Object.assign(new Error('GEAK_NATIVE_DELIVERY_INCOMPLETE: scripted export failure'),
+          {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
+      }
+      if (s.laneResult && s.laneResult[a.target_language]) return s.laneResult[a.target_language];
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
       return { validation_status: 'accepted', final_speedup: sp };
     },
@@ -370,6 +375,29 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
     ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
       JSON.stringify(trace.agentLabels));
+  }
+
+  console.log('\n# N. one failed native delivery preserves accepted siblings and env candidates');
+  for (const environmentWins of [false, true]) {
+    const answer = healthy('triton', [{language: 'hip', route: 'author'}]);
+    const {run, trace} = build({...BASE, mode: 'bakeoff', gpu_ids: '0,1'}, {
+      laneError: {hip: true},
+      laneResult: {triton: {validation_status: environmentWins ? 'flagged' : 'accepted',
+        final_speedup: 1.7, final_patch: '/tmp/accepted.diff', eval_dir: '/tmp/triton'}},
+      agent: label => label.startsWith('op_benchmarker') && environmentWins
+        ? {...answer(label), tuned_speedup: 1.2, winner_backend: 'aiter', apply_env: 'TUNED=1'}
+        : answer(label),
+    });
+    const result = await run();
+    ok(trace.lanes.length === 2, 'both sibling lanes settle after a delivery failure');
+    ok(result.winner && result.winner.kind === (environmentWins ? 'env' : 'lane'),
+      environmentWins ? 'env winner survives failed and flagged lanes' : 'accepted source winner survives failed sibling');
+    const failed = result.candidates.find(c => c.lang === 'hip');
+    ok(failed && failed.speedup === null, 'failed delivery has unavailable speedup');
+    ok(failed && failed.failure && failed.failure.code === 'GEAK_NATIVE_DELIVERY_INCOMPLETE',
+      'returned candidate keeps exact lane failure');
+    ok(failed && failed.delivery_incomplete.length === 1 && failed.delivery_incomplete[0].lane,
+      'returned candidate keeps its incomplete evidence and lane identity');
   }
 
   console.log(failures === 0

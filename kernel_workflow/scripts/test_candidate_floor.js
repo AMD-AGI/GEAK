@@ -91,7 +91,7 @@ ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup
 // Exercise the real shortcut: invalid or unconfirmed experiments must reach Verify
 // even when an engineer returned zero speedup and an empty patch (#480).
 const shortcut = src.match(/const trustworthyBelowBaseline = ([\s\S]*?);/)[1];
-const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', 'EXTERNAL_OBJECTIVE = null',
+const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', 'EXTERNAL_OBJECTIVE = null', 'HAS_WORKLOAD = false',
   `return ${shortcut};`);
 for (const eng of [
   { status: 'invalid_measurement', measurement_valid: false, speedup_geomean: 0 },

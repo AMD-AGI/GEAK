@@ -25,6 +25,13 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
+  throw new Error('prepare_only must be a boolean');
+if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
+    || A.state_dir || A.prepared_original_ref !== undefined || A.population_lineage
+    || A.objective?.kind === 'external_primary'
+    || A.search_duration_s != null || A.preparation_allowance_s != null))
+  throw new Error('prepare_only needs a fresh ORIGINAL lane, without author/resume/import/population or relative search controls');
 if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
   throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }
@@ -119,8 +126,31 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // replaced; leaving it out would make the "before" arm unreachable and force the comparison to be
 // made across two different scripts, where any other drift would be indistinguishable from the
 // scheduler's effect. Default 'pool'.
-const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
-const GPU_POOL = GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+const REQUIRED_GPU_COUNT = A.required_gpu_count ?? 1;
+if (!Number.isSafeInteger(REQUIRED_GPU_COUNT) || REQUIRED_GPU_COUNT < 1)
+  throw new Error('required_gpu_count must be a positive safe integer');
+if (REQUIRED_GPU_COUNT > 1 && (GPU_LIST.length !== REQUIRED_GPU_COUNT
+    || GPU_LIST.some(id => !/^(0|[1-9][0-9]*)$/.test(id))
+    || new Set(GPU_LIST).size !== GPU_LIST.length))
+  throw new Error('multi-GPU lane requires its exact, distinct allocated GPU IDs');
+// Own key: deadline_epoch would also arm the fixed-window stopping policy (07_deadline.js).
+const GPU_PROCESS_SETTLEMENT = REQUIRED_GPU_COUNT > 1 || A.wait_for_process_settlement === true;
+if (GPU_PROCESS_SETTLEMENT && (!agent.processTimeoutSupported
+    || !Number.isFinite(Number(A.settlement_deadline_epoch)) || Number(A.settlement_deadline_epoch) <= 0))
+  throw new Error('GPU group requires native process settlement and its original absolute deadline');
+const GPU_MODE = REQUIRED_GPU_COUNT > 1 ? 'set'
+  : String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
+const GPU_POOL = GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
+  : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+const GPU_GROUP_INSTRUCTIONS = REQUIRED_GPU_COUNT > 1 ? `
+This task requires ${REQUIRED_GPU_COUNT} GPUs together. Its assigned raw IDs are ${GPU_IDS}.
+GPU_ID=${GPU_POOL} is a lock argument: pass it unchanged to gpu_lock.sh or profile_kernel.sh
+for EVERY compile, correctness, benchmark, verification and diagnostic command. Never place
+set: in a HIP/CUDA/ROCR mask, choose one device from the group, or rewrite inherited ROCR.
+Run the immutable task's native multi-rank command in the foreground and wait for every rank.
+The wrapper sets numeric HIP visibility only after all device locks are held. Preserve the
+caller's ordinal-to-physical mapping and the frozen rank count; do not substitute a single-rank test.
+` : '';
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -168,6 +198,10 @@ const externalArgv = (value) => Array.isArray(value) && value.length
 if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
     || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
   throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+if (!EXTERNAL_OBJECTIVE && typeof runProcess !== 'function') {
+  throw Object.assign(new Error('Native kernel delivery requires the host runProcess runtime before Setup'),
+    {code: 'GEAK_HOST_RUNTIME_REQUIRED'});
 }
 const EXTERNAL_FINAL_COMMANDS = A.external_final_measurement_command != null
   || A.external_final_result_command != null;
@@ -251,8 +285,14 @@ async function captureFinalEvaluation(workspace) {
 
 async function writeFrozenFinalPatch() {
   const path = `${EVAL_DIR}/host_final_patch.diff`;
-  if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null) {
-    throw new Error('could not write the captured final source patch');
+  try {
+    if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null
+        || await hostRun('cat', ['--', path]) !== frozenFinalPatch) {
+      throw new Error('could not write the captured final source patch');
+    }
+  } catch (error) {
+    if (!EXTERNAL_OBJECTIVE) throw nativeDeliveryError(`final source export failed: ${String(error)}`);
+    throw error;
   }
   return path;
 }
@@ -366,16 +406,16 @@ const checkedExternal = (o, key) => o && o.external_measurement_valid === true
   && Number.isFinite(o[key]) ? o[key] : null;
 // The declared native primary is shared by external development and report/export.
 const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_speedup') : primSpeedup(o);
-// PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
-// agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+// PRIMARY-metric selector: declared workload weighting requires its measured weighted result.
+// A missing, nonfinite or nonpositive weighted result is unavailable, never an unweighted gain or a measured loss.
 // External mode uses the checked task primary, matching its declared final objective.
 // The checked all-case geomean remains a secondary diagnostic.
 const primSpeedup = (o) => {
-  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (!o) return EXTERNAL_OBJECTIVE || HAS_WORKLOAD ? null : 0;
   if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
-  if (HAS_WORKLOAD && Number.isFinite(w)) return w;
+  if (HAS_WORKLOAD) return Number.isFinite(w) && w > 0 ? w : null;
   const g = o.verified_geomean != null ? o.verified_geomean : o.speedup_geomean;
   return Number.isFinite(g) ? g : 0;
 };
@@ -766,7 +806,17 @@ const PLAN_SCHEMA = obj({
   },
 }, ['stop', 'directions']);
 
+// Optional author interpretation; never a score, eligibility gate or verification record.
+const evidenceContext = obj({
+  tested_applicability: {type: 'string'},
+  observations: {type: 'array', items: {type: 'string'}},
+  unresolved: {type: 'array', items: {type: 'string'}},
+  rival_explanations: {type: 'array', items: {type: 'string'}},
+  next_separating_observation: {type: 'string'},
+  evidence_refs: {type: 'array', items: {type: 'string'}},
+}, []);
 const ENG_SCHEMA = obj({
+  evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
@@ -779,6 +829,7 @@ const ENG_SCHEMA = obj({
 }, metricRequired(['status', 'speedup_geomean', 'measurement_valid']));
 
 const VERIFY_SCHEMA = obj({
+  evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
@@ -791,6 +842,7 @@ const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
   combos_tried: { type: 'array', items: { type: 'object', additionalProperties: true } },
   best: obj({
+    evidence_context: evidenceContext,
     patch_file: { type: 'string' },
     ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   }, EXTERNAL_OBJECTIVE ? ['patch_file', 'external_evaluation'] : ['patch_file']),
@@ -968,13 +1020,17 @@ function roleAgent(role, phase, intro, inputs) {
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
+  if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
-      if (agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const opts = agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+      if (groupTask || agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
+          processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
+          : agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
         const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
@@ -992,7 +1048,7 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      if (agent.processDeadlineActive && e
+      if ((groupTask || agent.processDeadlineActive) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
         return null;
@@ -1021,15 +1077,25 @@ async function agentT(p, o) {
 // A workflow script has no clock (Date.now() is unavailable — it would break resume), so the time is
 // read by a tiny low-effort agent. If that read FAILS the run is NOT killed: an unreadable clock
 // returns Infinity, degrading to the old budget-only behaviour rather than truncating a healthy run.
-const DEADLINE_EPOCH = (() => {
+const OUTER_DEADLINE_EPOCH = (() => {
   const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
+let DEADLINE_EPOCH = OUTER_DEADLINE_EPOCH;
 // Opt-in process cutoffs retain the original deadline and reserve later stages.
 const SEARCH_RESERVE_S = A.search_reserve_s == null ? 0 : Number(A.search_reserve_s);
 const FINAL_VALIDATION_RESERVE_S = Number(A.final_validation_reserve_s || 0);
 const FINAL_CLEANUP_RESERVE_S = Number(A.final_cleanup_reserve_s || 0);
 const PROCESS_BOUNDED = A.search_reserve_s != null;
+const SEARCH_DURATION_S = A.search_duration_s ?? 0;
+const PREPARATION_ALLOWANCE_S = A.preparation_allowance_s ?? 0;
+const RELATIVE_SEARCH = A.search_duration_s != null || A.preparation_allowance_s != null;
+let preparationStartedEpoch = null, preparationCutoffEpoch = null, searchStartedEpoch = null;
+if (RELATIVE_SEARCH && (!PROCESS_BOUNDED
+    || !Number.isSafeInteger(SEARCH_DURATION_S) || SEARCH_DURATION_S <= 0
+    || !Number.isSafeInteger(PREPARATION_ALLOWANCE_S) || PREPARATION_ALLOWANCE_S <= 0)) {
+  throw new Error('preparation_allowance_s and search_duration_s must both be positive safe integers with a process-bounded outer deadline');
+}
 if (PROCESS_BOUNDED) {
   if (!DEADLINE_EPOCH || !Number.isFinite(SEARCH_RESERVE_S) || SEARCH_RESERVE_S <= 0
       || !Number.isFinite(FINAL_VALIDATION_RESERVE_S) || FINAL_VALIDATION_RESERVE_S < 0
@@ -1039,7 +1105,137 @@ if (PROCESS_BOUNDED) {
       || typeof setProcessDeadline !== 'function' || !agent.processDeadlineActive) {
     throw new Error('search reserve requires the process-bounded runtime and ordered final reserves');
   }
-  setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+  if (RELATIVE_SEARCH) {
+    // At entry the existing runtime deadline is its immutable outer maximum.
+    const now = OUTER_DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S - setProcessDeadline.secondsLeft();
+    preparationStartedEpoch = now;
+    preparationCutoffEpoch = Math.min(now + PREPARATION_ALLOWANCE_S,
+      OUTER_DEADLINE_EPOCH - SEARCH_RESERVE_S - SEARCH_DURATION_S);
+    if (!(preparationCutoffEpoch > now + 7)) {
+      throw new Error('GEAK_NATIVE_DELIVERY_INCOMPLETE: search not admitted; full search and closure do not fit within the outer deadline');
+    }
+    setProcessDeadline(preparationCutoffEpoch);
+  } else setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+}
+// DELIVERY FACTS (opt-in; absent => unchanged prompts and control flow). Engineering and the round's
+// verify, integrate and commit share the search cutoff. Planner and engineer prompts get observed facts
+// only: no derived reserve, no prior and no bound. A role wall is host time from dispatch to return,
+// including lease, model and semaphore waits. It counts as completed when the role-returned verdict
+// matches COMPLETED_ROLE; every other return is listed as not completed. Both are recorded before the
+// host's external-measurement check, EVO retention and post-commit source-tree check, so they are not
+// host-validated completion or accepted delivery, and they exclude validation, retention and recovery.
+if (A.delivery_facts != null && typeof A.delivery_facts !== 'boolean') throw new Error('delivery_facts must be a boolean');
+const DELIVERY_FACTS = A.delivery_facts === true;
+if (DELIVERY_FACTS && !PROCESS_BOUNDED) throw new Error('delivery_facts requires the search reserve');
+let SEARCH_CUTOFF_EPOCH = DEADLINE_EPOCH - SEARCH_RESERVE_S;
+const LANE_START_EPOCH = DELIVERY_FACTS
+  ? Math.floor((RELATIVE_SEARCH ? preparationCutoffEpoch : SEARCH_CUTOFF_EPOCH) - setProcessDeadline.secondsLeft()) : 0;
+const COMPLETED_ROLE = {
+  verify: r => says(r.status, 'verified') || says(r.status, 'regression'),
+  integrate: r => r.attempted === true && (says(r.conclusion, 'improved') || says(r.conclusion, 'no_improvement')),
+  commit: r => r.committed === true,
+};
+const ROLE_WALLS_S = { verify: [], integrate: [], commit: [] }, NOT_COMPLETED = [];
+async function observeRole(kind, label, call) {
+  if (!DELIVERY_FACTS) return call();
+  const started = setProcessDeadline.secondsLeft();
+  let result = null;
+  try { return (result = await call()); } finally {
+    const left = setProcessDeadline.secondsLeft(), wall_s = Math.round(started - left);
+    if (result && COMPLETED_ROLE[kind](result)) ROLE_WALLS_S[kind].push(wall_s);
+    else NOT_COMPLETED.push({ kind, label, wall_s, outcome: result
+      ? String(result.status ?? result.conclusion ?? result.committed)
+      : left <= 7 ? 'no result at the search cutoff' : 'no result (timed out or failed)' });
+  }
+}
+async function deliveryFacts() {
+  let rows = '';
+  try { rows = await hostRun('sh', ['-c', 'if [ -r "${GEAK_GPU_USE_LOG:-}" ]; then cat -- "$GEAK_GPU_USE_LOG"; fi']) || ''; }
+  catch (error) { rows = ''; }
+  const now = SEARCH_CUTOFF_EPOCH - setProcessDeadline.secondsLeft();   // after the host read
+  const waits = rows.split('\n').map(line => { try { return JSON.parse(line); } catch (error) { return null; } })
+    .filter(row => row && row.t >= LANE_START_EPOCH && Number.isFinite(row.wait_s)).map(row => row.wait_s);
+  return { as_of_epoch: Math.floor(now), search_cutoff_epoch: SEARCH_CUTOFF_EPOCH,
+    seconds_to_search_cutoff: Math.floor(SEARCH_CUTOFF_EPOCH - now),
+    // ENGINEER_RESERVE_S is defined below; this runs only during Optimize, after it is set.
+    ...(ENGINEER_RESERVE_S ? { engineer_cutoff_epoch: ENGINEER_CUTOFF_EPOCH,
+      seconds_to_engineer_cutoff: Math.floor(ENGINEER_CUTOFF_EPOCH - now),
+      shared_cutoff: 'Planner and engineer calls end at engineer_cutoff_epoch; this round\'s verify, integrate ' +
+        'and commit continue until search_cutoff_epoch; a candidate is verified only after its engineer ' +
+        'returns or is stopped. Report and Validate have later cutoffs.' }
+      : { shared_cutoff: 'Engineering and this round\'s verify, integrate and commit all end at search_cutoff_epoch; ' +
+        'a candidate is verified only after its engineer returns. Report and Validate have later cutoffs.' }),
+    observed_role_walls_s: { meaning: 'observed role wall from dispatch to the role\'s return, includes ' +
+        'lease/model/semaphore waits; excludes host validation, retention and recovery; not a service cost',
+      ...Object.fromEntries(Object.entries(ROLE_WALLS_S).map(([kind, walls]) => [kind, walls.length
+        ? { count: walls.length, walls_s: [...walls].sort((a, b) => a - b) }
+        : 'unknown: no completed call observed in this run'])) },
+    completed_means: 'role-returned verdict, not host-validated completion or accepted delivery: verify ' +
+      'returned verified|regression; integrate attempted with improved|no_improvement; commit committed=true',
+    not_completed: NOT_COMPLETED.length ? NOT_COMPLETED : 'none observed',
+    gpu_lease_waits: waits.length ? { meaning: 'GEAK_GPU_USE_LOG rows with t at or after this lane start: one row ' +
+        'per successful lease acquisition after lock/idle settling, one per device for set leases; pending or ' +
+        'failed acquisitions are absent; overlapping waits, not hold time; assumes a lane-dedicated log and ' +
+        'comparable clocks; time filtering does not identify the command or role',
+      rows: waits.length, positive: waits.filter(w => w > 0).length,
+      sum_s: waits.reduce((a, b) => a + b, 0), max_s: Math.max(...waits) }
+      : 'unknown: no GEAK_GPU_USE_LOG rows readable for this run',
+    complete_ut_wall: 'unknown: no per-command hold time is recorded' };
+}
+// Common assigned-pool facts at each dispatch; observed delivery facts remain opt-in.
+const evaluationServiceFacts = () => ({
+  assigned_gpu_ids: GPU_LIST, lock_argument: GPU_POOL, mode: GPU_MODE,
+  required_gpus_per_evaluation: REQUIRED_GPU_COUNT,
+  meaning: 'Configured assigned evaluation pool, not an observation of live availability or throughput. ' +
+    (GPU_LIST.length === 1 ? 'All GPU evaluations in this lane serialize through the one assigned device lock. ' :
+      'Evaluations acquire the existing device/group locks. ') +
+    'Model concurrency is not GPU evaluation concurrency; directions meet at the existing round verification/integration barrier.',
+  clocks: 'Role timeouts are computed before runtime semaphore acquisition; queue, model and GPU lease waits consume wall time. ' +
+    'Delivery facts report qualified observations only; missing waits and complete evaluation service time remain unknown.'
+});
+const deliveryFactsInput = async () => ({EVALUATION_SERVICE: evaluationServiceFacts(),
+  ...(DELIVERY_FACTS ? {DELIVERY_FACTS: await deliveryFacts()} : {})});
+// ENGINEER RESERVE (opt-in; absent => unchanged). A declared budget allocation, not a cost estimate.
+// Planner and engineer calls carry the earlier per-call deadline search cutoff - engineer_reserve_s;
+// verify, integrate and commit keep the shared search cutoff, and Report/Validate keep their reserves.
+// The shared process deadline is never moved for this. No round or replan starts after the cutoff.
+const ENGINEER_RESERVE_S = A.engineer_reserve_s == null ? 0 : A.engineer_reserve_s;
+if (A.engineer_reserve_s != null && (!PROCESS_BOUNDED || !Number.isSafeInteger(ENGINEER_RESERVE_S)
+    || ENGINEER_RESERVE_S < 0)) {
+  throw new Error('engineer_reserve_s must be a nonnegative integer and requires the search reserve');
+}
+let ENGINEER_CUTOFF_EPOCH = ENGINEER_RESERVE_S ? SEARCH_CUTOFF_EPOCH - ENGINEER_RESERVE_S : null;
+const ENGINEER_CALL = ENGINEER_RESERVE_S ? { processDeadlineEpoch: ENGINEER_CUTOFF_EPOCH } : {};
+// Called once, after baseline/EVO initialization and before the first search plan.
+function beginSearchWindow() {
+  if (!RELATIVE_SEARCH) return null;
+  const now = preparationCutoffEpoch - setProcessDeadline.secondsLeft();
+  if (searchStartedEpoch !== null || now >= preparationCutoffEpoch
+      || now + SEARCH_DURATION_S + SEARCH_RESERVE_S > OUTER_DEADLINE_EPOCH) {
+    throw nativeDeliveryError('search not admitted; preparation exhausted the full-search fit');
+  }
+  searchStartedEpoch = now;
+  SEARCH_CUTOFF_EPOCH = now + SEARCH_DURATION_S;
+  DEADLINE_EPOCH = SEARCH_CUTOFF_EPOCH + SEARCH_RESERVE_S;
+  ENGINEER_CUTOFF_EPOCH = ENGINEER_RESERVE_S ? SEARCH_CUTOFF_EPOCH - ENGINEER_RESERVE_S : null;
+  if (ENGINEER_RESERVE_S) ENGINEER_CALL.processDeadlineEpoch = ENGINEER_CUTOFF_EPOCH;
+  const timing = {outer_deadline_epoch: OUTER_DEADLINE_EPOCH,
+    preparation_started_epoch: preparationStartedEpoch, preparation_cutoff_epoch: preparationCutoffEpoch,
+    search_window_state: 'started', search_started_epoch: now, search_duration_s: SEARCH_DURATION_S,
+    full_deadline_epoch: DEADLINE_EPOCH, search_cutoff_epoch: SEARCH_CUTOFF_EPOCH,
+    report_cutoff_epoch: DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S,
+    validation_cutoff_epoch: DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S};
+  setProcessDeadline(SEARCH_CUTOFF_EPOCH, timing);
+  return timing;
+}
+// True when no agent could start before the engineer cutoff (the runtime's 7 s floor).
+const engineerCutoffReached = (left) => ENGINEER_RESERVE_S > 0 && left - ENGINEER_RESERVE_S <= 7;
+// Optional verification time for unverified retained sources. Custody, selection of already qualified
+// sources and host export do not depend on this allocation. No cutoff moves.
+const DELIVERY_RESERVE_S = A.delivery_reserve_s == null ? 0 : A.delivery_reserve_s;
+if (A.delivery_reserve_s != null && (!PROCESS_BOUNDED || EXTERNAL_OBJECTIVE || !Number.isSafeInteger(DELIVERY_RESERVE_S)
+    || DELIVERY_RESERVE_S < 0 || DELIVERY_RESERVE_S >= SEARCH_RESERVE_S - FINAL_VALIDATION_RESERVE_S)) {
+  throw new Error('delivery_reserve_s must be a nonnegative integer inside the Report allowance of a process-bounded, agent-measured lane');
 }
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
 // Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
@@ -1122,6 +1318,18 @@ const setup = await agentT(
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
+if (A.population_lineage) {
+  if (EVAL_DIR !== A.eval_dir || CANONICAL !== `${A.eval_dir}/workspace`) {
+    throw new Error('population Setup must use its assigned private eval_dir/workspace');
+  }
+  const isolation = await runProcess({cmd: 'python3', args: ['-c',
+    'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:])\n' +
+    'assert w.parent == e and not (w == o or w in o.parents or o in w.parents), "population workspace is not isolated"\n' +
+    'assert pathlib.Path(subprocess.check_output(["git","-C",str(w),"rev-parse","--show-toplevel"],text=True).strip()).resolve() == w, "population workspace needs its own repository"',
+    EVAL_DIR, CANONICAL, KERNEL_PATH_ORIG], timeoutMs: 30000, graceMs: 2000});
+  if (isolation.status !== 'completed' || isolation.code !== 0 || isolation.strays_killed
+      || !isolation.group_cleared || isolation.stdio_held) throw new Error('population Setup failed source isolation checks');
+}
 const GFX = String(setup.device_gfx || '').trim().toLowerCase();
 const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
 const SETUP_DEVICE_NAME = String(setup.device_name || '').trim();
@@ -1246,12 +1454,16 @@ if (MODE === 'author') {
 // ===========================================================================
 // PHASE: Analyze + Roadmap (TechLead)
 // ===========================================================================
+// Optional immutable, caller-supplied evidence reference; the existing roles
+// check its bytes/applicability and return their normal schemas. No phase bypass.
+const PREPARED_INPUT = A.prepared_original_ref === undefined ? {}
+  : { PREPARED_ORIGINAL_REF: A.prepared_original_ref };
 phase('Analyze');
 const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
     KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
-    ...RESUME_INPUT,
+    ...RESUME_INPUT, ...PREPARED_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
 log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
@@ -1270,7 +1482,7 @@ phase('Benchmark');
 let bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
+    ANALYSIS: analysis, ...PREPARED_INPUT,
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
@@ -1295,10 +1507,29 @@ let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
-    ...RESUME_INPUT,
+    ...RESUME_INPUT, ...PREPARED_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+
+// The existing runtime persists this native return and separate metrics/backend events.
+// These are completed role returns, not independent qualification or optimization results.
+if (A.prepare_only === true) {
+  if (!analysis || !bench || !profileSummary || bench.reliable !== true
+      || !Array.isArray(bench.baseline_per_case) || !bench.baseline_per_case.length)
+    throw new Error('GEAK_PREPARATION_INCOMPLETE: missing role return or reliable baseline');
+  return {
+    schema: 'geak.prepared_original/1', status: 'preparation_roles_returned', prepare_only: true,
+    optimization_started: false, search_performed: false, final_validation_performed: false,
+    roles: { setup, analysis, benchmark: bench, profile: profileSummary },
+    paths: { input: KERNEL_PATH_ORIG, workflow: WORKFLOW_DIR, eval: EVAL_DIR,
+      workspace: CANONICAL, commandment: COMMANDMENT },
+    device: { gfx: GFX, target: DEVICE_TARGET, name: SETUP_DEVICE_NAME,
+      physical_cu_count: PHYSICAL_CU_COUNT, assigned_gpu_ids: GPU_IDS },
+    scope: 'ORIGINAL preparation role returns only; caller must qualify raw source/state/device ' +
+      'evidence and successful runtime metrics/backend trace before supplying this reference.',
+  };
+}
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
 // Runs AFTER Profile / BEFORE the optimize loop: profile + COMMANDMENT + analysis exist by now, so
@@ -1433,6 +1664,7 @@ const kbVerdict = (ver, sp) => {
     return /outside_editable_set/i.test(String(ver.notes || '')) ? 'inapplicable' : 'not_reproduced';
   }
   if (!says(ver.status, 'verified')) return 'not_reproduced';
+  if (!Number.isFinite(sp)) return 'not_reproduced';
   if (!(sp > 1.0)) return 'failed';              // applied, ran, correct, just did not go faster
   return says(ver.correctness, 'pass') ? 'inapplicable' : 'not_reproduced';   // fast but never adopted
 };
@@ -1577,7 +1809,7 @@ ${resolveScript}
             CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
-            GPU_ID: GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
             ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
@@ -1634,7 +1866,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_LIST[0], ROUND: 0,
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
               { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
@@ -1646,7 +1878,10 @@ correctness check; only report committed=true if it still passes. Return JSON {c
         if (rec && rec.status !== 'adopted') {
           rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
           rec.outcome = kbVerdict(ver, sp);
-          rec.verified_speedup = spReported || 0;
+          rec.verified_speedup = Number.isFinite(spReported) ? spReported : null;
+          if (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE && rec.verified_speedup === null) {
+            rec.measurement_reason = 'weighted_result_missing_or_invalid';
+          }
         }
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
       }
@@ -1663,8 +1898,8 @@ correctness check; only report committed=true if it still passes. Return JSON {c
           (planeFlags && x.session_id ? `--session-id ${JSON.stringify(x.session_id)} ` : '') +
           `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} ` +
           `--gfx ${GFX}${KB_VERSION_FLAG} --outcome ${x.outcome} ` +
-          `--measured-speedup ${Number(x.verified_speedup) || 0} ` +
-          `--note ${JSON.stringify(`kernel_lane warm-start c${x.rank}: ${x.status}`.slice(0, 200))} ` +
+          (Number.isFinite(x.verified_speedup) ? `--measured-speedup ${x.verified_speedup} ` : '') +
+          `--note ${JSON.stringify(`kernel_lane warm-start c${x.rank}: ${x.status}${x.measurement_reason ? '; ' + x.measurement_reason : ''}`.slice(0, 200))} ` +
           `--measured-by ${JSON.stringify('kernel_lane:' + GFX)} --apply || true`);
         await agentT(
           `You are the kernel knowledge-base attestor. Run EXACTLY these commands in order and ` +
@@ -1685,7 +1920,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start, evo = null) {
+async function greedyOptimize(start, evo = null, population = null) {
 const planSchema = evo ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
@@ -1701,12 +1936,23 @@ let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy. Choose an affordable direction count from the supplied evidence and service facts.` : '';
 const citations = [];
+const contextRef = (id, outDir) => {
+  if (evo) return {path: evo.path, entry_id: id, field: 'reported_context'};
+  const retained = retainedSources.find(row => row.id === id);
+  return retained?.source && !retained.retention_error
+    ? {path: `${retained.source.path}.json`, field: 'reported_context'}
+    : {unavailable: 'no complete retained context artifact', related_report: `${outDir}/report.md`};
+};
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
 await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
   ? 'resume_unknown' : 'initial', 0, finalWinner);
+if (population) await population.publishCheckpoint(0, finalWinner || bench,
+  await population.checkpointTree(null, 0));
+const searchTiming = beginSearchWindow();
+if (searchTiming) history.search_timing = searchTiming;
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -1718,14 +1964,24 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         `starting no further rounds; going straight to report + validation.`);
     break;
   }
+  if (engineerCutoffReached(left)) {
+    deadlineHit = true;
+    log(`ENGINEER CUTOFF reached after ${round} round(s): no new round starts; delivery keeps the search cutoff.`);
+    break;
+  }
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+
+  // Peers are deliberate planner references; refresh preserves this lineage's local best and budget.
+  if (population && evo) await population.refreshPeers();
 
   round++;
   const remaining = BUDGET - dispatched;
   phase('Optimize');
+  // Retained delivery needs each GEAK source's actual base; EVO sources share the archive base.
+  const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planInputs = (forbidStop) => ({
+  const planInputs = (forbidStop, facts = {}) => ({
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
@@ -1756,6 +2012,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `not on what you may look at.` } : {}),
     // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
     ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
+    ...facts,
     ...(forbidStop ? { STOP_NOT_PERMITTED:
       `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
       `unspent. This run is a FIXED-WINDOW measurement: ending early is an invalid data point no ` +
@@ -1771,8 +2029,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
       evolutionInstructions,
-      planInputs(false)),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema });
+      planInputs(false, await deliveryFactsInput())),
+    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema, ...ENGINEER_CALL });
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
@@ -1782,15 +2040,22 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // rule is "must keep optimizing until the budget is spent", so the refusal has to be as long-lived
   // as the window. Bounded by MAX_FORCED_REPLANS so a role that cannot produce a direction at all
   // degrades to stopping instead of spinning the window away on planning.
-  while (DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS &&
+  // With an engineer reserve, refuse a stop only while engineering time above the 7 s floor remains.
+  while (DEADLINE_EPOCH && (ENGINEER_RESERVE_S ? left - ENGINEER_RESERVE_S > Math.max(NO_STOP_S, 7) : left > NO_STOP_S)
+         && forcedReplans < MAX_FORCED_REPLANS &&
          (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions,
-        planInputs(true)),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema });
+        planInputs(true, await deliveryFactsInput())),
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema, ...ENGINEER_CALL });
     left = await secondsLeft(`replan-r${round}`);
+  }
+  if (engineerCutoffReached(left)) {
+    deadlineHit = true;   // Planning reached the engineer cutoff: dispatch nothing.
+    log(`Round ${round}: the engineer cutoff was reached while planning; no engineer starts.`);
+    break;
   }
 
   if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
@@ -1844,6 +2109,44 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
+  // Preserve issued direction labels even when an engineer returns no result or the round hits its cutoff.
+  // learned_refs here records issued references; later citation-cap accounting uses the working directions and may strip their attribution.
+  const directionHistory = directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty,
+    focus_files: Array.isArray(d.focus_files) ? d.focus_files : [], parent_id: d.parent_id || null, learned_refs: d.learned_refs || []}));
+
+  // Individual and newly integrated native sources use the same verifier and custody path.
+  const verifyCandidate = async (d, eng, patch, recovered = false,
+    engineerWorkspace = `${d.out_dir}/workspace`) => {
+    // The verifier gets a disposable copy. Custody files remain inputs to host promotion only.
+    const verification = !EXTERNAL_OBJECTIVE
+      ? await verificationCopy(patch, `${d.out_dir}/verification_input.diff`) : null;
+    if (!EXTERNAL_OBJECTIVE && !verification) {
+      return {d, eng, ver: null, patch, verification_input_error: 'source copy unavailable'};
+    }
+    const measured = verification ? verification.path : patch;
+    return observeRole('verify', d.id, () => agentT(
+      roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
+        CANONICAL: evo ? evo.base : CANONICAL, PATCH: measured, VERIFY_DIR: `${d.out_dir}/verify`,
+        ...(engineerWorkspace ? { ENGINEER_WORKSPACE: engineerWorkspace } : {}),
+        EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+        ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+      }),
+      { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
+    )).then(async (ver) => {
+      ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, measured);
+      const verificationStatus = verification ? await verificationIntact(verification, patch) : true;
+      if (verificationStatus === false) {
+        ver = {...ver, status: 'source_changed', correctness: 'unknown', measurement_valid: false};
+      }
+      const retained = evo ? await evo.record(d, eng, verificationStatus === null ? null : ver, patch) : null;
+      // Register every settled result before another direction or the round can hit its cutoff.
+      // Keep failed custody of an authoritative win visible; it must fail delivery explicitly.
+      const pendingVerification = verificationStatus === null ? verification : null;
+      await retainResult(d, eng, ver, patch, evo, roundBase, retained, pendingVerification);
+      return {d, eng, ver, patch, retained, verification: pendingVerification, verification_status: verificationStatus};
+    });
+  };
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
@@ -1885,12 +2188,13 @@ git -C ${d.out_dir}/workspace add -A
 git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost commit -qm 'Candidate baseline'
 \`\`\`
 `;
+      const facts = await deliveryFactsInput();   // after workspace preparation, at dispatch
       return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.
 
 ## Inputs
 ${cfg({
@@ -1911,28 +2215,36 @@ ${cfg({
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
         ...KB_INPUTS,
+        ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
+        ...facts,
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA,
+        ...ENGINEER_CALL }   // stopped at the engineer cutoff; its saved patch then goes to recovered verify
     ).then(async (eng) => {
       eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
-      if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
-      return {d, eng};
+      const patch = `${d.out_dir}/best_patch.diff`;
+      const retained = evo ? await evo.record(d, eng, null, patch) : null;
+      const measured = !EXTERNAL_OBJECTIVE
+        ? (evo ? retained?.patch_ref?.path : await pinSource(patch, d.out_dir)) || patch : patch;
+      await retainResult(d, eng, null, measured, evo, roundBase, retained);
+      return {d, eng, patch: measured};
     });
     },
 
-    (prev) => {
+    async (prev) => {
       const { d, eng } = prev;
       if (prev.initialization_failed) return {...prev, ver: null, patch: null};
-      const patch = `${d.out_dir}/best_patch.diff`;
+      const patch = prev.patch || `${d.out_dir}/best_patch.diff`;
       // A failed or missing response can still leave a valid patch. Skip verification
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
         eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!HAS_WORKLOAD || Number.isFinite(primSpeedup(eng))) &&
         (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
       if (trustworthyBelowBaseline && !evo) {
         return { d, eng, ver: null };
@@ -1940,23 +2252,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
-      return agentT(
-        roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
-          CANONICAL: evo ? evo.base : CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
-          ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
-          EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
-          ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
-          ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
-        }),
-        { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then(async (ver) => {
-        ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, patch);
-        if (evo) {
-          const retained = await evo.record(d, eng, ver, patch);
-          if (retained.retention_error || retained.last_record_error) ver = null;
-        }
-        return {d, eng, ver, patch};
-      });
+      return verifyCandidate(d, eng, patch, recovered);
     }
   );
 
@@ -1966,34 +2262,40 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     // retain completed work; no new engineer or GPU evaluation starts here.
     setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
     for (const r of clean) {
-      await evo.record(r.d, r.eng, r.ver, r.patch || `${r.d.out_dir}/best_patch.diff`);
+      const patch = r.patch || `${r.d.out_dir}/best_patch.diff`;
+      const binding = r.verification ? await verificationIntact(r.verification, patch) : true;
+      const retained = await evo.record(r.d, r.eng, binding === true ? r.ver : null, patch);
+      await retainResult(r.d, r.eng, r.ver, patch, evo, roundBase, retained, r.verification);
     }
     history.rounds.push({round, status: 'deadline', improved: false, cumulative,
-      directions: clean.map(r => ({id: r.d.id, parent_id: r.d.parent_id}))});
+      directions: directionHistory});
     deadlineHit = true;
     break;
   }
-  const verified = clean.filter(r => r.ver &&
+  const isQualified = r => r.ver && (!r.verification || r.verification_status === true) &&
     (says(r.ver.status, 'verified') || (evo && says(r.ver.status, 'regression'))) &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR));
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR);
+  const verified = clean.filter(isQualified);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
   // ratio-of-sums when a workload spec is active, else the unweighted geomean (unchanged behavior).
   // The raw unweighted geomean is retained separately for the report.
-  let candidates = verified.map(r => ({
+  const candidate = r => ({
     source: `engineer ${r.d.id}`, id: r.d.id, title: r.d.title, specialty: r.d.specialty,
     geomean: primSpeedup(r.ver), geomean_unweighted: r.ver.verified_geomean,
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
-  }));
+  });
+  let candidates = verified.map(candidate);
 
   let integrate = null;
   if (verified.length >= 2) {
     phase('Merge');
-    integrate = await agentT(
+    integrate = await observeRole('integrate', `r${round}`, () => agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -2001,18 +2303,47 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           ...externalFields(r.ver),
-          files: r.d.focus_files || [], patch: r.patch })),
+          files: r.d.focus_files || [], patch: r.patch,
+          reported_context: boundedContext(candidates.find(c => c.id === r.d.id).reported_context,
+            contextRef(r.d.id, r.d.out_dir), 8192) })),
         INSIGHTS: history.insights,
       }),
-      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
-    if (integrate && integrate.conclusion === 'improved' && integrate.best &&
+    if (!EXTERNAL_OBJECTIVE && integrate && integrate.best) {
+      const d = {id: `r${round}_integrated`, parent_id: 'ORIGINAL', out_dir: `${EVAL_DIR}/round_${round}/integrate`,
+        donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate', gpu_id: GPU_POOL};
+      // Preserve the complete integrator report as provisional evidence, before any verifier runs.
+      d.reported_context = {...reportedEvidence(d, null, null, integrate.best.patch_file,
+        candidates.map(c => c.reported_context)),
+        integrator: {...integrate.best, reported_by: 'integrator', notes: integrate.notes}};
+      integrate.best.reported_context = d.reported_context;
+      const retained = evo ? await evo.record(d, null, null, integrate.best.patch_file) : null;
+      const patch = (evo ? retained?.patch_ref?.path : await pinSource(integrate.best.patch_file, d.out_dir))
+        || integrate.best.patch_file;
+      await retainResult(d, null, null, patch, evo, roundBase, retained);
+      if (integrate.conclusion === 'improved' && integPrim > Math.max(...candidates.map(c => c.geomean))) {
+        // No new allowance: this independent measurement shares the ordinary search cutoff.
+        const r = await verifyCandidate(d, null, patch, false, null);
+        integrate.verification = {result: r.ver, patch: r.patch,
+          custody: r.verification_status ?? null, input_error: r.verification_input_error || null};
+        if (isQualified(r) && !(r.retained?.retention_error || r.retained?.last_record_error))
+          candidates.push({...candidate(r), source: 'integrated'});
+      }
+    }
+    // External integration keeps the existing host-checked measurement and identity route.
+    if (EXTERNAL_OBJECTIVE && integrate && integrate.conclusion === 'improved' && integrate.best &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
+      integrate.best.reported_context = {...reportedEvidence({id: `r${round}_integrated`},
+        null, null, integrate.best.patch_file, candidates.map(c => c.reported_context)),
+        integrator: {...reportedDetails(integrate.best), notes: integrate.notes,
+          reported_included_ids: integrate.best.patches || null}};
       candidates.push({
+        reported_context: integrate.best.reported_context,
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
         geomean: integPrim, geomean_unweighted: integrate.best.geomean,
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
@@ -2023,13 +2354,15 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   }
 
-  if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
-    const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
-      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
-      {...integrate.best, status: 'verified', correctness: 'pass',
-        verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
-      integrate.best.patch_file);
-    if (retained.retention_error || retained.last_record_error) {
+  if (EXTERNAL_OBJECTIVE && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
+    const d = {id: `r${round}_integrated`, parent_id: 'ORIGINAL', out_dir: `${EVAL_DIR}/round_${round}/integrate`,
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate',
+      reported_context: integrate.best.reported_context};
+    const ver = {...integrate.best, reported_by: 'integrator', status: 'verified', correctness: 'pass',
+      verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted};
+    const retained = evo ? await evo.record(d, null, ver, integrate.best.patch_file) : null;
+    await retainResult(d, null, ver, integrate.best.patch_file, evo, roundBase, retained);
+    if (retained && (retained.retention_error || retained.last_record_error)) {
       candidates = candidates.filter(c => c.id !== `r${round}_integrated`);
     }
   }
@@ -2055,11 +2388,21 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       winner = {...winner, archive_patch: winner.patch, patch: promotion.patch, source_tree: promotion.tree};
     }
   }
+  if (improved && !evo && !EXTERNAL_OBJECTIVE) {
+    let promotion = null;
+    try {
+      promotion = await promotionPatch(roundBase, pinned(winner.patch),
+        `${EVAL_DIR}/delivery/round_${round}.index`, `${EVAL_DIR}/delivery/round_${round}.diff`);
+    } catch (error) { log(`Round ${round}: could not bind the GEAK winner tree: ${String(error)}`); }
+    if (!promotion) improved = false;
+    else winner = {...winner, source_tree: promotion.tree};
+  }
   if (improved) {
+    const checkpointTree = population ? await population.checkpointTree(winner, round) : null;
     await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
     let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
-      if (PROCESS_BOUNDED || evo) {
+      if (!EXTERNAL_OBJECTIVE || PROCESS_BOUNDED || evo) {
         const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
         if (top !== CANONICAL.replace(/\/+$/, '')) {
           throw new Error('bounded commit requires an isolated canonical repository');
@@ -2085,37 +2428,46 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           log(`Round ${round}: retained tracked changes in ${dirtyPath} before restoring the committed source.`);
         }
       }
-      commitResult = await agentT(
+      await preservePatchObstructions(winner.patch, `round_${round}`);
+      commitResult = await observeRole('commit', `r${round}`, () => agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
+set -e
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 cd ${CANONICAL}
 git checkout -- .
-# Try a plain apply first, then a 3-way apply (auto-reconciles context-line drift against the blobs)
-# before falling back to a manual reconstruction. --3way resolves most "patch does not apply" cases
-# that are just context offsets, so the manual path is only hit on a genuine semantic conflict.
-git apply ${winner.patch} || git apply --3way ${winner.patch}
-git -c user.email=team@workflow -c user.name=team add -A
+# Stage only the selected patch, preserving unrelated untracked harnesses and caches.
+# This is the same exact-index apply used by host delivery; do not hand-merge measured bytes.
+git apply --index -- ${winner.patch}
 git -c user.email=team@workflow -c user.name=team commit -q -m "round ${round} winner: ${winner.source} (${winner.geomean.toFixed(2)}x)"
 git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > ${EVAL_DIR}/current_best.diff
 \`\`\`
-If BOTH \`git apply\` and \`git apply --3way\` fail, inspect the patch and apply it manually (edit the
-files to match the patch's intent), then \`add -A\` + commit. The applied source is NOT guaranteed to
-match the patch verbatim after a hand-merge, so after committing, RE-RUN the COMMANDMENT correctness
-check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only report committed=true if
-it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
-re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
-      { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+Run the block with fail-fast shell behavior. If the exact apply or commit fails, return committed=false
+and explain the error; do not reconstruct, remeasure or add unrelated files. Correctness belongs to the
+already verified source, and the host checks the resulting tree. Return JSON {committed, current_best_diff, note}.`,
+      { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA }));
     } catch (error) {
-      if (!evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
+      if (EXTERNAL_OBJECTIVE && !evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
       commitDeadline = error.code === 'GEAK_PROCESS_DEADLINE';
       if (evo) log(`Round ${round}: commit attempt failed; retaining the previous validated source.`);
     }
-    if (evo && commitResult && commitResult.committed === true
+    if ((!EXTERNAL_OBJECTIVE || evo) && commitResult && commitResult.committed === true
         && await git(CANONICAL, 'diff', '--exit-code', winner.source_tree, 'HEAD', '--', '.') !== '') {
       commitResult = null;
     }
-    if ((PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+    // GEAK delivery: a commit stands only while its snapshot holds the bytes pinned before verification. Checked
+    // after the commit, so a change by the verifier, integrator or commit agent restores the incumbent.
+    if (!EXTERNAL_OBJECTIVE && !evo && commitResult && commitResult.committed === true
+        && !await pinIntact(winner.patch)) commitResult = null;
+    if ((!EXTERNAL_OBJECTIVE || PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+      // A qualified winner (individual or integrated) whose commit did not finish stays deliverable,
+      // by its pinned bytes (EVO archive row or GEAK snapshot), never by the current promotion file.
+      if (!EXTERNAL_OBJECTIVE) keepForDelivery({key: `round_${round}_winner`, id: winner.id, d: null, eng: null,
+        reported_context: winner.reported_context,
+        ver: {status: 'verified', correctness: 'pass', verified_geomean: winner.geomean_unweighted,
+          verified_weighted: winner.weighted, per_case: winner.per_case},
+        evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
+        base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
       // Search has settled. Only host recovery may use the existing Report allowance.
       if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
@@ -2128,7 +2480,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
       if (atDeadline) {
         history.rounds.push({round, status, cumulative, improved: false,
-          directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+          directions: directionHistory,
           winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
         plannerStopReason = status;
         log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
@@ -2144,7 +2496,13 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;
       roundsCommitted += 1;
-      if (evo) await evo.selectBest(winner.id);
+      if (evo) {
+        const selected = await evo.selectBest(winner.id);
+        if (!selected && !EXTERNAL_OBJECTIVE) deliveryIncomplete.push({id: winner.id,
+          key: `round_${round}_winner`, status: 'archive_selection_failed', evidence: cumulative});
+      }
+
+      if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
       profileSummary = await agentT(
@@ -2167,10 +2525,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
-        notes: r.eng ? r.eng.notes : '' })),
+        notes: r.eng ? r.eng.notes : '', reported_context: boundedContext(
+          reportedEvidence(r.d, r.eng, r.ver, r.patch), contextRef(r.d.id, r.d.out_dir), 2048) })),
       ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
         engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
-      INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
+      INTEGRATE: integrate ? {...integrate, ...(integrate.best ? {best: {...integrate.best,
+        reported_context: boundedContext(integrate.best.reported_context,
+          contextRef(`r${round}_integrated`, `${EVAL_DIR}/round_${round}/integrate`), 8192)}} : {})} : null,
+      WINNER: winner ? {source: winner.source, geomean: winner.geomean,
+        reported_context: boundedContext(winner.reported_context, contextRef(winner.id, `${EVAL_DIR}/round_${round}`), 2048)} : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
       ...(STATE_DIR ? { STATE_DIR, CANONICAL, CUMULATIVE_SPEEDUP: cumulative, BEST_PER_CASE: bestPerCase } : {}),
@@ -2232,12 +2595,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   history.rounds.push({
     round,
     ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
-    directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
-      learned_refs: d.learned_refs || [] })),
+    directions: directionHistory,
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
       verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
       ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
-    integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
+    integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0,
+      ...(!EXTERNAL_OBJECTIVE ? {verification: integrate.verification || null} : {}) } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
   });
@@ -2266,6 +2629,124 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
 }
+// --- Retained delivery. Retained sources are taken in evidence order. An engineer-local source
+// is verified once by the ordinary verifier on its pinned bytes; any source qualifies only through the
+// ordinary commit gate (primary > cumulative × (1+MIN_IMPROVE)). The best one is committed with its exact
+// bytes, so Report, final validation, the archive and KB all describe one source. Verification runs only
+// inside the declared reserve; unfinished checks stay unmeasured and the incumbent stays committed.
+if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
+  // Qualified custody and host promotion use the existing Report allowance, even with no optional
+  // verification allocation. This does not extend the run or the final-validation cutoff.
+  if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+  const dir = `${EVAL_DIR}/delivery`, rows = [];
+  const digest = async (file) => ((await hostRun('sha256sum', ['--', file])) || '').slice(0, 64);
+  let best = null;
+  for (const c of [...retainedSources].sort((a, b) => b.evidence - a.evidence)) {
+    if (!(c.evidence > Math.max(cumulative * (1 + MIN_IMPROVE), best ? best.primary : 0))) continue;
+    const row = {key: c.key, id: c.id, basis: c.ver ? 'verifier' : 'engineer_local', evidence: c.evidence,
+      status: 'unmeasured', source: c.source, base_commit: c.base, original_patch: c.original_patch,
+      archive: c.archived ? evo.path : null};
+    rows.push(row);
+    if (!c.ver && !DELIVERY_RESERVE_S) continue;
+    if (PROCESS_BOUNDED && setProcessDeadline.secondsLeft() <= 7) {
+      row.status = 'incomplete'; continue;
+    }
+    // A successful cutoff checkpoint supersedes an earlier failed registration.
+    const latest = c.archived ? evo.entries.find(r => r.id === c.id && !r.retention_error
+      && !r.last_record_error) : null;
+    const src = latest?.patch_ref || c.source || null;
+    let promo = null, frozen = null;
+    try {
+      if (!src || !/^[0-9a-f]{40,64}$/.test(c.base || '')) {
+        row.status = 'unpinned'; row.error = c.retention_error || 'missing source or base'; continue;
+      }
+      row.source = src;
+      if (await digest(src.path) !== src.sha256) { row.status = 'source_changed'; continue; }
+      if (c.ver && c.verification) {
+        const binding = await verificationIntact(c.verification, src.path);
+        if (binding !== true) {
+          row.status = binding === false ? 'source_changed' : 'incomplete'; continue;
+        }
+      }
+      promo = await hostRun('mkdir', ['-p', dir]) === null ? null
+        : await promotionPatch(c.base, src, `${dir}/${c.key}.index`, `${dir}/${c.key}.diff`);
+      frozen = promo && evo ? `${dir}/${c.key}.source.diff` : promo && promo.patch;
+      if (promo && evo && (await hostRun('cp', ['--', src.path, frozen]) === null
+          || await digest(frozen) !== src.sha256)) promo = null;
+    } catch (error) { log(`[delivery] ${c.key}: ${String(error)}`); promo = null; }
+    if (!promo) { row.status = 'assembly_failed'; continue; }
+    if (promo.tree === ((await git(CANONICAL, 'rev-parse', 'HEAD^{tree}')) || '').trim()) {
+      row.status = 'already_committed'; continue;
+    }
+    let ver = c.ver;
+    if (!ver) {
+      // Only additional verification spends the optional allocation. An exhausted allocation cannot
+      // prevent promotion of a result whose authoritative verification has already settled.
+      setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S + DELIVERY_RESERVE_S);
+      if (setProcessDeadline.secondsLeft() <= 7) {
+        setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); continue;
+      }
+      const frozenSha = await digest(frozen);
+      try { ver = await agentT(
+        roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
+          CANONICAL: evo ? evo.base : CANONICAL, PATCH: frozen, VERIFY_DIR: `${dir}/${c.key}/verify`,
+          ENGINEER_WORKSPACE: `${c.d.out_dir}/workspace`,
+          EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+          ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+          ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
+        }),
+        { phase: 'Verify', label: `verify ${c.id} (delivery)`, schema: VERIFY_SCHEMA }); }
+      finally { setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); }
+      // The result binds only to the bytes it measured.
+      if (ver && (await digest(frozen) !== frozenSha || await digest(src.path) !== src.sha256)) {
+        row.status = 'source_changed'; continue;
+      }
+    }
+    const ok = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && primSpeedup(ver) > 0;
+    if (ok && evo && c.d) {
+      const kept = await evo.record(c.d, c.eng, ver, src.path);
+      if (kept && (kept.retention_error || kept.last_record_error)) row.archive_record_status = 'failed';
+    }
+    Object.assign(row, {status: !ver ? 'unmeasured' : ok ? 'qualified' : String(ver.status || 'unknown'),
+      primary: ok ? primSpeedup(ver) : null, source_sha256: src.sha256, tree: promo.tree});
+    if (ok && row.primary > cumulative * (1 + MIN_IMPROVE) && (!best || row.primary > best.primary)) {
+      best = {c, ver, promo, primary: row.primary, row};
+    }
+  }
+  // Qualification has settled; only the host commit uses the existing Report allowance.
+  if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+  if (best && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
+    best.row.status = 'delivered';
+    cumulative = best.primary;
+    bestPerCase = best.ver.per_case && best.ver.per_case.length ? best.ver.per_case : bestPerCase;
+    finalWinner = {source: `delivery ${best.c.key}`, id: best.c.id, title: best.c.d ? best.c.d.title : 'delivery',
+      geomean: best.primary, geomean_unweighted: best.ver.verified_geomean,
+      weighted: best.ver.verified_weighted != null ? best.ver.verified_weighted : null,
+      per_case: best.ver.per_case || [], patch: best.promo.patch, source_tree: best.promo.tree,
+      reported_context: reportedEvidence({...best.c.d, id: best.c.id, reported_context: best.c.reported_context},
+        best.c.eng, best.ver, best.promo.patch)};
+    roundsCommitted += 1;
+    if (evo && !await evo.selectBest(best.c.id)) best.row.archive_selection_status = 'failed';
+  } else if (best) best.row.status = 'commit_failed';
+  history.delivery = {reserve_s: DELIVERY_RESERVE_S, candidates: rows,
+    delivered: rows.find(row => row.status === 'delivered')?.key || null};
+  const unresolved = [...deliveryIncomplete, ...rows.filter(row => row.basis === 'verifier'
+    && row.evidence > cumulative && !['delivered', 'already_committed'].includes(row.status))];
+  if (best && best.row.archive_selection_status === 'failed') unresolved.push(best.row);
+  history.delivery.incomplete = unresolved;
+  const receipt = `${dir}/outcome.json`;
+  try {
+    if (await hostRun('mkdir', ['-p', dir]) === null
+        || await writeFile(`${receipt}.tmp`, JSON.stringify(history.delivery)) === null
+        || await hostRun('mv', ['--', `${receipt}.tmp`, receipt]) === null) {
+      throw new Error('receipt write unavailable');
+    }
+  } catch (error) {
+    unresolved.push({status: 'receipt_write_failed', path: receipt, error: String(error)});
+  }
+  if (unresolved.length) log(`[delivery] ${unresolved.length} incomplete source(s); retained evidence ${receipt}.`);
+  log(`[delivery] ${rows.length} retained source(s); delivered ${history.delivery.delivered || 'none (incumbent kept)'}.`);
+}
 return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
@@ -2281,18 +2762,20 @@ return {
 // proposed tree in a private Git index, then diff it against the current winner.
 // This avoids applying an old parent's patch to a different canonical source.
 async function evolutionPromotionPatch(evo, winner, round) {
-  const index = `${EVAL_DIR}/evolution/promotion-${round}.index`;
+  return promotionPatch(evo.baseCommit, evo.entries.find(row => row.id === winner.id)?.patch_ref,
+    `${EVAL_DIR}/evolution/promotion-${round}.index`, `${EVAL_DIR}/evolution/promotion-${round}.diff`);
+}
+// The same construction for any pinned source {path, sha256} on its recorded base commit.
+async function promotionPatch(base, source, index, patch) {
   const indexed = (...args) => hostRun('env', [`GIT_INDEX_FILE=${index}`, 'git', '-C', CANONICAL, ...args]);
-  const source = evo.entries.find(row => row.id === winner.id)?.patch_ref;
   const sourceMatches = async () => source &&
     ((await hostRun('sha256sum', ['--', source.path])) || '').split(/\s/)[0] === source.sha256;
   if (!await sourceMatches()) return null;
-  if (await indexed('read-tree', evo.baseCommit) === null
+  if (await indexed('read-tree', base) === null
       || await indexed('apply', '--cached', '--', source.path) === null || !await sourceMatches()) return null;
   const tree = ((await indexed('write-tree')) || '').trim();
   if (!/^[0-9a-f]{40,64}$/.test(tree)) return null;
   const diff = await indexed('diff', '--cached', '--binary', 'HEAD', '--', '.');
-  const patch = `${EVAL_DIR}/evolution/promotion-${round}.diff`;
   if (diff === null || await writeFile(patch, diff) === null) return null;
   return {tree, patch};
 }
@@ -2335,6 +2818,130 @@ async function restoreUncommittedRound(previous, priorUntracked, round) {
     partial_patch: diffPath};
 }
 
+// Retained delivery state. Each entry references existing outputs: an EVO archive row (pinned copy) or a
+// GEAK snapshot taken before its verification, plus the base commit it was written against.
+async function nativeDeliveryBoundary(call) {
+  // Only an explicit host capture/export failure has the delivery error class.
+  return await call();
+}
+function nativeDeliveryError(reason) {
+  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archive ${EVAL_DIR}/evolution/archive.json`),
+    {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
+}
+const retainedSources = [], deliveryIncomplete = [], PINS = new Map();
+function keepForDelivery(entry) {
+  const index = retainedSources.findIndex(c => c.key === entry.key);
+  if (index >= 0) retainedSources[index] = entry;
+  else retainedSources.push(entry);
+}
+async function retainResult(d, eng, ver, patch, evo, base, retained, verification = null) {
+  if (EXTERNAL_OBJECTIVE) return; // External measurements retain their own authority and contract.
+  const qualified = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass');
+  const local = !ver && eng && eng.measurement_valid === true
+    && !says(eng.status, 'failed') && !says(eng.status, 'invalid');
+  const entry = {key: d.out_dir.slice(EVAL_DIR.length + 1).replace(/\//g, '_'), id: d.id, d, eng,
+    ver: qualified ? ver : null, evidence: qualified ? primSpeedup(ver) : local ? primSpeedup(eng) : null,
+    archived: !!evo, source: evo ? retained?.patch_ref || null : pinned(patch),
+    original_patch: patch, base: evo ? evo.baseCommit : base, verification,
+    reported_context: retained?.reported_context || reportedEvidence(d, eng, ver, patch),
+    retention_error: retained && (retained.retention_error || retained.last_record_error) || null};
+  keepForDelivery(entry);
+  // EVO record() already checkpoints source and evidence atomically. GEAK keeps the same evidence
+  // beside its immutable source snapshot so a partial round leaves reviewable custody.
+  if (!evo && entry.source) {
+    try {
+      const receipt = `${entry.source.path}.json`;
+      if (await writeFile(`${receipt}.tmp`, JSON.stringify(entry)) === null
+          || await hostRun('mv', ['--', `${receipt}.tmp`, receipt]) === null)
+        entry.retention_error = 'could not retain source evidence';
+    } catch (error) { entry.retention_error = String(error); }
+  }
+}
+const pinned = (path) => PINS.has(path) ? {path, sha256: PINS.get(path)} : null;
+async function verificationCopy(source, target) {
+  try {
+    const sha = ((await hostRun('sha256sum', ['--', source])) || '').slice(0, 64);
+    if (!/^[0-9a-f]{64}$/.test(sha)
+        || await hostRun('cp', ['--no-clobber', '--', source, target]) === null
+        || await hostRun('chmod', ['u+w', '--', target]) === null) return null;
+    const copy = {path: target, sha256: sha};
+    return await verificationIntact(copy, source) ? copy : null;
+  } catch (error) { return null; }
+}
+async function verificationIntact(copy, source) {
+  try {
+    const measured = await hostRun('sha256sum', ['--', copy.path]);
+    const retained = await hostRun('sha256sum', ['--', source]);
+    if (measured === null || retained === null) return null;
+    return measured.slice(0, 64) === copy.sha256 && retained.slice(0, 64) === copy.sha256;
+  } catch (error) { return null; }
+}
+// True for an unpinned path; false once a pinned snapshot's bytes differ from their pin (or cannot be read).
+async function pinIntact(path) {
+  try { return !PINS.has(path) || ((await hostRun('sha256sum', ['--', path])) || '').slice(0, 64) === PINS.get(path); }
+  catch (error) { return false; }
+}
+// Copy a GEAK source once into an immutable snapshot; null when it cannot be pinned.
+async function pinSource(path, owner) {
+  const pin = `${EVAL_DIR}/delivery/sources/${owner.slice(EVAL_DIR.length + 1).replace(/\//g, '_')}.diff`;
+  try {
+    if (await hostRun('mkdir', ['-p', `${EVAL_DIR}/delivery/sources`]) === null
+        || await hostRun('cp', ['--no-clobber', '--', path, pin]) === null
+        || await hostRun('chmod', ['a-w', '--', pin]) === null) return null;
+    const sha = ((await hostRun('sha256sum', ['--', pin])) || '').slice(0, 64);
+    if (!/^[0-9a-f]{64}$/.test(sha) || ((await hostRun('sha256sum', ['--', path])) || '').slice(0, 64) !== sha) return null;
+    PINS.set(pin, sha);
+    return pin;
+  } catch (error) { return null; }
+}
+async function headCommit() {
+  try {
+    const head = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+    return /^[0-9a-f]{40,64}$/.test(head) ? head : null;
+  } catch (error) { return null; }
+}
+// An added source path may already exist untracked in CANONICAL. Preserve only
+// paths named by this patch before exact apply; never clean unrelated workspace files.
+async function preservePatchObstructions(patch, tag) {
+  const pending = await git(CANONICAL, 'ls-files', '--others', '-z'); // includes ignored obstructions
+  const changes = await git(CANONICAL, 'apply', '--numstat', '-z', '--', patch);
+  if (pending === null || changes === null) throw new Error('cannot inspect patch obstructions');
+  const touched = new Set(changes.split('\0').filter(Boolean).map(row => row.split('\t').slice(2).join('\t')));
+  const paths = pending.split('\0').filter(name => name && touched.has(name));
+  if (!paths.length) return;
+  const dir = `${EVAL_DIR}/delivery/obstructions/${tag}`;
+  if (await hostRun('mkdir', ['-p', `${EVAL_DIR}/delivery/obstructions`]) === null
+      || await hostRun('mkdir', ['--', dir]) === null) throw new Error('cannot create obstruction retention directory');
+  for (const name of paths) {
+    if (name.startsWith('/') || name.split('/').includes('..')) throw new Error('invalid obstruction path');
+    const parent = name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '';
+    if ((parent && await hostRun('mkdir', ['-p', '--', `${dir}/${parent}`]) === null)
+        || await hostRun('mv', ['--', `${CANONICAL}/${name}`, `${dir}/${name}`]) === null) {
+      throw new Error(`could not preserve obstruction ${name}; retained files ${dir}`);
+    }
+    log(`[delivery] preserved pre-existing untracked ${name} at ${dir}/${name} before exact apply.`);
+  }
+}
+
+// Commit exactly the qualified tree; on any mismatch restore the previous commit (incumbent bytes).
+async function commitExactTree(promo, message) {
+  const previous = await headCommit();
+  const untracked = previous ? await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z') : null;
+  if (!previous || untracked === null) return false;
+  let ok = false;
+  try {
+    const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim();
+    await preservePatchObstructions(promo.patch, 'final');
+    ok = /^[0-9a-f]{40,64}$/.test(root) && await git(CANONICAL, 'apply', '--index', '--', promo.patch) !== null
+      && await git(CANONICAL, '-c', 'user.email=team@workflow', '-c', 'user.name=team', 'commit', '-q', '-m', message) !== null
+      && await git(CANONICAL, 'diff', '--exit-code', promo.tree, 'HEAD', '--', '.') === '';
+    const best = ok ? await git(CANONICAL, 'diff', '--binary', root, 'HEAD', '--', '.') : null;
+    ok = ok && best !== null && await writeFile(`${EVAL_DIR}/current_best.diff`, best) !== null;
+  } catch (error) { log(`[delivery] commit failed: ${String(error)}`); ok = false; }
+  if (!ok) await restoreUncommittedRound(previous, untracked.split('\0').filter(Boolean), 'delivery');
+  return ok;
+}
+
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.
 let stopReason = '';
 function applyOptimizeResult(r) {
@@ -2355,11 +2962,76 @@ function applyOptimizeResult(r) {
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// These reports describe their source; custody hashes do not validate an explanation.
+function reportedDetails(value) {
+  if (!value) return null;
+  const keys = ['strategy', 'strategies_tried', 'notes', 'evidence_context'];
+  const useful = v => typeof v === 'string' ? v.trim().length > 0
+    : Array.isArray(v) ? v.length > 0 : v && typeof v === 'object' ? Object.keys(v).length > 0 : false;
+  const fields = keys.filter(key => useful(value[key])).map(key => [key, key === 'evidence_context'
+    ? Object.fromEntries(Object.entries(value[key]).filter(([, v]) => useful(v))) : value[key]])
+    .filter(([, value]) => useful(value));
+  return fields.length ? Object.fromEntries(fields) : null;
+}
+// Prior reports are supplied only for the same retained candidate/source continuation.
+// Parents and donors stay separately quoted; an empty default cannot erase useful context.
+function mergeReported(prior, value) {
+  const update = reportedDetails(value);
+  if (!update) return prior || null;
+  return {...prior, ...update, ...(prior?.evidence_context || update.evidence_context
+    ? {evidence_context: {...prior?.evidence_context, ...update.evidence_context}} : {})};
+}
+function reportedEvidence(direction, eng, ver, patch, contributors = []) {
+  const prior = direction?.reported_context;
+  return {schema: 'geak.reported_context/1', authority: 'author_reported_interpretation_only',
+    source_binding: {candidate_id: direction?.id || null, source_id: ver?.source_id || prior?.source_binding?.source_id || null,
+      patch_ref: {path: patch || null, sha256: ver?.patch_sha256 || null,
+        identity_status: ver?.patch_sha256 ? 'reported source hash available' : 'hash unavailable until archive or publication binding'}},
+    approach: direction?.approach || prior?.approach || null,
+    engineer: mergeReported(prior?.engineer, eng),
+    verifier: mergeReported(prior?.verifier, ver?.reported_by === 'integrator' ? null : ver),
+    ...(prior?.integrator || ver?.reported_by === 'integrator'
+      ? {integrator: mergeReported(prior?.integrator, ver?.reported_by === 'integrator' ? ver : null)} : {}),
+    ...(contributors.length || prior?.contributors ? {
+      contributor_scope: 'Input references are not proof of inclusion. Their observations apply to their own source only; they do not verify this combined source.',
+      contributors: contributors.length ? contributors : prior.contributors} : {})};
+}
+function contextBytes(value) {
+  let bytes = 0;
+  for (const char of JSON.stringify(value ?? null)) {
+    const point = char.codePointAt(0);
+    bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+// Prompt-only reduction. The full archive/checkpoint artifact is retained separately.
+function boundedContext(value, fullRef, limit = 16384) {
+  if (contextBytes(value) <= limit) return value;
+  const compact = (v, depth = 0) => typeof v === 'string'
+    ? [...v].slice(0, 192).join('') + ([...v].length > 192 ? ' [text omitted]' : '')
+    : Array.isArray(v) ? v.slice(0, 4).map(x => compact(x, depth + 1))
+      : v && typeof v === 'object' ? depth > 7 ? '[nested context omitted]'
+        : Object.fromEntries(Object.entries(v).slice(0, 24).map(([k, x]) => [k, compact(x, depth + 1)])) : v;
+  const result = {context_omitted: 'over_utf8_budget; summary may omit text, array items and nested context',
+    full_context_ref: fullRef, summary: compact(value)};
+  if (contextBytes(result) > limit) result.summary = {preview_json: [...JSON.stringify(result.summary)].slice(0, Math.floor(limit / 8)).join('')};
+  return result;
+}
+
 // Retained population for the stock GEAK loop. No model calls or separate runner.
 async function createEvolution(start) {
   const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
+  const population = A.population_lineage || null;
+  if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
+      || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
+      || !Array.isArray(population.imports)
+      || population.imports.some(id => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || id === population.id)
+      || (OPTIMIZER !== 'evo' && population.imports.length))) {
+    throw new Error('invalid population lineage configuration');
+  }
   const entries = [];
-  let baseCommit, bestId = 'ORIGINAL', queue = Promise.resolve();
+  let baseCommit, baseTree, baseSourceId = null, sourcePaths = null, bestId = 'ORIGINAL', queue = Promise.resolve();
   let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin: 'optimize_start'};
   const run = async (cmd, args, opts) => {
     const result = await hostRun(cmd, args, opts);
@@ -2372,6 +3044,7 @@ async function createEvolution(start) {
     return pending;
   };
   const snapshot = (rows, best) => ({schema: 'geak.evolution/1', base, base_commit: baseCommit,
+    ...(population ? {base_tree: baseTree, base_source_id: baseSourceId, lineage_id: population.id} : {}),
     baseline, best_id: best, entries: rows});
   const save = async (rows, best = bestId) => {
     await run('sh', ['-c',
@@ -2392,6 +3065,26 @@ async function createEvolution(start) {
   await run('mkdir', [base]);
   await run('bash', [`${WORKFLOW_DIR}/scripts/materialize_workspace.sh`, '--src', CANONICAL,
     '--dst', base, '--shared-root', `${EVAL_DIR}/_shared`, '--link-aiter']);
+  if (population) {
+    if (EXTERNAL_OBJECTIVE) {
+      // The owner already hashed the editable source closure. Fixed fixtures
+      // and per-lineage shared-input symlinks are not a parent identity.
+      const initial = await checkedExternalMeasurement(start.finalWinner || bench, base);
+      if (initial?.external_measurement_valid !== true || !/^[0-9a-f]{64}$/.test(initial.source_id)
+          || !Array.isArray(initial.source_paths) || !initial.source_paths.length) {
+        throw new Error('population base requires the native editable-source identity');
+      }
+      baseSourceId = initial.source_id;
+      sourcePaths = initial.source_paths;
+      baseTree = (await run('git', ['-C', CANONICAL, 'rev-parse', `${baseCommit}^{tree}`])).trim();
+    } else {
+      // Legacy tasks retain a private index once; queries reuse its objects.
+      await run('git', ['-C', base, 'init', '-q']);
+      await run('git', ['-C', base, 'add', '-A']);
+      baseTree = (await run('git', ['-C', base, 'write-tree'])).trim();
+    }
+    await run('mkdir', ['-p', `${population.root}/${population.id}`]);
+  }
   await save([], 'ORIGINAL');
   const retained = (id) => entries.find(row => row.id === id && row.patch_ref && !row.retention_error);
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
@@ -2400,7 +3093,7 @@ async function createEvolution(start) {
     const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
-      'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes'];
+      'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes', 'evidence_context'];
     return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
   };
   const digest = async (file) => {
@@ -2408,8 +3101,160 @@ async function createEvolution(start) {
     if (!hash) throw new Error('retained patch has no source hash');
     return hash[0];
   };
+  const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
+  const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
+    'sh', file], {input: contents});
+  const checkpointTree = async (winner, round) => {
+    if (!population) return null;
+    try {
+      if (winner?.source_tree) return winner.source_tree;
+      if (!winner) return (await run('git', ['-C', CANONICAL, 'rev-parse', 'HEAD^{tree}'])).trim();
+      const hash = await digest(winner.patch);
+      const indexed = (...args) => run('env', [`GIT_INDEX_FILE=${path}/checkpoint-${round}.index`,
+        'git', '-C', CANONICAL, ...args]);
+      await indexed('read-tree', 'HEAD');
+      await indexed('apply', '--cached', '--', winner.patch);
+      const tree = (await indexed('write-tree')).trim();
+      if (await digest(winner.patch) !== hash) throw new Error('winner patch changed');
+      return tree;
+    } catch (error) { log(`[population] checkpoint source unavailable: ${String(error)}`); return null; }
+  };
+  const publishCheckpoint = (round, winner, expectedTree) => serial(async () => {
+    if (!population || !expectedTree) return false;
+    try {
+      const tree = (await run('git', ['-C', CANONICAL, 'rev-parse', 'HEAD^{tree}'])).trim();
+      if (tree !== expectedTree
+          || (await run('git', ['-C', CANONICAL, 'status', '--porcelain', '--untracked-files=no'])).trim()) {
+        throw new Error('committed source differs from the verified winner');
+      }
+      const prefix = `${population.root}/${population.id}/r${round}`;
+      const patch = `${prefix}.diff`;
+      // Ordinary patches are relative to the previous local incumbent. Always
+      // export a cumulative patch from this lineage's fixed initial source.
+      const diff = await run('git', ['-C', CANONICAL, 'diff', '--binary', '--no-color',
+        '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', baseCommit, 'HEAD', '--', ...(sourcePaths || ['.'])]);
+      await immutable(patch, diff);
+      const hash = await digest(patch);
+      const checked = EXTERNAL_OBJECTIVE ? await checkedExternalMeasurement(winner, base, patch) : winner;
+      const speedup = EXTERNAL_OBJECTIVE ? primSpeedup(checked) : round === 0 ? start.cumulative : winner.geomean;
+      if (!Number.isFinite(speedup) || speedup <= 0
+          || (EXTERNAL_OBJECTIVE && (checked?.external_measurement_valid !== true
+            || checked.patch_sha256 !== hash))) throw new Error('committed checkpoint has no exact source-bound evidence');
+      let retainedTree = tree;
+      if (!EXTERNAL_OBJECTIVE) {
+        // Materialization can add an ignore file. Name the exact retained tree
+        // separately from the canonical commit checked above.
+        const indexed = (...args) => run('env', [`GIT_INDEX_FILE=${path}/published-${round}.index`,
+          'git', '-C', base, ...args]);
+        await indexed('read-tree', baseTree);
+        if (diff) await indexed('apply', '--cached', '--', patch);
+        retainedTree = (await indexed('write-tree')).trim();
+      }
+      let deliveryRef = null;
+      try {
+        const originalCommit = (await run('git', ['-C', CANONICAL, 'rev-list', '--max-parents=0', baseCommit])).trim();
+        if (!/^[0-9a-f]{40,64}$/.test(originalCommit)) throw new Error('no unique ORIGINAL commit');
+        const delivery = `${prefix}.delivery.diff`;
+        await immutable(delivery, await run('git', ['-C', CANONICAL, 'diff', '--binary', '--no-color',
+          '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', originalCommit, 'HEAD', '--', ...(sourcePaths || ['.'])]));
+        const deliveryHash = await digest(delivery);
+        const delivered = EXTERNAL_OBJECTIVE ? await checkedExternalMeasurement(winner, KERNEL_PATH_ORIG, delivery) : checked;
+        if (EXTERNAL_OBJECTIVE && (delivered?.external_measurement_valid !== true
+            || delivered.patch_sha256 !== deliveryHash)) throw new Error('delivery patch does not reconstruct measured source from ORIGINAL');
+        deliveryRef = {path: delivery, sha256: deliveryHash, base: 'ORIGINAL'};
+      } catch (error) { log(`[population] checkpoint r${round} retained without an ORIGINAL delivery patch: ${String(error)}`); }
+      let reported = null, reportedRef = null;
+      if (winner?.reported_context) {
+        reported = {...winner.reported_context,
+          published_source_binding: {lineage_id: population.id, round, source_id: checked?.source_id || null,
+            source_tree: retainedTree, patch_ref: {path: patch, sha256: hash}},
+          evidence_ref_scope: 'Paths quoted inside author reports belong to the origin lineage. They are unavailable locally unless separately shared; only this shared context artifact and published patch have shared custody.'};
+        const contextPath = `${prefix}.context.json`;
+        try {
+          await immutable(contextPath, JSON.stringify(reported, null, 2) + '\n');
+          reportedRef = {path: contextPath, sha256: await digest(contextPath), authority: 'reported_interpretation_only'};
+        } catch (error) {
+          reportedRef = {unavailable: 'full reported context artifact could not be retained', expected_path: contextPath};
+          log(`[population] checkpoint r${round} context unavailable; source qualification unchanged`);
+        }
+      }
+      const row = {schema: 'geak.population.checkpoint/1', lineage_id: population.id,
+        reported_context: reported ? boundedContext(reported, reportedRef, 8192) : null,
+        reported_context_ref: reportedRef,
+        optimizer: OPTIMIZER, round, base, base_commit: baseCommit, base_tree: baseTree,
+        base_source_id: baseSourceId, source_id: checked?.source_id || null,
+        source_tree: retainedTree, canonical_tree: tree,
+        patch_ref: {path: patch, sha256: hash, base_commit: baseCommit, base_tree: baseTree},
+        delivery_patch_ref: deliveryRef,
+        metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
+        external_evaluation: checked?.external_evaluation || null,
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
+          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
+          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+      await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
+      const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
+        checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};
+      await run('sh', ['-c',
+        'set -e; tmp=$(mktemp "$1/.latest.XXXXXX"); trap \'rm -f -- "$tmp"\' EXIT; cat > "$tmp"; mv -f -- "$tmp" "$1/latest.json"',
+        'sh', `${population.root}/${population.id}`], {input: JSON.stringify(pointer) + '\n'});
+      log(`[population] ${population.id} published committed checkpoint r${round} (${speedup.toFixed(3)}x)`);
+      return true;
+    } catch (error) {
+      log(`[population] checkpoint r${round} not published: ${String(error)}`);
+      return false;
+    }
+  });
+  const refreshPeers = () => serial(async () => {
+    if (!population?.imports.length) return;
+    try {
+      const result = JSON.parse(await run('python3', [`${WORKFLOW_DIR}/scripts/query_population.py`,
+        '--root', population.root, '--checkpoints-only',
+        ...(baseSourceId ? ['--base-source-id', baseSourceId] : ['--base-tree', baseTree]),
+        ...population.imports.flatMap(id => ['--lineage', id])]));
+      const next = [...entries];
+      for (const item of result.records || []) {
+        if (!['qualified', 'no_improvement', 'legacy_verified'].includes(item.status)) continue;
+        const peer = item.checkpoint;
+        if (!peer || !population.imports.includes(peer.lineage_id)
+            || (baseSourceId ? peer.base_source_id !== baseSourceId : peer.base_tree !== baseTree)
+            || JSON.stringify(peer.metric) !== JSON.stringify(metric)
+            || !Number.isSafeInteger(peer.round) || peer.round < 1) continue;
+        const id = `peer_${peer.lineage_id}_r${peer.round}`;
+        if (next.some(row => row.id === id)) continue;
+        const target = `${path}/patches/${id}.diff`;
+        if (await digest(peer.patch_ref.path) !== peer.patch_ref.sha256) throw new Error('peer patch changed before copy');
+        await run('cp', ['--no-clobber', '--', peer.patch_ref.path, target]);
+        if (await digest(target) !== peer.patch_ref.sha256) throw new Error('copied peer patch changed');
+        const verified = item.evidence || peer.evidence;
+        const speedup = EXTERNAL_OBJECTIVE ? primSpeedup(verified) : peer.speedup;
+        if (!Number.isFinite(speedup) || speedup <= 0) continue;
+        let reportedRef = peer.reported_context_ref || null;
+        if (reportedRef) {
+          try {
+            if (reportedRef.path !== `${population.root}/${peer.lineage_id}/r${peer.round}.context.json`
+                || !/^[0-9a-f]{64}$/.test(reportedRef.sha256)
+                || await digest(reportedRef.path) !== reportedRef.sha256) throw new Error('context identity unavailable');
+            reportedRef = {...reportedRef, custody: 'hash_checked_at_import'};
+          } catch (error) {
+            reportedRef = {unavailable: 'full context missing or identity not checked; inline checkpoint quote remains reported only',
+              expected_path: reportedRef.path, expected_sha256: reportedRef.sha256};
+          }
+        }
+        next.push({id, parent_id: 'ORIGINAL', donor_ids: [], title: `${peer.lineage_id} committed round ${peer.round}`,
+          approach: peer.reported_context?.approach || peer.reported_context?.summary?.approach || null,
+          reported_context: peer.reported_context || null, reported_context_ref: reportedRef,
+          specialty: 'peer_checkpoint', base_commit: baseCommit,
+          patch_ref: {path: target, sha256: peer.patch_ref.sha256, base_commit: baseCommit, base_tree: baseTree},
+          verified: true, speedup, status: speedup <= 1 ? 'slower' : 'correct',
+          engineer: null, verifier: evidence(verified), retention_error: null,
+          peer_checkpoint: {lineage_id: peer.lineage_id, round: peer.round,
+            path: item.checkpoint_path, sha256: item.checkpoint_sha256, source_tree: peer.source_tree}});
+      }
+      if (next.length !== entries.length) await save(next); // Preserve this member's local best ID.
+    } catch (error) { log(`[population] peer refresh failed: ${String(error)}`); }
+  });
   return {
-    base, baseCommit, path: archive, entries,
+    base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
@@ -2418,20 +3263,17 @@ async function createEvolution(start) {
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
           verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
           last_record_error: row?.last_record_error ?? null,
-          engineer: row?.engineer || null, verifier: row?.verifier || null};
+          engineer: row?.engineer || null, verifier: row?.verifier || null,
+          reported_context: row?.reported_context || null,
+          reported_context_ref: row?.reported_context_ref || {path: archive, entry_id: id},
+          peer_checkpoint: row?.peer_checkpoint || null};
       };
       // Prompt-only view: never retain an expanded context inside archive rows.
       const selectedEvidence = {
         parent: selected(direction.parent_id),
         donors: (direction.donor_ids || []).map(selected)};
-      let bytes = 0;
-      for (const char of JSON.stringify(selectedEvidence)) {
-        const point = char.codePointAt(0);
-        bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-      }
-      return bytes > 16384
-        ? {...context, selected_evidence_omitted: 'over_16384_utf8_bytes'}
-        : {...context, selected_evidence: selectedEvidence};
+      return {...context, selected_evidence: boundedContext(selectedEvidence,
+        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []})};
     },
     planInputs() {
       const summary = entries.slice(-12);
@@ -2443,7 +3285,9 @@ async function createEvolution(start) {
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          strategy: row.engineer && row.engineer.strategy}))};
+          strategy: row.engineer && row.engineer.strategy,
+          reported_context: boundedContext(row.reported_context,
+            row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
     },
     memoryInputs(directions) {
       return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
@@ -2526,12 +3370,13 @@ async function createEvolution(start) {
           && (!EXTERNAL_OBJECTIVE || ver.external_measurement_valid === true));
         const row = {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
           title: direction.title || '', approach: direction.approach || null, specialty: direction.specialty || '',
-          base_commit: baseCommit, patch_ref: null, original_patch: patch || null,
+          base_commit: baseCommit, patch_ref: null, original_patch: previous?.original_patch || patch || null,
           verified, speedup: verified ? speedup : null,
           status: verified ? (speedup <= 1 ? 'slower' : 'correct')
             : ver && says(ver.correctness, 'fail') ? 'incorrect' : 'unverified',
           engineer: evidence(eng) || previous?.engineer || null, verifier: evidence(ver),
-          evolution_context: direction.evolution_context || null, retention_error: null};
+          evolution_context: direction.evolution_context || null, retention_error: null,
+          reported_context: reportedEvidence({...direction, reported_context: direction.reported_context || previous?.reported_context}, eng, ver, patch)};
         try {
           if (typeof patch !== 'string' || !patch) throw new Error('no patch path supplied');
           const target = `${path}/patches/${direction.id}.diff`, hash = await digest(patch);
@@ -2541,6 +3386,7 @@ async function createEvolution(start) {
           if (!previous?.patch_ref) await run('cp', ['--no-clobber', '--', patch, target]);
           if (await digest(target) !== hash) throw new Error('existing retained patch differs');
           row.patch_ref = {path: target, sha256: hash, base_commit: baseCommit};
+          row.reported_context.source_binding.patch_ref = row.patch_ref;
         } catch (error) {
           if (error.sourceChanged) return failure(String(error));
           row.retention_error = `patch retention failed: ${String(error)}`;
@@ -2590,9 +3436,15 @@ const git = (dir, ...args) => hostRun('git', ['-C', dir, ...args]);
 const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { input: text });
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
-applyOptimizeResult(OPTIMIZER === 'evo'
-  ? await greedyOptimize(optimizeStart, await createEvolution(optimizeStart))
-  : await greedyOptimize(optimizeStart));
+applyOptimizeResult(await nativeDeliveryBoundary(async () => {
+  // Publication owns an archive; only EVO receives archive planning inputs.
+  const populationArchive = A.population_lineage ? await createEvolution(optimizeStart) : null;
+  return OPTIMIZER === 'evo'
+    ? await greedyOptimize(optimizeStart, populationArchive || await createEvolution(optimizeStart), populationArchive)
+    : await greedyOptimize(optimizeStart, null, populationArchive);
+}));
+const {report, finalPatch, validation, externalPromotion, finalGeomean, finalWeighted, finalPrimary} =
+  await nativeDeliveryBoundary(async () => {
 // ===========================================================================
 // PHASE: Final report (TechLead)
 // ===========================================================================
@@ -2606,6 +3458,49 @@ try {
   throw error;
 }
 if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
+const finalPatch = `${EVAL_DIR}/host_final_patch.diff`;
+// The first export must succeed. Later role/host cutoffs must preserve its pointer and
+// explicit uncertainty rather than erase this lane's already retained source evidence.
+async function refreshFinalPatch(stage) {
+  try { await writeFrozenFinalPatch(); return true; }
+  catch (error) {
+    const delivery = history.delivery || (history.delivery = {candidates: [], delivered: null, incomplete: []});
+    (delivery.incomplete || (delivery.incomplete = [])).push({status: 'export_unverified',
+      stage, path: finalPatch, error: String(error)});
+    log(`[delivery] final export unverified after ${stage}; retained pointer ${finalPatch}.`);
+    return false;
+  }
+}
+if (!EXTERNAL_OBJECTIVE) {  // Retained delivery: export committed sources within the task boundary.
+  // Resolve only now: CANONICAL and the host helpers exist after Setup/Optimize.
+  // Scope is caller-declared, or the extracted task's existing kernel_src boundary;
+  // model analysis and generated evaluation files do not define deliverable sources.
+  const requestedPaths = A.editable_source_paths === undefined
+    ? await hostRun('test', ['-d', `${CANONICAL}/kernel_src`]) !== null ? ['kernel_src'] : null
+    : A.editable_source_paths;
+  if (!Array.isArray(requestedPaths) || requestedPaths.length === 0 || requestedPaths.some(p =>
+      typeof p !== 'string' || p.startsWith('/') || p.includes('\0')
+      || p.split('/').includes('..') || !p.split('/').some(part => part && part !== '.'))) {
+    throw nativeDeliveryError('native final export requires declared relative editable_source_paths or an extracted kernel_src directory');
+  }
+  const sourcePaths = [...new Set(requestedPaths.map(p => p.split('/').filter(part => part && part !== '.').join('/')))];
+  const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim();
+  const head = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD')) || '').trim();
+  if (![root, head].every(rev => /^[0-9a-f]{40,64}$/.test(rev))) {
+    throw nativeDeliveryError('native final export could not resolve the committed ORIGINAL and selected HEAD');
+  }
+  for (const path of sourcePaths) {
+    // Either side permits newly added sources and retained source deletions.
+    const sourceIn = async rev => /^(blob|tree)$/.test(((await git(CANONICAL, 'cat-file', '-t', `${rev}:${path}`)) || '').trim());
+    if (!await sourceIn(root) && !await sourceIn(head)) {
+      throw nativeDeliveryError('native final export source scope is absent from ORIGINAL and selected HEAD');
+    }
+  }
+  // current_best.diff remains the separate, unchanged broad root-to-HEAD evidence.
+  frozenFinalPatch = await git(CANONICAL, '--literal-pathspecs', 'diff', '--binary', '--no-color', '--no-ext-diff',
+    '--src-prefix=a/', '--dst-prefix=b/', root, head, '--', ...sourcePaths);
+  await writeFrozenFinalPatch();
+}
 phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
@@ -2614,44 +3509,67 @@ const report = await agentT(
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,
   }),
   { phase: 'Report', label: 'tech_lead:report', schema: REPORT_SCHEMA });
-const finalPatch = EXTERNAL_OBJECTIVE ? await writeFrozenFinalPatch()
-  : (report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`);
 
 // ===========================================================================
 // PHASE: Director validation + arbitration
 // ===========================================================================
 if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S);
+// Report may consume its own window. Restore the captured bytes using the existing
+// validation allowance before a Director can measure them, never an expired Report window.
+let exportReady = await refreshFinalPatch('report');
 phase('Validate');
 const finalMeasurementFailure = await measureFinalEvaluation(CANONICAL);
-let validation = await agentT(
+let validation = exportReady ? await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT, FROZEN_ORACLE: FROZEN_ORACLE ? 'true' : 'false',
     FINAL_PATCH: finalPatch,
-    TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
-    ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
-        ? { TECH_LEAD_REPORTED_WEIGHTED: report.final_speedup_weighted } : {}),
+    // Delivery's primary claim belongs to the verified canonical winner. Report is explanatory.
+    TECH_LEAD_REPORTED_GEOMEAN: !EXTERNAL_OBJECTIVE && !HAS_WORKLOAD ? cumulative
+      : report ? report.final_speedup_geomean : cumulative,
+    ...(HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? { TECH_LEAD_REPORTED_WEIGHTED: cumulative }
+        : HAS_WORKLOAD && report && report.final_speedup_weighted != null
+          ? { TECH_LEAD_REPORTED_WEIGHTED: report.final_speedup_weighted } : {}),
     BASELINE_TIMING: BASELINE_PER_CASE,
   }),
-  { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+  { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA }) : {validation_status: 'unavailable', final_failure: 'final_patch_export_unverified'};
 const directorValidationStatus = validation && validation.validation_status;
+if (!EXTERNAL_OBJECTIVE) {
+  let measuredPatch = null;
+  try { measuredPatch = await hostRun('cat', ['--', finalPatch]); } catch (_) {}
+  if (measuredPatch !== frozenFinalPatch) {
+    validation = {...validation, director_review_status: directorValidationStatus || 'unavailable',
+      validation_status: measuredPatch === null ? 'unavailable' : 'source_changed',
+      final_failure: measuredPatch === null ? 'director_patch_identity_unavailable' : 'director_patch_changed'};
+  }
+  if (!await refreshFinalPatch('director')) {
+    // A role could have changed this same path. Previous readback is not current
+    // attestation: retain it for recovery, but withhold validation and promotion.
+    validation = {...validation, director_review_status: directorValidationStatus || 'unavailable',
+      validation_status: 'unavailable', final_failure: 'final_patch_export_unverified'};
+  }
+}
 if (EXTERNAL_OBJECTIVE) {
   // A report or review may write files, but cannot replace the captured patch.
-  await writeFrozenFinalPatch();
+  exportReady = await refreshFinalPatch('director') && exportReady;
   validation = {...validation,
     director_review_status: validation ? 'returned' : 'unavailable',
-    validation_status: validation ? validation.validation_status : 'accepted',
+    validation_status: validation ? validation.validation_status : 'unavailable',
     director_reported_evaluation: validation && validation.external_evaluation || null,
     external_evaluation: frozenFinalEvaluation};
 }
-validation = finalMeasurementFailure ? {...validation,
+validation = EXTERNAL_OBJECTIVE && !exportReady ? {...validation,
+  primary_speedup: null, external_measurement_valid: false, validation_status: 'unavailable',
+  native_reproducible_gain: false, native_reproducible_regression: false,
+  development_geomean_speedup: null, final_failure: 'final_patch_export_unverified'}
+  : finalMeasurementFailure ? {...validation,
   primary_speedup: null, external_measurement_valid: false, validation_status: 'invalid_measurement',
   native_reproducible_gain: false, native_reproducible_regression: false,
   development_geomean_speedup: null, final_failure: finalMeasurementFailure}
   : await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG, finalPatch, true);
 if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid) {
-  if (directorValidationStatus && !says(directorValidationStatus, 'accepted')) {
-    validation.validation_status = directorValidationStatus;
+  if (!says(directorValidationStatus, 'accepted')) {
+    validation.validation_status = directorValidationStatus || 'unavailable';
   } else if (!nativeGainEligible(validation)) {
     validation.validation_status = 'no_improvement';
   }
@@ -2659,15 +3577,23 @@ if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid) {
 const externalPromotion = !EXTERNAL_OBJECTIVE || !!(nativeGainEligible(validation)
   && validation && says(validation.validation_status, 'accepted'));
 
-const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_geomean : cumulative);
-// PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
-const finalWeighted = !EXTERNAL_OBJECTIVE && validation && validation.director_verified_speedup_weighted != null
+const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_geomean : null);
+// PRIMARY headline uses the declared metric; missing weighted measurement stays unavailable.
+const finalWeighted = !EXTERNAL_OBJECTIVE && validation
+  && Number.isFinite(validation.director_verified_speedup_weighted)
+  && (!HAS_WORKLOAD || validation.director_verified_speedup_weighted > 0)
   ? validation.director_verified_speedup_weighted : null;
 const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? nativePrimary(validation) : null)
-  : (HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean);
+  : (HAS_WORKLOAD ? (Number.isFinite(finalWeighted) ? finalWeighted : null) : finalGeomean);
 log(`COMPLETE. ${KERNEL_NAME}: verified ${EXTERNAL_OBJECTIVE ? 'external primary' : HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
+
+// Validation outcomes stay local to this lane. The return gate withholds promotion without
+// erasing the host-delivered source or another lane's independently accepted result.
+
+return {report, finalPatch, validation, externalPromotion, finalGeomean, finalWeighted, finalPrimary};
+});
 // ===========================================================================
 // PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
 // (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
@@ -2771,7 +3697,11 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+// A process cutoff can leave a report and cumulative gain without final validation.
+// Keep those diagnostics, but do not offer that patch to the parent's A/B gate or learn it.
+const processValidated = !!(validation && validation.validation_status === 'accepted'
+    && Number.isFinite(finalPrimary) && finalPrimary > 0);
+if (KB_WRITE_OK && GFX && externalPromotion && processValidated && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
   // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
@@ -2857,9 +3787,14 @@ return {
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
+  process_validated: processValidated,
+  delivered_patch: finalPatch,
+    delivery: history.delivery || {candidates: [], delivered: null, incomplete: []},
+    delivery_incomplete: history.delivery?.incomplete || [],
+  ...(history.search_timing ? {search_timing: history.search_timing} : {}),
   kernel_name: KERNEL_NAME,
   workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
-  final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  final_speedup: processValidated ? finalPrimary : null, // PRIMARY metric when final validation accepted
   ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
   ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
   ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
@@ -2878,7 +3813,7 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+  final_patch: !processValidated || (EXTERNAL_OBJECTIVE && !externalPromotion) ? ''
     : finalPatch,
   ...(EXTERNAL_OBJECTIVE ? {final_patch_sha256: externalPromotion ? validation.patch_sha256 : null} : {}),
   // null when the step was off, or the run earned nothing worth a card.
@@ -2896,14 +3831,17 @@ return {
   // Rounds where the planner overran the KB budget. A KB that binds every round is one that has taken
   // over planning, which is the regression this budget exists to catch.
   kb_cap_bound_rounds: kbCapBound,
-  // The monoculture canary, and it costs no GPU time: how many DISTINCT (specialty, focus_files)
-  // directions this run explored vs how many it issued. A KB that helps raises the verified speedup;
-  // a KB that cages lowers this without raising that. Reported on KB-less runs too — those are the
-  // baseline it has to be read against.
+  // Count distinct issued (specialty, focus_files) labels, not semantic diversity or completed work.
+  // Missing historical label metadata leaves this diagnostic unavailable.
   direction_entropy: (() => {
     const seen = new Set(); let n = 0;
-    for (const r of history.rounds) for (const d of (r.directions || [])) {
-      n++; seen.add(`${d.specialty}|${(d.focus_files || []).slice().sort().join(',')}`);
+    for (const r of history.rounds) {
+      if (!Array.isArray(r.directions)) return null;
+      for (const d of r.directions) {
+        if (!d || typeof d.specialty !== 'string' || !d.specialty.trim() ||
+            !Array.isArray(d.focus_files) || !d.focus_files.every(f => typeof f === 'string')) return null;
+        n++; seen.add(JSON.stringify([d.specialty, d.focus_files.slice().sort()]));
+      }
     }
     return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
   })(),

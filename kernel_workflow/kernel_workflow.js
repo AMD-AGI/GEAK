@@ -19,6 +19,9 @@ export const meta = {
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.preparation_allowance_s != null || A.search_duration_s != null) {
+  throw new Error('preparation_allowance_s/search_duration_s are supported only by direct kernel_lane.js; dispatcher clock semantics are not supported');
+}
 if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
   throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }
@@ -327,13 +330,17 @@ function roleAgent(role, phase, intro, inputs) {
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
+  if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
-      if (agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const opts = agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+      if (groupTask || agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
+          processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
+          : agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
         const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
@@ -351,7 +358,7 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      if (agent.processDeadlineActive && e
+      if ((groupTask || agent.processDeadlineActive) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
         return null;
@@ -391,9 +398,12 @@ function makeSem(ids) {
 }
 
 // PRIMARY metric of a worker (kernel_lane.js) result: its final_speedup is already the weighted number
-// when the run was workload-aligned, else the geomean. Fall back defensively.
+// when the run was workload-aligned, else the geomean. Declared weighting must remain available.
 const primSpeedup = (r) => {
   if (!r) return 0;
+  if (r.workload_aligned === true) {
+    return Number.isFinite(r.final_weighted) && r.final_weighted > 0 ? r.final_weighted : null;
+  }
   const g = r.final_speedup != null ? r.final_speedup
           : (r.final_weighted != null ? r.final_weighted
              : (r.final_geomean != null ? r.final_geomean : 0));
@@ -616,6 +626,8 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
       // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+      // The explicit bakeoff argument object must preserve the caller's role allowance too.
+      ...(A.agent_timeout_ms != null ? { agent_timeout_ms: A.agent_timeout_ms } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
@@ -629,10 +641,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
     return { lane: l, r, speedup };
   } catch (e) {
     log(`lane ${l.key} failed: ${e && e.message ? e.message : e}`);
-    return { lane: l, r: null, speedup: 0 };
+    const failure = {lane: l.key, eval_dir: `${EVAL_DIR}/bakeoff/${l.key}`,
+      code: e && e.code || 'lane_execution_failed', message: String(e && e.message || e)};
+    return {lane: l, r: {eval_dir: failure.eval_dir, validation_status: 'unavailable', process_validated: false,
+      final_speedup: null, final_patch: '', delivery_incomplete: [failure]}, speedup: null,
+      failure};
   }
 })));
-
 // ===========================================================================
 // PHASE: Report — rank ALL candidates on the SAME frozen baseline; write table + winner.
 // Candidates are THREE classes, all scored against the one frozen input-kernel baseline:
@@ -644,6 +659,8 @@ phase('Report');
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
+  delivery_incomplete: x.r && x.r.delivery_incomplete || [],
+  ...(x.failure ? {failure: x.failure} : {}),
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
@@ -676,7 +693,8 @@ if (rejectedByGate.length) {
 }
 const winner = ranked[0] || null;
 const laneRows = cands;
-const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
+const bestSpeedup = cands.reduce((m, c) => Number.isFinite(c.speedup)
+  ? (m === null ? c.speedup : Math.max(m, c.speedup)) : m, null);
 
 // Apply instruction depends on the winner class: a lane winner is a source patch (git apply); an
 // env-tune winner is a config/env deploy (no source change — record apply_env + tuning_artifact).
@@ -703,10 +721,10 @@ const rep = await agentT(
    - The WINNER (fastest verified) and a one-paragraph rationale. All speedups are directly comparable
      because every candidate — the input-language optimize lane, each authored language, AND the tuned
      env backend — was scored against the SAME frozen input kernel.
-     NOTE: WINNER may be null — this means NO candidate beat the frozen baseline (every speedup <= 1.0x,
-     e.g. all lanes failed or were slower than the original). In that case state clearly that no
-     candidate beat the baseline and the ORIGINAL kernel is RETAINED (do not present a slower-than-1.0x
-     candidate as a "winner by default"); still list every candidate in the table for transparency.
+     WINNER may be null because results are unavailable, validation rejected a candidate, or no
+     measured candidate improved the baseline. Report the actual reason from the candidate records;
+     unavailable speedup is not a measured loss. The ORIGINAL kernel is retained when no candidate
+     is eligible; still list every candidate, including unavailable results.
 2. ${applyStep}
 
 ## Inputs
@@ -724,8 +742,7 @@ Return ONLY {report_path, applied_to_original, note} as StructuredOutput.`,
 
 log(winner
   ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
-  : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
-
+  : `Bake-off COMPLETE. No eligible measured win (best reported ${bestSpeedup === null ? "unavailable" : bestSpeedup.toFixed(2) + "x"} across ${cands.length} candidate(s)); keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
 // ---------------------------------------------------------------------------
 // PHASE: UpdateExperience — bake-off curates CENTRALLY here (its lanes run with
 // update_experience=off): the reusable lesson is the cross-language routing outcome, which
