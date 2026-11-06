@@ -32,7 +32,8 @@
   "Bound UT tensor lifetime: new scaffolds freeze named weight RNG substreams with bounded pristine caches and private copies; input checks reuse construction/execution and compare exact bytes with bounded device snapshots; isolated oracle workers stream bounded output batches and clean files, preserving case/draw coverage, control margins and source restoration. Existing frozen task inputs/helpers are not rewritten.",
   "Negative controls search representative probes before the remaining cases and stop only the current control after a completed numerical rejection reaches the existing margin. Reports retain witness and checked/available counts; malformed hints, shape-only failures and execution errors cannot qualify a control. Full correctness coverage, per-leaf controls and source restoration remain required.",
   "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
-  "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping."
+  "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
+  "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain."
  ],
  "files": [
   {
@@ -185,17 +186,6 @@
    "modified": true
   },
   {
-   "file": "scripts/plan_points_budget.py",
-   "source": null,
-   "added_here": true
-  },
-  {
-   "file": "scripts/plan_sampling_points.py",
-   "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
-   "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
-   "modified": false
-  },
-  {
    "file": "scripts/plan_ut_cases.py",
    "source": null,
    "added_here": true,
@@ -315,7 +305,7 @@
    "file": "shared/kernel_selection.py",
    "source": "e2e_workflow/scripts/kernel_selection.py",
    "source_sha256": "ebc24e05faf44585c7e7e224df6cdf9f02097009403ddb577f96a4f6d254ee1b",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/kernel_source_delivery.mjs",
@@ -334,12 +324,6 @@
    "source": "e2e_workflow/scripts/overlay_setup.py",
    "source_sha256": "e14c2d644c2a8785462fa8b22a7c6f54409f5379309846adca10a19cbc97bdd8",
    "modified": false
-  },
-  {
-   "file": "shared/parse_profile.py",
-   "source": "e2e_workflow/scripts/parse_profile.py",
-   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
-   "modified": true
   },
   {
    "file": "shared/schema.mjs",
@@ -409,7 +393,7 @@
    "file": "shared/tests/test_kernel_selection.py",
    "source": "e2e_workflow/scripts/tests/test_kernel_selection.py",
    "source_sha256": "fab137b13c70a867357c98cb930d088d9f0b7b7e064f6b917838cab3b23bc378",
-   "modified": false
+   "modified": true
   },
   {
    "file": "shared/tests/test_kernel_source_delivery.mjs",
@@ -449,6 +433,12 @@
    "file": "shared/tests/test_server_object_replay.py",
    "source": null,
    "added_here": true
+  },
+  {
+   "file": "shared/trace_names.py",
+   "source": "e2e_workflow/scripts/parse_profile.py",
+   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
+   "modified": true
   },
   {
    "file": "shared/workspace_sources.py",
@@ -667,6 +657,25 @@
    "file": "ut_contracts/ut_driver.py",
    "source": null,
    "added_here": true,
+   "modified": true
+  }
+ ],
+ "removed_files": [
+  {
+   "file": "scripts/plan_points_budget.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/plan_sampling_points.py",
+   "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
+   "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
+   "modified": false
+  },
+  {
+   "file": "shared/parse_profile.py",
+   "source": "e2e_workflow/scripts/parse_profile.py",
+   "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
    "modified": true
   }
  ]

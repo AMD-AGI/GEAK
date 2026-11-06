@@ -195,7 +195,7 @@ class HandoffTests(unittest.TestCase):
         censuses={p['point_id']:p['census'] for p in points}
         for path in censuses.values():
             doc=H.read(path);doc['trace_dir']=str(self.profile/'traces');H.write(path,doc)
-        args=SimpleNamespace(select_by_kernel=True,select_arg=[],profile_only=True,
+        args=SimpleNamespace(select_by_kernel=True,select_arg=[],
                              all_evidence=False,draft_shares_name=False)
         seen=[]
         def steps(rows):

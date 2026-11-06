@@ -23,17 +23,17 @@ Outside the pipeline set these paths explicitly and supply the same input artifa
 1. Reuse the measured baseline's logs, effective launch settings, image/source/model
    identities, rank scope and compatible captures. Preserve per-config observations;
    client concurrency alone is not an execution shape. Keep `PROGRESS.md` in `$OUT`.
-2. Declare `serving.json` from the actual deployment. Run the standard observation and
-   point planners. With multiple configs, follow
+2. Declare each config's `serving.json` and pinned runtime identity from the actual
+   deployment. Parse its observations, then follow
    [shared sampling](../kernel-extract/references/multi-config-sampling.md):
-   `multi_config.py plan` → `capture` → `project --merge` → `select`. This supports one
-   config too. Inspect budget gaps before capture; retain them after achieved-shape
-   relabeling. Lowest/highest concurrency do not replace middle-only dispatch evidence.
-3. For an ordinary single config, run `probe_server.py` / `run_points.py` with
-   **`--profile-only`**, under the full allocated GPU-set lease from setup. This collects
-   census, kernel shapes, source map and adjacency without creating UT declarations.
-   Preserve actual graph/eager modes and failed probe evidence. The shared-pool capture
-   helper already passes `--profile-only` and holds the pool lease.
+   `multi_config.py plan` → `capture` → `project --merge` → `select`.
+   Supply one `--config` for a single workload; there is one planner for both cases.
+   Inspect budget gaps before capture and retain them after achieved-shape relabeling.
+   Lowest/highest concurrency do not replace middle-only dispatch evidence.
+3. The capture helper holds the full allocated GPU-set lease and invokes
+   `probe_server.py` / `run_points.py`. These produce census, shapes, source map and
+   adjacency only; UT drafting belongs to the next stage. Preserve actual graph/eager
+   modes and failed-probe evidence. Reuse the same tools for targeted retries.
 4. Apply the numeric selection policy in `$PARAMS`. Use complete operators, per-config
    then union where applicable; retain companions, collectives, tails and unsupported
    identities in the inventory/denominator. The split multiconfig example uses >3%.

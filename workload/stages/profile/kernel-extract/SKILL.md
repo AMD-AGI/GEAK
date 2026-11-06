@@ -45,8 +45,7 @@ Read [workload measurement](references/dynamic-workloads.md) and
 and sampling points; runtime traces determine actual kernels and costs. Keep request,
 token, call and device-time mass distinct; target at least 90% of device-time mass per
 material phase and disclose achieved coverage, approximations and missing mass. Counts
-come from the serving log, never from a parametric ISL/OSL model
-(`parse_profile.analytic_regime_calls` only when no log exists at all, and say so).
+come from the serving log. Missing observation logs are an explicit evidence gap.
 
 This stage is a fixed template. **The inputs you write are `serving.json` (step 1),
 the runtime identity for shared multi-config sampling, and the review of
@@ -58,40 +57,21 @@ with, and spent most of the hour doing it.
 1. **Declare the deployment.** `python3 "$SKILL_ROOT/scripts/probe_server.py" init --out
    "$EVAL_DIR/serving.json"`, then copy model, TP, GPUs, flags and environment from the
    baseline's launch exactly. Leave `decode_capture` at `profile_cuda_graph`.
-2. **Observed workload and points.** For one ordinary workload, use
-   `observed_workload.py` → `plan_sampling_points.py` (commands in the reference).
-   For multi-config input, first read all configs' observations and use the
-   [shared sampling workflow](references/multi-config-sampling.md):
+2. **Observe and plan.** Use `observed_workload.py` for each supplied config, then
+   the [shared sampling workflow](references/multi-config-sampling.md):
    `multi_config.py plan` → `capture` → `project --merge` → `select`.
-   This replaces per-config capture loops: profile the compatible point union once,
-   then reweight separately. A single config is also valid on this path. Lowest/highest
-   concurrency can guide the initial budget but cannot replace the other configs'
-   distributions and dispatch evidence. Pass scenario `sampling` parameters to the
-   planner and use the configured operator threshold (the multiconfig example is >3%).
-3. **Capture, census, rank, select, collect evidence** -- one command, one server:
-
-   ```bash
-   python3 "$SKILL_ROOT/scripts/probe_server.py" run --serving "$EVAL_DIR/serving.json" \
-       --run-dir "$EVAL_DIR/probe" -- \
-     python3 "$SKILL_ROOT/scripts/run_points.py" --server-state "$EVAL_DIR/probe/probe_server.json" \
-       --points "$EVAL_DIR/sampling_points.json" \
-       --observed "$EVAL_DIR/evidence/observed_workload.json" --eval-dir "$EVAL_DIR"
-   ```
-
-   It starts the deployment's graph server for the PREFILL points, then an eager server
-   for the DECODE points (decode is not tried under the graph: the profiler drops graph
-   replays of the spec-decoding VERIFY step; `--decode-on-graph` tries it anyway), captures every point back to
-   back, censuses each in the background, relabels points to their achieved shapes, and
-   writes `coverage.json`, `kernel_ranking.json`, `selection_targets.json`,
-   `evidence/{shapes,source_map.json,adjacency.json}` and a draft `task_decls.json`. It
-   resumes: rerunning it recaptures only points without a census (`--redo` forces one).
-   One recapture per failed point, then the gap is reported, as the skill requires.
-   The probe server also records, from process start, every Triton compile variant it
-   builds and the entry call that built it (`shared/compile_watch.py`, on by default) into
-   `evidence/compile_variants.json`. This covers what the timed windows skip -- startup,
-   warmup and graph capture -- and what M coverage cannot see: a variant is selected by
-   argument dtypes, None-ness, integer specialization (an int equal to 1 is a constexpr),
-   constexprs and the autotune config, not by M.
+   Supply one `--config` for a single workload. Pin its runtime identity and pass
+   the scenario's global sampling budget. Compatible configs share observed points;
+   projection retains each config's own frequencies and uncovered mass. Lowest/highest
+   concurrency do not substitute for the middle configs' dispatch evidence.
+3. **Capture and freeze profile evidence.** The capture helper holds each pool's
+   GPU-set lease and runs `probe_server.py` / `run_points.py`: prefill on the graph
+   server, decode normally on the eager server, per-point census, achieved-shape
+   relabeling, ranking and dispatch/source evidence. Resume reuses signed censuses;
+   `--redo` requests recapture. Failed or hidden windows stay explicit gaps.
+   `compile_watch.py` records startup, warmup and graph-capture compile variants and
+   call descriptors as well as timed-window evidence. Profile stops at that evidence;
+   it never drafts UT declarations automatically.
 4. Write `kernel_workload.json` from those artifacts (coverage, phase split, sampling
    plan, approximations). Distinguish stage share, share within the callable and share
    the extracted source can affect; nested scopes, not additive. Collectives,
@@ -111,7 +91,14 @@ but cannot turn a partial batch into completed extraction.
 
 ## 3. Declare complete task boundaries
 
-Read [delivery contract](references/delivery-contract.md). `task_decls.json` is drafted
+Read [delivery contract](references/delivery-contract.md). Start this UT step explicitly:
+
+```bash
+python3 "$SKILL_ROOT/scripts/draft_task_decls.py" --eval-dir "$EVAL_DIR" \
+    --out "$EVAL_DIR/task_decls.json"
+```
+
+`task_decls.json` is drafted
 from the evidence: one task per selected operator with all its member kernels and its
 other phase branch; its `target_callable` is the operator's entry (or the branches'
 innermost common frame); its `ut_family` is the family whose `match` patterns fit (the

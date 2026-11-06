@@ -43,17 +43,32 @@ class SamplingPipelineTest(unittest.TestCase):
         self.assertEqual(observed['prefill']['total_new_tokens'], 288)
         self.assertEqual(observed['prefill']['prefix_cache_hit_pct'], 75)
         self.assertEqual(observed['decode']['crosscheck']['disagreement_pct'], 0)
-        proc = self.run_script('plan_sampling_points.py', '--observed', self.root / 'observed.json',
-                               '--num-points', '4', '--out', self.root / 'points.json')
+        cfg = self.root / 'input'
+        (cfg / 'evidence').mkdir(parents=True)
+        (cfg / 'evidence/observed_workload.json').write_text(json.dumps(observed))
+        (cfg / 'serving.json').write_text(json.dumps({'model': 'test', 'tp': 1, 'gpus': '0'}))
+        (cfg / 'runtime_identity.json').write_text(json.dumps({
+            'image': 'test', 'model_revision': 'test', 'source_revision': 'test', 'gpu_arch': 'test'}))
+        output = self.root / 'profile'
+        proc = subprocess.run([sys.executable, str(SCRIPTS.parents[1] / 'multi_config.py'),
+                               'plan', '--group-dir', str(output), '--config', 'only=' + str(cfg),
+                               '--num-points', '4', '--target-pct', '100'], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        plan = json.loads((self.root / 'points.json').read_text())
-        self.assertEqual(plan['phase_budget'], {'PREFILL': 2, 'DECODE': 2})
+        plan = json.loads((output / 'sampling_plan.json').read_text())
+        self.assertEqual(plan['capture_count'], 4)
         for phase, mass in [('PREFILL', 2), ('DECODE', 20)]:
-            points = [p for p in plan['points'] if p['phase'] == phase]
-            self.assertTrue(points)
-            self.assertEqual(sum(p['represented']['instances'] for p in points), mass)
-            self.assertAlmostEqual(sum(p['represented']['phase_proxy_mass_share_pct']
-                                       for p in points), 100, places=2)
+            points = [p for p in plan['captures'] if p['point']['phase'] == phase]
+            self.assertEqual(sum(p['per_config']['only']['instances'] for p in points), mass)
+            self.assertEqual(plan['configs']['only']['phases'][phase]['planned_proxy_coverage_pct'], 100)
+
+    def test_top_n_summary_cannot_be_used_as_a_complete_census(self):
+        sys.path.insert(0, str(SCRIPTS))
+        from coverage_ledger import load_census
+        census = self.root / 'top_n.json'
+        census.write_text(json.dumps({'top_kernels': [{'name': 'k', 'total_ms': 1}],
+                                     'total_gpu_time_ms': 5, 'num_distinct_kernels': 3}))
+        with self.assertRaisesRegex(SystemExit, 'Top-N summaries are not a census'):
+            load_census(census, 'DECODE')
 
     def test_hybrid_swa_dialect_with_cp_rank_prefix(self):
         """sglang 0.5.22 / DeepSeek-V4 (InferenceX run 39258204219): the attention-CP rank

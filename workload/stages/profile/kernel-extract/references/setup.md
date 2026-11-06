@@ -6,14 +6,13 @@ Use the tools bundled with this skill:
 export SKILL_ROOT=/absolute/path/to/workload/stages/profile/kernel-extract
 export SHARED_TOOLS="$SKILL_ROOT/shared"
 export EVAL_DIR=/absolute/path/to/extraction-evidence
-export PARSE_PROFILE_STRICT_PHASES=1 KERNEL_ENV_SKIP_ENUM_REAP=1
+export KERNEL_ENV_SKIP_ENUM_REAP=1
 ```
 
-`PARSE_PROFILE_STRICT_PHASES=1` preserves this method's refusal of unknown forward
-annotations. Use `kernel_selection.py --strict-launch` for single-anchor evidence;
-joint verification already uses strict launch attribution. `KERNEL_ENV_SKIP_ENUM_REAP=1`
-keeps GPU wrappers from cleaning up unrelated processes. Export these controls into
-the capture/analysis processes, including remote/container commands.
+Use `kernel_selection.py --strict-launch` for single-anchor evidence; joint
+verification already uses strict launch attribution. `KERNEL_ENV_SKIP_ENUM_REAP=1`
+keeps GPU wrappers from cleaning up unrelated processes. Export it into capture
+and analysis processes, including remote/container commands.
 
 Use Python 3.10+ and Node.js 18+. Real tensor/GPU work requires the serving
 environment's PyTorch/backend. The helpers do not install or upgrade packages.

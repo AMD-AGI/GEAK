@@ -3,7 +3,7 @@
 drive the intended shape through it, and verify the trace contains what was asked for.
 
 Step three of log -> sampling points -> capture. Reads a point from
-`plan_sampling_points.py` output and produces a trace plus a journal recording what
+shared sampling plan and produces a trace plus a journal recording what
 actually happened, which `coverage_ledger.py` consumes.
 
 This is a DIAGNOSTIC probe. Its synthetic requests are chosen to hit an observed shape;
@@ -362,11 +362,11 @@ def pick_verify_file(paths):
 def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
     """Rule 4: assert the trace contains the phase and shape that were asked for."""
     try:
-        from parse_profile import _classify_step
+        from trace_names import _classify_step
         from trace_scan import scan, DEVICE_CATS
     except Exception as exc:
         journal.append({"event": "verify_SKIPPED", "error": str(exc)})
-        return {"verified": None, "reason": "parse_profile/trace_scan unavailable: %s" % exc}
+        return {"verified": None, "reason": "trace_names/trace_scan unavailable: %s" % exc}
 
     rec = pick_verify_file(paths)
     found, cpu_only, kernels, method = {}, {}, 0, None
@@ -579,7 +579,7 @@ def drive_decode(base, point, args, journal):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--points", required=True, help="plan_sampling_points.py output")
+    ap.add_argument("--points", required=True, help="shared sampling pool sampling_points.json")
     ap.add_argument("--point-id", required=True)
     ap.add_argument("--base-url", default=os.environ.get("PROBE_BASE_URL",
                                                          "http://127.0.0.1:30000"))

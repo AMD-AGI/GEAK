@@ -14,12 +14,6 @@ SPEC = importlib.util.spec_from_file_location(
 ks = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ks)
 
-# parse_profile owns the display-name limit that canonical_kernel_name's prefix rule depends on.
-PP_SPEC = importlib.util.spec_from_file_location(
-    "parse_profile", os.path.join(SCRIPTS, "parse_profile.py"))
-pp = importlib.util.module_from_spec(PP_SPEC)
-PP_SPEC.loader.exec_module(pp)
-
 TARGET = (
     "vllm.v1.attention.ops.chunked_prefill_paged_decode:"
     "chunked_prefill_paged_decode"
@@ -275,11 +269,11 @@ class TestRealRocmSymbolsCanonicalizeToTheirKernel(unittest.TestCase):
         self.assertTrue(ks.kernel_matches(bare, decorated))
 
     def test_a_name_truncated_by_the_display_limit_still_matches_its_full_symbol(self):
-        """parse_profile.short_name caps display names, and mangled and Tensile symbols run well past
+        """Legacy profiles capped display names, and mangled and Tensile symbols run well past
         the cap. The truncated name ends mid-token, so no word boundary can follow it -- without an
         explicit prefix rule our own shortening reads as a different kernel."""
         symbol = "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256ELi16ELb1ELb0ELb1ELi1EEEvPT0_i"
-        declared = symbol[:ks.SHORT_NAME_LIMIT]
+        declared = symbol[:60]
         self.assertGreater(len(symbol), ks.SHORT_NAME_LIMIT)
         self.assertTrue(ks.kernel_matches(declared, symbol))
         self.assertFalse(ks.kernel_matches(declared[:ks.SHORT_NAME_LIMIT - 1], symbol))
@@ -349,9 +343,6 @@ class TestRealRocmSymbolsCanonicalizeToTheirKernel(unittest.TestCase):
         self.assertFalse(ks.kernel_matches("k<128, 4, at::native::gpu_k",
                                            "k<128, 48, at::native::gpu_k"))
 
-    def test_the_display_limit_agrees_with_the_module_that_applies_it(self):
-        """The prefix rule above is only sound while both sides mean the same number of characters."""
-        self.assertEqual(ks.SHORT_NAME_LIMIT, pp.SHORT_NAME_LIMIT)
 
 
 class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):

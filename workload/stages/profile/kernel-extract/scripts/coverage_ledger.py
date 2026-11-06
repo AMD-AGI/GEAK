@@ -52,76 +52,6 @@ WAIT_KERNEL = "__collective_wait__"
 TAIL_KERNEL = "__untracked_tail__"
 
 
-def _from_parse_profile(d, phase, path):
-    """parse_profile.py's own summary -> ({kernel: us}, instances_covered).
-
-    Accepted because parse_profile is the obvious thing to point at a window's trace,
-    and requiring a hand-written adapter between two scripts in the same directory is
-    how formats drift apart. Three things have to be repaired on the way in:
-
-    1. It reports a TOP-N list (`--top`, default 25), not every kernel. The mass below
-       the cut is real device time, so dropping it would shrink every denominator here
-       and inflate coverage. It also records `total_gpu_time_ms` and
-       `num_distinct_kernels`, which makes the shortfall exactly computable: the
-       remainder is booked to `__untracked_tail__`, kept in the denominator, and marked
-       not optimizable. (`--top 0` is NOT the way to avoid this -- it slices to an empty
-       list and would read as a kernel-free workload.)
-    2. Its totals cover the WHOLE window, i.e. many step instances. The per-phase step
-       counts in `serving` divide that back down to one instance, which is what the
-       ledger's mass formula multiplies by the observed instance count.
-    3. A mixed window holds both phases' kernels. Each row is phase-tagged, so only the
-       point's own phase is kept -- otherwise prefill kernels would be scaled by a
-       decode instance count.
-    """
-    rows = d["top_kernels"]
-    serving = d.get("serving") or {}
-    inst = None
-    tagged = None
-    mixed = bool(serving.get("n_prefill_steps")) and bool(serving.get("n_decode_steps"))
-    if phase:
-        inst = serving.get("n_%s_steps" % phase.lower())
-        tagged = [r for r in rows if (r.get("phase") or "").upper() == phase]
-        if tagged:
-            rows = tagged
-    if mixed and not tagged:
-        raise SystemExit(
-            "coverage_ledger: %s holds both prefill and decode steps but its kernel rows "
-            "carry no phase tag, so there is no way to say which of them belong to the "
-            "%s point. Capture the point in its own window."
-            % (os.path.basename(path or "census"), phase))
-    if not inst:
-        raise SystemExit(
-            "coverage_ledger: this census is parse_profile.py output for a %s point, but "
-            "its serving.n_%s_steps is %r. Without the step count the window's totals "
-            "cannot be reduced to one instance, and multiplying a whole-window total by "
-            "the observed instance count would overstate the mass by that many times."
-            % (phase or "?", (phase or "?").lower(), inst))
-
-    def _row_us(r):
-        return (r["total_us"] if r.get("total_us") is not None
-                else float(r.get("total_ms", 0)) * 1000.0)
-
-    pk = {r["name"]: _row_us(r) for r in rows}
-    distinct = d.get("num_distinct_kernels")
-    total_ms = d.get("total_gpu_time_ms")
-    if distinct and total_ms and len(d["top_kernels"]) < distinct:
-        if mixed:
-            # The shortfall is a whole-window remainder with no phase attached. Booking
-            # all of it to one phase would overstate that phase's denominator; dropping
-            # it would overstate coverage. Neither is defensible, so neither is done.
-            raise SystemExit(
-                "coverage_ledger: %s is BOTH mixed-phase and truncated to the top %d of "
-                "%d kernels. The %.1f ms below the cut cannot be attributed to a phase. "
-                "Re-run parse_profile.py with a larger --top (not --top 0, which slices "
-                "to an empty list)."
-                % (os.path.basename(path or "census"), len(d["top_kernels"]), distinct,
-                   float(total_ms) - sum(_row_us(r) for r in d["top_kernels"]) / 1000.0))
-        tail = float(total_ms) * 1000.0 - sum(_row_us(r) for r in d["top_kernels"])
-        if tail > 0:
-            pk[TAIL_KERNEL] = tail
-    return pk, inst
-
-
 def load_census(path, phase=None):
     """Per-kernel device microseconds for ONE instance of a point's shape.
 
@@ -129,19 +59,16 @@ def load_census(path, phase=None):
       {"per_kernel": {name: us, ...}}
       {"per_kernel": {name: {"total_us": us, ...}}}
       {"kernels":  [{"name":.., "total_us":..}, ...]}
-      {"top_kernels": [...]}                  -- parse_profile.py output, see above
       {"per_rank": {rank: {name: us}}}        -- enables the collective split
-    `instances` (how many step instances the census covers) is divided out if present;
-    for parse_profile output it is read from that file's own per-phase step counts.
+    `instances` (how many step instances the census covers) is divided out if present.
     """
     d = json.load(open(path))
     per_rank = d.get("per_rank")
     pk = d.get("per_kernel")
-    inst_override = None
     if pk is None and isinstance(d.get("kernels"), list):
         pk = {k["name"]: k.get("total_us", 0) for k in d["kernels"]}
-    if pk is None and isinstance(d.get("top_kernels"), list):
-        pk, inst_override = _from_parse_profile(d, phase, path)
+    if "top_kernels" in d:
+        raise SystemExit("coverage_ledger: Top-N summaries are not a census; use point_census.py on the raw trace")
     if pk is None and per_rank:
         agg = defaultdict(float)
         for _r, kv in per_rank.items():
@@ -155,7 +82,7 @@ def load_census(path, phase=None):
             "format is documented in load_census(); a silently empty census would read "
             "as a kernel-free workload." % path)
     pk = {k: _us(v) for k, v in pk.items()}
-    inst = inst_override or d.get("instances") or d.get("step_instances") or 1
+    inst = d.get("instances") or d.get("step_instances") or 1
     if inst and inst != 1:
         pk = {k: v / inst for k, v in pk.items()}
         # main() rebuilds the census from per_rank when it is present, so it has to be
@@ -214,7 +141,7 @@ def ut_covers(case, phase, shape, tol):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--points", required=True, help="plan_sampling_points.py output")
+    ap.add_argument("--points", required=True, help="sampling_points.json or sampling_points_final.json")
     ap.add_argument("--census", action="append", default=[], metavar="POINT_ID=PATH",
                     help="per-point kernel census; repeat per measured point")
     ap.add_argument("--ut-cases", default=None,

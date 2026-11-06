@@ -1,6 +1,7 @@
 # Shared sampling before multi-config extraction
 
-Use this path when several configs are supplied. It also accepts one config. Read
+Use this path for every workload: one `--config` for a single config, or repeat it
+for several configs. Read
 each config's scheduler observations first; an endpoint-only trace does not establish
 the middle configs' shapes, frequencies or dispatch branches. Observations can come
 from existing baseline/CI logs. Collect a short observation window only where the
@@ -95,7 +96,7 @@ python3 "$PROFILE_SLOT/multi_config.py" select --group-dir "$OUT" --params "$PAR
 ```
 
 `capture` holds each pool's full GPU set through `shared/gpu_lock_set.py`, then starts
-one server using `probe_server.py`. It runs `run_points.py --all-evidence`: a kernel small in the pooled discovery
+one server using `probe_server.py`. It runs `run_points.py --all-evidence` (profile evidence only): a kernel small in the pooled discovery
 log must not lose its source evidence before the per-config >3% test. GPU commands run
 in the deployed image with the configured devices; `--dry-run` only prints argv arrays.
 Pools run sequentially by this helper; users with separately leased device sets can run

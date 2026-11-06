@@ -17,7 +17,6 @@ from collections import defaultdict
 SLOT = Path(__file__).resolve().parent
 SCRIPTS = SLOT / "kernel-extract/scripts"
 sys.path.insert(0, str(SCRIPTS))
-from plan_sampling_points import boundaries_from_server_info  # noqa: E402
 from relabel_points import relabel  # noqa: E402
 
 
@@ -80,6 +79,33 @@ def deployment(serving, identity):
         i += 1
     doc["args"] = kept
     return {"serving": doc, "runtime_identity": identity}
+
+
+def boundaries_from_server_info(info):
+    b = {"prefill_chunk": None, "graph_bs": [], "notes": []}
+    if not info:
+        b["notes"].append("no server info supplied: dispatch boundaries are unknown; "
+                          "retain evidence/server_info.json from the deployed server.")
+        return b
+    for k in ("chunked_prefill_size", "max_prefill_tokens", "chunk_size"):
+        if info.get(k):
+            b["prefill_chunk"] = int(info[k])
+            b["notes"].append("prefill chunk ceiling %d from server arg %r" % (b["prefill_chunk"], k))
+            break
+    for k in ("cuda_graph_bs", "capture_bs", "cuda_graph_batch_sizes"):
+        v = info.get(k)
+        if isinstance(v, list) and v:
+            b["graph_bs"] = sorted(int(x) for x in v)
+            b["notes"].append("CUDA-graph capture sizes from server arg %r" % k)
+            break
+    if not b["graph_bs"]:
+        mx = info.get("cuda_graph_max_bs") or info.get("cuda_graph_max_bs_decode")
+        if mx:
+            b["notes"].append(
+                "cuda_graph_max_bs=%s but the capture-size LIST is not exposed; decode "
+                "batches are padded to captured sizes, so without the list a point at "
+                "bs=B may be measuring the pad, not B." % mx)
+    return b
 
 
 def server_info(serving, directory):
@@ -291,7 +317,7 @@ def capture_commands(group_dir):
             "--server-state", str(pool / "probe/probe_server.json"),
             "--points", str(pool / "sampling_points.json"),
             "--observed", str(pool / "evidence/observed_workload.json"),
-            "--all-evidence", "--profile-only", "--eval-dir", str(pool)]))
+            "--all-evidence", "--eval-dir", str(pool)]))
     return commands
 
 
