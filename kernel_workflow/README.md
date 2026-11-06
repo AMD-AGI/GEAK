@@ -75,6 +75,9 @@ Workflow({
                                //           cumulative best for a round winner to be committed
     deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
                                //           (heavyweight; always runs in its own dedicated round)
+    max_rounds: 0,             // optional, default 0 = no cap: hard cap on optimization rounds
+    fast_mode: "false",        // optional: "true" for time-boxed runs (see "Time-boxed runs")
+    engineer_minutes: 6,       // optional, fast_mode only: wall-clock time box per optimize engineer
     gpu_ids: "0",              // optional, comma-separated, default "0"
     gpus_per_job: 1,           // optional: GPUs each GPU command needs; detected from the task's
                                //   test when unset (see "Multi-GPU jobs"); >1 leases N of gpu_ids
@@ -149,6 +152,23 @@ override that `gpu_ids` cannot hold stops the run. Group
 leases share the per-GPU lock files with single-GPU jobs, are acquired all-or-nothing, and are killed
 after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and `author` modes;
 `bakeoff` rejects multi-GPU jobs.
+
+### Time-boxed runs (`fast_mode`, opt-in)
+For workshops and demos where the whole run has to fit in ~20 minutes. Most of a run's gain usually
+comes early in the first round; `fast_mode` cuts the parts that only pay off in long runs:
+- after the last round (budget used up or `max_rounds` reached) the re-profile and the cross-round
+  memory update are skipped, since nothing reads them;
+- each optimize engineer gets a wall-clock time box (`engineer_minutes`, default 6) and stops early
+  when its last three attempts together gain < 3%.
+
+A setup that works well for a single kernel:
+```
+budget: 2, max_rounds: 1, fast_mode: "true", engineer_minutes: 6
+```
+Two directions run in parallel in one round; the integrator can still merge them. Shipping a ready
+correctness/benchmark harness in `kernel_path` saves the benchmark engineer from writing one
+(5–7 min). Measured on an fp32 1024³ GEMM (HIP, MI300X): ~20 min end to end at 4.3x, versus
+~107 min at 5.2x for a default budget-3 run.
 
 ### Deep Research Agent / Research phase (NEW, opt-in)
 `dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
