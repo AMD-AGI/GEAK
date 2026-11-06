@@ -173,6 +173,16 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
       return item;
     })),
     runProcess: async opts => {
+      // Before the exact commit apply, the host preserves untracked paths the winner patch names
+      // (none in this canonical source). These are the only search-time Git reads.
+      if (opts.cmd === 'git' && !captured && ['ls-files', 'apply'].includes(opts.args[2])) {
+        assert.equal(commits, 0, 'obstructions are inspected before the commit role');
+        assert.deepEqual(opts.args, opts.args[2] === 'ls-files'
+          ? ['-C', '/canonical', 'ls-files', '--others', '-z']
+          : ['-C', '/canonical', 'apply', '--numstat', '-z', '--', '/eval/round_1/engineer_1/best_patch.diff']);
+        return {status: 'completed', code: 0, group_cleared: true,
+          stdout: opts.args[2] === 'ls-files' ? '' : '1\t1\tk.py\0'};
+      }
       if (opts.cmd === 'git') {
         assert.equal(captured, true, 'freeze the patch from the host-captured final source');
         assert.equal(cumulative, undefined, 'freeze patch bytes before Report');
@@ -195,6 +205,10 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
         hostPatch = opts.input;
         hostPatchWrites++;
         return {status: 'completed', code: 0, group_cleared: true, stdout: ''};
+      }
+      if (opts.cmd === 'cat') { // Every host write is read back before it counts.
+        assert.deepEqual(opts.args, ['--', hostPatchPath]);
+        return {status: 'completed', code: 0, group_cleared: true, stdout: hostPatch};
       }
       if (opts.args.includes('--capture-selection')) {
         canonicalCaptures++;
@@ -413,7 +427,9 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
   assert.equal(patchReads, 1, 'Report and Director never trigger a recapture');
   assert.equal(hostPatchWrites, 3);
   assert.equal(hostPatch, capturedPatch);
-  assert.equal(kbWrites, finalHostFailure || finalReaderReject || finalNoGain || director === 'veto' ? 0 : 1);
+  // Promotion and learning require an accepted Director review; an unavailable review withholds them too.
+  const withheld = director === 'veto' || director === 'unavailable';
+  assert.equal(kbWrites, finalHostFailure || finalReaderReject || finalNoGain || withheld ? 0 : 1);
   assert.equal(value.director_review_status, director === 'unavailable' ? 'unavailable' : 'returned');
   if (bounded) assert.deepEqual(deadlines, [9700, 9900, 9990]);
   assert.equal(value.final_selection.candidate_id, selectedCandidate);
@@ -455,7 +471,9 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
     assert.equal(value.final_patch_sha256, null);
     return;
   }
-  assert.equal(value.final_speedup, originalFinal ? 1 : 1.55); // checked native result, never Director's 999.
+  assert.equal(value.primary_speedup, originalFinal ? 1 : 1.55); // checked native result, never Director's 999.
+  // A final that is not accepted keeps its checked primary but reports no final speedup.
+  assert.equal(value.final_speedup, value.validation_status === 'accepted' ? value.primary_speedup : null);
   assert.equal(value.development_geomean_speedup, originalFinal ? 1 : 1.45, 'final all-case secondary is retained');
   if (originalFinal) {
     assert.equal(value.external_measurement_valid, true, 'ORIGINAL with an empty patch is a valid final measurement');
@@ -466,11 +484,12 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
   assert.equal(value.workload_aligned, false);
   assert.equal(value.budget_used, bounded ? 0 : 3);
   assert.equal(value.stopped_by, 'budget');
-  assert.equal(value.validation_status, director === 'veto' ? 'flagged' : finalNoGain ? 'no_improvement' : 'accepted');
-  assert.equal(value.outcome, finalNoGain || director === 'veto' ? 'no_improvement' : 'improved');
-  assert.equal(value.final_patch, finalNoGain || director === 'veto' ? '' : hostPatchPath);
+  assert.equal(value.validation_status, director === 'veto' ? 'flagged' : director === 'unavailable' ? 'unavailable'
+    : finalNoGain ? 'no_improvement' : 'accepted');
+  assert.equal(value.outcome, finalNoGain || withheld ? 'no_improvement' : 'improved');
+  assert.equal(value.final_patch, finalNoGain || withheld ? '' : hostPatchPath);
   assert.equal(value.patch_sha256, patchHash, 'retain the measured patch identity even on no-gain or veto');
-  assert.equal(value.final_patch_sha256, finalNoGain || director === 'veto' ? null : patchHash);
+  assert.equal(value.final_patch_sha256, finalNoGain || withheld ? null : patchHash);
   if (warm) {
     // Adopted, reported and divided on native primary (1.4 > 1); geomean stays diagnostic.
     assert.equal(value.warm_start.adopted, true);

@@ -7,12 +7,28 @@
 
 const assert = require('assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
 
 const lane = path.resolve(__dirname, '..', 'kernel_lane.js');
 const body = fs.readFileSync(lane, 'utf8').replace(/^export const meta/m, 'const meta');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+// Native delivery runs host Git custody, so each capture gets a real temporary canonical repository
+// and the host runProcess, as in test_greedy_parity.js. Prompts are compared with that root normalized.
+const hostEnv = { ...process.env, GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@localhost',
+  GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@localhost',
+  GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' };
+const spawn = (cmd, args, options = {}) =>
+  spawnSync(cmd, args, { encoding: 'utf8', timeout: 10000, env: hostEnv, ...options });
+const sh = (cmd, args) => {
+  const r = spawn(cmd, args);
+  assert.equal(r.status, 0, `${cmd} ${args.join(' ')}: ${r.error || r.stderr}`);
+  return r.stdout;
+};
+const field = (prompt, key) => (prompt.split('\n').find((line) => line.startsWith(`- ${key}: `)) || '')
+  .slice(key.length + 4);
 const evidence = ['hardware', 'roofline', 'profile', 'compiler-ir', 'assembly'].map((name) =>
   `/cpu-fixture/evidence/${name}.md sha256=${hash(`fake ${name} evidence`)}`);
 const skill = `/cpu-fixture/skills/kernel-hardware-evidence/SKILL.md sha256=${hash('fake skill')}`;
@@ -76,15 +92,36 @@ function answer(label) {
 
 async function capture(source, extraArgs = {}) {
   const calls = [];
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-task-context-'));
+  const canonical = path.join(temp, 'eval', 'workspace');
+  fs.mkdirSync(canonical, { recursive: true });
+  fs.writeFileSync(path.join(canonical, 'kernel.py'), 'VALUE = 0\n');
+  for (const args of [['init', '-q'], ['add', '-A'], ['commit', '-qm', 'ORIGINAL']]) sh('git', ['-C', canonical, ...args]);
   const globals = {
     args: { kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
-      budget: 4, deadline_epoch: 100000, max_forced_replans: 1,
+      budget: 4, deadline_epoch: 100000, max_forced_replans: 1, editable_source_paths: ['kernel.py'],
       agent_timeout_ms: 0, agent_retries: 1, ...extraArgs },
     phase: () => {}, log: () => {},
     workflow: async () => { throw new Error('Unexpected nested workflow'); },
     agent: async (prompt, options) => {
-      calls.push({ label: options.label, prompt: String(prompt) });
-      return JSON.parse(JSON.stringify(answer(options.label)));
+      const text = String(prompt);
+      calls.push({ label: options.label, prompt: text.split(temp).join('/cpu-fixture') });
+      if (/^(eng |deep )/.test(options.label)) { // Engineers leave a real candidate patch.
+        const workspace = field(text, 'KERNEL_PATH');
+        fs.mkdirSync(path.dirname(workspace), { recursive: true });
+        sh('git', ['clone', '-q', canonical, workspace]);
+        fs.writeFileSync(path.join(workspace, 'kernel.py'), `VALUE = ${JSON.stringify(options.label)}\n`);
+        fs.writeFileSync(path.join(field(text, 'OUTPUT_DIR'), 'best_patch.diff'),
+          sh('git', ['-C', workspace, 'diff', '--binary']));
+      }
+      if (options.label.startsWith('commit ')) sh('bash', ['-e', '-c', text.match(/```bash\n([\s\S]*?)\n```/)[1]]);
+      return JSON.parse(JSON.stringify(answer(options.label)).split('/cpu-fixture').join(temp));
+    },
+    runProcess: async (request) => {
+      const r = spawn(request.cmd, request.args, { cwd: request.cwd, input: request.input,
+        env: { ...hostEnv, ...(request.env || {}) } });
+      return { status: r.error ? 'failed' : 'completed', code: r.status, stdout: r.stdout || '',
+        stderr: r.stderr || '', group_cleared: true, strays_killed: false, stdio_held: false };
     },
     parallel: async (thunks) => Promise.all(thunks.map((thunk) => thunk())),
     // Exercise the real engineer -> verifier stages; an empty pipeline would miss both roles.
@@ -95,10 +132,14 @@ async function capture(source, extraArgs = {}) {
     })),
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
   };
-  const run = new Function(...Object.keys(globals), `return (async () => { ${source} })();`);
-  const result = await run(...Object.values(globals));
-  assert.equal(result.stopped_by, 'budget', 'fixture must exercise both optimization rounds');
-  return calls;
+  try {
+    const run = new Function(...Object.keys(globals), `return (async () => { ${source} })();`);
+    const result = await run(...Object.values(globals));
+    assert.equal(result.stopped_by, 'budget', 'fixture must exercise both optimization rounds');
+    return calls;
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 }
 
 (async () => {

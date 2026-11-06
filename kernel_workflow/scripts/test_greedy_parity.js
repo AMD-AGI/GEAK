@@ -8,7 +8,7 @@
 //     right before phase('Report') (round, dispatched, cumulative, bestPerCase, finalWinner,
 //     roundsCommitted, history, citations, profileSummary, deadlineHit, forcedReplans, kbCapBound)
 // and compares its SHA256 digest with test_greedy_parity.golden.json, derived from records produced by
-// the ordinary loop at the `evo` base (3619cd04). Reviewed instruction and product-status
+// the ordinary loop of the reviewed lane (its source_lane_sha256). Reviewed instruction and product-status
 // changes update prompt hashes; reviewed schema changes update option hashes. Calls, state and
 // results remain checked.
 // The two captures are a read-only __probe() call
@@ -16,7 +16,7 @@
 //
 //   (a) improve_then_budget        integrate + three commits (incl. a deep_explore round), storage reclaim, budget end
 //   (b) warmstart_then_no_improve  warm-start adopt feeds the loop's start state; two stalls -> no_improve
-//   (c) planner_filter_stop        gfx1201/unknown peaks: roofline directions filtered -> planner stop reason
+//   (c) planner_filter_stop        gfx1201/unknown peaks: roofline directions are still dispatched -> tech_lead_stop
 //   (d) deadline_mid_loop          a committed round, then the clock passes the deadline before round 2
 //   (e) forced_replan_failures     refused stops, failed/missing/invalid candidates, replan cap -> tech_lead_stop
 //   (f) citations_kb_cap           learned-card citations, KB cap strip + forced cold direction, kb:cite
@@ -96,7 +96,7 @@ function build(body, argsObj, answer, observeCall, host = {}) {
 // and host runtime because native delivery requires custody and an independently exported patch.
 const EVAL = '/cpu-fixture/eval';
 const BASE_ARGS = { kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
-  agent_timeout_ms: 0, agent_retries: 1 };
+  editable_source_paths: ['k.py'], agent_timeout_ms: 0, agent_retries: 1 };
 const perCase = (s) => [{ name: 'c1', baseline_ms: 2, optimized_ms: +(2 / s).toFixed(4), speedup: s },
                         { name: 'c2', baseline_ms: 4, optimized_ms: +(4 / s).toFixed(4), speedup: s }];
 const verified = (v) => ({ status: 'verified', correctness: 'pass', verified_geomean: v,
@@ -178,7 +178,8 @@ const SCENARIOS = [
       r2: { stop: false, directions: [dir('a2', 'algorithm')] },
       r3: { stop: false, directions: [dir('a3', 'deep_explore', { expected_speedup: 2.5 })] },
     },
-    verify: { a1: 1.3, b1: 1.2, a2: 1.8, a3: 2.2 },
+    // An integrated source is admitted only after its own independent verification.
+    verify: { a1: 1.3, b1: 1.2, a2: 1.8, a3: 2.2, r1_integrated: 1.5 },
     integrate: { r1: { attempted: true, conclusion: 'improved',
       best: { geomean: 1.5, arithmetic: 1.52, per_case: perCase(1.5), patch_file: EVAL + '/round_1/integrate/best.diff' } } } },
 
@@ -238,8 +239,9 @@ async function runScenario(body, sc, observeCall) {
     : Array.isArray(value) ? value.map(v => mapStrings(v, transform))
     : value && typeof value === 'object'
       ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, transform)])) : value;
+  // Paths derived from the checkout (exp/, perf_knowledge/, kb stores) must not enter the digests.
   const normalize = value => mapStrings(value, s => s.split(workflow).join(BASE_ARGS.workflow_dir)
-    .split(temp).join('/cpu-fixture'));
+    .split(temp).join('/cpu-fixture').split(ROOT).join('/cpu-fixture'));
   const actual = value => mapStrings(value, s => s.split(BASE_ARGS.workflow_dir).join(workflow)
     .split('/cpu-fixture').join(temp));
   // Git objects and receipts are reproducible; normalization only removes scratch/check-out paths.

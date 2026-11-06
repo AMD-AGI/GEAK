@@ -109,10 +109,12 @@ ok(!maySkip({ status: 'partial', measurement_valid: true, development_geomean_sp
 ok(maySkip({ status: 'partial', measurement_valid: true, external_measurement_valid: true }, 1,
            () => 1, external), 'external mode: a checked measured no-op can still skip Verify');
 const verifiedFilter = src.match(/const verified = clean\.filter\(([\s\S]*?)\);/);
-ok(!!verifiedFilter, 'the complete verified filter is available for a behavioral check');
-if (verifiedFilter) {
+// The filter applies the round's named qualification predicate; replay both real statements.
+const qualifiedPredicate = src.match(/const isQualified = [\s\S]*?;\n/);
+ok(!!verifiedFilter && !!qualifiedPredicate, 'the complete verified filter is available for a behavioral check');
+if (verifiedFilter && qualifiedPredicate) {
   const filter = new Function('clean', 'evo', 'CANDIDATE_FLOOR', 'primSpeedup', 'says',
-    `${verifiedFilter[0]} return verified;`);
+    `${qualifiedPredicate[0]}${verifiedFilter[0]} return verified;`);
   const candidate = speed => ({ver: {status: 'verified', correctness: 'pass', verified_geomean: speed}});
   const candidates = [candidate(0.8), candidate(1), candidate(1.2)];
   const admitted = (evo, floor) => filter(candidates, evo, floor,

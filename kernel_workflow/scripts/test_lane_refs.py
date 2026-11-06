@@ -19,8 +19,12 @@ WF = os.path.dirname(HERE)
 
 
 def declared(path):
-    return set(re.findall(r'^\s*(?:const|let|var)\s+([A-Z][A-Z0-9_]{2,})\s*=',
-                          open(path).read(), re.M))
+    src = open(path).read()
+    names = set(re.findall(r'^\s*(?:const|let|var)\s+([A-Z][A-Z0-9_]{2,})\s*=', src, re.M))
+    # Later declarators of a one-line statement: `const sources = [], PINS = new Map();`
+    for statement in re.findall(r'^\s*(?:const|let|var)\s+([^;\n]*);', src, re.M):
+        names.update(re.findall(r',\s*([A-Z][A-Z0-9_]{2,})\s*=', statement))
+    return names
 
 
 _REGEX_OK_AFTER = set("(,=:[!&|?{};+-*%~^<>") | {""}

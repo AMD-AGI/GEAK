@@ -43,7 +43,7 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   setProcessDeadline.secondsLeft = () => activeDeadline - currentEpoch;
   const g = {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: repeatedFailures ? 5 : failThenSucceed ? 2 : successfulRounds + 1,
-      max_no_improve: 2,
+      max_no_improve: 2, editable_source_paths: ['k.py'],
       agent_timeout_ms: 45000, agent_retries: 1,
       warm_start: 'off', update_experience: 'off', llm_stats: 'false',
       ...(bounded ? {deadline_epoch: total, search_reserve_s: 5100,
