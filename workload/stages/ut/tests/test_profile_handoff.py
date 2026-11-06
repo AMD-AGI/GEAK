@@ -255,7 +255,7 @@ class HandoffTests(unittest.TestCase):
             rows.append({'label':name,'task_dir':str(task),'ut_family':'gemm','planned_cases':{'total':2}})
         H.write(self.ut/'task_plan.json',{'tasks':rows})
         p=subprocess.run([sys.executable,str(UT/'kernel-ut/scripts/ut_wave.py'),'start',
-            '--eval-dir',str(self.ut),'--runner',str(runner),'--backend','local','--gpus','0,1',
+            '--eval-dir',str(self.ut),'--runner',str(runner),'--backend','local',
             '--foreground','--tick-sec','1','--lane-sec','120'],
             capture_output=True,text=True,timeout=30,
             env=dict(os.environ,KERNEL_EXTRACT_LOCK_DIR=str(self.root/'test_gpu_locks'),
@@ -268,6 +268,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn('--validation-mode correctness',prompt)
         self.assertIn('GPU MODE: on-demand',prompt)
         self.assertTrue(all(r['gpus']==[] for r in summary.values()))
+        self.assertEqual(H.read(self.ut/'ut_wave/wave.json')['gpus'],[0])
         self.assertFalse((self.ut/'tasks/a/run/timing.trace').exists())
 
 

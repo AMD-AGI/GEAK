@@ -140,12 +140,26 @@ def task_rows(eval_dir, only=None):
     return rows
 
 
+def parse_gpu_ids(value, source):
+    values = value if isinstance(value, list) else str(value).split(',')
+    if not values or any(not str(v).strip().isascii() or not str(v).strip().isdigit() for v in values):
+        raise SystemExit('ut_wave: %s must contain nonnegative physical GPU IDs' % source)
+    ids = [int(v) for v in values]
+    if len(set(ids)) != len(ids):
+        raise SystemExit('ut_wave: %s contains duplicate GPU IDs' % source)
+    return ids
+
+
 def deployment_gpus(eval_dir):
     for path in (os.path.join(eval_dir, "serving.json"),
                  os.path.join(os.path.dirname(eval_dir.rstrip("/")), "serving.json")):
+        if not os.path.exists(path):
+            continue
         cfg = load(path)
-        if cfg and cfg.get("gpus"):
-            return [int(g) for g in str(cfg["gpus"]).split(",") if g.strip() != ""]
+        if not isinstance(cfg, dict):
+            raise SystemExit('ut_wave: cannot read workload GPU allocation from %s' % path)
+        if 'gpus' in cfg:
+            return parse_gpu_ids(cfg['gpus'], path + ':gpus')
     return None
 
 
@@ -715,14 +729,15 @@ def tail(a):
 # ----------------------------------------------------------------------------- CLI
 def cmd_plan(a, quiet=False):
     eval_dir = os.path.abspath(a.eval_dir)
-    gpus = ([int(g) for g in a.gpus.split(",") if g.strip() != ""] if a.gpus
-            else deployment_gpus(eval_dir))
+    workload_gpus = deployment_gpus(eval_dir)
+    gpus = parse_gpu_ids(a.gpus, '--gpus') if a.gpus is not None else workload_gpus
     if not gpus:
         raise SystemExit("ut_wave: no --gpus and no `gpus` in serving.json")
-    if len(set(gpus)) != len(gpus) or min(gpus) < 0:
-        raise SystemExit('ut_wave: GPUs must be distinct nonnegative physical IDs')
+    if workload_gpus is not None and not set(gpus).issubset(workload_gpus):
+        raise SystemExit('ut_wave: requested GPUs %s exceed workload serving.json allocation %s; '
+                         '--gpus may only select a subset' % (gpus, workload_gpus))
     allowed = os.environ.get('GEAK_GPU_ALLOWED')
-    if allowed and not set(gpus).issubset(int(x) for x in allowed.split(',')):
+    if allowed and not set(gpus).issubset(parse_gpu_ids(allowed, 'GEAK_GPU_ALLOWED')):
         raise SystemExit('ut_wave: --gpus exceeds GEAK_GPU_ALLOWED')
     mask = os.environ.get('ROCR_VISIBLE_DEVICES')
     if a.gpu_mode == 'on-demand' and mask:
@@ -896,7 +911,7 @@ def main(argv=None):
     for name in ("plan", "start"):
         p = sub.add_parser(name)
         p.add_argument("--eval-dir", required=True)
-        p.add_argument("--gpus", default=None, help="physical GPU ids; default serving.json `gpus`")
+        p.add_argument("--gpus", default=None, help="physical GPU IDs; default workload serving.json `gpus`; may only narrow that set")
         p.add_argument("--tasks", default=None, help="comma list of task labels (default all)")
         p.add_argument("--force", action="store_true", help="include tasks that already pass")
         p.add_argument("--max-gpus-per-task", type=int, default=4, help='spare GPU cap in legacy --gpu-mode lane')

@@ -1,16 +1,16 @@
 {
   "file_count": 5,
   "files": {
-    "SKILL.md": "72716393ac293e4e83ef58d85924f6bc896015817be968adc14c328b5d53d6d5",
+    "SKILL.md": "b1469f7274f0bf7dc78ce926d2590787594cfe81a9a9700c3f52cd53b6849ef0",
     "references": "symlink:../../profile/kernel-extract/references",
     "scripts": "symlink:../../profile/kernel-extract/scripts",
     "shared": "symlink:../../profile/kernel-extract/shared",
     "ut_contracts": "symlink:../../profile/kernel-extract/ut_contracts"
   },
   "modified_from_origin": false,
-  "note": "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
+  "note": "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
   "origin": "Local GEAK split profile/UT workflow",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "e2ba4a9ecab6ab8bdb33c0fa730277075a2e57a5e59f56cea2dd687b5b0d2c59"
+  "tree_sha256": "7704b9d14c917c1bc678c3300eb4ce2310f84bd8c768040bf757a3dcc129a661"
 }

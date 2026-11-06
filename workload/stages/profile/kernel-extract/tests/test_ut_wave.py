@@ -14,6 +14,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -236,6 +237,7 @@ class WaveTest(unittest.TestCase):
         self.assertEqual(self.planned(), ["a"])
 
     def test_on_demand_authors_overlap_without_gpu_and_request_only_needed_cards(self):
+        W.save(os.path.join(self.eval, 'serving.json'), {'gpus': '3,7'})
         self.tasks([('a', 'gemm', 10, 1, 'ok'), ('b', 'gemm', 10, 1, 'ok'),
                     ('ar', 'all_reduce', 10, 2, 'ok')])
         res, out = self.wave('--gpu-mode', 'on-demand', '--gpus', '3,7', '--timing', 'none')
@@ -260,6 +262,7 @@ class WaveTest(unittest.TestCase):
             self.assertFalse(Path(self.eval, 'tasks', req['task'], 'run', 'timing.trace').exists())
 
     def test_on_demand_timing_tail_and_retry(self):
+        W.save(os.path.join(self.eval, 'serving.json'), {'gpus': '2,5'})
         self.tasks([('a', 'gemm', 10, 1, 'ok'), ('b', 'gemm', 10, 1, 'second')])
         res, out = self.wave('--gpu-mode', 'on-demand', '--gpus', '2,5', '--timing-workers', '2')
         self.assertEqual({r['status'] for r in res.values()}, {'passed'}, out)
@@ -334,6 +337,50 @@ if not os.path.exists(once):
             self.assertEqual(devices, ['/dev/kfd', '/dev/dri/renderD152', '/dev/dri/renderD184'])
             self.assertIn('GPU_IDS=0,1', gpu)
             self.assertNotIn('ROCR_VISIBLE_DEVICES=0,1,2,3', gpu)
+
+    def pool_plan(self, gpus=None, mode='on-demand'):
+        args = SimpleNamespace(eval_dir=self.eval, gpus=gpus, gpu_mode=mode,
+                               tasks=None, force=False, timing='none', max_gpus_per_task=4)
+        return W.cmd_plan(args, quiet=True)[1]
+
+    def test_gpu_pool_inherits_workload_and_can_only_be_narrowed(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        for mode in ('on-demand', 'lane'):
+            for allowed in ('', '0,1,2,3,4,5,6,7'):
+                with self.subTest(mode=mode, allowed=allowed), mock.patch.dict(
+                        os.environ, {'GEAK_GPU_ALLOWED': allowed, 'ROCR_VISIBLE_DEVICES': ''}):
+                    self.assertEqual(self.pool_plan(mode=mode), [0, 1, 2, 3])
+                    self.assertEqual(self.pool_plan('1,3', mode), [1, 3])
+                    for gpus in ('0,1,2,3,4', '4,5', '0,7'):
+                        with self.assertRaisesRegex(SystemExit, 'exceed workload'):
+                            self.pool_plan(gpus, mode)
+
+    def test_scheduler_allocation_can_further_restrict_workload_pool(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '0,1', 'ROCR_VISIBLE_DEVICES': ''}):
+            self.assertEqual(self.pool_plan('0'), [0])
+            with self.assertRaisesRegex(SystemExit, 'GEAK_GPU_ALLOWED'):
+                self.pool_plan('2')
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '', 'ROCR_VISIBLE_DEVICES': '2,3'}):
+            self.assertEqual(self.pool_plan('2'), [2])
+            with self.assertRaisesRegex(SystemExit, 'inherited ROCR'):
+                self.pool_plan('1')
+
+    def test_parent_workload_and_gpu_zero_still_bound_explicit_pool(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        Path(self.eval, 'serving.json').unlink()
+        W.save(os.path.join(self.tmp, 'serving.json'), {'gpus': 0})
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '', 'ROCR_VISIBLE_DEVICES': ''}):
+            self.assertEqual(self.pool_plan(), [0])
+            with self.assertRaisesRegex(SystemExit, 'exceed workload'):
+                self.pool_plan('1')
+
+    def test_invalid_workload_allocation_cannot_be_bypassed_with_explicit_gpus(self):
+        for value in ('', None, '0,0', '0,,1', [], 'bad'):
+            with self.subTest(value=value):
+                W.save(os.path.join(self.eval, 'serving.json'), {'gpus': value})
+                with self.assertRaisesRegex(SystemExit, 'serving.json'):
+                    self.pool_plan('0')
 
 if __name__ == "__main__":
     unittest.main()

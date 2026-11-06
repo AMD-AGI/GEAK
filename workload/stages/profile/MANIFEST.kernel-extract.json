@@ -1,7 +1,7 @@
 {
   "file_count": 116,
   "files": {
-    "PROVENANCE.json": "d922b98ca124ee63af0389745888fcb94c6c9a839b2a51269b7066f80d955c45",
+    "PROVENANCE.json": "051541dcbb543e71f0661578f7be0622b0aec35a97887e269b3ffa0bb9691a4f",
     "SKILL.md": "13160c5c711648a3d7c183818f195bc614573013704cd952086719655b7322ca",
     "references/capture.md": "f0dabdade2fbcf889ab714716fbb6514d516de554e046e68dab144c36d06da07",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -13,7 +13,7 @@
     "references/multi-config-ut-merge.md": "09f9e9f0fad260025f10be98cd907fe0ae04a2513d7b60e1b39d9cde03989453",
     "references/pipeline-handoff.md": "de780adc96ab24daf31b260058f38d55e1db4d016ca59bb2a10df2bcb46c30cb",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
-    "references/setup.md": "5ed8fbd52a360883cd3d5ce05f7e8cdfaa4925cb0c920d16082ab1d4209b98ad",
+    "references/setup.md": "20b1e8c544685eba4dcdc57ba0aa2e7668264a1e8815199ac7a785290a9191ca",
     "references/source-delivery-records.md": "36e77c86c33263f1746eb1209af666a3797519ac341d7c06c01c04f854600a6a",
     "references/source-extraction.md": "ee4e841dd5030014faee5519f3ac5b4728ee950aa77cb674a37ccf6ed4abec05",
     "references/task-authoring.md": "4ea12b42d7c37bc1f93bcc402ad54afdd00ec6b5289c7750e08aa2a8e3ba6c70",
@@ -42,7 +42,7 @@
     "scripts/source_map.py": "daa119b7b8c4a680e0d064cfa51727791ae07c810d305a81b35a7fc36bb05b64",
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
     "scripts/ut_gpu_queue.py": "eb5c2cdbee8770465bb0695a2c26c24e3fc7c3f418f3d7a46f7b31dd597a6f28",
-    "scripts/ut_wave.py": "3929620c4110b93850a0e8ba8d150f0b6c66bccfbafab0a8f786303cdc49682b",
+    "scripts/ut_wave.py": "8ab451ff596d6eb8b2960d056c9989714a2b68339c2f55d5c7bb784b908078e3",
     "shared/capture_shapes.py": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
     "shared/compile_watch.py": "b1fe2acab9157b8c2c45926ac89613187a2ba80c55e09114946f918947e4bb2e",
     "shared/delivery_contract.mjs": "3068cfb994196f61ce15a00272ba6c244673c1d98d4a16374383c74cc563f412",
@@ -85,7 +85,7 @@
     "tests/test_run_points_graph_hidden.py": "5990d5dd84515644f731d6dcadce78dc421167cc65a36630b59a0abba58b70b5",
     "tests/test_sampling_pipeline.py": "49f0cae470abcbd4ac0b97bd5a464d12180743a8c89bdf703c15ab567d102500",
     "tests/test_ut_gpu_queue.py": "d42339c0ccc1d97c629316f7432a5c2f4e7057932242e62f483c97366826520d",
-    "tests/test_ut_wave.py": "0ab2f35efb11b1bbf2fbed17874254acfebb756a61a5fa67b0b46b650b478182",
+    "tests/test_ut_wave.py": "134362be50745e814df4c9f41c7a50473413abf8109cad3e2c13714731e8f8d1",
     "ut_contracts/README.md": "c155041c97638be16dd8bb98fc4b86aab4fdbd2b4a36a4a651dd9b9005473dac",
     "ut_contracts/families/act_mul.json": "8c7d3b8bf920796b0f2ad28213de73463c4cfe4c607dbf37b8ba08b4717ff0d0",
     "ut_contracts/families/all_reduce.json": "30215dedd2af7446669f72aae9364251be8b34c011ea288fa85a700f93dcd2a8",
@@ -119,9 +119,9 @@
     "ut_contracts/ut_driver.py": "44c0022e8c2a2ab4447521e9afb56d67503eb4b7ac1e19f9095e23d0ca4d1d25"
   },
   "modified_from_origin": true,
-  "note": "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
+  "note": "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "d4f58bb02d3b11cef57fbe9b4657a759848cb6838a7acb29785670a589927394"
+  "tree_sha256": "52d6993b3eab846c072ae3fed79387dfb2caac655411abd563b6697338edf84d"
 }

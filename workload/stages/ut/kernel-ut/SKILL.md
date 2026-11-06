@@ -78,6 +78,9 @@ Use one CPU author lane per task, with one writer per task directory. The defaul
 `--gpu-mode on-demand` borrows GPUs only for validation commands. Start the wave on
 the allocated host without holding an outer `gpu_lock_set.py`/campaign pool lock:
 the host broker uses those same lock files for each command.
+The GPU pool inherits the workload's `serving.json:gpus`. `--gpus` may narrow this
+set, but cannot add other devices. An idle GPU outside the workload allocation is
+not available to UT agents; `gpu --count N` only requests devices from this pool.
 
 ```bash
 python3 "$SKILL_ROOT/scripts/ut_wave.py" plan --eval-dir "$OUT" --gpus <allocated-ids>
