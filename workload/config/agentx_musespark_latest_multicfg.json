@@ -71,8 +71,17 @@
         "serving_env": null,
         "point_serving_env": {},
         "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file.",
-        "agent_budget_sec": 36000,
-        "_note_agent_budget_sec": "overlay-ab is an agent session; 2 representative points x (stock control + candidate) x repeats 3 at ~80 min per leg is ~10 h, so the 4 h agent default would stop it half way."
+        "agent_budget_sec": 54000,
+        "_note_agent_budget_sec": "10 points x one CI-length leg (~25 min server start + 60 min) is ~14 h; the agent session is capped at 15 h. A shorter allocation resumes: measured points are kept.",
+        "reference": "ci",
+        "points": "all",
+        "ci": {
+          "hf_hub": "/shared_nfs/yueliu14/muse_spark_opt_1021/e2e_ab/hf_hub",
+          "model_mounts": "/mnt/hf_cache:/mnt/hf_cache:ro",
+          "agentx_bin": "/shared_nfs/yueliu14/musespark_c8_opt_1023_hongtaom/e2e/client-venv/bin/agentx",
+          "inferencex_path": "/shared_nfs/ethany/home/DS4P_E2E_1021/rig/InferenceX/inferencex-e2e"
+        },
+        "_note_reference": "Against each point's official CI number, measured with that point's own CI launch (ci_point_leg.sh): an A/B is admitted only with an ALIGNED alignment.json. points=all measures every adopted point, each EP group's low/mid/high concurrency first."
       }
     },
     "roofline": {

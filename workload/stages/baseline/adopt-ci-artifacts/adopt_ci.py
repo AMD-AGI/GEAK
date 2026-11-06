@@ -554,7 +554,23 @@ def main():
             bs = sorted(bs, key=lambda b: b["config"]["concurrency"])
             rep += sorted({bs[0]["point_id"], bs[-1]["point_id"]},
                           key=lambda p: [b["point_id"] for b in bs].index(p))
+    # The order applyback measures in when it measures more than the two ends: every group's
+    # lowest, middle and highest concurrency first (a curve's shape before its detail), then
+    # the rest of each group ascending. params.measure_order overrides it.
+    order = params.get("measure_order")
+    if not order:
+        first, rest = [], []
+        for g, bs in sorted(groups.items()):
+            ids = [b["point_id"] for b in sorted(bs, key=lambda b: b["config"]["concurrency"])]
+            pick = [ids[0], ids[len(ids) // 2], ids[-1]] if len(ids) > 2 else ids
+            pick = list(dict.fromkeys(pick))
+            first += pick
+            rest += [i for i in ids if i not in pick]
+        order = first + rest
     known = {b["point_id"] for b in points}
+    if set(order) - known:
+        return emit("blocked", notes="measure_order points %s are not among %s"
+                    % (sorted(set(order) - known), sorted(known)))
     if set(rep) - known:
         return emit("blocked", notes="representative points %s are not among %s"
                     % (sorted(set(rep) - known), sorted(known)))
@@ -590,7 +606,7 @@ def main():
                groups={g: [b["point_id"] for b in sorted(bs, key=lambda b: b["config"]["concurrency"])]
                        for g, bs in groups.items()},
                group_by=group_by, split_on=split_on, launch_diff=launch_diff,
-               representative=rep, resolution=resolution,
+               representative=rep, measure_order=order, resolution=resolution,
                note="top-level throughput/config are the first representative point's; every "
                     "point's own baseline is under points/<pid>/baseline.json")
     json.dump(top, open(os.path.join(out, "baseline.json"), "w"), indent=1)

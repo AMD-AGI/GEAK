@@ -126,7 +126,12 @@ def main():
     top = read_json(os.path.join(run_root, "baseline", "out", "baseline.json"))
     if top.get("multi_config") and top.get("representative") \
             and not os.environ.get("APPLYBACK_POINT"):
-        pids = list(top["representative"])
+        # params.points: "representative" (default: each group's two ends) or "all"
+        # (baseline measure_order: each group's low/mid/high first, then the rest)
+        if params.get("points") == "all" and top.get("measure_order"):
+            pids = list(top["measure_order"])
+        else:
+            pids = list(top["representative"])
         for pid in pids:
             pout = os.path.join(out, "points", pid)
             os.makedirs(pout, exist_ok=True)
@@ -206,7 +211,25 @@ def main():
     if "measured" in historical and historical["measured"] is not True:
         return fail("the baseline is not a measured receipt; complete the baseline stage "
                     "before an A/B", status="blocked")
-    base = summary.get("stock_control")
+    if (params.get("reference") or summary.get("reference")) == "ci":
+        # Against the official CI number: admissible only if this leg launched exactly what
+        # the CI job launched (ci_point_leg.sh -> alignment.json: image, every CI server arg,
+        # every CI env var) and ran its full duration, and the metric is the CI row's own key.
+        align = read_json(os.path.join(out, "alignment.json"))
+        if align.get("aligned") is not True:
+            return fail("reference=ci needs alignment.json with aligned=true: the leg must "
+                        "launch the CI config exactly (image, args, env), or the delta "
+                        "measures the configuration difference", status="blocked")
+        if summary.get("duration_s") and summary.get("ci_duration_s") \
+                and summary["duration_s"] != summary["ci_duration_s"]:
+            return fail("the leg ran %ss against the CI's %ss; a shortened leg is a smoke, "
+                        "not an A/B" % (summary["duration_s"], summary["ci_duration_s"]))
+        ci_key = (historical.get("provenance") or {}).get("throughput_key")
+        base = {"throughput": historical.get("throughput"), "metric_basis": ci_key,
+                "provenance": historical.get("provenance"), "admissible": True,
+                "reference": "ci"}
+    else:
+        base = summary.get("stock_control")
     if not isinstance(base, dict) or base.get("admissible") is not True:
         return fail("bench_summary.json has no admissible fresh stock_control; measure "
                     "the unchanged stack in this A/B before comparing the candidate",
@@ -253,6 +276,9 @@ def main():
         "kernels_applied": len(ops),
         "kernels_skipped": applied.get("skipped", []),
         "stock_control": summary.get("stock_control"),
+        "reference": base.get("reference") or "stock_control",
+        "secondary": summary.get("secondary"),
+        "alignment": "alignment.json" if base.get("reference") == "ci" else None,
     }
     native_p90 = summary.get("native_interactivity_p90") or {}
     if params.get("require_native_interactivity_p90") and native_p90.get("available") is not True:
@@ -281,8 +307,9 @@ def main():
             "native_p90_interactivity_baseline": native_p90["baseline"],
             "native_p90_interactivity_candidate": native_p90["candidate"],
             "native_p90_interactivity_delta_pct": native_p90["delta_pct"]})
-    artifacts = {"ab": "ab.json", "applied": "applied.json", "overlay": "overlay"}
-    for name in ("shadow_check.json", "REPORT.md"):
+    artifacts = {"ab": "ab.json", "applied": "applied.json"}
+    # a per-point leg of a multi-config A/B shares the stage's one overlay
+    for name in ("overlay", "shadow_check.json", "alignment.json", "REPORT.md"):
         if os.path.exists(os.path.join(out, name)):
             artifacts[name.split(".")[0].lower()] = name
     return emit("ok", artifacts=artifacts, metrics=metrics, notes=" ".join(notes))

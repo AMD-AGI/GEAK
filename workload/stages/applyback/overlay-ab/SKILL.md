@@ -155,29 +155,43 @@ baseline separately in this control record; leave the baseline stage's receipt i
 The finalizer uses the fresh control for A/B and keeps the historical baseline alongside
 it. Without a usable fresh control, report `blocked` rather than substituting history.
 
-## Several configs
+## Several configs: against the CI, in the CI's own configuration
 
-With a multi-config baseline (`adopt-ci-artifacts`: `baseline.json` has `multi_config: true`),
-build, prove and smoke the overlay **once**, then measure **each representative point**
-(`baseline.json` `representative`, by default each group's lowest and highest concurrency)
-in its own `$OUT/points/<pid>/`, on a fresh server, with its own stock control:
+With a multi-config baseline (`adopt-ci-artifacts`: `baseline.json` has `multi_config: true`)
+the reference is **the official CI number of each point**, and the only admissible way to
+measure against it is to launch **exactly what the CI job launched** for that point. Set
+`params.reference: "ci"`. Everything runs on this node in the deployment image -- the same
+image optimize built and cold-verified the kernels in -- never on the host's Python:
 
-- the point's deployment: CONC and TP from `baseline/out/points/<pid>/baseline.json`
-  `config`; the launch settings that differ between points (KV offload, speculative
-  decoding, ...) from `params.point_serving_env.<pid>`, else the
-  `baseline/out/points/<pid>/serving_env.sh` the baseline generated from the point's CI
-  recipe, else `params.serving_env`. Export CONC/TP after sourcing the env file so the
-  point's own values win;
-- in `$OUT/points/<pid>/`: `applied.json` and `shadow_check.json` (copies of the
-  top-level ones), and `e2e/bench_summary.json` with that point's candidate and
-  `stock_control`, exactly as section 3 describes for one point.
+1. **Build and prove the overlay once, inside the image.** The binding check imports the target
+   modules, so run `overlay_setup.py check` with the image's interpreter (`docker run --rm
+   --device /dev/kfd --device /dev/dri -v /shared_nfs:/shared_nfs <image> python3 ...`), and run
+   it through `python3 -c "import runpy,sys; ..."` rather than `python3 <task>/overlay_setup.py`:
+   a script's own directory goes first on `sys.path`, and a task directory's `unittest.py` then
+   shadows the stdlib `unittest` and `import sglang` fails. Save `shadow_check.json`.
+2. **Measure each point with `../ci_point_leg.sh <baseline/out/points/<pid>> $OUT/points/<pid>
+   $OUT/overlay`**, in the order `params.points` asks for: `representative` (each group's two
+   ends) or `all` (`baseline.json` `measure_order`: each EP group's lowest, middle and highest
+   concurrency, then the rest). The leg reads the point's `server_logs/logs/config.yaml` --
+   image, every server arg, every server env var, the client's concurrency, duration and AIPERF
+   env -- launches a fresh server container from it with the overlay as `PYTHONPATH` (the only
+   difference), writes `alignment.json` from `docker inspect` of what actually runs
+   (`../ci_config.py align`) and stops unless it is ALIGNED, checks a correctness probe, runs the
+   CI's `aiperf profile` argv through the AgentX harness, and turns the export into the CI row
+   with InferenceX's own `process_agentic_result` (`../ci_result.py`) -> `e2e/bench_summary.json`.
+   Its inputs are `params.ci` (`hf_hub`, `model_mounts`, `agentx_bin`, `inferencex_path`),
+   exported as `CI_HF_HUB`, `CI_MODEL_MOUNTS`, `AGENTX_BIN`, `INFERENCEX_PATH`.
+3. Copy `applied.json` and `shadow_check.json` into each `$OUT/points/<pid>/`. Points measured
+   by an earlier session (`result.json` `ok`) are kept, not re-measured.
 
-The finalizer judges every point against its own baseline and folds them
-(`../aggregate_points.py`): any regression makes the verdict `regression`, a gain needs a
-gain somewhere and no regression, a point without an A/B makes it `incomplete`. The
-top-level `e2e_delta_pct` is the geometric mean over points and says so; the per-point
-deltas are the result. A point's historical reference is the CI runner, not this node, so
-the fresh stock control is what each A/B divides by.
+The finalizer judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
+row's own metric key, refuses a point without an ALIGNED `alignment.json` or with a shortened
+duration, and folds them (`../aggregate_points.py`): any regression makes the verdict
+`regression`, a gain needs a gain somewhere and no regression, a point without an A/B makes it
+`incomplete`. Each point's `ab.json` also carries p90 interactivity and per-GPU total throughput
+from the same row. What remains different from the CI is the node itself (CPU count and host
+memory); `noise_band` has to cover it. Kernels verified only under one EP group are still
+measured under the others -- the correctness probe is their first check there, so say so.
 
 ## 4. Do not grade yourself
 
