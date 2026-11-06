@@ -66,8 +66,11 @@ This writes `task_plan.json` and the family scaffolds: `cases.py`, `meta.json`,
 `unittest.py`, `run/ut_cases.json`, `run/ut_contract.json` and task evidence. Fill only the
 template hooks and case metadata. Generate ordinary values from fixed seeds; retain
 valid structural/routing/page semantics. Do not save large ordinary input/output `.pt`
-fixtures. Shared driver scratch and inline tensors can still be large; report actual
-storage, not a blanket "no tensors saved" claim.
+fixtures. Use the shared template's bounded, private weight cache and the driver's
+batch output handling; do not replace them with suite-wide golden-output files.
+Preserve all cases and draws. Read [temporary tensor lifecycle](ut_contracts/README.md#temporary-tensor-lifecycle)
+for the frozen generation recipe and budgets. Report `ut_report.json.data_handling`;
+one oversized case and inline recorded tensors can still be large.
 
 ## Parallel authoring and validation
 

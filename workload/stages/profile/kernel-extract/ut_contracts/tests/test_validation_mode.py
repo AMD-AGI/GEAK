@@ -5,13 +5,18 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('validation_mode_driver', Path(__file__).parents[1] / 'ut_driver.py')
 driver = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(driver)
+_path = sys.path[:]
+try:
+    spec.loader.exec_module(driver)
+finally:
+    sys.path[:] = _path
 
 
 class ValidationModeTests(unittest.TestCase):

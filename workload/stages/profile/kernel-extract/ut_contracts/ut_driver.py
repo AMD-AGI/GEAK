@@ -51,6 +51,10 @@ mode remains the bare-command default for optimizer callers and also requires ti
 """
 
 import argparse
+from contextlib import contextmanager
+import math
+import selectors
+import signal
 import hashlib
 import importlib.util
 import json
@@ -205,8 +209,8 @@ def gate_inputs(T, a):
     rows, ok = [], True
     for spec in T.random_specs():
         seed = T.cases.case_seed(spec)
-        same, digests = T.U.check_reproducible(lambda g: T.cases.make_args(spec, gen=g), seed, device)
-        args = T.cases.make_args(spec, gen=_gen(torch, device, seed))
+        same, digests, args = T.U.check_reproducible(
+            lambda g: T.cases.make_args(spec, gen=g), seed, device, return_inputs=True)
         lf_ok, lf_bad = T.U.check_layout_facts(T.doc, args, args["_sym"])
         iv_ok, iv_bad = T.U.check_input_values(T.doc, args, args["_sym"])
         rows.append({"sig": spec["sig"], "reproducible": same, "layout_facts": lf_bad,
@@ -265,6 +269,146 @@ def _parallel(items, gpus, fn):
     return out
 
 
+class OracleWorker:
+    """An isolated, immutable-overlay process reused across bounded output batches."""
+    def __init__(self, T, state, job, gpu):
+        serial = state["oracle_worker_starts"] = state.get("oracle_worker_starts", 0) + 1
+        env, self.watch = _watch_env(T, state, job.get("watch") and "worker_%d" % serial)
+        env.update(T.h.gpu_env(gpu))
+        env = dict(os.environ, **env)
+        env["PYTHONPATH"] = os.pathsep.join([job["overlay"]] +
+                                           ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        self.log_path = os.path.join(state["scratch"], "oracle_worker_%d.log" % serial)
+        self.log = open(self.log_path, "wb")
+        try:
+            self.proc = subprocess.Popen([sys.executable, os.path.join(T.dir, "leg_runner.py"),
+                "--task", T.dir, "--mode", "oracle-worker"], env=env, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=self.log, start_new_session=True)
+        except BaseException:
+            self.log.close()
+            raise
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.proc.stdout, selectors.EVENT_READ)
+        self.buffer = b""
+        self.timeout = float(T.mc.get("oracle_timeout", 3600))
+        self.failed = False
+
+    def run(self, job, sigs, output):
+        try:
+            return self._run(job, sigs, output)
+        except BaseException:
+            self.failed = True
+            raise
+
+    def _run(self, job, sigs, output):
+        request = dict(seed=job["seed"], draws=job["draws"], sigs=sigs, out=output)
+        self.proc.stdin.write((json.dumps(request) + "\n").encode())
+        self.proc.stdin.flush()
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                if line.startswith(b"GEAK_ORACLE_BATCH "):
+                    result = json.loads(line[len(b"GEAK_ORACLE_BATCH "):])
+                    if result.get("out") != output:
+                        raise RuntimeError("oracle worker returned a different batch")
+                    self.cache_stats = result.get("weight_cache")
+                    return
+            ready = self.selector.select(max(0, min(1, deadline - time.monotonic())))
+            if ready:
+                chunk = os.read(self.proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                self.buffer = (self.buffer + chunk)[-262144:]
+            elif self.proc.poll() is not None:
+                break
+        with open(self.log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 3000))
+            why = f.read().decode(errors="replace")
+        raise RuntimeError("oracle worker failed or timed out: " + why)
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            # A multi-rank leg can leave children after its leader exits.
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.proc.wait()
+            self.proc.stdout.close()
+            self.selector.close()
+            self.log.close()
+        return self.proc.returncode
+
+
+@contextmanager
+def oracle_workers(T, state):
+    workers = {}
+    state["_oracle_workers"] = workers
+    try:
+        yield
+    finally:
+        errors = []
+        for worker in workers.values():
+            try:
+                code = worker.close()
+                if code != 0 and not worker.failed:
+                    errors.append("oracle worker exited %s after its batch" % code)
+                _register_watch(state, worker.watch)
+                if getattr(worker, "cache_stats", None):
+                    state.setdefault("weight_cache_workers", []).append(worker.cache_stats)
+            except Exception as exc:
+                errors.append(str(exc))
+        state.pop("_oracle_workers", None)
+        if errors and sys.exc_info()[0] is None:
+            raise RuntimeError("; ".join(errors))
+
+
+def oracle_batches(T, draws=1, copies=3):
+    """Bound output accumulation by case count and estimated serialized tensor bytes.
+
+    A single oversized case remains whole (the numerical comparison is not sampled).
+    Its size is reported explicitly; this is an output budget, not a total RAM limit.
+    """
+    budget = int(T.mc.get("oracle_batch_bytes", 256 << 20))
+    limit = int(T.mc.get("oracle_batch_cases", 32))
+    if budget < 1 or limit < 1:
+        raise ValueError("oracle batch budgets must be positive")
+    group, used = [], 0
+    for spec in T.random_specs():
+        try:
+            sym = T.U.symbols_for(T.doc, spec.get("axes") or {})
+            size = sum(math.prod(T.U.shape_of(o, sym)) *
+                       T.U._torch().empty((), dtype=T.U.torch_dtype(T.U.dtype_of(o, sym))).element_size()
+                       for o in T.doc["outputs"].values() if T.U.present(o, sym))
+            size = max(1, size) * draws * copies
+        except (KeyError, ValueError, TypeError):
+            size = budget  # unknown output descriptors conservatively get a singleton
+        if group and (used + size > budget or len(group) >= limit):
+            yield group, used
+            group, used = [], 0
+        group.append(spec["sig"])
+        used += size
+    if group:
+        yield group, used
+
+
+@contextmanager
+def case_batch(T, sigs):
+    previous = T.sig_filter
+    T.sig_filter = set(sigs)
+    try:
+        yield
+    finally:
+        T.sig_filter = previous
+
+
 def _oracles(T, state, jobs):
     """Oracle legs -> one blob per job. A job is {overlay, path, seed, draws, watch}.
 
@@ -272,6 +416,7 @@ def _oracles(T, state, jobs):
     per GPU and all shards of all jobs run concurrently. Draws are seeded per case, so a
     sharded blob is the unsharded blob."""
     torch = T.U._torch()
+    batch_id = state["oracle_batches"] = state.get("oracle_batches", 0) + 1
     sigs = [c["sig"] for c in T.random_specs()]
     gpus = T.gpus or [None]
     k = max(1, min(len(gpus), len(sigs)))
@@ -281,18 +426,36 @@ def _oracles(T, state, jobs):
     def leg(item, gpu):
         j, i = item
         job = jobs[j]
-        env, wpath = _watch_env(T, state, job.get("watch") and "%s.s%d" % (job["watch"], i))
-        env.update(T.h.gpu_env(gpu))
         out = "%s.s%d" % (job["path"], i)
-        T.h._run_leg(T.dir, job["overlay"], "oracle", out=out, seed=job["seed"],
-                     draws=job["draws"], env_extra=env,
-                     sigs=shards[i] if (k > 1 or T.sig_filter is not None) else None)
-        _register_watch(state, wpath)
+        workers = state.get("_oracle_workers")
+        if workers is not None:
+            key = (job["overlay"], job["path"], gpu)
+            if key not in workers:
+                workers[key] = OracleWorker(T, state, job, gpu)
+            workers[key].run(job, shards[i], out)
+        else:
+            env, wpath = _watch_env(T, state, job.get("watch") and "%s.b%d.s%d" % (job["watch"], batch_id, i))
+            env.update(T.h.gpu_env(gpu))
+            T.h._run_leg(T.dir, job["overlay"], "oracle", out=out, seed=job["seed"],
+                         draws=job["draws"], env_extra=env,
+                         sigs=shards[i] if (k > 1 or T.sig_filter is not None) else None)
+            _register_watch(state, wpath)
         return out
     paths = _parallel(items, gpus, leg)
     blobs = [{} for _ in jobs]
-    for (j, _), path in zip(items, paths):
-        blobs[j].update(torch.load(path, map_location="cpu"))
+    total = sum(os.path.getsize(path) for path in paths)
+    state["peak_oracle_files_bytes"] = max(state.get("peak_oracle_files_bytes", 0), total)
+    try:
+        for (j, i), path in zip(items, paths):
+            blob = torch.load(path, map_location="cpu")
+            expected = {"%s|%d" % (sig, n) for sig in shards[i] for n in range(jobs[j]["draws"])}
+            if set(blob) != expected:
+                raise RuntimeError("oracle batch is missing or added case/draw outputs")
+            blobs[j].update(blob)
+    finally:
+        for path in paths:
+            if os.path.exists(path):
+                os.unlink(path)
     return blobs
 
 
@@ -321,9 +484,11 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
                     "candidate" if key not in cand_blob else "baseline")})
                 ok = False
                 continue
-            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=True)
+            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=bool(T.doc.get("reference")))
             refs, mags, sel = _references(T, args)
-            inputs = {k: v for k, v in _cpu(args).items() if not str(k).startswith("_")}
+            score_inputs = {o["bound"].get("scores") for o in T.doc["outputs"].values()
+                            if o["bound"]["kind"] == "topk_equivalent"}
+            inputs = {k: _cpu(args[k]) for k in score_inputs if k in args}
             res = T.U.compare_outputs(T.doc, cand_blob[key], base_blob[key], sym=args["_sym"],
                                       refs=refs, magnitudes=mags, inputs=inputs, rows=sel,
                                       base_noise=(noise_blob or {}).get(key))
@@ -337,26 +502,38 @@ def gate_correctness(T, a, state):
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     seed, draws = a.seed, a.draws
     sd = state["scratch"]
-    jobs = [{"overlay": base, "path": os.path.join(sd, "base.pt"), "seed": seed, "draws": draws,
-             "watch": "oracle"},
-            {"overlay": cand, "path": os.path.join(sd, "cand.pt"), "seed": seed, "draws": draws}]
-    if _needs_noise(T):
-        jobs.append({"overlay": base, "path": os.path.join(sd, "base2.pt"), "seed": seed,
-                     "draws": draws})
-    blobs = _oracles(T, state, jobs)
-    base_blob, cand_blob = blobs[0], blobs[1]
-    noise_blob = blobs[2] if _needs_noise(T) else None
-    state["base_blob"], state["noise_blob"] = base_blob, noise_blob
-    out = {}
-    if T.doc["compare"].get("determinism") == "bitwise":
-        again = _oracle(T, cand, os.path.join(sd, "cand2.pt"), seed, draws)
-        flaky = sorted(k for k in cand_blob
-                       if T.U.tensor_digest(cand_blob[k]) != T.U.tensor_digest(again.get(k)))
+    rows, flaky, ok, batches, oversized = [], [], True, 0, []
+    bitwise = T.doc["compare"].get("determinism") == "bitwise"
+    copies = 2 + int(_needs_noise(T)) + int(bitwise)
+    with oracle_workers(T, state):
+        for sigs, estimated in oracle_batches(T, draws, copies):
+            batches += 1
+            if estimated > int(T.mc.get("oracle_batch_bytes", 256 << 20)):
+                oversized.extend(sigs)
+            with case_batch(T, sigs):
+                jobs = [{"overlay": base, "path": os.path.join(sd, "base.pt"), "seed": seed,
+                         "draws": draws, "watch": "oracle"},
+                        {"overlay": cand, "path": os.path.join(sd, "cand.pt"), "seed": seed, "draws": draws}]
+                if _needs_noise(T):
+                    jobs.append({"overlay": base, "path": os.path.join(sd, "base2.pt"), "seed": seed,
+                                 "draws": draws})
+                blobs = _oracles(T, state, jobs)
+                base_blob, cand_blob = blobs[:2]
+                noise_blob = blobs[2] if _needs_noise(T) else None
+                if bitwise:
+                    again = _oracle(T, cand, os.path.join(sd, "cand2.pt"), seed, draws, state)
+                    flaky.extend(k for k in cand_blob if
+                                 T.U.tensor_digest(cand_blob[k]) != T.U.tensor_digest(again.get(k)))
+                    del again
+                good, batch_rows = compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob)
+                rows.extend(batch_rows)
+                ok = ok and good
+                del blobs, base_blob, cand_blob, noise_blob
+    out = {"cases": rows, "batches": batches, "oversized_single_cases": oversized,
+           "output_budget_bytes": int(T.mc.get("oracle_batch_bytes", 256 << 20))}
+    if bitwise:
         out["bitwise_repeat"] = {"ok": not flaky, "differing": flaky}
-    ok, rows = compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob)
-    out["cases"] = rows
-    good = ok and out.get("bitwise_repeat", {}).get("ok", True)
-    return {"status": "pass" if good else "fail", "seed": seed, "draws": draws, **out}
+    return {"status": "pass" if ok and rows and not flaky else "fail", "seed": seed, "draws": draws, **out}
 
 
 def _server_calls_leg(T, overlay, out, env=None):
@@ -448,8 +625,10 @@ def gate_compile_variants(T, a, state):
         return {"status": "not_required",
                 "why": "the server compiled no Triton variant on this task's launch paths"}
     if not state.get("watch_files"):
-        _oracle(T, T.overlays()[0], os.path.join(state["scratch"], "base_cv.pt"), a.seed, 1,
-                state, watch="oracle_only")
+        for sigs, _ in oracle_batches(T, copies=1):
+            with case_batch(T, sigs):
+                _oracle(T, T.overlays()[0], os.path.join(state["scratch"], "base_cv.pt"), a.seed, 1,
+                        state, watch="oracle_only")
     cw = _load("compile_watch", os.path.join(T.dir, "compile_watch.py"))
     ut_events = []
     for p in state.get("watch_files") or []:
@@ -589,60 +768,60 @@ def gate_negative_controls(T, a, state):
     if not controls:
         return {"status": "fail", "why": "meta.ut_contract.negative_controls is empty"}
     margin_needed = float(T.mc.get("min_control_margin", DEFAULT_CONTROL_MARGIN))
-    base_blob, noise_blob = state.get("base_blob"), state.get("noise_blob")
-    if base_blob is None:
-        base = T.overlays()[0]
-        base_blob = _oracle(T, base, os.path.join(state["scratch"], "base.pt"), a.seed, 1)
-        if _needs_noise(T):
-            noise_blob = _oracle(T, base, os.path.join(state["scratch"], "base2.pt"), a.seed, 1)
-    rows, ok = [], True
+    rows = []
     for i, c in enumerate(controls):
+        row = {"leaf": c["leaf"], "expect": c.get("expect"), "caught": False,
+               "margin": 0.0, "cases": [], "restored": True}
+        rows.append(row)
         path = os.path.join(T.dir, c["leaf"])
         with open(path, "rb") as f:
             pristine = f.read()
         text = pristine.decode("utf-8", errors="surrogateescape")
-        row = {"leaf": c["leaf"], "expect": c.get("expect")}
         if text.count(c["find"]) != 1:
             row.update(ok=False, why="`find` occurs %d times" % text.count(c["find"]))
-            rows.append(row)
-            ok = False
             continue
         try:
             with open(path, "wb") as f:
                 f.write(text.replace(c["find"], c["replace"]).encode("utf-8", errors="surrogateescape"))
-            _, cand = T.h.build_candidate_overlay(T.dir, T.meta)
-            try:
-                blob = _oracle(T, cand, os.path.join(state["scratch"], "control_%d.pt" % i), a.seed, 1)
-            except Exception as e:      # build/import/launch failure: not a numerical control
-                row.update(ok=False, why="mutated source did not run to completion (%s); a "
-                                          "control must execute and produce wrong numbers" % str(e)[-300:])
-                rows.append(row)
-                ok = False
-                continue
-            caught, results = False, []
-            _, crow = compare_blobs(T, blob, base_blob, a.seed, 1, noise_blob, only_draw=0)
-            margin = 0.0
-            for r in crow:
-                if not r["ok"]:
-                    caught = True
-                    m = T.U.control_margin({"outputs": {k: v for k, v in r.items()
-                                                        if isinstance(v, dict)}})
-                    margin = max(margin, m)
-                results.append({"case": r["case"], "ok": r["ok"]})
-            row.update(caught=caught, margin=margin, cases=results,
-                       ok=caught and margin >= margin_needed)
-            if caught and margin < margin_needed:
-                row["why"] = "caught at %.3gx the bound, need >= %gx" % (margin, margin_needed)
-            elif not caught:
-                row["why"] = "the mutation passed every compare: the gate cannot see this defect"
+            base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
+            # A control's overlay stays unchanged until all its workers have stopped.
+            # Baselines are regenerated in bounded batches, never retained suite-wide.
+            with oracle_workers(T, state):
+                for sigs, _ in oracle_batches(T, copies=3):
+                    with case_batch(T, sigs):
+                        jobs = [{"overlay": base, "path": os.path.join(state["scratch"], "base.pt"),
+                                 "seed": a.seed, "draws": 1},
+                                {"overlay": cand, "path": os.path.join(state["scratch"], "control.pt"),
+                                 "seed": a.seed, "draws": 1}]
+                        if _needs_noise(T):
+                            jobs.append({"overlay": base, "path": os.path.join(state["scratch"], "base2.pt"),
+                                         "seed": a.seed, "draws": 1})
+                        try:
+                            blobs = _oracles(T, state, jobs)
+                        except Exception as exc:
+                            row["why"] = "control legs did not run to completion (%s); not a numerical control" % str(exc)[-300:]
+                            break
+                        _, comparisons = compare_blobs(T, blobs[1], blobs[0], a.seed, 1,
+                                                       blobs[2] if _needs_noise(T) else None, only_draw=0)
+                        for result in comparisons:
+                            if not result["ok"]:
+                                row["caught"] = True
+                                margin = T.U.control_margin({"outputs": {k: v for k, v in result.items()
+                                                                        if isinstance(v, dict)}})
+                                row["margin"] = max(row["margin"], margin)
+                            row["cases"].append({"case": result["case"], "ok": result["ok"]})
+                        del blobs
         finally:
             with open(path, "wb") as f:
                 f.write(pristine)
-        row["restored"] = _sha(path) == hashlib.sha256(pristine).hexdigest()
-        ok = ok and row["ok"] and row["restored"]
-        rows.append(row)
-    T.h.build_candidate_overlay(T.dir, T.meta)
-    return {"status": "pass" if ok else "fail", "min_margin": margin_needed, "controls": rows}
+            row["restored"] = _sha(path) == hashlib.sha256(pristine).hexdigest()
+            T.h.build_candidate_overlay(T.dir, T.meta)
+        row["ok"] = (row["caught"] and row["margin"] >= margin_needed and row["restored"]
+                     and "why" not in row)
+        if not row["ok"] and "why" not in row:
+            row["why"] = "mutation not detected at the required numerical margin"
+    return {"status": "pass" if all(r["ok"] for r in rows) else "fail",
+            "min_margin": margin_needed, "controls": rows}
 
 
 def gate_restore(T, a, state):
@@ -685,13 +864,13 @@ def inproc_isolation(T, a):
     rows, ok = [], True
     for spec in T.random_specs():
         args = T.cases.make_args(spec, gen=_gen(torch, device, a.seed))
-        same, changed, _ = T.U.inputs_unmodified(T.cases.call, args)
+        same, changed, first_output = T.U.inputs_unmodified(T.cases.call, args)
         other = T.cases.make_args(spec, gen=_gen(torch, device, a.seed + 1))
-        ind_ok, why = T.h.assert_independent_outputs(T.cases.call, args, other)
+        ind_ok, why = T.h.assert_independent_outputs(T.cases.call, args, other, first_output=first_output)
         rows.append({"sig": spec["sig"], "inputs_unchanged": same, "changed": changed,
                      "fresh_outputs": ind_ok, "why": why})
         ok = ok and same and ind_ok
-        del args, other
+        del args, other, first_output
     return {"status": "pass" if ok else "fail", "cases": rows}
 
 
@@ -843,7 +1022,11 @@ def run_gates(T, a):
     else:
         verdict, code = "fail", 1
     report.update(verdict=verdict, exit_code=code, seconds=round(time.time() - report["started"], 1),
-                  performance_measured=report["gates"].get("timing", {}).get("status") == "pass")
+                  performance_measured=report["gates"].get("timing", {}).get("status") == "pass",
+                  data_handling={"oracle_batches": state.get("oracle_batches", 0),
+                                 "oracle_worker_starts": state.get("oracle_worker_starts", 0),
+                                 "weight_cache_workers": state.get("weight_cache_workers", []),
+                                 "peak_oracle_files_bytes": state.get("peak_oracle_files_bytes", 0)})
     return report, code
 
 

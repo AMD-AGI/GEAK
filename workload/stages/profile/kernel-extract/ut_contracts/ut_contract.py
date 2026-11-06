@@ -24,6 +24,7 @@ a login host.
 """
 
 import ast
+from collections import OrderedDict
 import hashlib
 import json
 import math
@@ -136,6 +137,11 @@ def validate_family(doc):
     if doc["ut_contract_version"] != CONTRACT_VERSION:
         raise ContractError("contract version %r, this library reads %d"
                             % (doc["ut_contract_version"], CONTRACT_VERSION))
+    generation = doc.get("input_generation")
+    if generation is not None:
+        budget = generation.get("weight_cache_bytes", 2 << 30)
+        if generation.get("protocol") != "weight_substreams/v1" or type(budget) is not int or budget < 0:
+            raise ContractError("invalid input_generation protocol or weight cache budget")
     names = list(doc["axes"]) + list(doc.get("attrs", {})) + list(doc["inputs"]) + list(doc["outputs"])
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
@@ -641,7 +647,67 @@ def _sparse_indices(shape, context, pad, gen, device):
     return out.view(*shape)
 
 
-def build_inputs(doc, case_axes, gen, device, hooks=None, skip=(), with_logical=True):
+class WeightCache:
+    """Bounded per-process pristine weights; callers receive independent copies.
+
+    Only built-in, read-only distributions without layout hooks are eligible. Named
+    weight RNG streams make cache hits/misses identical and independent of the case's
+    activation shape. The protocol is explicitly frozen in new task contracts.
+    """
+    def __init__(self, max_bytes=2 << 30):
+        self.max_bytes = int(max_bytes)
+        if self.max_bytes < 0:
+            raise ValueError("weight cache budget must be nonnegative")
+        self.entries = OrderedDict()
+        self.bytes = self.hits = self.misses = 0
+
+    def clear(self):
+        self.entries.clear()
+        self.bytes = 0
+
+    def draw(self, name, spec, sym, gen, device):
+        params = {k: evaluate(v, sym) if isinstance(v, str) and k != "kind" else v
+                  for k, v in spec["dist"].items()}
+        identity = {"protocol": "weight_substreams/v1", "name": name,
+                    "shape": shape_of(spec, sym), "dtype": dtype_of(spec, sym),
+                    "distribution": params, "seed": int(gen.initial_seed())}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        # Device index is storage identity, not RNG identity: paired legs on different
+        # logical devices must still generate the same seeded numerical inputs.
+        torch = _torch()
+        dev = torch.device(device)
+        if dev.type == "cuda" and dev.index is None:
+            dev = torch.device("cuda", torch.cuda.current_device())
+        key = (digest, str(dev))
+        if key in self.entries:
+            self.hits += 1
+            value = self.entries.pop(key)
+            self.entries[key] = value
+            return value.clone(), None
+        self.misses += 1
+        stream = torch.Generator(device=dev).manual_seed(int(digest[:16], 16) % (2**63))
+        value, _ = draw(name, spec, sym, stream, dev)
+        size = value.numel() * value.element_size()
+        if size <= self.max_bytes and self.max_bytes:
+            while self.entries and self.bytes + size > self.max_bytes:
+                _, old = self.entries.popitem(last=False)
+                self.bytes -= old.numel() * old.element_size()
+            self.entries[key] = value
+            self.bytes += size
+            # Never expose the cached pristine buffer to hooks or device kernels.
+            return value.clone(), None
+        return value, None
+
+
+def cacheable_weight(spec, sym=None):
+    layout = spec.get("layout")
+    layout_active = layout and (sym is None or layout.get("when") is None or evaluate(layout["when"], sym))
+    return (spec.get("lifetime") == "weight" and not spec.get("writable")
+            and not layout_active and spec.get("dist", {}).get("kind") in
+            ("normal", "lecun_normal", "uniform", "log_uniform", "int_range", "constant"))
+
+
+def build_inputs(doc, case_axes, gen, device, hooks=None, skip=(), with_logical=True, weight_cache=None):
     """All present inputs of one case, in contract order: (stored args, logical args, symbols).
 
     Inputs named in `skip` are left to the caller (structural fixtures). A `hook` distribution
@@ -660,7 +726,9 @@ def build_inputs(doc, case_axes, gen, device, hooks=None, skip=(), with_logical=
         if spec.get("kind") == "scalar":
             args[name] = sym[name] = evaluate(spec.get("value", spec.get("default")), sym)
             continue
-        got = draw(name, spec, sym, gen, device, hooks)
+        got = (weight_cache.draw(name, spec, sym, gen, device)
+               if weight_cache is not None and cacheable_weight(spec, sym)
+               else draw(name, spec, sym, gen, device, hooks))
         produced = got if isinstance(got, dict) else {name: got}
         for n, (stored, log) in produced.items():
             if log is None and with_logical:
@@ -703,15 +771,65 @@ def tensor_digest(obj):
     return h.hexdigest()
 
 
-def check_reproducible(make_inputs, seed, device):
+def input_snapshot(obj, device_budget=256 << 20):
+    """Exact private snapshot, preferring device copies within a bounded GPU budget."""
+    torch = _torch()
+    left = [device_budget]
+    def copy(value):
+        if isinstance(value, torch.Tensor):
+            size = value.numel() * value.element_size()
+            if value.device.type != "cpu" and size > left[0]:
+                return value.detach().to("cpu", copy=True)
+            left[0] -= size if value.device.type != "cpu" else 0
+            return value.detach().clone()
+        if isinstance(value, dict):
+            return {k: copy(v) for k, v in value.items() if not str(k).startswith("_")}
+        if isinstance(value, (list, tuple)):
+            return type(value)(copy(v) for v in value)
+        return value
+    return copy(obj)
+
+
+def inputs_equal(a, b):
+    """Bit-exact comparison; no bulk CPU hashes/copies on the common device path."""
+    torch = _torch()
+    if isinstance(a, torch.Tensor):
+        if not isinstance(b, torch.Tensor) or a.shape != b.shape or a.dtype != b.dtype:
+            return False
+        x = a.detach().contiguous().reshape(-1).view(torch.uint8)
+        y = b.detach().contiguous().reshape(-1).view(torch.uint8)
+        if x.device == y.device:
+            return torch.equal(x, y)
+        # CPU fallback snapshots compare in bounded transfer chunks.
+        step = 4 << 20
+        return all(torch.equal(x[i:i+step], y[i:i+step].to(x.device))
+                   for i in range(0, x.numel(), step))
+    if isinstance(a, dict):
+        if not isinstance(b, dict):
+            return False
+        keys = {k for k in b if not str(k).startswith("_")}
+        return keys == set(a) and all(inputs_equal(v, b[k]) for k, v in a.items())
+    if isinstance(a, (list, tuple)):
+        return type(a) is type(b) and len(a) == len(b) and all(inputs_equal(x, y) for x, y in zip(a, b))
+    if a is None or isinstance(a, (int, float, str, bool)):
+        return type(a) is type(b) and repr(a) == repr(b)
+    # Non-tensor objects were outside tensor_digest's comparison; introducing a
+    # tensor/container/scalar in their place still changes the checked input set.
+    return not (b is None or isinstance(b, (torch.Tensor, dict, list, tuple, int, float, str, bool)))
+
+
+def check_reproducible(make_inputs, seed, device, *, return_inputs=False):
     """Build one case twice from the same seed; the digests must match. A builder that calls a
     nondeterministic routine (an atomics-based sort, a parallel top-k) fails here, where the
     cause is visible, instead of as 'kernel nondeterminism' inside the correctness gate."""
     torch = _torch()
     a = make_inputs(torch.Generator(device=device).manual_seed(seed))
+    snapshot = input_snapshot(a)
+    del a
     b = make_inputs(torch.Generator(device=device).manual_seed(seed))
-    da, db = tensor_digest(a), tensor_digest(b)
-    return da == db, {"digest_a": da, "digest_b": db}
+    same = inputs_equal(snapshot, b)
+    details = {} if same else {"digest_a": tensor_digest(snapshot), "digest_b": tensor_digest(b)}
+    return (same, details, b) if return_inputs else (same, details)
 
 
 def check_layout_facts(doc, args, sym):
@@ -747,7 +865,7 @@ def check_input_values(doc, args, sym):
             continue
         dist = spec.get("dist") or {}
         if t.dtype.is_floating_point and t.element_size() >= 2:
-            if not bool(torch.isfinite(t.float()).all()):
+            if not bool(torch.isfinite(t).all()):
                 bad.append("%s has non-finite values" % name)
         if dist.get("kind") == "int_range":
             lo, hi = int(evaluate(dist["lo"], sym)), int(evaluate(dist["hi"], sym))
@@ -771,11 +889,9 @@ def inputs_unmodified(call, args, writable=()):
     """Run `call(args)` once and confirm no input other than `writable` changed. An extracted
     kernel that writes an operand in place (a residual `add_`, a cache it should only read) makes
     every later draw of the same buffers wrong, and a graph replay doubly so."""
-    before = {k: tensor_digest(v) for k, v in args.items()
-              if k not in writable and not str(k).startswith("_")}
+    before = input_snapshot({k: v for k, v in args.items() if k not in writable})
     out = call(args)
-    after = {k: tensor_digest(args[k]) for k in before}
-    changed = sorted(k for k in before if before[k] != after[k])
+    changed = sorted(k for k in before if k not in args or not inputs_equal(before[k], args[k]))
     return not changed, changed, out
 
 

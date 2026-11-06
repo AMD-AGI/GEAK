@@ -62,6 +62,43 @@ run (`--skip` makes the verdict `partial`, never `pass`); 3 = `UT_HARNESS_INCOMP
 itself is missing something (a graph phase without a replay bundle) — fix the UT, do not
 blame the candidate.
 
+## Temporary tensor lifecycle
+
+New scaffolds freeze `input_generation.protocol: "weight_substreams/v1"` in
+`run/ut_contract.json`. Built-in read-only `lifetime: "weight"` operands use a named
+random stream keyed by round seed, input name, resolved shape/dtype/distribution.
+Changing activation shape does not redraw the same weight. A per-process LRU cache
+holds at most `input_generation.weight_cache_bytes` (default 2 GiB). Every caller
+receives a private copy, so kernel writes cannot poison the cached original. Writable
+state, active layout hooks and custom/produced distributions remain independently
+constructed. Different draw seeds still produce different weights. A zero cache budget
+retains exactly the same random-stream recipe while disabling retention.
+
+This explicit generation recipe applies to newly scaffolded tests. Existing frozen
+contracts/helpers keep their previous inputs; do not retrofit completed experiments.
+After deliberately changing a contract, sync metadata and qualify it again.
+
+Input reproducibility builds twice and returns the second set for layout/value checks.
+Checks compare exact tensor bytes on-device where possible, including NaN payloads and
+signed zero. Snapshots use at most 256 MiB of GPU storage; larger operands fall back to
+CPU snapshots with chunked comparison. Isolation reuses its first execution for the
+output-independence check instead of invoking the kernel again.
+
+Correctness and negative controls compare all cases/draws in bounded batches, controlled
+by `meta.ut_contract.oracle_batch_cases` (default 32) and `oracle_batch_bytes` (default
+256 MiB of estimated output across the legs). A single larger case stays whole and is
+reported; the output budget is not a total host/GPU-memory guarantee. Baseline/candidate
+workers keep separate, unchanged overlays across batches, so batching does not pay a new
+Torch import for every case. Controls get their own worker lifetime; workers stop before
+source restoration. Each batch's temporary `.pt` files are loaded and removed before
+the next batch. Negative controls regenerate bounded baseline batches instead of retaining
+suite-wide oracles, and still run every case; this does not change the rejection margin.
+
+`ut_report.json.data_handling` records worker starts, batches, peak temporary oracle-file
+bytes and weight-cache statistics. Unneeded input copies are omitted from comparisons;
+reference operands and top-k score inputs retain their original comparison semantics.
+Only completed batches contribute results; missing case/draw outputs fail validation.
+
 ## The case manifest (`run/ut_cases.json`)
 
 ```json

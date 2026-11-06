@@ -161,7 +161,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
     ap.add_argument("--mode", required=True,
-                    choices=("list", "resolve", "time", "oracle", "server_calls"))
+                    choices=("list", "resolve", "time", "oracle", "oracle-worker", "server_calls"))
     ap.add_argument("--bucket", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
@@ -327,19 +327,35 @@ def _run(a, task, meta):
 
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    draws = a.draws or int(meta.get("random_draws", 3))
-    blob = {}
-    only = set(a.sigs.split(",")) if a.sigs is not None else None
-    for shape in cases.random_shapes(h, meta):
-        if only is not None and shape["sig"] not in only:
-            continue
-        case_call, _ = case_execution(shape)
-        for i in range(max(1, draws)):
-            rng = torch.Generator(device=device).manual_seed(int(a.seed) + i)
-            out = case_call(shape["make_inputs"](rng))
-            blob[f"{shape['sig']}|{i}"] = _snapshot(out)
-    torch.save(blob, a.out)
-    print(json.dumps({"out": a.out, "n": len(blob)}))
+    def oracle(seed, draws, sigs, output):
+        blob = {}
+        only = set(sigs) if sigs is not None else None
+        for shape in cases.random_shapes(h, meta):
+            if only is not None and shape["sig"] not in only:
+                continue
+            case_call, _ = case_execution(shape)
+            for i in range(max(1, draws)):
+                rng = torch.Generator(device=device).manual_seed(int(seed) + i)
+                out = case_call(shape["make_inputs"](rng))
+                blob[f"{shape['sig']}|{i}"] = _snapshot(out)
+        torch.save(blob, output)
+        cache = getattr(cases, "_WEIGHTS", None)
+        stats = ({"hits": cache.hits, "misses": cache.misses, "resident_bytes": cache.bytes}
+                 if cache is not None else None)
+        return {"out": output, "n": len(blob), **({"weight_cache": stats} if stats else {})}
+
+    if a.mode == "oracle-worker":
+        # One overlay per process. The controller sends one bounded batch at a time
+        # and consumes/deletes its output before requesting the next batch.
+        for line in sys.stdin:
+            request = json.loads(line)
+            result = oracle(request["seed"], request["draws"], request["sigs"], request["out"])
+            print("GEAK_ORACLE_BATCH " + json.dumps(result), flush=True)
+        return
+    result = oracle(a.seed, a.draws or int(meta.get("random_draws", 3)),
+                    a.sigs.split(",") if a.sigs is not None else None, a.out)
+    print(json.dumps(result))
+
 
 
 if __name__ == "__main__":

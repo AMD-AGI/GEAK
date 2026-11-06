@@ -37,6 +37,9 @@ def _load(name):
 
 U = _load("ut_contract")
 CONTRACT = U.load_task_contract(_HERE)
+_GENERATION = CONTRACT.get("input_generation") or {{}}
+_WEIGHTS = (U.WeightCache(_GENERATION.get("weight_cache_bytes", 2 << 30))
+            if _GENERATION.get("protocol") == "weight_substreams/v1" else None)
 with open(os.path.join(_HERE, "run", "ut_cases.json")) as _fh:
     MANIFEST = json.load(_fh)
 TARGET = {target_callable!r}
@@ -87,7 +90,7 @@ def make_args(spec, gen=None, seed=None, with_logical=False):
     if gen is None:
         gen = torch.Generator(device=device).manual_seed(case_seed(spec) if seed is None else int(seed))
     args, logical, sym = U.build_inputs(CONTRACT, spec.get("axes") or {{}}, gen, device, HOOKS,
-                                        with_logical=with_logical)
+                                        with_logical=with_logical, weight_cache=_WEIGHTS)
     args["_sig"] = spec["sig"]
     args["_sym"] = sym
     if with_logical:

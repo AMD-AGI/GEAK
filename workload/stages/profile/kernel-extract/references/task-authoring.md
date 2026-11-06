@@ -131,6 +131,12 @@ This fallback persists reconstructed operands and baseline outputs. Prefer the
 seeded factory above when it avoids capture entirely. Never regenerate structural
 state through nondeterministic routing while pretending the inputs are unchanged.
 
+Use the scaffold's weight cache and [bounded tensor lifecycle](../ut_contracts/README.md#temporary-tensor-lifecycle).
+Only built-in read-only weight distributions are shared; preserve active layout hooks,
+structural state and per-call inputs. Return private task objects rather than storing
+mutable per-case objects in the cache. The driver batches output comparisons while
+retaining independent baseline/candidate workers and every required numerical check.
+
 ## Correctness and timing
 
 UT generation runs steps 0–6 with `--validation-mode correctness`; step 7 is
