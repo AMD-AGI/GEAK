@@ -90,6 +90,16 @@ def test_short_name():
     assert D.short_name("_fused_norm_kernel(int, int)") == "_fused_norm_kernel"
 
 
+def test_short_name_is_linear_on_hostile_mangled_names():
+    # CodeQL: the old _ZN regex backtracked exponentially on '_ZN0' + '00' * n; this one never finished.
+    import time
+    t = time.time()
+    for s in ("_ZN0" + "00" * 5000 + "!", "_ZN" + "9" * 10000, "_ZN1a" * 20000, "_ZN99x"):
+        assert D.short_name(s).startswith(("_ZN", "a"))
+    assert time.time() - t < 1.0
+    assert D.short_name("_ZN3foo3barEv") == "foo::bar"
+
+
 @pytest.mark.skipif(not MUSE_POINTS.is_dir(), reason="muse traces not on this box")
 def test_muse_traces_match_parse_profile(tmp_path):
     """Cross-check: digest per-step device time x steps == the trace's kernel time inside step windows,

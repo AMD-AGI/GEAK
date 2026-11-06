@@ -51,16 +51,21 @@ def short_name(name: str) -> str:
     if name.startswith("void "):
         return name[5:95]           # demangled C++: template args carry '(', keep them
     n = name.split("(")[0] if not name.startswith("_ZN") else name
-    m = re.match(r"_ZN(?:\d+\w+?)*?(\d+)([A-Za-z_]\w*)", n)
-    if n.startswith("_ZN") and m:
-        # Itanium mangling: take the innermost readable identifier of the nested name.
+    if n.startswith("_ZN"):
+        # Itanium mangling: _ZN <len><identifier> <len><identifier> ... -- read the length-prefixed parts
+        # left to right (linear; a regex over \d+\w+ backtracks exponentially on runs of digits).
         parts, i = [], 3
         while i < len(n) and n[i].isdigit():
             j = i
             while j < len(n) and n[j].isdigit():
                 j += 1
+            if j - i > 6:
+                break               # no identifier is a million characters long: not a length field
             ln = int(n[i:j])
-            parts.append(n[j:j + ln])
+            part = n[j:j + ln]
+            if not ln or len(part) < ln or not (part[0].isalpha() or part[0] == "_"):
+                break               # not a well-formed identifier: keep what was read
+            parts.append(part)
             i = j + ln
         n = "::".join(parts) or n
     return n[:90]
