@@ -13,11 +13,14 @@ import tempfile
 import textwrap
 import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 import ut_wave as W  # noqa: E402
+import ut_gpu_queue as Q
 
 # A task's UT stand-in: --skip timing -> partial receipt without timing; --reuse -> pass.
 FAKE_UT = textwrap.dedent('''\
@@ -51,15 +54,22 @@ STUB_RUNNER = textwrap.dedent('''\
     T="$TASK_DIR"
     echo "start $(date +%s.%N) ROCR=$ROCR_VISIBLE_DEVICES GPU_IDS=$GPU_IDS" >> "$T/run/lane.trace"
     mode="$(cat "$T/mode")"
-    SKIP="--skip timing"; grep -q "run every gate, timing included" "$PROMPT" && SKIP=""
-    grep -q "validation-mode correctness" "$PROMPT" && SKIP="--validation-mode correctness --reuse"
+    SKIP="--skip timing"; grep -q "^TIMING .*run every gate, timing included" "$PROMPT" && SKIP=""
+    grep -q "^TIMING .*validation-mode correctness" "$PROMPT" && SKIP="--validation-mode correctness --reuse"
     grep -q "THIS IS ATTEMPT" "$PROMPT" && echo continuation >> "$T/run/lane.trace"
     sleep 1
+    run_ut() {
+      if [ -n "$UT_WAVE_TOKEN" ]; then
+        python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$T/unittest.py" $SKIP
+      else
+        python3 "$T/unittest.py" $SKIP
+      fi
+    }
     case "$mode" in
-      ok)      python3 "$T/unittest.py" $SKIP ;;
+      ok)      run_ut ;;
       block)   python3 "$SKILL_ROOT/scripts/ut_wave.py" block --task-dir "$T" --reason "no fixture X: ls shows it" ;;
       runner78) exit 78 ;;
-      second)  if [ -f "$T/run/tried" ]; then python3 "$T/unittest.py" $SKIP; else touch "$T/run/tried"; fi ;;
+      second)  if [ -f "$T/run/tried" ]; then run_ut; else touch "$T/run/tried"; fi ;;
       never)   : ;;
     esac
     echo "end $(date +%s.%N)" >> "$T/run/lane.trace"
@@ -100,8 +110,11 @@ class WaveTest(unittest.TestCase):
     def wave(self, *extra):
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ut_wave.py"), "start",
                             "--eval-dir", self.eval, "--runner", self.runner, "--backend", "local",
-                            "--foreground", "--tick-sec", "1", "--lane-sec", "120", "--timing", "tail", *extra],
-                           capture_output=True, text=True, timeout=300)
+                            "--foreground", "--tick-sec", "1", "--lane-sec", "120", "--timing", "tail",
+                            "--gpu-mode", "lane", *extra],
+                           capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, KERNEL_EXTRACT_LOCK_DIR=os.path.join(self.tmp, 'locks'),
+                                    GEAK_GPU_REQUIRE_IDLE='0', KERNEL_ENV_KEEP_ARCH='1'))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         with open(os.path.join(self.eval, "ut_wave", "summary.json")) as f:
             return json.load(f)["tasks"], p.stdout
@@ -221,6 +234,106 @@ class WaveTest(unittest.TestCase):
         time.sleep(0.05)
         os.utime(os.path.join(self.eval, "tasks", "a", "unittest.py"))   # a changed after its receipt
         self.assertEqual(self.planned(), ["a"])
+
+    def test_on_demand_authors_overlap_without_gpu_and_request_only_needed_cards(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok'), ('b', 'gemm', 10, 1, 'ok'),
+                    ('ar', 'all_reduce', 10, 2, 'ok')])
+        res, out = self.wave('--gpu-mode', 'on-demand', '--gpus', '3,7', '--timing', 'none')
+        self.assertEqual({r['status'] for r in res.values()}, {'passed'}, out)
+        spans = []
+        for name in res:
+            self.assertEqual(res[name]['gpus'], [])
+            start, end = self.trace(name).splitlines()
+            self.assertIn('ROCR= GPU_IDS=', start)
+            spans.append((float(start.split()[1]), float(end.split()[1])))
+        self.assertLess(max(s for s, _ in spans), min(e for _, e in spans))
+        paths = list(Path(self.eval, 'ut_wave', 'gpu_queue').glob('*/request.json'))
+        self.assertEqual(len(paths), 3)
+        for path in paths:
+            req = W.load(str(path))
+            result = W.load(str(path.with_name('result.json')))
+            self.assertEqual(result['returncode'], 0)
+            self.assertTrue(set(result['gpus']) <= {3, 7})
+            self.assertEqual(len(result['gpus']), 2 if req['task'] == 'ar' else 1)
+            calls = Path(self.eval, 'tasks', req['task'], 'run', 'ut_calls.log').read_text()
+            self.assertIn('GPU_IDS=0,1' if req['task'] == 'ar' else 'GPU_IDS=0', calls)
+            self.assertFalse(Path(self.eval, 'tasks', req['task'], 'run', 'timing.trace').exists())
+
+    def test_on_demand_timing_tail_and_retry(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok'), ('b', 'gemm', 10, 1, 'second')])
+        res, out = self.wave('--gpu-mode', 'on-demand', '--gpus', '2,5', '--timing-workers', '2')
+        self.assertEqual({r['status'] for r in res.values()}, {'passed'}, out)
+        self.assertEqual(res['b']['attempts'], 2)
+        end_authoring = max(float(self.trace(n).splitlines()[-1].split()[1]) for n in res)
+        for name in res:
+            timing = Path(self.eval, 'tasks', name, 'run', 'timing.trace').read_text()
+            self.assertGreater(float(timing.splitlines()[0].split()[1]), end_authoring)
+
+    def test_stopped_on_demand_wave_drains_before_resuming_same_task(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        ut = Path(self.eval, 'tasks', 'a', 'unittest.py')
+        ut.write_text('''import os, time
+once = os.path.join(os.path.dirname(__file__), 'run', 'once')
+if not os.path.exists(once):
+    open(once, 'w').close()
+    time.sleep(600)
+''' + FAKE_UT)
+        first, _ = self.wave('--gpu-mode', 'on-demand', '--timing', 'none', '--max-wall-sec', '3')
+        self.assertEqual(first['a']['status'], 'running')
+        queue = Path(self.eval, 'ut_wave', 'gpu_queue')
+        old = list(queue.glob('*/result.json'))
+        self.assertEqual(len(old), 1)
+        self.assertEqual(W.load(str(old[0]))['returncode'], 130)
+        res, out = self.wave('--gpu-mode', 'on-demand', '--timing', 'none')
+        self.assertEqual(res['a']['status'], 'passed', out)
+        results = list(queue.glob('*/result.json'))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(Q.last_command_passed(str(queue.parent), 'a'))
+
+    def test_failed_gpu_envelope_prevents_receipt_reuse_and_force_retries(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        self.wave('--gpu-mode', 'on-demand', '--timing', 'none')
+        self.assertEqual(self.planned(), [])
+        result = next(Path(self.eval, 'ut_wave', 'gpu_queue').glob('*/result.json'))
+        state = W.load(str(result))
+        state['returncode'] = 86  # simulate a post-command source audit invalidating its receipt
+        W.save(str(result), state)
+        self.assertEqual(self.planned(), ['a'])
+        res, out = self.wave('--gpu-mode', 'on-demand', '--timing', 'none', '--force')
+        self.assertEqual(res['a']['status'], 'passed', out)
+        self.assertTrue(Q.last_command_passed(str(result.parent.parent.parent), 'a'))
+
+    def test_group_request_does_not_hold_a_partial_set(self):
+        import fcntl
+        locks = Path(self.tmp, 'locks')
+        locks.mkdir()
+        with open(locks / 'gpu_7.lock', 'w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual(Q.try_lease([3, 7], 2, str(locks), lambda _: True), ([], []))
+            gpus, fds = Q.try_lease([3], 1, str(locks), lambda _: True)
+            self.assertEqual(gpus, [3])
+            Q.release(fds)
+        gpus, fds = Q.try_lease([3, 7], 2, str(locks), lambda _: True)
+        self.assertEqual(gpus, [3, 7])
+        Q.release(fds)
+
+    def test_cpu_docker_has_no_devices_and_gpu_container_has_only_leased_nodes(self):
+        backend = W.Docker(self.tmp, 'pinned:image')
+        with mock.patch.dict(os.environ, {'UT_WAVE_CONTAINER_PREFIX': ''}):
+            self.assertNotEqual(W.Docker(self.tmp, 'image').cname('a'),
+                                W.Docker(self.tmp + '/other', 'image').cname('a'))
+        with mock.patch.object(W.subprocess, 'run') as run, mock.patch.object(W.os.path, 'exists', return_value=True):
+            run.return_value = subprocess.CompletedProcess([], 0, stdout='', stderr='')
+            backend.start('author', [], ['worker.py'], {'ROCR_VISIBLE_DEVICES': '0,1,2,3'})
+            cpu = run.call_args.args[0]
+            self.assertNotIn('--device', cpu)
+            self.assertIn('ROCR_VISIBLE_DEVICES=', cpu)
+            backend.start('gpu_job', [3, 7], ['worker.py'], {'ROCR_VISIBLE_DEVICES': '0,1,2,3'})
+            gpu = run.call_args.args[0]
+            devices = [gpu[i + 1] for i, arg in enumerate(gpu) if arg == '--device']
+            self.assertEqual(devices, ['/dev/kfd', '/dev/dri/renderD152', '/dev/dri/renderD184'])
+            self.assertIn('GPU_IDS=0,1', gpu)
+            self.assertNotIn('ROCR_VISIBLE_DEVICES=0,1,2,3', gpu)
 
 if __name__ == "__main__":
     unittest.main()

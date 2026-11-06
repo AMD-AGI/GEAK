@@ -132,7 +132,11 @@ loosening compatibility to manufacture a saving.
 
 ## UT parallelism
 
-UT authoring and GPU correctness gates use independent task lanes. The default
+UT authors run in CPU-only task lanes (`--author-workers`, default 8). Default
+`--gpu-mode on-demand` routes each GPU command through `ut_wave.py gpu -- ...`, leasing
+only its required device count from the campaign pool and releasing it after workers
+drain. Multi-GPU requests wait without holding partial sets. Do not hold an outer pool
+lease around this wave; its host broker shares the existing GPU lock files. The default
 `ut_wave.py start --timing none` finishes with `unittest.py --validation-mode correctness
 --reuse`; it runs no timing tail. Preserve all weighted shapes for optimization and
 report `performance_measured: false`.

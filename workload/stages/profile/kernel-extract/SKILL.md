@@ -176,12 +176,13 @@ python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$EVAL_DIR" --runner "
 python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 540   # repeat
 ```
 
-One agent lane per task, each writing, validating and fixing its own task directory
-([UT lane](references/ut-lane.md)) on its own GPU(s). The lanes are the deployment's GPUs
-(`serving.json` `gpus`, free again once the probe server stopped): the most expensive task
-starts first, GPUs left over when there are fewer tasks than GPUs go to the most expensive
-tasks (the UT spreads its legs over every GPU it holds), and a task needing several GPUs at
-once runs after the single-GPU ones. The default `--timing none` qualifies all non-timing
+One CPU agent lane per task writes and fixes its own task directory
+([UT lane](references/ut-lane.md)); `--author-workers` controls author concurrency.
+Default `--gpu-mode on-demand` leases GPUs only for each `ut_wave.py gpu -- <command>`.
+The pool is the deployment's physical GPUs (`serving.json` `gpus`); release the probe
+server and any outer campaign GPU lock first. Each command leases `required_gpu_count`
+cards together (normally 1), drains its workers, then returns them to the pool. CPU
+writing/lint holds no GPU. The default `--timing none` qualifies all non-timing
 gates with `unittest.py --validation-mode correctness --reuse`; no timing tail runs.
 Preserve weighted shapes and timing support for the optimizer. An explicitly requested
 performance wave can use `--timing tail --timing-workers N` on disjoint GPU sets after
@@ -220,8 +221,9 @@ routing semantics, cache/page state and complete outputs.
 
 Run every GPU command from its task directory under the lease tools in
 [setup](references/setup.md) — `gpu_lock.sh` for one device, `gpu_lock_set.py` for the
-whole allocated set. Never run a GPU command outside a lease. (A UT-wave lane holds its
-GPUs through its container; inside it, `GPU_IDS` is the lease.)
+whole allocated set outside a wave. Inside an on-demand UT lane use `ut_wave.py gpu --
+<command>`; its host broker owns the lease and returns GPUs after worker cleanup.
+Never nest the old lock wrappers inside it. `GPU_IDS` is populated only in GPU commands.
 
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input

@@ -1,16 +1,16 @@
 {
   "file_count": 5,
   "files": {
-    "SKILL.md": "fb182fa56b79461bed6ab74e0540f73077fded4728cd6fb09d686713d8084503",
+    "SKILL.md": "72716393ac293e4e83ef58d85924f6bc896015817be968adc14c328b5d53d6d5",
     "references": "symlink:../../profile/kernel-extract/references",
     "scripts": "symlink:../../profile/kernel-extract/scripts",
     "shared": "symlink:../../profile/kernel-extract/shared",
     "ut_contracts": "symlink:../../profile/kernel-extract/ut_contracts"
   },
   "modified_from_origin": false,
-  "note": "Intentional negative-control witness search with per-control early stopping, unchanged numerical margin and complete correctness scope. Prior frozen task receipts and GPU scheduling are unchanged.",
+  "note": "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
   "origin": "Local GEAK split profile/UT workflow",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "279c0261e3f141a948a381572b68e6deb84cb32de30a26deb7138c7a1d0227bc"
+  "tree_sha256": "e2ba4a9ecab6ab8bdb33c0fa730277075a2e57a5e59f56cea2dd687b5b0d2c59"
 }

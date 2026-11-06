@@ -28,6 +28,14 @@ shapes and the timing implementation for optimization, which runs
 The unqualified `unittest.py` command retains performance mode for existing optimizer
 callers. Plain `--skip timing` in performance mode remains a partial result.
 
+GPU scheduling defaults to `--gpu-mode on-demand`: up to `--author-workers` CPU-only
+authors (default 8), one writer per task, submit `ut_wave.py gpu -- <command>` when
+validation needs a device. The host broker leases the required cards together, runs a
+short-lived GPU worker in the pinned image, drains workers and returns the cards.
+There is no GPU reservation during authoring/lint and no outer full-wave pool lock.
+See [setup](kernel-ut/references/setup.md) for host locks, mounts and command environment.
+`--gpu-mode lane` retains the previous fixed allocation for compatible older runners.
+
 For split scenarios:
 
 ```json

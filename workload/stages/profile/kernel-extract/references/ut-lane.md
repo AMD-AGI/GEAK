@@ -1,6 +1,7 @@
 # UT lane: write, validate and fix one task's UT
 
-`scripts/ut_wave.py` runs one of these per task, in parallel, each on its own GPU(s). You
+`scripts/ut_wave.py` runs one of these per task, in parallel. By default authoring is
+CPU-only and GPU commands borrow devices from the host broker. You
 are one lane. Everything shared -- the profile, the census, the selection, the task
 boundary, the case plan, the server evidence -- is already done and frozen; you turn one
 scaffolded task directory into a UT whose every gate passes on the installed baseline.
@@ -12,9 +13,18 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
   sibling task.
 - **Start no server, take no profile, no capture.** The evidence is what it is. If the
   task cannot be built from it, that is a blocker (below), not a reason to collect more.
-- **Only your GPUs.** `GPU_IDS` lists them (0..k-1 inside the lane). `unittest.py` spreads
-  its legs over all of them by itself; do not pin a GPU by hand and do not take a
-  `gpu_lock` on a device outside `GPU_IDS`.
+- **Borrow GPUs per command.** The CPU author has an empty `GPU_IDS`. For every GPU
+  operation use `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- <command>`. This
+  includes imports/compilation that need GPU access. The host broker leases the task's
+  `required_gpu_count` devices (default 1); use `gpu --count N -- ...` to request more
+  for sharding. Inside that command, `GPU_IDS` is logical 0..k-1. Never nest `gpu_lock`
+  or override device masks. Legacy `--gpu-mode lane` alone runs commands directly on
+  its fixed lane devices, with the caller holding the outer campaign lease.
+- **Keep validation files in the task.** GPU commands start in `TASK_DIR` in a new
+  container with the pinned image. Author-container `/tmp`, pip installs and shell
+  exports do not carry over. Use `gpu --env K=V -- ...` for explicit command environment,
+  and shared task-local scripts/caches. The queue transports argv, logs and status only;
+  UTs create random tensors in the GPU worker, never send tensors through the queue.
 - **Do not edit the boundary.** `run/requested_kernel.json` fixes the kernels, the entry
   (`target_callable`), the phases and the family. If it is wrong, block with the evidence.
 - The frozen helpers copied into the task (`ut_driver.py`, `ut_contract.py`,
@@ -41,15 +51,15 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
    control per editable leaf; `meta.workload.serving_weight_model.evidence_path`. Then
    `python3 $SKILL_ROOT/ut_contracts/scaffold_ut.py sync-meta --task $TASK_DIR`.
 4. **CPU lint until clean:** `python3 $TASK_DIR/ut_contract.py $TASK_DIR`.
-5. **Iterate on the boundary cases:** `cd $TASK_DIR && python3 unittest.py --quick`. It runs
+5. **Iterate on the boundary cases:** `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" --quick`. It runs
    every gate except timing on the smallest, middle and largest case of each phase and a
    few server calls, one draw, and writes `run/ut_report.quick.json`. It never passes;
    it is how you find a wrong `call()`, a hook, a bound or a control in minutes instead of
    an hour. Fix and rerun until every gate it runs passes.
-6. **Qualify the UT:** by default run `python3 unittest.py --validation-mode correctness --reuse`.
+6. **Qualify the UT:** by default run `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse`.
    Every non-timing gate must pass. Preserve weighted shapes and the timing API, but
    perform no timing measurements and report `performance_measured: false`.
-   If the wave explicitly requests a performance tail, use `python3 unittest.py --skip timing`
+   If the wave explicitly requests a performance tail, use the same wrapper with `python3 unittest.py --skip timing`
    and let the tail finish it; an explicit in-lane performance request uses
    `python3 unittest.py --validation-mode performance`. Fix failures and reuse unchanged
    passing gates. A quick run never substitutes for qualification.
@@ -83,7 +93,9 @@ is an `--override` with a stated reason, recorded by the lint.
 ## Collectives
 
 A task with `required_gpu_count` > 1 in `run/requested_kernel.json` is a collective on the
-deployment's world size; the wave gives the lane that many GPUs. The generic driver runs
+deployment's world size; each validation request leases that many GPUs together.
+For a multi-rank harness pass `--gpus 0` to the UT driver so it starts only one rank
+pool at a time; that pool still sees every leased device. The generic driver runs
 one process, so build the multi-rank harness of `references/collective-ut.md` inside the
 task (every rank's output checked, the deployed graph mode, a numerical negative control)
 and keep `unittest.py` as its entry. If it cannot be built here, that is a blocker naming

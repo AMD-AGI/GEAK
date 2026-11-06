@@ -257,13 +257,17 @@ class HandoffTests(unittest.TestCase):
         p=subprocess.run([sys.executable,str(UT/'kernel-ut/scripts/ut_wave.py'),'start',
             '--eval-dir',str(self.ut),'--runner',str(runner),'--backend','local','--gpus','0,1',
             '--foreground','--tick-sec','1','--lane-sec','120'],
-            capture_output=True,text=True,timeout=30)
+            capture_output=True,text=True,timeout=30,
+            env=dict(os.environ,KERNEL_EXTRACT_LOCK_DIR=str(self.root/'test_gpu_locks'),
+                     GEAK_GPU_REQUIRE_IDLE='0',KERNEL_ENV_KEEP_ARCH='1'))
         self.assertEqual(p.returncode,0,p.stdout+p.stderr)
         summary=H.read(self.ut/'ut_wave/summary.json')['tasks']
         self.assertEqual({r['status'] for r in summary.values()},{'passed'},p.stdout)
         prompt=(self.ut/'ut_wave/prompts/a.1.txt').read_text()
         self.assertIn(str(UT/'kernel-ut'),prompt)
         self.assertIn('--validation-mode correctness',prompt)
+        self.assertIn('GPU MODE: on-demand',prompt)
+        self.assertTrue(all(r['gpus']==[] for r in summary.values()))
         self.assertFalse((self.ut/'tasks/a/run/timing.trace').exists())
 
 

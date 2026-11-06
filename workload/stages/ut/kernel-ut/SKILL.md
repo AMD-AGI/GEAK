@@ -74,18 +74,36 @@ one oversized case and inline recorded tensors can still be large.
 
 ## Parallel authoring and validation
 
-Hold the allocated GPU pool through the existing campaign lease wrapper and use one
-agent lane per task. A task directory has one writer:
+Use one CPU author lane per task, with one writer per task directory. The default
+`--gpu-mode on-demand` borrows GPUs only for validation commands. Start the wave on
+the allocated host without holding an outer `gpu_lock_set.py`/campaign pool lock:
+the host broker uses those same lock files for each command.
 
 ```bash
 python3 "$SKILL_ROOT/scripts/ut_wave.py" plan --eval-dir "$OUT" --gpus <allocated-ids>
 python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$OUT" --runner "$RUNNER" \
   --backend docker --image <pinned-image> --gpus <allocated-ids> \
-  --timing none
+  --gpu-mode on-demand --author-workers 8 --timing none
 ```
 
 Lanes follow [the UT lane procedure](references/ut-lane.md), author and fix in parallel,
-and run CPU lint, quick iterations, then `unittest.py --validation-mode correctness --reuse`.
+and run CPU lint without a GPU. Inside a lane, route every GPU operation through:
+
+```bash
+python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- \
+  python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse
+```
+
+Use the same wrapper for quick iterations and imports/compilation requiring a GPU.
+The request defaults to `required_gpu_count` (usually 1); `gpu --count N -- ...`
+can borrow more for driver sharding. A collective requests all required cards together.
+Waiting for a full set holds no partial allocation. The command runs in a short-lived
+container using the pinned image and shared task files; CPU author containers have no
+GPU devices or Docker socket. Keep scripts under `TASK_DIR`; pass command-specific
+environment with `gpu --env K=V -- ...`. Do not nest another GPU lock inside this wrapper.
+The broker returns devices after all workers exit, including on failure/cancellation.
+See [setup](references/setup.md) for host allocation, mounts and shared locks.
+
 This runs every non-timing gate and emits a passing UT qualification without starting
 any timing workers. Reuse unchanged passing gates; preserve the cases, draws and
 per-config weights for later optimization. Negative controls use

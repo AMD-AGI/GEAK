@@ -30,7 +30,8 @@
   "Integrate the profile/UT split with geak-x-multiconfig 6a425ef: preserve eager decode capture, batch-size dispatch merge policy and share ordering; document provisional-plan ordering and retain postprocess counts with strict replay accounting.",
   "UT extraction now defaults to correctness qualification without timing. Explicit kernel_ut_validation/v1 receipts preserve all non-timing gates and mark performance unmeasured; optimization retains full timing and can reuse unchanged correctness results.",
   "Bound UT tensor lifetime: new scaffolds freeze named weight RNG substreams with bounded pristine caches and private copies; input checks reuse construction/execution and compare exact bytes with bounded device snapshots; isolated oracle workers stream bounded output batches and clean files, preserving case/draw coverage, control margins and source restoration. Existing frozen task inputs/helpers are not rewritten.",
-  "Negative controls search representative probes before the remaining cases and stop only the current control after a completed numerical rejection reaches the existing margin. Reports retain witness and checked/available counts; malformed hints, shape-only failures and execution errors cannot qualify a control. Full correctness coverage, per-leaf controls and source restoration remain required."
+  "Negative controls search representative probes before the remaining cases and stop only the current control after a completed numerical rejection reaches the existing margin. Reports retain witness and checked/available counts; malformed hints, shape-only failures and execution errors cannot qualify a control. Full correctness coverage, per-leaf controls and source restoration remain required.",
+  "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes."
  ],
  "files": [
   {
@@ -253,6 +254,11 @@
   },
   {
    "file": "scripts/trace_scan.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/ut_gpu_queue.py",
    "source": null,
    "added_here": true
   },
@@ -494,6 +500,11 @@
    "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py",
    "source_sha256": "8e8a8fd966b24113c227419160e1dd6d6b59ff412bc79d9d77a6b8aeea286fb5",
    "modified": true
+  },
+  {
+   "file": "tests/test_ut_gpu_queue.py",
+   "source": null,
+   "added_here": true
   },
   {
    "file": "tests/test_ut_wave.py",

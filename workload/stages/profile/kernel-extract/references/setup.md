@@ -40,7 +40,38 @@ set. Preserve an inherited `ROCR_VISIBLE_DEVICES` allocation mask. A set lease
 restores the requested `HIP_VISIBLE_DEVICES` only after acquiring all locks.
 Do not copy the variable values from a previous run.
 
-Run every GPU command from its task directory under a lease:
+The UT wave defaults to command-scoped leases. Start `ut_wave.py start --gpu-mode
+on-demand` on the host whose physical GPUs were allocated. `--gpus` is that physical
+pool, fenced by `GEAK_GPU_ALLOWED` and any inherited numeric `ROCR_VISIBLE_DEVICES`.
+Resolve UUID/container-local mappings on the host first. Release any outer campaign
+pool lock before starting this mode; its broker must acquire the same global locks.
+Keep the scheduler allocation while releasing only each command's advisory lease.
+
+Inside a CPU author lane:
+
+```bash
+python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- \
+  python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse
+```
+
+`gpu --count N` leases N free, idle GPUs together, without holding partial sets while
+waiting. Default N is `required_gpu_count`. The broker holds host lock files, starts a
+GPU worker in the same pinned image, drains descendants before unlocking, and reports
+devices/wait/runtime under `ut_wave/gpu_queue/<request>/`. `--timeout` includes queue
+wait. Source checks run before/after the command and build caches stay task-local.
+`--author-workers` controls CPU concurrency independently (default 8). Docker authors
+have no GPU devices; the GPU worker mounts only leased render nodes. Both need the
+skill/task paths mounted identically (default `/shared_nfs`; other paths use
+`UT_WAVE_DOCKER_EXTRA` mounts). Do not grant the author a Docker socket or GPU devices.
+Container names default to a wave-specific prefix; an explicit
+`UT_WAVE_CONTAINER_PREFIX` must be unique per campaign and is saved for resume.
+Command-specific exports require `gpu --env K=V`; CPU-container `/tmp` is not shared.
+Local mode uses visibility masks and a Linux subreaper for trusted runners/tests.
+After controller death the broker drains jobs before releasing locks; resume drains
+the previous broker and authors before launching new writers. If Docker cannot confirm
+cleanup, the broker retains the locks and retries; restore Docker access before resume.
+
+Outside an on-demand wave, run every GPU command from its task directory under a lease:
 
 ```bash
 cd "$TASK_DIR"
@@ -50,7 +81,9 @@ python3 "$SHARED_TOOLS/gpu_lock_set.py" "$GPU_SET" -- <foreground-command>
 ```
 
 A single-lock comma list is a pool that leases ONE device; a set lock holds every
-requested device. Reconcile device IDs with the physical allocation. Serialize captures
+requested device (the legacy set wrapper acquires sorted locks sequentially).
+Legacy `ut_wave --gpu-mode lane` still requires a full-wave outer campaign lease.
+Reconcile device IDs with the physical allocation. Serialize captures
 and UTs if isolation cannot be established, and let no detached GPU child outlive the
 lease.
 
