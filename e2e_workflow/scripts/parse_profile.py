@@ -165,10 +165,13 @@ def _seg(name, tag):
 # EXTEND and DRAFT_EXTEND_V2 are context shapes; DECODE (the EAGLE draft forward)
 # and TARGET_VERIFY are generation shapes -- the same split
 # step_span_utils.build_detailed_annotation_suffix makes with its c_/g_ prefixes.
+# DFLASH names its decode-side forwards step[VERIFY bs=..] / step[DRAFT bs=..]: both are
+# generation shapes too (a DFLASH decode iteration is one of each).
 _SGLANG_STEP_RE = re.compile(
     r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?\]")
 _SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True,
-                        "DECODE": False, "TARGET_VERIFY": False}
+                        "DECODE": False, "TARGET_VERIFY": False,
+                        "VERIFY": False, "DRAFT": False}
 
 
 def _parse_sglang_step(name):

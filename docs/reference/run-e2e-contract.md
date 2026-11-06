@@ -19,14 +19,20 @@ changes while the workflow evolves internally.
 Run the external orchestrator entry point as follows.
 
 ```bash
-python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
+python interface/run_e2e.py <handoff.json> <result.json> [--timeout-s N] [--dry-run] \
+    [--kernel-fusion | --no-kernel-fusion]
 ```
 
 - Exit code `0`: `result.json.status` is `ok`, `no_gain` or `timeout`.
 - Exit code `1`: a crash; `result.json.status == "error"` with an `error` field.
 - Exit code `2`: bad usage or unreadable handoff.
 - `--dry-run`: print the mapped `e2e_workflow.js` args and the prompt and
-  exit `0` (no GPU work). Use this to validate the mapping in CI.
+  exit `0` (no GPU work). Use this to validate the mapping in CI. The plan also
+  carries a `kernel_fusion` entry: the KernelFusion stage's script and args, or
+  `{"enabled": false}` when the stage is off.
+- `--kernel-fusion` / `--no-kernel-fusion`: switch the KernelFusion stage on or
+  off for this run; overrides the handoff and `GEAK_KERNEL_FUSION` (see
+  [KernelFusion stage](#kernelfusion-stage)).
 
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
@@ -109,6 +115,46 @@ The mapping is owned by `run_e2e.py:map_args`.
 | — | `config_tune="false"` | Caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
 
+### KernelFusion stage
+
+Before the main workflow, `run_e2e.py` runs the KernelFusion (KF) stage
+(`e2e_workflow/kernel_fusion/`): it captures a serving trace, picks fusion
+patterns with the `fusion-analysis` skill, writes and unit-tests one fused
+kernel per pattern, and applies the passing kernels as one overlay gated by one
+e2e A/B (gsm8k accuracy gate, then throughput). When that A/B accepts the
+overlay, it becomes the main workflow's `initial_overlay_pythonpath`, so the main
+workflow measures its own baseline on the fused stack. A stage that fails, finds
+nothing or is switched off leaves the main workflow's args unchanged.
+
+The stage is on by default. Precedence, highest first: the CLI flags, the
+`GEAK_KERNEL_FUSION=0|1` environment variable, then the handoff:
+
+```jsonc
+{
+  "kernel_fusion": false                      // off
+  // or a settings object (on unless "enabled": false):
+  "kernel_fusion": {
+    "prompt": "/path/deployment_notes.txt",   // run-specific prompt(s), comma-separated
+    "budget_s": 14400,                        // default: min(12 h, 1/3 of the run); hard stop <= 40% of the run
+    "steps": "trace,topk,author,apply",
+    "task": "operator constraints for every stage agent"
+  }
+}
+```
+
+The stage budget is taken from the run's timeout and capped so the stage's hard
+stop stays within 40% of the run; a run too short for a 2 h stage budget skips
+the stage (`status: skipped`). The main workflow gets the run's timeout minus
+the seconds the stage used. A failure anywhere in the stage ends it as
+`status: error` and the main workflow runs with its original arguments.
+Processes the stage leaves running are stopped before the main workflow starts.
+An accepted overlay is handed on only after `validate_overlay` passes (inside
+the stage dir, compiles, every initial-overlay file kept byte-identical with its
+sitecustomize still imported, and unchanged since the A/B that accepted it);
+otherwise the status is `rejected_overlay` and the main workflow keeps its
+initial overlay. Every settings key also has a `GEAK_KF_*` environment variable; the full
+list is in `e2e_workflow/kernel_fusion/README.md`.
+
 ### TraceLens prior autodiscovery
 
 Owned by `run_e2e.py:resolve_tracelens_report`. An upstream orchestrator might have
@@ -177,13 +223,27 @@ The workflow writes the following fields to the result file.
   },
   "report_path": ".../final_report.md",
   "kernel_journey_path": ".../kernel_journey.json",
-  "recovered_from_disk": true
+  "recovered_from_disk": true,
+  "kernel_fusion": {                     // present only when the KF stage ran
+    "status": "accepted | no_gain | analysis_only | skipped | rejected_overlay | error",
+    "kf_dir": "/work/experiment/geak/kf_<model>_<ts>",
+    "throughput_speedup": 1.018,         // the stage's own A/B
+    "final_overlay": ".../overlay/cand_kf_stack",
+    "accepted": [ /* fused kernels */ ],
+    "rejected": [ /* with stage and reason */ ],
+    "overlay_check": {"ok": true, "problems": [], "manifest_sha256": "..."},  // accepted only
+    "main_timeout_s": 28800,             // budget left for the main workflow
+    "combined_speedup_vs_original": 1.05 // stage A/B x main-workflow A/B
+  }
 }
 ```
 
 Schema v2 renames `baseline_divergence_pct` to
 `raw_session_baseline_divergence_pct`. The raw-session metric is audit-only
 because it includes accepted upstream configuration gains.
+
+`kernel_fusion.combined_speedup_vs_original` multiplies the stage's A/B
+speedup by the main workflow's, which is measured on the fused stack.
 
 `current_best_same_config_divergence_pct` is the primary cross-harness
 alignment metric. `measurement_divergence_pct` remains an exact compatibility
