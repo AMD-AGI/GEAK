@@ -50,6 +50,41 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// Optional hard cap on optimization rounds (0 / absent = no cap, i.e. unchanged behaviour). Budget
+// alone does not bound the round count: the TechLead may spend a budget of 2 as one round of two
+// directions or as two rounds of one, which roughly doubles the wall time.
+const MAX_ROUNDS = (() => {
+  const v = parseInt(A.max_rounds != null ? A.max_rounds : 0, 10);
+  return Number.isFinite(v) && v > 0 ? v : Infinity;
+})();
+// fast_mode (opt-in, for time-boxed runs such as workshops; absent/false = unchanged behaviour):
+//  - after the FINAL round, skip the re-profile and the cross-round memory update; their output
+//    only feeds a next round that will not happen;
+//  - give optimize engineers a wall-clock time box (engineer_minutes, default 6). Engineers stop on
+//    stalled STEPS (role + self_monitoring), not on time, and in practice reach most of their gain
+//    early: on an fp32 GEMM they had ~95% of their final speedup after ~5 min and spent the next
+//    ~20 min on <1%. A workflow script has no clock, so the box is enforced by the engineer reading
+//    `date +%s` -- a firm instruction, not a hard kill.
+const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false').trim().toLowerCase() === 'true';
+const ENGINEER_MINUTES = Math.max(1, parseFloat(A.engineer_minutes != null ? A.engineer_minutes : 6));
+function fastModeEngineerBlock(outDir) {
+  if (!FAST_MODE) return '';
+  const secs = Math.round(ENGINEER_MINUTES * 60);
+  return `
+
+## FAST MODE -- HARD TIME BOX (overrides the "Iterate" step and the self-monitoring stop rules)
+1. Your FIRST command: \`date +%s > ${outDir}/.t0\`
+2. Keep your current best kernel IN KERNEL_PATH (the workspace source file), never only in /tmp or a
+   scratch copy, and re-save best_patch.diff the moment your best improves.
+3. Before starting EACH new experiment run \`echo $(( $(date +%s) - $(cat ${outDir}/.t0) ))\`.
+   If it prints >= ${secs} (${ENGINEER_MINUTES} min), STOP experimenting.
+4. Also STOP when your last 3 benchmarked attempts together improved your best by < 3%, or after
+   3 consecutive attempts that failed correctness or were slower.
+5. Iterate with the quick BENCHMARK command; run FULL_BENCHMARK once, on your final best only.
+6. On STOP: workspace holds the best kernel, CORRECTNESS passes, best_patch.diff is saved AND non-empty
+   (check \`wc -c ${outDir}/best_patch.diff\`; an empty patch is DISCARDED by verify) -> return
+   the worker_result immediately. A correct result on time beats a marginally faster one delivered late.`;
+}
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
 // gate is tunable per run (e.g. raise it on a noisy box, lower it to bank small compounding wins).
@@ -1466,7 +1501,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 }
 
 let plannerStopReason = '';
-while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round < MAX_ROUNDS) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
@@ -1642,7 +1677,7 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + fastModeEngineerBlock(d.out_dir),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
@@ -1767,6 +1802,9 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     roundsCommitted += 1;
 
     // --- (f) Re-profile the new best ------------------------------------
+    if (FAST_MODE && (dispatched >= BUDGET || round >= MAX_ROUNDS)) {
+      log(`  [fast_mode] last round (${round}) -- skipping the re-profile.`);
+    } else
     profileSummary = await agentT(
       roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
         WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
@@ -1779,7 +1817,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
-  const mem = await agentT(
+  const mem = (FAST_MODE && (dispatched >= BUDGET || round >= MAX_ROUNDS)) ? null : await agentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.', {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
