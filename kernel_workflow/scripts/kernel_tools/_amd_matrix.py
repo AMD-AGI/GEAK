@@ -1,5 +1,7 @@
 """Installed AMD Matrix Instruction Calculator adapter; no downloads or installs."""
-import re, subprocess, sys
+import re
+import subprocess
+import sys
 
 # byte width per calculator dtype token -> elems/lane = (GPRs*4 bytes) / bytes_per_elem
 _DTYPE_BYTES = {"FP8": 1, "BF8": 1, "FP4": 0.5, "FP6": 0.75, "I8": 1, "INT8": 1,
@@ -8,7 +10,7 @@ _DTYPE_BYTES = {"FP8": 1, "BF8": 1, "FP4": 0.5, "FP6": 0.75, "I8": 1, "INT8": 1,
 
 def _gap(msg):
     print(f"SCOPED TOOL-GAP: {msg}", file=sys.stderr)
-    print("  -> fall back to distilled perf_knowledge/hardware/ + gluon_authoring/references/hardware/ values (probe-then-trust); never fabricate",
+    print("  -> fall back to distilled perf_knowledge/hardware/ with explicit source and uncertainty; never fabricate",
           file=sys.stderr)
     sys.exit(3)
 
@@ -24,21 +26,21 @@ def _calc_path():
 def _run(calc, *args):
     from matrix_dependency import interpreter
     try:
-        r = subprocess.run([interpreter(calc), calc, *args], capture_output=True, text=True, timeout=60)
-    except Exception as e:
+        r = subprocess.run([interpreter(calc), calc, *args], check=False, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
         _gap(f"calculator invocation failed: {e}")
     return r.returncode, r.stdout, r.stderr
 
 
 def _detail(calc, arch, instr):
-    rc, out, err = _run(calc, "-a", arch, "-i", instr, "-d")
+    rc, out, _err = _run(calc, "-a", arch, "-i", instr, "-d")
     if rc != 0 or "Matrix Dimensions" not in out:
         _gap(f"calculator has no '{instr}' for {arch} (list: layout_facts.py {arch} --list)")
     return out
 
 
 def _grab(text, label):
-    m = re.search(rf"^\s*{re.escape(label)}:\s*(.+?)\s*$", text, re.M)
+    m = re.search(rf"^\s*{re.escape(label)}:\s*(.+?)\s*$", text, re.MULTILINE)
     return m.group(1).strip() if m else None
 
 
@@ -82,5 +84,5 @@ def facts(calc, arch, instr, want_layout):
             print("  --- A register layout (v{lane}.[bits] holding A[m][k]) ---")
             print("\n".join("  " + ln for ln in lay.splitlines() if "|" in ln or ln.startswith("Block")))
     print(f"  # provenance: MI-calc {arch} {instr} -> distill into "
-          f"perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/isa-mechanisms.md with this citation")
+          f"your analysis record with this citation")
     print()

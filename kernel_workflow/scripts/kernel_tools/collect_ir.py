@@ -2,17 +2,19 @@
 """Copy one compilation's IR and metadata without mixing kernels or configurations."""
 import argparse
 import json
-from pathlib import Path
 import shutil
 import sys
+from pathlib import Path
+
+from amd_artifacts import assembly_kernel_name
 
 
 def collect(cache, dest, variant, kernel_name=''):
     groups = {}
     for path in sorted(cache.rglob('*')):
-        if path.is_file() and path.suffix in ('.ttgir', '.llir', '.amdgcn'):
-            if not kernel_name or kernel_name in path.stem:
-                groups.setdefault((path.parent, path.stem), {})[path.suffix] = path
+        if (path.is_file() and path.suffix in ('.ttgir', '.llir', '.amdgcn')
+                and (not kernel_name or kernel_name in path.stem)):
+            groups.setdefault((path.parent, path.stem), {})[path.suffix] = path
     if len(groups) != 1:
         candidates = ', '.join(str(parent.relative_to(cache) / name) for parent, name in groups)
         raise ValueError(f'expected one compilation, found {len(groups)} matching {kernel_name!r}. '
@@ -27,9 +29,11 @@ def collect(cache, dest, variant, kernel_name=''):
     if not metadata_path.is_file():
         raise ValueError(f'incomplete compilation {stem}: missing metadata')
     metadata = json.loads(metadata_path.read_text())
-    if not isinstance(metadata, dict) or not metadata.get('name'):
+    if not isinstance(metadata, dict) or not isinstance(metadata.get('name'), str) or not metadata['name'].strip():
         raise ValueError(f'invalid compilation metadata: {metadata_path}')
+    actual_name = assembly_kernel_name(artifacts['.amdgcn'].read_text(), metadata['name'])
     manifest = {'schema_version': 1, 'kernel_name': (metadata or {}).get('name') or stem,
+                'identity_status': 'verified' if actual_name else 'unavailable',
                 'compilation': str(parent.relative_to(cache) / stem), 'artifacts': {},
                 'metadata': None}
     for ext, source in artifacts.items():

@@ -10,5 +10,6 @@ if __name__ == '__main__':
 else:
     # Preserve imports of the historical database query helpers.
     import sys
+
     import _amd_isa_db
     sys.modules[__name__] = _amd_isa_db

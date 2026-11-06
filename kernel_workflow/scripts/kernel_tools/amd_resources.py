@@ -7,11 +7,13 @@ stay None; a numeric zero is retained. Sources accompany the parsed values.
 from __future__ import annotations
 
 import re
+
 import amd_occupancy as occupancy
+from amd_artifacts import assembly_kernel_name
 
 
 def _integer(text, pattern):
-    match = re.search(pattern, text, re.M)
+    match = re.search(pattern, text, re.MULTILINE)
     return int(match.group(1)) if match else None
 
 
@@ -27,9 +29,7 @@ def analyze(text, *, arch=None, vgpr=None, lds_bytes=None, workgroup_size=None,
     must come from this compilation's metadata or its caller's launch record.
     Multiple kernels in one assembly are rejected rather than mixed by regex.
     """
-    names = re.findall(r'^\s*\.amdhsa_kernel\s+(\S+)', text, re.M)
-    if len(names) > 1:
-        raise ValueError('resource analysis requires one kernel per assembly')
+    kernel_name = assembly_kernel_name(text)
     observed_arch = occupancy.arch_from_asm(text)
     arch = observed_arch or arch
     model = occupancy.model_for(arch)
@@ -109,7 +109,7 @@ def analyze(text, *, arch=None, vgpr=None, lds_bytes=None, workgroup_size=None,
     if sgpr is None:
         sgpr = _metadata(text, 'sgpr_count')
     return {'sgpr': sgpr, 'accum_offset': accum_offset, 'arch': arch, 'wave_size': wave, 'vgpr_arch': arch_vgpr, 'agpr': agpr,
-            'vgpr_combined': combined, 'spill_bytes': spill, 'kernel_name': names[0] if names else None,
+            'vgpr_combined': combined, 'spill_bytes': spill, 'kernel_name': kernel_name,
             'wg_size': workgroup_size, 'wg_size_compile_bound': bound,
             'lds_bytes_per_wg': lds_bytes, 'lds_capacity_scope': 'CU' if occupancy.lds_per_cu(arch) else None,
             'waves_by_vgpr_term': reg, 'waves_by_lds_term': lds, 'waves_per_simd': waves,

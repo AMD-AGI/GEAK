@@ -24,12 +24,20 @@ calibration remain with GEAK's profiling workflow and TraceLens.
   existing assets, and `TILE_HW_CACHE` to a writable workload cache when needed.
 - [dump_ir.sh](dump_ir.sh) runs the caller's command with a fresh absolute cache
   path. [collect_ir.py](collect_ir.py) requires one complete compilation group:
-  nonempty TTGIR, LLVM IR, AMDGCN and named metadata. It rejects empty, partial
+  nonempty TTGIR, LLVM IR, AMDGCN and named metadata. It checks the observable
+  assembly kernel against metadata before copying, and rejects empty, partial
   or ambiguous captures, preserves the previous variant and writes a manifest.
 - [amd_resources.py](amd_resources.py) is the shared resource parser. It keeps
   architectural, accumulator and combined register counts distinct, handles zero
   occupancy, rejects multi-kernel assembly, and records per-field sources. Actual
   launch geometry never comes from the compiler's maximum workgroup bound.
+  [amd_artifacts.py](amd_artifacts.py) binds launch/LDS metadata through a manifest
+  or same-stem cache sidecar, checking the assembly symbol independently at read
+  time. Renamed files are supported through the manifest. Missing symbols leave
+  launch data unknown; matching names in unrelated directories are insufficient.
+  Probe text and JSON use the same per-artifact records, so different compilations
+  of the same kernel retain their own resources. The JSON `kernels` list is
+  authoritative; the name-keyed LDS summary omits conflicting configurations.
   [amd_occupancy.py](amd_occupancy.py) owns register/LDS model arithmetic and
   compiler sweeps; its assembly entry point uses this same parser.
 - [probe.py](probe.py) renders the shared resource record or estimates resident
@@ -69,10 +77,26 @@ They retain source release/page information and verification limitations. In
 particular, new CDNA4 low-precision and sparse layouts retain their recorded
 caveats; a successful lookup is not GPU numerical validation.
 
+When updating committed ISA data:
+
+1. Record the upstream document/XML release, URL, page or instruction identifier,
+   license, retrieval date and verification scope with the data change.
+2. Update the appropriate database and the target/provider declarations in
+   `amd_targets.py`. Keep encoding, matrix rules and prose facts separate.
+3. Run the offline ISA selftests and shared CLI suites below. For calculator-backed
+   targets, run actual facts/layout/locate queries using the pinned dependency.
+4. Preserve known errors and unverified low-precision/sparse rules. A cross-check
+   against CDNA3 does not validate new CDNA4 behavior; use numerical GPU tests
+   before relying on those layouts for correctness.
+
+A complete automatic XML/PDF-to-database rebuild pipeline is not included.
+Database updates therefore require review of the source diff and per-record
+provenance, not an assumption that a generator reproduced the files.
+
 Run the CPU regression suites from the repository root:
 
 ```bash
-python3 -m pytest -q kernel_workflow/scripts/tests/test_kernel_tools_isa.py kernel_workflow/scripts/tests/test_isa_workflow_boundaries.py kernel_workflow/scripts/tests/test_shared_amd_tools.py
+python3 -m pytest -q kernel_workflow/scripts/tests/test_kernel_tools_isa.py kernel_workflow/scripts/tests/test_isa_workflow_boundaries.py kernel_workflow/scripts/tests/test_shared_amd_tools.py kernel_workflow/scripts/tests/test_matrix_dependency.py
 ```
 
 For a toolchain-specific VGPR allocation check, use `amd_occupancy.py
@@ -88,7 +112,24 @@ correctness or performance claims. Gluon source APIs vary by compiler version;
 for example, `AMDMFMALayout.instr_shape` is `[M, N]` in the tested 3.5.1 build
 and `[M, N, K]` in 3.7.0/3.8.0.
 
-## Scope of supported architecture facts
+## Dependencies and supported architecture facts
+
+| Query | gfx950 / CDNA4 | gfx942 / CDNA3 | gfx1201 / RDNA4 |
+| --- | --- | --- | --- |
+| Instruction encoding | Committed database | Committed database | Committed database |
+| Matrix facts/layout/locate | Committed database and rules | Optional AMD calculator | Optional AMD calculator |
+| Structured register/waitcnt/memory prose | Committed facts, with caveats | Not extracted | Not extracted |
+| Static occupancy | Registers/LDS, subject to launch data | Registers/LDS, subject to launch data | Registers; LDS scope unverified |
+
+Use [dependencies.md](dependencies.md) for pinned calculator preparation, offline
+installation, interpreter selection and real query checks. ISA queries and IR
+inspection do **not** require rocprofv3, rocprof-compute or ATT. Optional
+`hw_sources.sh decode` uses **isa_spec_cli for static instruction bytes**; it is
+not an ATT trace decoder. Runtime profiling and ATT environment checks belong to
+the separate profiling integration (PR4), with SDK/decoder packages supplied by
+the workload image.
+
+## Coverage limits
 
 Encoding queries support gfx942/CDNA3, gfx950/CDNA4 and gfx1201/RDNA4. Matrix
 layout queries use their declared providers; calculator availability is checked
