@@ -115,6 +115,16 @@ const RDNA4_ISOLATE = RDNA4_ISA;
 const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE || RDNA35_ISA;
 const E2E_LEARNED_KB_ENABLED = !CLIENT_RDNA_ISOLATE;
 const MATRIX_CORE_NAME = CLIENT_RDNA_ISOLATE ? 'WMMA' : 'MFMA';
+// Renaming the matrix core does not make the fused-fp8 advice true everywhere. gfx115x has no fp8
+// matrix instruction (its peaks.md section has no fp8 key; amd_ryzen.md: "fp8 matrix path: none"),
+// so its three fused-quant prompt sites name an in-register upcast instead. Every other ISA keeps
+// the original wording byte for byte.
+const FP8_MATRIX_ABSENT = RDNA35_ISA;
+const FP8_UPCAST_GEMM = 'one GEMM that reads fp8 weights and upcasts them in registers (this ISA has no fp8 ' +
+  'matrix instruction: the win is bytes moved and one fewer pass, not a narrower matrix op)';
+const FP8_FUSED_QUANT = FP8_MATRIX_ABSENT ? FP8_UPCAST_GEMM : `one fp8 ${MATRIX_CORE_NAME}`;
+const FP8_FUSED_GEMM = FP8_MATRIX_ABSENT ? FP8_UPCAST_GEMM : `one fp8 ${MATRIX_CORE_NAME} GEMM`;
+const FP8_FUSED_RUN = FP8_MATRIX_ABSENT ? `run ${FP8_UPCAST_GEMM}` : `run ONE fp8 ${MATRIX_CORE_NAME} GEMM`;
 
 // Lanes launched from here default the learned KB OFF (kernel_workflow alone defaults it ON): e2e
 // extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
@@ -988,7 +998,7 @@ const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
-  `fused quant (one fp8 ${MATRIX_CORE_NAME}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
+  `fused quant (${FP8_FUSED_QUANT}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
   'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
   "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
   'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
@@ -5076,8 +5086,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
-              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 ${MATRIX_CORE_NAME} ` +
-              `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, ${FP8_FUSED_GEMM}) ` +
+              `and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
               `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
           }, `${j.short_name}:${lang}`);
@@ -5335,7 +5345,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
               `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
-              `(fold the block-scale into the operand scale, run ONE fp8 ${MATRIX_CORE_NAME} GEMM — the "kill the dequant" lever) and cache ` +
+              `(fold the block-scale into the operand scale, ${FP8_FUSED_RUN} — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',

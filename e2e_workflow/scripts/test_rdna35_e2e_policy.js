@@ -31,6 +31,7 @@ const ok = (cond, msg, detail) => {
 
 function build(argsObj, opts) {
   const o = opts || {};
+  const body = o.body || BODY;
   const trace = { workflowCalls: [], phases: [], logs: [], agentPrompts: [] };
   const g = {
     args: { workflow_dir: E2E_DIR, ...argsObj },
@@ -66,7 +67,7 @@ function build(argsObj, opts) {
     pipeline: async (items) => items,
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
   };
-  const fn = new Function(...Object.keys(g), `return (async () => { ${BODY} })();`);
+  const fn = new Function(...Object.keys(g), `return (async () => { ${body} })();`);
   return { run: () => fn(...Object.values(g)), trace };
 }
 
@@ -216,6 +217,33 @@ const R9700 = {
     // matrix_instr_nonkdim / kpack knobs on every isolated ISA.
     ok(/CLIENT_RDNA_ISOLATE\n\s+\? ' DIRECTION=wmma-layout:/.test(BODY),
       'the MFMA-only tuning knobs are gated behind the client-RDNA branch');
+  }
+
+  console.log('\n# fp8 prompts: no fp8 matrix op is prescribed where the ISA has none');
+  {
+    // Render the prompt fragments for real: return them right after GRAPH_REQ is built.
+    const PROBE_BODY = BODY.replace(/(\nconst GRAPH_REQ = [\s\S]*?\n\) : '';\n)/,
+      '$1return { GRAPH_REQ, FP8_FUSED_QUANT, FP8_FUSED_GEMM, FP8_FUSED_RUN };\n');
+    ok(PROBE_BODY !== BODY, 'the GRAPH_REQ probe point exists');
+    const render = async (identity) => build(
+      { model_path: '/models/m', backend: 'vllm', ...identity }, { body: PROBE_BODY }).run();
+    const halo = await render(HALO);
+    const all = (r) => [r.GRAPH_REQ, r.FP8_FUSED_QUANT, r.FP8_FUSED_GEMM, r.FP8_FUSED_RUN].join(' | ');
+    ok(!/fp8 (WMMA|MFMA)/.test(all(halo)) && /upcasts them in registers/.test(halo.GRAPH_REQ),
+      'gfx1151 is told to upcast in registers, not to use an fp8 matrix op', all(halo).slice(0, 300));
+    // Every other ISA renders exactly what it did before this change.
+    for (const [name, identity, core] of [['R9700', R9700, 'WMMA'], ['gfx950', MI355X, 'MFMA']]) {
+      const r = await render(identity);
+      ok(r.GRAPH_REQ.includes(`fused quant (one fp8 ${core}, kill the dequant)`)
+        && r.FP8_FUSED_GEMM === `one fp8 ${core} GEMM` && r.FP8_FUSED_RUN === `run ONE fp8 ${core} GEMM`,
+        `${name} keeps the fp8 ${core} wording`, all(r).slice(0, 300));
+    }
+    // The core name may name an fp8 op only in the three per-site constants, so a new prompt
+    // cannot reintroduce "fp8 WMMA" on gfx115x without going through FP8_MATRIX_ABSENT.
+    const byCore = BODY.split('\n').filter((l) => /fp8 \$\{MATRIX_CORE_NAME\}/.test(l));
+    ok(byCore.length === 3 && byCore.every((l) => /^const FP8_FUSED_(QUANT|GEMM|RUN) = FP8_MATRIX_ABSENT/.test(l)),
+      'fp8 is joined to the core name only inside the FP8_FUSED_* constants', byCore.join(' || '));
+    ok(!/fp8 (WMMA|MFMA)/.test(BODY), 'no prompt hard-codes an fp8 matrix op');
   }
 
   console.log(failures === 0
