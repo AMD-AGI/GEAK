@@ -18,8 +18,8 @@ sources:
 > instruction table, the **block-scaled** intrinsic, and the layout it expects.
 
 ## TL;DR
-> 256 CU × 4 = **1024 Matrix Cores**, each **2× the FP16/FP8 rate** of CDNA3 → FP16/BF16 **2.5 PF**,
-> FP8 **5 PF**, FP6/FP4 **10 PF**. The headline new op is **`v_mfma_scale_f32_32x32x64_f8f6f4`**:
+> On MI355X, 256 CU × 4 = **1024 Matrix Cores**, each **2× the FP16/FP8 rate** of CDNA3 → FP16/BF16 **2.5 PF**,
+> FP8 **5 PF**, FP6/FP4 **10.1 PF**. The headline new op is **`v_mfma_scale_f32_32x32x64_f8f6f4`**:
 > A and B may be any of FP8/FP6/FP4 (chosen independently) with **per-32-element E8M0 scales** applied
 > after the dot product. **FP8 is OCP** here; **TF32 is gone**.
 
@@ -50,7 +50,7 @@ sources:
 
 > Cycle rule for f8f6f4/scaled: the **lower** count applies when neither A nor B is FP8 (i.e.
 > FP6/FP4-only); the **higher** count applies when **either matrix is FP8**. This is why FP6/FP4 reach
-> 10 PF while FP8 tops at 5 PF. SMFMAC (4:2 sparse) carries over from CDNA3.
+> 10.1 PF while FP8 tops at 5 PF. SMFMAC (4:2 sparse) carries over from CDNA3.
 
 ### The block-scaled intrinsic
 ```cpp
@@ -91,7 +91,7 @@ wide, so 32 FP4 (128 bit) pad the upper 128 bits with zero. See
 - **FNUZ→OCP bit-copy** corrupts FP8.
 - **Wrong E8M0 scale layout** (Ax/Bx) — the calculator's `--get-register` gives the exact map.
 - **Expecting TF32** — removed.
-- **Assuming FP6 is slower than FP4** — they share the 10 PF rate.
+- **Assuming FP6 is slower than FP4** — they share the 10.1 PF rate.
 
 ## Verify
 - `amd_matrix_instruction_calculator --architecture cdna4 --instruction
@@ -99,6 +99,7 @@ wide, so 32 FP4 (128 bit) pad the upper 128 bits with zero. See
 - `--get-register --A-matrix`/`--Ax` for exact scale/operand placement before wiring scales.
 
 ## Sources
+- Current product peaks (MI355X FP6/FP4 10.1 PF; MI350X 9.2 PF): [peak_tables.md](peak_tables.md).
 - Matrix Core Programming on CDNA3/CDNA4 — ROCm Blogs (CDNA4 table, scaled intrinsic, type codes,
   layout, FP6=FP4 rate): https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
 - AMD CDNA4 ISA Reference Guide, MFMA with block exponent scaling:

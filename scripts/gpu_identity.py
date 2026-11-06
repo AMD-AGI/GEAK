@@ -7,6 +7,16 @@
 `r9700` or `r9600d` only when the same GPU agent reports the corresponding
 exact marketing name; every other product remains `unknown`. Product identity
 does not establish serving-policy or performance-calibration qualification.
+
+The separate `sku` field names the peak-table row for roofline lookups: `r9700` / `r9600d`
+and the Instinct parts (`mi300x`, `mi325x`, `mi308x`
+on gfx942; `mi350x`, `mi355x` on gfx950) only when ALL of these hold on the same
+agent: the exact marketing name, the expected gfx, and the full-device physical
+CU count. A partitioned device (e.g. CPX mode reports a fraction of the CUs per
+agent), a VF/OAM variant name, or a name/ISA mismatch is `unknown` -- the
+product's full-device peaks would be wrong for it. `sku` values are the
+`identity_target` keys of perf_knowledge/hardware/data/sku.json; tests assert
+the two tables agree.
 """
 
 from __future__ import annotations
@@ -26,10 +36,30 @@ PRODUCT_TARGETS = {
     R9700_MARKETING_NAME: "r9700",
     R9600D_MARKETING_NAME: "r9600d",
 }
+# marketing name -> (target, gfx, full-device physical CU count). Exact match only.
+# Shared specifications own exact product names and expected full-device resources.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hardware_context import products  # noqa: E402 (repository-local module)
+INSTINCT_PRODUCTS = {name: spec for name, spec in products().items()
+                     if name.startswith("AMD Instinct ")}
+KNOWN_SKUS = frozenset({"unknown"} | set(PRODUCT_TARGETS.values()) | {t for t, _, _ in INSTINCT_PRODUCTS.values()})
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
 _GFX_RE = re.compile(r"^gfx[0-9a-f]+$", re.IGNORECASE)
+
+
+def product_sku(gfx: str, marketing_name: str, physical_cu_count: int) -> str:
+    """The peak-table SKU for one agent, or `unknown`. Never inferred from the ISA alone.
+    (Not the `target` pin, which stays r9700 | r9600d | unknown.)"""
+    if marketing_name in PRODUCT_TARGETS:
+        spec = products().get(marketing_name)
+        return spec[0] if spec and (gfx, physical_cu_count) == spec[1:] else "unknown"
+    spec = INSTINCT_PRODUCTS.get(marketing_name)
+    if spec and spec[1] == gfx and spec[2] == physical_cu_count:
+        return spec[0]
+    return "unknown"
 
 
 class IdentityError(RuntimeError):
@@ -89,6 +119,7 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
                 "gfx": gfx,
                 "marketing_name": marketing_name,
                 "target": target,
+                "sku": product_sku(gfx, marketing_name, physical_cu_count),
                 "physical_cu_count": physical_cu_count,
             }
         )

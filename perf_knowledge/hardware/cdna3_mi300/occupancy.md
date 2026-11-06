@@ -4,8 +4,10 @@ kind: hardware
 gens: [gfx942]
 dtypes: []
 regimes: [both]
-updated: 2026-06-08
+updated: 2026-10-07
 sources:
+  - perf_knowledge/hardware/data/hw_constants.json
+  - https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://rocm.github.io/rocprofiler-compute/performance_model.html
@@ -18,20 +20,22 @@ sources:
 
 ## TL;DR
 > Occupancy = resident waves/SIMD, capped at **8** (32/CU). It is the **minimum** of the VGPR limit
-> (`floor(512/N)`), the LDS limit (`floor(65536/L)`), and the wave-slot cap. **Register pressure is
+> (`floor(512/roundup8(N))`), the LDS limit (`floor(65536/L)`), and the wave-slot cap. **Register pressure is
 > the #1 killer**; attention/softmax are usually **LDS**-limited. HBM-bound kernels want ≥4 waves/CU;
 > MFMA-bound GEMM often runs 1–2 wg/CU and hides latency with double-buffered LDS instead.
 
 ## Concepts
 
 ### Inputs
-1. **N** = VGPRs/wave (ISA `.vgpr_count`, **rounded up to a multiple of 16**).
+1. **N** = VGPRs/wave counted over **ArchVGPR + AGPR combined** (`alignTo(arch, 4) + agpr` when AGPRs
+   are used; ISA `.vgpr_count` + `.agpr_count`), **rounded up to a multiple of 8** — `vgpr_alloc_granule`
+   in [`../data/hw_constants.json`](../data/hw_constants.json) (compiler-derived).
 2. **L** = LDS bytes/workgroup.
 3. **nW** = waves/workgroup = `ceil(threads_per_block / 64)`.
 
 ### Limits (MI300X)
 ```
-occ_vgpr (waves/SIMD)    = floor(512 / N)            # cap 8
+occ_vgpr (waves/SIMD)    = floor(512 / roundup8(N))  # cap 8; unified ArchVGPR+AGPR file
 occ_lds  (workgroups/CU) = floor(65536 / L)          # 64 KiB LDS
 wave_slots               = 8/SIMD = 32/CU            # hard cap
 wg_from_vgpr             = floor(occ_vgpr * 4 / nW)  # 4 SIMDs/CU
@@ -60,13 +64,19 @@ occ_vgpr=floor(512/48)=10->cap 8 ; wg_from_vgpr=floor(8*4/4)=8 ; occ_lds=floor(6
 wave-slot cap floor(32/4)=8 -> wg_per_CU=8 -> 32 waves/CU (max)
 ```
 
-### The 16-VGPR granule trap
-170 VGPRs rounds to 176. Watch tier boundaries at 64/80/96/128/168/256 — shaving a few VGPRs across a
-boundary can jump an occupancy tier.
+### The 8-VGPR granule trap
+170 VGPRs rounds to 176 → 2 waves/SIMD, where 168 gives 3. The tier boundaries — the last combined
+VGPR count that still fits each wave count — are 64/72/80/96/128/168/256 → 8/7/6/5/4/3/2 waves
+(`vgpr_wave_steps` in [`../data/hw_constants.json`](../data/hw_constants.json), measured from LLVM's
+`; Occupancy:` output; `kernel_workflow/scripts/kernel_tools/amd_occupancy.py --vgpr N --arch gfx942`
+computes it). Shaving a few VGPRs across a boundary can jump an occupancy tier. A 16-VGPR granule
+(which some guides state) has no 7-wave tier and puts 168 at 2 waves — it does not match the compiler.
 
 ## The levers
 1. **Cut VGPRs** (smaller tile, `waves_per_eu`, **AGPR escape hatch**
-   `-mllvm -amdgpu-mfma-vgpr-form=false -mllvm -amdgpu-agpr-alloc=256`).
+   `-mllvm -amdgpu-mfma-vgpr-form=false -mllvm -amdgpu-agpr-alloc=256` — AGPRs come out of the same
+   512-entry file, so they lift the per-wave ceiling past 256 arch VGPRs without spilling but do not
+   lower the occupancy count).
 2. **Cut LDS** (less buffering, packing) when LDS binds (attention).
 3. **`buffer_load_to_lds`** removes staging VGPRs — biggest GEMM occupancy win (see
    [memory_hierarchy.md](memory_hierarchy.md)).
@@ -89,14 +99,20 @@ boundary can jump an occupancy tier.
 ## Pitfalls
 - **Maximizing occupancy blindly** — GEMM often wins at low occupancy with deep prefetch.
 - **Ignoring the LDS limiter** for attention.
-- **Forgetting 16-granule rounding** when budgeting VGPRs.
+- **Forgetting 8-granule rounding**, or counting arch VGPRs only — AGPRs count toward the same budget.
 
 ## Verify
 - ISA `.vgpr_count`/`.lds_size`; on-box `occ.sh` (ROCm workload guide) → waves/CU.
 - `rocprof-compute` occupancy panel: resident vs theoretical waves, which resource binds.
 
 ## Sources
-- ROCm MI300X workload optimization (512 VGPR/EU, 16-granule, occ.sh, waves_per_eu):
+- GEAK hardware constants (`vgpr_alloc_granule` = 8, `vgpr_wave_steps`, compiler-derived on ROCm 7.2.1 /
+  LLVM 22; the single source for the granule): `perf_knowledge/hardware/data/hw_constants.json`
+- LLVM `AMDGPUBaseInfo.cpp` — `getVGPRAllocGranule` returns 8 for every `FeatureGFX90AInsts` target and
+  `getTotalNumVGPRs` = `alignTo(ArchVGPR, 4) + AGPR`:
+  https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp
+- ROCm MI300X workload optimization (512 VGPR/EU, occ.sh, waves_per_eu; its 16-granule statement is
+  superseded by the compiler-derived granule above):
   https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 - HIP Hardware implementation (wave slots, SIMD, VGPR/AGPR):
   https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html

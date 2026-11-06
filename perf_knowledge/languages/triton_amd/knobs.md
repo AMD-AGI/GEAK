@@ -39,8 +39,8 @@ more AGPR/VGPR pressure, coarser scheduling). `nonkdim=32` requires `BLOCK_M,BLO
 Prefer 16 unless 32 measurably wins.
 
 ## 2. `waves_per_eu` — occupancy via register trimming
-Emits `amdgpu-waves-per-eu`. Hardware: **512 VGPR/EU**, allocated in **16-granules**. Achievable iff
-`round_up_16(vgpr_used) · waves_per_eu ≤ 512`.
+Emits `amdgpu-waves-per-eu`. Hardware: **512 VGPR/EU**, allocated in **8-granules** (gfx90a and later; ArchVGPR + AGPR share the file). Achievable iff
+`round_up_8(arch_vgpr + agpr) · waves_per_eu ≤ 512` (`kernel_workflow/scripts/kernel_tools/amd_occupancy.py`).
 
 | vgpr_used | rounds to | max waves/EU |
 |---|---|---|

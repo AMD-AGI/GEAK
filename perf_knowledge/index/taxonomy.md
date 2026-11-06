@@ -10,7 +10,7 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx90a` | CDNA2 | MI210, MI250, MI250X |
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
-| `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK product calibration is R9700-only |
+| `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK serving policy covers R9700 and R9600D; measurement coverage is separate |
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·

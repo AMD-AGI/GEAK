@@ -85,18 +85,17 @@ see the disagreement rather than a single blended number that hides it.
    what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve peaks from `peaks.md` via
-   `resolve_peaks(gfx, product=env_report.device_target)`.
-   `device_target=unknown` (every card without a product section, MI300/MI355
-   included) is no
-   product constraint: the ISA-keyed tables still resolve. Client RDNA4
-   numeric peaks exist only for the products with a `product:` section
-   (`r9700`, `r9600d`). A bare gfx1201 (or any other
-   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
-   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
-   — it must not use that gate. Other unknown architectures may derive from
-   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
-   canonical dtype keys; a missing dtype is unknown, never the table maximum.
+1. Resolve the observed product and resource scope using
+   `resolve_peaks(peaks_md_path, gfx, hardware_context=env_report.hardware_context)`
+   or export `GEAK_HARDWARE_CONTEXT` to the run's `hardware_context.json` file.
+   `device_target=unknown` is not a product identity. Bare gfx942/gfx950 must not
+   select MI300X/MI355X whole-device peaks. Unknown/conflicting name, ISA or CU
+   scope returns no numerical reference; emit unknown headroom. Exact MI308X
+   uses its own derived reference with low confidence and cannot rank (§6 L1).
+   Old explicit product-only calls remain low-confidence reference lookups.
+   Local SKU estimates are planning-only; native TraceLens retains independent
+   models, calibration and report semantics. Use `peak_flops_for()` for precision
+   lookup; a missing precision stays unknown.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.
