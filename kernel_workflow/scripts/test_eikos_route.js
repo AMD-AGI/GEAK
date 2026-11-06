@@ -17,7 +17,7 @@ const KDIR = path.resolve(__dirname, '..');
 const ROOT = path.resolve(KDIR, '..');
 const SRC = fs.readFileSync(path.join(KDIR, 'kernel_lane.js'), 'utf8');
 const SPEC = JSON.parse(fs.readFileSync(path.join(ROOT, 'e2e_workflow/scripts/eikos_questions/lane_sufficiency.json'), 'utf8'));
-const H45 = 'claude-haiku-4-5', S5 = 'claude-sonnet-5-5', O55 = 'claude-opus-5-5';
+const H45 = 'claude-haiku-5-5', S5 = 'claude-sonnet-5-5', O55 = 'claude-opus-5-5';
 
 let n = 0, fails = 0;
 function ok(name, cond) { n++; if (cond) console.log(`PASS  ${name}`); else { fails++; console.log(`FAIL  ${name}`); } }
