@@ -1678,7 +1678,7 @@ def rank_head(node: dict, master: str, log: str, profile_dir: str, launch_id: st
     banner = f"mn-launch id={launch_id} rank={rank} if={nic} ip={ip} master={master} log={log}"
     return [
         f"ip -4 -o addr show dev {q(nic)} | grep -qF {q(f'inet {ip}/')} || {{ echo {q(lost)} >&2; exit 1; }}",
-        f"export NCCL_SOCKET_IFNAME={q(nic)} GLOO_SOCKET_IFNAME={q(nic)} MASTER_ADDR={q(master)}",
+        f"export NCCL_SOCKET_IFNAME={q(nic)} GLOO_SOCKET_IFNAME={q(nic)} MASTER_ADDR={q(master)} GEAK_NODE_IP={q(ip)}",
         f"mkdir -p {q(os.path.dirname(log))} {q(profile_dir)}",
         f"echo {q(banner)}",
     ]

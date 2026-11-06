@@ -4604,6 +4604,71 @@ class AtomProfileLaunchTest(_PinnedEnv):
             self.assertNotIn("ATOM_PROFILER_MORE", self.rendered(rank))
 
 
+@unittest.skipUnless(HAVE_SH, "needs bash")
+class AtomGeneratedPdTest(_PinnedEnv):
+    """Generated mode: no launch_command, GEAK renders the ATOM engines and the atomesh router."""
+    ADAPTERS = os.path.realpath(os.path.join(HERE, "..", "adapters"))
+
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(self.ADAPTERS, os.path.join(self.tmp, "adapters"))
+        self.pin(dict(PD_STATE, serve_port=8000, nodes=[
+            dict(PD_STATE["nodes"][0], role="prefill", tp=8, gpus=8),
+            dict(PD_STATE["nodes"][1], role="decode", tp=8, gpus=8)]))
+        os.environ.update(GEAK_MN_DRY_RUN="1", BACKEND="atom", TP="8", PROFILE="1",
+                          GEAK_MN_ADAPTERS=os.path.join(self.tmp, "adapters"))
+        self.addCleanup(os.environ.pop, "PROFILE", None)
+
+    def sh(self, snippet, **env):
+        return subprocess.run(["bash", "-c", f'. "{self.ADAPTERS}/atom.sh"; {snippet}'], capture_output=True,
+                              text=True, env=dict(os.environ, **env))
+
+    def test_the_real_atom_adapter_serves_pd_and_still_refuses_tp_span(self):
+        root = os.path.dirname(self.ADAPTERS)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GEAK_MN_ADAPTERS")
+            self.assertTrue(mn.resolve_adapter("atom", root, "pd_disagg").endswith("atom.sh"))
+            with self.assertRaises(SystemExit) as e:
+                mn.resolve_adapter("atom", root, "tp_span")
+        self.assertIn("adapter_dist_args", str(e.exception))
+
+    def test_each_role_gets_mooncakes_kv_config_with_the_nodes_ip(self):
+        for role, kv in (("prefill", "kv_producer"), ("decode", "kv_consumer")):
+            out = self.sh(f"adapter_pd_args {role} 30898 mooncake_tcp", GEAK_NODE_IP="10.10.0.166")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            argv = shlex.split(out.stdout)
+            self.assertEqual(argv[0], "--kv-transfer-config")
+            self.assertEqual(json.loads(argv[1]), {"kv_role": kv, "kv_connector": "mooncake",
+                                                   "proxy_ip": "10.10.0.166", "handshake_port": 30898})
+
+    def test_no_node_ip_or_an_unknown_role_is_refused(self):
+        self.assertNotEqual(self.sh("adapter_pd_args prefill 30898", GEAK_NODE_IP="").returncode, 0)
+        self.assertNotEqual(self.sh("adapter_pd_args router 30898", GEAK_NODE_IP="1.2.3.4").returncode, 0)
+
+    def test_the_router_gets_every_engine_and_no_bootstrap_port(self):
+        log = os.path.join(self.tmp, "lb.log")
+        out = self.sh('SERVER_LAUNCH_PREFIX=echo EXTRA_ENV= LOG="$L"; adapter_pd_lb_launch 0.0.0.0 8000 '
+                      '"http://a:1 http://b:1" 30898 "http://c:2"; wait', L=log)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        with open(log, encoding="utf-8") as f:
+            line = f.read()
+        self.assertIn("atomesh launch --host 0.0.0.0 --port 8000 --pd-disaggregation --prefill http://a:1 "
+                      "--prefill http://b:1 --decode http://c:2 --policy random --backend atom", line)
+        self.assertNotIn("30898", line)
+
+    def test_the_rendered_engines_carry_their_role_ip_and_profile_dir(self):
+        self.assertEqual(self.launch(), 0)
+        prof = os.environ["PROFILE_DIR"]
+        for rank, ip, role in (("rank0", "10.10.0.166", "prefill"), ("rank1", "10.10.0.183", "decode")):
+            script = self.rendered(rank)
+            self.assertIn(f"GEAK_NODE_IP={ip}", script)
+            self.assertIn(f"adapter_pd_args {role} 8008 mooncake_tcp", script)
+            self.assertIn(f"export PROFILE_DIR={prof}/{role}\n", script)
+            self.assertIn(f"mkdir -p {os.path.dirname(os.environ['LOG'])} {prof}/{role}", script)
+        lb = self.rendered("lb")
+        self.assertIn("adapter_pd_lb_launch 0.0.0.0 8000 http://10.10.0.166:8001 8008 http://10.10.0.183:8002", lb)
+
+
 class _FakeEngine:
     """One PD engine's HTTP side, for the profile window: it records what /start_profile carried
     and, on /stop_profile, leaves traces behind the way its backend does (ATOM: `<dir>/rank_<N>/`

@@ -458,10 +458,17 @@ same runtime to be comparable.
 
 ## ATOM engines and the atomesh router
 
-ATOM is served from the caller's own commands (provided mode, Hyperloom's per-pod `launch_command`).
-`adapters/atom.sh` defines no `adapter_dist_args` / `adapter_pd_args`, so a generated launch for it is
-refused, and ATOM's server takes no `--nnodes` / `--node-rank`, so a TP group spanning nodes is not
-offered either. A node's engine is one TP world on its own cards.
+ATOM runs either way. **Provided**: Hyperloom's per-pod `launch_command`s, run as given. **Generated**
+(no `launch_command`): `adapters/atom.sh` renders the engines and the router, for `pd_disagg` only:
+`adapter_pd_args` gives each role `--kv-transfer-config '{"kv_role": kv_producer|kv_consumer,
+"kv_connector": "mooncake", "proxy_ip": <the node's cluster IP>, "handshake_port": <pd bootstrap port>}'`
+(`mn.py` exports the IP as `GEAK_NODE_IP`; the transfer backend / IB device of `pd` do not apply, Mooncake
+reads its protocol from `EXTRA_ENV`'s `MC_*`), and `adapter_pd_lb_launch` starts
+`atomesh launch --pd-disaggregation --prefill <url>... --decode <url>... --policy random --backend atom`
+with the flags of ATOM's `pd_disaggregation_guide.md`. Engine HTTP ports follow `serve_port`; each role is
+launched with its own profile dir (see below). A `tp_span` generated launch is still refused: ATOM's server
+takes no `--nnodes` / `--node-rank`, so a TP group spanning nodes is not offered. A node's engine is one TP
+world on its own cards. xPyD replicas on one host would share the handshake port; give each its own host.
 
 What check reads from an ATOM command:
 
