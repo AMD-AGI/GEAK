@@ -1621,7 +1621,15 @@ function __routeEscalatePastFailedLane(scope, route) {
   const r = model != null ? __routeRank(model) : -1;
   if (r < 0 || r >= ROUTE_TOP) return;                          // unknown lane, or already at the top: nothing to escalate past
   const next = r + 1;
-  const st = __routeLadder[scope];
+  // eikos v2 E1 (R12 / Astra SHADOW-VERDICT item 2): operate on the ACTIVE decider's ladder. Under LIVE P1
+  // (route_decider=p1) the scope's measured state lives in __p1Ladder, NOT the legacy __routeLadder — reading
+  // __routeLadder made this a NO-OP under live P1 (Astra: the real live-P1 picker between refusals produced
+  // Haiku 5.5 -> Haiku 5.5 -> Haiku 5.5). Raising __p1Ladder[scope].floor_rank + excluding the failed lane via
+  // fails_by_lane makes __p1Reduce drop the incapable lane and pick the next capable one. Eikos/sonnet keep
+  // __routeLadder. Capability/availability escalation stays SEPARATE from earned work_product failures.
+  const st = ROUTE_P1_ON
+    ? (__p1Ladder[scope] || (__p1Ladder[scope] = __p1NewState(__routeScopeClass(scope))))
+    : __routeLadder[scope];
   if (!st) return;
   if (typeof st.floor_rank === 'number') st.floor_rank = Math.max(st.floor_rank, next);   // eikos / p1 ladder floor
   if (st.fails_by_lane) {                                                                  // exclude the incapable lane
@@ -1999,6 +2007,25 @@ async function agentTCore(p, o) {
       return r;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
+      // eikos v2 E1 (R12 / Astra SHADOW-VERDICT item 1): an AUTHORITATIVE PRE-START model-capability
+      // refusal — a 4xx the endpoint returns while VALIDATING the request (e.g. a lane that cannot do the
+      // adaptive thinking the commit dispatch asks for: 'model does not support X' / adaptive-thinking-not-
+      // supported), BEFORE any tokens/work — PROVES the one-shot writer never ran. Mark it on the commit
+      // error-sink so the commit classifier can treat ONLY this as not_started (safe to ESCALATE past the
+      // incapable lane); retrying the SAME lane is pointless, so resolve null now WITHOUT burning retries.
+      // EVERY OTHER error (ordinary/non-capability fault, or a resolved null) stays UNKNOWN -> the classifier
+      // keeps it AMBIGUOUS -> quarantine+RETAIN (no second writer). Routing-off / non-commit callers pass no
+      // sink, so this is a no-op for them (the return value is null either way). Requires BOTH an explicit
+      // capability phrase AND a 4xx signal, so a 401/429/5xx or a bare mid-work error never trips it.
+      const __st = Number((e && (e.status || e.statusCode || e.http_status)) || 0);
+      const __capRefusal =
+        /(does not support|not supported|unsupported|adaptive[\s_-]*thinking|model[_\s-]*capab)/i.test(msg)
+        && (((__st >= 400) && (__st < 500)) || /\b4\d\d\b/.test(msg));
+      if (__capRefusal) {
+        if (errSink) { errSink.capability_refused = true; errSink.capability_reason = msg; }
+        log(`  [capability guard] ${label} hit a PRE-START model-capability refusal (${msg}) — the one-shot writer never ran; NOT retrying this incapable lane.`);
+        return null;
+      }
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
         continue;
@@ -3296,15 +3323,20 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
     // writer; we QUARANTINE and RETAIN the already-verified winner as RECOVERABLE (fixes the original
     // $31-loss motivation without the concurrent-mutation hazard).
     const __commitExclusiveOwnership = (receipt, atRoute) =>
-      // 'not_started' | 'terminated' | 'ambiguous'. A non-null receipt means agent() RESOLVED, so the
-      // one-shot writer subprocess exited; a null with no issued dispatch id means the router never launched a
-      // writer. R11 self-heal: a null WITH a dispatch id is AMBIGUOUS (writer may still be LIVE) ONLY when the
-      // dispatch TIMED OUT (the hang-guard fired -> atRoute.timed_out). A null from a RESOLVED or hard-ERRORED
-      // dispatch (agent() settled; e.g. a 4xx/model-capability refusal — the one-shot writer never ran) is a
-      // DEFINITIVE not_started: exclusive ownership is guaranteed, so it is SAFE to re-dispatch (escalating).
+      // 'not_started' | 'terminated' | 'ambiguous' — the AUTHORITATIVE dispatch disposition (R12, Astra
+      // SHADOW-VERDICT item 1). not_started: the one-shot writer PROVABLY never ran — the router issued no
+      // dispatch (no dispatch_id), OR the dispatch was rejected PRE-START by a CONFIRMED model-capability
+      // refusal (a 4xx 'does not support'/adaptive-thinking error the endpoint returns BEFORE any tokens/
+      // work; agentTCore marks atRoute.capability_refused). Exclusive ownership is guaranteed -> SAFE to
+      // escalate+retry. terminated: a non-null receipt — agent() RESOLVED, so the one-shot subprocess exited
+      // (exclusive ownership). ambiguous: EVERYTHING ELSE — a resolved null (may follow executed work), an
+      // ordinary/non-capability error, missing structured output, OR a true timeout (hang-guard,
+      // atRoute.timed_out). The writer may be LIVE or have done partial work -> RETAIN QUARANTINE, never a
+      // second writer. (R11 inferred not_started from 'null && !timed_out', wrongly re-dispatching a
+      // resolved-null-after-work / ordinary error; capability failures are now kept APART from earned work.)
       (!(atRoute && atRoute.dispatch_id)) ? 'not_started'
         : (receipt != null ? 'terminated'
-           : ((atRoute && atRoute.timed_out) ? 'ambiguous' : 'not_started'));
+           : ((atRoute && atRoute.capability_refused) ? 'not_started' : 'ambiguous'));
     const __retainQuarantine = (stage, atRoute, atReceipt, opts) => {
       // QUARANTINE + RETAIN: persist a recovery reference to the verified integrated winner (its patch lives
       // on disk under round_${round}/integrate|engineer_*) so the verified work is RECOVERABLE, not discarded.
@@ -3365,9 +3397,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
     let termRoute = commitRoute, termRes = commitRes, termScope = `commit r${round}`;
     if (ROUTING_ON && !committed && !(commitRes != null && commitRes.committed === false)) {
       // BUG 1 GATE: the FIRST commit dispatch must grant EXCLUSIVE ownership before we launch any salvage
-      // writer. An AMBIGUOUS (TIMED-OUT) initial commit => retain + quarantine (never a second writer). R11
-      // self-heal: a DEFINITIVE not-started (4xx/model-capability refusal or resolved/hard-errored null — the
-      // writer never ran) is NOT ambiguous; it falls through to the ESCALATING retry below (safe ownership).
+      // writer. An AMBIGUOUS initial commit (a true timeout, a resolved null, OR an ordinary non-capability
+      // error — the writer may be LIVE or have done work) => retain + quarantine (NEVER a second writer).
+      // R12 (Astra SHADOW item 1): ONLY a CONFIRMED pre-start capability refusal (a 4xx 'does not support',
+      // the writer never ran) is not-started; it falls through to the ESCALATING retry below (safe ownership).
       if (__commitExclusiveOwnership(commitRes, commitRoute) === 'ambiguous') {
         return __retainQuarantine(`commit r${round}`, commitRoute, commitRes);
       }
@@ -3415,7 +3448,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
           break;
         }
         if (__commitExclusiveOwnership(commitRetry, retryRoute) === 'ambiguous') {
-          // BUG 1: the retry TIMED OUT (receipt-less, hang-guard) — its writer may be live; do NOT launch another.
+          // R12: the retry is AMBIGUOUS — a true timeout, a resolved null, OR an ordinary error; its writer
+          // may be LIVE or have done partial work. Do NOT launch another writer; quarantine + retain.
           quarantine = __retainQuarantine(`commit r${round} retry`, retryRoute, commitRetry);
           break;
         }
