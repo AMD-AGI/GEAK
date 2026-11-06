@@ -98,3 +98,19 @@ extracted; capabilities reports this explicitly. RDNA LDS occupancy requires
 verified WGP/CU scope handling and remains withheld. No gfx950 default is used
 to fill either gap. Shared GPU measurements remain owned by GEAK profiling and
 TraceLens, not by these static bounds.
+
+## Profiling integration (PR4)
+
+Container execution lives in shared `locus.sh`; the historical Gluon path sources
+that implementation. `TILE_KERNEL_*` environment names remain compatible. GEAK
+embedded runs use their existing workload container and GPU lease. The complete
+GEAK tools directory must be mounted for IR collection; `capture.sh` no longer
+copies a shell script without its Python dependencies. Capture preserves the
+application argv after `--`, pins the requested kernel, and archives old evidence
+before collecting again. Non-Triton applications may report the static IR layer
+unavailable; this does not invent Triton IR for HIP or replace their build tooling.
+
+Profiling parsers, ATT/Perfetto rendering, GPU guards and native roofline delegation
+are shared. `profile_payload.py` and campaign decisions remain optional Gluon
+adapters. TraceLens owns measured roofline, frozen calibration and acceptance;
+static resource estimates are planning evidence and never a fallback roofline engine.

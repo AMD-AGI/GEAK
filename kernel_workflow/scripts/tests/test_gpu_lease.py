@@ -1053,7 +1053,7 @@ def test_profile_wrapper_accepts_compact_group_spec(tmp_path):
     output = tmp_path / "profile-visible"
     profile_dir = tmp_path / "profile"
     benchmark = (
-        "python -c \"import os; from pathlib import Path; "
+        f"{sys.executable} -c \"import os; from pathlib import Path; "
         f"Path({str(output)!r}).write_text(os.environ['HIP_VISIBLE_DEVICES'])\""
     )
     # A pinned arch skips the rocminfo identity probe, so this runs on CPU-only CI.

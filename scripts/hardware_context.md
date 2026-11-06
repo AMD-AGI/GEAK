@@ -113,3 +113,14 @@ Run `python3 -m pytest -q scripts/tests/test_hardware_context.py` and
 `node kernel_workflow/scripts/test_hardware_context_routing.js` for regression
 coverage. A changed catalog requires regenerating run contexts; archived contexts
 remain provenance and must not silently select new numerical references.
+
+## Shared profiling adapter
+
+`kernel_workflow/scripts/kernel_tools/roofline.sh --hardware-context FILE` also
+accepts `GEAK_HARDWARE_CONTEXT` or a context in the workspace/parent run directory.
+The adapter validates scope before delegation, checks live identity for GPU modes,
+and forwards/maps the context through the shared host/container execution helper.
+Successful native measurements receive a hardware binding; offline analysis checks
+that binding and the selected native arch before using the reference. Native
+numerical calibration audits remain in force. Missing native tools or bindings
+produce an explicit unavailable result, never a local numerical substitute.

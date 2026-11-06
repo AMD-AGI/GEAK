@@ -1,6 +1,7 @@
 # kernel_workflow — Dynamic Workflow for Kernel / Model Inference Optimization
 
 Optional shared AMD hardware queries: see [dependency preparation](scripts/kernel_tools/dependencies.md) for pinned calculator assets, isolated Python and offline setup.
+Profiler/ATT environment checks and version pairing: [profiling dependencies](scripts/kernel_tools/profiling-dependencies.md).
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
