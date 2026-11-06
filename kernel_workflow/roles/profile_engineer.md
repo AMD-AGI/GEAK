@@ -75,9 +75,17 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
      opposite fixes, so the TechLead needs the sub-case, not just "latency". Re-read this split after
      any tile / `num_stages` / `num_warps` change — it is a property of the config, not the source.
    - **Run the cheap peak/fill sanity-checks** (`profiling_guide.md` → "Cheap checks…") before trusting
-     the label: any roofline efficiency > 100% is a mis-calibrated peak (use HBM%/F32), and
+     the label: retain roofline efficiencies > 100% and investigate scope, cache, timing and reference assumptions; do not clamp or substitute another precision/model. Also,
      `CTAs = Grid/Workgroup < CU count` means the GPU is not even filled — call that out first.
-5. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
+5. When native `kernel-roofline` analysis is available and relevant, reuse the matching trace/report.
+   Follow `perf_knowledge/profiling/roofline_on_mi.md` and the native skill's integration instructions.
+   Existing-trace analysis is offline. New measured-window UT/counter work is separately requested and
+   runs under the existing GEAK lease/source guard. Preserve `geak.kernel_roofline.v1` mode, engine,
+   reports, coverage and limitations; return its path as `profile_roofline_json` and link it in the
+   summary. If unavailable, leave the path empty and state why. Never substitute a local calculator,
+   reorder measured kernels, or infer attainable speedup from distance to a reference. Missing absolute
+   counter metrics remain null; normalized raw counts are not utilization.
+6. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
    `EVAL_DIR/profiling_summary.md` (or `round_N_shift_analysis.md`). For reprofile, include a
    BEFORE→AFTER shift section explaining why the bottleneck moved and what to target next.
 
@@ -96,6 +104,7 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
   "top_kernels": [{"name": "...", "pct_of_total": 0.0}],
   "top_opportunities": ["ranked, specific, tied to a metric or per-case number"],
   "summary_path": "<path to the md>",
+  "profile_roofline_json": "<native evidence index path, or empty when unavailable>",
   "shift_note": "for reprofile: BEFORE→AFTER and what to target next (empty for baseline)"
 }
 ```

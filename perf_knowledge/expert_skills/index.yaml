@@ -217,13 +217,13 @@ skills:
     arch_class:
     - '*'
     gens:
-    - gfx942
     - gfx950
+    - gfx942
     dtypes:
     - bf16
     - fp16
-    - fp8_e4m3_fnuz
     - fp8_e4m3
+    - fp8_e4m3_fnuz
     regimes:
     - '*'
     from_backend:

@@ -1,0 +1,35 @@
+# check_pack_refs.py allowlist -- references that are INTENTIONALLY not files of this pack.
+# One fnmatch pattern per line: `<ref-pattern>` or `<citing-file-pattern>::<ref-pattern>`.
+# Never add a real broken pointer here: fix the pointer.
+
+# Run artifacts: files a run writes into $WORK, named so the reader knows what to look for.
+decision_log.md
+skeptic_review.md
+closure_review.md
+round_ledger.md
+job_description.md
+summary.md
+report.md
+COMMANDMENT.md
+notes.md
+# Host / agent memory files (Claude Code), not pack files.
+CLAUDE.md
+MEMORY.md
+# Upstream sibling packs: the tile-programming-triton front end (not vendored in GEAK) and its
+# scripts / pages, plus the NVIDIA packs a cross-reference names. Each citing line says so.
+scripts/plain_autotune.py
+scripts/knob_expose.py
+scripts/knob_probe.py
+scripts/champion_emit.py
+scripts/ttgir_facts.py
+search-routing.md
+triton-negative-patterns.md
+nvidia-sm12x.md
+*references/method/profile.md::references/companion-tools.md
+*references/method/profile.md::references/dsl/cutedsl/references/companion-tools.md
+# Placeholders in prose explaining the citation syntax itself.
+*references/method/orchestration.md::file.md*
+# JSON-schema self reference: resolved relative to the stage cards in runtime/stages/, not the schema.
+*runtime/stage-card.schema.json::../stage-card.schema.json
+# check_term_index.py's own selftest fixtures (strings that build a throwaway pack).
+*scripts/check_term_index.py::*

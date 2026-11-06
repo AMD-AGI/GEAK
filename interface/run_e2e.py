@@ -932,6 +932,11 @@ def map_args(
     # (per-op tuners -> tuned artifacts -> engagement proof), which upstream did
     # not do. So it stays enabled by default and is only overridden on request.
     # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
+    if h.get("use_gluon_skill") is not None:
+        gluon_mode = str(h["use_gluon_skill"]).strip().lower()
+        if gluon_mode not in {"auto", "true", "false"}:
+            raise ValueError("use_gluon_skill must be auto, true or false")
+        ps_args["use_gluon_skill"] = gluon_mode
     if h.get("tuning_skillset") is not None:
         ps_args["tuning_skillset"] = "true" if _as_bool(h["tuning_skillset"]) else "false"
     # tuning-kb is the skillset's per-model ANSWER KEY: right for production, but it

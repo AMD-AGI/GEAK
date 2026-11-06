@@ -15,6 +15,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
+PACK = REPO / "perf_knowledge" / "expert_skills" / "skills" / "gluon_authoring"
+PACK_SCRIPTS = PACK / "scripts"
 HW_DATA = REPO / "perf_knowledge" / "hardware" / "data"
 ROOFLINE_DIR = REPO / "e2e_workflow" / "knowledge" / "analysis_skills" / "roofline"
 
@@ -55,15 +57,56 @@ def extract_sku():
 
 
 
-# --------------------------------------------------------------------------- selftests
+# --------------------------------------------------------------------------- selftests, KT + shim
 
+@pytest.mark.parametrize("where", ["kt", "shim"])
 @pytest.mark.parametrize("tool", TOOLS)
-def test_roofline_tool_selftest(tool):
-    path = KT / f"{tool}.py"
+def test_roofline_tool_selftest(tool, where):
+    path = (KT if where == "kt" else PACK_SCRIPTS) / f"{tool}.py"
     result = run(sys.executable, path, "--selftest")
     out = result.stdout + result.stderr
     assert result.returncode == 0, out[-3000:]
     assert "SELFTEST PASS" in out, out[-3000:]
+
+
+@pytest.mark.parametrize("where", ["kt", "shim"])
+def test_hw_budget_reading_route_page_check_actually_runs(where):
+    """workload_models.json reading_route.page is pack-relative and must resolve via
+    _hwdata.pack_dir(); the 13-archetype / precheck-heading assertions must RUN, not skip."""
+    path = (KT if where == "kt" else PACK_SCRIPTS) / "hw_budget.py"
+    out = run(sys.executable, path, "--selftest").stdout
+    assert "reading-route page checked" in out and "13 archetype sections" in out, out[-2000:]
+    assert "SKIPPED" not in out
+
+
+def test_reading_route_page_resolves_via_pack_dir():
+    sys.path.insert(0, str(KT))
+    try:
+        import _hwdata  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(KT))
+    page = json.loads((HW_DATA / "workload_models.json").read_text())["reading_route"]["page"]
+    assert (_hwdata.pack_dir() / page).is_file(), page
+
+
+def test_shims_are_thin_and_point_at_kt():
+    for tool in TOOLS:
+        text = (PACK_SCRIPTS / f"{tool}.py").read_text()
+        assert f"kernel_workflow/scripts/kernel_tools/{tool}.py" in text, tool
+        assert len(text.splitlines()) < 30, f"{tool} shim carries logic"
+
+
+def test_shim_import_is_the_kt_module():
+    """`import calc_perf` / `import hw_budget` from the pack's scripts/ binds the KT module."""
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import calc_perf, hw_budget, extract_sku, "
+            "mem_bw_probe; print(calc_perf.__file__); print(hw_budget.__file__); "
+            "print(len(calc_perf.SKU_PEAKS))")
+    r = run(sys.executable, "-c", code, PACK_SCRIPTS)
+    assert r.returncode == 0, r.stderr[-2000:]
+    files = r.stdout.splitlines()
+    assert Path(files[0]).resolve() == (KT / "calc_perf.py").resolve()
+    assert Path(files[1]).resolve() == (KT / "hw_budget.py").resolve()
+    assert int(files[2]) >= 13
 
 
 # --------------------------------------------------------------------------- one source, agreeing
@@ -158,7 +201,10 @@ def test_generated_doc_blocks_are_current(extract_sku):
     rel = {str(Path(f).relative_to(REPO)) for f in files}
     for must in ("kernel_workflow/knowledge/amd_instinct.md",
                  "perf_knowledge/hardware/cdna4_mi350/peak_tables.md",
-                 "perf_knowledge/hardware/cdna3_mi300/peak_tables.md"):
+                 "perf_knowledge/hardware/cdna3_mi300/peak_tables.md",
+                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna4-skus.md",
+                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna3-skus.md",
+                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/atlas.md"):
         assert must in rel, must
     assert extract_sku.check_docs(extract_sku.load()) == []
 

@@ -308,6 +308,14 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+// Language-method discovery is independent of validated expert-recipe selection.
+// Default for supported Triton/Gluon lanes; an explicit false disables it at every layer.
+const USE_GLUON_SKILL = String(A.use_gluon_skill != null ? A.use_gluon_skill : 'auto').toLowerCase();
+if (!['auto', 'true', 'false'].includes(USE_GLUON_SKILL)) throw new Error('use_gluon_skill must be auto, true or false');
+const GLUON_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer', 'profile_engineer']);
+let GLUON_SKILL_GFX = EXPECTED_GFX;
+let GLUON_SOURCE_LANGUAGE = '';
+
 // Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
 let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201';
@@ -592,6 +600,7 @@ const PROFILE_SCHEMA = obj({
   key_metrics: { type: 'object', additionalProperties: true },
   top_kernels: { type: 'array', items: { type: 'object', additionalProperties: true } },
   top_opportunities: { type: 'array', items: { type: 'string' } },
+  profile_roofline_json: { type: 'string' }, // native evidence index, optional/unavailable
   summary_path: { type: 'string' }, shift_note: { type: 'string' },
 }, ['bottleneck', 'top_opportunities']);
 
@@ -957,6 +966,21 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+// Provide language guidance without promoting a draft to a validated optimization recipe.
+function gluonSkillBlock(role) {
+  if (USE_GLUON_SKILL === 'false' || !GLUON_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR ||
+      !['gfx942', 'gfx950'].includes(GLUON_SKILL_GFX) || !['triton', 'gluon'].includes(TARGET_LANGUAGE)) return '';
+  const route = TARGET_LANGUAGE === 'triton' && (A.target_language != null || GLUON_SOURCE_LANGUAGE !== 'gluon')
+    ? 'Keep the requested Triton backend. Inspect the tuned plain champion and use applicable diagnostics; a Gluon migration needs an explicitly selected Gluon direction.'
+    : 'Inspect the actual source: tuned plain Triton uses the port entry; existing Gluon uses the incumbent entry and skips transcription/parity gates. For fresh authoring use the API references; do not invent a champion.';
+  return `\n\n## Triton/Gluon method (automatic language reference)\n` +
+    `Read ${EXPERT_SKILLS_DIR}/skills/gluon_authoring/skill.md and its reference.md router. ` +
+    `Read validation.status: draft means unvalidated guidance, not a proven speedup recipe. ` +
+    `${route} Use existing GEAK roles and rounds, GPU leases, oracle and measured acceptance. ` +
+    `Roofline/full-counter analysis belongs to the native kernel-roofline skill; preserve its evidence and report unavailable coverage. ` +
+    `Load only the reference needed for the current stage. use_gluon_skill=false disables this language reference.`;
+}
+
 // Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
@@ -981,7 +1005,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + multiGpuBlock(role);
+  return base + expertSkillsBlock(role) + gluonSkillBlock(role) + multiGpuBlock(role);
 }
 
 // ===========================================================================
@@ -1044,6 +1068,7 @@ const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 
   ? `calibrated-${DEVICE_TARGET}`
   : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
 const RDNA4_ISOLATE = GFX === 'gfx1201';
+GLUON_SKILL_GFX = GFX;
 if (RDNA4_ISOLATE) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
@@ -1140,6 +1165,7 @@ log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
 // no operator card applies (e.g. point-cloud HIP ops) or KERNEL_KNOWLEDGE_DIR is unset → no change.
 const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
 const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
+GLUON_SOURCE_LANGUAGE = KK_LANGUAGE;
 const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
 
 // ===========================================================================
@@ -1709,6 +1735,7 @@ ${cfg({
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        profile_roofline_json: profileSummary ? profileSummary.profile_roofline_json || '' : '',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
@@ -1719,7 +1746,7 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + gluonSkillBlock(isDeep ? 'deep_engineer' : 'engineer'),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
@@ -1808,7 +1835,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -1817,7 +1844,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agentT(
+    const commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -1838,18 +1865,23 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
-    cumulative = winner.geomean;
-    bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
-    finalWinner = winner;
-    roundsCommitted += 1;
+    if (commitResult && commitResult.committed === true) {
+      cumulative = winner.geomean;
+      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      finalWinner = winner;
+      roundsCommitted += 1;
 
-    // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best ------------------------------------
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    } else {
+      improved = false;
+      log(`Round ${round}: candidate commit was not confirmed; retaining the previous best and profile.`);
+    }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;

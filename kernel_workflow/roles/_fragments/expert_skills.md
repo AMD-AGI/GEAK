@@ -21,9 +21,9 @@ faster but can never reduce a result below your measured baseline.
      owned by the e2e tuning phase. Those match on `operator: '*'`, so they would otherwise match
      everything here; they are about tuning an op the stack already dispatches, not authoring one.
    - `match.operator` is either a scalar equal to this op's operator
-     (`KK_OPERATOR` / `op_spec.op_kind`) or a list containing that operator
-   - box `gen` ∈ `match.gens`; `op_spec.dtype` ∈ `match.dtypes`; `op_spec.regime` ∈ `match.regimes`
-   - migration skills: `from_backend`→`to_backend` fits this run's `mode`/`target_language`
+     (`KK_OPERATOR` / `op_spec.op_kind`), `*`, or a list containing that operator or `*`
+   - box `gen` ∈ `match.gens`; dtype and regime match their respective lists, with `*` matching any value
+   - migration skills: `from_backend`→`to_backend` fits the actual source backend and this run's `target_language`; a backend list matches any listed value
      (e.g. authoring Triton from a TileLang source → a `tilelang→triton` skill applies)
    - `validation_status == validated` (ignore draft/failed; `stale` = plain reference only)
 3. For each match, Read the skill file and treat its `Procedure` as a **high-prior author/optimize

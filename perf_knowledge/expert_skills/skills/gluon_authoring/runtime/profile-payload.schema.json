@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tile programming profile payload",
+  "type": "object",
+  "required": ["schema", "policy", "locus", "device", "source", "execution", "outputs"],
+  "properties": {
+    "schema": { "const": "tile.profile-payload/1" },
+    "policy": {
+      "type": "object",
+      "required": ["host_allowed_roots"],
+      "properties": {
+        "host_allowed_roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^/" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "locus": {
+      "type": "object",
+      "required": ["kind", "image_inventory_sha256"],
+      "properties": {
+        "kind": { "enum": ["host", "container"] },
+        "image_inventory_sha256": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "device": {
+      "type": "object",
+      "required": ["logical", "pci_bdf"],
+      "properties": {
+        "logical": { "type": "string", "minLength": 1 },
+        "pci_bdf": { "type": "string", "pattern": "^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\\.[0-7]$" }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "required": ["cwd", "argv", "env_allowlist"],
+      "properties": {
+        "cwd": {
+          "type": "object",
+          "required": ["host", "container"],
+          "properties": {
+            "host": { "type": "string", "minLength": 1 },
+            "container": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "env_allowlist": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "kernel_selector": { "type": "object" },
+    "capture": { "type": "object" },
+    "outputs": {
+      "type": "object",
+      "required": ["root"],
+      "properties": { "root": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
