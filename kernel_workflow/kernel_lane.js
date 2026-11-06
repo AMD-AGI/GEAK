@@ -1706,17 +1706,14 @@ function __p1Observe(scope, liveModel, ok, kind) {
 // run_result.json path is UNCHANGED and remains the PRIMARY source; this exists only so a mid-run death that
 // never writes run_result.json (e.g. the SHADOW_FAILURE2 commit-abort) still leaves the dispatch-level shadow
 // events on disk. It NEVER changes a routing decision or the live pick, and ANY fault is swallowed. fs is
-// acquired best-effort: require() when the runtime exposes it, else a ONE-TIME dynamic import() (the workflow
-// runtime runs this script as an async function). Where no fs is reachable it is a silent no-op.
+// acquired best-effort: require() when the runtime exposes it. If require is unavailable, __p1ShadowFS stays
+// null and __p1ShadowFlush() silently no-ops -- the PRIMARY run_result.json audit (via __routeReport ->
+// run_result.json) remains the source. FIX ROUND 10: a deferred dynamic node:fs loader fallback was REMOVED
+// here because the native Workflow runtime rejects dynamic ES-module loading at script-load (a parse-time
+// ban that made this ENTIRE script fail to load, before any agent ran). Astra re-review #11 accepted the
+// no-op-sink fallback for exactly this "native filesystem access unavailable" case.
 var __p1ShadowFS = null;
 try { if (typeof require === 'function') { __p1ShadowFS = require('fs'); } } catch (e) { __p1ShadowFS = null; }
-if (!__p1ShadowFS) {
-  try {
-    Promise.resolve().then(function () { return import('node:fs'); })
-      .then(function (m) { if (m) { __p1ShadowFS = m.default || m; } })
-      .catch(function () {});
-  } catch (e) { /* dynamic import unsupported here: the sink stays a no-op; run_result.json is the fallback */ }
-}
 function __p1ShadowFlush(line) {
   try {
     var fs = __p1ShadowFS;
