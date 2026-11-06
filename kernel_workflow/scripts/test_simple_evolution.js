@@ -820,6 +820,65 @@ cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalL
   {...externalLineage, name: 'final trusted reader rejects source drift between native capture and Git diff',
     patchSourceMismatch: source(99, 99, {'inherited.py': 'P = 1\n'})});
 
+const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, speedup: 0.8,
+  baseline_ms: 2, optimized_ms: 2.5, count: i + 1, weight: 2 * (i + 1),
+  reps: 3, speedup_spread: 0.01}));
+const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
+cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view => ({
+  name: `case evidence view ${JSON.stringify(evolution_case_evidence_view)}`,
+  args: {budget: 3, max_no_improve: 3,
+    ...(evolution_case_evidence_view !== undefined ? {evolution_case_evidence_view} : {})},
+  best: 1.4, bestId: 'r2_d0', expected: fast,
+  plans: {r1: plan(direction('slower')), r2: plan(direction('best')), r3: plan(direction('missing'))},
+  candidates: {
+    r1_d0: {files: slow, speed: 0.8,
+      engineer: {status: 'ok', measurement_valid: true, speedup_geomean: 0.8,
+        speedup_weighted: 0.81, speedup_arithmetic: 0.82, per_case: caseViewRows,
+        evidence_context: {evidence_refs: caseViewRefs}},
+      verifier: {status: 'regression', correctness: 'pass', verified_geomean: 0.8,
+        variance_note: 'reported repeat spread', graph_safe: 'not checked', per_case: caseViewRows,
+        evidence_context: {evidence_refs: caseViewRefs}}},
+    r2_d0: {files: fast, speed: 1.4},
+    r3_d0: {files: source(5, 5), inherited: fast, noPatch: true,
+      engineer: {status: 'failed', per_case: []}},
+  },
+  check: ({archive, events, h}) => {
+    const slowRow = archive.entries.find(row => row.id === 'r1_d0');
+    assert.equal(slowRow.engineer.speedup_weighted, 0.81);
+    assert.equal(slowRow.engineer.speedup_arithmetic, 0.82);
+    assert.equal(slowRow.verifier.variance_note, 'reported repeat spread');
+    assert.equal(slowRow.verifier.graph_safe, 'not checked');
+    assert.deepEqual(slowRow.verifier.per_case, caseViewRows);
+    assert.deepEqual(slowRow.verifier.evidence_context.evidence_refs, caseViewRefs);
+    for (const event of events.filter(e => /^tech_lead:(?:plan|memory) /.test(e.label))) {
+      const rows = h.field(event.prompt, event.label.startsWith('tech_lead:plan')
+        ? 'EVOLUTION_ENTRIES' : 'EVOLUTION_ROUND');
+      for (const row of rows) {
+        assert.equal(Object.hasOwn(row, 'case_evidence'), evolution_case_evidence_view === true);
+        if (!row.case_evidence) continue;
+        const saved = archive.entries.find(entry => entry.id === row.id), view = row.case_evidence;
+        assert.equal(view.archive_ref.entry_id, row.id);
+        assert.deepEqual(view.patch_ref, saved.patch_ref);
+        assert.equal(view.entry_verified, saved.verified);
+        assert.deepEqual(view.metric, {kind: 'geomean'});
+        assert.match(view.authority, /no new verification/);
+        for (const role of ['engineer', 'verifier']) {
+          if (!saved[role]) {
+            assert.equal(view[role], null);
+            continue;
+          }
+          assert.deepEqual(view[role].per_case, saved[role].per_case ?? null);
+          assert.equal(view[role].case_rows, saved[role].per_case?.length ?? null);
+          assert.deepEqual(view[role].evidence_refs, saved[role].evidence_context?.evidence_refs ?? null);
+          for (const key of ['status', 'correctness', 'measurement_valid', 'speedup_weighted',
+            'speedup_arithmetic', 'variance_note', 'graph_safe'])
+            assert.equal(view[role][key], saved[role][key]);
+        }
+      }
+    }
+  },
+})));
+
 (async () => {
   console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
   const h = harness({});

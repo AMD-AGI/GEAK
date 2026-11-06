@@ -61,3 +61,22 @@ to false and does not change stored archive rows or promotion rules.
 The archive is a per-run record, without a separate exporter, semantic diversity
 index, or cross-run resume protocol. An ancestry link records a selection; useful
 contribution survival and later improvement require inspection and measurement.
+
+With `evolution_case_evidence_view: true`, each exposed planning entry and current
+round-memory entry also carries `case_evidence`: its archive/patch references,
+entry verification state, task metric, and separate engineer/verifier reports.
+The view preserves every supplied per-case row, including extra fields such as
+repeat counts or measurement spread, and all supplied raw evidence references.
+It does not filter winners, infer families, calculate scores or certify reports.
+`case_rows` counts supplied rows only; it does not establish complete task coverage.
+Missing case evidence is `null`, distinct from an explicitly empty array. Reference
+paths may be unavailable and still need checking. Legacy verifier reports retain
+their existing authority; native measurement checks remain separate.
+
+This option defaults to false and leaves the current planning/memory input shape
+unchanged when omitted or false. It is independent of engineer evidence handoff.
+Both settings retain the same full archive, including supplied engineer weighted/
+arithmetic metrics and verifier variance/graph-safety notes. The recent-twelve-plus-
+best entry selection, full-archive access, eligibility and delivery rules are unchanged.
+The option is supported by the direct lane and optimize/author pass-through routes;
+other wrappers with explicit argument mappings do not automatically forward it.

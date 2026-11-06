@@ -57,6 +57,21 @@ function boundedContext(value, fullRef, limit = 16384) {
   return result;
 }
 
+// Prompt-only numerical view. Keep every supplied case and its extra fields;
+// row counts describe the report, not expected task coverage or qualification.
+function caseEvidenceReport(value) {
+  if (!value) return null;
+  const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
+    'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
+    'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
+    'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
+    'variance_note', 'graph_safe'];
+  return {...Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
+    per_case: value.per_case ?? null,
+    case_rows: Array.isArray(value.per_case) ? value.per_case.length : null,
+    evidence_refs: value.evidence_context?.evidence_refs ?? null};
+}
+
 // Retained population for the stock GEAK loop. No model calls or separate runner.
 async function createEvolution(start) {
   const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
@@ -132,6 +147,7 @@ async function createEvolution(start) {
     const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
+      'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',
       'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes', 'evidence_context'];
     return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
   };
@@ -141,6 +157,12 @@ async function createEvolution(start) {
     return hash[0];
   };
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
+  const caseEvidence = (row) => ({
+    archive_ref: {path: archive, entry_id: row.id},
+    patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
+    reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
+    authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
+    engineer: caseEvidenceReport(row.engineer), verifier: caseEvidenceReport(row.verifier)});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
   const checkpointTree = async (winner, round) => {
@@ -324,6 +346,7 @@ async function createEvolution(start) {
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
+          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row)} : {}),
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
             row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
@@ -335,6 +358,7 @@ async function createEvolution(start) {
           approach: direction.approach || null, patch_ref: row?.patch_ref || null,
           status: row?.status || null, verified: row?.verified ?? null,
           retention_error: row?.retention_error || null, last_record_error: row?.last_record_error || null,
+          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row || {id: direction.id})} : {}),
           report_path: `${direction.out_dir}/report.md`};
       })};
     },
