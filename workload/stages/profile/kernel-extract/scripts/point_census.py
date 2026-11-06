@@ -67,9 +67,12 @@ from trace_scan import scan, DEVICE_CATS  # noqa: E402
 
 STEP_RE = re.compile(r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?")
 RANK_RE = re.compile(r"TP-(\d+)")
+VLLM_STEP_RE = re.compile(
+    r"^execute_(?P<total>\d+)_context_(?P<ctx>\d+)\((?:sq)?(?P<ctx_tokens>\d+)(?:sk[^)]*)?\)"
+    r"_generation_(?P<gen>\d+)\([^)]*\)")
 PREFILL_TARGET = {"EXTEND"}
 DRAFT_MODES = {"DRAFT", "DRAFT_EXTEND", "DRAFT_EXTEND_V2"}
-DECODE_ANCHOR_MODES = ("TARGET_VERIFY", "VERIFY", "DECODE")   # most specific first
+DECODE_ANCHOR_MODES = ("TARGET_VERIFY", "VERIFY", "DECODE", "VLLM_DECODE")
 # Cross-device operators only. A bare `reduce`/`gather` would bill local compute
 # (`_sparse_mla_reduce_kernel`, `gemm2_..._reduce_...`, `vectorized_gather_kernel`).
 COLLECTIVE_PAT = re.compile(
@@ -112,7 +115,8 @@ def prefill_steps(spans, draft_shares_name):
 def step_spans(events):
     """(gpu step spans, cpu step spans) from scan() events: (start, end, name, mode, bs, toks)."""
     gpu, cpu = [], []
-    for cat, name, ts, dur, *_ in events:
+    vllm_gpu = {}
+    for cat, name, ts, dur, *rest in events:
         if cat not in ("gpu_user_annotation", "user_annotation"):
             continue
         m = STEP_RE.match(name)
@@ -120,6 +124,20 @@ def step_spans(events):
             rec = (ts, ts + dur, name, m.group("mode"), int(m.group("bs")),
                    int(m.group("toks") or 0))
             (gpu if cat == "gpu_user_annotation" else cpu).append(rec)
+        else:
+            vm = VLLM_STEP_RE.match(name)
+            if vm:
+                mode = "VLLM_PREFILL" if int(vm["ctx_tokens"]) else "VLLM_DECODE"
+                rec = (ts, ts + dur, name, mode, int(vm["gen"]), int(vm["total"]))
+                args = rest[2] if len(rest) > 2 else None
+                ext = (args or {}).get("External id")
+                if cat == "gpu_user_annotation" and ext is not None:
+                    key = (name, ext)
+                    old = vllm_gpu.get(key)
+                    vllm_gpu[key] = (min(old[0], rec[0]), max(old[1], rec[1]), *rec[2:]) if old else rec
+                else:
+                    (gpu if cat == "gpu_user_annotation" else cpu).append(rec)
+    gpu.extend(vllm_gpu.values())
     gpu.sort()
     cpu.sort()
     return gpu, cpu
@@ -131,6 +149,16 @@ def instance_windows(gpu, cpu, phase, draft_shares_name=False):
     The one definition of an instance (see the module docstring); kernel_shapes.py uses
     it too, so a shape manifest and a census always talk about the same steps.
     """
+    if any(s[3].startswith("VLLM_") for s in gpu + cpu):
+        anchors = [s for s in gpu if s[3].startswith("VLLM_")]
+        if len(anchors) < 2:
+            return [], None, "vLLM needs two device execution anchors; CPU-only annotations cannot establish device cost"
+        wanted = "VLLM_" + phase
+        wins = [{"start": a[0], "end": b[0],
+                 "shape": a[5] if phase == "PREFILL" else a[4],
+                 "mode": a[3], "paired": True}
+                for a, b in zip(anchors, anchors[1:]) if a[3] == wanted]
+        return wins, "gpu_user_annotation vLLM execute-to-next-execute", None
     if phase == "PREFILL":
         return ([{"start": st["start"], "end": st["end"], "shape": st["shape"],
                   "mode": st["mode"], "paired": st["has_draft"]}
@@ -160,7 +188,7 @@ def scan_rank(job):
     path, phase, draft_shares_name = job
     m = RANK_RE.search(os.path.basename(path))
     rank = m.group(1) if m else os.path.basename(path)
-    s = scan(path)
+    s = scan(path, args_cats=("user_annotation", "gpu_user_annotation"))
     gpu, cpu = step_spans(s.events)
     dev = [(ts, dur, name) for cat, name, ts, dur, *_ in s.events if cat in DEVICE_CATS]
     starts = [d[0] for d in dev]

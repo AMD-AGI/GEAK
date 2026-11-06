@@ -179,18 +179,63 @@ def watch_overlay(run_dir):
 
 
 def command(cfg, mode, trace_root, watch_dir=None):
+    framework = cfg.get("framework", "sglang")
+    if framework not in ("sglang", "vllm"):
+        raise ValueError("unsupported serving framework: " + framework)
     cmd = list(cfg.get("launcher") or TEMPLATE["launcher"])
-    cmd += ["--model-path", cfg["model"], "--host", cfg.get("host", "127.0.0.1"),
-            "--port", str(cfg["port"]), "--tp-size", str(cfg["tp"])]
+    if framework == "vllm":
+        cmd = list(cfg.get("launcher") or ["vllm", "serve"])
+        cmd += [cfg["model"], "--host", cfg.get("host", "127.0.0.1"),
+                "--port", str(cfg["port"]), "--tensor-parallel-size", str(cfg["tp"])]
+    else:
+        cmd += ["--model-path", cfg["model"], "--host", cfg.get("host", "127.0.0.1"),
+                "--port", str(cfg["port"]), "--tp-size", str(cfg["tp"])]
     args = list(cfg.get("args") or [])
+    explicit_profiler = dict(cfg.get("profiler_config") or {})
+    if framework == "vllm":
+        retained = []
+        it = iter(args)
+        for arg in it:
+            if arg == "--profiler-config":
+                explicit_profiler.update(json.loads(next(it)))
+            elif arg.startswith("--profiler-config="):
+                explicit_profiler.update(json.loads(arg.split("=", 1)[1]))
+            else:
+                retained.append(arg)
+        args = retained
     cmd += args
-    if mode == "profile_cuda_graph" and "--enable-profile-cuda-graph" not in args:
+    if framework == "vllm":
+        if mode == "eager" and "--enforce-eager" not in args:
+            cmd.append("--enforce-eager")
+        if "--profiler-config" not in args:
+            prof = explicit_profiler
+            # GEAK computes its census from the raw trace. vLLM's optional text
+            # table recursively aggregates a large event tree after export and
+            # can exceed worker RPC timeouts on detailed DSpark traces.
+            try:
+                from vllm.config import ProfilerConfig
+                import dataclasses
+                fields = set(getattr(ProfilerConfig, "model_fields", {}) or {})
+                fields.update(getattr(ProfilerConfig, "__annotations__", {}) or {})
+                if dataclasses.is_dataclass(ProfilerConfig):
+                    fields.update(f.name for f in dataclasses.fields(ProfilerConfig))
+            except ImportError:
+                fields = set()
+            for key, value in (("torch_profiler_dump_cuda_time_total", False),
+                               ("torch_profiler_record_shapes", True),
+                               ("torch_profiler_with_stack", True),
+                               ("detailed_trace_annotation", True)):
+                if key in fields:
+                    prof.setdefault(key, value)
+            prof.update(profiler="torch", torch_profiler_dir=trace_root)
+            cmd += ["--profiler-config", json.dumps(prof)]
+    elif mode == "profile_cuda_graph" and "--enable-profile-cuda-graph" not in args:
         cmd.append("--enable-profile-cuda-graph")
-    if mode == "eager" and "--disable-cuda-graph" not in args:
+    if framework == "sglang" and mode == "eager" and "--disable-cuda-graph" not in args:
         cmd.append("--disable-cuda-graph")
     env = dict(os.environ)
     env.update({k: str(v) for k, v in (cfg.get("env") or {}).items()})
-    env["SGLANG_TORCH_PROFILER_DIR"] = trace_root
+    env[("VLLM" if framework == "vllm" else "SGLANG") + "_TORCH_PROFILER_DIR"] = trace_root
     if cfg.get("gpus"):
         env["HIP_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"] = cfg["gpus"]
     if not env.get("GPU_ARCHS"):
@@ -200,7 +245,7 @@ def command(cfg, mode, trace_root, watch_dir=None):
     if cfg.get("pythonpath_prepend"):
         env["PYTHONPATH"] = cfg["pythonpath_prepend"] + (":" + env["PYTHONPATH"]
                                                         if env.get("PYTHONPATH") else "")
-    if mode == "profile_cuda_graph":
+    if framework == "sglang" and mode == "profile_cuda_graph":
         env["PROBE_GUARD_GRAPH_SNAPSHOT"] = "1"
     if watch_dir or mode == "profile_cuda_graph":
         env["PYTHONPATH"] = watch_overlay(os.path.dirname(trace_root)) + (
@@ -208,6 +253,10 @@ def command(cfg, mode, trace_root, watch_dir=None):
     if watch_dir:
         env["COMPILE_WATCH_DIR"] = watch_dir
         env["COMPILE_WATCH_FRAMES"] = str(cfg.get("compile_watch_frames", 12))
+    if framework == "vllm":
+        env.setdefault("GEAK_ITERATION_LOG_DIR", os.path.join(os.path.dirname(trace_root), "iterations"))
+        observer = os.path.join(os.path.dirname(__file__), "vllm_observer")
+        env["PYTHONPATH"] = observer + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return cmd, env
 
 
@@ -329,6 +378,8 @@ class Server:
             log("vocab_size not found for %s (set \"vocab_size\" in serving.json); the probe "
                 "keeps prompt ids small" % self.cfg["model"])
         state = {"base_url": url, "pid": self.proc.pid, "pgid": os.getpgid(self.proc.pid),
+                 "framework": self.cfg.get("framework", "sglang"), "model": self.cfg["model"],
+                 "iteration_log_dir": env.get("GEAK_ITERATION_LOG_DIR"),
                  "compile_watch_dir": watch, "vocab_size": vocab,
                  "decode_capture": mode, "decode_eager": mode == "eager",
                  "trace_root": self.trace_root, "expect_files": int(self.cfg["tp"]),
@@ -440,7 +491,7 @@ def cmd_run(a, cfg):
         sys.exit(128 + signum)
     signal.signal(signal.SIGTERM, bye)
     signal.signal(signal.SIGINT, bye)
-    mode = cfg.get("decode_capture") or "profile_cuda_graph"
+    mode = cfg.get("decode_capture") or ("as_declared" if cfg.get("framework") == "vllm" else "profile_cuda_graph")
     rc = 1
     try:
         start_with_fallback(srv, mode, a.ready_timeout)
@@ -479,6 +530,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("init")
     p.add_argument("--out", required=True)
+    p.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
     for name in ("run", "start", "stop"):
         p = sub.add_parser(name)
         p.add_argument("--serving", required=True)
@@ -491,7 +543,11 @@ def main():
     if a.cmd == "init":
         if os.path.exists(a.out):
             raise SystemExit("probe_server: %s exists" % a.out)
-        json.dump(TEMPLATE, open(a.out, "w"), indent=1)
+        template = dict(TEMPLATE)
+        if a.framework == "vllm":
+            template.update(framework="vllm", launcher=["vllm", "serve"],
+                            args=["--trust-remote-code"], decode_capture="as_declared")
+        json.dump(template, open(a.out, "w"), indent=1)
         print("wrote %s; fill in model/tp/gpus/port/args/env from the deployment" % a.out)
         return 0
     cfg = json.load(open(a.serving))

@@ -98,6 +98,12 @@ def scrape_metrics(base, timeout=30):
         return {}, str(exc)
     out, realtime = {}, {}
     for line in text.splitlines():
+        if FRAMEWORK == "vllm":
+            for metric, key in (("vllm:num_requests_running", "num_running_reqs"),
+                                ("vllm:generation_tokens_total", "generation_tokens_total"),
+                                ("vllm:prompt_tokens_total", "prompt_tokens_total")):
+                if line.startswith(metric + "{") or line.startswith(metric + " "):
+                    out[key] = out.get(key, 0.0) + float(line.rsplit(" ", 1)[1])
         m = _REALTIME_RE.match(line)
         if m:
             mode = re.search(r'mode="([^"]+)"', m.group("labels"))
@@ -133,6 +139,9 @@ def scrape_metrics(base, timeout=30):
 # so a vocabulary larger than 150000 draws the same ids as before.
 ID_HI = 150000
 UNKNOWN_VOCAB_HI = 31999    # every tokenizer this targets has at least 32000 ids
+FRAMEWORK = "sglang"
+SERVED_MODEL = None
+ITERATION_LOG_DIR = None
 
 
 def rand_ids(n, seed):
@@ -154,9 +163,14 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
                                 "ignore_eos": True}}
     if rid:
         body["rid"] = rid
+    endpoint = "/generate"
+    if FRAMEWORK == "vllm":
+        endpoint = "/v1/completions"
+        body = {"model": SERVED_MODEL, "prompt": ids, "max_tokens": max_new_tokens,
+                "temperature": 0.0, "ignore_eos": True}
     t0 = time.time()
     try:
-        post(base, "/generate", body, timeout=timeout)
+        post(base, endpoint, body, timeout=timeout)
         journal.append({"event": "request_done", "label": label,
                         "prompt_tokens": len(ids), "max_new_tokens": max_new_tokens,
                         "wall_s": round(time.time() - t0, 2)})
@@ -179,6 +193,34 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0,
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
     t0 = time.time()
+    if FRAMEWORK == "vllm" and ITERATION_LOG_DIR:
+        while time.time() - t0 < timeout:
+            rows = []
+            for path in glob.glob(os.path.join(ITERATION_LOG_DIR, "rank0_pid*.jsonl")):
+                with open(path, "rb") as fh:
+                    fh.seek(max(0, os.path.getsize(path) - 65536))
+                    lines = fh.read().splitlines()
+                for line in lines[-12:]:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d["time"] >= t0:
+                        if "error" in d:
+                            raise RuntimeError(d["error"])
+                        rows.append(d)
+            rows.sort(key=lambda d: d["time"])
+            latest = rows[-3:]
+            if len(latest) == 3 and time.time() - latest[-1]["time"] < 3 and all(
+                    len(d["requests"]) == want_bs and
+                    all(r["phase"] == "DECODE" for r in d["requests"]) for d in latest):
+                journal.append({"event": "steady_state_confirmed", "want_bs": want_bs,
+                                "observed_bs": want_bs, "basis": "three consecutive observed vLLM decode iterations",
+                                "last_iteration": latest[-1]})
+                return True, want_bs, None
+            time.sleep(poll)
+        journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs})
+        return False, None, None
     prev, last = None, {}
     while time.time() - t0 < timeout:
         if requests_finished is not None and requests_finished():
@@ -247,11 +289,13 @@ def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True
             "activities": ["CPU", "GPU"], "profile_by_stage": False}
     if record_shapes:
         body.update(record_shapes=True, with_stack=True)
+    if FRAMEWORK == "vllm":
+        body = {"profile_prefix": os.path.basename(out_dir), "max_iterations": int(num_steps)}
     t0 = time.time()
     try:
         txt = post(base, "/start_profile", body, timeout=timeout)
     except urllib.error.HTTPError as exc:
-        if not record_shapes or exc.code not in (400, 422):
+        if FRAMEWORK == "vllm" or not record_shapes or exc.code not in (400, 422):
             raise
         journal.append({"event": "record_shapes_rejected", "error": str(exc),
                         "consequence": "no operand shapes or Python frames in this trace"})
@@ -294,6 +338,10 @@ def stop_profile(base, journal, timeout=1800):
 
 def abort_requests(base, rids, journal):
     """Abort this probe's requests so the next point starts on an empty scheduler."""
+    if FRAMEWORK == "vllm":
+        journal.append({"event": "bounded_requests_draining", "requests": len(rids),
+                        "reason": "vLLM has no SGLang abort_request API; requests have a finite token bound"})
+        return
     done = 0
     for rid in rids:
         try:
@@ -341,8 +389,17 @@ def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, p
     journal.append({"event": "window_close_TIMEOUT", "waited_s": round(time.time() - t0, 1)})
     return False
 
-
 def traces_written(trace_dir, since_ts):
+    if FRAMEWORK == "vllm":
+        # vLLM's per-session prefix changes names, not its configured output directory.
+        tag = os.path.basename(trace_dir)
+        for src in glob.glob(os.path.join(os.path.dirname(trace_dir), tag + "*.trace.json*")):
+            dst = os.path.join(trace_dir, os.path.basename(src))
+            suffix = os.path.basename(src)[len(tag):]
+            if suffix and suffix[0].isdigit():
+                continue
+            if os.path.isfile(src) and os.path.getmtime(src) >= since_ts and not os.path.lexists(dst):
+                os.symlink(os.path.abspath(src), dst)
     out = []
     for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True):
         if os.path.isfile(p) and os.path.getmtime(p) >= since_ts:
@@ -373,7 +430,7 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
     anchors, partly_hidden = None, False
     if rec is not None:
         t0 = time.time()
-        s = scan(rec["path"])
+        s = scan(rec["path"], args_cats=("user_annotation", "gpu_user_annotation"))
         method = s.method
         for cat, nm, *_ in s.events:
             if cat in DEVICE_CATS:
@@ -527,10 +584,16 @@ def warm_shape(base, prefixes, news, args, journal):
 def drive_prefill(base, prefixes, news, args, journal):
     """Send the measured batch: each sequence's cached prefix plus its new tokens.
     max_new_tokens=1 keeps the request in prefill."""
-    with ThreadPoolExecutor(max_workers=len(news)) as ex:
-        for i, (pre, new) in enumerate(zip(prefixes, news)):
-            ex.submit(generate, base, list(pre) + new, 1, journal, "prefill_seq%d" % i,
-                      args.request_timeout)
+    # vLLM cycles end at the following execute marker. A lone prefill request
+    # supplies no complete cycle. Use distinct suffixes of the same size so the
+    # profiler sees successive executions rather than a fully cached repeat.
+    repeats = (args.num_steps or 8) + 1 if FRAMEWORK == "vllm" else 1
+    for repeat in range(repeats):
+        with ThreadPoolExecutor(max_workers=len(news)) as ex:
+            for i, (pre, new) in enumerate(zip(prefixes, news)):
+                suffix = new if repeat == 0 else rand_ids(len(new), args.seed + 900001 + repeat * 997 + i)
+                ex.submit(generate, base, list(pre) + suffix, 1, journal,
+                          "prefill_seq%d_repeat%d" % (i, repeat), args.request_timeout)
 
 
 def drive_decode(base, point, args, journal):
@@ -628,8 +691,15 @@ def main():
                     help="the model's vocab_size (probe_server.json has it): prompt ids stay "
                          "below it. Unknown: ids stay below %d" % (UNKNOWN_VOCAB_HI + 1))
     ap.add_argument("--out", required=True, help="journal JSON for this point")
+    ap.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
+    ap.add_argument("--served-model")
+    ap.add_argument("--iteration-log-dir")
     args = ap.parse_args()
-    global ID_HI
+    global ID_HI, FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR
+    FRAMEWORK, SERVED_MODEL = args.framework, args.served_model
+    ITERATION_LOG_DIR = args.iteration_log_dir
+    if FRAMEWORK == "vllm" and not SERVED_MODEL:
+        ap.error("--served-model is required for vLLM")
     ID_HI = min(ID_HI, args.vocab_size - 1) if args.vocab_size else UNKNOWN_VOCAB_HI
 
     plan = json.load(open(args.points))

@@ -22,6 +22,9 @@ TP layout, allocation and deployed graph/compile modes. Do not silently start
 optimization or a new full replay. Missing GPU access permits useful CPU work,
 but leaves GPU validation explicitly incomplete.
 
+For vLLM, first read [vLLM observation and profiling](references/vllm.md).
+Its throughput logger and request/profiler APIs differ from the SGLang defaults.
+
 ## 1. Establish the run and resume state
 
 Use the completed measured baseline logs, benchmark exports, effective model

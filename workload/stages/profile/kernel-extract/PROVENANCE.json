@@ -38,7 +38,8 @@
   "On-demand UT GPU leases: CPU-only authors submit foreground commands to a host broker using shared physical-GPU flock files. Multi-device requests retain no partial allocation while waiting; workers drain before unlock, including cancellation, controller death and resume. Keep correctness-only qualification and explicit optional timing tails; preserve legacy fixed lanes.",
   "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
   "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain.",
-  "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge."
+  "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
+  "vLLM extraction compatibility, ported from the Nov 2 DeepSeek-V4.1-Flash local experiment after the same log/RPC failure in the Nov 5 Qwen3-8B-FP8 run: bundled opt-in worker observation, iteration JSONL parsing, vLLM launch/metrics/completions/profiler RPCs, and device iteration census. Preserve this branch's task and multi-config contracts; see references/vllm.md."
  ],
  "files": [
   {
@@ -627,6 +628,26 @@
    "source": null,
    "added_here": true,
    "modified": true
+  },
+  {
+   "file": "tests/test_vllm_profile.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "references/vllm.md",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/vllm_observer/geak_vllm_observer.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "scripts/vllm_observer/sitecustomize.py",
+   "source": null,
+   "added_here": true
   }
  ],
  "removed_files": [

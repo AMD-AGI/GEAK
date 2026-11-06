@@ -140,10 +140,16 @@ def _torch():
 
 
 def _capturing(torch):
+    # Breakable capture includes eager segments; copying their inputs to CPU can
+    # synchronize another still-capturing stream and invalidate the whole graph.
+    mod = sys.modules.get("vllm.compilation.breakable_cudagraph")
+    capture = getattr(mod, "BreakableCUDAGraphCapture", None) if mod else None
+    if capture is not None and capture.is_active():
+        return True
     try:
         return bool(torch.cuda.is_current_stream_capturing())
     except Exception:
-        return False
+        return True  # Unknown capture state must never permit a device-to-host copy.
 
 
 def _sample(x, n):
@@ -225,7 +231,7 @@ def _describe(x, tensors, budget, in_capture, depth=0, name=""):
                 "items": [_describe(v, tensors, budget, in_capture, depth + 1,
                                     "%s[%d]" % (name, i)) for i, v in enumerate(x)]}
     return {"__object__": "%s.%s" % (type(x).__module__, type(x).__qualname__),
-            "repr": repr(x)[:120]}
+            "repr": object.__repr__(x)[:120]}
 
 
 def _frame_name(frame):

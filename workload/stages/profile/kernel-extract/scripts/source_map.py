@@ -46,7 +46,7 @@ FRAME_RE = re.compile(r"^(?P<path>.+?\.py)\((?P<line>\d+)\): (?P<func>.+)$")
 DEFAULT_PACKAGES = ("sglang", "sgl_kernel", "aiter", "vllm", "flashinfer", "flash_mla")
 # Plumbing between a callable and its launch: never a useful seam.
 # Model code: a frame here is a call site, not an operator entry.
-MODEL_TREE = re.compile(r"^(sglang/srt/|vllm/model_executor/|vllm/v1/|vllm/worker/|"
+MODEL_TREE = re.compile(r"^(sglang/srt/|vllm/model_executor/|vllm/models/|vllm/v1/|vllm/worker/|"
                         r"vllm/attention/layer\.py)")
 # Library frames that only dispatch into compiled code: never an operator entry by themselves.
 GENERIC_ENTRY = re.compile(r"(^|/)aiter/jit/core\.py$")
@@ -125,11 +125,15 @@ class Resolver:
                 for ch in ast.iter_child_nodes(node):
                     if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                         end = getattr(ch, "end_lineno", None) or ch.lineno
+                        start = min([ch.lineno] + [d.lineno for d in ch.decorator_list])
                         name = prefix + ch.name
-                        if ch.lineno <= line <= end:
+                        if start <= line <= end:
                             if not isinstance(ch, ast.ClassDef) and ch.name == func:
                                 best = name
                             walk(ch, name + ".")
+                    else:
+                        # Definitions can sit under platform/version conditionals.
+                        walk(ch, prefix)
             walk(tree, "")
         except (OSError, SyntaxError, ValueError):
             pass

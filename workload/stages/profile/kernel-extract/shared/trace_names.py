@@ -43,7 +43,8 @@ def _parse_vllm_detailed(name):
         return None
     ctx = _seg(name, "context")
     gen = _seg(name, "generation")
-    return (ctx[1] > 0, ctx[1], gen[0] or gen[1], gen[2])
+    return (ctx[1] > 0, ctx[1] + gen[1] if ctx[1] > 0 else 0,
+            gen[0] or gen[1], gen[2])
 
 
 STEP_DIALECTS = [
