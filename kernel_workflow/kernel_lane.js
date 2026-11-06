@@ -50,6 +50,13 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// Optional hard cap on optimization rounds (0 / absent = no cap, i.e. unchanged behaviour). Budget
+// alone does not bound the round count: the TechLead may spend a budget of 2 as one round of two
+// directions or as two rounds of one, which roughly doubles the wall time.
+const MAX_ROUNDS = (() => {
+  const v = parseInt(A.max_rounds != null ? A.max_rounds : 0, 10);
+  return Number.isFinite(v) && v > 0 ? v : Infinity;
+})();
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
 // gate is tunable per run (e.g. raise it on a noisy box, lower it to bank small compounding wins).
@@ -1466,7 +1473,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 }
 
 let plannerStopReason = '';
-while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round < MAX_ROUNDS) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
