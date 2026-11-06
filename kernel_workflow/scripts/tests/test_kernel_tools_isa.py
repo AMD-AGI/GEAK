@@ -47,7 +47,7 @@ PY_TOOLS = ["asm_loop_audit", "asm_schedule_viz", "mfma_efficiency", "deep_mfma_
             "gfx950_isa", "layout_facts", "amd_occupancy", "probe"]
 SH_TOOLS = ["hw_sources.sh", "dump_ir.sh"]
 PACK_BENCH = ["ab_bench", "create_harness", "parse_correctness", "parity_gate", "champion_gate",
-              "lever_index", "check_term_index", "ttgir_bridge", "probe_levers"]
+              "check_term_index", "ttgir_bridge", "probe_levers"]
 
 
 def run(*args, env=None, cwd=None, timeout=300):
@@ -135,14 +135,6 @@ def test_gfx950_isa_reads_moved_databases():
                  "v_mfma_f32_32x32x8_f16")
     _ok(result)
     assert "CDNA3" in result.stdout
-
-
-def test_lever_cards_resolve_from_pack():
-    code = ("import sys; sys.path.insert(0, %r); import mfma_efficiency as m; "
-            "print(len(m._cards_by_bucket()))" % str(KT))
-    result = run(sys.executable, "-c", code)
-    _ok(result)
-    assert int(result.stdout.strip()) > 0
 
 
 # ---- a tool that needs an arch refuses when it is not given --------------------------------------

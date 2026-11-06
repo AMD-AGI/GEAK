@@ -31,7 +31,7 @@ examples use `--arch gfx950`, the main line, with gfx942 as the downgrade.
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` | who owes the gap; parity |
 | evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `tile_trace.py`, `serve_traces.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
 | measure | `harness_lib.py` (GEAK, acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | is the difference real |
-| climb | `$SKILL/scripts/lever_index.py`, `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | which AMD lever applies to the named bound |
+| climb | `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | compiled examples for the agent's chosen hypothesis |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `context_contracts.py`, `source_excerpt.py`, `profile_payload.py`, `debt.py`, `skill_index.py`, `wait_for.sh`, `locus.sh`, `runtime_env.sh` | the auditable record |
 | pack hygiene | `$SKILL/scripts/selftest_all.sh`, `smoke_test_recover.sh`, `check_pack_refs.py`, `check_term_index.py` | the toolchain and the references are sound offline |
 
@@ -277,7 +277,7 @@ the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowl
 | `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py` | rocprof-compute parse; per-kernel time/bound breakdown; hot-PC ranking from ATT |
 | `att_to_perfetto.py`, `att_merge_perfetto.py`, `att_timeline.py`, `att_opclass.py`, `tile_trace.py`, `serve_traces.py` | ATT warp-trace views and op-class rollups; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
 | `asm_loop_audit.py [--opcodes] [--meta <ir_dir>] [--kernel <substr>]` | static hot-loop audit (A1, A3, B3): `next_free_vgpr`/AGPR/spill, LDS bytes/WG from the cache metadata (not `group_segment_fixed_size`, a structural 0), per-opcode histogram + diff |
-| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: ranked inter-MFMA bubble ownership, LDS-vs-global feed split, schedule views; routes buckets to lever cards |
+| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: ranked inter-MFMA bubble ownership, LDS-vs-global feed split, schedule views for agent analysis |
 | `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | MFMA operand-layout facts (B4); the offline gfx950 ISA (other targets `--arch cdna3\|rdna3\|rdna4`); fetching primary sources |
 
 ## Measure
@@ -298,7 +298,6 @@ baseline and the `MIN_IMPROVE` commit gate.
 
 | command | gives you |
 | --- | --- |
-| `lever_index.py --bound <class> --arch gfx950` | the AMD lever cards (`references/hardware/lever-cards.json`) expressible in Gluon for the bound your profile named — chip-absent levers excluded, gating-law-forbidden flagged. Experience, not verdict; a ranked bucket with no card is a catalogue gap |
 | `pipeline_examples_cdna4.py` | **the gfx950 reference** for authored overlap: sync-staging control plus the async forms (and a warp-pipeline case), numerics-checked; each case reports per-lane access width, whether it compiled, `ds_write` count and a numeric verdict, so an unsupported width separates from a layout that does not cover the tile. Needs a GPU |
 | `pipeline_examples_cdna3.py` | **the gfx942 downgrade** set: sync staging and the `warp_pipeline_stage` hint (async only at 32 bits with `order=[1, 0]`). Needs a GPU; does not run on Triton 3.6.0 |
 

@@ -203,7 +203,7 @@ report a missing number as missing — never as a zero) is in `climb.md ## 3. Th
 
 | | what you must know | tool | bad-value tell |
 | --- | --- | --- | --- |
-| B1 | **ranked inter-MFMA bubble ownership in measured cycles**, plus the cadence verdict (issue-bound vs bubble-diluted) | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
+| B1 | **ranked inter-MFMA bubble ownership in measured cycles**, plus measured cadence and its reference | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
 | B2 | the feed bucket **resolved: LDS (lgkmcnt) vs global (vmcnt)** | same rollup | the two halves are one bucket over two resources with **opposite** fixes (layout/swizzle vs coalescing/async copy) |
 | B3 | **per-opcode hot-loop histogram + diff vs last round** | `asm_loop_audit.py --opcodes` | op-class ("valu 64.5%") is one level too coarse: a dtype-conversion sequence, an address chain and a layout permute all land there. Keep `s_waitcnt` in the diff — it moves when only the *schedule* moved (D3) — and read the whole histogram, not the mnemonic you came to count |
 | B4 | MFMA operand-layout facts **before** picking a tile | `layout_facts.py` | two shapes with equal MAC/cycle can differ 4× in accumulator GPR/lane |
@@ -490,10 +490,9 @@ measurements.
 
 ### Rule: decompose a saturated VALU before picking a lever
 
-> Lever single source: `../hardware/bound-class-signals.md ## Lever cards (bound-class ×
-> applicability)` (+ `../hardware/lever-cards.json`, filtered by your measured bound; query with
-> `scripts/lever_index.py`). The recipes in this and the next two subsections are the how-to detail
-> behind those cards, not a second lever registry.
+> The recipes below are reference material. The agent must establish applicability from the
+> current SKU/roofline, profile and ISA/IR evidence, then modify and validate the kernel;
+> a bound label does not dispatch a recipe.
 
 "VALU-bound" is not one thing. When **`VALUBusy`** is the binding metric (genuinely
 VALU-throughput-bound — confirmed by the busy-counter rule above, not a `VALUUtilization` ~100% stall
@@ -1039,8 +1038,8 @@ same 0-15 ladder).
 **Worksheet [D] is the plain-stage BRANCH screen — FIVE STRUCTURAL AXES (+2 conditional) + ③ (layer-0)
 cards.** The bound class is advisory; override it in the plan with evidence when the live profile
 disagrees. [D] is anchored by **five workload-agnostic structural axes** worth considering for every
-non-trivial kernel (`decision.prescan_candidates` with `axis_seed:true`), plus two that fire
-conditionally. The five: **`computation_dag_reformulation`** (a different decomposition of the op
+non-trivial kernel, plus two conditional axes for the agent to assess. No decision script
+seeds or selects these candidates. The five: **`computation_dag_reformulation`** (a different decomposition of the op
 itself?), **`parallel_ownership_decomposition`** (a different parallel axis / who owns which
 output?), **`kernel_boundary_topology`** (fuse vs defuse, and where the kernel boundaries fall),
 **`intermediate_materialization_recompute`** (materialize an intermediate or recompute it?), and

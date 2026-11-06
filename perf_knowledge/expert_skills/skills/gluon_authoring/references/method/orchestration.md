@@ -274,8 +274,8 @@ each names the method section that stage operates:
 [`budget.md`](budget.md) · **roofline** [`../hardware/roofline-models.md`](../hardware/roofline-models.md) ·
 **profile** [`profile.md`](profile.md) · **hardware**
 [`../hardware/capability-matrix.md`](../hardware/capability-matrix.md) · **experience**
-[`../pitfalls/negative-patterns.md`](../pitfalls/negative-patterns.md). `scripts/lever_index.py --bound
-<class> --arch gfx950` indexes the experience cards by the bound YOUR profile named — experience, not verdict.
+[`../pitfalls/negative-patterns.md`](../pitfalls/negative-patterns.md).
+The agent interprets these references against the current evidence; there is no bound-to-action router.
 
 **Canonical record.** `scripts/canonical_record.py` (worker result, structure-suspect / resweep requests,
 run state, final report), `round_record.py`, `close_audit.py`, `report_lint.py`. If you keep them, write each

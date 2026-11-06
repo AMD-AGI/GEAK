@@ -459,9 +459,9 @@ one is a `resweep_request` / `structure_suspect` with evidence. The layer order 
    scheduling** within the structure (4+) and **beyond the hot loop** (6) and **low precision** (7) where the
    archetype gives them surface.
 
-AMD-specific levers are catalogued as cards: `python3 "$SKILL/scripts/lever_index.py" --bound <class> --arch
-gfx950` lists the ones expressible in Gluon for the bound your profile named — use it before inventing a lever
-and after; a ranked bucket with no card is a catalogue gap to report. **Inline asm** has its own gate
+The agent analyzes SKU/roofline, profile and ISA/IR evidence to identify the bound and its
+sub-resources, choose a change, and validate it. No fixed bound-to-action decision tree is used.
+**Inline asm** has its own gate
 (`references/pitfalls/negative-patterns.md` `Inline asm: justify the reach before taking it`); a round touching
 `inline_asm_elementwise` is accepted on the disassembly plus a determinism race test, not a counter delta.
 
@@ -576,7 +576,7 @@ infrastructure owns locking, profiling entry and timing.
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` |
 | evidence | GEAK `kernel_workflow/scripts/profile_kernel.sh` (+ `gpu_lock.sh`); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `amd_isa.py --arch <target>`, `hw_sources.sh` |
 | measure | GEAK `e2e_workflow/scripts/harness_lib.py` (acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py` |
-| climb | `$SKILL/scripts/lever_index.py`, `pipeline_examples_cdna4.py` (gfx950 reference), `pipeline_examples_cdna3.py` (gfx942 downgrade) |
+| climb | `pipeline_examples_cdna4.py` (gfx950 reference), `pipeline_examples_cdna3.py` (gfx942 downgrade) |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `wait_for.sh` |
 
 ## Roles in GEAK

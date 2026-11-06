@@ -6,9 +6,8 @@
 > `perf_knowledge/hardware/data/` (GEAK repo root; read via
 > `kernel_workflow/scripts/kernel_tools/_hwdata.py`): `hw_constants.json` (arch facts),
 > `thresholds.json` (calibrated cutoffs, each `basis`-tagged — this page cites their **keys**; the
-> current values live only there; its `bound_classification` block is GEAK's one bound ladder —
-> ≥ 80 saturated, ≥ 60 bound, 40–60 balanced band, < 40 low — shared with the e2e roofline and
-> `kernel_workflow/knowledge/profiling_guide.md`), `workload_models.json` (per-type intensity), `sku.json`
+> current values live only there; its `bound_classification` block contains historical
+> reading hints, not an executable classification policy), `workload_models.json` (per-type intensity), `sku.json`
 > (peaks / CU / L2 — the single peak source). `lever-cards.json` (levers + gating laws) stays
 > next to this file.
 >
@@ -23,8 +22,8 @@
 > that produce it, are in `../method/profile.md` ("3.1 Required evidence — the four dials, every
 > round"); the tool index is `scripts/USAGE.md`.
 
-Maps **rocprofv3 / rocprof-compute / ATT / derived metrics** to a bound class and the
-**first backbone layer** to attack. Use after `../method/profile.md`; confirm before
+Provides **rocprofv3 / rocprof-compute / ATT / derived metrics** as diagnostic
+references for the agent's analysis. Use after `../method/profile.md`; confirm before
 `capability-matrix.md` lever rows. Examples and calibrations are gfx950 (MI355X / MI350X) first;
 gfx942 deltas are called out per row and in `cdna3-gfx942.md`.
 
@@ -53,9 +52,8 @@ gfx942 deltas are called out per row and in `cdna3-gfx942.md`.
   `perf_knowledge/profiling/rocprofv3_counters.md`, `perf_knowledge/profiling/rocprof_compute_workflow.md`.
 
 **Role in the three-table split (avoid drift):**
-- **`bound-class-signals.md` (this file)** = *judgement*: the decision tree, the
-  discriminator leaves, the stall-reason map, and the **lever-applicability single source
-  of truth** (gating laws + lever cards).
+- **`bound-class-signals.md` (this file)** = diagnostic references for agent judgement;
+  the former decision tree and its automatic dispatch are not used.
 - **`capability-matrix.md`** = lever *availability* / arch gate (✓ / ◐ / blocked per target).
 - **`../method/profile.md`** = the *primary metric* per bound class + how to read a report.
 
@@ -72,9 +70,9 @@ three-evidence discipline.
 ```mermaid
 flowchart LR
   D["发现/分析<br/>timeline Amdahl → floor-probe 定阶段 → kernel_breakdown 取证"]
-  C["分类<br/>bound-class 决策树 → stall / occupancy-limiter / wave-quant / VALU-IOPs 叶子"]
+  C["分类<br/>agent 综合 SKU/roofline、profile、ISA/IR 提出假设"]
   P["优先级<br/>ranked bubble-ownership → ranked census 沿栈下降 #1→#2→#3"]
-  L["lever<br/>适用性轴 (门控/代价/边界) + gating-laws SoT + capability-matrix 可用性"]
+  L["lever<br/>agent 选择改写 + capability-matrix 核对可用性"]
   V["验证<br/>重跑 breakdown → bubble 收缩 + 边界 timing 仲裁 + 三证据闭环"]
   D --> C --> P --> L --> V
   V -->|未达标 / 资源触底| C
@@ -85,88 +83,17 @@ Evidence source per stage is unified by `scripts/kernel_breakdown.py`: dynamic P
 (`roofline-models.md` feeds-and-speeds), with a degraded (static-only, bubble-inferred)
 path when PMC is blind (`../method/profile.md ## Profiler-capability preflight`).
 
-Stage → owner: 发现 = timeline/Amdahl + floor-probe + `kernel_breakdown`; 分类 = the tree
-below + its leaves; 优先级 = ranked bubble-ownership → ranked census
-(`../method/profile.md`, `../method/climb.md ## Fallback ladder`); lever = `## Lever cards` +
-`## Lever gating laws` + `capability-matrix.md`; 验证 = re-run breakdown (bubble shrinks) +
+Stage → owner: 发现 = timeline/Amdahl + floor-probe + `kernel_breakdown`; 分类 = agent analysis of the evidence; 优先级 = ranked bubble-ownership → ranked census
+(`../method/profile.md`, `../method/climb.md ## Fallback ladder`); lever = agent hypothesis + `capability-matrix.md` availability checks; 验证 = re-run breakdown (bubble shrinks) +
 boundary timing + three-evidence (`../method/close.md`).
 
 ## Bound-class decision tree (exhaustive, ordered, defaulted)
 
-The discriminator table below is a set of necessary-not-sufficient rows; this tree is the
-**exhaustive entry** that guarantees every profile lands in exactly one class, with
-**latency/occupancy as the forced residual** when nothing saturates. Read the **busy**
-(throughput) counters, NOT the duty-cycle `*Utilization` (see `## Rules`).
-
-```text
-read busy (NOT util) →
- 1. compute unit saturated? → compute-bound → sub-resource decompose
-      MATRIX ENGAGEMENT IS UNIFIED (like NCU SM-throughput = MAX over pipes): matrix-bound iff
-        generic MfmaUtil ≥ confirm  OR  scaled-fp8 pipe engaged (MOPS_F8>0 / mfma_by_dtype.fp8_scaled
-        on a scaled arch gfx950/CDNA4, where generic MfmaUtil~0). Which counter answers is
-        an arch-gated DATA fact (is the scaled-fp8 pipe engaged?) -- NOT a separate branch.
-      VALUBusy near peak → compute / valu (sub-decompose)
-     1b. VALU active-threads/wave ≪ wave_size OR Branch Util high            → compute / divergence  ← wave-internal predication (NCU Branch-Eff)
-     1c. MfmaUtil LOW but occupancy already ADEQUATE (≥2 waves AND not the VGPR/LDS limiter)
-         AND the tile is UNDER-FILLED (a long exposed VALU-only run / high full-drain, matrix
-         engine starved) → compute / mfma-issue (under-fill)  ← the fix is a BIGGER tile (raise
-         arithmetic intensity, accept lower occupancy), NOT occupancy relief. This is the fork out
-         of the "low MfmaUtil → latency" trap: only route to latency (node 3) when occupancy is
-         INADEQUATE (waves<2 OR a VGPR/LDS limiter). See `## under-fill vs occupancy` below.
- 2. else memory saturated / streaming? → memory-bound → SUB-DECOMPOSE (NCU Memory Workload Analysis):
-      2a. memory pipe (vmem %-of-peak) ≥ hbm_bw_saturated → memory / bandwidth   (cut bytes; in-flight inert)
-      2b. else L2 hit < l2_hit_locality AND coalescing OK → memory / l2-locality (GROUP_SIZE_M / XCD remap)
-          [low L2 hit WITH low coalescing = an access-pattern SYMPTOM (grid remap inert) -> generic memory / under-fill]
-      2c. else L2-Fabric latency high (per-arch) & not saturated → memory / latency (add in-flight/prefetch)
-      2d. else LDS/shared bound (LDSBankConflict / ds_read interval > 16cyc, OR a mixed lds-gmem-feed
-          bucket whose lgkmcnt share > vmcnt) → memory / shared  (NCU folds shared-mem under Memory
-          Workload); refine: shared-bank-conflict (swizzle) vs shared-issue-rate (~ mio_throttle)
- 3. else (nothing saturated) → DEFAULT: latency/occupancy-bound   ← explicit residual ①, force-land here
-      → `## Stall-reason → lever` + occupancy limiter (SPI 6.2.x, `../method/profile.md`)
-      → sub=ifetch when L1I hit low / fetch-latency high (NCU no_instructions stall)
-      → then the `### Residual-① limiter ladder` below
- 4. no SOL block leads #2 by > sol_lead_margin (degraded: all inside balanced_band = 40–60 % — was 20–60;
-    below 40 on every pipe is node 3, latency) → balanced  ← explicit residual ② (algorithmic / fusion opportunity)
-```
-
-> **Canonical `bound_class` vocabulary (use these names when you report one):** `compute` (sub: mfma-issue / valu /
-> valu-integer-address / **divergence**) · `memory` (sub: **bandwidth / latency / l2-locality /
-> shared** — where **shared** = the LDS sub-resource, refined to **shared-bank-conflict /
-> shared-issue-rate**) · `latency` (sub: dependency-stall / issue-limited / over-sync / **ifetch**) ·
-> `register` (emitted on hot-loop spill) · `balanced` (residual②). **LDS is no longer a first-branch
-> class** — it is `memory / shared` (NCU folds shared memory under Memory Workload Analysis).
-> **occupancy** and **wave-quantization** are also NOT separate first-branch classes — they are
-> sub-diagnoses + lever groups reached under `latency` (the discriminator rows below refine all of these).
->
-> **ARCH SCOPE (evidence is gfx950/CDNA4).** The three memory subs, divergence, and ifetch are
-> **universal concepts** (NCU parity), but their thresholds are arch-specific and live in the machine
-> layer: HBM-BW-saturation % + L2-hit % (`thresholds.json`, portable cutoffs vs the A-number PEAK in
-> `sku.json`), L2-Fabric-latency-high cyc (`hw_constants.arch.<gfx>.l2_fabric_latency_high_cyc`, per-arch
-> — gfx950-calibrated only), wave width for divergence (`hw_constants.arch.<gfx>.wave_size`: CDNA=64,
-> RDNA/gfx1250=32 — never hardcode 64). The **scaled-fp8 matrix-engagement** term is gfx950/CDNA4
-> scaled-path only (folded into node-1's unified matrix test, not a separate branch).
->
-> **Basis of the memory %-of-peak.** Node 2a's `vmem %-of-peak ≥ hbm_bw_saturated_pct` is, by
-> default, a `counters` numerator over the `sku.json` **datasheet** peak — enough to *classify* and
-> rank, not to close. Before a bandwidth verdict closes a direction (or declares "at the HBM
-> ceiling"), re-express it over an in-shape probe (`roofline-models.md ## Calibration`); on gfx950
-> also confirm the numerator is not the under-counting `FETCH_SIZE` route.
-
-Discipline (systematic without contradicting repo philosophy):
-1. **busy, not utilization** — a `VALUUtilization` ~100% with `VALUBusy` **and** `MfmaUtil`
-   both low lands in residual ① (latency) — UNLESS occupancy is already adequate (≥2 waves,
-   not capped) AND the tile is under-filled, which is node 1c (compute/under-fill, grow the
-   tile), NOT latency. This is the repo's edge over a
-   naive SOL tree; preserve it.
-2. the residual is a **route** (go run floor-probe / stall-reason / occupancy-limiter),
-   NOT a substitute for the A/B / floor-probe / cross-check rules.
-3. the discriminator table is the tree's **leaves (refine)**. On residual ① the spine
-   continues: occupancy limiter (SPI) + stall-reason → then the ranked census picks order.
-
-After classifying, do **not** stop at one class: read the **ranked bubble-ownership stack**
-(`scripts/kernel_breakdown.py`; `../method/profile.md ## Bound classification`) to decide
-which to attack first; when #1 hits its floor, descend to #2/#3
-(`../method/climb.md ## Fallback ladder`).
+The fixed decision tree formerly under this heading is removed. The heading is retained for
+existing reference links. The agent analyzes SKU/roofline, profile and ISA/IR evidence, states
+its bound/sub-resource hypothesis and uncertainty, implements a change and validates it.
+Missing or conflicting evidence does not force a default class. The remaining diagnostic
+tables are reference examples, not mandatory branches or automatic optimization choices.
 
 ### Residual-① limiter ladder (ordered by dev-effort × impact)
 
@@ -420,61 +347,19 @@ counter only localizes** (`../method/profile.md`).
 
 ### Three lever tiers (T0 divergent / T1 universal / T2 convergent)
 
-Levers were historically ranked into three tiers; the tier names are retired (they described a search POLICY, not the kind of work). Kept here only to read older records:
-
-- **T0 — divergent (fan-out).** Cards tagged `search_class: divergent`: mutually-exclusive
-  structural/algorithm/dispatch bets whose winner is unknown a priori (split-K, defuse,
-  packed-atomic, grow-tile, grid remap, group_size_m). The single-bound census *cannot converge*
-  on these — you don't pick one by reading the profile, you **fan out a best-of-N** and let the
-  measured target line pick the winner. When >=1 divergent card is **on-bound** (or its coarse
-  signal fired, or the reduction router hoisted it), classify sets `decision.requires_prescan` and
-  lists them in `prescan_candidates[]`. An *off-bound* divergent card (e.g. `split_k` on a
-  compute-bound kernel) is **not** a fan-out direction — it would preempt the targeted fix — and a
-  round whose profile pinned a specific sub-resource with an exact convergent lever (e.g.
-  the authored-overlap lever for `schedule-overlap`) keeps that targeted lever ahead of a merely
-  bound-generic divergent card. When you fan mutually-exclusive structural bets (`../method/climb.md ## Layer Backbone`), take
-  EACH arm deep — a structural direction gets a real budget (climb it toward its ceiling), not a shallow screen,
-  because its anchor is a regression and the shallow ranking inverts versus the deep one. Compare the
-  arms at their deep potential and keep the winner; the deep_engineer's closure self-review (`../method/close.md ## Closure challenge (self-review before a ceiling / keep-baseline / negative close)`) checks whether a
-  ceiling-raising bet was left untried.
-- **T1 — universal (coarse single-shot).** `tier: universal` cards whose own cheap `coarse_signal`
-  fired (below): a self-evident single action, surfaced above the on-bound tier but **not** fanned
-  out — there is nothing to compare, you just do it.
-- **T2 — convergent (deep-in).** Everything else: the coupled tile ladder (memory → LDS → pipeline
-  → slicing → …), advanced one cell at a time under the per-direction iteration budget. This is the
-  census's home tier — a single evolving candidate, matured with keep/revert, not a fan-out.
+The former automatic tier/prescan dispatch is removed. These tier names may appear in old
+records; they do not select actions in this skill.
 
 ### Universal (coarse) vs fine levers
 
-Most levers are **fine**: they are surfaced only when the round's `bound_class` matches the
-card's `applies_to[].bound`, because touching them blind (before the sub-resource is confirmed)
-could regress the wrong axis. But a few actions are **self-evident** and should fire on their
-OWN cheap signal *regardless of the bound-class label* — `tier: universal` cards carry a
-`coarse_signal` to check against already-considered
-metrics, and when it fires the lever is promoted to the **top tier**, above the on-bound levers.
-This is what stops a mis-classified round from burying the obvious fix in the weak off-bound tier
-(a small-tile kernel: grow-tile buried under a latency mis-read; and the LDS-relief stranding).
-
-| Universal card | coarse_signal | fires when |
-| --- | --- | --- |
-| `grow_tile_underfill` | `tile_underfill` | MfmaUtil low + occupancy not the limiter + a long exposed VALU-only run |
-| `eliminate_inloop_transpose` | `dead_transpose` | a layout-convert/transpose VALU share high in the hot loop |
-| `downcast_rounding_rtz` | `fp32_cast_present` | an fp32→bf16 cast/convert VALU share in the hot loop |
-| `cut_address_arith_iops` | `hot_addr_math` | loop-invariant integer/address IOPs share high |
-| `cut_hbm_bytes` | `cuttable_bytes` | HBM pipe near saturation / a bytes-model overage |
-| `swizzle_padding` | `bank_conflict` | LDS bank-conflict fraction elevated |
-
-Cutoffs live in `thresholds.json` (`confirm.longest_valu_run_high` / `layout_convert_share_high`
-/ `addr_iops_share_high` / `hbm_bw_saturated_pct` / `lds_bank_conflict_frac_high`). A universal
-card whose signal does NOT fire falls back to normal on/off-bound tiering (demote-never-exclude);
-a card vetoed by `isa_gate` / `default_off` is not promoted even if its signal fires. Everything
-else stays **fine** — grows regs / trades occupancy / rewrites structure, so a blind attempt could
-regress (e.g. `amortize_parallel_axis`, `mfma_tile_shape`, `tile_slicing`, the pipeline cards).
+No signal automatically promotes or excludes a tactic. The agent establishes applicability
+from the current evidence and validates the selected change.
 
 ## Lever gating laws (single source of truth)
 
-Consolidated here so lever selection is not misapplied; the detailed derivations stay in
-their source files (back-link only). A lever that is inert in the wrong state:
+Historical diagnostic notes, not executable gates or universal exclusion rules. The agent
+checks each premise against the current kernel. In particular, two resident waves alone do
+not establish that latency is hidden. The detailed discussions remain in their source files:
 
 | Law | When it bites | Source (derivation) |
 | --- | --- | --- |
@@ -507,10 +392,10 @@ per the reference-free section below -- qualitative / relative only.
 | **softmax / fp-compute** high | the fused epilogue math is the real residue | Layer 7 -- fold scalars off the chain, packed VALU, `exp2`; if already minimal it is the structural floor |
 | per-op **MFMA stall/lat** high (`att_opclass`) | MFMA operand-feed starved | same WAIT levers; confirms low `MfmaUtil` |
 
-**MFMA efficiency judge (no peer needed):** compare the median MFMA cadence to the **theoretical
-cadence** (fp16/bf16 ~16 cyc, fp8 ~32 cyc; `planning-constants.md`) and to the p10-cadence
-self-reference floor. median ~ ideal -> genuine **MFMA-issue-bound** (Layer 7 tile / ILP);
-median >> ideal -> **bubble-diluted** (attack the #1 inter-MFMA bucket above).
+**MFMA cadence evidence (no peer needed):** compare the measured cadence with the applicable
+architecture/instruction reference and the observed p10. The tool reports those measurements;
+the agent determines their meaning using SKU/roofline, profile and ISA/IR evidence. No fixed
+cadence ratio selects a bound class or a tactic.
 
 **Structural-vs-schedulable discriminator (do NOT skip before spending an overlap lever):** a high
 WAIT% alone does not license a reorder/interleave lever. Combine three signals --

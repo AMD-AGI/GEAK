@@ -74,7 +74,7 @@ Onboarding is not here — read GEAK's language layer first if you have not writ
 | the gfx942 downgrade in one page | [`references/hardware/cdna3-gfx942.md`](references/hardware/cdna3-gfx942.md) |
 | what the hardware actually does (ISA mechanisms, primary sources) | [`isa-mechanisms.md`](references/hardware/isa-mechanisms.md), [`primary-sources.md`](references/hardware/primary-sources.md) |
 | SKU tables | `references/hardware/amd-*-skus.md` |
-| AMD lever cards (data) and the term index | `references/hardware/lever-cards.json` (via `scripts/lever_index.py`), [`term-index.md`](references/hardware/term-index.md) |
+| Historical lever notes and the term index | `references/hardware/lever-cards.json` (reference only; no decision routing), [`term-index.md`](references/hardware/term-index.md) |
 | GEAK's own hardware cards | [`perf_knowledge/hardware/`](../../../hardware/) (`cdna4_mi350/`, `cdna3_mi300/`, `shared/`) |
 
 ## Tools

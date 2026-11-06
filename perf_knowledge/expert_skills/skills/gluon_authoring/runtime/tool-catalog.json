@@ -999,21 +999,6 @@
       "description": "One-key MFMA/WMMA operand-layout preflight, and the single entry point for ISA questions on ANY AMD arch -- it routes to whichever source can answer. Run it BEFORE authoring a matrix / low-precision / transpose lever: a scale or operand LAYOUT mismatch is the top cause of a kernel that compiles and returns wrong numbers, and this generates the authoritative table instead of guessing. `layout_facts.py <arch> <instr> [--layout]` gives dims, cycles, dtypes and the A/B lane-VGPR table. The instruction chapters are reachable through the same entry point on gfx950, cdna3, rdna3 and rdna4: `layout_facts.py <arch> encoding|format|opcodes|search|errata ...` answers from the in-pack databases with no network and no calculator. Layout for cdna1/2/3 and rdna3/4 needs the Matrix Calculator -- check `hw_sources.sh preflight` first. Every answer prints a `# provenance:` line to cite."
     },
     {
-      "name": "lever_index",
-      "classification": "internal",
-      "path": "scripts/lever_index.py",
-      "command": [
-        "python3",
-        "scripts/lever_index.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "locus",
       "classification": "internal",
       "path": "scripts/locus.sh",

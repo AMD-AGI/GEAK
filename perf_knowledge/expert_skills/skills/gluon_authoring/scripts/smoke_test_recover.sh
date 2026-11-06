@@ -67,7 +67,6 @@ bash "$SCRIPT_DIR/dump_ir.sh" --selftest | tail -1
 echo "== 1f. gates, lever index and harness/bench self-tests =="
 python3 "$SCRIPT_DIR/parity_gate.py" --selftest
 python3 "$SCRIPT_DIR/champion_gate.py" --selftest
-python3 "$SCRIPT_DIR/lever_index.py" --selftest | cut -c1-100
 python3 "$SCRIPT_DIR/check_term_index.py" --selftest
 python3 "$SCRIPT_DIR/check_term_index.py" --pack "$SCRIPT_DIR/.."
 python3 "$SCRIPT_DIR/ab_bench.py" --selftest
