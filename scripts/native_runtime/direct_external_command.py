@@ -141,6 +141,7 @@ def checked_result(request, native_root, workspace, patch=None):
             "per_case": per_case,
             "development_geomean_speedup": math.exp(sum(map(math.log, speedups)) / len(speedups)),
             "external_evaluation": {"candidate_id": candidate_id, "evaluation_id": request["operation_id"]},
+            "source_id": source_id, "source_paths": list(paths),
             "patch_sha256": digest(patch_bytes[0]) if patch_bytes is not None else None,
             "receipt_ref": {"path": str(native_root / "START.json"), "sha256": digest(raw["START.json"])},
             "timing_basis": "external_whole_call_ut", "external_measurement_valid": True,

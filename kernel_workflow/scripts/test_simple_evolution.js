@@ -310,6 +310,7 @@ async function runCase(sc) {
         return {committed: true};
       }
       if (label.startsWith('integrate ') && sc.integration) {
+        if (sc.inspectIntegration) sc.inspectIntegration({prompt, h});
         assert.ok(h.field(prompt, 'PATCHES').every(p => p.reported_context.authority === 'author_reported_interpretation_only'));
         const base = h.field(prompt, 'CANONICAL');
         assert.deepEqual(readSources(base), original, 'integrator uses the frozen base');
@@ -387,6 +388,16 @@ async function runCase(sc) {
     try { result = await run(); } catch (error) { throw errors[0] || error; }
     if (errors.length) throw errors[0];
     const archive = JSON.parse(fs.readFileSync(path.join(evalDir, 'evolution/archive.json'), 'utf8'));
+    if (sc.external) for (const row of archive.entries) {
+      for (const report of [row.engineer, row.verifier]) {
+        if (report?.external_measurement_valid !== true) continue;
+        assert.equal(report.observed_evidence.authority, 'host_result_reader');
+        assert.deepEqual(report.observed_evidence.per_case, report.per_case);
+        assert.deepEqual(report.observed_evidence.external_evaluation, report.external_evaluation);
+        assert.equal(report.observed_evidence.timing_basis, 'cpu_fixture');
+        assert.deepEqual(report.observed_evidence.objective, objective);
+      }
+    }
     assert.deepEqual(readSources(task), original, 'task source unchanged');
     assert.deepEqual(readSources(archive.base), original, 'archive base unchanged');
     assert.deepEqual(readSources(canonical), finalFiles, 'canonical holds the final captured source');
@@ -505,8 +516,12 @@ const cases = [
             assert.deepEqual(Object.keys(evidence).sort(), ['id', 'patch_ref', 'status', 'verified',
               'retention_error', 'last_record_error', 'engineer', 'verifier', 'reported_context',
                'reported_context_ref', 'peer_checkpoint'].sort());
-            for (const key of Object.keys(evidence).filter(k => k !== 'reported_context_ref'))
-               assert.deepEqual(evidence[key], row[key] ?? null);
+            for (const key of Object.keys(evidence).filter(k => k !== 'reported_context_ref')) {
+              const expected = ['engineer', 'verifier'].includes(key) && row[key]
+                ? Object.fromEntries(Object.entries(row[key]).filter(([name]) =>
+                  !['per_case', 'reported_per_case', 'observed_evidence'].includes(name))) : row[key] ?? null;
+              assert.deepEqual(evidence[key], expected);
+            }
              assert.equal(evidence.reported_context_ref.entry_id, row.id);
           }
           assert.match(parent.engineer.notes, /\nRaw: \/cpu-fixture\/evidence\.json$/);
@@ -824,6 +839,39 @@ const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, spee
   baseline_ms: 2, optimized_ms: 2.5, count: i + 1, weight: 2 * (i + 1),
   reps: 3, speedup_spread: 0.01}));
 const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
+const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+for (const count of [6, 400]) {
+  const rows = Array.from({length: count}, (_, i) => ({...caseViewRows[i % 6], name: `case-${i}`}));
+  cases.push({...integrationFixture, name: `complete or explicit-reference case handoffs with ${count} rows`,
+    args: {...integrationFixture.args, evolution_case_evidence_view: true, evolution_evidence_handoff: true},
+    plans: {...integrationFixture.plans, r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+    candidates: {...integrationFixture.candidates,
+      r1_d0: {...integrationFixture.candidates.r1_d0,
+        verifier: {...verifiedAt(1.2), per_case: rows}},
+      r1_d1: {...integrationFixture.candidates.r1_d1,
+        verifier: {...verifiedAt(1.4), per_case: rows}},
+      r2_d0: {...integrationFixture.candidates.r2_d0, inherited: source(1, 0), inspect: ({prompt, h}) => {
+        const view = h.field(prompt, 'EVOLUTION').selected_case_evidence;
+        if (count === 6) assert.ok(view.entries.every(entry => entry.verifier.case_rows === 6));
+        else {
+          assert.equal(view.entries, null, 'no first-four numeric preview on overflow');
+          assert.match(view.case_evidence_omitted, /read complete cases/);
+          assert.deepEqual(view.full_context_ref.entry_ids, ['r1_d0', 'r1_d1']);
+          assert.ok(view.row_counts.every(entry => entry.verifier === count));
+        }
+      }}},
+    inspectIntegration: ({prompt, h}) => {
+      const view = h.field(prompt, 'CANDIDATE_CASE_EVIDENCE');
+      if (count === 6) assert.ok(view.entries.every(entry => entry.verifier.per_case.length === 6));
+      else {
+        assert.equal(view.entries, null);
+        assert.deepEqual(view.full_context_ref.entry_ids, ['r1_d0', 'r1_d1']);
+        assert.ok(view.row_counts.every(entry => entry.verifier === count));
+      }
+    },
+    check: ({archive}) => assert.equal(archive.entries.find(row => row.id === 'r1_integrated').verified, true),
+  });
+}
 cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view => ({
   name: `case evidence view ${JSON.stringify(evolution_case_evidence_view)}`,
   args: {budget: 3, max_no_improve: 3,

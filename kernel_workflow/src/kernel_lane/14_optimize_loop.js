@@ -355,6 +355,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...(EXTERNAL_OBJECTIVE ? {reported_per_case: r.ver.reported_per_case ?? null} : {}),
     reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
   });
@@ -374,6 +375,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           files: r.d.focus_files || [], patch: r.patch,
           reported_context: boundedContext(candidates.find(c => c.id === r.d.id).reported_context,
             contextRef(r.d.id, r.d.out_dir), 8192) })),
+        ...(evo && A.evolution_case_evidence_view === true
+          ? {CANDIDATE_CASE_EVIDENCE: evo.caseInputs(verified.map(r => r.d.id))} : {}),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
@@ -417,6 +420,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        reported_per_case: integrate.best.reported_per_case ?? null,
         ...externalFields(integrate.best),
       });
     }

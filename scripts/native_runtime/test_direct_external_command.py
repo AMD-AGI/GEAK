@@ -156,6 +156,10 @@ class DirectExternalCommandTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["primary_speedup"], 200 / 70)
         self.assertEqual(rows[0]["objective"], {"kind": "external_primary", "primary_regime": "extend"})
         self.assertIs(rows[0]["external_measurement_valid"], True)
+        self.assertEqual(rows[0]["source_id"], identity["source_id"])
+        self.assertEqual(rows[0]["source_paths"], identity["source_paths"])
+        self.assertEqual(rows[0]["status"], "verified")
+        self.assertEqual(rows[0]["correctness"], "pass")
 
         (native / "process_03/ut_result.json").write_bytes(b"{}")
         with self.assertRaises((ValueError, KeyError)):

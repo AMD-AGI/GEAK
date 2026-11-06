@@ -30,6 +30,9 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   const legacy = make({});
   assert.equal(legacy.primSpeedup({verified_weighted: 2, verified_geomean: 3}), 2);
   assert.equal(legacy.nativePrimary({verified_weighted: 2, verified_geomean: 3}), 2);
+  const ordinary = await legacy.checkedExternalMeasurement({status: 'verified',
+    observed_evidence: {authority: 'host_result_reader'}, reported_per_case: []}, '/candidate');
+  assert.equal(Object.hasOwn(ordinary, 'observed_evidence'), false, 'ordinary roles cannot author host provenance');
   assert.equal(make({}, false).primSpeedup({verified_weighted: 2, verified_geomean: 3}), 3);
   const mode = make({objective, external_measurement_command: ['/owner/evaluate'],
     external_result_command: ['/owner/read']});
@@ -49,6 +52,37 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   assert.equal(mode.nativeGainEligible(read), true);
   assert.deepEqual(calls[0].args, ['--candidate-id','candidate','--evaluation-id','evaluation',
     '--workspace','/candidate','--patch','/candidate.diff']);
+  const reportedCases = [{name: 'agent-only', speedup: 999}];
+  const missingCases = await mode.checkedExternalMeasurement({external_evaluation: ref,
+    per_case: reportedCases, observed_evidence: {per_case: reportedCases},
+    status: 'verified', correctness: 'pass', measurement_valid: true, validation_status: 'accepted'}, '/candidate');
+  assert.equal(missingCases.per_case, null, 'missing reader rows never inherit model validity');
+  assert.equal(missingCases.observed_evidence.per_case, null);
+  assert.equal(missingCases.observed_evidence.case_rows, null);
+  assert.equal(missingCases.observed_evidence.receipt_ref, null);
+  for (const key of ['status', 'correctness', 'measurement_valid', 'validation_status'])
+    assert.equal(missingCases[key], null, `reader omission cannot inherit authoritative ${key}`);
+  assert.deepEqual(missingCases.reported_per_case, reportedCases, 'retain the report without observed authority');
+  const observedCases = [{name: 'reader-case', baseline_ms: 2, optimized_ms: 1.5,
+    count: 0, regime: 'decode', correctness: 'pass', repeats: 3}];
+  output = {...native, per_case: observedCases, receipt_ref: {path: '/owner/receipt', sha256: 'a'.repeat(64)},
+    timing_basis: 'full_call', source_id: 'b'.repeat(64), phase_speedups: {decode: 4 / 3}};
+  const observedCasesRead = await mode.checkedExternalMeasurement(missingCases, '/candidate');
+  assert.deepEqual(observedCasesRead.observed_evidence.per_case, observedCases);
+  assert.deepEqual(observedCasesRead.reported_per_case, reportedCases, 'rechecking does not relabel observations as author rows');
+  assert.deepEqual(observedCasesRead.observed_evidence.receipt_ref, output.receipt_ref);
+  assert.deepEqual(observedCasesRead.observed_evidence.objective, objective);
+  assert.equal(observedCasesRead.observed_evidence.timing_basis, 'full_call');
+  output = {...native, per_case: []};
+  const emptyCases = await mode.checkedExternalMeasurement({external_evaluation: ref}, '/candidate');
+  assert.deepEqual(emptyCases.observed_evidence.per_case, [], 'empty and unavailable remain distinct');
+  assert.equal(emptyCases.observed_evidence.case_rows, 0);
+  output = {...native, native_reproducible_gain: undefined, native_reproducible_regression: undefined};
+  const unknownGain = await mode.checkedExternalMeasurement({...native,
+    correctness: 'pass', status: 'verified'}, '/candidate');
+  assert.equal(unknownGain.native_reproducible_gain, null);
+  assert.equal(unknownGain.native_reproducible_regression, null);
+  assert.equal(mode.nativeGainEligible(unknownGain), false, 'reported reproduction cannot authorize export');
   output = {...native, native_reproducible_gain: false};
   const noGain = await mode.checkedExternalMeasurement({external_evaluation: ref}, '/candidate');
   assert.equal(mode.primSpeedup(noGain), 1.4); // the gate does not enter development scoring
@@ -65,6 +99,12 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   assert.equal(mode.primSpeedup(bad), null);
   assert.equal(mode.nativePrimary(bad), null);
   assert.equal(bad.validation_status, 'invalid_measurement');
+  assert.equal(bad.observed_evidence, null, 'invalid readers cannot retain observed authority');
+  assert.equal(bad.external_evaluation, null);
+  if (process.argv.includes('--reader-only')) {
+    console.log('external reader: source identity, primary metric, observed/report separation and missing-case checks passed');
+    return;
+  }
   await fullLane();
   await fullLane({retainedIntegration: true});
   await fullLane({finalNoGain: true});

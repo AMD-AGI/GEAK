@@ -102,6 +102,7 @@ Promise.all(cases.map(async A => {
       profileSummary: '', history: {},
       createEvolution: async () => { calls.push('createEvolution'); return 'evolution'; },
       greedyOptimize: async (_start, evolution) => { calls.push(evolution || 'ordinary'); },
+      nativeDeliveryBoundary: async work => work(),
       applyOptimizeResult: () => {},
     });
     return {...child, policy_calls: calls};
@@ -121,6 +122,36 @@ check("evo selector enters the existing evolution policy in the shared loop",
       results[2].get("policy_calls") == ["createEvolution", "evolution"])
 check("invalid optimizer is rejected before workflow dispatch",
       all(result.get("error") == "optimizer must be greedy or evo" for result in results[3:]))
+
+# Exercise the source argument boundary directly so this check also works before
+# assembled workflows are regenerated. The generated call-site checks above remain.
+source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
+source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
+evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff")
+evidence_cases = [{"optimizer": "evo"}]
+evidence_cases += [{"optimizer": "evo", flag: value}
+                  for flag in evidence_flags for value in (False, True, "true", "false", None, 0, 1)]
+evidence_probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundary, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+const results = cases.map(A => vm.runInNewContext(boundary + `
+({inherited: laneArgs({kernel_path: "/task"}),
+  overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false})})`, {
+  A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,
+}));
+console.log(JSON.stringify(results));
+"""], input=json.dumps({"boundary": source_boundary, "cases": evidence_cases}),
+    text=True, capture_output=True, check=True)
+evidence_results = json.loads(evidence_probe.stdout)
+for case, result in zip(evidence_cases, evidence_results):
+    inherited = result["inherited"]
+    for flag in evidence_flags:
+        label = f"{flag}={case.get(flag, '<omitted>')!r}"
+        check(f"source lane preserves {label} without coercion",
+              (flag not in inherited if flag not in case else
+               flag in inherited and inherited[flag] == case[flag]
+               and type(inherited[flag]) is type(case[flag])))
+        check(f"per-call false overrides {label}", result["overridden"][flag] is False)
 
 budget_declaration = re.search(r"^const KERNEL_BUDGET =.*$", s, re.MULTILINE).group(0)
 budget_cases = [{}, {"kernel_budget": 1}, {"kernel_budget": 12}, {"kernel_budget": "12"}, {"kernel_budget": " +012 "}]

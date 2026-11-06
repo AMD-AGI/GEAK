@@ -299,11 +299,27 @@ async function captureCanonicalSelection(history, kind, round, winner = null, st
 }
 
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
-  if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
-  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+  if (!EXTERNAL_OBJECTIVE) {
+    if (!value) return value;
+    const {observed_evidence, reported_per_case, ...reported} = value;
+    return reported; // Reserved host provenance cannot be authored by an ordinary role.
+  }
+  if (!value && !final) return value;
+  // These fields feed native acceptance, delivery and evidence consumers. Missing
+  // reader facts stay unknown even when the model returned plausible values.
+  // The declared task objective remains EXTERNAL_OBJECTIVE, independent of this view.
+  const readerFields = ['status', 'correctness', 'validation_status', 'measurement_valid',
+    'external_measurement_valid', 'objective', 'primary_regime', 'primary_speedup',
+    'native_reproducible_gain', 'native_reproducible_regression', 'development_geomean_speedup',
+    'external_evaluation', 'source_id', 'source_paths', 'patch_sha256', 'receipt_ref',
+    'timing_basis', 'phase_speedups', 'per_case', 'verified_geomean', 'verified_weighted',
+    'verified_arithmetic', 'speedup_geomean', 'speedup_weighted', 'speedup_arithmetic',
+    'geomean', 'weighted', 'arithmetic'];
+  const readerFacts = read => Object.fromEntries(readerFields.map(key => [key, read[key] ?? null]));
+  const invalid = { ...value, ...readerFacts({}), external_measurement_valid: false,
     status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
     native_reproducible_gain: false, native_reproducible_regression: false,
-    development_geomean_speedup: null };
+    development_geomean_speedup: null, observed_evidence: null };
   const ref = value && value.external_evaluation;
   if (final && (!ref || !frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
       || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) {
@@ -329,7 +345,22 @@ async function checkedExternalMeasurement(value, workspace, patch = null, final 
         || !Number.isFinite(read.development_geomean_speedup) || read.development_geomean_speedup <= 0
         || read.external_evaluation.candidate_id !== ref.candidate_id
         || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
-    return { ...value, ...read };
+    // Only the host reader supplies observed facts. An omitted reader field must
+    // not acquire authority from the model report merged above it.
+    const observed = Object.fromEntries([
+      'objective', 'primary_regime', 'external_evaluation', 'source_id', 'source_paths',
+      'patch_sha256', 'receipt_ref', 'timing_basis', 'phase_speedups', 'status', 'correctness',
+      'validation_status', 'native_reproducible_gain', 'native_reproducible_regression',
+    ].map(key => [key, read[key] ?? null]));
+    observed.per_case = Array.isArray(read.per_case) ? read.per_case : null;
+    observed.case_rows = observed.per_case?.length ?? null;
+    observed.authority = 'host_result_reader';
+    // Keep the original reported rows separately for audit, including repeated
+    // checks of a winner. Neither their presence nor this copy verifies them.
+    const reported = Object.hasOwn(value || {}, 'reported_per_case')
+      ? value.reported_per_case : value?.per_case ?? null;
+    return { ...value, ...read, ...readerFacts(read), reported_per_case: reported,
+      per_case: observed.per_case, observed_evidence: observed };
   } catch (error) {
     log(`External measurement reader failed: ${String(error)}`);
     return invalid;

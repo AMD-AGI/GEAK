@@ -364,11 +364,27 @@ async function captureCanonicalSelection(history, kind, round, winner = null, st
 }
 
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
-  if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
-  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+  if (!EXTERNAL_OBJECTIVE) {
+    if (!value) return value;
+    const {observed_evidence, reported_per_case, ...reported} = value;
+    return reported; // Reserved host provenance cannot be authored by an ordinary role.
+  }
+  if (!value && !final) return value;
+  // These fields feed native acceptance, delivery and evidence consumers. Missing
+  // reader facts stay unknown even when the model returned plausible values.
+  // The declared task objective remains EXTERNAL_OBJECTIVE, independent of this view.
+  const readerFields = ['status', 'correctness', 'validation_status', 'measurement_valid',
+    'external_measurement_valid', 'objective', 'primary_regime', 'primary_speedup',
+    'native_reproducible_gain', 'native_reproducible_regression', 'development_geomean_speedup',
+    'external_evaluation', 'source_id', 'source_paths', 'patch_sha256', 'receipt_ref',
+    'timing_basis', 'phase_speedups', 'per_case', 'verified_geomean', 'verified_weighted',
+    'verified_arithmetic', 'speedup_geomean', 'speedup_weighted', 'speedup_arithmetic',
+    'geomean', 'weighted', 'arithmetic'];
+  const readerFacts = read => Object.fromEntries(readerFields.map(key => [key, read[key] ?? null]));
+  const invalid = { ...value, ...readerFacts({}), external_measurement_valid: false,
     status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
     native_reproducible_gain: false, native_reproducible_regression: false,
-    development_geomean_speedup: null };
+    development_geomean_speedup: null, observed_evidence: null };
   const ref = value && value.external_evaluation;
   if (final && (!ref || !frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
       || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) {
@@ -394,7 +410,22 @@ async function checkedExternalMeasurement(value, workspace, patch = null, final 
         || !Number.isFinite(read.development_geomean_speedup) || read.development_geomean_speedup <= 0
         || read.external_evaluation.candidate_id !== ref.candidate_id
         || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
-    return { ...value, ...read };
+    // Only the host reader supplies observed facts. An omitted reader field must
+    // not acquire authority from the model report merged above it.
+    const observed = Object.fromEntries([
+      'objective', 'primary_regime', 'external_evaluation', 'source_id', 'source_paths',
+      'patch_sha256', 'receipt_ref', 'timing_basis', 'phase_speedups', 'status', 'correctness',
+      'validation_status', 'native_reproducible_gain', 'native_reproducible_regression',
+    ].map(key => [key, read[key] ?? null]));
+    observed.per_case = Array.isArray(read.per_case) ? read.per_case : null;
+    observed.case_rows = observed.per_case?.length ?? null;
+    observed.authority = 'host_result_reader';
+    // Keep the original reported rows separately for audit, including repeated
+    // checks of a winner. Neither their presence nor this copy verifies them.
+    const reported = Object.hasOwn(value || {}, 'reported_per_case')
+      ? value.reported_per_case : value?.per_case ?? null;
+    return { ...value, ...read, ...readerFacts(read), reported_per_case: reported,
+      per_case: observed.per_case, observed_evidence: observed };
   } catch (error) {
     log(`External measurement reader failed: ${String(error)}`);
     return invalid;
@@ -2272,6 +2303,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...(EXTERNAL_OBJECTIVE ? {reported_per_case: r.ver.reported_per_case ?? null} : {}),
     reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
   });
@@ -2291,6 +2323,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           files: r.d.focus_files || [], patch: r.patch,
           reported_context: boundedContext(candidates.find(c => c.id === r.d.id).reported_context,
             contextRef(r.d.id, r.d.out_dir), 8192) })),
+        ...(evo && A.evolution_case_evidence_view === true
+          ? {CANDIDATE_CASE_EVIDENCE: evo.caseInputs(verified.map(r => r.d.id))} : {}),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
@@ -2334,6 +2368,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        reported_per_case: integrate.best.reported_per_case ?? null,
         ...externalFields(integrate.best),
       });
     }
@@ -3011,7 +3046,18 @@ function caseEvidenceReport(value) {
   return {...Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
     per_case: value.per_case ?? null,
     case_rows: Array.isArray(value.per_case) ? value.per_case.length : null,
+    ...(value.observed_evidence !== undefined ? {observed_evidence: value.observed_evidence,
+      reported_per_case: value.reported_per_case ?? null} : {}),
     evidence_refs: value.evidence_context?.evidence_refs ?? null};
+}
+
+// Numeric handoffs are complete or explicitly reference-only. Prose reduction
+// must not turn the first four case rows into a seemingly complete comparison.
+function boundedCaseEvidence(rows, fullRef, limit = 16384) {
+  if (contextBytes(rows) <= limit) return {entries: rows, full_context_ref: fullRef};
+  return {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
+    full_context_ref: fullRef, row_counts: rows.map(row => ({entry_id: row.archive_ref.entry_id,
+      engineer: row.engineer?.case_rows ?? null, verifier: row.verifier?.case_rows ?? null}))};
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
@@ -3090,7 +3136,8 @@ async function createEvolution(start) {
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',
-      'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes', 'evidence_context'];
+      'per_case', ...(EXTERNAL_OBJECTIVE ? ['observed_evidence', 'reported_per_case'] : []), 'native_reproducible_gain',
+      'native_reproducible_regression', 'notes', 'evidence_context'];
     return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
   };
   const digest = async (file) => {
@@ -3105,6 +3152,8 @@ async function createEvolution(start) {
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
     engineer: caseEvidenceReport(row.engineer), verifier: caseEvidenceReport(row.verifier)});
+  const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
+    entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
   const checkpointTree = async (winner, round) => {
@@ -3258,15 +3307,18 @@ async function createEvolution(start) {
   });
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
+    caseInputs: selectedCases,
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
+      const proseReport = value => value ? Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !['per_case', 'reported_per_case', 'observed_evidence'].includes(key))) : null;
       const selected = (id) => {
         const row = entries.find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
           verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
           last_record_error: row?.last_record_error ?? null,
-          engineer: row?.engineer || null, verifier: row?.verifier || null,
+          engineer: proseReport(row?.engineer), verifier: proseReport(row?.verifier),
           reported_context: row?.reported_context || null,
           reported_context_ref: row?.reported_context_ref || {path: archive, entry_id: id},
           peer_checkpoint: row?.peer_checkpoint || null};
@@ -3276,7 +3328,8 @@ async function createEvolution(start) {
         parent: selected(direction.parent_id),
         donors: (direction.donor_ids || []).map(selected)};
       return {...context, selected_evidence: boundedContext(selectedEvidence,
-        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []})};
+        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
+        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
     },
     planInputs() {
       const summary = entries.slice(-12);

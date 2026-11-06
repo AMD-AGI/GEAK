@@ -831,6 +831,10 @@ def map_args(
     # Select the policy of the same nested kernel worker; omission keeps its default.
     if "optimizer" in h:
         ps_args["optimizer"] = h["optimizer"]
+    # Evidence views use literal boolean true in the worker; preserve caller values.
+    for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff"):
+        if flag in h:
+            ps_args[flag] = h[flag]
     if "kernel_budget" in h:
         ps_args["kernel_budget"] = h["kernel_budget"]
     if gpu_identity is not None:

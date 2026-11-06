@@ -293,6 +293,18 @@ class TestMapArgs(_RunE2ECase):
                 ps = rx.map_args(self._handoff(optimizer=optimizer))
                 self.assertEqual(ps["optimizer"], optimizer)
 
+    def test_kernel_evidence_flags_are_optional_and_not_coerced(self):
+        flags = ("evolution_case_evidence_view", "evolution_evidence_handoff")
+        omitted = rx.map_args(self._handoff(optimizer="evo"))
+        for flag in flags:
+            self.assertNotIn(flag, omitted)
+            for value in (False, True, "true", "false", None, 0, 1):
+                with self.subTest(flag=flag, value=value):
+                    ps = rx.map_args(self._handoff(optimizer="evo", **{flag: value}))
+                    self.assertEqual(ps[flag], value)
+                    self.assertIs(type(ps[flag]), type(value))
+                    self.assertNotIn(next(other for other in flags if other != flag), ps)
+
     def test_invalid_kernel_optimizer_fails_before_gpu_probe(self):
         self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
         for optimizer in (None, "", "population", "EVO", True, 1, [], {}):

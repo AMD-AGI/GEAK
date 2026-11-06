@@ -69,7 +69,18 @@ function caseEvidenceReport(value) {
   return {...Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
     per_case: value.per_case ?? null,
     case_rows: Array.isArray(value.per_case) ? value.per_case.length : null,
+    ...(value.observed_evidence !== undefined ? {observed_evidence: value.observed_evidence,
+      reported_per_case: value.reported_per_case ?? null} : {}),
     evidence_refs: value.evidence_context?.evidence_refs ?? null};
+}
+
+// Numeric handoffs are complete or explicitly reference-only. Prose reduction
+// must not turn the first four case rows into a seemingly complete comparison.
+function boundedCaseEvidence(rows, fullRef, limit = 16384) {
+  if (contextBytes(rows) <= limit) return {entries: rows, full_context_ref: fullRef};
+  return {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
+    full_context_ref: fullRef, row_counts: rows.map(row => ({entry_id: row.archive_ref.entry_id,
+      engineer: row.engineer?.case_rows ?? null, verifier: row.verifier?.case_rows ?? null}))};
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
@@ -148,7 +159,8 @@ async function createEvolution(start) {
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',
-      'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes', 'evidence_context'];
+      'per_case', ...(EXTERNAL_OBJECTIVE ? ['observed_evidence', 'reported_per_case'] : []), 'native_reproducible_gain',
+      'native_reproducible_regression', 'notes', 'evidence_context'];
     return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
   };
   const digest = async (file) => {
@@ -163,6 +175,8 @@ async function createEvolution(start) {
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
     engineer: caseEvidenceReport(row.engineer), verifier: caseEvidenceReport(row.verifier)});
+  const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
+    entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
   const checkpointTree = async (winner, round) => {
@@ -316,15 +330,18 @@ async function createEvolution(start) {
   });
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
+    caseInputs: selectedCases,
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
+      const proseReport = value => value ? Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !['per_case', 'reported_per_case', 'observed_evidence'].includes(key))) : null;
       const selected = (id) => {
         const row = entries.find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
           verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
           last_record_error: row?.last_record_error ?? null,
-          engineer: row?.engineer || null, verifier: row?.verifier || null,
+          engineer: proseReport(row?.engineer), verifier: proseReport(row?.verifier),
           reported_context: row?.reported_context || null,
           reported_context_ref: row?.reported_context_ref || {path: archive, entry_id: id},
           peer_checkpoint: row?.peer_checkpoint || null};
@@ -334,7 +351,8 @@ async function createEvolution(start) {
         parent: selected(direction.parent_id),
         donors: (direction.donor_ids || []).map(selected)};
       return {...context, selected_evidence: boundedContext(selectedEvidence,
-        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []})};
+        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
+        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
     },
     planInputs() {
       const summary = entries.slice(-12);

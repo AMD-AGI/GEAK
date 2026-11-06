@@ -36,6 +36,11 @@ const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
     ...(A.optimizer !== undefined ? { optimizer: A.optimizer } : {}),
+    // The worker enables these only for boolean true; do not coerce caller values.
+    ...(A.evolution_case_evidence_view !== undefined
+      ? { evolution_case_evidence_view: A.evolution_case_evidence_view } : {}),
+    ...(A.evolution_evidence_handoff !== undefined
+      ? { evolution_evidence_handoff: A.evolution_evidence_handoff } : {}),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
