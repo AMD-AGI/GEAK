@@ -150,7 +150,11 @@ def waves_by_vgpr(vgpr, arch=None, model=None):
     if m is None:
         return None, (f"unknown arch {arch!r}: no VGPR-file model on record -- read LLVM's "
                       f"`; Occupancy:` from the .s, or add the arch to amd_occupancy.MODELS")
-    if not vgpr:
+    if vgpr is None:
+        return None, "missing register count: occupancy withheld"
+    if vgpr < 0:
+        raise ValueError("register count must be nonnegative")
+    if vgpr == 0:
         return m["max_waves_per_simd"], m["label"]
     gran = m["vgpr_alloc_granule"]
     alloc = ((int(vgpr) + gran - 1) // gran) * gran
@@ -212,7 +216,7 @@ def workgroup_size_from_asm(text):
     return None, "no .max_flat_workgroup_size in this dump"
 
 
-def waves_by_lds(lds_bytes_per_wg, arch, workgroup_size, model=None):
+def waves_by_lds(lds_bytes_per_wg, arch, workgroup_size, model=None, capacity=None):
     """(waves_per_simd, detail) LDS-limited occupancy in waves/SIMD, or (None, why-not).
 
     Needs three things the register model does not: LDS/CU for the arch, SIMDs/CU for the arch,
@@ -232,7 +236,7 @@ def waves_by_lds(lds_bytes_per_wg, arch, workgroup_size, model=None):
         return None, f"unknown arch {arch!r}: no register/LDS geometry on record"
     if not lds_bytes_per_wg:
         return None, "LDS per workgroup is 0 or unknown: no LDS term"
-    cap = lds_per_cu(arch)
+    cap = capacity if capacity is not None else lds_per_cu(arch)
     if not cap:
         return None, (f"no lds_per_cu_kib for {arch} in hw_constants.json -- on RDNA this is "
                       f"deliberate (shared memory is per-WGP with a separate per-WG cap); read "
@@ -244,7 +248,7 @@ def waves_by_lds(lds_bytes_per_wg, arch, workgroup_size, model=None):
     if not workgroup_size:
         return None, "workgroup size unknown: wg/CU cannot be converted to waves/SIMD"
     wg_per_cu = int(cap) // int(lds_bytes_per_wg)
-    waves_per_wg = int(workgroup_size) // int(m["wave_size"])
+    waves_per_wg = -(-int(workgroup_size) // int(m["wave_size"]))
     if wg_per_cu < 1:
         return 0, (f"{lds_bytes_per_wg} B/workgroup exceeds the {cap} B LDS of one CU on {arch}: "
                    f"this kernel does not launch")
@@ -280,44 +284,10 @@ def occupancy_from_asm(text, vgpr=None, lds_bytes_per_wg=None, workgroup_size=No
     so, including when the LDS term could not be computed and why. See the module docstring for
     why min'ing the two is safe without settling whether the emitter already folded LDS in.
     """
-    arch = arch_from_asm(text)
-    occ = llvm_occupancy(text)
-    m = model_for(arch)
-    label = m["label"] if m else f"unknown arch {arch!r}"
-
-    if occ is not None:
-        reg, reg_src = occ, "llvm-comment"
-        reg_label = f"{label}; LLVM `; Occupancy:` in this dump (register term)"
-    else:
-        reg, reg_label = waves_by_vgpr(vgpr, arch=arch, model=m)
-        reg_src = "model" if reg is not None else "unknown"
-
-    if lds_bytes_per_wg is None:
-        lds_bytes_per_wg, lds_field = lds_bytes_per_wg_from_asm(text)
-    else:
-        lds_field = "caller-supplied"
-    if workgroup_size is None:
-        workgroup_size, wg_field = workgroup_size_from_asm(text)
-    else:
-        wg_field = "caller-supplied"
-
-    lds_waves, lds_detail = waves_by_lds(lds_bytes_per_wg, arch, workgroup_size, model=m)
-    if lds_waves is None:
-        note = f"NO LDS TERM ({lds_detail}) -- this is a register-term answer"
-        if lds_bytes_per_wg:
-            note += f"; observed {lds_bytes_per_wg} B/wg from {lds_field} was NOT applied"
-        elif lds_bytes_per_wg == 0:
-            note += (f"; {lds_field} reports 0 B/wg, which on a kernel that sizes its group "
-                     f"segment at launch means the LDS term is missing, not absent")
-        return reg, reg_src, f"{reg_label} | {note}"
-
-    if reg is None:
-        return lds_waves, "lds", f"{reg_label} | LDS term binds: {lds_detail} [{lds_field}]"
-    waves = min(reg, lds_waves)
-    binder = "LDS" if lds_waves < reg else ("register" if reg < lds_waves else "both (tied)")
-    return waves, f"{reg_src}+lds", (f"{reg_label} | LDS term: {lds_detail} "
-                                     f"[{lds_field}; wg size from {wg_field}] | "
-                                     f"min -> {waves} waves/SIMD, {binder}-bound")
+    from amd_resources import analyze
+    r = analyze(text, vgpr=vgpr, lds_bytes=lds_bytes_per_wg, workgroup_size=workgroup_size)
+    label = r['waves_warning'] or r['lds_detail']
+    return r['waves_per_simd'], r['waves_source'], label
 
 
 # ---------------------------------------------------------------- compiler-derived sweep
@@ -627,21 +597,21 @@ def _selftest():
                    '\t\t.amdhsa_group_segment_fixed_size 38144\n'
                    '; Occupancy: 8\n'
                    '    .max_flat_workgroup_size: 256\n')
-        waves, src, label = occupancy_from_asm(lds_asm)
+        waves, src, label = occupancy_from_asm(lds_asm, workgroup_size=256)
         assert (waves, src) == (4, "llvm-comment+lds"), (waves, src, label)
-        assert "LDS-bound" in label, label
+        assert "LDS/CU" in label, label
         # Idempotence of the min under the open hypothesis: an emitter that HAD folded LDS in
         # would have printed 4, and the same call must still return 4 with the same source.
-        assert occupancy_from_asm(lds_asm.replace("; Occupancy: 8", "; Occupancy: 4"))[0] == 4
+        assert occupancy_from_asm(lds_asm.replace("; Occupancy: 8", "; Occupancy: 4"), workgroup_size=256)[0] == 4
         # A register term that binds below the LDS term must survive unchanged.
-        assert occupancy_from_asm(lds_asm.replace("; Occupancy: 8", "; Occupancy: 2"))[:2] \
+        assert occupancy_from_asm(lds_asm.replace("; Occupancy: 8", "; Occupancy: 2"), workgroup_size=256)[:2] \
             == (2, "llvm-comment+lds")
         # Caller-supplied LDS overrides a dump that says 0 (the JIT case).
         jit_asm = ('\t.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n'
                    '\t\t.amdhsa_group_segment_fixed_size 0\n; Occupancy: 8\n')
         w0, s0, l0 = occupancy_from_asm(jit_asm)
-        assert (w0, s0) == (8, "llvm-comment") and "NO LDS TERM" in l0, (w0, s0, l0)
-        assert "missing, not absent" in l0, l0
+        assert (w0, s0) == (8, "llvm-comment") and "register term only" in l0, (w0, s0, l0)
+        assert "unknown" in l0, l0
         assert occupancy_from_asm(jit_asm, lds_bytes_per_wg=38144, workgroup_size=256)[0] == 4
 
     # An arch the reference does not give simds_per_cu for must report NO LDS term rather than

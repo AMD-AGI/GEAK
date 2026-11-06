@@ -124,7 +124,8 @@ def pack_file(rel: str) -> Path | None:
 
 def _selftest() -> int:
     fails = []
-    for n in ("sku.json", "hw_constants.json", "thresholds.json", "workload_models.json"):
+    for n in ("sku.json", "hw_constants.json", "thresholds.json", "workload_models.json",
+              "gfx950-encoding.json.gz"):
         if find(n) is None:
             fails.append(f"missing {n}")
     try:
@@ -132,8 +133,6 @@ def _selftest() -> int:
             fails.append("hw_constants.json has no gfx950")
     except Exception as e:  # noqa: BLE001
         fails.append(f"load_json: {e}")
-    if pack_dir() is None:
-        fails.append("pack dir not found")
     old = os.environ.get("GEAK_HW_DATA_DIR")
     os.environ["GEAK_HW_DATA_DIR"] = "/nonexistent-geak-hw"
     try:

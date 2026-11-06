@@ -86,7 +86,8 @@ sweep.
 
 Re-derive on a new ROCm with
 `python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py
---compiler-sweep --arch gfx1201`.
+--compiler-sweep --arch gfx1201` (run under `kernel_workflow/scripts/gpu_lock.sh` only if a GPU is
+needed; the sweep itself is compile-only).
 Dividing 256 by a kernel's VGPR count (the old CDNA-style file budget) **under-reports** RDNA
 occupancy 2–3×.
 
