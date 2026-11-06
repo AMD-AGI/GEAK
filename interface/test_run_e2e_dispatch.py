@@ -294,6 +294,33 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["expected_physical_cu_count"], 256)
         self.assertEqual(ps["backend"], "sglang")
 
+    def test_hardware_context_enrichment_and_resume(self):
+        c = rx._hardware_context.build({"gfx":"gfx950", "marketing_name":"AMD Instinct MI355X",
+            "physical_cu_count":256, "memory_bytes":288 * 1024**3})
+        for handoff in (self._handoff(hardware_context=c, hardware_context_path='/tmp/hw.json'),
+                        self._handoff(state={"hardware_context":c})):
+            ps = rx.map_args(handoff)
+            self.assertEqual(ps['expected_sku'], 'mi355x')
+            self.assertEqual(ps['hardware_context'], c)
+        self.assertEqual(rx.map_args(self._handoff())['hardware_context']['sku'], 'mi355x')
+        incompatible = rx._hardware_context.build({"gfx":"gfx942", "marketing_name":"AMD Instinct MI308X",
+            "physical_cu_count":80})
+        with self.assertRaisesRegex(ValueError, 'hardware_context'):
+            rx.map_args(self._handoff(hardware_context=incompatible))
+        # A legacy ISA pin does not fabricate a SKU; a supplied context is still checked.
+        pins = dict(expected_gfx='gfx942', expected_target='unknown')
+        self.assertNotIn('hardware_context', rx.map_args(self._handoff(**pins)))
+        with self.assertRaisesRegex(ValueError, 'hardware_context'):
+            rx.map_args(self._handoff(**pins, hardware_context=c))
+
+    def test_reported_partition_is_not_discarded_before_table_selection(self):
+        os.environ['GEAK_GPU_IDENTITY_JSON'] = json.dumps({
+            'gfx':'gfx942', 'target':'unknown', 'marketing_name':'AMD Instinct MI300X',
+            'physical_cu_count':304, 'compute_partition':'CPX'})
+        ps = rx.map_args(self._handoff())
+        self.assertEqual(ps['hardware_context']['observed']['compute_partition'], 'CPX')
+        self.assertEqual(ps['expected_sku'], 'unknown')
+
     def test_probe_less_dry_run_marks_identity_unavailable(self):
         os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
         self.patch_rx(
