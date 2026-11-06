@@ -7,9 +7,9 @@ Examples: --arch gfx942 facts v_mfma_f32_16x16x16_f16
 """
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from amd_targets import COMMANDS, MATRIX_COMMANDS, TARGETS, canonical, capabilities
 

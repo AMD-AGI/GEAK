@@ -220,7 +220,7 @@ fi
 python3 "$(dirname "$SELF")/collect_ir.py" "$CACHE" "$DEST" "$VARIANT" --kernel-name "$KERNEL_NAME"
 
 # Echo the config the dumped IR was compiled with, so it can be confirmed to match
-# the pinned autotune-winning config (gluon_authoring references/method/transcribe.md, step 0).
+# the pinned autotune-winning config (see isa_tools.md: pin one compilation configuration).
 if [ -f "$DEST/$VARIANT.ttgir" ]; then
   NW="$(grep -oE '"ttg.num-warps"[^,}]*' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"
   NS="$(grep -oE 'num_stages[^,}]*[0-9]+' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"
@@ -252,7 +252,7 @@ if [ -n "$EMIT_GLUON" ]; then
     echo "  ! --emit-gluon needs recover_gluon.py from the gluon_authoring pack, and it was not found" >&2
     echo "    (\$GEAK_GLUON_PACK_DIR/scripts, perf_knowledge/expert_skills/skills/gluon_authoring/scripts)." >&2
     echo "    The IR dump above SUCCEEDED ($DEST). Transcription happens on the gluon side: hand the" >&2
-    echo "    champion over per gluon_authoring references/method/entry.md and run --emit-gluon there." >&2
+    echo "    champion into a Gluon-enabled environment and run --emit-gluon there." >&2
     exit 3
   fi
   # Only the optional language adapter owns transcription and Gluon mode semantics.

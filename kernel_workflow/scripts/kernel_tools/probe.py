@@ -187,7 +187,8 @@ def _from_asm(path: str, lds_bytes: int | None = None,
               workgroup_size: int | None = None, num_warps: int | None = None,
               kernel_name: str | None = None) -> dict | None:
     try:
-        txt = open(path, errors="ignore").read()
+        with open(path, errors="ignore") as stream:
+            txt = stream.read()
     except OSError:
         return None
     from amd_resources import analyze
@@ -207,10 +208,11 @@ def _lds_from_meta(d: str) -> dict[str, int]:
     out = {}
     for root, _dirs, files in os.walk(d):
         for f in files:
-            if not f.endswith(".json") or f.startswith("__grp__") or f.startswith("meta___grp__"):
+            if not f.endswith(".json") or f.startswith(("__grp__", "meta___grp__")):
                 continue
             try:
-                j = json.load(open(os.path.join(root, f)))
+                with open(os.path.join(root, f)) as stream:
+                    j = json.load(stream)
             except (OSError, ValueError):
                 continue
             if isinstance(j, dict) and isinstance(j.get("shared"), int):
@@ -225,7 +227,7 @@ def _num_warps_from_meta(d: str) -> dict[str, int | None]:
     out = {}
     for root, _dirs, files in os.walk(d):
         for f in files:
-            if not f.endswith(".json") or f.startswith("__grp__") or f.startswith("meta___grp__"):
+            if not f.endswith(".json") or f.startswith(("__grp__", "meta___grp__")):
                 continue
             try:
                 with open(os.path.join(root, f)) as fh:
@@ -328,37 +330,26 @@ def _limiter_row(name, shared_b, num_warps, waves, cap, simds, cap_src=None):
     return row + regs + f"  -> {min(by_lds, by_reg)} WGs/CU, {binder} bind"
 
 
-def _kernel_name(path):
-    """Resolve renamed dump artifacts through their compilation manifest, then ISA symbol."""
-    from pathlib import Path
-    path = Path(path)
-    manifest = path.parent / 'ir_manifest.json'
-    if manifest.is_file():
-        data = json.loads(manifest.read_text())
-        artifacts = list(data['artifacts'].values())
-        if path.name in artifacts or path.with_suffix('.amdgcn').name in artifacts:
-            return data['kernel_name']
-    names = re.findall(r'^\s*\.amdhsa_kernel\s+(\S+)', path.read_text(errors='replace'), re.M)
-    return names[0] if len(names) == 1 else path.name
-
-
 def cmd_measure(a):
+    from amd_artifacts import inspect_artifact
     asms = []
     for root, _dirs, files in os.walk(a.dir):
         asms += [os.path.join(root, f) for f in files
-                 if f.endswith((".amdgcn", ".s")) or f.endswith("_final_isa.s")]
-    # LDS first: the occupancy a kernel row reports is min(register term, LDS term), so the
-    # limiter has to be in hand BEFORE the rows are built, not printed in a separate block
-    # underneath them. Keeping the two halves apart is what let the register term be read as
-    # the occupancy for as long as it was.
-    lds = _lds_from_meta(a.dir)
-    nw = _num_warps_from_meta(a.dir)
+                 if f.endswith((".amdgcn", ".s"))]
+    # Bind launch data by the artifact's manifest or same-stem cache sidecar.
+    # A global name match cannot distinguish two compilations of the same kernel.
     kernels = []
     for path in sorted(asms):
-        name = _kernel_name(path)
-        r = _from_asm(path, _match_lds(name, lds), a.lds_per_cu, a.arch,
-                      num_warps=_match_lds(name, nw), kernel_name=name)
+        name, metadata, _bound = inspect_artifact(path)
+        shared = metadata.get('shared') if metadata else None
+        warps = metadata.get('num_warps') if metadata else None
+        shared = shared if type(shared) is int and shared >= 0 else None
+        warps = warps if type(warps) is int and warps > 0 else None
+        r = _from_asm(path, shared, a.lds_per_cu, a.arch,
+                      num_warps=warps, kernel_name=name)
         if r:
+            r['sources']['kernel_identity'] = 'assembly' if name else 'unavailable'
+            r['artifact_path'] = os.path.relpath(path, a.dir)
             kernels.append(r)
 
     print(f"=== probe measure: {a.dir} ===")
@@ -382,37 +373,30 @@ def cmd_measure(a):
                   f"LDS allows {k['waves_by_lds_term']} (lds/WG={k['lds_bytes_per_wg']} B, "
                   f"wg={k['wg_size']}) -- spending registers here buys nothing.")
     print()
-    if lds:
-        # Per-arch divisor or none at all. Labelling a guessed divisor does not make it safe --
-        # it makes it quotable. With no target named, print the bytes (a measured fact) and
-        # WITHHOLD the WGs/CU verdict (a derived one), naming the flag that would supply it.
-        #
-        # The arch is taken from the dumps only when EVERY dump names the SAME one. Picking the
-        # first kernel that happens to name a target and dividing every other kernel's LDS by it
-        # is the same borrowing error `_match_lds` refuses: one dump's fact is not another's, and
-        # a dir holding both a gfx94* and a gfx95* dump has no single divisor at all.
-        _archs = {k["arch"] for k in kernels}
-        _arch = _sole_arch(kernels)
-        _cap = a.lds_per_cu or lds_per_cu(_arch)
-        _src = "--lds-per-cu" if a.lds_per_cu else _arch
-        # Both limiters per row, in WGs/CU, joined to the kernel BY NAME (see `_limiter_row`):
-        # the LDS figure alone advertises headroom a register-bound kernel does not have.
-        _nw = _num_warps_from_meta(a.dir)
-        _simds = _simds_per_cu(_arch)
-        for n, b in sorted(lds.items(), key=lambda kv: -kv[1]):
-            print(_limiter_row(n, b, _nw.get(n), _waves_for(n, kernels), _cap, _simds, _src))
-        if not _cap:
-            _why = ("the dumps here do not all name the same target"
-                    if len(_archs) > 1 else
-                    f"no LDS/CU divisor for {_arch or 'an unnamed target'}")
-            print(f"  ^ {_why}: LDS/CU is 64 KiB on gfx94* and 160 KiB on gfx95*, a 2.5x "
-                  f"spread. Re-dump with the target named, or pass --lds-per-cu <bytes>, rather "
-                  f"than reading a WGs/CU number off a guess.")
-    else:
-        print("  lds/WG UNAVAILABLE -- no Triton cache metadata under this dir. Do NOT read LDS "
-              "from the KD or rocprof-compute: both are structurally 0 for Triton kernels.")
+    lds = {}
+    for k in kernels:
+        shared = k['lds_bytes_per_wg']
+        if shared is None:
+            continue
+        name = k['kernel_name']
+        if name:
+            lds[name] = shared if name not in lds or lds[name] == shared else None
+        arch = k['arch']
+        wave = k['wave_size']
+        warps = k['wg_size'] // wave if k['wg_size'] and wave else None
+        model = arch_model(arch)
+        # Even a compiler occupancy comment cannot establish unsupported wave geometry.
+        simds = _simds_per_cu(arch) if model and wave == model['wave_size'] else None
+        cap = a.lds_per_cu or lds_per_cu(arch)
+        print(_limiter_row(k['artifact_path'], shared, warps, k['waves_by_vgpr_term'],
+                           cap, simds, '--lds-per-cu' if a.lds_per_cu else arch))
+    lds = {name: shared for name, shared in lds.items() if shared is not None}
+    if not any(k['lds_bytes_per_wg'] is not None for k in kernels):
+        print("  lds/WG UNAVAILABLE -- no verified launch metadata or nonzero static LDS. "
+              "A zero descriptor does not establish Triton's dynamic LDS allocation.")
     if a.json:
-        json.dump({"kernels": kernels, "lds_bytes_per_wg": lds}, open(a.json, "w"), indent=2)
+        with open(a.json, "w") as stream:
+            json.dump({"kernels": kernels, "lds_bytes_per_wg": lds}, stream, indent=2)
         print(f"\nwrote {a.json}")
     return 0
 
@@ -707,7 +691,10 @@ def main():
     if a.selftest:
         return _selftest()
     if a.cmd == "measure":
-        return cmd_measure(a)
+        try:
+            return cmd_measure(a)
+        except (ValueError, OSError) as e:
+            ap.error(str(e))
     if a.cmd == "plan":
         try:
             return cmd_plan(a)

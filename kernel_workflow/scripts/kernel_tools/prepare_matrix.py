@@ -3,10 +3,10 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import sys
 import venv
+from pathlib import Path
 
 from matrix_dependency import MANIFEST
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # hw_sources.sh — acquire/generate AMD hardware primary-source FACTS on demand (three tiers;
-# see perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md). Machine-readable-first: generate layouts from the
+# see kernel_workflow/scripts/kernel_tools/isa_tools.md). Machine-readable-first: generate layouts from the
 # Matrix Instruction Calculator, decode encodings from the ISA XML; the PDF is a CDNA4-only
 # fallback. Nothing large is committed — everything lands in a cache. Fail-safe: on any fetch/build
 # failure, print a scoped tool-gap and exit 3 (caller falls back to distilled perf_knowledge/hardware
-# + gluon_authoring/references/hardware values); never fabricate.
+# values with explicit source/uncertainty); never fabricate.
 # Lives in kernel_workflow/scripts/kernel_tools/ (GEAK shared kernel tool); the in-repo databases
 # are read from perf_knowledge/hardware/data/ via _hwdata.py ($GEAK_HW_DATA_DIR overrides).
 #
@@ -26,7 +26,7 @@ set -uo pipefail
 HERE_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Directory of the in-repo hardware databases, via the single locator (_hwdata.py).
 hw_data_dir(){ python3 "$HERE_SELF/_hwdata.py" 2>/dev/null | grep -v '^None$' || true; }
-gap(){ echo "SCOPED TOOL-GAP: $*" >&2; echo "  -> fall back to distilled perf_knowledge/hardware/ + gluon_authoring/references/hardware/ values (probe-then-trust)" >&2; exit 3; }
+gap(){ echo "SCOPED TOOL-GAP: $*" >&2; echo "  -> fall back to distilled perf_knowledge/hardware/ with explicit source and uncertainty" >&2; exit 3; }
 
 # gfx950 layout is dispatched BEFORE the cache gate below, deliberately: the CDNA4 layout database
 # is committed inside the pack, so this path fetches nothing, builds nothing and writes nothing.
@@ -38,9 +38,14 @@ if [ "${1:-}" = "layout" ]; then
       instr="${3:?instr}"; shift 3
       g="$HERE_SELF/gfx950_isa.py"
       [ -f "$g" ] || gap "Matrix Calculator has NO CDNA4/gfx950 support and gfx950_isa.py is missing from this pack -> use: hw_sources.sh pdf cdna4-isa (render the layout table)"
+      have_operand=0
+      for arg in "$@"; do
+        case "$arg" in -A|-B|-C|-D|--operand|--operand=*) have_operand=1;; esac
+      done
+      if [ "$have_operand" -eq 0 ]; then set -- -A "$@"; fi
       python3 "$g" facts "$instr" || exit $?
-      python3 "$g" layout "$instr" -A "$@" || exit $?
-      echo "# provenance: gfx950-mfma-layout.json (CDNA4 ISA ch.7, verified) — more: gfx950_isa.py --help" >&2
+      python3 "$g" layout "$instr" "$@" || exit $?
+      echo "# provenance: gfx950-mfma-layout.json (CDNA4 ISA ch.7; per-record verification caveats apply) — more: gfx950_isa.py --help" >&2
       exit 0 ;;
   esac
 fi
@@ -54,7 +59,7 @@ usage(){
   echo "  decode          Tier 1 decode raw bytes using a preinstalled isa_spec_cli"
   echo "  pdf             Tier 3 fetch + render pages (prose and anything not in a database)"
   echo "  --selftest      offline check (no cache, no network)"
-  echo "see perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md (tiers; gfx950 + cdna3/rdna3/rdna4 answer from"
+  echo "see kernel_workflow/scripts/kernel_tools/isa_tools.md (tiers; gfx950 + cdna3/rdna3/rdna4 answer from"
   echo "    perf_knowledge/hardware/data/, no fetch)"
 }
 # --help is answered BEFORE the cache gate: asking a tool what it does must not require a
@@ -230,7 +235,7 @@ case "${1:-}" in
     calc_python="$(python3 "$HERE_SELF/matrix_dependency.py" --path "$d/matrix_calculator.py" --python)" || exit 3
     "$calc_python" "$d/matrix_calculator.py" -a "$arch" -i "$instr" --markdown "$@" \
       || gap "calculator failed for $arch/$instr (list: matrix_calculator.py -a $arch -L)"
-    echo "# provenance: MI-calc $arch $instr $* — distill into perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/isa-mechanisms.md, cite this line" >&2 ;;
+    echo "# provenance: MI-calc $arch $instr $* — distill into your analysis record, cite this line" >&2 ;;
   xml)
     x="$(fetch_xml "${2:?arch}")" || exit 3; echo "$x"
     echo "# ISA XML (encoding). For instruction DECODE build isa_spec_manager: hw_sources.sh decode $2 <bytes>" >&2 ;;

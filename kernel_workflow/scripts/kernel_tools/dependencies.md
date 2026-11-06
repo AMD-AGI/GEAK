@@ -79,3 +79,17 @@ prefix when sharing an ABI-compatible environment.
 Other optional primary-source operations are independent: PDF rendering uses
 Poppler's `pdftoppm`; raw ISA decode uses a prebuilt `isa_spec_cli` and the selected
 XML; these are not prerequisites for committed encoding queries or matrix layout.
+
+
+## Profilers and ATT are separate
+
+- PR2 installs no ROCm, rocprofv3, rocprof-compute or ATT components. Its ISA and
+  compiler-inspection commands do not depend on them.
+- GEAK's profiling workflow discovers tools in the workload environment; installing
+  GEAK's Python requirements does not provision the ROCm profiling stack.
+- Profiling integration (PR4) adds dependency reports and preparation guidance.
+  The image must supply a compatible ROCm/rocprofiler-sdk/ATT decoder combination;
+  reporting a dependency status is not installation or successful GPU decoding.
+- `isa_spec_cli` decodes static instruction bytes from ISA XML. An ATT decoder
+  processes captured thread traces and is a different dependency.
+- TraceLens retains measured profiling, roofline and calibration ownership.
