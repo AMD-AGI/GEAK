@@ -121,6 +121,16 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0])["scheduled_tokens"], 1)
 
+    def test_unsupported_worker_reports_missing_evidence_without_breaking_serving(self):
+        class Worker:
+            def execute_model(self):
+                return 42
+        with patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            observer.patch_worker(types.SimpleNamespace(Worker=Worker))
+        self.assertIn("observation unavailable", err.getvalue())
+        self.assertEqual(Worker().execute_model(), 42)
+        self.assertFalse(hasattr(Worker, "annotate_profile"))
+
     def rows(self):
         return [
             {"time": 100, "rank": 0, "scheduled_tokens": 206,

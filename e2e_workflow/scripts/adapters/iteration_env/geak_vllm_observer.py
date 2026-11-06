@@ -34,8 +34,10 @@ def patch_worker(module):
     worker = module.Worker
     original = getattr(worker, "annotate_profile", None)
     if original is None:
-        raise RuntimeError("GEAK vLLM observation requires Worker.annotate_profile and "
-                           "scheduler request geometry; this installed build needs an observer adapter")
+        print("GEAK: vLLM iteration observation unavailable: this build has no "
+              "Worker.annotate_profile; serving continues without iteration evidence. "
+              "An observer adapter is required for extraction.", file=sys.stderr)
+        return
     if getattr(original, "_geak_iteration_observer", False):
         return
     files, stopped = {}, set()
