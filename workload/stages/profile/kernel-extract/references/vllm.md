@@ -20,8 +20,9 @@ export PYTHONPATH="$SKILL_ROOT/scripts/vllm_observer${PYTHONPATH:+:$PYTHONPATH}"
 The observer wraps `vllm.v1.worker.gpu_worker.Worker.annotate_profile`, preserving
 its return value. The installed scheduler output must expose `scheduled_new_reqs`,
 `scheduled_cached_reqs.is_context_phase`, computed-token counts and scheduled-token
-counts (validated on the pinned vLLM DeepSeek-V4.1-Flash image). Unsupported builds
-must supply an equivalent observer; do not claim full coverage from an empty log.
+counts (validated on the pinned vLLM DeepSeek-V4.1-Flash image). Builds without the hook
+continue serving with a diagnostic and no iteration evidence. They must supply an
+equivalent observer; do not claim full coverage from an empty log.
 Only CPU metadata is recorded: timestamp, rank, phase, query and prior context
 length. No prompt content, request IDs, tensor values or arbitrary object reprs.
 It chains the next `sitecustomize`, preserving the serving overlays. The default
