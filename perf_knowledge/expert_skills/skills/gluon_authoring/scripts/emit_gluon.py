@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Gluon-specific transcription after the shared IR capture has succeeded."""
 import argparse
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main():

@@ -1,9 +1,9 @@
 """Run real CLI boundaries with compiler fixtures; no GPU or network required."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +12,7 @@ KT = Path(__file__).resolve().parents[1] / 'kernel_tools'
 
 def run(*args, cwd=None, **env):
     return subprocess.run([str(a) for a in args], cwd=cwd, env=dict(os.environ, **env),
-                          capture_output=True, text=True, timeout=30)
+                          check=False, capture_output=True, text=True, timeout=30)
 
 
 def compiler(tmp_path, groups, chdir=False):
@@ -111,7 +111,7 @@ def test_conflicting_same_name_metadata_is_not_silently_overwritten(tmp_path):
 
 
 def test_compiler_workgroup_bound_does_not_supply_launch_geometry(tmp_path):
-    (tmp_path/'k.s').write_text('.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n.vgpr_count: 64\n.max_flat_workgroup_size: 1024\n')
+    (tmp_path/'k.s').write_text('.amdhsa_kernel k\n.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n.vgpr_count: 64\n.max_flat_workgroup_size: 1024\n')
     (tmp_path/'k.json').write_text(json.dumps({'name':'k','shared':81920}))
     r=run(sys.executable,KT/'probe.py','measure','--dir',tmp_path,'--json',tmp_path/'out.json')
     assert r.returncode == 0,r.stderr
@@ -154,3 +154,110 @@ def test_layout_queries_use_seed_without_cloning(tmp_path):
     r=run(sys.executable,KT/'layout_facts.py','cdna3','--list',TILE_HW_SEED='',TILE_HW_TOOLS='',
           TILE_HW_CACHE=str(tmp_path/'missing-cache'))
     assert r.returncode == 3 and not (tmp_path/'missing-cache').exists()
+
+
+@pytest.mark.parametrize('operand', [[], ['-A'], ['-B'], ['-C'], ['-D'],
+                                   ['--operand', 'B'], ['--operand=D']])
+def test_layout_wrapper_preserves_operand_across_shared_and_legacy(operand):
+    instruction = 'v_mfma_f32_16x16x32_f16'
+    pack = KT.parents[2] / 'perf_knowledge/expert_skills/skills/gluon_authoring/scripts'
+    direct = run(sys.executable, KT/'amd_isa.py', '--arch', 'gfx950',
+                 'layout', instruction, *operand)
+    assert direct.returncode == 0, direct.stderr
+    for wrapper in (KT/'hw_sources.sh', pack/'hw_sources.sh'):
+        result = run('bash', wrapper, 'layout', 'gfx950', instruction, *operand)
+        assert result.returncode == 0, result.stderr
+        assert direct.stdout in result.stdout
+
+
+def compilation_group(tmp_path, *, symbol='compiled_kernel', metadata_name='compiled_kernel'):
+    cache = tmp_path/'cache'
+    cache.mkdir()
+    asm = '.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n.amdhsa_next_free_vgpr 64\n'
+    if symbol:
+        asm += f'.amdhsa_kernel {symbol}\n'
+    for ext, content in [('ttgir', 'module {}'), ('llir', '; LLVM IR'), ('amdgcn', asm)]:
+        (cache/f'k.{ext}').write_text(content)
+    (cache/'k.json').write_text(json.dumps({'name': metadata_name, 'shared': 81920, 'num_warps': 4}))
+    dest = tmp_path/'output'
+    dest.mkdir()
+    return cache, dest
+
+
+def test_collector_rejects_kernel_identity_mismatch_before_copy(tmp_path):
+    cache, dest = compilation_group(tmp_path, metadata_name='different_kernel')
+    r = run(sys.executable, KT/'collect_ir.py', cache, dest, 'renamed')
+    assert r.returncode == 3 and 'kernel identity mismatch' in r.stderr
+    assert not list(dest.iterdir())
+
+
+@pytest.mark.parametrize('mutation', ['assembly', 'manifest', 'metadata', 'missing_name', 'metadata_path'])
+def test_probe_independently_validates_collected_identity(tmp_path, mutation):
+    cache, dest = compilation_group(tmp_path)
+    r = run(sys.executable, KT/'collect_ir.py', cache, dest, 'renamed')
+    assert r.returncode == 0, r.stderr
+    if mutation == 'assembly':
+        p = dest/'renamed.amdgcn'
+        p.write_text(p.read_text().replace('compiled_kernel', 'different_kernel'))
+    elif mutation == 'metadata':
+        p = dest/'meta_k.json'
+        p.write_text(p.read_text().replace('compiled_kernel', 'different_kernel'))
+    else:
+        p = dest/'ir_manifest.json'
+        data = json.loads(p.read_text())
+        if mutation == 'missing_name':
+            del data['kernel_name']
+        elif mutation == 'metadata_path':
+            data['metadata'] = '../cache/k.json'
+        else:
+            data['kernel_name'] = 'different_kernel'
+        p.write_text(json.dumps(data))
+    r = run(sys.executable, KT/'probe.py', 'measure', '--dir', dest, '--json', dest/'probe.json')
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert not (dest/'probe.json').exists()
+
+
+@pytest.mark.parametrize('symbol', ['compiled_kernel', None])
+def test_renamed_capture_requires_observable_identity_for_launch_data(tmp_path, symbol):
+    cache, dest = compilation_group(tmp_path, symbol=symbol)
+    r = run(sys.executable, KT/'collect_ir.py', cache, dest, 'renamed')
+    assert r.returncode == 0, r.stderr
+    r = run(sys.executable, KT/'probe.py', 'measure', '--dir', dest, '--json', dest/'probe.json')
+    assert r.returncode == 0, r.stderr
+    data = json.loads((dest/'probe.json').read_text())
+    k = data['kernels'][0]
+    assert k['kernel_name'] == symbol
+    assert k['wg_size'] == (256 if symbol else None)
+    assert k['waves_by_lds_term'] == (2 if symbol else None)
+    if not symbol:
+        assert data['lds_bytes_per_wg'] == {}
+        assert 'LDS bind' not in r.stdout
+
+
+def test_raw_same_stem_metadata_mismatch_is_rejected(tmp_path):
+    cache, _ = compilation_group(tmp_path, metadata_name='different_kernel')
+    r = run(sys.executable, KT/'probe.py', 'measure', '--dir', cache)
+    assert r.returncode == 2 and 'kernel identity mismatch' in r.stderr
+
+
+def test_same_symbol_configurations_keep_their_own_launch_metadata(tmp_path):
+    for index, shared in enumerate([81920, 4096]):
+        root = tmp_path/str(index)
+        root.mkdir()
+        cache, _ = compilation_group(root)
+        (cache/'k.json').write_text(json.dumps({'name': 'compiled_kernel', 'shared': shared, 'num_warps': 4}))
+    r = run(sys.executable, KT/'probe.py', 'measure', '--dir', tmp_path, '--json', tmp_path/'probe.json')
+    assert r.returncode == 0, r.stderr
+    data = json.loads((tmp_path/'probe.json').read_text())
+    assert [k['lds_bytes_per_wg'] for k in data['kernels']] == [81920, 4096]
+    assert [k['waves_per_simd'] for k in data['kernels']] == [2, 8]
+    assert data['lds_bytes_per_wg'] == {}  # no directory-wide value for this name
+
+
+def test_kernel_name_in_another_directory_does_not_supply_launch_data(tmp_path):
+    cache, _ = compilation_group(tmp_path)
+    (cache/'k.json').rename(tmp_path/'unrelated.json')
+    r = run(sys.executable, KT/'probe.py', 'measure', '--dir', tmp_path, '--json', tmp_path/'probe.json')
+    assert r.returncode == 0, r.stderr
+    k = json.loads((tmp_path/'probe.json').read_text())['kernels'][0]
+    assert k['wg_size'] is None and k['lds_bytes_per_wg'] is None

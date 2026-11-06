@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compatibility CLI for matrix facts; shared dispatch lives in amd_isa.py."""
 import sys
-from amd_targets import COMMANDS as GFX950_SUBCOMMANDS
-from amd_isa import main as query
+
 from _amd_matrix import _elems_per_lane
+from amd_isa import main as query
+from amd_targets import COMMANDS as GFX950_SUBCOMMANDS
 
 
 def main(argv):

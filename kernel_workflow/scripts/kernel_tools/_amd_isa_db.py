@@ -2,7 +2,7 @@
 """gfx950_isa.py — the gfx950/CDNA4 ISA reference, offline. All 13 ISA chapters, three databases.
 
 WHY THIS EXISTS. The AMD Matrix Instruction Calculator (Tier 2 of
-perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md) *generates* the operand layout table for cdna1/2/3 and
+kernel_workflow/scripts/kernel_tools/isa_tools.md) *generates* the operand layout table for cdna1/2/3 and
 rdna3/4 — but it has NO cdna4/gfx950 support, so for the one chip this pack targets by default
 the Tier-2 answer was a tool-gap and the only path was "render the PDF and read it by eye".
 This script closes that gap for the whole document, not just for matrix layout.
@@ -61,14 +61,15 @@ Usage:
   gfx950_isa.py --selftest                             # offline: re-derive the figures from the rules
 
 Provenance: every record cites `CDNA4 ISA p<NN>`. Copy a distilled fact into
-perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/isa-mechanisms.md WITH that citation so the next agent never re-derives it
-(primary-sources.md provenance rule).
+your analysis record WITH that citation so the next agent never re-derives it
+(isa_tools.md provenance guidance).
 """
 import argparse
 import json
 import os
 import re
 import sys
+from contextlib import redirect_stderr
 from math import ceil
 from pathlib import Path
 
@@ -87,7 +88,7 @@ def _db_path(name):
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
     try:
-        import _hwdata  # noqa: PLC0415
+        import _hwdata
         return _hwdata.find(name)
     except ImportError:
         pass
@@ -107,7 +108,8 @@ def _db_path(name):
 #
 # A `None` here is a deliberate, documented absence with a named alternative -- never a hint
 # that the hardware lacks the feature. `_require` below prints the alternative.
-from amd_targets import TARGETS, ALIASES
+from amd_targets import ALIASES, TARGETS
+
 _ARCH_DBS = {key: {kind: row[kind] for kind in ('layout', 'encoding', 'facts')}
              for key, row in TARGETS.items() if row['encoding']}
 _ARCH_ALIAS = {key: value for key, value in ALIASES.items() if value in _ARCH_DBS}
@@ -133,12 +135,12 @@ _CMD_DB = {
 _ALTERNATIVE = {
     "layout": ("the AMD Matrix Instruction Calculator generates this arch's layout exactly -- "
                "run `kernel_workflow/scripts/kernel_tools/layout_facts.py {arch} <instr> --layout` (Tier 2, "
-               "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md). No layout DB is shipped for {arch} "
+               "kernel_workflow/scripts/kernel_tools/isa_tools.md). No layout DB is shipped for {arch} "
                "because that tool already derives it."),
     "facts": ("ISA chapters 1-6 and 8-11 are not extracted for {arch} yet -- this is missing "
               "KNOWLEDGE, not an absent hardware feature. Read the page: "
               "`kernel_workflow/scripts/kernel_tools/hw_sources.sh pdf {arch}-isa <p0> <p1>`, and record what you find in "
-              "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/isa-mechanisms.md with its page."),
+              "your analysis record with its page."),
     "encoding": ("no encoding DB is shipped for {arch} -- fetch the machine-readable ISA XML "
                  "instead: `kernel_workflow/scripts/kernel_tools/hw_sources.sh xml {arch}`."),
 }
@@ -165,8 +167,7 @@ def _select_arch(argv):
     if want is not None:
         key = _ARCH_ALIAS.get(want.lower(), want.lower())
         if key not in _ARCH_DBS:
-            gap("unknown --arch %r; known: %s (aliases: %s)"
-                % (want, ", ".join(sorted(_ARCH_DBS)), ", ".join(sorted(_ARCH_ALIAS))))
+            gap("unknown --arch {!r}; known: {} (aliases: {})".format(want, ", ".join(sorted(_ARCH_DBS)), ", ".join(sorted(_ARCH_ALIAS))))
         ARCH = key
         d = _ARCH_DBS[key]
         DB_REL, ENC_DB_REL, FACTS_DB_REL = d["layout"], d["encoding"], d["facts"]
@@ -180,8 +181,7 @@ def _require(cmd):
     if kind is None:
         return
     if _ARCH_DBS[ARCH][kind] is None:
-        gap("`%s` reads the %s database, which is not shipped for %s.  -> %s"
-            % (cmd, kind, ARCH, _ALTERNATIVE[kind].format(arch=ARCH)))
+        gap(f"`{cmd}` reads the {kind} database, which is not shipped for {ARCH}.  -> {_ALTERNATIVE[kind].format(arch=ARCH)}")
 # The live XML is preferred over the committed encoding DB when it is on disk, so its filename
 # has to follow --arch. The release ships one file per arch under these names.
 _XML_NAME = {"gfx950": "amdgpu_isa_cdna4.xml", "cdna3": "amdgpu_isa_cdna3.xml",
@@ -191,9 +191,9 @@ ARCHES = {"cdna4", "gfx950"}
 
 
 def gap(msg):
-    """Scoped tool-gap, per primary-sources.md: record it and fall back; never fabricate."""
+    """Scoped tool-gap, per isa_tools.md: record it and fall back; never fabricate."""
     print(f"SCOPED TOOL-GAP: {msg}", file=sys.stderr)
-    print("  -> fall back to distilled perf_knowledge/hardware/ + gluon_authoring/references/hardware/ values (probe-then-trust); "
+    print("  -> fall back to distilled perf_knowledge/hardware/ with explicit source and uncertainty; "
           "never fabricate", file=sys.stderr)
     sys.exit(3)
 
@@ -394,7 +394,7 @@ def find_instr(db, name, required=True):
     # answer, not a failure. A caller that genuinely needs layout is stopped by `_require`.
     if db is None:
         if required:
-            gap("no layout database for %s; `find_instr` has nothing to resolve against" % ARCH)
+            gap(f"no layout database for {ARCH}; `find_instr` has nothing to resolve against")
         return None
     want = name.upper().lstrip("_")
     by_name = {r["name"].upper(): r for r in db["instructions"]}
@@ -607,9 +607,9 @@ def cmd_layout(db, args):
             print("  " + h.ljust(width) + "  " + "  ".join(vals))
     for c in caveats_for(db, r):
         print(f"!! {c}", file=sys.stderr)
-    print(f"# provenance: gfx950-mfma-layout.json layout_rules + packing_rules "
-          f"(CDNA4 ISA ch.7); generated, not transcribed — the DB's figures are the "
-          f"transcription and --selftest checks this against them", file=sys.stderr)
+    print("# provenance: gfx950-mfma-layout.json layout_rules + packing_rules "
+          "(CDNA4 ISA ch.7); generated, not transcribed — the DB's figures are the "
+          "transcription and --selftest checks this against them", file=sys.stderr)
     return 0
 
 
@@ -764,7 +764,7 @@ def cmd_encoding(db, args):
     for ename, opcode, cond, ops in encs:
         print(f"  encoding    {ename}   opcode={opcode}   cond={cond}")
         for field, fmt, otype, size, is_in, is_out in ops:
-            print(f"    {str(field):<8} {str(fmt):<20} {str(otype):<18} size={size} "
+            print(f"    {field!s:<8} {fmt!s:<20} {otype!s:<18} size={size} "
                   f"{'in' if is_in else ''}{'/out' if is_out else ''}")
         print(f"                -> bit fields of this encoding: gfx950_isa.py format {ename}")
 
@@ -893,7 +893,7 @@ def cmd_opcodes(db, args):
             f"(searched name, functional group and encoding across "
             f"{len(edb['instructions'])} instructions)")
     for name, enc, op, grp, desc in sorted(rows):
-        print(f"  {name:<34} {enc:<18} op={str(op):<5} {grp:<8} {desc}")
+        print(f"  {name:<34} {enc:<18} op={op!s:<5} {grp:<8} {desc}")
     print(f"\n  {len(rows)} of {len(edb['instructions'])} instructions"
           f"   # provenance: cdna4 ISA XML {edb['source']['release']} (= ISA ch.12)")
     return 0
@@ -1242,7 +1242,7 @@ def _check_figure(db, fig):
     """The figure was read by eye off a rendered image; the rules came from the text layer.
     Agreement is real evidence because the two arrived by independent paths."""
     sh = fig["shape"]
-    M, N, K = sh["m"], sh["n"], sh["k"]
+    M, _N, K = sh["m"], sh["n"], sh["k"]
     eb = fig["elem_bits"]
     ok = bad = 0
     for cell in fig["cells"]:
@@ -1326,8 +1326,7 @@ def cmd_selftest(db, args):
 
     # 5. the dense formulas must refuse sparse A/B rather than answering confidently
     leaked = []
-    real_err, sys.stderr = sys.stderr, open(os.devnull, "w")   # the guard's message is the point
-    try:                                                       # of the guard, not of this probe
+    with open(os.devnull, "w") as sink, redirect_stderr(sink):
         for r in db["instructions"]:
             if not r.get("sparse"):
                 continue
@@ -1337,9 +1336,6 @@ def cmd_selftest(db, args):
                     leaked.append(f"{r['name']}.{op}")
                 except SystemExit:
                     pass
-    finally:
-        sys.stderr.close()
-        sys.stderr = real_err
     n_sparse = sum(1 for r in db["instructions"] if r.get("sparse"))
     print(f"[{'ok ' if not leaked else 'FAIL'}] sparse guard: {n_sparse} sparse instruction(s), "
           f"{len(leaked)} would have been answered with the dense formula")
@@ -1424,7 +1420,7 @@ def cmd_selftest(db, args):
                   f"not settle them. Not a failure; re-read the page before acting on one.")
 
     print()
-    print(f"verification record carried by the DB:")
+    print("verification record carried by the DB:")
     for k, t in v["tests"].items():
         print(f"  {k:<24} {t}")
     print()
@@ -1452,9 +1448,9 @@ def main(argv):
                     "three databases). `--arch cdna3|rdna3|rdna4` answers the instruction "
                     "chapters (12-13) for those documents; their matrix layout comes from the "
                     "Matrix Instruction Calculator instead, which supports them and not gfx950.",
-        epilog="arch=%s, databases present: %s.  Every arch's coverage and the named alternative "
+        epilog="arch={}, databases present: {}.  Every arch's coverage and the named alternative "
                "for a missing one: `--arch <a> <cmd>` tells you in place. See "
-               "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md." % (ARCH, ", ".join(have) or "none"))
+               "kernel_workflow/scripts/kernel_tools/isa_tools.md.".format(ARCH, ", ".join(have) or "none"))
     p.add_argument("--arch", default=ARCH, metavar="A",
                    help="gfx950 (default) | cdna3 | rdna3 | rdna4; aliases cdna4/gfx942/mi300/"
                         "mi325/gfx1100/gfx1200")
@@ -1532,9 +1528,9 @@ def main(argv):
     args = p.parse_args(argv[1:])
     if args.selftest:
         if DB_REL is None:
-            gap("--selftest re-derives the matrix grids from the layout rules, and %s ships no "
+            gap(f"--selftest re-derives the matrix grids from the layout rules, and {ARCH} ships no "
                 "layout database. Run it without --arch (gfx950) to exercise that; the encoding "
-                "database's own checks are recorded in its `verification` block." % ARCH)
+                "database's own checks are recorded in its `verification` block.")
         return cmd_selftest(db, args)
     if not getattr(args, "fn", None):
         p.print_help()

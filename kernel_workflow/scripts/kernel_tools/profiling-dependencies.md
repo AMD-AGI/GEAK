@@ -44,10 +44,18 @@ work do not install or require the optional decoder.
   degrade the ATT layer with the reason retained. They do not become zero counters.
 
 Pin ROCm, rocprofiler-sdk and decoder to a tested release combination in the image
-inventory. The old decoder repository says ROCm >=7.13 includes it by default;
-current rocm-systems development also has a V2 API. Do not install a floating
+inventory. Decoder packaging and ABI vary by release; inspect the installed
+SDK's CLI and that release's documentation rather than inferring compatibility
+from a version threshold or the presence of a `.so`. Do not install a floating
 development decoder into an older SDK image. Preserve the selected release's
-license; old prebuilt binaries and the newer MIT source have different packaging.
+license; legacy prebuilt binaries and newer source releases have different packaging.
+
+This PR provides checks and instructions, **not an ATT installer**. Prepare the
+SDK, compute analyzer and any external decoder while building the workload image,
+then run the preflight inside that image. The optional AMD matrix calculator has
+its own [pinned preparation flow](dependencies.md); it has no ATT dependency.
+`hw_sources.sh decode` uses `isa_spec_cli` for static instruction bytes, which is
+separate from decoding a captured ATT trace.
 
 Upstream sources:
 [rocprofiler-sdk](https://github.com/ROCm/rocm-systems/tree/develop/projects/rocprofiler-sdk),

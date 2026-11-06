@@ -10,7 +10,6 @@ The pack's bench/harness scripts that now time through e2e_workflow/scripts/harn
 covered here too. No GPU, no network, no torch.
 """
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -94,7 +93,7 @@ def test_shim_import_resolves_to_kernel_tools():
 
 def test_data_resolves_through_hwdata_and_override():
     """hw_constants.json comes from perf_knowledge/hardware/data; $GEAK_HW_DATA_DIR wins."""
-    code = "import sys; sys.path.insert(0, %r); import amd_occupancy as o; print(o._find_hw_constants())" % str(KT)
+    code = f"import sys; sys.path.insert(0, {str(KT)!r}); import amd_occupancy as o; print(o._find_hw_constants())"
     result = run(sys.executable, "-c", code)
     _ok(result)
     assert Path(result.stdout.strip()).resolve() == (HW_DATA / "hw_constants.json").resolve()
@@ -102,7 +101,7 @@ def test_data_resolves_through_hwdata_and_override():
 
 def test_hwdata_override_wins(tmp_path):
     (tmp_path / "hw_constants.json").write_text(json.dumps({"arch": {}}))
-    code = "import sys; sys.path.insert(0, %r); import amd_occupancy as o; print(o._find_hw_constants())" % str(KT)
+    code = f"import sys; sys.path.insert(0, {str(KT)!r}); import amd_occupancy as o; print(o._find_hw_constants())"
     result = run(sys.executable, "-c", code, env={"GEAK_HW_DATA_DIR": str(tmp_path)})
     _ok(result)
     assert Path(result.stdout.strip()) == tmp_path / "hw_constants.json"
