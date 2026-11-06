@@ -69,6 +69,7 @@ async function run(body, overrides = {}, reply = selection()) {
     profile: { profile_workload_json: '/old/workload.json', kernel_ranking_json: '/old/ranking.json' },
     strategy: null, kernelQueue: [], headQueue: [], history: { ledger: [] },
     ST: {}, A: {}, FAST_MODE: false, DEEP_MODE: false,
+    HARDWARE_CONTEXT: null, HARDWARE_CONTEXT_PATH: '',
     e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
     MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
@@ -142,6 +143,12 @@ async function run(body, overrides = {}, reply = selection()) {
   const broad = await run(initial + carry, { BUDGET: 1, HEAD_BUDGET: 1 }, broadSelection);
   assert.equal(broad.headQueue.length, 3);
   assert.equal(broad.kernelQueue.length, 4);
+  const hardwareContext = { sku: 'mi308x', observed: { gfx: 'gfx942', physical_cu_count: 80 } };
+  const withHardware = await run(initial + carry, {
+    HARDWARE_CONTEXT: hardwareContext, HARDWARE_CONTEXT_PATH: '/eval/hardware_context.json',
+  });
+  assert.strictEqual(withHardware.state.hardware_context, hardwareContext);
+  assert.equal(withHardware.state.hardware_context_path, '/eval/hardware_context.json');
   const broadResume = await run(resume, { ST: broad.state, BUDGET: 1, HEAD_BUDGET: 1 });
   assert.equal(broadResume.calls.length, 0, 'saved inventory queues do not require rerunning selection');
   assert.deepEqual(broadResume.headQueue.map(c => c.short_name), broad.headQueue.map(c => c.short_name));
