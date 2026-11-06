@@ -3163,6 +3163,7 @@ async function prepareAgentXKernels(round, throughput) {
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
     BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    BASELINE_ITERATION_DIR: `${EVAL_DIR}/baseline/iterations`,
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
     BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
     CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
