@@ -701,8 +701,18 @@ def main():
     ap.add_argument("--workgroup-size", type=int, default=None,
                     help="threads per workgroup at LAUNCH; overrides .max_flat_workgroup_size, "
                          "which is only the compile-time bound")
+    ap.add_argument("--hardware-context", help="validated run context; defaults to GEAK_HARDWARE_CONTEXT")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
+    try:
+        context = _load_hwdata().run_context(a.hardware_context)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        ap.error(str(e))
+    if context:
+        observed_arch = context["observed"]["gfx"]
+        if a.arch and a.arch != observed_arch:
+            ap.error("architecture conflicts with the run hardware context")
+        a.arch = observed_arch
     if a.compiler_sweep:
         if not a.arch:
             raise SystemExit("--compiler-sweep requires --arch")
@@ -723,6 +733,8 @@ def main():
             m = re.search(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)", text, re.M)
             vgpr = int(m.group(1)) if m else None
         arch = arch_from_asm(text)
+        if context and arch != a.arch:
+            ap.error("assembly architecture conflicts with the run hardware context")
         waves, src, label = occupancy_from_asm(text, vgpr, a.lds_bytes_per_wg, a.workgroup_size)
         obs_lds, lds_field = ((a.lds_bytes_per_wg, "caller-supplied")
                               if a.lds_bytes_per_wg is not None else lds_bytes_per_wg_from_asm(text))

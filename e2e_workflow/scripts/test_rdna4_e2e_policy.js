@@ -73,6 +73,8 @@ function build(argsObj, opts) {
           device_target: o.setupIdentity.target,
           device_name: o.setupIdentity.name,
           physical_cu_count: o.setupIdentity.cu,
+          hardware_context: o.setupIdentity.hardware_context,
+          hardware_context_path: "/tmp/eval/hardware_context.json",
         };
       }
       return null;
@@ -92,7 +94,8 @@ const R9700 = {
   expected_physical_cu_count: 64,
 };
 
-(async () => {
+module.exports = {build};
+if (require.main === module) (async () => {
   console.log('\n# A. laneArgs() isolation on a declared R9700 run');
   {
     const { run, trace } = build({ kernel_path: '/tmp/k', ...R9700 });

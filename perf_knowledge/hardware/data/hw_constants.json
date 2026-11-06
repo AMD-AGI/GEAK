@@ -294,7 +294,7 @@
         "WMMA"
       ],
       "scaled_mfma": false,
-      "_note": "gfx1201 ISA constants; product calibration is separate and R9700-only in GEAK. Occupancy-first, no mfma_scaled/blockscale, no TDM; do not apply the CDNA combined-512-VGPR formula (rdna-fork.md)."
+      "_note": "gfx1201 ISA constants; GEAK serving policy covers R9700 and R9600D; calibration is separate. Occupancy-first, no mfma_scaled/blockscale, no TDM; do not apply the CDNA combined-512-VGPR formula (rdna-fork.md)."
     },
     "gfx1200": {
       "family": "RDNA4",

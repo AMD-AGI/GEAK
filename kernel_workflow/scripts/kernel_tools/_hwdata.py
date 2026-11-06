@@ -79,6 +79,31 @@ def load_json(name: str):
         return json.load(fh)
 
 
+def run_context(value=None):
+    """Validate a supplied run context through GEAK's shared identity contract."""
+    value = value or os.environ.get("GEAK_HARDWARE_CONTEXT")
+    if not value:
+        return None
+    import sys
+    shared = str(REPO_ROOT / "scripts")
+    if shared not in sys.path:
+        sys.path.insert(0, shared)
+    import hardware_context
+    return hardware_context.load(value)
+
+
+def run_sku(sku=None, value=None):
+    """Select the observed SKU; refuse reference fallback for unresolved run scope."""
+    context = run_context(value)
+    if context is None:
+        return sku, None
+    if sku and str(sku).lower() != context["sku"]:
+        raise ValueError("SKU override conflicts with the run hardware context")
+    if context["status"] != "matched" or context["specification"]["geak_support"] != "supported":
+        raise ValueError("run hardware context has no supported product peaks")
+    return context["sku"].upper(), context
+
+
 def pack_dir() -> Path | None:
     """Root of the gluon_authoring pack, or None if it is not reachable."""
     env = os.environ.get("GEAK_GLUON_PACK_DIR")

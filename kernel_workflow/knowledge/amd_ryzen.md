@@ -31,15 +31,15 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
 | Register file | 1536 VGPR/SIMD, 256 addressable per wave |
 | VGPR granule / waves | granule 24, up to 16 waves/SIMD |
 | SIMDs | 2 per CU; CUs pair into a WGP |
-| LDS | 128 KB per WGP, 64 KB max per workgroup |
+| LDS | 64 KiB max per workgroup; occupancy-pool scope unverified |
 | Memory | LPDDR5X, shared with the CPU |
 
 ## 2. Applying these numbers
 
 - **Occupancy** follows from the machine model above — wave32, 1536 VGPR/SIMD, granule 24, cap 16
   waves/SIMD. 249 VGPRs is 5 waves/SIMD here. The per-arch table is
-  `perf_knowledge/hardware/data/hw_constants.json`; query
-  it with `scripts/amd_occupancy.py --vgpr N --arch gfx1151`.
+  `perf_knowledge/hardware/data/hw_constants.json`; query it with
+  `python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py --vgpr N --arch gfx1151`.
 - **VGPR cost per tile.** At wave32 a given tile occupies twice the VGPR per lane that it would at
   wave64, because half as many lanes share it.
 - **The Triton `matrix_instr_nonkdim` and `kpack` knobs are accepted and silently ignored** — they
@@ -53,8 +53,8 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   was idle.
 - **Backend availability is a probe result, not an arch inference.** aiter, CK and hipBLASLt all
   build for gfx11. Probe the install rather than inferring availability from the arch.
-- **No LDS-per-CU number is defined** — shared memory is 128 KB per WGP with a 64 KB per-workgroup
-  cap, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. `perf_knowledge/hardware/data/hw_constants.json` records only
+- **No LDS-per-CU number is defined** — the per-workgroup cap is 64 KiB, but the
+  occupancy-pool scope is not established here, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. `perf_knowledge/hardware/data/hw_constants.json` records only
   `lds_per_wg_kib` for gfx1151; `lds_per_wgp_kib` is deliberately absent (its `_lds_basis` explains
   why the per-WGP scope is not established for RDNA3.5), so LDS occupancy is reported as not priced
   rather than derived. Do not fill it in from gfx1100 / gfx1200.

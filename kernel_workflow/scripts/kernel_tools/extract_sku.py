@@ -184,8 +184,8 @@ def _num(x):
 
 def peaks_entry(name: str, row: dict) -> dict:
     """The e2e roofline view of one row (what roofline_tools.load_peaks returns, minus provenance
-    fields). Memory is the DATASHEET pin rate: the e2e roofline ranks against datasheet ceilings
-    and carries the measured R9700/gfx1151 figures separately (target_eff / measured_ceilings)."""
+    fields). Memory is the DATASHEET pin rate: legacy offline references use the pin rate when available;
+    measured/derived provenance remains explicit in the catalog."""
     l2 = row.get("l2_per_xcd_mb") or row.get("l2_mb")
     return {
         "gfx": row["arch"], "sku": name, "cu": row["cus"],
@@ -211,7 +211,7 @@ def render_peaks_yaml(doc: dict) -> str:
         e = peaks_entry(name, r)
         scope = []
         if r.get("roofline_default_for_arch"):
-            scope.append(f"the default for a bare `{r['arch']}`")
+            scope.append(f"offline reference default for `{r['arch']}`; not device identity")
         if r.get("identity_target"):
             scope.append(f"selected by `product: {r['identity_target']}`")
         out.append(f"### {name} — {r.get('product') or name} ({r['arch']}, {r['family']}); "
@@ -224,9 +224,9 @@ def render_peaks_yaml(doc: dict) -> str:
         if r.get("roofline_default_for_arch"):
             out.append("default_for_gfx: true")
         out.append(f"cu: {e['cu']}")
-        hb = f"{r['peak_hbm_basis']}" if r["peak_hbm_basis"] == "datasheet" else \
-            f"datasheet pin rate; sku.json peak_hbm_tb_s {r['peak_hbm_tb_s']} is {r['peak_hbm_basis']}"
+        hb = "datasheet" if r.get("datasheet_hbm_tb_s") else r["peak_hbm_basis"]
         out.append(f"hbm_bw_bytes_s: {_num(e['hbm_bw_bytes_s'])}    # {hb}")
+        out.append(f"memory_basis: {hb}")
         out.append("flops:                          # dense, FLOP/s (OPS/s for int)")
         for dt, v in e["flops"].items():
             out.append(f"  {dt}: {_num(v)}")
@@ -436,18 +436,21 @@ def main() -> None:
         key = argv[argv.index("--print") + 1].upper()
         print(json.dumps(d["skus"].get(key, {"error": f"unknown {key}"}), indent=2))
         return
-    if "--check" in argv:
-        bad = check(d)
-        print("\n".join(bad) if bad else "sku.json: clean")
+    if "--check" in argv or "--check-docs" in argv:
+        bad = []
+        if "--check" in argv:
+            issues = check(d)
+            print("\n".join(issues) if issues else "sku.json: clean")
+            bad.extend(issues)
+        if "--check-docs" in argv:
+            issues = check_docs(d)
+            print("\n".join(issues) if issues else "generated doc blocks: in sync")
+            bad.extend(issues)
         sys.exit(1 if bad else 0)
     if "--render" in argv:
         i = argv.index("--render")
         print(render(d, " ".join(argv[i + 1:i + 3])))
         return
-    if "--check-docs" in argv:
-        bad = check_docs(d)
-        print("\n".join(bad) if bad else "generated doc blocks: in sync")
-        sys.exit(1 if bad else 0)
     if "--sync-docs" in argv:
         for p in sync_docs(d):
             print(f"rewrote {os.path.relpath(p, REPO_ROOT)}")

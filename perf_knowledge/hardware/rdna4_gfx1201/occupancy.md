@@ -7,7 +7,7 @@ regimes: [both]
 updated: 2026-10-07
 sources:
   - ../data/hw_constants.json
-  - ../../expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
+  - ../../../kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 ---
 
 # RDNA4 / gfx1201 — occupancy

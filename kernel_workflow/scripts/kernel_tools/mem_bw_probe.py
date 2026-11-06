@@ -311,7 +311,7 @@ def _emit(sku_name, sku, p, readings, requested_mb, label, out_json, reference_t
     print(f"  footprint  {p['moved_bytes']/MIB:.1f} MiB moved "
           f"({p['read_bytes']/MIB:.1f} read + {p['write_bytes']/MIB:.1f} write), "
           f"span {p['span_bytes']/MIB:.1f} MiB")
-    print(f"  readings   " + ", ".join(f"{r:.3f}" for r in readings) + " TB/s")
+    print("  readings   " + ", ".join(f"{r:.3f}" for r in readings) + " TB/s")
     if not v["ok"]:
         print("  *** REJECTED ***")
         for r in v["reasons"]:
@@ -363,6 +363,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sku", help="SKU key from perf_knowledge/hardware/data/sku.json (for the "
                                   "refusals), e.g. MI355X")
+    ap.add_argument("--hardware-context", help="validated run context; defaults to GEAK_HARDWARE_CONTEXT")
     ap.add_argument("--footprint-mb", type=float, default=2048.0,
                     help="unique MiB MOVED per pass (binary, to match how cache capacity is "
                          "quoted); must be several x the MEMORY-SIDE LLC (sku.json mall_mb), not "
@@ -390,6 +391,14 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(_selftest())
+    try:
+        a.sku, context = _hwdata.run_sku(a.sku, a.hardware_context)
+        if context:
+            import hardware_context as hc
+            if not hc.same_device_scope(context, hc.probe()):
+                ap.error("live GPU differs from the run hardware context")
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
+        ap.error(str(e))
     if not a.sku:
         ap.error("--sku is required: the physical-limit and cache-residency refusals are not "
                  "optional, and both need the SKU's peak/L2 (or --selftest)")

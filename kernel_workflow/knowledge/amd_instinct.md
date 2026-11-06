@@ -30,8 +30,8 @@ rocm-smi --showmeminfo vram 2>/dev/null | head              # HBM capacity
 - **Peaks are nameplate, not achievable.** The table in §1 is the datasheet (`sku.json`). A
   memory-bound kernel typically reaches ~0.7–0.85× the nameplate HBM rate; a dense MFMA loop
   likewise sits below the nameplate FLOPS. A nameplate denominator may **rank** kernels; it may not
-  gate or close one — for that, measure the achievable ceiling on this box (in-shape probe:
-  `kernel_workflow/scripts/kernel_tools/mem_bw_probe.py`) and say which denominator you used
+  gate or close one. In-shape probes support diagnosis, and their provenance must be recorded.
+  Acceptance and closure require GEAK’s correctness/performance validation and round-budget rules
   (`perf_knowledge/profiling/roofline_on_mi.md`).
 
 ## 1. Card comparison (datasheet — verify on-box)
@@ -116,9 +116,9 @@ The per-dtype dense peaks for every Instinct SKU are in the §1 table (from `sku
 For a roofline estimate: memory-bound `min_time ≈ bytes_moved / HBM_BW`; compute-bound
 `min_time ≈ FLOPs / peak_FLOPS[dtype]`. Every "% of roofline" you report must state its
 **numerator basis** (analytic model vs measured counters) and **denominator basis** (datasheet vs
-empirical@tool-version vs in-shape probe): a datasheet denominator ranks only; only a measured
-numerator over a probed/calibrated denominator may gate or close a kernel. Measurement is the final
-word. Tools: `kernel_workflow/scripts/kernel_tools/hw_budget.py --sku MI355X ...` (budget + floors),
+empirical@tool-version vs in-shape probe): local estimates remain planning-only (`may_gate: false`), including measured inputs.
+Native TraceLens owns calibration/reporting; GEAK’s correctness/performance validation and round
+budget govern acceptance and closure. Tools: `kernel_workflow/scripts/kernel_tools/hw_budget.py --sku MI355X ...` (budget + floors),
 `calc_perf.py`, `mem_bw_probe.py` (in-shape HBM ceiling).
 
 ## Critical Rules

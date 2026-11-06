@@ -1,8 +1,8 @@
 # Shared hardware specifications
 
-`sku.json` supplies product specifications to GEAK's local planning tools. It is
-independent of native TraceLens architecture models and calibration CSVs, and of
-the legacy e2e roofline engine. Local calculations remain `analysis_role: planning`
+`sku.json` supplies product specifications to GEAK's local planning tools and
+the legacy e2e roofline resolver. The legacy `peaks.md` is a generated view.
+Native TraceLens architecture models and calibration CSVs remain independent. Local calculations remain `analysis_role: planning`
 and `may_gate: false`, including when supplied measured bandwidth or manual peaks.
 
 ## Sources and product identity
@@ -42,3 +42,12 @@ also counts scales. Low-precision floating-point inputs default to a 16-bit outp
 while FP32/TF32 and FP64 use 4-byte and 8-byte outputs. This is an optimistic
 storage model; use `hw_budget.py --tensors` to describe actual padded storage or
 other output widths. It does not measure HBM traffic or attainable throughput.
+
+## Runtime consumers
+
+Setup/Freeze capture [the shared hardware context](../../../scripts/hardware_context.md),
+which kernel, bakeoff and e2e/resume pass to their roles. Local tools accept
+`--hardware-context FILE` or `GEAK_HARDWARE_CONTEXT`; inconsistent SKU/ISA inputs
+are refused. The legacy Gluon occupancy entry forwards to the shared implementation.
+No pack-local hardware JSON is maintained. Adding a catalog row does not enroll
+a product in GEAK's serving policy.

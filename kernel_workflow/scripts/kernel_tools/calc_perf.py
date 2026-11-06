@@ -49,6 +49,7 @@ import importlib
 import json
 import math
 import os
+from pathlib import Path
 import sys
 
 
@@ -83,6 +84,8 @@ def _emit_json(a, res):
     """If --json was passed, print the result dict and signal caller to return."""
     if getattr(a, "json", False):
         res.setdefault("sku", getattr(a, "sku_label", None))
+        if getattr(a, 'hardware_context_sha256', None):
+            res['hardware_context_sha256'] = a.hardware_context_sha256
         print(json.dumps(res, indent=2))
         return True
     return False
@@ -216,10 +219,31 @@ def peak_for_dtype(entry, dtype, sku_name="?"):
 
 def resolve_sku(sku=None, dtype="fp16", peak_tflops=None, peak_hbm_bw=None,
                 lds_per_cu=None, vgpr_per_simd=None, cus=None, l2_mb=None, wave_size=None,
-                arch=None, need_peaks=True):
+                arch=None, need_peaks=True, hardware_context=None):
     """(label, cfg). Peaks come from sku.json only. With neither --sku nor --arch nor manual peaks
     this REFUSES: the old silent gfx950 default turned every other part's percent-of-peak into
     fiction, and GEAK tools that need an arch and were not given one refuse."""
+    context = None
+    if hardware_context:
+        shared = Path(__file__).resolve().parents[3] / 'scripts'
+        if str(shared) not in sys.path:
+            sys.path.insert(0, str(shared))
+        import hardware_context as hc
+        try:
+            context = hc.load(hardware_context)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            _refuse(f'invalid hardware context: {e}')
+        observed = context['observed']
+        if ((sku and sku.lower() != context['sku']) or
+                (arch and arch != observed['gfx']) or
+                (cus is not None and cus != observed['physical_cu_count'])):
+            _refuse('SKU/arch/CU override conflicts with the run hardware context')
+        arch, cus = observed['gfx'], observed['physical_cu_count']
+        sku = context['sku'].upper() if context['status'] == 'matched' else None
+        if sku and SKU_PEAKS.get(sku) != context['specification']:
+            _refuse('selected SKU catalog differs from the run hardware context')
+        if sku and context['specification']['geak_support'] != 'supported' and need_peaks:
+            _refuse('reference-only SKU is not a supported run roofline')
     if not SKU_PEAKS and (sku or (arch and peak_tflops is None)):
         _refuse("sku.json not found ($GEAK_HW_DATA_DIR or perf_knowledge/hardware/data)")
     if sku:
@@ -243,7 +267,7 @@ def resolve_sku(sku=None, dtype="fp16", peak_tflops=None, peak_hbm_bw=None,
         # (gfx950 -> MI355X, gfx942 -> MI300X, gfx1151 -> AI_MAX_395), labelled as such; geometry
         # (register file, wave size, LDS pool) always from the named arch. No default row (gfx1201:
         # R9700 is product-scoped) -> no peaks at all, and the roofline subcommands refuse.
-        dflt = arch_default_sku(arch)
+        dflt = None if context else arch_default_sku(arch)
         if dflt:
             base = dict(SKU_PEAKS[dflt])
             base["peak_tflops_fp16"] = (peak_for_dtype(base, dtype, dflt)
@@ -290,6 +314,8 @@ def resolve_sku(sku=None, dtype="fp16", peak_tflops=None, peak_hbm_bw=None,
         base["l2_mb"] = l2_mb
     if wave_size is not None:
         base["wave_size"] = wave_size
+    if context:
+        base['hardware_context_sha256'] = context['catalog_sha256']
     if need_peaks and (base.get("peak_tflops_fp16") is None or base.get("peak_hbm_tb_s") is None):
         _refuse(f"{label}: no peak on record for this target -- pass --sku, or --peak-tflops and "
                 f"--peak-hbm-bw.")
@@ -306,8 +332,10 @@ def apply_sku_to_args(a, need_peaks=True):
         explicit_lds, getattr(a, "vgpr_per_simd", None),
         getattr(a, "cus", None), getattr(a, "l2_mb", None), getattr(a, "wave_size", None),
         getattr(a, "arch", None), need_peaks=need_peaks,
+        hardware_context=getattr(a, 'hardware_context', None) or os.environ.get('GEAK_HARDWARE_CONTEXT'),
     )
     a.sku_label = label
+    a.hardware_context_sha256 = cfg.get('hardware_context_sha256')
     a._compute_basis = ("hand-entered" if getattr(a, "peak_tflops", None) is not None
                         else cfg.get("basis", "unknown"))
     a._memory_basis = ("hand-entered" if getattr(a, "peak_hbm_bw", None) is not None
@@ -439,7 +467,7 @@ def budget(a):
         print(f"wg_per_{a.lds_pool_scope} by LDS    = {int((a.lds_pool_kib * 1024) // max(lds, 1))}")
     else:
         print(f"wg per CU/WGP by LDS = NOT PRICED -- {a.lds_basis}.")
-        print(f"                       Pass --lds-per-cu <KiB> to price it.")
+        print("                       Pass --lds-per-cu <KiB> to price it.")
     if getattr(a, "M", None) and getattr(a, "N", None):
         tiles = math.ceil(a.M / a.bm) * math.ceil(a.N / a.bn)
         print(f"grid tiles (M,N)     = {tiles}  -> saturation {tiles/a.cus:.2f} tiles/CU")
@@ -552,7 +580,7 @@ def occ(a):
         else:
             print(f"wg by LDS          = NOT PRICED  (LDS/wg = {a.lds/1024:.1f} KiB) -- "
                   f"{a.lds_basis}.")
-            print(f"                     Pass --lds-per-cu <KiB> to price it.")
+            print("                     Pass --lds-per-cu <KiB> to price it.")
 
 
 def _selftest():
@@ -718,7 +746,8 @@ def _selftest():
             f"expected {want_pool} KiB/{want_scope}")
     # the whole point of the regression: gfx942 and gfx950 must not resolve to the same pool
     _a942, _a950 = _args(arch="gfx942"), _args(arch="gfx950")
-    apply_sku_to_args(_a942, need_peaks=False); apply_sku_to_args(_a950, need_peaks=False)
+    apply_sku_to_args(_a942, need_peaks=False)
+    apply_sku_to_args(_a950, need_peaks=False)
     assert _a942.lds_pool_kib != _a950.lds_pool_kib, "the LDS cap is not tracking --arch"
     # every RDNA SKU refuses rather than quoting a number; every CDNA SKU prices in CU scope
     for name, row in SKU_PEAKS.items():
@@ -810,6 +839,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp):
+        sp.add_argument('--hardware-context', help='validated run context; defaults to GEAK_HARDWARE_CONTEXT')
         sp.add_argument("--sku", default=None, choices=list(SKU_PEAKS),
                         help="SKU key from perf_knowledge/hardware/data/sku.json (preferred). "
                              "Without --sku/--arch/--peak-* the tool REFUSES (no gfx950 default)")
@@ -828,39 +858,55 @@ def main():
         sp.add_argument("--json", action="store_true",
                         help="emit a JSON result dict instead of text (for normalize/resolve)")
 
-    t = sub.add_parser("tflops"); common(t)
-    t.add_argument("--M", type=int, required=True); t.add_argument("--N", type=int, required=True)
-    t.add_argument("--K", type=int, required=True); t.add_argument("--time-us", type=float, required=True)
+    t = sub.add_parser("tflops")
+    common(t)
+    t.add_argument("--M", type=int, required=True)
+    t.add_argument("--N", type=int, required=True)
+    t.add_argument("--K", type=int, required=True)
+    t.add_argument("--time-us", type=float, required=True)
     t.add_argument("--dtype", default="fp16", choices=DTYPE_BYTES,
                    help="dtype whose sku.json peak is the denominator (absent rate -> refused)")
     t.set_defaults(func=tflops)
 
-    r = sub.add_parser("roofline"); common(r)
-    r.add_argument("--M", type=int, required=True); r.add_argument("--N", type=int, required=True)
-    r.add_argument("--K", type=int, required=True); r.add_argument("--dtype", default="fp16", choices=DTYPE_BYTES)
+    r = sub.add_parser("roofline")
+    common(r)
+    r.add_argument("--M", type=int, required=True)
+    r.add_argument("--N", type=int, required=True)
+    r.add_argument("--K", type=int, required=True)
+    r.add_argument("--dtype", default="fp16", choices=DTYPE_BYTES)
     r.set_defaults(func=roofline)
 
-    bd = sub.add_parser("budget"); common(bd)
-    bd.add_argument("--bm", type=int, required=True); bd.add_argument("--bn", type=int, required=True)
-    bd.add_argument("--bk", type=int, required=True); bd.add_argument("--num-warps", type=int, required=True)
-    bd.add_argument("--stages", type=int, default=2); bd.add_argument("--dtype", default="fp16", choices=DTYPE_BYTES)
-    bd.add_argument("--M", type=int, default=None); bd.add_argument("--N", type=int, default=None)
+    bd = sub.add_parser("budget")
+    common(bd)
+    bd.add_argument("--bm", type=int, required=True)
+    bd.add_argument("--bn", type=int, required=True)
+    bd.add_argument("--bk", type=int, required=True)
+    bd.add_argument("--num-warps", type=int, required=True)
+    bd.add_argument("--stages", type=int, default=2)
+    bd.add_argument("--dtype", default="fp16", choices=DTYPE_BYTES)
+    bd.add_argument("--M", type=int, default=None)
+    bd.add_argument("--N", type=int, default=None)
     bd.set_defaults(func=budget)
 
-    m = sub.add_parser("mfma"); common(m)
+    m = sub.add_parser("mfma")
+    common(m)
     m.add_argument("--mfma-cycles", type=float, required=True)
     m.add_argument("--num-mfma", type=int, required=True)
     m.add_argument("--iter-cycles", type=float, required=True)
     m.set_defaults(func=mfma)
 
-    at = sub.add_parser("attn-tflops"); common(at)
-    at.add_argument("--bh", type=int, required=True); at.add_argument("--seqlen", type=int, required=True)
-    at.add_argument("--d", type=int, required=True); at.add_argument("--time-us", type=float, required=True)
+    at = sub.add_parser("attn-tflops")
+    common(at)
+    at.add_argument("--bh", type=int, required=True)
+    at.add_argument("--seqlen", type=int, required=True)
+    at.add_argument("--d", type=int, required=True)
+    at.add_argument("--time-us", type=float, required=True)
     at.add_argument("--dtype", default="bf16", choices=DTYPE_BYTES,
                     help="dtype whose sku.json peak is the denominator (absent rate -> refused)")
     at.set_defaults(func=attn_tflops)
 
-    af = sub.add_parser("attn-fwd"); common(af)
+    af = sub.add_parser("attn-fwd")
+    common(af)
     af.add_argument("--bh", type=int, required=True, help="B*H (batch * num_heads)")
     af.add_argument("--seqlen", type=int, required=True, help="sequence length S")
     af.add_argument("--d", type=int, required=True, help="head dim D")
@@ -870,7 +916,8 @@ def main():
     af.add_argument("--dtype", default="bf16", choices=DTYPE_BYTES, help="dtype (default bf16)")
     af.set_defaults(func=attn_fwd)
 
-    o = sub.add_parser("occ"); common(o)
+    o = sub.add_parser("occ")
+    common(o)
     o.add_argument("--vgpr", type=int, required=True)
     o.add_argument("--lds", type=int, default=0)
     o.set_defaults(func=occ)

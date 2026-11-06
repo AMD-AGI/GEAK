@@ -1194,10 +1194,10 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
                     f"multiple-over-floor as a prize until this closes."
                     # (3) is not a hypothesis here, it is the leading one -- this SKU has no
                     # established LLC size, so nothing above could have ruled residency out.
-                    + (f" NOTE: cause (3) is the FIRST thing to check on this part -- its "
-                       f"memory-side LLC capacity is unknown (mall_mb null), so the residency "
-                       f"check above could not run and a resident working set is exactly what a "
-                       f"sub-floor time looks like."
+                    + (" NOTE: cause (3) is the FIRST thing to check on this part -- its "
+                       "memory-side LLC capacity is unknown (mall_mb null), so the residency "
+                       "check above could not run and a resident working set is exactly what a "
+                       "sub-floor time looks like."
                        if resident and resident.get("llc_mb") is None else ""))
     return out
 
@@ -1373,11 +1373,11 @@ def _print_human(b):
             # bracket is still too wide to size a prize; it needs measured bytes, not a wider model.
             if w["multiple_over_floor"][0] < 1:
                 for i, line in enumerate(textwrap.wrap(
-                        f"the low end of that multiple is under 1x, which is not a record: it means "
-                        f"the TOP of the byte bracket implies a floor above the measured time, so "
-                        f"that much traffic provably did not reach the fabric. The bracket is too "
-                        f"wide to size anything -- measure the bytes (parse_pmc.py) instead of "
-                        f"widening the model.", 88)):
+                        "the low end of that multiple is under 1x, which is not a record: it means "
+                        "the TOP of the byte bracket implies a floor above the measured time, so "
+                        "that much traffic provably did not reach the fabric. The bracket is too "
+                        "wide to size anything -- measure the bytes (parse_pmc.py) instead of "
+                        "widening the model.", 88)):
                     print(f"      {'! ' if i == 0 else '  '}{line}")
             if w.get("ceiling_refused"):
                 print(f"    achieved {_rng(w['achieved_hbm_tb_s'], ' TB/s')} [bytes: {w['bytes_source']}]")
@@ -1397,7 +1397,7 @@ def _print_human(b):
         elif w["binding_floor"].startswith("NONE"):
             pass                       # no floor exists, so there is no multiple to print
         else:
-            print(f"    (pass --measured-ms X to see your multiple over the floor -- the prize size)")
+            print("    (pass --measured-ms X to see your multiple over the floor -- the prize size)")
         if not w.get("calibrated"):
             print("    NOT CALIBRATED -- do not size a prize on this gap until these close:")
             for t in w["uncalibrated_terms"]:
@@ -2052,6 +2052,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sku")
+    ap.add_argument("--hardware-context", help="validated run context; defaults to GEAK_HARDWARE_CONTEXT")
     ap.add_argument("--workload", help="gemm | attention | attn_bwd | reduction | norm | moe | ... (+aliases)")
     ap.add_argument("--shapes", help="k=v,k=v (e.g. b=1,h=32,d=128,s=8192 or M=4096,N=4096,K=8192)")
     ap.add_argument("--dtype", default="bf16")
@@ -2139,8 +2140,12 @@ def main():
     if a.selftest:
         _selftest()
         return
+    try:
+        a.sku, context = _hwdata.run_sku(a.sku, a.hardware_context)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        ap.error(str(e))
     if not a.sku:
-        ap.error("--sku is required (or --selftest)")
+        ap.error("--sku is required without a matched --hardware-context (or --selftest)")
     if a.from_census:
         try:
             facts = (json.load(open(a.from_census)).get("facts") or {})
@@ -2199,6 +2204,8 @@ def main():
                    flops_engine=a.flops_engine)
     except ValueError as e:
         ap.error(str(e))
+    if context:
+        b["hardware_context_sha256"] = context["catalog_sha256"]
     if a.json:
         print(json.dumps(b, indent=2))
     else:

@@ -24,6 +24,23 @@ freeze directly from the **input kernel dir**. You do NOT optimize; you build th
 > random in-regime values**, which is exactly what `h.check_random_vs_baseline` is for — see its docstring:
 > *"using the real production kernel as the truth source for each fresh draw — no stored golden needed."*
 
+
+### Shared hardware context (Setup / Freeze)
+
+Read `scripts/hardware_context.md` at the GEAK root. After creating `EVAL_DIR`, run:
+
+```bash
+python3 "$SKILL_DIR/../scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
+```
+
+Return the complete CLI JSON as `hardware_context`, its `sku` as `device_sku`,
+and the absolute filename as `hardware_context_path`. Check any supplied
+`HARDWARE_CONTEXT` against this fresh observation. Preserve unknown/conflicting
+SKU status; do not use gfx942 as an MI300X identity. Include the same object in
+`env_report.json` when producing that artifact. All downstream roles receive it
+independently of expert-skill settings.
+
+
 ## Inputs
 `KERNEL_PATH` (input kernel dir), `EXP_ROOT` (where run dirs go), `KERNEL_NAME_HINT`, `GPU_ID`,
 `OP_SPEC` (optional hints: op_kind, shapes, dtype, regime), `WORKLOAD_SPEC_PATH` (optional real-workload
@@ -269,6 +286,9 @@ value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fai
   "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name>",
   "physical_cu_count": 256,
+  "device_sku": "<sku from hardware_context.py>",
+  "hardware_context": {"...": "complete CLI result"},
+  "hardware_context_path": "<EVAL_DIR>/hardware_context.json",
   "reference_io_sha256": "",
   "op_spec": { "op_kind": "...", "shapes": {}, "dtype": "bf16", "regime": "both" },
   "workload_path": "<task_dir>/workload.json or ''",

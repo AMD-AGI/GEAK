@@ -9,7 +9,7 @@ exact marketing name; every other product remains `unknown`. Product identity
 does not establish serving-policy or performance-calibration qualification.
 
 The separate `sku` field names the peak-table row for roofline lookups: `r9700` / `r9600d`
-exactly when `target` is, and the Instinct parts (`mi300x`, `mi325x`, `mi308x`
+and the Instinct parts (`mi300x`, `mi325x`, `mi308x`
 on gfx942; `mi350x`, `mi355x` on gfx950) only when ALL of these hold on the same
 agent: the exact marketing name, the expected gfx, and the full-device physical
 CU count. A partitioned device (e.g. CPX mode reports a fraction of the CUs per
@@ -37,13 +37,12 @@ PRODUCT_TARGETS = {
     R9600D_MARKETING_NAME: "r9600d",
 }
 # marketing name -> (target, gfx, full-device physical CU count). Exact match only.
-INSTINCT_PRODUCTS: dict[str, tuple[str, str, int]] = {
-    "AMD Instinct MI355X": ("mi355x", "gfx950", 256),
-    "AMD Instinct MI350X": ("mi350x", "gfx950", 256),
-    "AMD Instinct MI300X": ("mi300x", "gfx942", 304),
-    "AMD Instinct MI325X": ("mi325x", "gfx942", 304),
-    "AMD Instinct MI308X": ("mi308x", "gfx942", 80),
-}
+# Shared specifications own exact product names and expected full-device resources.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hardware_context import products  # noqa: E402 (repository-local module)
+INSTINCT_PRODUCTS = {name: spec for name, spec in products().items()
+                     if name.startswith("AMD Instinct ")}
 KNOWN_SKUS = frozenset({"unknown"} | set(PRODUCT_TARGETS.values()) | {t for t, _, _ in INSTINCT_PRODUCTS.values()})
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
@@ -54,8 +53,9 @@ _GFX_RE = re.compile(r"^gfx[0-9a-f]+$", re.IGNORECASE)
 def product_sku(gfx: str, marketing_name: str, physical_cu_count: int) -> str:
     """The peak-table SKU for one agent, or `unknown`. Never inferred from the ISA alone.
     (Not the `target` pin, which stays r9700 | r9600d | unknown.)"""
-    if marketing_name in PRODUCT_TARGETS and gfx == "gfx1201":
-        return PRODUCT_TARGETS[marketing_name]
+    if marketing_name in PRODUCT_TARGETS:
+        spec = products().get(marketing_name)
+        return spec[0] if spec and (gfx, physical_cu_count) == spec[1:] else "unknown"
     spec = INSTINCT_PRODUCTS.get(marketing_name)
     if spec and spec[1] == gfx and spec[2] == physical_cu_count:
         return spec[0]
