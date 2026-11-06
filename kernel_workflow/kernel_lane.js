@@ -2629,11 +2629,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
 }
-// --- Retained delivery. Retained sources are taken in evidence order. An engineer-local source
-// is verified once by the ordinary verifier on its pinned bytes; any source qualifies only through the
-// ordinary commit gate (primary > cumulative × (1+MIN_IMPROVE)). The best one is committed with its exact
-// bytes, so Report, final validation, the archive and KB all describe one source. Verification runs only
-// inside the declared reserve; unfinished checks stay unmeasured and the incumbent stays committed.
+// End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
 if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
   // Qualified custody and host promotion use the existing Report allowance, even with no optional
   // verification allocation. This does not extend the run or the final-validation cutoff.
@@ -2642,7 +2638,7 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
   const digest = async (file) => ((await hostRun('sha256sum', ['--', file])) || '').slice(0, 64);
   let best = null;
   for (const c of [...retainedSources].sort((a, b) => b.evidence - a.evidence)) {
-    if (!(c.evidence > Math.max(cumulative * (1 + MIN_IMPROVE), best ? best.primary : 0))) continue;
+    if (!(c.evidence > Math.max(cumulative, best ? best.primary : 0))) continue;
     const row = {key: c.key, id: c.id, basis: c.ver ? 'verifier' : 'engineer_local', evidence: c.evidence,
       status: 'unmeasured', source: c.source, base_commit: c.base, original_patch: c.original_patch,
       archive: c.archived ? evo.path : null};
@@ -2709,7 +2705,7 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
     }
     Object.assign(row, {status: !ver ? 'unmeasured' : ok ? 'qualified' : String(ver.status || 'unknown'),
       primary: ok ? primSpeedup(ver) : null, source_sha256: src.sha256, tree: promo.tree});
-    if (ok && row.primary > cumulative * (1 + MIN_IMPROVE) && (!best || row.primary > best.primary)) {
+    if (ok && row.primary > cumulative && (!best || row.primary > best.primary)) {
       best = {c, ver, promo, primary: row.primary, row};
     }
   }

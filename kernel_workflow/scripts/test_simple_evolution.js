@@ -743,7 +743,18 @@ const failedIntegratedCommit = {name: 'a qualified integrated winner whose commi
     assert.equal(rec.after_loop.finalWinner.reported_context.verifier, null);
     deliveredFinal(source(1, 2))({result, temp});
   }};
-cases.push(retainedMain,
+cases.push({name: 'final delivery preserves a verified gain below the search promotion threshold',
+  args: {budget: 1, min_improve: 0.02}, best: 1.01, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('small-gain'))},
+  candidates: {r1_d0: {files: fast, speed: 1.01}},
+  check: ({rec, events, result, temp}) => {
+    assert.equal(rec.after_loop.history.rounds[0].improved, false, 'search promotion keeps its threshold');
+    assert.equal(rec.after_loop.history.rounds[0].cumulative, 1, 'search leaves ORIGINAL committed');
+    assert.equal(delivery(rec).delivered, 'round_1_engineer_0');
+    assert.equal(delivery(rec).candidates[0].basis, 'verifier');
+    assert.ok(!events.some(e => e.label.endsWith('(delivery)')), 'reuse the exact existing qualification');
+    deliveredFinal(fast)({result, temp});
+  }}, retainedMain,
   ...['null', 'flagged', 'tamper'].map(director => ({...retainedMain, director,
     name: `Director ${director}: validation is withheld while host custody stays available`,
     check: ({result, temp, archive}) => {
