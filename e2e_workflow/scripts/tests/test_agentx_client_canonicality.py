@@ -229,6 +229,14 @@ class AgentXClientCanonicalityTest(unittest.TestCase):
         self.assertIn("entries=50", rec["noncanonical_reasons_seen"])
         self.assertIn("canonical 393", rec["noncanonical_reasons_seen"])
 
+    def test_a_declared_entry_count_moves_the_reference(self):
+        """A workload whose reference is not 393 traces declares its own count."""
+        rec = self._run(MEASUREMENT_PURPOSE="parity", AGENTX_NUM_ENTRIES="200",
+                        AGENTX_CANONICAL_NUM_ENTRIES="200")
+        self.assertEqual(rec["noncanonical_reasons_seen"], "")
+        rec = self._run(MEASUREMENT_PURPOSE="parity", AGENTX_CANONICAL_NUM_ENTRIES="200")
+        self.assertIn("entries=393(canonical 200)", rec["noncanonical_reasons_seen"])
+
     def test_a_stale_inherited_verdict_never_survives_into_a_canonical_run(self):
         """Pass-through would let a previous leg's stamp mark a clean run dirty."""
         rec = self._run(
