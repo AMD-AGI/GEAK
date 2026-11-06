@@ -39,7 +39,7 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
 2. Clear cache in `WORKSPACE`, then run:
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
    This warms up, then profiles with the architecture-specific policy and writes a report:
-   gfx1201 uses rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
+   gfx1201 and gfx115x use rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
    the remaining supported tools to benchmark-only.
    If the report contains a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
    `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once

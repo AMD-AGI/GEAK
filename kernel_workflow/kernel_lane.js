@@ -236,9 +236,10 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
-// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
+// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 or
+// gfx115x run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
-let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201';
+let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201' || /^gfx115\d$/.test(EXPECTED_GFX);
 
 // --- Deep Research Agent (DRA) -------------------------------------------------------------------
 // OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
@@ -961,15 +962,17 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
+// Client RDNA: R9700 / gfx1201 and the RDNA 3.5 APUs (gfx115x; Strix Halo is gfx1151).
+const CLIENT_RDNA_ISOLATE = GFX === 'gfx1201' || /^gfx115\d$/.test(GFX);
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
   : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
-const RDNA4_ISOLATE = GFX === 'gfx1201';
-if (RDNA4_ISOLATE) {
+if (CLIENT_RDNA_ISOLATE) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
-  // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
+  // client RDNA (R9700 / gfx1201, Strix Halo / gfx1151) receives the dedicated in-tree
+  // hardware guide but no CDNA-biased external cards.
   USE_EXPERT_SKILLS = false;
   KERNEL_KNOWLEDGE_DIR = '';
   USE_LEARNED_READ = false;
@@ -1953,8 +1956,8 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimar
         'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
           SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
-          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
-          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
+          CURATION_ISOLATE: CLIENT_RDNA_ISOLATE ? 'true' : 'false',
+          REQUIRED_PLATFORMS: CLIENT_RDNA_ISOLATE ? [GFX] : [],
           WINNER: {
             kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
             device_target: DEVICE_TARGET, physical_cu_count: PHYSICAL_CU_COUNT,

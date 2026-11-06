@@ -106,11 +106,15 @@ const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
-// ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
-// an exact product identity selects calibrated peaks, serving backend and image policy.
+// RDNA 3.5 APU (Strix Halo). Kept separate from RDNA4_ISA so each name keeps
+// one meaning; CLIENT_RDNA_ISOLATE below is what every consumer reads.
+const RDNA35_ISA = /^gfx115\d$/.test(EXPECTED_GFX);
+// ISA isolation and product policy are separate: any gfx1201 or gfx115x target avoids CDNA priors,
+// but only an exact product identity selects calibrated peaks, serving backend and image policy.
 const RDNA4_ISOLATE = RDNA4_ISA;
-const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
-const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
+const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE || RDNA35_ISA;
+const E2E_LEARNED_KB_ENABLED = !CLIENT_RDNA_ISOLATE;
+const MATRIX_CORE_NAME = CLIENT_RDNA_ISOLATE ? 'WMMA' : 'MFMA';
 
 // Lanes launched from here default the learned KB OFF (kernel_workflow alone defaults it ON): e2e
 // extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
@@ -120,7 +124,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // Every nested lane call builds its args here, so none silently takes the lane's own defaults;
 // test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
 // ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
-// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
+// explicitly. wfArgs spreads last so a per-call value wins (client-RDNA isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
@@ -128,7 +132,7 @@ const laneArgs = (wfArgs) => {
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
-  if (RDNA4_ISOLATE) {
+  if (CLIENT_RDNA_ISOLATE) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
     out.perf_knowledge_dir = '';
@@ -372,14 +376,14 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // The vendored tuning skillset (hash-pinned whole by scripts/tuning_skillset_sync.py) is run by one
 // role (tuning_specialist) as one phase between ConfigSweep and HeadKernel (that phase says why).
 // tuning_skillset="false" disables it entirely.
-const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Under expert_skills/ so its skills are selected through the same index.yaml as every other expert
 // skill; the index entries live outside the pinned tree.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
 // tuning-kb/ is the skillset's per-model answer key (verified wins + artifacts): fine in production,
 // contaminating in a blind eval. tuning_kb="false" tells the role not to read it.
-const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+const TUNING_KB_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // No tuning op budget on purpose: tuning ops are cheap and cumulative; the role decides when to stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
@@ -570,7 +574,7 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+if (CLIENT_RDNA_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 // Kernel-layer warm start: before round 1 a lane re-validates its kernel's top stored patches from
 // kb_artifacts/ through the normal verify gate. e2e only forwards the knobs, so every lane shares one
 // store and an orchestrator-supplied store reaches them; unset values equal the lane defaults.
@@ -578,7 +582,7 @@ const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
   kb_artifacts_dir: KB_ARTIFACTS_DIR,
-  warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
+  warm_start: CLIENT_RDNA_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // The KB plane lanes read and write (one per run); unset leaves the lane default `store`
@@ -671,7 +675,7 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // Expert skills: human-authored, validated recipes (perf_knowledge/expert_skills/) used as advisory
 // high priors that roles reproduce and gate by the usual on-box A/B; never override measurement.
 // Default off (use_expert_skills="true" enables); flag and dir are passed to the kernel layer.
-const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = !CLIENT_RDNA_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
@@ -4878,7 +4882,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
         ` DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (${MATRIX_CORE_NAME}) for software pipelining.`,
         ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        RDNA4_ISOLATE
+        CLIENT_RDNA_ISOLATE
           ? ' DIRECTION=wmma-layout: re-tune WMMA tile shape / LDS swizzle / num_warps / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).'
           : ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
         ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
