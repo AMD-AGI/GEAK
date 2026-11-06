@@ -106,3 +106,22 @@ def test_amdhsa_identity_ignores_argument_names():
 def test_metadata_only_multiple_kernels_with_missing_name_are_rejected():
     with pytest.raises(ValueError, match='one kernel'):
         analyze('amdhsa.kernels:\n  - .vgpr_count: 64\n  - .name: second\n    .vgpr_count: 128\n')
+
+
+@pytest.mark.parametrize('name', [None, 'kernel', 'prefix_kernel_suffix'])
+def test_assembly_audit_rejects_unverified_or_partial_kernel_match(name, capsys):
+    import asm_loop_audit
+    asm_loop_audit.print_lds_budget(None, 163840, 'gfx950', name,
+                                   records=[('prefix_kernel', 81920)])
+    output = capsys.readouterr().out
+    assert 'UNAVAILABLE' in output and 'WGs/CU by LDS <=' not in output
+
+
+def test_assembly_audit_retains_full_metadata_identity(tmp_path, capsys):
+    import asm_loop_audit
+    name = 'kernel_' + 'x' * 70
+    path = tmp_path/'k.json'
+    path.write_text(json.dumps({'name': name, 'shared': 81920}))
+    assert asm_loop_audit.lds_from_meta(str(path)) == [(name, 81920)]
+    asm_loop_audit.print_lds_budget(str(path), 163840, 'gfx950', name)
+    assert 'WGs/CU by LDS <= 2' in capsys.readouterr().out

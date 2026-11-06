@@ -340,8 +340,9 @@ def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
             d = json.load(open(p))
         except (OSError, ValueError):
             continue
-        if isinstance(d, dict) and isinstance(d.get("shared"), int):
-            out.append((str(d.get("name") or os.path.basename(p))[:40], d["shared"]))
+        if (isinstance(d, dict) and type(d.get("shared")) is int and d["shared"] >= 0
+                and isinstance(d.get("name"), str) and d["name"]):
+            out.append((d["name"], d["shared"]))
     return out
 
 
@@ -364,7 +365,7 @@ def lds_per_cu(arch) -> int | None:
 
 
 def print_lds_budget(meta_path: str | None, cap: int | None,
-                     cap_src: str | None = None, kernel: str | None = None) -> None:
+                     cap_src: str | None = None, kernel: str | None = None, records=None) -> None:
     """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
     can be capped by both at once, and relieving only one buys nothing.
 
@@ -378,7 +379,7 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
     name. With a kernel named, only its entry is used; a mismatch is reported, never silently
     resolved."""
     print("LDS budget per workgroup (the SECOND occupancy limiter):")
-    kernels = lds_from_meta(meta_path) if meta_path else []
+    kernels = records if records is not None else lds_from_meta(meta_path) if meta_path else []
     if not kernels:
         print("  UNAVAILABLE -- pass --meta <ir-dir | kernel.json> (Triton cache metadata).")
         print("  Do NOT substitute the KD's group_segment_fixed_size or rocprof-compute 7.1.8: "
@@ -386,11 +387,11 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
         print("  structurally 0 for Triton kernels and will read as 'this kernel uses no LDS'.")
         print()
         return
+    if not kernel:
+        print("  UNAVAILABLE -- no observable kernel identity; launch metadata is withheld.\n")
+        return
     if kernel:
-        # Match the audited kernel. Metadata names are truncated for display, and a mangled
-        # symbol may carry a suffix the metadata name lacks, so accept containment either way.
-        hit = [kv for kv in kernels if kv[0] == kernel] or \
-              [kv for kv in kernels if kv[0] in kernel or kernel in kv[0]]
+        hit = [kv for kv in kernels if kv[0] == kernel]
         if len(hit) == 1:
             kernels = hit
         elif not hit:
@@ -406,8 +407,7 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
                   f"which is this kernel's.")
             print()
             return
-    # several kernels and none named -> the MAX drives occupancy (same rule as kd_regs).
-    name, shared = max(kernels, key=lambda kv: kv[1])
+    name, shared = kernels[0]
     if not shared:
         print(f"  lds_bytes_per_wg = 0  ({name})  -> no LDS staging in this kernel")
     elif cap:
@@ -902,8 +902,8 @@ def main() -> None:
     # means what the help already promised: look next to <asm>.
     ap.add_argument("--meta", nargs="?", const="",
                     help="Triton cache metadata .json (or a dir to scan) for the LDS "
-                         "bytes/WG. Bare `--meta`, or omitted, defaults to the dir holding "
-                         "<asm>. The KD and rocprof-compute both report 0 LDS for Triton -- "
+                         "bytes/WG. Bare `--meta`, or omitted, uses the artifact manifest or "
+                         "same-stem metadata. The KD and rocprof-compute report 0 dynamic LDS -- "
                          "this is the only correct source.")
     # The old help said "CDNA gfx942/gfx950 64 KiB", which is wrong and contradicts this
     # pack's own arch cards: gfx950 has 160 KiB/CU.
@@ -939,7 +939,7 @@ def main() -> None:
     # scored loops from every kernel at once.
     # `.amdgcn_target` precedes the first kernel, so read the arch from the whole module
     # BEFORE narrowing -- it is a property of the build, not of the kernel picked.
-    _arch = a.arch or (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None)
+    _arch = (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None) or a.arch
     lines, kname = select_kernel(lines, a.kernel)
     print(f"=== asm loop audit: {a.asm}"
           + (f"  [kernel: {kname}]" if kname else "  [single unnamed object]") + " ===\n")
@@ -953,7 +953,17 @@ def main() -> None:
         _lds, _src = a.lds_per_cu, "--lds-per-cu"
     else:
         _lds, _src = lds_per_cu(_arch), _arch
-    print_lds_budget(a.meta or os.path.dirname(os.path.abspath(a.asm)), _lds, _src, kname)
+    records = None
+    if not a.meta:
+        from amd_artifacts import inspect_artifact
+        try:
+            _name, metadata, _bound = inspect_artifact(a.asm)
+        except (ValueError, OSError) as exc:
+            ap.error(str(exc))
+        records = []
+        if (metadata and type(metadata.get('shared')) is int and metadata['shared'] >= 0):
+            records = [(metadata['name'], metadata['shared'])]
+    print_lds_budget(a.meta, _lds, _src, kname, records=records)
 
     loops = find_loops(lines)
     picked = pick_loop(lines, loops, a.loop_label)
