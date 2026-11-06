@@ -263,7 +263,8 @@ async function runCase(sc) {
             spec.speed, spec.development)} : {})};
       }
       if (label.startsWith('verify ')) {
-        const id = label.split(' ')[1], spec = sc.candidates[id];
+        const id = label.split(' ')[1];
+        const spec = sc.candidates[id] || (/^r\d+_integrated$/.test(id) ? sc.integration : null);
         assert.ok(spec, `unexpected verifier ${id}`);
         assert.deepEqual(readSources(h.field(prompt, 'CANONICAL')), original, 'verifier uses ORIGINAL');
         assert.deepEqual(h.field(prompt, 'BASELINE_PER_CASE'), h.perCase(1));
