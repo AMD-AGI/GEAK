@@ -83,3 +83,11 @@ def test_partial_ir_is_not_a_successful_capture(tmp_path):
 def test_multi_kernel_assembly_cannot_mix_resources():
     with pytest.raises(ValueError, match='one kernel'):
         analyze('.amdhsa_kernel a\n.amdhsa_next_free_vgpr 64\n.amdhsa_kernel b\n.amdhsa_next_free_vgpr 128\n')
+
+
+def test_assembly_audit_uses_shared_register_record():
+    import asm_loop_audit
+    asm = '.amdhsa_next_free_vgpr 168\n.amdhsa_accum_offset 160\n.amdhsa_next_free_sgpr 32\n'
+    r = analyze(asm)
+    assert asm_loop_audit.kd_regs(asm.splitlines()) == {
+        'vgpr': r['vgpr_combined'], 'sgpr': r['sgpr'], 'accum_vgpr': r['agpr']}

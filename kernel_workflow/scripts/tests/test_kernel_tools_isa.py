@@ -20,7 +20,8 @@ REPO = Path(__file__).resolve().parents[3]
 KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
 HW_DATA = REPO / "perf_knowledge" / "hardware" / "data"
 
-PY_TOOLS = ["gfx950_isa", "layout_facts", "amd_occupancy", "probe"]
+PY_TOOLS = ["asm_loop_audit", "asm_schedule_viz", "mfma_efficiency", "deep_mfma_analysis",
+            "gfx950_isa", "layout_facts", "amd_occupancy", "probe"]
 SH_TOOLS = ["hw_sources.sh", "dump_ir.sh"]
 
 
