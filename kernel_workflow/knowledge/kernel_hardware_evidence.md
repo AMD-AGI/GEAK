@@ -84,6 +84,12 @@ signal. Correctness and independent unprofiled timing still determine fitness;
 the gap is conditional headroom, not promised removable time. It does not override
 declared budgets or stop conditions.
 
+Report applicable case-level attainment and missing reference coverage in the existing
+notes/report. A weighted score does not establish that every case met its target, and
+local attainment does not establish whole-workload attainment. Preserve residual cost
+and broader-boundary requests for the outer owner to assess against its independent
+serving-regime measurements and supported workload reference, when available.
+
 Keep this comparison anchor fixed across comparable source revisions. An unchanged
 mathematical/state contract does not prove a universal minimum operation count.
 Do not improve the numerator by counting padding, redundant work or a candidate's

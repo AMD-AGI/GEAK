@@ -5,6 +5,17 @@ Fixed ISL/OSL output throughput and AgentX trace-replay metrics are different ob
 retain the declared total-token throughput, interactivity, TTFT and quality definitions; a fast isolated
 kernel or a sampled phase does not establish improvement in any of those workload measurements.
 
+When this run supplies both kernel/region and whole-workload objectives, pursue them
+concurrently and report them separately in the existing reasoning and reports. Kernel attainment
+is not a prerequisite for workload optimization and does not establish workload attainment. Use a
+workload fraction only with a separate supported ceiling for the same metric, request work/mix,
+resource budget and serving regime; a sum or average of kernel fractions is not that ceiling.
+Without it, report measured serving results and the missing denominator as unknown. Select among
+kernel, complete-region and available recipe/system actions using workload evidence; high local
+attainment does not make avoidable work necessary. Reuse applicable models and observations rather
+than adding a calibration stage before useful engineering. Reference targets do not relax numerical
+correctness, quality, latency/error gates, protected configuration or the declared evaluation budget.
+
 ## Follow cost through the workload
 
 Start with the complete captured inventory, actual callables and producer/consumer dependencies.
