@@ -16,7 +16,7 @@
     "references/source-extraction.md": "ee4e841dd5030014faee5519f3ac5b4728ee950aa77cb674a37ccf6ed4abec05",
     "references/task-authoring.md": "9baa42f616733c670f9c0f04f2a94e3b5ff4241ed2fba24cbe2e64ba1d06fa88",
     "references/ut-lane.md": "03ab568d2e7f4cd78a476a7591e947e86603dd58498ed9a243976b8eb3a8868d",
-    "references/vllm.md": "a3e17e1fb452cb11e6e6a09455cae31053388d91e8a0533c2d692a40a07cf188",
+    "references/vllm.md": "5fdb65f9759e685af1f5f1e08688656ef1654ac39ba0d15478cd819b701e58ea",
     "scripts/adjacency.py": "31e12a600fcb7c62361792702dcd125d81f37e6faf86af8aef2236d9abff7815",
     "scripts/build_ranking.py": "8f988f78ee8c1518a1e1a659a676f6aeb3a8102d03329d5e33462e5a747fbe1f",
     "scripts/build_task_plan.py": "c11521a74140be46626c266916a6c8311435c8751d3aeba5fa51236d3de1fcd1",
@@ -40,7 +40,7 @@
     "scripts/source_map.py": "f493bf3331206c08ff4dac54bf0da04320c4ddf1f55e7f644d8bc5498d8791a4",
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
     "scripts/ut_wave.py": "a93dfb5fdfdcca90abb3a433a95e17c7e4025de35bdadeb40ea0746ab68b6c40",
-    "scripts/vllm_observer/geak_vllm_observer.py": "c6abbc9ee55db33d36d4af7ccc1ec8998c4158314fd0ef8515790703e38e2e9f",
+    "scripts/vllm_observer/geak_vllm_observer.py": "90ae4d8e3d2976ae65241eab4ac63d751a12b549302c1b9157c7915098adb0cf",
     "scripts/vllm_observer/sitecustomize.py": "f18f510938d52f91e014c4516c6dbf899a28055491ce04f4fba8e94ed1d3e784",
     "shared/capture_shapes.py": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
     "shared/compile_watch.py": "fd7d7a2e2c3bbd93a27b491f84009725a20a0355726cd08cdb52063008aecd4d",
@@ -72,7 +72,7 @@
     "tests/test_profile_fast_path.py": "4ad4ad6c99cd853bbab0ef276bbef71694fcd5f3229def7aa7d611ddfec90e0c",
     "tests/test_sampling_pipeline.py": "0dac9036c457a32c171db127456ae5d546b24032684a62e687c3761e502fe2ae",
     "tests/test_ut_wave.py": "f8621055311e1fac5215fbee56a977c937ae6589377e266f3472e75186b74bd3",
-    "tests/test_vllm_profile.py": "6002fb95ff21e55e20349946d228df00e7a95798ceff49b5bb0175eb4c521d37",
+    "tests/test_vllm_profile.py": "d601f4820648062580eda4e32c2a0586a1464b2ea05127cfbc59fce77f2cfdd5",
     "ut_contracts/README.md": "f85964e8020325866d12f25bf3b1bc3623883f7c96912342021a6ef1f84757c0",
     "ut_contracts/families/act_mul.json": "8c7d3b8bf920796b0f2ad28213de73463c4cfe4c607dbf37b8ba08b4717ff0d0",
     "ut_contracts/families/all_reduce.json": "30215dedd2af7446669f72aae9364251be8b34c011ea288fa85a700f93dcd2a8",
@@ -106,5 +106,5 @@
   "origin": "AMD-AGI/GEAK geak-x@b68537d:workload/stages/profile/kernel-extract",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "9ca7645840fb93f58dcaefe658d08a162b427ede15b00022160d5bd81eaa13d3"
+  "tree_sha256": "59cf7fd8c0f59c099d8bb2f0d50ec2f65bd6678eb9f116379b0e7623548d87ab"
 }
