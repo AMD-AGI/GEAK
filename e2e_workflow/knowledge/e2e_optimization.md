@@ -1,103 +1,91 @@
-# E2E Inference Optimization — Levers Above the Kernel
+# Workload optimization — shared decision guide
 
-The headline metric for e2e is **serving throughput** (output tok/s at fixed ISL/OSL/concurrency),
-secondarily latency (TTFT, TPOT). Unlike single-kernel geomean, e2e is dominated by **Amdahl**: only
-a speedup on a kernel that is a large share of GPU time, multiplied by how often that path runs,
-moves throughput. A 5x on a 2%-of-time kernel is invisible. Always reason in (pct_gpu_time ×
-achievable_speedup).
+Use the objective, quality gates, comparison method and original deadlines supplied by this run.
+Fixed ISL/OSL output throughput and AgentX trace-replay metrics are different objectives. For AgentX,
+retain the declared total-token throughput, interactivity, TTFT and quality definitions; a fast isolated
+kernel or a sampled phase does not establish improvement in any of those workload measurements.
 
-## The two regimes (do not conflate them)
-- **Prefill** — large M (= total prompt tokens in batch, e.g. 15362). Compute-bound: big GEMMs,
-  prefill attention. Throughput-for-prefill ≈ raw FLOPs efficiency.
-- **Decode** — small M (= running batch size, e.g. 64). Latency/memory-bound: skinny GEMMs, paged
-  KV attention, per-step launch overhead, cuda-graph replay.
-A kernel optimized for one regime may not help the other. The Profiler carries shapes so the
-Architect can tell which regime a kernel serves; optimization may produce regime-specific variants.
+## Follow cost through the workload
 
-## Lever tiers (highest ROI first for a fresh model)
+Start with the complete captured inventory, actual callables and producer/consumer dependencies.
+Top-N is an index for preparation, not a complete account of optimization opportunities. Preserve
+failed extraction, unknown state, graph-hidden work and unrepresented phases as visible gaps.
+Keep each cost tied to its source/configuration, rank, stream, phase, shapes and measurement window.
+Do not merge same-named or same-shaped calls until layouts, state, semantics and dispatch agree.
 
-### Tier 0 — Config / backend (Config Tuner, runs FIRST, no source edits)
-Cheapest, biggest, and it reshapes the kernel landscape (so profile AFTER). Knobs:
-- **Attention backend**: `--attention-backend {triton, aiter, ck, fa3, ...}`. Huge for attn-heavy.
-- **GEMM backend / tuning**: aiter vs hipBLASLt; populate the hipBLASLt/Tensile tuning DB for the
-  exact shapes (untuned GEMM falls back to a default solution — see the `aiter ... not found tuned
-  config ... using default config` warnings; tuning these is often a free 1.1–1.4x on the GEMM).
-- **Quantization**: fp8/int8 weights/kv (`--quantization`, `--kv-cache-dtype fp8`) when accuracy
-  budget allows — the single biggest throughput lever for compute-bound prefill.
-- **CUDA/HIP graph**: `--enable-cuda-graph` / graph batch sizes — kills decode launch overhead.
-- **torch.compile**: `--enable-torch-compile` (fuses elementwise/norm chains).
-- **chunked prefill / max-prefill-tokens / schedule**: balances prefill vs decode interleave.
-- **TP/EP/DP and mem-fraction**: parallelism + KV cache budget (bigger KV → higher concurrency).
-Sweep one axis at a time, measure throughput delta with a variance band, keep wins, re-profile.
-**Config wins STACK and compound** — accept them incrementally, and then carry the **accepted config
-stack as the REF leg** when gating a kernel, so the kernel's delta is isolated on top of the real serving
-config (not on top of the bare baseline). A lossy config (e.g. fp8 KV cache) must clear the parity gate
-before it joins the stack.
+Distinguish summed dispatch durations, interval-union activity and workload elapsed time. Concurrent
+dispatches contribute separately to the sum. An interval occupied only by one kernel family is not
+automatically removable time; dependencies and other ranks can still determine completion. Overlapped
+work can also matter through resource contention. Inspect the relevant evidence before choosing a
+critical-path explanation. A capture's phase proportions are not the whole replay's weights.
 
-### Tier 1 — Editable hot kernels (Kernel Extractor → recursive kernel squad)
-For `triton`/`fused_custom`/`reduction_norm` kernels with meaningful pct_gpu_time: extract with real
-shapes + recorded I/O oracle, optimize via the unchanged single-kernel workflow, compare backends
-(triton/CK/HIP/asm) per the playbook, then overlay back and re-validate throughput.
+Under a fixed serial model, accelerating fraction `f` of baseline elapsed time by factor `s` saves
+`f * (1 - 1/s)` of that time and yields `1 / (1 - f + f/s)` speedup. Use per-case terms when coverage
+or acceleration differs. Substituting a share of summed GPU durations gives only a conditional
+device-time model. Never rank by share times speedup or call that product an E2E gain.
+Do not count a parent region and its member events twice. Estimated improvements, applicable
+roofline comparators and actual workload measurements remain distinct evidence.
 
-### Tier 2 — Dispatch / host overhead (host_runtime specialist, or graph)
-Many tiny elementwise/cast/copy kernels at high call counts → fuse (Lever 1 of geomean_levers) or
-cover with a cuda-graph. Native layouts to drop transpose/contiguous passes.
+## Choose the investigation and its executable boundary
 
-### Integrating an authored / JIT kernel into the live (graph-captured) path (general)
-Getting an isolated-win kernel to actually move e2e — backend-agnostic rules:
-- **Rebind via a passive/lazy seam.** Don't eager-import a heavy kernel lib at interpreter startup —
-  the serving stack spawns many short-lived helpers (compile workers, mp children, trackers) that would
-  each pay the init cost and can pile up into a process/enumerator storm. Install the dispatcher only
-  when the target module is first imported by the real model worker; skip helper subprocesses.
-- **JIT/eager-compiling code cannot live inside a CUDA-graph capture region.** Make the kernel
-  compile-once / shape-agnostic and **pre-warm it during the warmup forward**, so the captured region
-  only *launches* the cached kernel (no eager compile under capture → no crash, and the kernel ends up
-  inside the graph). Raise the serving watchdog if first-call compile exceeds the startup budget.
-- **Swap only where it wins for the throughput-dominant regime.** Steady-state serving throughput is
-  **decode-dominated**, so a prefill-only kernel swap won't move output tok/s — confirm the op is on the
-  decode hot path before integrating, and route per-shape (engage only the shapes/regimes that win).
-- **Per-call preprocessing caches must cover the full working set** (≥ the number of distinct reuse keys,
-  e.g. transformer layers). An undersized cache thrashes — re-doing the preprocessing every step — and
-  can REGRESS e2e badly even when the kernel itself is faster.
-- Prove **engagement** on the live path (log/probe that the new kernel actually ran), then gate on the
-  same-session isolated A/B above. Profile again after it lands — the bottleneck shifts, exposing the
-  next lever (e.g. a prologue/epilogue that can now be fused).
+Compare plausible recoverable cost, uncertainty, implementation effort and remaining engineering
+time. Large operators are useful targets. Groups of small operations, transfers, launch gaps and
+changes to dataflow can also be valuable. A roofline describes one formulation and does not prove
+that its work, materializations or synchronization are necessary, or that local tuning is exhausted.
 
-## Amdahl stop rule
-After each milestone, estimate remaining headroom = Σ over untouched editable kernels of
-(pct_gpu_time × plausible_speedup_fraction). If the best remaining candidate can't plausibly move
-end-to-end throughput by more than the measurement noise band (typically ~2–3%), STOP — further
-kernel work won't show up at the e2e level even if the isolated speedup is real. In practice the small
-editable kernels (each a few % of GPU) usually land in-band or negative; spend the budget on the head,
-not the tail.
+Use these as questions, not fixed specialist assignments or mandatory steps:
 
-## Finishing a long or interrupted run
-Accepted work is durable on disk independently of the orchestrator: the config wins (`config/`), each
-gate-accepted kernel overlay + its `integrate_result.json`, and the baseline all persist. If a long run
-is interrupted (crash/timeout) after the head wins have landed, **do not resume to grind the remaining
-low-pct_gpu_time milestone kernels** — finish with a direct **same-session Validate of the accepted
-stack vs the true baseline** (the run-wide serving config TP=SERVING_TP GPU=SERVING_GPU, a couple of reps, + greedy parity). That recovers the official
-number quickly without re-doing hours of low-value work.
+- **Operation or region:** can an equivalent algorithm, layout, backend or fusion boundary reduce
+  work or movement? Read the complete callable and intermediate/state contract. Triton, HIP,
+  FlyDSL, CK or assembly are options only where their tools and deployment boundary are qualified.
+- **Communication and scheduling:** what do producers, collectives and consumers wait for? Check
+  message sizes, routing, rank imbalance and resource sharing. Skew or a collective name alone
+  does not prove busy-wait, establish intrinsic transfer time or exclude a kernel rewrite.
+- **Serving and capacity:** do KV/cache movement, memory placement, batching, request ownership or
+  graph execution explain the workload behavior? Use only actions exposed by this run. For nested
+  AgentX, Hyperloom owns enabled serving-recipe actions; the inner kernel path cannot execute
+  arbitrary flags or unsupported topology changes. Read the current action menu and its configuration,
+  backend, scheduling and memory options before concluding that an action is absent. Record missing
+  capabilities rather than pretending a nominated direction has an executor.
 
-## Measurement discipline (e2e is noisy)
-- Keep the server WARM across validations; never fold server-startup into the timed window.
-- Run enough requests (≥ 5× concurrency). The round count belongs to the lifecycle, not to you: under
-  the default `warm_server` there is one timed sample and `spread` is structurally 0.0% — an absence
-  of evidence, not a quiet box. Repeat only when you need a dispersion estimate.
-- Gate a kernel into e2e only when its isolated speedup is real AND Amdahl says it can move the
-  needle. Accept an e2e change only if the throughput delta exceeds the measured noise band.
-- Always check **output parity** (greedy/temp=0, fixed seed) vs baseline — a faster wrong server is
-  a regression.
-- **Isolation (do this or the delta is fiction).** Measure baseline vs candidate **sequentially on the
-  same serving config (TP=SERVING_TP GPU=SERVING_GPU), same session** (tear one server fully down before
-  launching the next). Do NOT run two
-  servers concurrently on one node for the headline ratio: shared-resource contention drags the baseline
-  leg down and **inflates the ratio into a false win**. With several samples per leg, trust a delta only
-  when run spreads are tight and the two legs' run ranges are **non-overlapping**; with one timed round
-  per leg there is no range to overlap, so the delta has to clear the noise band on its own.
-- **Harness pitfalls that silently corrupt a leg:** (a) never name an eval-dir output folder after an
-  importable package (`triton/`, `flydsl/`, `aiter/`, …) — such a dir on the bench process's CWD
-  **shadows** the real package (`import X`→empty namespace) and the bench crashes; looks like a kernel
-  failure but is a naming bug. (b) Give each leg a **fresh JIT/compile cache dir** (e.g. `TRITON_CACHE_DIR`)
-  to avoid cross-leg cache races. (c) Raise the serving **watchdog timeout** when a candidate JIT-compiles
-  on first call (a cold kernel compile can exceed the default startup budget).
+Prefill and decode often have different shapes, state and resource limits, and can share a batch.
+Identify them from actual observations; neither phase is universally dominant. Check the full
+workload objective before excluding a prefill-only or decode-only change.
+
+A new multi-operation boundary needs captured inputs/outputs/state, supported numerical equivalence,
+all replaced work inside timing, and a real integration point. Nominate it through the existing
+extraction path. If extraction cannot establish the contract, preserve that gap and pursue other
+ready work; a larger region is not made executable by naming it a megakernel.
+
+## Integrate, measure and continue
+
+- Bind the replacement to the actual serving callable and verify its loaded/executed path. Keep
+  fallback outside qualified coverage. Compatible tensor shapes alone do not prove engagement.
+- Prepare JIT code before graph capture using the run's existing warmup path. Keep initialization,
+  compilation and benchmark timing separate, within the declared startup and final allowances.
+- Include preprocessing, temporary storage, cache keys/lifetimes, copies and synchronization in the
+  replaced boundary. Size caches for the actual working set, aliases and lifetimes; pointer equality
+  alone does not establish immutable contents or safe reuse. Do not move work outside measurement
+  or assume an observed constant is universal.
+- Use the supplied same-condition ORIGINAL/current-reference/candidate measurement procedure and
+  full quality scope. Preserve all failed legs. A noise allowance or proxy window is not proof of
+  reproducibility; do not replace the declared method with a generic request count or shorter replay.
+- Preserve exact source, configuration, results and incomplete delivery through the existing archive
+  and checkpoint paths. A correct slower realization can retain useful evidence for later development.
+  Preservation and closure must not consume the engineering time already assigned to a lineage.
+- After an accepted change, reconsider the workload and reuse observations whose applicability still
+  holds. Refresh only the evidence needed for the next decision. Stop according to remaining useful
+  investigation and the declared budget, not because every untouched row is individually small.
+- Resume supported checkpoints without erasing prior failures, changing original clocks or skipping
+  required finals. Deliver the best eligible exact bytes and keep better undeliverable results visible.
+
+Check observed fallback messages such as "not found tuned config ... using default config" against
+actual shapes, dtype, backend and selected dispatch. They identify an investigation, not proof that
+another configuration is faster. Keep helper imports passive/lazy where appropriate so inspection
+does not initialize the model, spawn workers or reserve GPUs. Avoid output directories that shadow
+importable packages, use isolated compiler caches, and preserve lifecycle ownership.
+
+Use controlled sequential measurements for headline comparisons under the declared method. Disjoint
+GPUs can still share host memory bandwidth, PCIe or network resources. Concurrent research is useful,
+but its result describes that co-tenancy until appropriately confirmed; interference need not affect
+every candidate equally or in a single direction.
