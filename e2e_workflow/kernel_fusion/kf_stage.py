@@ -145,7 +145,7 @@ AUTHOR_KEYS = ("final_patch", "work_dir", "overlay_dir", "banner", "isolated_spe
 
 
 def slim_topk(d: dict, author_k: int) -> dict:
-    """Every candidate (the triage agent judges them all); with an author_k cap, only the first author_k
+    """Every candidate (the Feasibility Review judges them all); with an author_k cap, only the first author_k
     recommended ones plus every candidate they name (fallback / exclusive)."""
     cands = {str(c.get("id")): c for c in d.get("candidates") or [] if isinstance(c, dict)}
     rec = [str(i) for i in d.get("recommended") or []]

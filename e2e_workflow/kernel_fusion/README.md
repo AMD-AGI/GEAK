@@ -1,25 +1,27 @@
 # KernelFusion — optional stage before the GEAK e2e workflow
 
 A separate module, **on by default**: every external `interface/run_e2e.py` call runs it to
-completion **before** the main e2e workflow (baseline → trace → topk → author → apply back → the
-e2e workflow). When it accepts a fused overlay, the main workflow starts from that overlay (its own
+completion **before** the main e2e workflow (baseline → trace → Opportunity Analysis → Feasibility Review +
+author → Integration Review + apply back → the e2e workflow). When it accepts a fused overlay, the main workflow starts from that overlay (its own
 baseline is measured on the fused stack). Switched off, nothing changes.
 
 ```
-trace ──► topk ──► author ──► apply
-(GEAK     (fusion  (UT: GEAK  (GEAK e2e_integrator
-profiler)  strategy skill;     A/B, compounding
-                    kernel:    overlay)
-                    agent)
+trace ──► Opportunity ──► Feasibility Review ──► Integration Review
+(GEAK     Analysis       + author             + apply
+profiler) (fusion-       (UT: GEAK;           (GEAK e2e_integrator
+          analysis       kernel: agent)        A/B, compounding
+          skill)                               overlay)
 ```
+
+Step keys (`kf_steps`) keep their short names: `trace`, `topk` (Opportunity Analysis), `author`, `apply`.
 
 | Step | What runs | Reused GEAK code |
 |---|---|---|
 | Setup | eval dir + baseline throughput (one fresh server, one timed round, no warmup round) | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
 | `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
-| `topk` | `kf_trace_digest.py` (deterministic: per-step kernel sequences, plus the live model classes and files read from the eager Python stacks, where every seam must live), then the analyst agent follows the **`fusion-analysis` skill** (`knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md`) plus the run's prompt(s) → `analysis/topk.json` + the report the skill asks for | `parse_profile.py` |
-| `author` | a triage agent reads the whole Top-K and picks, by its own judgement, the patterns worth a kernel (no cap, no gain floor; the one hard line is a Python seam); each: region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per pattern, given the region and the UT, no GEAK kernel layer |
-| `apply` | once, after every kernel is written: a select agent reads the UT results and picks which kernels go on (no speedup floor; one kernel per seam / overlapping region); they go in together as ONE combined overlay on ONE A/B vs the reference (gsm8k on the whole stack first, then validation-length legs). Only if the stack fails accuracy or engagement is each kernel checked alone (correctness only) and the A/B re-run without the failing ones; only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
+| `topk` — Opportunity Analysis | `kf_trace_digest.py` (deterministic: per-step kernel sequences, plus the live model classes and files read from the eager Python stacks, where every seam must live), then the Opportunity Analysis agent follows the **`fusion-analysis` skill** (`knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md`) plus the run's prompt(s) → `analysis/topk.json` + the report the skill asks for | `parse_profile.py` |
+| `author` — Feasibility Review | the Feasibility Review agent reads every opportunity and picks, by its own judgement, the patterns worth a kernel (no cap, no gain floor; the one hard line is a Python seam); each: region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per pattern, given the region and the UT, no GEAK kernel layer |
+| `apply` — Integration Review | once, after every kernel is written: the Integration Review agent reads the UT results and picks which kernels go on (no speedup floor; one kernel per seam / overlapping region); they go in together as ONE combined overlay on ONE A/B vs the reference (gsm8k on the whole stack first, then validation-length legs). Only if the stack fails accuracy or engagement is each kernel checked alone (correctness only) and the A/B re-run without the failing ones; only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
 
 ## Switch
 
@@ -44,9 +46,9 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `baseline_dir` | `GEAK_KF_BASELINE_DIR` | — | a measured baseline dir of this same stack (`bench_summary.json`, `server.log`); copied, not re-measured |
 | `source_dirs` | `GEAK_KF_SOURCE_DIRS` | installed packages | framework/op-library source for the analyst when it is not importable where the stage runs |
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
-| `author_k` | `GEAK_KF_AUTHOR_K` | 0 (no cap) | optional cap on the patterns the triage agent sends to authoring |
+| `author_k` | `GEAK_KF_AUTHOR_K` | 0 (no cap) | optional cap on the patterns the Feasibility Review sends to authoring |
 | `baseline_mode` | `GEAK_KF_BASELINE_MODE` | `isolated_server` | lifecycle of the stage's baseline: one fresh server, one timed round, no discarded warmup round |
-| `implementable_levels` | `GEAK_KF_IMPLEMENTABLE_LEVELS` | `L1,L2,L3` | fusion levels the analysis may recommend and the triage may author (all levels are still ranked) |
+| `implementable_levels` | `GEAK_KF_IMPLEMENTABLE_LEVELS` | `L1,L2,L3` | fusion levels the analysis may recommend and the Feasibility Review may author (all levels are still ranked) |
 | `unsupported_patterns` | `GEAK_KF_UNSUPPORTED_PATTERNS` | L3 MegaKernel (e.g. MegaMoE), L4 MonoKernel | patterns inside those levels that are ranked but not recommended or authored |
 | `accuracy_confirm_limit` | `GEAK_KF_ACCURACY_CONFIRM_LIMIT` | 1319 (full gsm8k test set) | when the fused stack misses the gsm8k gate on the 200-question sample, both sides are re-scored on this many questions and that result decides; the per-kernel screen (only if it still fails) uses it too |
 | `min_gain_pct` | `GEAK_KF_MIN_GAIN_PCT` | 0.5 | the combined A/B hands the overlay on only when its gain exceeds max(measured noise band, this) |

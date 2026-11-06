@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fusion-oriented digest of torch-profiler traces (the KernelFusion TopK step's deterministic half).
+"""Fusion-oriented digest of torch-profiler traces (the deterministic half of the KernelFusion Opportunity Analysis).
 
 parse_profile.py answers "which kernels are hot". Fusion needs a different view of the same trace:
 which kernels run back to back inside one step, how short they are, how much of the step is idle
