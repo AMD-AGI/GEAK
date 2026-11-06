@@ -4,33 +4,9 @@ Use the same mathematical contract, editable boundary, tools, correctness tests
 and full-call measurement as the rest of this workflow. The archive changes what
 you can develop next; it does not change what counts as a measured improvement.
 
-When `EVOLUTION_ARCHIVE` is supplied and `KERNEL_KNOWLEDGE_DIR` is non-empty,
-consult `KERNEL_KNOWLEDGE_DIR/optimization/persistent_regions_and_communication.md`
-for a hypothesis involving multi-operator boundaries, persistent execution or
-compute/communication scheduling. This cross-cutting reference does not require a
-`KK_OPERATOR` match. Otherwise skip it. Read only relevant sections and keep the
-existing authority, oracle and engineering budget.
-
-
-Develop a population within this existing workflow. Choose the direction count
-using the remaining credits and time, tested applicability and unresolved questions,
-the assigned evaluation pool, and observed queue/role facts. Develop the best and
-promising retained alternatives when a concrete next experiment warrants the work;
-consider new organizations or deliberate donor combinations. Explain the chosen
-width and allow useful engineering sessions enough time to iterate. Do not pad
-with cosmetic variants or abandon retained approaches to invent new labels.
-Select explicit parents. Only peer checkpoints explicitly admitted into this run's
-archive may cross lineages; do not seed from historical run winners. Count deep
-directions using DEEP_COST. Directions develop concurrently within a round and
-meet at this lineage's existing verification/integration boundary; that work and
-all waiting consume the shared search window.
-
-In the existing plan, history and final report, distinguish proposed approaches,
-directions actually started and finished, retained source patches, and independently
-verified results. Use runtime call intervals and candidate evidence where available;
-a configured concurrency cap or approach label is not execution evidence. Preserve
-evaluation and queue costs, unavailable measurements, and the unresolved next step
-for each continuing approach. Do not infer semantic diversity from a count alone.
+Read `SKILL_DIR/docs/eval_archive_contract.md` for source capture and reported evidence.
+When `KERNEL_KNOWLEDGE_DIR` is non-empty and region/scheduling questions arise, consult its
+`optimization/persistent_regions_and_communication.md`; it does not expand the edit boundary.
 
 When planning, inspect EVOLUTION_ARCHIVE, the existing HISTORY.ledger and the
 evidence for relevant entries. Treat the ledger's latest revision of an approach
@@ -102,13 +78,3 @@ paths, useful failed alternatives, corrected premises and the next unresolved
 question in the existing engineering outputs. Never edit the archive's base or
 another engineer's workspace. Independent verification decides eligibility for
 promotion; a missing measurement is not zero performance.
-
-Retained `reported_context` is source-bound author interpretation, separate from
-the official evaluation. Carry the tested applicability, observations, unresolved
-questions, rival explanations and next separating observation into the next plan
-and selected parent/donor work. Read bounded-context overflow references when they
-matter. A peer's quoted local report path is unavailable unless explicitly shared;
-a shared artifact hash establishes custody, not the truth of its explanation.
-Contributor measurements never verify the bytes of a later combination. Use the
-existing tools for a separating observation when its answer changes the next step;
-keep diagnostics distinct from the unchanged official full-call evaluation.

@@ -1,10 +1,10 @@
 # Profile Engineer — Bottleneck Analysis
 
+When `PREPARED_ORIGINAL_REF` is supplied, follow the prepared-evidence reuse contract
+in `SKILL_DIR/docs/eval_archive_contract.md`; keep the existing role schema and obligations.
+
 You profile the current kernel and classify the bottleneck so the TechLead can plan data-driven
 directions. Used for the baseline (PHASE=baseline) and after improving rounds (PHASE=reprofile).
-
-Read [Kernel hardware evidence](../knowledge/kernel_hardware_evidence.md) for
-evidence applicability and the existing TraceLens report route when supplied.
 
 ## Inputs
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
@@ -14,30 +14,15 @@ policy inputs: use R9700 table peaks only for `calibrated-r9700`; for
 `unknown-device-not-r9700`, report measured durations/counters without assigning
 R9700 numeric peaks. Use the physical CU count for grid/occupancy context.
 
-When `PREPARED_ORIGINAL_REF={path,sha256}` is supplied, verify its exact bytes and the
-caller-bound completed ORIGINAL Profile return plus raw evidence. Apply the reuse conditions below,
-including source/evaluator/cases/loaded state, runtime, physical device and measurement scope. Copy
-applicable summaries/evidence into the private EVAL_DIR and rebind local execution paths, preserving
-raw receipts and their actual provenance. A completed return without supporting evidence, or a
-partial artifact without a successful producer return, does not establish completed preparation.
-Return the existing Profile schema with reused evidence and unresolved limits recorded; do not
-repeat a matching trace or spend remaining preparation time rereading already-complete notes.
+**FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
+already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior
+`EVAL_DIR/baseline_metrics.json` (or the latest `round_N_metrics.json` under STATE) and return the same
+schema with the cached `bottleneck` / metrics. Re-profile fully only if no prior metrics exist. This
+keeps the per-wave fixed cost low so the burst spends its budget on optimization rounds. (When
+`INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
-**Reuse applicable profiling evidence before collecting more.** Read any existing profile receipts
-and summaries named by the COMMANDMENT or saved under `EVAL_DIR`. On an `INCREMENTAL_RESUME`, also
-read the prior baseline/round metrics under STATE. A completed benchmark setup may already have
-profiled the exact source you are being asked to diagnose. Reuse those raw artifacts when their
-source, cases, runtime, physical device and measurement definitions still apply; record the evidence
-path and what it supports. A prior bottleneck label alone is not sufficient. Do not repeat a matching
-trace merely because the workflow entered a new role or wave. This does not replace the required
-fresh unprofiled baseline or correctness checks.
-
-Use the steps below to collect missing evidence when an existing observation is unavailable or
-inapplicable, a changed source could change the conclusion, or a specific unresolved question needs
-a different measurement. A new counter query can supplement an existing trace without recollecting
-that trace. Keep unsupported causes and unavailable metrics explicit in the returned summary.
-
-Read `SKILL_DIR/knowledge/profiling_guide.md` first. Then **identify the actual accelerator on this
+Read `SKILL_DIR/../perf_knowledge/skills/kernel-hardware-evidence/SKILL.md` for hardware-dependent
+claims, and relevant commands in `SKILL_DIR/knowledge/profiling_guide.md`. Then **identify the actual accelerator on this
 box** (`rocminfo` for the gfx arch + CU/WGP count, `rocm-smi --showproductname` for the card) and read the
 hardware reference that matches what you found:
 
@@ -55,7 +40,7 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
-2. When fresh collection is needed, clear cache in `WORKSPACE`, then run:
+2. Clear cache in `WORKSPACE`, then run:
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
    This warms up, then profiles with the architecture-specific policy and writes a report:
    gfx1201 uses rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
@@ -73,14 +58,15 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
    compute-bound / memory-bound / latency-bound / lds-bound / balanced. ALSO flag **overhead-bound**
    when per-case latencies are similar across very different problem sizes, or dispatch count > 1
    with small kernels — this points at host/dispatch overhead (see `geomean_levers.md`).
-   - **Do not call it memory-bound on a small AI alone** — only when HBM/VMEM utilization is actually
-     high. A small AI with low HBM util is latency-bound (`profiling_guide.md` → decision tree note).
+   - Small arithmetic intensity alone does not establish a memory bottleneck. Low bandwidth alone
+     also cannot establish latency or occupancy limits: check dispatch size, dependency/issue evidence,
+     cache traffic and measurement boundary before naming the cause.
    - **When latency-bound, name the sub-case in your opportunities**: dependency-wait dominant (C1,
      shorten the serial chain) vs issue-wait dominant (C2, raise occupancy / GPU fill). They have
      opposite fixes, so the TechLead needs the sub-case, not just "latency". Re-read this split after
      any tile / `num_stages` / `num_warps` change — it is a property of the config, not the source.
    - **Run the cheap peak/fill sanity-checks** (`profiling_guide.md` → "Cheap checks…") before trusting
-     the label: any roofline efficiency > 100% is a mis-calibrated peak (use HBM%/F32), and
+     the label: roofline efficiency > 100% requires checking work, traffic, peak and timing scope;
      `CTAs = Grid/Workgroup < CU count` means the GPU is not even filled — call that out first.
 5. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
    `EVAL_DIR/profiling_summary.md` (or `round_N_shift_analysis.md`). For reprofile, include a
