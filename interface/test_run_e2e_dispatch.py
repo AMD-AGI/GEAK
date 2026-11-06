@@ -755,6 +755,15 @@ class TestBenchClient(_RunE2ECase):
         self.assertEqual(os.environ["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
         self.assertEqual(exported["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
 
+    def test_apply_workload_spec_exports_a_declared_reference(self):
+        exported = rx.apply_workload_spec(self._agentx_spec(
+            canonical_corpus="semianalysis_cc_traces_weka_062126_256k",
+            canonical_num_entries=200, canonical_duration_s=1800))
+        self.assertEqual(exported["AGENTX_CANONICAL_DATASET"],
+                         "semianalysis_cc_traces_weka_062126_256k")
+        self.assertEqual(exported["AGENTX_CANONICAL_NUM_ENTRIES"], "200")
+        self.assertEqual(exported["AGENTX_CANONICAL_DURATION"], "1800")
+
     def test_apply_workload_spec_noop_on_synthetic_handoff(self):
         os.environ.pop("GEAK_WORKLOAD_KIND", None)
         self.assertEqual(rx.apply_workload_spec({"workload": {"isl": 1024}}), {})

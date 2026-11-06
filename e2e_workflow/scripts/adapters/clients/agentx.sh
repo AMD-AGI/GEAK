@@ -145,7 +145,7 @@ adapter_bench() {
   # which means WITHOUT this stamp every search-leg measurement would come back
   # looking leaderboard-valid. So the client states the deviations itself and
   # map_aiperf.py forces submission_valid=false with them attached.
-  local canon_entries=393
+  local canon_entries="${AGENTX_CANONICAL_NUM_ENTRIES:-393}"
   local canon_duration="${AGENTX_CANONICAL_DURATION:-3600}"
   local -a noncanon=()
   [ "$corpus" != "$canon_ds" ] && noncanon+=("corpus=${corpus}(canonical ${canon_ds})")

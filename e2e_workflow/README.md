@@ -222,7 +222,7 @@ which is the same object Hyperloom puts on its handoff:
       metric_basis: "p90_intvty_inferencex",   // or aggregate_total_token_tok_s,
                                                // aggregate_output_tok_s, e2e_norm_intvty_p90
       canonical_corpus: "semianalysis_cc_traces_weka_062126",   // optional; what results are
-      canonical_duration_s: 3600,                               // stamped canonical against
+      canonical_num_entries: 393, canonical_duration_s: 3600,   // stamped canonical against
       warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
       failed_request_threshold: 0.10,
       observed_isl: 0, observed_osl: 0,  // optional; omit to measure it off the baseline
@@ -242,10 +242,10 @@ Three parts of that object do more than they look:
   widen it: two same-config baseline replicas differed by 3.86% on P90 interactivity (3.43% on total
   tok/s). `noise_band_pct` sets that floor instead; the TTFT-inclusive `e2e_norm_intvty_p90` moved
   17% on the same pair, so pass one if you grade on it.
-- **The reference.** Overriding `corpus` or `duration_s` does not move what a result is stamped
-  canonical against, so a replay of anything else comes back `submission_valid=false`. To change the
-  reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
-  `canonical_duration_s` too.
+- **The reference.** Overriding `corpus`, `num_entries` or `duration_s` does not move what a result is
+  stamped canonical against, so a replay of anything else comes back `submission_valid=false`. To
+  change the reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
+  `canonical_num_entries` / `canonical_duration_s` too.
 - **The mapper.** An `inferencex_path` checkout's `map_aiperf.py` wins over GEAK's vendored copy, and
   upstream's own fallback mapping carries no P90 ITL, so outside Hyperloom's runtime it cannot grade
   the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the run would use
