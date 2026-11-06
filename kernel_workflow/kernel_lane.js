@@ -966,9 +966,15 @@ const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
 const CLIENT_RDNA_ISOLATE = GFX === 'gfx1201' || /^gfx115\d$/.test(GFX);
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
+// gfx1151 has a peaks.md row for the 40-CU Radeon 8060S only. The 8050S / 8040S share the ISA with
+// no product key, and the other gfx115x parts have no row: roofline_tools.resolve_peaks(gfx, cu=...)
+// returns None for exactly the same cases.
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
-  : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
+  : /^gfx120/.test(GFX) ? 'unknown-device-not-r9700'
+  : (GFX === 'gfx1151' && Number(PHYSICAL_CU_COUNT) === 40) ? 'tabulated-gfx1151'
+  : /^gfx115\d$/.test(GFX) ? 'unknown-gfx115x-not-tabulated'
+  : 'non-rdna';
 if (CLIENT_RDNA_ISOLATE) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // client RDNA (R9700 / gfx1201, Strix Halo / gfx1151) receives the dedicated in-tree

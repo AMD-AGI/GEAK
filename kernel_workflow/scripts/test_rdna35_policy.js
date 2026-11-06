@@ -27,6 +27,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     deviceTarget = 'unknown',
     physicalCuCount = 40,
     budget = 0,
+    planDirections = null,
   } = extras;
   const globals = {
     args: {
@@ -82,7 +83,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
         return { bottleneck: 'unknown', device: deviceGfx, summary_path: '' };
       }
       if (options.label.startsWith('tech_lead:plan')) {
-        return { stop: false, directions: [] };
+        return { stop: false, directions: planDirections || [] };
       }
       if (options.label === 'update_experience') {
         return { action: 'skipped', card_path: '', key: '', note: 'test' };
@@ -207,7 +208,44 @@ const SKILLS = 'Expert skills (ADVISORY';
     }
   }
 
-  console.log('PASS: gfx115x is isolated from CDNA inputs in the lane and the bake-off; controls are not.');
+  // --- E. Roofline status: gfx1151 is tabulated only at 40 CU (the 8060S row). ----
+  // roofline_tools.resolve_peaks(gfx, cu=...) draws the same line; see test_roofline_skill.py.
+  for (const [gfx, cu, status] of [
+    ['gfx1151', 40, 'tabulated-gfx1151'],
+    ['gfx1151', 32, 'unknown-gfx115x-not-tabulated'],
+    ['gfx1150', 16, 'unknown-gfx115x-not-tabulated'],
+    ['gfx1152', 40, 'unknown-gfx115x-not-tabulated'],
+    ['gfx1100', 96, 'non-rdna'],
+    ['gfx950', 256, 'non-rdna'],
+  ]) {
+    const lane = await run(gfx, '', { physicalCuCount: cu });
+    mustInclude(analyzeOf(lane.prompts), `- ROOFLINE_STATUS: ${status}`, `${gfx} at ${cu} CU is not ${status}`);
+  }
+  // The planner drops roofline directions on any unknown-* status, so the status is load-bearing:
+  // the same plan is filtered on the 32-CU part and kept on the 40-CU part.
+  const roofPlan = [{
+    id: 'roof', title: 'Use roofline peak bandwidth', prompt: 'Reach 90% of peak',
+    specialty: 'memory', focus_files: ['kernel.py'],
+  }];
+  const filtered = await run('gfx1151', '', { physicalCuCount: 32, budget: 1, planDirections: roofPlan });
+  if (filtered.result.stopped_by !== 'all_directions_filtered_unknown_peaks') {
+    throw new Error(`the 32-CU part kept a roofline direction: ${filtered.result.stopped_by}`);
+  }
+  const kept = await run('gfx1151', '', { physicalCuCount: 40, budget: 1, planDirections: roofPlan });
+  if (kept.result.stopped_by === 'all_directions_filtered_unknown_peaks') {
+    throw new Error('the tabulated 40-CU part lost its roofline direction');
+  }
+  // Every role that reads ROOFLINE_STATUS names both gfx115x statuses.
+  for (const role of ['profile_engineer.md', 'tech_lead.md']) {
+    const text = fs.readFileSync(path.join(wfDir, 'roles', role), 'utf8');
+    mustInclude(text, 'tabulated-gfx1151', `${role} does not explain tabulated-gfx1151`);
+    mustInclude(text, 'unknown-gfx115x-not-tabulated', `${role} does not explain the gfx115x unknown`);
+  }
+  mustInclude(fs.readFileSync(path.join(wfDir, 'roles', 'deep_engineer.md'), 'utf8'), 'tabulated-gfx1151',
+    'deep_engineer.md does not say when the gfx1151 row applies');
+
+  console.log('PASS: gfx115x is isolated from CDNA inputs in the lane and the bake-off; controls are not;');
+  console.log('      gfx1151 roofline peaks apply only at 40 CU.');
 })().catch((error) => {
   console.error(error);
   process.exit(1);

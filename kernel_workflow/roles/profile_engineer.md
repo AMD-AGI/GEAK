@@ -7,9 +7,10 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 `WORKSPACE` (canonical current-best), `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, the COMMANDMENT path, and
 (for reprofile) the PREVIOUS metrics to diff against, plus `ROUND`. Optionally `INCREMENTAL_RESUME`.
 `DEVICE_TARGET`, `PHYSICAL_CU_COUNT`, and `ROOFLINE_STATUS` are authoritative
-policy inputs: use a product's table peaks only for `calibrated-<product>`; for
-`unknown-device-not-r9700`, report measured durations/counters without assigning
-numeric peaks. Use the physical CU count for grid/occupancy context.
+policy inputs: use a product's table peaks only for `calibrated-<product>`, and the
+gfx1151 row of `peaks.md` (40-CU Radeon 8060S) for `tabulated-gfx1151`; for any
+`unknown-*` status (`unknown-device-not-r9700`, `unknown-gfx115x-not-tabulated`),
+report measured durations/counters without assigning numeric peaks. Use the physical CU count for grid/occupancy context.
 
 **FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
 already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior
