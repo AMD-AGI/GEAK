@@ -2058,25 +2058,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     break;
   }
 
-  if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
-    const before = plan.directions.length;
-    plan.directions = plan.directions.filter((d) =>
-      !/roofline|peak\s*(?:flops|bandwidth)|%\s*of\s*peak/i.test(
-        `${d && d.title || ''} ${d && d.prompt || ''} ${d && d.why || ''}`));
-    if (plan.directions.length !== before) {
-      log(`Round ${round}: removed ${before - plan.directions.length} direction(s) that relied on unknown peaks.`);
-    }
-    if (before > 0 && plan.directions.length === 0) {
-      plannerStopReason = 'all_directions_filtered_unknown_peaks';
-    }
-  }
-
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
     if (PROCESS_BOUNDED && left <= 7) {
       deadlineHit = true; // No agent may start inside its seven-second cleanup reserve.
       log(`Round ${round}: the search process cutoff was reached while planning.`);
-    } else if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
-      log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
     }
