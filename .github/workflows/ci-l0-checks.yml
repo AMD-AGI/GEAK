@@ -81,9 +81,6 @@ jobs:
       # never named is a test file that never runs — the same trap the contract checks
       # below were added to close. They also measure the modules that were dragging the
       # coverage gate down, which is what a suite nothing runs looks like from the outside.
-      - name: vLLM AgentX extraction compatibility (CPU)
-        run: python3 e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_vllm_profile.py
-
       - name: unit tests (no GPU)
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
@@ -131,6 +128,7 @@ jobs:
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
             e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_vllm_profile.py \
             e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
