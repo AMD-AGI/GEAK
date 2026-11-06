@@ -62,6 +62,7 @@ async function lane(sc) {
     const obs = {verified: {}, custodyBeforeVerify: {}, commits: [], unhandled: [], history: null, cumulative: null};
     const g = {
       args: {kernel_path: '/original', workflow_dir: '/workflow', budget: sc.speeds.length, max_no_improve: 2,
+        editable_source_paths: sc.newFiles ? ['k.py', 'backend.hip', 'impl.s', 'module.py'] : ['k.py'],
         agent_timeout_ms: 45000, agent_retries: 1, warm_start: 'off', update_experience: 'off', llm_stats: 'false',
         deadline_epoch: total, search_reserve_s: 5100, final_validation_reserve_s: 1800, final_cleanup_reserve_s: 300,
         ...(sc.delivery === false ? {} : {delivery_reserve_s: sc.delivery === 0 ? 0 : 1000})},

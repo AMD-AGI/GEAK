@@ -48,6 +48,7 @@ async function runCase(sc) {
     const perCase = speedup => [{name: 'c1', baseline_ms: 8, optimized_ms: 8 / speedup, speedup}];
     const g = {
       args: {kernel_path: '/original', workflow_dir: '/workflow', budget: sc.rounds, max_no_improve: 2,
+        editable_source_paths: ['k.py'],
         agent_timeout_ms: 45000, agent_retries: 1, warm_start: 'off', update_experience: 'off',
         llm_stats: 'false', deadline_epoch: total, search_reserve_s: 5100,
         final_validation_reserve_s: 1800, final_cleanup_reserve_s: 300},
