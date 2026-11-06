@@ -177,7 +177,7 @@ Make the change wherever it belongs and the measurement still sees it."
 fi
 # The slot script the prompt tells the agent to call, resolved here so no path is
 # guessed inside the prompt text.
-WORKLOAD_SCRIPTS="${WORKLOAD_SCRIPTS:-$GEAK_ROOT/workload/campaign}"
+WORKLOAD_SCRIPTS="${WORKLOAD_SCRIPTS:-$GEAK_ROOT/workload/engine/campaign}"
 EXTRA_STEER="${EXTRA_STEER:-}"
 
 # Hints from the task directory save the agent a detour, but their absence must not be

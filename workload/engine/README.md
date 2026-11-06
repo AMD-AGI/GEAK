@@ -3,8 +3,8 @@
 Everything under here exists so that the skill above it can be read without it. Nothing
 in `engine/` knows an individual stage skill by name, and nothing a reader or an operator
 normally edits lives here: `config/`, `stages/` and `runners/` are one level up, and
-`run.py` forwards into `engine/core/stage.py` so that the entry point does not move when
-the implementation behind it does.
+`run.py` forwards into `engine/core/stage.py` for the standard recipe. The root SKILL.md
+is the adaptive controller; this directory supplies execution and evidence tools.
 
 Four directories, each named after the question it answers.
 

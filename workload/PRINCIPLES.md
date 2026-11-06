@@ -1,7 +1,8 @@
 # Principles
 
-This is a **skill**, not a product and not a framework: five named stages that an agent
-executes, held together by as little machinery as possible. `README.md` says how it works.
+This is a **skill**, not a product and not a framework: an agent chooses bounded
+experiments through modules and their implementations. The five-stage standard recipe
+remains available with its existing budgets. `README.md` says how it works.
 This file says how it is designed and maintained, and is what a PR here is read against.
 If a rule is wrong, change *it* here, with the reason.
 
@@ -12,9 +13,10 @@ A `SKILL.md`, a `README.md`, or a JSON field beats a module. Code is for what mu
 checked mechanically; everything else is instructions to an agent.
 
 **R2 — Modularity is contracts, not a framework.**
-`stages/CONTRACT.md` and `runners/CONTRACT.md` are the whole mechanism. A new stage,
-runner or skill is a directory named in a config. No registry, no DSL, no workflow engine,
-no base classes.
+`stages/CONTRACT.md` and `runners/CONTRACT.md` are the whole mechanism. A module defines
+a capability and its input/output/acceptance contract; implementation skills or tools
+provide the method. Call them by path or configuration. No registry, DSL, workflow
+engine or base classes. Module selection and implementation selection are separate.
 
 **R3 — The glue stays thin.**
 Each module does one thing and says so in one file; the layer that connects them only
@@ -37,14 +39,13 @@ defence and none ever removing one, until 545 lines of fossil stood between an a
 four shell commands. Prose carries the lesson at no runtime cost and can be read by the
 one party able to act on it.
 
-**R6 — The slot owns the criterion; the skill owns the work.**
-What counts as passing belongs to the stage, not to the implementation plugged into it.
-Swapping an implementation must not require rewriting the criterion — and the criterion
-includes whether the configuration actually took effect. Every slot carries it in
-`stages/<stage>/finalize.py`, one name across all five, run after every stage of either
-shape. **The criterion is written once**: prose that describes it points at that file
-instead of restating its numbers, because a second copy of a rule is a rule that will
-drift. *Enforced by:* `run.py --dry-run`.
+**R6 — The module owns the criterion; the implementation owns the work.**
+Changing the method must not change what counts as passing, including whether the
+requested configuration took effect. Reuse the native test or validation owner for the
+claim being made; the loop cannot redefine its verdict. Standard-recipe stages retain
+their unconditional `finalize.py`, checked by `run.py --dry-run`. A scoped observation
+need not pretend to be a full stage or ship another validator. **The criterion is
+written once**: prose points at its owner instead of restating its numbers.
 
 **R7 — Vendored skills stay byte-identical.**
 Fix their defects in the slot around them, or upstream. *Enforced by:*
@@ -55,6 +56,8 @@ Fix their defects in the slot around them, or upstream. *Enforced by:*
 **R8 — A run states what it was configured to do, and whether it did it.**
 Config is policy, not suggestion. `blocked` (precondition missing) is never written as
 `fail`, and neither is ever written as `ok`.
+A completed call is not a performance win. Keep the verified reference until the
+declared comparison admits a replacement; report extra exploration cost separately.
 
 **R9 — No secrets and no developer-machine paths in the tree.**
 Credentials live outside the repo, reached through `runner_env.env_file`. Paths resolve
@@ -68,6 +71,8 @@ Move it, archive it, gitignore it.
 `run.py --config <scenario> --dry-run` (the config resolves) are the self-check: no GPU,
 no token, no network. The `smoke_stub` scenario drives the whole chain the same way when
 given a `STUB_SCRIPT`. A check that needs a cluster is not a check anybody runs.
+CPU compatibility checks do not establish a serving-performance floor; that requires
+controlled measurements under the task's workload, quality and resource contract.
 
 ## Non-goals
 
