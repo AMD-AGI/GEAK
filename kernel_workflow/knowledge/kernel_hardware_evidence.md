@@ -66,6 +66,44 @@ an additional stopping rule. Averaging dispatch rates differs from summing work
 and dividing by summed duration; overlapping durations cannot be summed as elapsed
 time. Keep separately collected or replayed counters scoped to their actual passes.
 
+## Develop toward a fixed engineering reference
+
+Use a supported positive `T_ref` as a fixed engineering target for the admitted complete
+region: bind its useful-work and numerical/state contract, cases and weights,
+physical hardware/runtime, and timing boundary. Record the reference version,
+expression, operands/units and source or calibration evidence in the existing
+report or supplied Design Genome; label a theoretical bound versus an empirical
+comparator. An unsupported reference stays unknown; continue useful engineering.
+
+For matching unprofiled time `T_measured`, track `efficiency = T_ref / T_measured`
+and conditional gap `1 - efficiency`. A declared positive target fraction `q` gives
+`T_goal = T_ref / q`; do not invent a universal target percentage. Preserve the
+evaluator's case aggregation; a mean of percentages must not replace its weighted
+score. At a fixed reference this is monotonic with latency, not another ranking
+signal. Correctness and independent unprofiled timing still determine fitness;
+the gap is conditional headroom, not promised removable time. It does not override
+declared budgets or stop conditions.
+
+Report applicable case-level attainment and missing reference coverage in the existing
+notes/report. A weighted score does not establish that every case met its target, and
+local attainment does not establish whole-workload attainment. Preserve residual cost
+and broader-boundary requests for the outer owner to assess against its independent
+serving-regime measurements and supported workload reference, when available.
+
+Keep this comparison anchor fixed across comparable source revisions. An unchanged
+mathematical/state contract does not prove a universal minimum operation count.
+Do not improve the numerator by counting padding, redundant work or a candidate's
+new formula; report formulation-dependent work/traffic roofs separately. If an
+equivalent algorithm invalidates assumed work/bytes or beats the reference, retain
+the faster correct source and measured result. Check the model, visibly version
+any justified reference correction and recompute comparable history; never clamp
+efficiency or reject a candidate for exceeding 100%.
+
+Use source, profile and compiler evidence to explain the residual resource or
+dataflow gap and choose the next discriminating experiment. High attainment alone
+does not establish a host/launch floor or rule out an equivalent organization.
+Reuse applicable evidence; refresh only what the changed source or question needs.
+
 ## Use the existing tool path honestly
 
 Start with the supplied `profiling_summary`, `codebase_context`, task handoff and

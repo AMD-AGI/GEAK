@@ -82,9 +82,21 @@ Hardware models guide questions; their assumptions and gaps are not measured gai
 Use the existing profiling tools when they resolve an uncertainty, and confirm
 performance with the unprofiled full-call evaluator.
 
+When planning development of a particular realization, use the existing
+DIRECTION.prompt to identify the intended organization, what would establish that
+it was realized, and the next experiment that warrants retaining it. This is a
+request to investigate, not to claim fidelity when the evidence contradicts it.
+
 Keep `best_patch.diff` cumulative against the private workspace's initial Git
-commit, including inherited parent changes. Save the best correct implementation
-even if it is slower than the original. Retain unfinished code with its limitation
+commit, including inherited parent changes. For such a direction, return the best
+correct implementation of the requested realization even when it is slower than
+the selected parent or ORIGINAL. Report its own measurements and limitations.
+The existing archive preserves the incumbent; returning a development source does
+not promote it. For these directions this replaces the stock role's instructions
+to keep only changes faster than the current best and omit a patch on regression.
+Keep the final workspace, returned patch and measurement tied to those same bytes.
+Other experiment files may be preserved as evidence, but report paths alone do not
+make them selectable archive entries. Retain unfinished code with its limitation
 clearly stated; do not describe it as correct or measured. Preserve raw evidence
 paths, useful failed alternatives, corrected premises and the next unresolved
 question in the existing engineering outputs. Never edit the archive's base or
