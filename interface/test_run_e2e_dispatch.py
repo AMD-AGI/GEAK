@@ -365,6 +365,33 @@ class TestMapArgs(_RunE2ECase):
                 ))
                 self.assertEqual(mapped["backend"], "vllm")
 
+    def test_gfx115x_defaults_to_vllm_on_the_isa(self):
+        # gfx1151 has no product key (the 8060S/8050S/8040S share it), so the
+        # default is an ISA match. ROCm 7.2.3 reports an empty marketing name
+        # there; libdrm's table names it "AMD Radeon 8060S Graphics".
+        for gfx, name, cus, backend in (
+            ("gfx1151", "", 40, "vllm"),
+            ("gfx1151", "AMD Radeon 8050S Graphics", 32, "vllm"),
+            ("gfx1150", "", 16, "vllm"),
+            ("gfx1100", "AMD Radeon RX 7900 XTX", 96, "sglang"),
+            ("gfx1103", "AMD Radeon 780M Graphics", 12, "sglang"),
+            ("gfx950", "AMD Instinct MI355X", 256, "sglang"),
+        ):
+            with self.subTest(gfx=gfx, cus=cus):
+                mapped = rx.map_args(self._handoff(
+                    eval_dir=str(self.tmp / f"e2e_{gfx}_{cus}_default"),
+                    expected_gfx=gfx, expected_target="unknown",
+                    expected_device_name=name, expected_physical_cu_count=cus,
+                ))
+                self.assertEqual(mapped["backend"], backend)
+        # An explicit framework still wins; the workflow is what refuses it.
+        mapped = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_gfx1151_explicit"), framework="sglang",
+            expected_gfx="gfx1151", expected_target="unknown",
+            expected_device_name="", expected_physical_cu_count=40,
+        ))
+        self.assertEqual(mapped["backend"], "sglang")
+
     def test_r9600d_identity_rejects_wrong_isa(self):
         with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
             rx._expected_gpu_identity({
@@ -929,6 +956,18 @@ class TestBenchLauncher(_RunE2ECase):
     def test_per_backend_env_script_is_discovered(self):
         os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
         self.assertEqual(rx.apply_bench_launcher({"framework": "sglang"}), "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/sglang.sh")
+
+    def test_resolved_backend_selects_its_own_per_backend_script(self):
+        # With no framework in the handoff, the caller's resolved backend (an
+        # identity-derived vllm default) must pick the vllm script, not sglang's.
+        os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
+        os.environ["MAGPIE_VLLM_SCRIPT"] = "/magpie/vllm.sh"
+        self.assertEqual(rx.apply_bench_launcher({}, "vllm"), "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/vllm.sh")
+        # Without it the handoff default is unchanged.
+        os.environ.pop("MAGPIE_LAUNCH_SCRIPT")
+        self.assertEqual(rx.apply_bench_launcher({}), "magpie")
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/sglang.sh")
 
     def test_atom_per_backend_env_script_is_discovered(self):
@@ -3028,6 +3067,26 @@ class TestMain(_RunE2ECase):
         self.assertEqual(rc, 2)
         self.assertIn("empty/invalid handoff", err.getvalue())
         self.assertFalse(self.result_path.exists())
+
+    def test_dry_run_gfx1151_default_backend_reaches_the_launcher(self):
+        # map_args resolves vllm from the identity; the launcher must use the same
+        # backend, or a vllm run is handed the sglang launch script.
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
+        os.environ["MAGPIE_VLLM_SCRIPT"] = "/magpie/vllm.sh"
+        os.environ.pop("MAGPIE_LAUNCH_SCRIPT", None)
+        os.environ.pop("BENCH_LAUNCHER", None)
+        handoff = self._handoff(
+            framework="", expected_gfx="gfx1151", expected_target="unknown",
+            expected_device_name="", expected_physical_cu_count=40,
+        )
+        rc, stdout = self._run(handoff, "--dry-run")
+        self.assertEqual(rc, 0)
+        plan = json.loads(stdout)
+        self.assertEqual(plan["mapped_args"]["backend"], "vllm")
+        self.assertEqual(plan["bench_launcher"], "magpie")
+        self.assertEqual(plan["magpie_launch_script"], "/magpie/vllm.sh")
 
     def test_dry_run_reports_the_full_dispatch_plan_without_invoking(self):
         """--dry-run is the only way an operator can audit what GEAK is about to

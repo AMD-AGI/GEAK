@@ -1,8 +1,8 @@
 export const meta = {
   name: 'e2e-workflow',
 
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
-  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only), and RDNA 3.5 gfx1151 (Strix Halo, vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 and gfx115x are vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700 and on gfx115x) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
 
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
@@ -106,11 +106,25 @@ const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
-// ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
-// an exact product identity selects calibrated peaks, serving backend and image policy.
+// RDNA 3.5 APU (Strix Halo). Kept separate from RDNA4_ISA so each name keeps
+// one meaning; CLIENT_RDNA_ISOLATE below is what every consumer reads.
+const RDNA35_ISA = /^gfx115\d$/.test(EXPECTED_GFX);
+// ISA isolation and product policy are separate: any gfx1201 or gfx115x target avoids CDNA priors,
+// but only an exact product identity selects calibrated peaks, serving backend and image policy.
 const RDNA4_ISOLATE = RDNA4_ISA;
-const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
-const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
+const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE || RDNA35_ISA;
+const E2E_LEARNED_KB_ENABLED = !CLIENT_RDNA_ISOLATE;
+const MATRIX_CORE_NAME = CLIENT_RDNA_ISOLATE ? 'WMMA' : 'MFMA';
+// Renaming the matrix core does not make the fused-fp8 advice true everywhere. gfx115x has no fp8
+// matrix instruction (its peaks.md section has no fp8 key; amd_ryzen.md: "fp8 matrix path: none"),
+// so its three fused-quant prompt sites name an in-register upcast instead. Every other ISA keeps
+// the original wording byte for byte.
+const FP8_MATRIX_ABSENT = RDNA35_ISA;
+const FP8_UPCAST_GEMM = 'one GEMM that reads fp8 weights and upcasts them in registers (this ISA has no fp8 ' +
+  'matrix instruction: the win is bytes moved and one fewer pass, not a narrower matrix op)';
+const FP8_FUSED_QUANT = FP8_MATRIX_ABSENT ? FP8_UPCAST_GEMM : `one fp8 ${MATRIX_CORE_NAME}`;
+const FP8_FUSED_GEMM = FP8_MATRIX_ABSENT ? FP8_UPCAST_GEMM : `one fp8 ${MATRIX_CORE_NAME} GEMM`;
+const FP8_FUSED_RUN = FP8_MATRIX_ABSENT ? `run ${FP8_UPCAST_GEMM}` : `run ONE fp8 ${MATRIX_CORE_NAME} GEMM`;
 
 // Lanes launched from here default the learned KB OFF (kernel_workflow alone defaults it ON): e2e
 // extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
@@ -120,7 +134,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // Every nested lane call builds its args here, so none silently takes the lane's own defaults;
 // test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
 // ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
-// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
+// explicitly. wfArgs spreads last so a per-call value wins (client-RDNA isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
@@ -128,7 +142,7 @@ const laneArgs = (wfArgs) => {
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
-  if (RDNA4_ISOLATE) {
+  if (CLIENT_RDNA_ISOLATE) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
     out.perf_knowledge_dir = '';
@@ -225,10 +239,18 @@ if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang')).trim()
-  || (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang');  // serving adapter
+// The global default is sglang. The RDNA4 serving products and gfx115x default to vllm: the only
+// backend validated on R9700 and on gfx1151 (the other gfx115x parts follow gfx1151). Which
+// backends each one ACCEPTS is decided by the guards below.
+const VLLM_DEFAULT = RDNA4_PRODUCT_E2E || RDNA35_ISA;
+const BACKEND = String(A.backend != null ? A.backend : (VLLM_DEFAULT ? 'vllm' : 'sglang')).trim()
+  || (VLLM_DEFAULT ? 'vllm' : 'sglang');  // serving adapter
 if (RDNA4_PRODUCT_E2E && BACKEND !== 'vllm') {
   throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
+}
+// Model mode only: a single-kernel pass-through never starts a server, so its backend is moot.
+if (MODEL_PATH && RDNA35_ISA && BACKEND !== 'vllm') {
+  throw new Error(`${EXPECTED_GFX} E2E is vLLM-only (got backend=${BACKEND}): no other serving backend is validated on the RDNA 3.5 APUs; pass args.backend=vllm (framework=vllm in a run_e2e.py handoff)`);
 }
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
@@ -372,14 +394,14 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // The vendored tuning skillset (hash-pinned whole by scripts/tuning_skillset_sync.py) is run by one
 // role (tuning_specialist) as one phase between ConfigSweep and HeadKernel (that phase says why).
 // tuning_skillset="false" disables it entirely.
-const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Under expert_skills/ so its skills are selected through the same index.yaml as every other expert
 // skill; the index entries live outside the pinned tree.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
 // tuning-kb/ is the skillset's per-model answer key (verified wins + artifacts): fine in production,
 // contaminating in a blind eval. tuning_kb="false" tells the role not to read it.
-const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+const TUNING_KB_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // No tuning op budget on purpose: tuning ops are cheap and cumulative; the role decides when to stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
@@ -570,7 +592,7 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+if (CLIENT_RDNA_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 // Kernel-layer warm start: before round 1 a lane re-validates its kernel's top stored patches from
 // kb_artifacts/ through the normal verify gate. e2e only forwards the knobs, so every lane shares one
 // store and an orchestrator-supplied store reaches them; unset values equal the lane defaults.
@@ -578,7 +600,7 @@ const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
   kb_artifacts_dir: KB_ARTIFACTS_DIR,
-  warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
+  warm_start: CLIENT_RDNA_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // The KB plane lanes read and write (one per run); unset leaves the lane default `store`
@@ -671,7 +693,7 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // Expert skills: human-authored, validated recipes (perf_knowledge/expert_skills/) used as advisory
 // high priors that roles reproduce and gate by the usual on-box A/B; never override measurement.
 // Default off (use_expert_skills="true" enables); flag and dir are passed to the kernel layer.
-const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = !CLIENT_RDNA_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
@@ -976,7 +998,7 @@ const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
-  `fused quant (one fp8 ${MATRIX_CORE_NAME}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
+  `fused quant (${FP8_FUSED_QUANT}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
   'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
   "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
   'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
@@ -4878,7 +4900,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
         ` DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (${MATRIX_CORE_NAME}) for software pipelining.`,
         ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        RDNA4_ISOLATE
+        CLIENT_RDNA_ISOLATE
           ? ' DIRECTION=wmma-layout: re-tune WMMA tile shape / LDS swizzle / num_warps / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).'
           : ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
         ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
@@ -5064,8 +5086,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
-              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 ${MATRIX_CORE_NAME} ` +
-              `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, ${FP8_FUSED_GEMM}) ` +
+              `and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
               `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
           }, `${j.short_name}:${lang}`);
@@ -5323,7 +5345,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
               `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
-              `(fold the block-scale into the operand scale, run ONE fp8 ${MATRIX_CORE_NAME} GEMM — the "kill the dequant" lever) and cache ` +
+              `(fold the block-scale into the operand scale, ${FP8_FUSED_RUN} — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',

@@ -215,19 +215,36 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
-def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+def is_client_rdna35(gfx):
+    """True for the RDNA 3.5 APUs (gfx1150-gfx1153; Strix Halo is gfx1151).
+
+    Discrete RDNA3 (gfx1100-gfx1102) and the gfx1103 iGPU are different parts and
+    must not match. Exactly one trailing digit, the same boundary as
+    `/^gfx115\\d$/` in e2e_workflow.js and kernel_lane.js.
+    """
+    return bool(re.fullmatch(r"gfx115\d", str(gfx or "").lower()))
+
+
+def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None):
+    """Resolve tabulated peaks; never derive a numeric roofline for a client RDNA part.
 
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
-    and its GDDR clock interpretation is toolchain-dependent. An absent table
-    entry on gfx120x is therefore a hard unknown rather than a low-confidence
-    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
-    is not in that family and may derive.
+    and its GDDR clock interpretation is toolchain-dependent. On the RDNA 3.5
+    APUs the "memory clock" is system DRAM shared with the CPU. An absent table
+    entry on gfx120x or gfx115x is therefore a hard unknown rather than a
+    low-confidence numeric denominator. R9700 peaks require product='r9700'.
+    CDNA5 gfx1250 is in neither family and may derive.
+
+    The gfx1151 row is the 40-CU Radeon 8060S; the 8050S (32 CU) and 8040S report
+    the same ISA and no product key. Pass the physical CU count as ``cu``: on
+    gfx115x a row whose ``cu`` differs is a hard unknown as well.
     """
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     if peaks:
+        if cu and is_client_rdna35(gfx) and peaks.get("cu") and int(float(cu)) != int(float(peaks["cu"])):
+            return None
         return peaks
-    if is_client_rdna4(gfx):
+    if is_client_rdna4(gfx) or is_client_rdna35(gfx):
         return None
     return derive_peaks_from_props(device)
 
@@ -518,11 +535,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="reproduce the SKILL.md worked example")
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
+    ap.add_argument("--cu", type=int, default=None, help="physical CU count, checked on gfx115x")
     a = ap.parse_args()
     if a.peaks:
         p = resolve_peaks(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
             a.peaks,
+            cu=a.cu,
         )
         print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)

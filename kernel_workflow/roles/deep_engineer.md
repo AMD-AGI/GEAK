@@ -77,7 +77,8 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
    cards, and so do the fp8 format and the matrix ISA. On RDNA4, MFMA/MX peaks do not exist — use a
    the product's datasheet peaks (see `peaks.md`) only
-   when `ROOFLINE_STATUS` is `calibrated-<product>`;
+   when `ROOFLINE_STATUS` is `calibrated-<product>` (on gfx1151, the `peaks.md` row
+   only when it is `tabulated-gfx1151`);
    pair them with measured on-box rates when available.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
 2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory

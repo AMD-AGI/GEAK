@@ -86,14 +86,19 @@ see the disagreement rather than a single blended number that hides it.
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
 1. Resolve peaks from `peaks.md` via
-   `resolve_peaks(gfx, product=env_report.device_target)`.
+   `resolve_peaks(gfx, product=env_report.device_target, cu=env_report.physical_cu_count)`.
    `device_target=unknown` (every card without a product section, MI300/MI355
    included) is no
    product constraint: the ISA-keyed tables still resolve. Client RDNA4
    numeric peaks exist only for the products with a `product:` section
    (`r9700`, `r9600d`). A bare gfx1201 (or any other
    gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
-   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
+   unknown headroom, and do not rank on roofline. **`gfx1151` is tabulated** (the
+   40-CU Radeon 8060S) and resolves with no `product`, so report achieved-vs-peak
+   there. The same ISA ships as the 32-CU 8050S and 16-CU 8040S, and the `cu`
+   argument returns None for them; that, and any other gfx115x ISA, is a hard
+   unknown that never derives (the APU's "memory clock" is shared system DRAM).
+   `gfx125x` is CDNA5, not RDNA4
    — it must not use that gate. Other unknown architectures may derive from
    device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
    canonical dtype keys; a missing dtype is unknown, never the table maximum.
@@ -244,7 +249,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | level | trigger | behavior |
 |---|---|---|
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
+| **L1** | `gfx` absent from `peaks.md` (not gfx120x / gfx115x, §3) | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
 | **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |

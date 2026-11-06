@@ -224,6 +224,49 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
+    def test_client_rdna35_family_is_gfx115x_not_discrete_rdna3(self):
+        """gfx1151 is the RDNA 3.5 APU; gfx1100/gfx1103 are different parts."""
+        self.assertTrue(rt.is_client_rdna35("gfx1151"))
+        self.assertTrue(rt.is_client_rdna35("gfx1150"))
+        self.assertFalse(rt.is_client_rdna35("gfx1100"))
+        self.assertFalse(rt.is_client_rdna35("gfx1103"))
+        self.assertFalse(rt.is_client_rdna35("gfx11510"))
+        self.assertFalse(rt.is_client_rdna35("gfx1201"))
+        self.assertFalse(rt.is_client_rdna35(None))
+
+    def test_unmeasured_gfx115x_is_hard_unknown_not_derived(self):
+        """An untabulated RDNA 3.5 part must not fall through to torch props: on an
+        APU the "memory clock" is system DRAM shared with the CPU, so a derived
+        bandwidth is a wrong denominator, not a low-confidence one."""
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return {"hbm_bw_bytes_s": 1.0, "flops": {}, "cu": 1,
+                    "source": "derived", "confidence": "low"}
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1152"))
+            self.assertEqual(called, [], "gfx115x must not reach derive_peaks_from_props")
+            # Control: discrete RDNA3 is outside the family and still derives.
+            self.assertIsNotNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100"))
+            self.assertEqual(called, [0])
+        finally:
+            rt.derive_peaks_from_props = original
+
+    def test_gfx1151_row_applies_only_at_its_cu_count(self):
+        """The row is the 40-CU 8060S; the 32-CU 8050S shares the ISA and has no product key."""
+        self.assertEqual(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40)["cu"], 40)
+        self.assertIsNotNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu="40"))
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=32))
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=16))
+        # Without a CU count the call is unchanged.
+        self.assertIsNotNone(rt.resolve_peaks(PEAKS_MD, "gfx1151"))
+        # Control: the CU check is gfx115x-only; product-keyed R9700 peaks are untouched.
+        self.assertIsNotNone(rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700", cu=32))
+
     def test_gfx1250_missing_table_may_derive(self):
         called = []
         original = rt.derive_peaks_from_props
@@ -461,6 +504,15 @@ class TestSkillDocConsistency(unittest.TestCase):
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
                      "attention decode (paged) | **0.50**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
+
+    def test_skill_md_states_gfx1151_is_tabulated_and_cu_gated(self):
+        """A run on hardware wrote "No roofline peak table exists for gfx1151" into its
+        environment report; the agent-facing doc must say the row exists, and pass the
+        CU count that decides whether it applies."""
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("**`gfx1151` is tabulated**", text)
+        self.assertIn("cu=env_report.physical_cu_count", text)
 
     def test_workload_contract_is_stated(self):
         """The hard constraint the byte-reduction track must not violate."""
