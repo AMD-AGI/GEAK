@@ -264,6 +264,12 @@ It never launches a server. Its most important check is that `aiperf` actually s
 a stock aiperf cannot replay the corpus at all, but pointed at a server it will still report a
 throughput — a "successful" run that measured a different workload.
 
+A handoff run checks the client before anything launches. `run_e2e.py` resolves the `aiperf` the
+bench will run (`AIPERF_BIN`, else `aiperf_bin`, else `aiperf` on `PATH`), and when that is an absolute
+path that is missing, not executable, or in a venv whose interpreter is gone, it writes
+`error_class: agentx_client_unavailable` instead of launching a server. A bare name missing from
+`PATH` only warns, since the bench's `PATH` can differ; `GEAK_STRICT_AGENTX_PREFLIGHT=1` refuses it too.
+
 ### What the declaration changes
 
 The workflow composes one `bench_env.sh` and the Director writes it beside the copied bench script;

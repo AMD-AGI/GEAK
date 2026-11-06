@@ -1788,6 +1788,8 @@ class TestAgentXPreflight(_RunE2ECase):
         self.assertEqual(
             rx.agentx_preflight({"workload_spec": {"kind": "synthetic_isl_osl"}}), []
         )
+        self.assertIsNone(rx.agentx_refusal({}))
+        self.assertIsNone(rx.agentx_refusal({"workload_spec": {"kind": "synthetic_isl_osl"}}))
 
     def test_missing_aiperf_is_reported_with_the_name_it_looked_for(self):
         os.environ["PATH"] = "/nonexistent"
@@ -1854,6 +1856,81 @@ class TestAgentXPreflight(_RunE2ECase):
         # aiperf only: the vendored mapper covers the other prerequisite.
         self.assertEqual(len(problems), 1)
         self.assertIn("aiperf", problems[0])
+
+    def _venv_client(self, base_python: str) -> str:
+        """aiperf in a venv laid out like uv's: bin/python links the interpreter that built it."""
+        bin_dir = Path(tempfile.mkdtemp(dir=self.tmp)) / "venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir.parent / "pyvenv.cfg").write_text(f"home = {os.path.dirname(base_python)}\n")
+        (bin_dir / "python").symlink_to(base_python)
+        client = bin_dir / "aiperf"
+        client.write_text(f"#!{bin_dir / 'python'}\nimport sys\n")
+        client.chmod(0o755)
+        return str(client)
+
+    def test_an_absolute_client_whose_venv_interpreter_is_gone_refuses_the_run(self):
+        """X_OK passes the script itself; exec() would fail with "bad interpreter"
+        only after a server had been launched and warmed."""
+        gone = str(self.tmp / "uv" / "python3.11")
+        os.environ["AIPERF_BIN"] = self._venv_client(gone)
+        refusal = rx.agentx_refusal(dict(self.AGENTX))
+        self.assertIn("interpreter is gone", refusal or "")
+        self.assertIn(gone, refusal)
+        self.assertIn(refusal, rx.agentx_preflight(dict(self.AGENTX)))
+
+    def test_an_absolute_client_that_cannot_start_refuses_the_run(self):
+        missing = self.tmp / "no_such" / "aiperf"
+        plain = self.tmp / "aiperf_not_executable"
+        plain.write_text("#!/bin/sh\n")
+        for client, why in ((missing, "does not exist"), (plain, "is not executable")):
+            with self.subTest(why=why):
+                os.environ["AIPERF_BIN"] = str(client)
+                self.assertEqual(rx.agentx_refusal(dict(self.AGENTX)),
+                                 f"the AgentX client {client} {why}")
+
+    def test_a_stale_python_link_outside_a_venv_is_not_a_refusal(self):
+        """A system bin dir can hold a dangling python link beside a working client."""
+        bin_dir = self.tmp / "usr" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "python").symlink_to(self.tmp / "python2.7")
+        client = bin_dir / "aiperf"
+        client.write_text("#!/bin/sh\n")
+        client.chmod(0o755)
+        os.environ["AIPERF_BIN"] = str(client)
+        self.assertIsNone(rx.agentx_refusal(dict(self.AGENTX)))
+
+    def test_a_working_venv_client_is_not_refused(self):
+        os.environ["AIPERF_BIN"] = self._venv_client(sys.executable)
+        os.environ.pop("INFERENCEX_PATH", None)
+        self.assertIsNone(rx.agentx_refusal(dict(self.AGENTX)))
+        self.assertEqual(rx.agentx_preflight(dict(self.AGENTX)), [])
+
+    def test_the_declared_aiperf_bin_is_checked_when_the_environment_names_none(self):
+        """bench_env.sh assigns the declared client only when AIPERF_BIN is unset."""
+        missing = str(self.tmp / "declared" / "aiperf")
+        h = {"workload_spec": {**self.AGENTX["workload_spec"], "aiperf_bin": missing}}
+        os.environ.pop("AIPERF_BIN", None)
+        self.assertIn(missing, rx.agentx_refusal(h) or "")
+        os.environ["AIPERF_BIN"] = self._venv_client(sys.executable)
+        self.assertIsNone(rx.agentx_refusal(h))
+
+    def test_a_bare_name_off_path_warns_unless_strict(self):
+        os.environ["PATH"] = "/nonexistent"
+        os.environ.pop("AIPERF_BIN", None)
+        os.environ.pop("GEAK_STRICT_AGENTX_PREFLIGHT", None)
+        self.assertIsNone(rx.agentx_refusal(dict(self.AGENTX)))
+        os.environ["GEAK_STRICT_AGENTX_PREFLIGHT"] = "1"
+        self.assertIn("aiperf not found on PATH", rx.agentx_refusal(dict(self.AGENTX)) or "")
+
+    def test_a_bare_name_that_finds_a_broken_client_is_reported_not_refused(self):
+        """Another aiperf may come first on the bench's PATH."""
+        client = self._venv_client(str(self.tmp / "uv" / "python3.11"))
+        os.environ["PATH"] = os.path.dirname(client)
+        os.environ.pop("AIPERF_BIN", None)
+        os.environ.pop("GEAK_STRICT_AGENTX_PREFLIGHT", None)
+        problems = rx.agentx_preflight(dict(self.AGENTX))
+        self.assertTrue(any(f"resolves to {client}" in p for p in problems), msg=str(problems))
+        self.assertIsNone(rx.agentx_refusal(dict(self.AGENTX)))
 
 
 class TestAlignmentFlags(_RunE2ECase):
@@ -3314,6 +3391,47 @@ class TestMain(_RunE2ECase):
         journey = json.loads(
             (self.eval_dir / rx.KERNEL_JOURNEY_FILE).read_text())
         self.assertEqual(journey["kernels"], [])
+
+    def _agentx_handoff_without_a_client(self) -> Path:
+        os.environ["AIPERF_BIN"] = str(self.tmp / "gone_venv" / "bin" / "aiperf")
+        return self._handoff(workload_spec={"kind": rx.WORKLOAD_KIND_AGENTX})
+
+    def test_an_agentx_client_that_cannot_start_is_refused_before_any_launch(self):
+        """The client adapter would only find this after a server had warmed."""
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("a refused run must not launch"))
+        rc, stdout = self._run(self._agentx_handoff_without_a_client())
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(stdout)["status"], "error")
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["error_class"], "agentx_client_unavailable")
+        self.assertIn("gone_venv", out["error"])
+
+    def test_a_dry_run_reports_the_refusal_without_refusing(self):
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        rc, stdout = self._run(self._agentx_handoff_without_a_client(), "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("gone_venv", json.loads(stdout)["agentx_refusal"])
+        self.assertFalse(self.result_path.exists())
+
+    def test_a_terminal_eval_dir_is_re_emitted_without_a_client(self):
+        """Re-emitting from disk measures nothing, so it needs no client."""
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
+            "schema_version": 1,
+            "eval_dir": str(self.eval_dir),
+            "baseline_throughput_tok_s": 400.0,
+            "final_throughput_tok_s": 500.0,
+            "throughput_speedup": 1.25,
+            "output_parity": "pass",
+        })
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("must not re-run the workflow"))
+        rc, _stdout = self._run(self._agentx_handoff_without_a_client())
+        self.assertEqual(rc, 0)
+        self.assertNotEqual(
+            json.loads(self.result_path.read_text()).get("error_class"),
+            "agentx_client_unavailable")
 
     def test_sigterm_handler_self_stops_as_a_timeout(self):
         """The outer runner's graceful stop must be converted into a TimeoutError
