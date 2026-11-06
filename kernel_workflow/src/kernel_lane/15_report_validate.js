@@ -115,10 +115,12 @@ if (EXTERNAL_OBJECTIVE) {
 }
 validation = EXTERNAL_OBJECTIVE && !exportReady ? {...validation,
   primary_speedup: null, external_measurement_valid: false, validation_status: 'unavailable',
+  observed_evidence: null,
   native_reproducible_gain: false, native_reproducible_regression: false,
   development_geomean_speedup: null, final_failure: 'final_patch_export_unverified'}
   : finalMeasurementFailure ? {...validation,
   primary_speedup: null, external_measurement_valid: false, validation_status: 'invalid_measurement',
+  observed_evidence: null,
   native_reproducible_gain: false, native_reproducible_regression: false,
   development_geomean_speedup: null, final_failure: finalMeasurementFailure}
   : await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG, finalPatch, true);

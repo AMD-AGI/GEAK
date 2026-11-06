@@ -90,6 +90,8 @@ async function runCase(sc) {
       development_geomean_speedup: development, native_reproducible_gain: speed > 1,
       native_reproducible_regression: speed < 1, timing_basis: 'cpu_fixture',
       status: speed <= 1 ? 'regression' : 'verified', validation_status: 'accepted'}});
+    if (id === 'integrated' && sc.integration?.readerMissing)
+      delete externalRecords.get(id).value[sc.integration.readerMissing];
     return ref;
   };
   const hostEnv = {...process.env,
@@ -324,6 +326,8 @@ async function runCase(sc) {
         return {attempted: true, conclusion: 'improved', best: {
           evidence_context: {tested_applicability: 'integrated fixture source', unresolved: ['integration rival']},
            geomean: sc.integration.speed, arithmetic: sc.integration.speed,
+          ...(sc.external ? {external_evaluation: registerExternal('integrated', workspace,
+            sc.integration.speed, sc.integration.speed)} : {}),
           per_case: h.perCase(sc.integration.speed), patch_file: patch}};
       }
       if (label.startsWith('storage:reclaim')) {
@@ -840,6 +844,19 @@ const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, spee
   reps: 3, speedup_spread: 0.01}));
 const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
 const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+for (const readerMissing of [null, 'status', 'correctness']) {
+  cases.push({...integrationFixture, name: `native integrated reader authority with missing ${readerMissing}`,
+    external: true, args: {budget: 2},
+    best: readerMissing ? 1.4 : 1.8, bestId: readerMissing ? 'r1_d1' : 'r1_integrated',
+    bestDev: readerMissing ? 1.4 : 1.8,
+    expected: readerMissing ? fast : source(1, 2),
+    plans: {r1: integrationFixture.plans.r1},
+    candidates: {r1_d0: {files: source(1, 0), speed: 1.2, development: 1.2},
+      r1_d1: {files: fast, speed: 1.4, development: 1.4}},
+    integration: {...integrationFixture.integration, readerMissing},
+    check: ({archive}) => assert.equal(archive.entries.some(row => row.id === 'r1_integrated'), !readerMissing),
+  });
+}
 for (const count of [6, 400]) {
   const rows = Array.from({length: count}, (_, i) => ({...caseViewRows[i % 6], name: `case-${i}`}));
   cases.push({...integrationFixture, name: `complete or explicit-reference case handoffs with ${count} rows`,

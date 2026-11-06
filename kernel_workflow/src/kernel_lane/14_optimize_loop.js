@@ -408,6 +408,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
     // External integration keeps the existing host-checked measurement and identity route.
     if (EXTERNAL_OBJECTIVE && integrate && integrate.conclusion === 'improved' && integrate.best &&
+      isQualified({ver: integrate.best}) &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
       integrate.best.reported_context = {...reportedEvidence({id: `r${round}_integrated`},
         null, null, integrate.best.patch_file, candidates.map(c => c.reported_context)),
@@ -430,7 +431,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     const d = {id: `r${round}_integrated`, parent_id: 'ORIGINAL', out_dir: `${EVAL_DIR}/round_${round}/integrate`,
       donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate',
       reported_context: integrate.best.reported_context};
-    const ver = {...integrate.best, reported_by: 'integrator', status: 'verified', correctness: 'pass',
+    const ver = {...integrate.best, reported_by: 'integrator',
       verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted};
     const retained = evo ? await evo.record(d, null, ver, integrate.best.patch_file) : null;
     await retainResult(d, null, ver, integrate.best.patch_file, evo, roundBase, retained);

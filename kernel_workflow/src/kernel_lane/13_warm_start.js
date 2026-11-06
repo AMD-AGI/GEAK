@@ -202,6 +202,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
               arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              ...(EXTERNAL_OBJECTIVE ? {reported_per_case: ver.reported_per_case ?? null} : {}),
               ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
             warm_start.adopted = true;
