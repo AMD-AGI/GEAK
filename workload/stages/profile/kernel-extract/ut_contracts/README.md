@@ -84,7 +84,7 @@ signed zero. Snapshots use at most 256 MiB of GPU storage; larger operands fall 
 CPU snapshots with chunked comparison. Isolation reuses its first execution for the
 output-independence check instead of invoking the kernel again.
 
-Correctness and negative controls compare all cases/draws in bounded batches, controlled
+Correctness compares all cases/draws in bounded batches, controlled
 by `meta.ut_contract.oracle_batch_cases` (default 32) and `oracle_batch_bytes` (default
 256 MiB of estimated output across the legs). A single larger case stays whole and is
 reported; the output budget is not a total host/GPU-memory guarantee. Baseline/candidate
@@ -92,12 +92,45 @@ workers keep separate, unchanged overlays across batches, so batching does not p
 Torch import for every case. Controls get their own worker lifetime; workers stop before
 source restoration. Each batch's temporary `.pt` files are loaded and removed before
 the next batch. Negative controls regenerate bounded baseline batches instead of retaining
-suite-wide oracles, and still run every case; this does not change the rejection margin.
+suite-wide oracles. Each negative control searches for a numerical witness as described
+below; its rejection margin is unchanged.
 
 `ut_report.json.data_handling` records worker starts, batches, peak temporary oracle-file
 bytes and weight-cache statistics. Unneeded input copies are omitted from comparisons;
 reference operands and top-k score inputs retain their original comparison semantics.
 Only completed batches contribute results; missing case/draw outputs fail validation.
+
+## Negative-control witness search
+
+A mutation needs a completed numerical comparison that fails by at least the configured
+`min_control_margin`. It does not need to fail every case. The driver first tries a small
+case, then bounded batches of every remaining random case until it finds that witness.
+Stop applies only to the current control; every other declared control still runs.
+Correctness, input checks and replay keep their existing coverage.
+
+An author can optionally order known leaf/branch probes in the control declaration:
+
+```json
+{"leaf": "kernel_src/op.py", "find": "...", "replace": "...",
+ "expect": "...", "probe_sigs": ["DECODE_m4", "PREFILL_m200"]}
+```
+
+These must be unique random-case signatures from the manifest. They are tried one at a
+time, followed by the remaining cases if needed; they never narrow the fallback scope.
+Without a hint, the first probe has the smallest estimated output. A quick run stays
+within its own selected cases and still cannot qualify a UT. A hint is not proof of leaf
+execution: retain the normal source/binding and per-leaf delivery evidence.
+
+Weak numerical deviations continue the search. Import/build/launch failure, missing
+batch outputs and missing/incorrectly shaped returns cannot themselves qualify a
+control. If no sufficiently strong numerical witness exists, all eligible cases are
+checked and the control fails. Workers stop and the original source is restored and
+hashed on both success and failure.
+
+Each control reports `available_cases`, `checked_cases`, `early_stopped` and
+`witness_case`, alongside the existing margin and completed case comparisons. Early
+stopping happens after a completed batch; cases already executed in that batch remain
+in the report. The full UT manifest and workload weights are never reduced.
 
 ## The case manifest (`run/ut_cases.json`)
 

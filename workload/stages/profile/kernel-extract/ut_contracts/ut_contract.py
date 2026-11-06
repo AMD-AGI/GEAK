@@ -437,6 +437,11 @@ def lint_task(task_dir):
                               % (leaf, n))
             if not (c.get("expect") or "").strip():
                 errors.append("negative control on %s states no expected deviation" % leaf)
+            probes = c.get("probe_sigs", [])
+            known = {case["sig"] for case in cases if case.get("random")}
+            if (not isinstance(probes, list) or any(not isinstance(s, str) for s in probes)
+                    or len(set(probes)) != len(probes) or set(probes) - known):
+                errors.append("negative control on %s: probe_sigs must name unique random cases" % leaf)
 
     # The server compiles the kernel after its framework has been imported; a framework can
     # rebind library functions at import (sglang: triton.next_power_of_2), so a leg that never

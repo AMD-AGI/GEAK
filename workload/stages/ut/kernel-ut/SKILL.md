@@ -88,7 +88,10 @@ Lanes follow [the UT lane procedure](references/ut-lane.md), author and fix in p
 and run CPU lint, quick iterations, then `unittest.py --validation-mode correctness --reuse`.
 This runs every non-timing gate and emits a passing UT qualification without starting
 any timing workers. Reuse unchanged passing gates; preserve the cases, draws and
-per-config weights for later optimization. Wait/status the wave and retain each failure.
+per-config weights for later optimization. Negative controls use
+[witness search](ut_contracts/README.md#negative-control-witness-search): after a control
+produces the required numerical rejection, stop its remaining cases and retain its
+witness/margin. Every other control and the full correctness suite still run. Wait/status the wave and retain each failure.
 
 Every accepted task needs full correctness, binding/launch, server-call/variant,
 isolation/replay, per-leaf negative controls and restored-source evidence as required

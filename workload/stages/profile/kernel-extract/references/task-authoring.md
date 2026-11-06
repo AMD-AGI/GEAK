@@ -208,6 +208,10 @@ The shared leg runner already performs this isolation.
 6. Apply a reversible bad-source mutation per editable leaf. It must execute
    the intended native/JIT computation and produce a numerical/semantic
    mismatch. Import/build/launch failure does not satisfy this negative control.
+   Optionally give each mutation `probe_sigs` for known leaf/branch cases. The driver
+   tries those first, then expands to remaining cases until the original margin is
+   reached; it stops only that control. Keep every normal correctness case and every
+   leaf's control. See [witness search](../ut_contracts/README.md#negative-control-witness-search).
    **Record the deviation the mutation actually produced and check it clears the
    tolerance by a wide margin** — `oracle_power.py ... --tol T --control-rel-err
    <observed>`. A control that "passed" without its deviation ever being measured

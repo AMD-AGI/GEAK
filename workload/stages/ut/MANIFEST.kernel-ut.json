@@ -1,16 +1,16 @@
 {
   "file_count": 5,
   "files": {
-    "SKILL.md": "71a9b96c0fc60642dabee48e79bb836c8db845be4c00b35053e4a67f63d23004",
+    "SKILL.md": "fb182fa56b79461bed6ab74e0540f73077fded4728cd6fb09d686713d8084503",
     "references": "symlink:../../profile/kernel-extract/references",
     "scripts": "symlink:../../profile/kernel-extract/scripts",
     "shared": "symlink:../../profile/kernel-extract/shared",
     "ut_contracts": "symlink:../../profile/kernel-extract/ut_contracts"
   },
   "modified_from_origin": false,
-  "note": "Intentional UT tensor-lifecycle update: bounded private weight caching, shared input checks and batched oracle comparisons with isolated workers. Correctness qualification still omits timing. Prior frozen experiment receipts are unchanged.",
+  "note": "Intentional negative-control witness search with per-control early stopping, unchanged numerical margin and complete correctness scope. Prior frozen task receipts and GPU scheduling are unchanged.",
   "origin": "Local GEAK split profile/UT workflow",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "cef5971ae660177982617b28d6eb89bb16b5f4c5b08c3496a89809817e820cda"
+  "tree_sha256": "279c0261e3f141a948a381572b68e6deb84cb32de30a26deb7138c7a1d0227bc"
 }

@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -10,7 +11,11 @@ from unittest.mock import patch
 SCRIPT = Path(__file__).resolve().parents[1] / 'ut_driver.py'
 spec = importlib.util.spec_from_file_location('server_call_accounting_driver', SCRIPT)
 driver = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(driver)
+_path = sys.path[:]
+try:
+    spec.loader.exec_module(driver)
+finally:
+    sys.path[:] = _path
 
 
 class ServerCallAccountingTest(unittest.TestCase):

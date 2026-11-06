@@ -370,6 +370,17 @@ def oracle_workers(T, state):
             raise RuntimeError("; ".join(errors))
 
 
+def oracle_output_bytes(T, spec, draws=1, copies=3):
+    try:
+        sym = T.U.symbols_for(T.doc, spec.get("axes") or {})
+        size = sum(math.prod(T.U.shape_of(o, sym)) *
+                   T.U._torch().empty((), dtype=T.U.torch_dtype(T.U.dtype_of(o, sym))).element_size()
+                   for o in T.doc["outputs"].values() if T.U.present(o, sym))
+        return max(1, size) * draws * copies
+    except (KeyError, ValueError, TypeError):
+        return int(T.mc.get("oracle_batch_bytes", 256 << 20))
+
+
 def oracle_batches(T, draws=1, copies=3):
     """Bound output accumulation by case count and estimated serialized tensor bytes.
 
@@ -382,14 +393,7 @@ def oracle_batches(T, draws=1, copies=3):
         raise ValueError("oracle batch budgets must be positive")
     group, used = [], 0
     for spec in T.random_specs():
-        try:
-            sym = T.U.symbols_for(T.doc, spec.get("axes") or {})
-            size = sum(math.prod(T.U.shape_of(o, sym)) *
-                       T.U._torch().empty((), dtype=T.U.torch_dtype(T.U.dtype_of(o, sym))).element_size()
-                       for o in T.doc["outputs"].values() if T.U.present(o, sym))
-            size = max(1, size) * draws * copies
-        except (KeyError, ValueError, TypeError):
-            size = budget  # unknown output descriptors conservatively get a singleton
+        size = oracle_output_bytes(T, spec, draws, copies)
         if group and (used + size > budget or len(group) >= limit):
             yield group, used
             group, used = [], 0
@@ -763,6 +767,40 @@ def _sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def negative_control_batches(T, control):
+    """Probe likely witnesses first, then every remaining eligible case if needed.
+
+    Author-provided probe_sigs name known leaf/branch cases. Without a hint, try
+    the smallest estimated output first. Hints order the search; they never narrow
+    its scope, and a quick run cannot expand beyond its own selected cases.
+    """
+    specs = T.random_specs()
+    eligible = {s["sig"]: s for s in specs}
+    known = {s["sig"] for s in T.manifest["cases"] if s.get("random")}
+    probes = control.get("probe_sigs", [])
+    if (not isinstance(probes, list) or any(not isinstance(s, str) for s in probes)
+            or len(set(probes)) != len(probes) or set(probes) - known):
+        raise ValueError("negative-control probe_sigs must be unique random-case signatures")
+    probes = [s for s in probes if s in eligible]
+    if not probes and specs:
+        probes = [min(specs, key=lambda s: oracle_output_bytes(T, s))["sig"]]
+    batches = [([sig], oracle_output_bytes(T, eligible[sig])) for sig in probes]
+    with case_batch(T, set(eligible) - set(probes)):
+        batches.extend(oracle_batches(T))
+    return batches
+
+
+def numerical_control_outputs(T, comparison):
+    # Missing outputs and shape errors are not numerical rejections. In particular,
+    # control_margin's generic exact-bound fallback must not turn them into infinity.
+    metrics = {"peak_bound_multiple", "sqnr_db", "mismatches", "mismatched_bytes",
+               "bad_rows", "max_rel_err", "nonfinite_mismatches"}
+    return {name: result for name, result in comparison.items()
+            if name in T.doc["outputs"] and isinstance(result, dict) and result.get("ok") is False
+            and (bool(metrics.intersection(result)) or
+                 result.get("kind") == "harness" and result.get("why") == "non-finite mismatch")}
+
+
 def gate_negative_controls(T, a, state):
     controls = T.mc.get("negative_controls") or []
     if not controls:
@@ -771,8 +809,15 @@ def gate_negative_controls(T, a, state):
     rows = []
     for i, c in enumerate(controls):
         row = {"leaf": c["leaf"], "expect": c.get("expect"), "caught": False,
-               "margin": 0.0, "cases": [], "restored": True}
+               "margin": 0.0, "cases": [], "restored": True,
+               "available_cases": len(T.random_specs()), "checked_cases": 0,
+               "early_stopped": False, "witness_case": None}
         rows.append(row)
+        try:
+            batches = negative_control_batches(T, c)
+        except ValueError as exc:
+            row.update(ok=False, why=str(exc))
+            continue
         path = os.path.join(T.dir, c["leaf"])
         with open(path, "rb") as f:
             pristine = f.read()
@@ -787,7 +832,7 @@ def gate_negative_controls(T, a, state):
             # A control's overlay stays unchanged until all its workers have stopped.
             # Baselines are regenerated in bounded batches, never retained suite-wide.
             with oracle_workers(T, state):
-                for sigs, _ in oracle_batches(T, copies=3):
+                for sigs, _ in batches:
                     with case_batch(T, sigs):
                         jobs = [{"overlay": base, "path": os.path.join(state["scratch"], "base.pt"),
                                  "seed": a.seed, "draws": 1},
@@ -804,13 +849,19 @@ def gate_negative_controls(T, a, state):
                         _, comparisons = compare_blobs(T, blobs[1], blobs[0], a.seed, 1,
                                                        blobs[2] if _needs_noise(T) else None, only_draw=0)
                         for result in comparisons:
-                            if not result["ok"]:
+                            numerical = numerical_control_outputs(T, result)
+                            if not result["ok"] and numerical:
                                 row["caught"] = True
-                                margin = T.U.control_margin({"outputs": {k: v for k, v in result.items()
-                                                                        if isinstance(v, dict)}})
+                                margin = T.U.control_margin({"outputs": numerical})
                                 row["margin"] = max(row["margin"], margin)
+                                if margin >= margin_needed and row["witness_case"] is None:
+                                    row["witness_case"] = result["case"]
                             row["cases"].append({"case": result["case"], "ok": result["ok"]})
+                        row["checked_cases"] = len(row["cases"])
                         del blobs
+                        if row["witness_case"] is not None:
+                            row["early_stopped"] = row["checked_cases"] < row["available_cases"]
+                            break
         finally:
             with open(path, "wb") as f:
                 f.write(pristine)
