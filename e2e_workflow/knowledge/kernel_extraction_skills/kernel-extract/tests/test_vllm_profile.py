@@ -4,6 +4,7 @@ The same entry failures occurred in the Nov 2 DeepSeek-V4.1-Flash experiment
 and the Nov 5 Qwen3-8B-FP8 AgentX run: SGLang logs/CLI/RPCs were assumed.
 """
 import datetime as dt
+import importlib
 import importlib.util
 import io
 import json
@@ -88,6 +89,37 @@ class VllmProfileTest(unittest.TestCase):
             "import sys; assert sys.geak_test_overlay == 'loaded'; assert 'vllm' not in sys.modules"],
             cwd=self.root, env=env, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_lazy_worker_import_installs_once_and_keeps_original_call(self):
+        """Exercise the actual import hook, as a spawned serving worker reaches it."""
+        package = self.root / "vllm/v1/worker"
+        package.mkdir(parents=True)
+        for directory in (package, package.parent, package.parent.parent):
+            (directory / "__init__.py").write_text("")
+        (package / "gpu_worker.py").write_text(
+            "class Worker:\n    rank = 0\n"
+            "    def annotate_profile(self, output):\n        return 'original-result'\n")
+        with patch.dict(sys.modules), patch.object(sys, "path", [str(self.root), *sys.path]), \
+                patch.object(sys, "meta_path", list(sys.meta_path)), \
+                patch.dict(os.environ, {"GEAK_ITERATION_LOG_DIR": str(self.root / "iterations")}):
+            for name in list(sys.modules):
+                if name == "vllm" or name.startswith("vllm."):
+                    del sys.modules[name]
+            observer.install()
+            observer.install()
+            module = importlib.import_module(observer.MODULE)
+            observer.install()  # An already-loaded worker must not gain a second wrapper.
+            self.assertTrue(module.Worker.annotate_profile._geak_iteration_observer)
+            empty = types.SimpleNamespace(total_num_scheduled_tokens=0)
+            self.assertEqual(module.Worker().annotate_profile(empty), "original-result")
+            output = types.SimpleNamespace(total_num_scheduled_tokens=1,
+                scheduled_new_reqs=[types.SimpleNamespace(req_id="private", num_computed_tokens=0)],
+                scheduled_cached_reqs=types.SimpleNamespace(req_ids=[], num_computed_tokens=[]),
+                num_scheduled_tokens={"private": 1})
+            self.assertEqual(module.Worker().annotate_profile(output), "original-result")
+        lines = next((self.root / "iterations").glob("*.jsonl")).read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["scheduled_tokens"], 1)
 
     def rows(self):
         return [
