@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -65,6 +66,27 @@ def read_state(root: Path):
     return state
 
 
+def local_git_excludes(src: Path) -> str:
+    """Keep local exclusion rules across copies without copying Git metadata."""
+    if not (src / ".git").exists():
+        return ""
+    paths = subprocess.run(
+        ["git", "-C", str(src), "rev-parse", "--path-format=absolute",
+         "--show-toplevel", "--git-path", "info/exclude"],
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    if len(paths) != 2 or Path(paths[0]).resolve() != src.resolve():
+        raise ValueError(f"local exclusions require the source repository root: {src}")
+    exclude = Path(paths[1])
+    content = exclude.read_text() if exclude.exists() else ""
+    if not any(line.strip() and not line.startswith("#")
+               for line in content.splitlines()):
+        return ""
+    # info/exclude has lower precedence than root and nested .gitignore files.
+    # Prepending preserves that order; fixture bytes remain in the workspace.
+    return "# Inherited repository-local exclusions.\n" + content.rstrip("\n") + "\n"
+
+
 def relocate(src: Path, dst: Path):
     ancestors = sorted(
         {str(src), str(src.resolve()), *read_state(src)["ancestors"]},
@@ -94,11 +116,14 @@ def relocate(src: Path, dst: Path):
     (dst / STATE).write_text(json.dumps({"ancestors": ancestors}) + "\n")
     # Keep provenance and invalid-measurement history out of candidate patches.
     ignore = dst / ".gitignore"
-    content = ignore.read_text() if ignore.exists() else ""
+    original = ignore.read_text() if ignore.exists() else ""
+    content = local_git_excludes(src) + original
     if "/.geak/" not in content.splitlines():
+        content = content.rstrip("\n") + "\n/.geak/\n"
+    if content != original:
         if ignore.is_symlink():
             ignore.unlink()
-        ignore.write_text(content.rstrip("\n") + "\n/.geak/\n")
+        ignore.write_text(content)
     check(dst)
 
 
