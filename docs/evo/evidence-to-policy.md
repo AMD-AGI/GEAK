@@ -35,6 +35,18 @@ are measurement repetitions. Changed runtime conditions prevent treating all
 historical results as interchangeable replications. Execution failures and
 missing finals remain visible without becoming evidence that a search idea failed.
 
+The latest follow-ups add both positive and mixed evidence:
+
+| Record | Result and policy implication |
+| --- | --- |
+| EN01 | Selected GEAK-EVO **1.127721×** versus GEAK **1.044524×**, each relative to ORIGINAL, is one scoped population/capability signal. It does not isolate population size, retention or inheritance as the cause. |
+| R1 | Confirmed ratios to ORIGINAL were **E+ 1.003052×, E− 1.020384×, G′ 1.003046× and G 1.016413×**. These results do not establish method separation or retention superiority: all observed parents were ORIGINAL, so the intended retained-parent contrast was not exercised. |
+| P1 delivery correction | Retained sources measured around **1.016–1.020×** were blocked by the **2%** end-of-run gate. Final delivery now admits the best verified retained gain above the incumbent while search promotion keeps its margin. This repairs a demonstrated delivery defect; benefit to search or retention efficacy remains unmeasured. |
+| EN02 | Its guidance package bundles changes; an isolated guidance benefit has not been established. Keep it experimental rather than promoting the package to proven architecture. |
+
+None of these records establishes autonomous end-to-end discovery at **85% of a
+defensible workload ceiling**; that requires separate complete workload evidence.
+
 ## A small feedback loop using existing records
 
 ```mermaid
