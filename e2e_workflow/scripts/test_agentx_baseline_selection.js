@@ -73,6 +73,7 @@ async function run(body, overrides = {}, reply = selection()) {
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
     MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
+    SERVING_TOPOLOGY: '', MN: null, MN_SPEC: null, curPd: { prefill: {}, decode: {} },
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
     searchClosed: () => false, searchWindowShort: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),

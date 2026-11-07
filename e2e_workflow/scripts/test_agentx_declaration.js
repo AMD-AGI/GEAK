@@ -442,6 +442,7 @@ function buildIdentity(args) {
   // precisely why they cannot drift; the shape is the only live input to this function.
   const preamble = `const log = () => {};\n${shqSrc}\n`
     + `const BACKEND = 'sglang';\n const SERVING_TP = 8;\n const SERVING_EP = 1;\n`
+    + `const MN_SPEC = null;\n`
     + `const KB_DIMS = { model: 'M', gfx: 'gfx950', framework_version: '0.5.19',`
     + ` precision: 'mxfp4', rocm_version: '7.2.0' };\n`;
   return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
