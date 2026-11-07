@@ -89,7 +89,8 @@ capture before making those claims.
 
 The trace directory above is a point subdirectory of the server's configured
 profiler root. vLLM writes prefix-named files to that root; the probe links the
-current point's new traces into its subdirectory. Request and window limits remain
+current point's new traces into its subdirectory. Elsewhere (multinode's
+`PROFILE_DIR[/<role>]`), `--profiler-root` names the root. Request and window limits remain
 finite. No SGLang abort RPC is sent to vLLM; finite requests must drain before the
 next point. A trace must contain actual GPU kernels at the requested phase/shape.
 The GPU lease and serving lifecycle rules in setup/capture still apply.
