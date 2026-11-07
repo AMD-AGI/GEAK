@@ -230,15 +230,26 @@ async function runCase(sc) {
         // have materialized the selected source before this model call starts.
         const workspace = h.field(prompt, 'KERNEL_PATH');
         assert.deepEqual(readSources(workspace), spec.inherited || original, `${id} inherited source`);
+        // Before any archive source exists, engineers get the greedy rules and no evolution context;
+        // the save command still carries the fixed cumulative-patch anchor.
         const evolution = h.field(prompt, 'EVOLUTION');
-        assert.equal(Object.hasOwn(evolution, 'selected_evidence'),
-          sc.args?.evolution_evidence_handoff === true,
-          'explicit handoff preserves a bounded view even on overflow');
-        if (evolution.selected_evidence?.context_omitted) {
-          assert.ok(evolution.selected_evidence.full_context_ref.path.endsWith('/evolution/archive.json'));
-          assert.ok(Buffer.byteLength(JSON.stringify(evolution.selected_evidence)) <= 16384);
+        if (evolution) {
+          assert.match(prompt, /retain useful slower approaches/);
+          assert.equal(Object.hasOwn(evolution, 'selected_evidence'),
+            sc.args?.evolution_evidence_handoff === true,
+            'explicit handoff preserves a bounded view even on overflow');
+          if (evolution.selected_evidence?.context_omitted) {
+            assert.ok(evolution.selected_evidence.full_context_ref.path.endsWith('/evolution/archive.json'));
+            assert.ok(Buffer.byteLength(JSON.stringify(evolution.selected_evidence)) <= 16384);
+          }
+        } else {
+          assert.match(prompt, /never go below baseline/);
+          assert.doesNotMatch(prompt, /retain useful slower approaches|roles\/evolution\.md/);
+          assert.equal(h.field(prompt, 'EVOLUTION_ARCHIVE'), undefined);
         }
-        const anchor = evolution.workspace_base_commit;
+        const anchor = evolution ? evolution.workspace_base_commit
+          : prompt.match(/save_candidate_patch\.sh <KERNEL_PATH> \S+ ([0-9a-f]{40,64}) /)[1];
+        if (evolution) assert.equal(prompt.match(/save_candidate_patch\.sh <KERNEL_PATH> \S+ ([0-9a-f]{40,64}) /)[1], anchor);
         assert.match(anchor, /^[0-9a-f]{40,64}$/, 'host supplies the fixed cumulative-patch anchor');
         assert.equal(git(workspace, 'show', `${anchor}:k.py`), original['k.py'], 'patch anchor stays ORIGINAL');
         assert.equal(git(workspace, 'show', 'HEAD:k.py'), (spec.inherited || original)['k.py'],

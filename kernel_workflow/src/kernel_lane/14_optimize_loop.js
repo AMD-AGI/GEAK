@@ -232,6 +232,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         }
       }
       const isDeep = d.specialty === 'deep_explore';
+      // Before any retained source exists, EVO engineers get the greedy development rules; the
+      // evolution policy applies once there is an archive source to develop from.
+      const evoEngineer = archiveHasSource();
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
@@ -264,14 +267,14 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
-(facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.
+(facts/how-to only; measure everything; ${evoEngineer ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${evoEngineer ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.
 
 ## Inputs
 ${cfg({
         ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
-        ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
+        ...(evoEngineer ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
           'Improve the measured primary metric within the assigned budget. Work toward any supplied engineering target using the fixed-reference method in knowledge/kernel_hardware_evidence.md. ' +
