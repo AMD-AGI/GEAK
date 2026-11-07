@@ -794,7 +794,8 @@ The serving stack is launched through the selected backend adapter
 selected independently by `BENCH_CLIENT`:
 
 * `native` (default standalone) — each backend's built-in bench
-  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
+  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain. On a multinode run
+  it is the one client that runs on rank0 rather than the driver.
 * `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
   (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
@@ -805,8 +806,10 @@ selected independently by `BENCH_CLIENT`:
 `run_e2e.py` resolves `handoff.bench_client` (`auto` → `inferencex` when an
 InferenceX checkout is discoverable via `INFERENCEX_PATH`, else `native`) and
 exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents run
-inherits it. The profile round (server-side trace) always delegates back to the
-backend's native bench. The chosen client is echoed in `result.bench_client`, and
+inherits it. On one host the profile-round fallback (`PROF=1`) delegates back to the
+backend's native bench; on a multinode run it is a fresh load under the launcher's
+window. The chosen client is echoed in `result.bench_client` (where it ran in
+`result.bench_client_host`: `driver` | `rank0`), and
 the sweep reuse path carries it forward so sweep points use the same client.
 
 ### Server-LAUNCHER adapter (closes the launch-recipe residual)
