@@ -99,6 +99,226 @@ fi
 SERVER_STOP_GRACE_S="${SERVER_STOP_GRACE_S:-90}"
 export SERVER_STOP_GRACE_S
 
+# Trace wait: done once every expected trace is non-empty and the byte total has been
+# quiet for SETTLE; quiet for QUIET with traces missing means a rank died.
+_MN_TRACE_SETTLE_S=30
+_MN_TRACE_QUIET_S=180
+_MN_TRACE_TIMEOUT_S=1800
+_MN_STOP_PROFILE_TIMEOUT_S=180
+_MN_PD_HEALTH_TIMEOUT_S=10
+
+# Load on an engine, from its /metrics: "<requests running> <prompt tokens so far>"
+# (vllm:num_requests_running / sglang:num_running_reqs and *:prompt_tokens_total, labelled
+# series, summed); empty when it serves no /metrics (sglang without --enable-metrics).
+_mn_load() {
+  curl -sf -m 5 "$1/metrics" 2>/dev/null \
+    | awk '/^(vllm:num_requests_running|sglang:num_running_reqs)[{ ]/ {s += $NF; n = 1}
+           /^(vllm|sglang):prompt_tokens_total[{ ]/ {p += $NF}
+           END {if (n) printf "%d %.0f\n", s, p}'
+}
+
+# Best effort: hold the window until every engine is loaded, at most PROFILE_LOAD_WAIT_SEC.
+# Loaded is a request running or the prompt-token counter moving since the last poll: at
+# concurrency 1 a prefill engine finishes each request between polls and its gauge reads 0.
+# The trace gate, not this wait, decides whether the window is usable.
+_mn_wait_load() {
+  local _wait="${PROFILE_LOAD_WAIT_SEC:-300}" _role _url _n _p _idle _blind=""
+  local -A _last=()
+  local _deadline=$(( $(date +%s) + _wait ))
+  while :; do
+    _idle=""
+    while IFS='=' read -r _role _url; do
+      [ -n "$_url" ] || continue
+      _n="" _p=""
+      read -r _n _p <<< "$(_mn_load "$_url")"
+      if [ -z "$_n" ]; then
+        case " $_blind " in *" $_role "*) ;; *) _blind="$_blind $_role"
+          echo ">>> multinode: the $_role engine serves no /metrics; not waiting for its load" >&2 ;; esac
+      else
+        [ "$_n" -ge 1 ] || [ "${_last[$_role]:-$_p}" -lt "$_p" ] || _idle="$_idle $_role"
+        _last[$_role]=$_p
+      fi
+    done <<< "$_MN_PD_ENGINES"
+    [ -n "$_idle" ] || return 0
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      echo "!!! multinode: no request running on${_idle} after ${_wait}s; opening the window anyway" >&2
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# pd_disagg window: both engines are opened first and closed
+# together, so their GPU-time totals describe the same interval. Prints role=url
+# for every engine that opened one. Payload knobs read the backend adapter's env names.
+_mn_pd_window() {
+  local _acts="${SGLANG_PROFILE_ACTIVITIES:-[\"CPU\",\"GPU\"]}"
+  local _stack="${SGLANG_PROFILE_WITH_STACK:-false}" _role _url _windowed="" _stop_rc
+  _mn_wait_load
+  # One directory per engine: both number their ranks TP-0..N.
+  while IFS='=' read -r _role _url; do
+    [ -n "$_url" ] || continue
+    mkdir -p "$PROFILE_DIR/$_role"
+    if curl -sf -X POST "${_url}/start_profile" -H 'Content-Type: application/json' \
+        -d "{\"output_dir\":\"${PROFILE_DIR}/${_role}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
+        >/dev/null 2>&1; then
+      _windowed="${_windowed}${_role}=${_url}"$'\n'
+    else
+      echo "!!! multinode: /start_profile failed on the $_role engine ($_url)" >&2
+    fi
+  done <<< "$_MN_PD_ENGINES"
+  [ -n "$_windowed" ] || return 1
+  # Bounded by TIME and closed explicitly: num_steps counts forward steps, and
+  # decode runs ~10x more of them than prefill, so prefill's window would still
+  # be open at teardown and write nothing.
+  sleep "${PROFILE_WINDOW_SEC:-20}"
+  # Bounded: a wedged scheduler never answers /stop_profile.
+  while IFS='=' read -r _role _url; do
+    [ -n "$_url" ] || continue
+    _stop_rc=0
+    curl -sf -m "$_MN_STOP_PROFILE_TIMEOUT_S" -X POST "${_url}/stop_profile" \
+      >/dev/null 2>&1 || _stop_rc=$?
+    if [ "$_stop_rc" -eq 28 ]; then
+      echo "!!! multinode: the $_role engine did not answer /stop_profile within" \
+           "${_MN_STOP_PROFILE_TIMEOUT_S}s; its traces will be missing" >&2
+    elif [ "$_stop_rc" -ne 0 ]; then
+      echo ">>> multinode: the $_role engine had already closed its window" >&2
+    fi
+  done <<< "$_windowed"
+  printf '%s' "$_windowed"
+}
+
+# A field of the pd record's replica-0 engine of a role (mn_launch.json).
+_mn_engine() {
+  python3 -c 'import json,sys;e=(json.load(open(sys.argv[1])).get("pd") or {}).get("engines") or [];print(next((x.get(sys.argv[3]) or "" for x in e if x.get("role")==sys.argv[2] and not x.get("replica")),""))' \
+    "${OUT_DIR:-.}/mn_launch.json" "$1" "$2" 2>/dev/null
+}
+
+# adapter_probe_args <phase> <point dir> — serving_probe.py's flags (bench_e2e.sh
+# PROFILE_PROBE_POINTS). Requests go to the client port (the LB on pd_disagg, which
+# proxies no profiler); the window opens on the engine that runs the point's phase.
+# Occupancy: that engine's /metrics (adapter_launch gave the probe leg --enable-metrics).
+adapter_probe_args() {
+  local _url="$BASE_URL" _dir="$2" _ranks="$TP" _role
+  if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+    _role=decode; [ "$1" = "PREFILL" ] && _role=prefill
+    _url="$(printf '%s\n' "$_MN_PD_ENGINES" | sed -n "s/^$_role=//p" | head -n1)"
+    _ranks="$(_mn_engine "$_role" tp)"
+    _dir="$2/$_role"
+  fi
+  if [ -z "$_url" ] || [ -z "$_ranks" ]; then
+    echo "!!! multinode: no ${_role:-master} engine url/tp for a $1 probe" \
+         "(${OUT_DIR:-.}/mn_launch.json)" >&2
+    return 1
+  fi
+  printf '%s\n' --base-url "$BASE_URL" --profile-url "$_url" \
+    --mode multinode --trace-dir "$_dir" --expect-traces "$_ranks" --record-shapes \
+    --with-stack "${SGLANG_PROFILE_WITH_STACK:-false}"
+  # vllm writes into the profiler dir mn.py launched the engine with, named by the point.
+  [ "${BACKEND:-}" = vllm ] && printf '%s\n' --framework vllm \
+    --profiler-root "$PROFILE_DIR${_role:+/$_role}" --served-model \
+    "$(curl -sf -m 30 "$_url/v1/models" | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])')"
+  return 0
+}
+
+# adapter_probe_after <phase> <point dir> — the rank-set report of the window the probe
+# opened; pd_disagg also writes that engine's ranks/mn_trace_roles.json for pd-mass.
+adapter_probe_after() {
+  local _ranks="$TP" _role=""
+  if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+    _role=decode; [ "$1" = "PREFILL" ] && _role=prefill
+    _ranks="$(_mn_engine "$_role" tp)"
+  fi
+  python3 "$_MN_DIR/mn.py" trace-gate --profile-dir "$2" --expect-ranks "${_ranks:-$TP}" \
+    --nodes "$_MN_NNODES" \
+    ${_role:+--launch-json "${OUT_DIR:-.}/mn_launch.json" --role "$_role"}
+}
+# serving_probe.py speaks sglang and vllm; bench_e2e.sh refuses ATOM's PROFILE_PROBE_POINTS.
+case "${BACKEND:-}" in atom) unset -f adapter_probe_args adapter_probe_after ;; esac
+
+# adapter_profile_window: the backend's version returns on ONE new trace; here
+# every rank's trace must finish flushing before the gate runs.
+adapter_profile_window() {
+  local _expect="$TP"
+  local _before _after _deadline _depth=1 _windowed=""
+  [ "$_MN_TOPOLOGY" = "pd_disagg" ] && _depth=2
+  _mn_traces() { find "$PROFILE_DIR" -maxdepth "$_depth" -name '*.trace.json*' "$@" 2>/dev/null; }
+  _before=$(_mn_traces | wc -l)
+
+  if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+    _windowed="$(_mn_pd_window)"
+    if [ -z "$_windowed" ]; then
+      echo "!!! multinode: no engine accepted a profiler window" >&2
+      return 1
+    fi
+    # Each engine has its own TP; count only the engines that opened a window.
+    local _etp=0 _r
+    for _r in $(echo "$_windowed" | cut -d= -f1); do _etp=$(( _etp + $(_mn_engine "$_r" tp || true) + 0 )); done
+    [ "$_etp" -gt 0 ] && _expect="$_etp"
+    echo ">>> multinode: profiler window closed on $(grep -c = <<< "$_windowed") engine(s);" \
+         "expecting $_expect rank trace(s)"
+  else
+    adapter_profile_window_native || {
+      echo "!!! multinode: the profiler window failed on the master rank" >&2
+      return 1
+    }
+  fi
+
+  # Done = every expected file non-empty AND the byte total quiet for
+  # _MN_TRACE_SETTLE_S: torch creates each file before streaming into it.
+  local _settle="$_MN_TRACE_SETTLE_S" _quiet="$_MN_TRACE_QUIET_S"
+  local _interval=5 _bytes _last_bytes=-1 _stable=0 _nochange=0
+  _deadline=$(( $(date +%s) + _MN_TRACE_TIMEOUT_S ))
+  while [ "$(date +%s)" -lt "$_deadline" ]; do
+    _after=$(_mn_traces -size +1c | wc -l)
+    _bytes=$(_mn_traces -printf '%s\n' | awk '{s+=$1} END {print s+0}')
+    if [ "$_bytes" != "$_last_bytes" ]; then
+      _last_bytes="$_bytes"; _stable=0; _nochange=0
+    else
+      _stable=$(( _stable + _interval )); _nochange=$(( _nochange + _interval ))
+    fi
+    if [ "$(( _after - _before ))" -ge "$_expect" ] && [ "$_stable" -ge "$_settle" ]; then
+      break
+    fi
+    # Quiet but incomplete: a rank died. Let the gate describe what is there.
+    if [ "$_nochange" -ge "$_quiet" ]; then
+      echo "!!! multinode: $(( _after - _before ))/$_expect trace(s) and no new" \
+           "bytes for ${_quiet}s ($_bytes bytes total); giving up on the rest" >&2
+      break
+    fi
+    sleep "$_interval"
+  done
+  _after=$(_mn_traces -size +1c | wc -l)
+  echo ">>> multinode: $(( _after - _before ))/$_expect rank trace(s) landed in" \
+       "$PROFILE_DIR ($(( ${_last_bytes:-0} / 1048576 )) MiB total," \
+       "quiet for ${_stable}s)"
+
+  local _launch_json="${OUT_DIR:-.}/mn_launch.json"
+  [ "$_MN_TOPOLOGY" = "pd_disagg" ] && [ -f "$_launch_json" ] || _launch_json=""
+  PROFILE_DIR="$PROFILE_DIR" TP="$TP" \
+    python3 "$_MN_DIR/mn.py" trace-gate \
+      --profile-dir "$PROFILE_DIR" --expect-ranks "$_expect" \
+      --nodes "$_MN_NNODES" \
+      ${_launch_json:+--launch-json "$_launch_json" --window-s "${PROFILE_WINDOW_SEC:-20}"}
+  local _rc=$?
+  # Non-fatal: a partial set still ranks; the verdict is on disk.
+  if [ "$_rc" -ne 0 ]; then
+    echo "!!! multinode: the trace set did NOT pass the gate; see" \
+         "$PROFILE_DIR/ranks/mn_trace_report.json before trusting the Top-N." >&2
+  fi
+  # Except an engine that ran nothing in the window: its share would have to come from
+  # another window, and the two would not describe one interval. Re-capture instead.
+  local _idle_engines
+  _idle_engines="$(python3 -c 'import json,sys;print(" ".join(r["role"] for r in json.load(open(sys.argv[1]))["roles"] if r.get("ranks") and not r.get("kernel_events")))' \
+                   "$PROFILE_DIR/ranks/mn_trace_roles.json" 2>/dev/null)"
+  if [ -n "$_idle_engines" ]; then
+    echo "!!! multinode: the $_idle_engines engine(s) ran no GPU kernel in the window; re-capture" \
+         "(longer PROFILE_WINDOW_SEC, more load) rather than splice windows" >&2
+    return 1
+  fi
+  [ "$(( _after - _before ))" -gt 0 ]
+}
+
 # pd_disagg: the router answers /health before any worker is reachable, so the LB
 # AND every engine replica must answer.
 if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
@@ -135,6 +355,14 @@ adapter_launch() {
       return 2
     }
   done <<< "$_MN_LEASES"
+  # sglang serves /metrics only with --enable-metrics (a provided script gets it through
+  # EXTRA_SERVER_ARGS like any accepted flag); the probe then reads the engine, not a log
+  # the shared mount delays.
+  local _extra="${EXTRA_SERVER_ARGS:-}"
+  if [ -n "${PROFILE_PROBE_POINTS:-}" ] && [ "${BACKEND:-sglang}" = "sglang" ]; then
+    _extra="$_extra --enable-metrics"
+    echo ">>> multinode launcher: probe leg, engines add --enable-metrics (occupancy from /metrics)"
+  fi
   echo ">>> multinode launcher: starting $(basename "$_MN_STATE") topology; launch log: $_launchlog"
   ( cd "$_MN_DIR" && EXTRA_SERVER_ARGS="$_extra" python3 mn.py launch ) >> "$_launchlog" 2>&1
   local rc=$?
