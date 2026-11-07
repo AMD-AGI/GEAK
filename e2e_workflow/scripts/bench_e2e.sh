@@ -433,6 +433,12 @@ EXTRA_SERVER_ARGS=${EXTRA_SERVER_ARGS:-}    # e.g. "--attention-backend triton"
 EXTRA_ENV=${EXTRA_ENV:-}
 # OVERLAY_PYTHONPATH: prepend an overlay dir so a patched subtree / monkeypatch loads first.
 OVERLAY_PYTHONPATH=${OVERLAY_PYTHONPATH:-}
+# Accepted source is a baseline dependency, independent of candidate overlays.
+# The per-run request also supports replay outside the original agent process.
+if [ -f "$HERE/source_request.json" ] || [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+  _source_paths="$(_stage_lookup source_paths.sh)" || exit 5
+  source "$_source_paths" || exit 5
+fi
 
 # ---- port: auto-allocate a free one if not pinned (avoids 30000 collisions on shared boxes) ----
 # Constrained auto-allocation: pick a free port inside [PORT_BASE, PORT_BASE+PORT_SPAN) so a run can be

@@ -14,6 +14,10 @@ adapter_default_port() { echo 30000; }
 _SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP" ] || _SGL_PP=""
 
 adapter_launch() {
+  local _server_pp="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
+  if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+    _server_pp="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${_SGL_PP:+$_SGL_PP:}${PYTHONPATH:-}"
+  fi
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
   # server before CUDA-graph capture. Harmless for stock runs. Only add it if the caller didn't already
@@ -35,7 +39,7 @@ adapter_launch() {
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
-    PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    PYTHONPATH="$_server_pp" \
     python -m sglang.launch_server \
       --model-path "$MODEL" \
       --host "$HOST" --port "$PORT" \
