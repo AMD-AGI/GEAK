@@ -1,0 +1,57 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "controlled_variants",
+  "maturity": "contract_ready_variant_hooks_operator_specific",
+  "tool": "immutable EP8 harness + explicitly declared variant hooks",
+  "purpose": "Bound exposed communication, payload movement, launch/materialization, and synchronization through controlled differences",
+  "capability_probe": [
+    "each variant reports a machine-readable ID and changed_components list",
+    "the full variant is bitwise/configuration-equivalent to the frozen measured path",
+    "correctness or intentionally changed semantics are declared before timing"
+  ],
+  "command_template": "{ep8_command} {variant_args} --output {output_json}",
+  "required_variants": [
+    "full",
+    "no_payload",
+    "local_loopback",
+    "compute_only",
+    "launch_materialization_control"
+  ],
+  "preconditions": [
+    "hold workload tensors, route, rank mapping, tuned configs, warmup, repetitions, clocks, and GPU lease constant",
+    "change exactly the components declared in changed_components",
+    "retain per-rank/per-repetition latency instead of only a reduced mean",
+    "do not add deltas from variants whose changed_components overlap",
+    "validate that no-payload and loopback controls preserve synchronization/metadata behavior they claim to retain"
+  ],
+  "outputs": [
+    {
+      "artifact": "geak-controlled-experiment-v2 manifest",
+      "information": "variant IDs, changed components, invariants and non-additivity warnings"
+    },
+    {
+      "artifact": "rank records per variant",
+      "information": "rank-max latency, noise and regression evidence"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "revision, commands, scope, repetitions and raw paths"
+    }
+  ],
+  "helps_diagnose": [
+    "upper/lower bounds on exposed communication",
+    "payload versus synchronization/metadata cost",
+    "launch/materialization contribution",
+    "whether measured deltas survive route and token regimes"
+  ],
+  "not_measured": [
+    "independent additive component times when variants overlap",
+    "instruction-level root cause",
+    "physical XGMI bytes without counters",
+    "a preferred implementation"
+  ],
+  "provenance": {
+    "reference": "kernel_workflow/scripts/multi_rank_analysis/experiments.py",
+    "notes": "Variant hooks must be implemented and audited in the operator harness; the generic framework only validates the experiment contract."
+  }
+}
