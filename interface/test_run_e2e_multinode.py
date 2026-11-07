@@ -336,6 +336,86 @@ def test_a_multinode_run_executes_here_without_ssh_to_the_master(monkeypatch, tm
 
 # ---- the first-round profile Hyperloom already ran (profile_trace) ----
 
+def _profile_tree(root: Path, dirs=None) -> dict:
+    """<root>/<podIP>_<role>/ with a rank0 and a rank1 trace plus capture_traces/; returns role -> rank0s."""
+    out = {}
+    for ip, role in dirs or [(ip, "prefill") for ip in _PREFILL] + [(ip, "decode") for ip in _DECODE]:
+        d = root / f"{ip}_{role}"
+        (d / "capture_traces").mkdir(parents=True)
+        (d / "capture_traces" / "rank0.trace.json.gz").write_bytes(b"x")
+        for rank in (0, 1):
+            (d / f"dp0_tp{rank}_rank{rank}.pt.trace.json.gz").write_bytes(b"x")
+        out.setdefault(role, []).append(str(d / "dp0_tp0_rank0.pt.trace.json.gz"))
+    return out
+
+
+_GLOBBED = {"analysis_md": "/s/kernel-agent/a/tracelens/analysis.md", "trace_file": "/s/runs/roofline/x/torch_trace"}
+
+
+def test_profile_trace_becomes_one_rank0_trace_per_engine_pod_steady_first(tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    rank0 = _profile_tree(root)
+    steady = rank0["decode"][0]
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root), steady_state_trace=steady), dict(_GLOBBED))
+    assert tl["trace_file"] == str(root), "the caller's profile, not the glob's"
+    assert tl["analysis_md"] == _GLOBBED["analysis_md"]
+    assert tl["trace_files"][0] == steady
+    assert sorted(tl["trace_files"]) == sorted(rank0["prefill"] + rank0["decode"])
+    assert not any("capture_traces" in t for t in tl["trace_files"])
+
+
+def test_a_directory_that_names_no_pod_is_ignored(tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    rank0 = _profile_tree(root, [(_PREFILL[0], "prefill"), (_DECODE[0], "decode"), ("10.9.9.9", "decode"),
+                                 (_PREFILL[1], "decode")])
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root)), dict(_GLOBBED))
+    assert sorted(tl["trace_files"]) == sorted([rank0["prefill"][0], rank0["decode"][0]])
+
+
+def test_a_role_without_traces_drops_the_prior(tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    _profile_tree(root, [(ip, "prefill") for ip in _PREFILL])
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root)), dict(_GLOBBED))
+    assert "trace_files" not in tl and "analysis_md" not in tl, "GEAK profiles on its own"
+
+
+def test_a_missing_profile_trace_never_falls_back_to_the_glob(tmp_path) -> None:
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(tmp_path / "gone")), dict(_GLOBBED))
+    assert tl == {"analysis_md": _GLOBBED["analysis_md"]}
+
+
+def test_map_args_forwards_the_trace_list(tmp_path, node_state) -> None:
+    exp = tmp_path / "session"
+    (exp / "kernel-agent" / "r" / "tracelens").mkdir(parents=True)
+    (exp / "kernel-agent" / "r" / "tracelens" / "analysis.md").write_text("# a", encoding="utf-8")
+    root = exp / "runs" / "profile" / "torch_trace"
+    _profile_tree(root)
+    node_state(_doc(profile_trace=str(root)))
+    tl = rx.map_args(_handoff(exp_root=str(exp / "geak")), timeout_s=3600)["tracelens"]
+    assert tl["trace_file"] == str(root) and len(tl["trace_files"]) == 4
+    assert tl["analysis_md"].endswith("analysis.md")
+
+
+def test_a_pd_profile_keeps_only_dirs_with_a_rank0_and_a_steady_trace_from_elsewhere(tmp_path, capsys) -> None:
+    root = tmp_path / "torch_trace"
+    rank0 = _profile_tree(root, [(_PREFILL[0], "prefill"), (_DECODE[0], "decode")])
+    (root / "README").write_text("not a pod", encoding="utf-8")
+    (root / f"{_PREFILL[1]}_prefill").mkdir()
+    steady = tmp_path / "steady.pt.trace.json.gz"
+    steady.write_bytes(b"x")
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root), steady_state_trace=str(steady)), dict(_GLOBBED))
+    assert tl["trace_files"][0] == str(steady)
+    assert sorted(tl["trace_files"][1:]) == sorted(rank0["prefill"] + rank0["decode"])
+    assert "has no rank0 trace at its top level" in capsys.readouterr().err
+
+
+def test_a_tp_span_profile_is_the_trace_dir_alone(tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    root.mkdir()
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root), pd_mode="none"), dict(_GLOBBED))
+    assert tl == {"analysis_md": _GLOBBED["analysis_md"], "trace_file": str(root)}
+
+
 def test_a_node_state_that_is_not_an_object_is_refused(tmp_path, monkeypatch) -> None:
     path = tmp_path / "node_state.json"
     path.write_text("[]", encoding="utf-8")
