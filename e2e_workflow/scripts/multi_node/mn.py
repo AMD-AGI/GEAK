@@ -1054,7 +1054,7 @@ def visible_gpus() -> int:
 
 # The kernel tools a node runs (gpu_lock.sh and profile_kernel.sh forward to these copies).
 KERNEL_SCRIPTS = os.path.join(HERE, os.pardir, os.pardir, os.pardir, "kernel_workflow", "scripts")
-TOOLS = ("gpu_lock.sh", "workspace_sources.py", "profile_kernel.sh", "profile_policy.sh")
+TOOLS = ("gpu_lock.sh", "workspace_sources.py", "gpu_lease.py", "profile_kernel.sh", "profile_policy.sh")
 
 
 def stage_tools(work_dir: str) -> str:
@@ -1737,6 +1737,10 @@ def cmd_launch(argv: list) -> int:
         print(">>> multinode: injected SYNC_TOKEN_IDS_ACROSS_TP=1 (tp spanning nodes, caller did not set it)", file=sys.stderr)
 
     pythonpath = env("PYTHONPATH", "")
+    # bench_e2e.sh's sitecustomize shims (profile_env, iteration_env), from the adapters every node reads.
+    shims = ":".join(os.path.join(adapters_dir(shared), os.path.basename(p))
+                     for p in env("PROFILE_PYTHONPATH", "").split(":") if p)
+    iterations = env("GEAK_ITERATION_LOG_DIR", "")
 
     launch_id = uuid.uuid4().hex[:10]
     magpie = os.path.join(adapters_dir(shared), "launchers", "magpie.sh") if provided else ""
@@ -1788,6 +1792,8 @@ def cmd_launch(argv: list) -> int:
                                   profile_dir=rank_profile_dir, overlay=overlay,
                                   pythonpath=pythonpath, extra_env=" ".join(rank_env),
                                   extra_args=rank_extra)
+        rank_vars.update(PROFILE_PYTHONPATH=shims, GEAK_ITERATION_LOG_DIR=(
+            os.path.join(iterations, role) if pd is not None and iterations else iterations))
         if provided:
             wrapper = os.path.join(out_dir, f"mn_cmd_rank{rank}.sh")
             with open(wrapper, "w", encoding="utf-8") as f:

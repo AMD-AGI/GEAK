@@ -328,6 +328,7 @@ jobs:
         run: |
           set -e
           node e2e_workflow/scripts/test_multinode_args.js
+          node e2e_workflow/scripts/test_pd_guards.js
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       - name: gfx1151 knowledge doc contract
