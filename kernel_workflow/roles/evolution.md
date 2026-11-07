@@ -26,8 +26,8 @@ The current-best profile may describe different source than the selected parent;
 check its applicability before carrying bottleneck conclusions into a direction.
 The prompt contains only recent archive entries and the best entry. Search the
 full archive file and its referenced evidence for older approaches when planning.
-Deep engineers may run alongside other directions in this mode. Keep their total
-declared cost within BUDGET_REMAINING, counting DEEP_COST for each deep engineer.
+When selecting deep_explore, make it the only direction in that round. The workflow
+reserves the round for that investigation and charges DEEP_COST against BUDGET_REMAINING.
 Use the remaining budget to answer concrete engineering questions. Do not abandon
 a potentially useful formulation solely because its first implementation is slow.
 For exploratory retention, these instructions replace the stock role's rule to
