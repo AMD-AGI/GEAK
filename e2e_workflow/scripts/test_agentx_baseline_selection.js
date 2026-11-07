@@ -18,6 +18,8 @@ const schemas = between('const obj =', '// Result of the ensure_flydsl');
 const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
 const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
+assert(!/Date\.now\(|new Date\(/.test(helper), 'the Workflow runtime throws on wall-clock reads');
+const pdHelpers = between('const PD_ROLES =', 'function roleAgent(');
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
@@ -84,7 +86,7 @@ async function run(body, overrides = {}, reply = selection()) {
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${schemas}\n${phaseSelector}\n${helper}\n${body}
+    ${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
