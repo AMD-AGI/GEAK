@@ -35,8 +35,10 @@ _ix_resolve_bench_py() {
 adapter_bench() {
   local NUMP="$1" MAXC="$2" PROF="${3:-0}"
 
-  # The portable InferenceX client has no server-trace hook; for the profile
-  # round fall back to the backend's native bench (set up by bench_e2e.sh).
+  # Its --profile sends a fixed {"num_steps": 1, "profile_by_stage": true} body,
+  # which is not the window GEAK sizes; the profile round keeps the backend's
+  # native bench (set up by bench_e2e.sh). Only a fallback: the windowed path
+  # drives this client at PROF=0.
   if [ "$PROF" = "1" ] && declare -F adapter_bench_native >/dev/null; then
     adapter_bench_native "$NUMP" "$MAXC" 1
     return $?
@@ -84,8 +86,9 @@ adapter_bench() {
 
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
   # stack (matches Hyperloom). --request-rate inf + --max-concurrency: the same
-  # saturation driver. --ignore-eos + fixed seed + random-range-ratio: identical
-  # dataset semantics.
+  # saturation driver (REQUEST_RATE, as for the native clients, staggers arrivals:
+  # bench_e2e.sh sets it for the profiling load).
+  # --ignore-eos + fixed seed + random-range-ratio: identical dataset semantics.
   "$py" "$bench_py" \
     --model "$MODEL" \
     --backend vllm \
@@ -96,7 +99,7 @@ adapter_bench() {
     --random-range-ratio "${RANDOM_RANGE_RATIO:-0}" \
     --num-prompts "$NUMP" \
     --max-concurrency "$MAXC" \
-    --request-rate inf \
+    --request-rate "${REQUEST_RATE:-inf}" \
     --ignore-eos \
     --num-warmups "$num_warmups" \
     --percentile-metrics "ttft,tpot,itl,e2el" \
