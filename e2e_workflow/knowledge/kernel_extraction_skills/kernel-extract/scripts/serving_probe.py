@@ -37,6 +37,12 @@ Four rules, each of which was learned by a window failing
    this probe parses the trace and asserts the intended phase and shape are actually in
    it, and reports what it found either way.
 
+A multi-node server (bench_e2e.sh PROFILE_PROBE_POINTS) runs these same rules with
+--mode multinode: requests go to the router (--base-url), the window opens on the
+point's engine (--profile-url) and occupancy is that engine's /metrics (or its log,
+--occupancy-log, when the leg could not add --enable-metrics), every rank writes a trace
+(--expect-traces), and the drives keep a PD engine's batch intact (see --mode).
+
 Stdlib only.
 """
 import argparse
@@ -48,12 +54,15 @@ import re
 import secrets
 import sys
 from pathlib import Path
+import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from observed_workload import parse_line  # noqa: E402
 
 
 def post(base, path, obj=None, timeout=1800):
@@ -70,6 +79,7 @@ SERVED_MODEL = None
 ITERATION_LOG_DIR = None
 ID_HI = 150000
 CACHE_SALT = None
+VLLM_SOURCE = None
 
 
 def scrape_metrics(base, timeout=30):
@@ -125,9 +135,47 @@ def scrape_metrics(base, timeout=30):
     return out, None
 
 
-def rand_ids(n, seed):
+def metrics_occupancy(base):
+    """scrape_metrics as an occupancy callable -> (num_running_reqs, gen_throughput, err)."""
+    def read():
+        cur, err = scrape_metrics(base)
+        return cur.get("num_running_reqs"), cur.get("gen_throughput"), err
+    return read
+
+
+class LogOccupancy:
+    """The same (num_running_reqs, gen_throughput) from the scheduler's own decode rows,
+    for a server without /metrics. Parsed by observed_workload's dialects, the parser the
+    replay weights come from. Only rows logged after this probe started count; a row is
+    logged every decode_log_interval forwards, so the latest one stands until the next."""
+
+    def __init__(self, path, rank=0):
+        self.path, self.rank = path, rank
+        self.offset = os.path.getsize(path)
+        self.last = (None, None)
+
+    def __call__(self):
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+        except OSError as exc:
+            return None, None, str(exc)
+        complete = chunk[:chunk.rfind(b"\n") + 1]
+        self.offset += len(complete)
+        for line in complete.decode("utf-8", "replace").splitlines():
+            rec = parse_line(line)
+            if rec and rec["kind"] == "decode" and rec["rank"] == self.rank:
+                self.last = (rec["running"], rec["gen_tps"])
+        return self.last[0], self.last[1], None
+
+
+def rand_ids(n, seed, vocab=None):
+    # Ids past the model's vocab make the embedding gather read out of bounds and fault the
+    # engine (DeepSeek-V4 has 129280).
     rnd = random.Random(seed)
-    return [rnd.randint(0, ID_HI) for _ in range(n)]
+    hi = min(vocab - 1, 150000) if vocab and vocab > 1001 else ID_HI
+    return [rnd.randint(1000 if hi > 1000 else 0, hi) for _ in range(n)]
 
 
 def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
@@ -158,16 +206,24 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
         return False
 
 
-def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
+def wait_for_occupancy(occupancy, want_bs, journal, timeout, poll=0.5, tolerance=0,
+                       alive=None):
     """Block until the scheduler holds the intended batch AND is past prefill.
+
+    `occupancy` is the engine's base URL, read through its /metrics phase counters, or a
+    LogOccupancy -> (bs, tps, err) for a server without /metrics.
 
     Occupancy alone is not steady state: a request with a 234k-token prompt counts as
     running from admission while the scheduler spends the next ten seconds chunk-ingesting
-    it, and a window armed then carried no decode step at all. Arm only once the decode
-    counter has advanced by at least one token per resident request since the last
-    reading AND the prefill counter has not moved. Counters that update in steps (every
-    decode_log_interval iterations) simply take a few polls to show the advance.
+    it, and a window armed then carried no decode step at all. With a URL, arm only once
+    the decode counter has advanced by at least one token per resident request since the
+    last reading AND the prefill counter has not moved. Counters that update in steps
+    (every decode_log_interval iterations) simply take a few polls to show the advance.
+    A callable carries no phase counter: it arms on the intended batch with non-zero
+    throughput, and verify_trace is the guard against a prefill window.
 
+    `alive()` -> False once a driven request has returned: a LogOccupancy row outlives
+    the batch it describes, so without it an idle engine reads as the intended batch.
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
     t0 = time.time()
@@ -199,9 +255,43 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
             time.sleep(poll)
         journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs})
         return False, None, None
+    if callable(occupancy):
+        last = (None, None)
+        while time.time() - t0 < timeout:
+            if alive is not None and not alive():
+                journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
+                                "observed_bs": last[0], "gen_throughput": last[1],
+                                "waited_s": round(time.time() - t0, 1),
+                                "consequence": "a driven request returned before the batch "
+                                               "was confirmed; window NOT armed"})
+                return False, last[0], last[1]
+            bs, tps, err = occupancy()
+            last = (bs, tps)
+            if err is None and bs is not None and abs(bs - want_bs) <= tolerance \
+                    and (tps or 0) > 0:
+                journal.append({"event": "steady_state_confirmed", "want_bs": want_bs,
+                                "observed_bs": bs, "gen_throughput": tps,
+                                "waited_s": round(time.time() - t0, 1),
+                                "basis": "occupancy+throughput only"})
+                return True, bs, tps
+            time.sleep(poll)
+        journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
+                        "observed_bs": last[0], "gen_throughput": last[1],
+                        "waited_s": round(time.time() - t0, 1),
+                        "consequence": "window NOT armed; arming here would capture the ramp "
+                                       "or an unrelated batch and label it as this point"})
+        return False, last[0], last[1]
     prev, last = None, {}
     while time.time() - t0 < timeout:
-        cur, err = scrape_metrics(base)
+        if alive is not None and not alive():
+            journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
+                            "observed_bs": last.get("num_running_reqs"),
+                            "gen_throughput": last.get("gen_throughput"),
+                            "waited_s": round(time.time() - t0, 1),
+                            "consequence": "a driven request failed before the batch "
+                                           "was confirmed; window NOT armed"})
+            return False, last.get("num_running_reqs"), last.get("gen_throughput")
+        cur, err = scrape_metrics(occupancy)
         last = cur or last
         bs, tps = cur.get("num_running_reqs"), cur.get("gen_throughput")
         if err is None and bs is not None and abs(bs - want_bs) <= tolerance:
@@ -248,12 +338,17 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
     return False, last.get("num_running_reqs"), last.get("gen_throughput")
 
 
-def start_profile(base, out_dir, num_steps, journal, timeout):
+def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=False,
+                  with_stack=None):
     """Arm once. profile_by_stage is deliberately not offered -- see rule 2."""
     body = {"output_dir": out_dir, "num_steps": int(num_steps),
             "activities": ["CPU", "GPU"], "profile_by_stage": False}
+    if record_shapes:
+        body["record_shapes"] = True
+    if with_stack is not None:
+        body["with_stack"] = with_stack == "true"
     if FRAMEWORK == "vllm":
-        body = {"profile_prefix": os.path.basename(out_dir), "max_iterations": int(num_steps)}
+        body = {"profile_prefix": vllm_source(out_dir)[1], "max_iterations": int(num_steps)}
     t0 = time.time()
     txt = post(base, "/start_profile", body, timeout=timeout)
     arm_s = round(time.time() - t0, 1)
@@ -279,9 +374,8 @@ def stop_profile(base, journal, timeout=1800):
         return False
 
 
-def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, poll=1.0,
-                        stable_reads=3):
-    """True once trace files exist (at least expect_files) and stopped growing.
+def wait_traces_settled(written, journal, timeout, expect_files=0, poll=1.0, stable_reads=3):
+    """True once `written()` lists trace files (at least expect_files) that stopped growing.
 
     The scheduler closes the window itself after num_steps forwards and then writes one
     file per rank; that, not a fixed timeout, is when the capture is over. Settled means
@@ -290,7 +384,7 @@ def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, p
     """
     t0, last, same = time.time(), None, 0
     while time.time() - t0 < timeout:
-        w = traces_written(trace_dir, since_ts)
+        w = written()
         sig = tuple((x["path"], x["bytes"]) for x in w)
         same = same + 1 if (sig == last and w) else 0
         if w and len(w) >= max(1, expect_files) and same >= stable_reads - 1:
@@ -303,17 +397,26 @@ def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, p
     return False
 
 
+def vllm_source(trace_dir):
+    """(profiler root, file prefix) of a point: vLLM fixes the root at launch and names each
+    session's files by its prefix. --profiler-root sets it when the root is not the parent."""
+    return VLLM_SOURCE or (os.path.dirname(trace_dir), os.path.basename(trace_dir))
+
+
+def link_vllm_traces(trace_dir, keep):
+    root, tag = vllm_source(trace_dir)
+    for src in glob.glob(os.path.join(root, tag + "*.trace.json*")):
+        dst = os.path.join(trace_dir, os.path.basename(src))
+        suffix = os.path.basename(src)[len(tag):]
+        if suffix and suffix[0].isdigit():
+            continue
+        if os.path.isfile(src) and keep(src) and not os.path.lexists(dst):
+            os.symlink(os.path.abspath(src), dst)
+
+
 def traces_written(trace_dir, since_ts):
     if FRAMEWORK == "vllm":
-        # vLLM's per-session prefix changes names, not its configured output directory.
-        tag = os.path.basename(trace_dir)
-        for src in glob.glob(os.path.join(os.path.dirname(trace_dir), tag + "*.trace.json*")):
-            dst = os.path.join(trace_dir, os.path.basename(src))
-            suffix = os.path.basename(src)[len(tag):]
-            if suffix and suffix[0].isdigit():
-                continue
-            if os.path.isfile(src) and os.path.getmtime(src) >= since_ts and not os.path.lexists(dst):
-                os.symlink(os.path.abspath(src), dst)
+        link_vllm_traces(trace_dir, lambda src: os.path.getmtime(src) >= since_ts)
     out = []
     for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True):
         if os.path.isfile(p) and os.path.getmtime(p) >= since_ts:
@@ -321,8 +424,29 @@ def traces_written(trace_dir, since_ts):
     return sorted(out, key=lambda d: -d["bytes"])
 
 
-def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
-    """Rule 4: assert the trace contains the phase and shape that were asked for."""
+def trace_files(trace_dir):
+    out = {p for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True)
+           if os.path.isfile(p)}
+    if FRAMEWORK == "vllm":
+        root, tag = vllm_source(trace_dir)
+        out |= set(glob.glob(os.path.join(root, tag + "*.trace.json*")))
+    return out
+
+
+def new_trace_files(trace_dir, before):
+    """Files not present when the probe began. Not mtime: on a shared mount the writer's
+    clock is another machine's."""
+    if FRAMEWORK == "vllm":
+        link_vllm_traces(trace_dir, lambda src: src not in before)
+    out = [{"path": p, "bytes": os.path.getsize(p)}
+           for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True)
+           if os.path.isfile(p) and p not in before]
+    return sorted(out, key=lambda d: -d["bytes"])
+
+
+def verify_trace(paths, want_phase, want_shape_key, want_shape, journal, strict=False):
+    """Rule 4: assert the trace contains the phase and shape that were asked for.
+    `strict` also fails an idle window and a prefix-cache answer, and marks stray steps."""
     try:
         from parse_profile import _step_span_candidates, _classify_step
     except Exception as exc:
@@ -330,7 +454,7 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
         return {"verified": None, "reason": "parse_profile unavailable: %s" % exc}
 
     import gzip
-    found, kernels, scanned = {}, 0, 0
+    found, kernels, scanned, prefill_tokens = {}, 0, 0, 0
     for rec in paths[:4]:
         p = rec["path"]
         if not (p.endswith(".json") or p.endswith(".json.gz") or p.endswith(".pt.trace.json")
@@ -346,6 +470,7 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
         events = data.get("traceEvents", data if isinstance(data, list) else [])
         kernels += sum(1 for e in events
                        if isinstance(e, dict) and e.get("cat") in ("kernel", "Kernel"))
+        file_prefill_tokens = 0
         for e, nm in _step_span_candidates(events):
             c = _classify_step(nm)
             if c is None:
@@ -354,6 +479,10 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
             shape = c[1] if c[0] else c[2]
             found.setdefault(phase, {}).setdefault(shape, 0)
             found[phase][shape] += 1
+            if c[0]:
+                file_prefill_tokens += c[1] or 0
+        # Every rank traces the same steps; summing files would count them once per rank.
+        prefill_tokens = max(prefill_tokens, file_prefill_tokens)
 
     res = {"files_scanned": scanned, "kernel_events": kernels,
            "step_spans_by_phase_shape": {k: dict(sorted(v.items())) for k, v in found.items()},
@@ -361,7 +490,11 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
     got = found.get(want_phase, {})
     res["phase_present"] = bool(got)
     res["exact_shape_present"] = want_shape in got
-    if kernels == 0 and scanned:
+    if strict and scanned and not found:
+        res["verified"] = False
+        res["reason"] = ("no step spans at all: the window ran no forward, so the engine "
+                         "was idle while it was open")
+    elif kernels == 0 and scanned:
         res["verified"] = False
         res["reason"] = ("trace has step spans but ~no kernel events -- it records "
                          "dispatch structure only and cannot carry a census. A "
@@ -369,12 +502,28 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
     elif not got:
         res["verified"] = False
         res["reason"] = "no %s step spans in the trace; the window captured another phase" % want_phase
+    elif strict and want_phase == "PREFILL" and want_shape and prefill_tokens * 2 < want_shape:
+        # Summed over steps so a chunked prefill of the planned size still counts in full.
+        res["verified"] = False
+        res["prefill_tokens_computed"] = prefill_tokens
+        res["reason"] = ("PREFILL computed %d of the planned %s=%s tokens (steps %s): the "
+                         "prompt was mostly answered from the prefix cache, so this trace "
+                         "does not measure the planned shape."
+                         % (prefill_tokens, want_shape_key, want_shape, sorted(got)[:12]))
     elif not res["exact_shape_present"]:
         res["verified"] = "partial"
         res["reason"] = ("%s captured, but not at %s=%s. Present: %s. The measurement is "
                          "real; it just stands for a different shape than planned, and "
                          "the ledger must say so."
                          % (want_phase, want_shape_key, want_shape, sorted(got)[:12]))
+    elif strict and len(got) > 1:
+        # The census divides the window's total by its step count, so a stray step (a
+        # router's /health is a 1-token generate on sglang) would halve a 1-step point.
+        res["verified"] = "partial"
+        res["reason"] = ("%s at %s=%s present, but the window also holds %s steps at %s, "
+                         "and the census would average them in."
+                         % (want_phase, want_shape_key, want_shape, want_phase,
+                            sorted(s for s in got if s != want_shape)[:12]))
     else:
         res["verified"] = True
         res["reason"] = "%s at %s=%s present, %d kernel events" % (
@@ -384,6 +533,33 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
 
 
 # --------------------------------------------------------------------------- #
+# (pause, body, resume): while paused, sglang still admits and queues new requests
+# (scheduler.py's event loop receives before it checks _engine_paused). Only sglang offers probes.
+PAUSE_APIS = (("/pause_generation", {"mode": "in_place"}, "/continue_generation"),)
+# PREFILL: how long the paused engine queues the point's requests before it is resumed.
+GATHER_S = 2.0
+
+
+def pause_scheduler(engine, journal):
+    """The resume path of the first pause API the engine accepts, else None."""
+    for pause, body, resume in PAUSE_APIS:
+        try:
+            post(engine, pause, body, timeout=60)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 405):
+                continue
+            journal.append({"event": "pause_failed", "path": pause, "error": str(exc)})
+            return None
+        except Exception as exc:
+            journal.append({"event": "pause_failed", "path": pause, "error": str(exc)})
+            return None
+        journal.append({"event": "scheduler_paused", "path": pause})
+        return resume
+    journal.append({"event": "pause_unavailable", "note": "no pause API on %s: the first "
+                    "request is scheduled alone and the point may verify partial" % engine})
+    return None
+
+
 def drive_prefill(base, point, args, journal):
     """Drive the aggregate scheduled-token target; retain reconstruction limits."""
     toks = int(point["new_tokens"])
@@ -412,6 +588,33 @@ def drive_prefill(base, point, args, journal):
                       "prefill_seq%d" % i, args.request_timeout)
 
 
+def drive_prefill_batched(base, point, args, journal, engine=None):
+    """`new_seq` requests whose prompts add up to the batch's `new_tokens`, in ONE step.
+
+    Sent concurrently, the first request reaches an idle scheduler alone and runs as its
+    own step (14 x 512 runs as 512 + 6656 on sglang and vllm alike). So the point's engine
+    is paused while they are sent and resumed once they are queued.
+    """
+    nseq = max(1, int(point.get("new_seq") or 1))
+    toks, extra = divmod(int(point["new_tokens"]), nseq)
+    resume = pause_scheduler(engine or base, journal) if nseq > 1 else None
+    # max_new_tokens=1 keeps the request in prefill: we are measuring the context
+    # forward, and a long generation would mix decode into the window.
+    with ThreadPoolExecutor(max_workers=nseq) as ex:
+        try:
+            for i in range(nseq):
+                n = max(1, toks + (i < extra))
+                ex.submit(generate, base, rand_ids(n, args.seed + i, getattr(args, "vocab", None)), 1, journal,
+                          "prefill_seq%d" % i, args.request_timeout)
+            if resume:
+                time.sleep(GATHER_S)
+        finally:
+            if resume:
+                post(engine or base, resume, timeout=60)
+                journal.append({"event": "scheduler_resumed", "path": resume,
+                                "gathered_s": GATHER_S})
+
+
 def drive_decode(base, point, args, journal):
     """Hold `bs` requests resident and generating, then arm. Returns the futures so the
     caller can keep them alive across the window."""
@@ -424,12 +627,72 @@ def drive_decode(base, point, args, journal):
     return ex
 
 
-def main():
+DECODE_TAIL_TOKENS = 256
+
+
+def drive_decode_closed_loop(base, point, args, journal, stop):
+    """Hold `bs` requests resident until `stop` is set: `bs` workers, each sending its next
+    request the moment its last one returns, so the batch outlives any arm cost.
+
+    Every prompt is one shared prefix plus its own tail, and the prefix is prefilled once
+    before the workers start. A full-context prefill takes about a minute at long ISL and a
+    PD prefill engine runs them one after another, so `bs` fresh prompts reach decode a
+    minute apart and are never resident together; a tail's prefill takes well under a second.
+    The decode shape is unchanged: each request still attends over its whole context."""
+    bs = int(point["batch_size"])
+    ctx = int(point.get("context_tokens") or 1024)
+    vocab = getattr(args, "vocab", None)
+    tail = min(DECODE_TAIL_TOKENS, max(1, ctx // 4))
+    prefix = rand_ids(ctx - tail, args.seed + 100, vocab)
+    if not generate(base, prefix, 1, journal, "decode_prefix", args.request_timeout):
+        raise RuntimeError("the shared decode prefix could not be prefilled")
+
+    def worker(i):
+        n = 0
+        while not stop.is_set():
+            ids = prefix + rand_ids(tail, args.seed + 1000 * (i + 1) + n, vocab)
+            if not generate(base, ids, args.decode_tokens, journal, "decode_req%d" % i,
+                            args.request_timeout):
+                return
+            n += 1
+
+    ex = ThreadPoolExecutor(max_workers=bs)
+    for i in range(bs):
+        ex.submit(worker, i)
+    return ex
+
+
+def decode_requests_done(journal):
+    return sum(1 for e in journal if e.get("event") == "request_done"
+               and str(e.get("label", "")).startswith("decode_req"))
+
+
+def decode_requests_failed(journal):
+    return sum(1 for e in journal if e.get("event") == "request_failed"
+               and str(e.get("label", "")).startswith("decode_req"))
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--points", required=True, help="plan_sampling_points.py output")
     ap.add_argument("--point-id", required=True)
     ap.add_argument("--base-url", default=os.environ.get("PROBE_BASE_URL",
                                                          "http://127.0.0.1:30000"))
+    ap.add_argument("--profile-url", default=None,
+                    help="where /start_profile and /stop_profile go, if not --base-url "
+                         "(PD: the engine of this point's phase; requests go to the router)")
+    ap.add_argument("--occupancy-log", default=None,
+                    help="read occupancy from this scheduler log instead of /metrics "
+                         "(the decode engine's log on a server without --enable-metrics)")
+    ap.add_argument("--expect-traces", type=int, default=0,
+                    help="after the window closes, wait for this many trace files (one per "
+                         "rank) to finish exporting before verifying")
+    ap.add_argument("--trace-settle", type=float, default=30,
+                    help="seconds their sizes must hold still to count as exported")
+    ap.add_argument("--record-shapes", action="store_true")
+    ap.add_argument("--with-stack", choices=("true", "false"), default=None,
+                    help="sent only when given; Python stacks can make the export block "
+                         "the scheduler")
     ap.add_argument("--trace-dir", required=True,
                     help="host-visible directory the server writes traces to "
                          "(SGLANG_TORCH_PROFILER_DIR)")
@@ -443,17 +706,31 @@ def main():
     ap.add_argument("--steady-timeout", type=float, default=300)
     ap.add_argument("--window-timeout", type=float, default=900)
     ap.add_argument("--decode-tokens", type=int, default=512)
+    ap.add_argument("--mode", choices=("single", "multinode"), default="single",
+                    help="'multinode' (bench_e2e.sh's multinode launcher): PREFILL sends new_seq "
+                         "sequences into one paused step; DECODE keeps batch_size shared-prefix "
+                         "requests resident until the window closes; the trace check also fails "
+                         "prefix-cache hits and stray steps")
     ap.add_argument("--request-timeout", type=float, default=1800)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", required=True, help="journal JSON for this point")
     ap.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
     ap.add_argument("--served-model")
+    ap.add_argument("--profiler-root",
+                    help="vLLM's launch-time profiler directory, if not --trace-dir's parent "
+                         "(multinode: PROFILE_DIR, or PROFILE_DIR/<role> on pd_disagg)")
     ap.add_argument("--iteration-log-dir")
     ap.add_argument("--vocab-size", type=int)
     ap.add_argument("--expect-files", type=int, default=1)
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
-    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI, CACHE_SALT
+    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI, CACHE_SALT, VLLM_SOURCE
     FRAMEWORK, SERVED_MODEL = args.framework, args.served_model
+    VLLM_SOURCE = (args.profiler_root, args.point_id) if args.profiler_root else None
     ITERATION_LOG_DIR = args.iteration_log_dir
     CACHE_SALT = secrets.token_hex(16) if FRAMEWORK == "vllm" else None
     if FRAMEWORK == "vllm" and not SERVED_MODEL:
@@ -462,6 +739,7 @@ def main():
         ap.error("--vocab-size must be positive")
     ID_HI = min(150000, args.vocab_size - 1) if args.vocab_size else 31999
     os.makedirs(args.trace_dir, exist_ok=True)
+    profile_url = args.profile_url or args.base_url
 
     with open(args.points) as fh:
         plan = json.load(fh)
@@ -474,41 +752,63 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
-                "request_seed": args.seed, "cache_salt": CACHE_SALT,
+                "profile_url": profile_url, "occupancy": args.occupancy_log or "/metrics",
+                "seed": args.seed, "cache_salt": CACHE_SALT,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
+    before = trace_files(args.trace_dir)
     server_dir = args.server_trace_dir or args.trace_dir
     num_steps = args.num_steps or (32 if phase == "DECODE" else 8)
     ok = False
     verify = {}
     ex = None
     capture_scope = None
+    stop_decode = threading.Event()
 
+    multinode = args.mode == "multinode"
     try:
+        # /metrics of the engine the window opens on: a PD router serves no engine counters.
+        occupancy = LogOccupancy(args.occupancy_log) if args.occupancy_log else profile_url
+        occupancy_now = occupancy if callable(occupancy) else metrics_occupancy(occupancy)
         if phase == "DECODE":
             # Steady state FIRST (rule 1): put the batch on, confirm the scheduler has
             # admitted it and is generating, and only then pay for the arm.
-            ex = drive_decode(args.base_url, point, args, journal)
             want = int(point["batch_size"])
+            if multinode:
+                ex = drive_decode_closed_loop(args.base_url, point, args, journal, stop_decode)
+                alive = lambda: decode_requests_failed(journal) == 0
+            else:
+                ex = drive_decode(args.base_url, point, args, journal)
+                alive = None
             confirmed, obs_bs, _ = wait_for_occupancy(
-                args.base_url, want, journal, args.steady_timeout)
+                occupancy, want, journal, args.steady_timeout, alive=alive)
             if not confirmed:
                 raise RuntimeError(
                     "steady state not reached: wanted bs=%s, scheduler reported %s. Not "
                     "arming." % (want, obs_bs))
-            start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
-            # The scheduler closes the window itself once num_steps forwards have run;
-            # the batch is already resident, so the steps are the intended shape.
-            if FRAMEWORK == "vllm":
-                if not wait_traces_settled(args.trace_dir, t_start, journal,
-                                           args.window_timeout, args.expect_files):
+            start_profile(profile_url, server_dir, num_steps, journal, args.arm_timeout,
+                          args.record_shapes, args.with_stack)
+            deadline = time.time() + args.window_timeout
+            if multinode:
+                # sglang closes the window itself once num_steps forwards have run and then
+                # exports, well inside one generation; a server whose profiler has no step
+                # counter is stopped once every resident request has turned over.
+                done0 = decode_requests_done(journal)
+                while (time.time() < deadline and not new_trace_files(args.trace_dir, before)
+                       and decode_requests_done(journal) - done0 < want):
+                    if decode_requests_failed(journal):
+                        raise RuntimeError("a decode request failed while the window was open")
+                    time.sleep(5)
+            elif FRAMEWORK == "vllm":
+                if not wait_traces_settled(lambda: traces_written(args.trace_dir, t_start),
+                                           journal, args.window_timeout, args.expect_files):
                     raise RuntimeError("vLLM profile window did not produce the expected traces")
             else:
-                deadline = time.time() + args.window_timeout
+                # The scheduler closes the window itself once num_steps forwards have run;
+                # the batch is already resident, so the steps are the intended shape.
                 while time.time() < deadline:
                     time.sleep(5)
-                    metrics, _ = scrape_metrics(args.base_url)
-                    bs = metrics.get("num_running_reqs")
+                    bs, _, _ = occupancy_now()
                     if bs == 0:
                         journal.append({"event": "batch_drained", "note": "requests finished "
                                         "before the window closed; shorten --decode-tokens "
@@ -518,19 +818,31 @@ def main():
             # Prefill is a single forward per request: arm first, then send, because
             # there is no resident state to confirm. The window is still bounded by
             # num_steps and still closed explicitly.
-            start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
-            capture_scope = drive_prefill(args.base_url, point, args, journal)
+            start_profile(profile_url, server_dir, num_steps, journal, args.arm_timeout,
+                          args.record_shapes, args.with_stack)
+            if multinode and FRAMEWORK != "vllm":
+                drive_prefill_batched(args.base_url, point, args, journal, profile_url)
+            else:
+                capture_scope = drive_prefill(args.base_url, point, args, journal)
         ok = True
     except Exception as exc:
         journal.append({"event": "probe_failed", "error": "%s: %s"
                         % (type(exc).__name__, exc)})
     finally:
         # Rule 3: always, even on the failure path.
-        stop_profile(args.base_url, journal)
+        stop_profile(profile_url, journal)
+        stop_decode.set()
         if ex is not None:
-            ex.shutdown(wait=False)
+            # Closed loop: a request still decoding would sit in the next point's batch.
+            ex.shutdown(wait=multinode)
 
-    written = traces_written(args.trace_dir, t_start)
+    # A rank set missing a rank is not the server: the point fails whatever TP-0 shows.
+    complete = not (ok and args.expect_traces) or wait_traces_settled(
+        lambda: [w for w in new_trace_files(args.trace_dir, before) if w["bytes"]], journal,
+        args.window_timeout, args.expect_traces, stable_reads=int(args.trace_settle) + 1)
+    ok = ok and complete
+    written = (new_trace_files(args.trace_dir, before) if multinode
+               else traces_written(args.trace_dir, t_start))
     journal.append({"event": "traces_written", "count": len(written),
                     "total_bytes": sum(w["bytes"] for w in written),
                     "files": written[:12]})
@@ -539,7 +851,7 @@ def main():
             written, phase,
             "new_tokens" if phase == "PREFILL" else "batch_size",
             point.get("new_tokens") if phase == "PREFILL" else point.get("batch_size"),
-            journal)
+            journal, strict=multinode)
     else:
         journal.append({"event": "verify", "verified": False,
                         "reason": "no trace files appeared under %s" % args.trace_dir})
