@@ -56,7 +56,9 @@ and a rival, then choose a measurement or intervention that separates them. Zoom
 out to another computational organization when local tuning stops being useful.
 Hardware models guide questions; their assumptions and gaps are not measured gains.
 Use the existing profiling tools when they resolve an uncertainty, and confirm
-performance with the unprofiled full-call evaluator.
+performance with the unprofiled full-call evaluator. Carry any supplied fixed engineering reference,
+declared target and residual-gap question into `DIRECTION.prompt` and existing reports, using
+`knowledge/kernel_hardware_evidence.md`; retain its case aggregation and full-call fitness.
 
 When planning development of a particular realization, use the existing
 DIRECTION.prompt to identify the intended organization, what would establish that

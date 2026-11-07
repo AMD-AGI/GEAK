@@ -2220,7 +2220,9 @@ ${cfg({
         ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
-          'Improve the measured primary metric within the assigned budget. Use roofline estimates only with supported work counts and product-specific limits; they are not required attainment targets.' } : {}),
+          'Improve the measured primary metric within the assigned budget. Work toward any supplied engineering target using the fixed-reference method in knowledge/kernel_hardware_evidence.md. ' +
+          'For a declared fraction q and supported complete-region reference T_ref, use T_goal = T_ref / q with the existing evaluator case aggregation; keep the reference fixed across comparable revisions. ' +
+          'An unsupported reference remains unknown. Independent unprofiled full-call measurement decides fitness; reference attainment does not change correctness, ranking or the assigned budget.' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
         CANONICAL: evo ? evo.base : CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
