@@ -76,6 +76,12 @@ for f in harness_lib.py leg_runner.py overlay_setup.py; do cp "$SKILL_DIR/script
 Check supplied source/launcher hints first, then inspect imports and installed source. Append any
 new candidate with its role, depth, matching device kernels and evidence.
 
+Before freezing the task, connect the selected region to current recipe dispatch in `notes`, using
+the existing binding, source, build and regime metadata. Cover its complete inputs/outputs and
+mutable state, required dependencies, installation path and runtime engagement check. If a proposed
+reformulation needs a broader region than this extraction route can represent, report that boundary
+and integration limitation for end-to-end planning; do not freeze a narrower task as its substitute.
+
 - A standalone library call without an editable body belongs to config/tuning: return
   `editable:false`, `target_callable:""`; do not invent a source-rewrite proxy.
 - For fused/grouped MoE, select the whole-operation `op_seam`, even if its implementation is native.

@@ -15,8 +15,9 @@ that directory; `update_experience` returns a no-op. The `GEAK/perf_knowledge/` 
 operator/language guides can widen options; verify actual device/dtype/toolchain support.
 
 Keep the supplied workload, including ISL/OSL/CONC, fixed. Do not introduce speculative decoding.
-Preserve full-operation correctness and timing, public signatures, state, and serving integration.
-Backend changes are allowed when the installed toolchain and the operation contract support them.
+Preserve the supplied outer contract: full-operation correctness and timing, public signatures,
+state, output ownership and serving integration. Internal computational boundaries, algorithms,
+backends and recipe implementation may change when the deployed stack and contract support them.
 
 ## PHASE=strategize
 
@@ -37,13 +38,21 @@ Inputs: `EVAL_DIR`, `PROFILE_TOPN`, `BASELINE_THROUGHPUT`, `WORKLOAD`, `BUDGET`,
 4. Route head GEMM/attention and fused/grouped MoE at `HEAD_THRESHOLD_PCT` (default 5%) to `extract_op`
    and Op Benchmarker regardless of library editability. The ladder includes backend comparison,
    per-backend tuning (GEMM: aiter per-shape DB), and actual author+optimize through kernel_workflow
-   (at least Triton where applicable); preserve the operation's math and integration boundary.
+   (at least Triton where applicable); preserve the outer operation contract and provide a deployable binding.
 5. Route below-head-threshold editable kernels to extraction and the kernel squad. Route tiny
    high-call operations/host overhead to suitable fusion or host/runtime directions. Respect
    `BUDGET`, `HEAD_BUDGET` and the milestone threshold/floor below.
 6. Write `EVAL_DIR/strategy.md`, including evidence, ordering, candidate costs, limitations and routing.
 
 ### Live binding before scheduling
+
+For every selected intervention, record its path into the current serving recipe in `strategy.md`
+and the existing `rationale`/`extract_hint`: source and call boundary, live dispatch, complete
+inputs/outputs and mutable state, supported build/dependencies, and required install/env/flag changes.
+Name how runtime engagement will be proved and which existing full-region and serving evaluations
+will measure it. A broader reformulation may replace current internal boundaries; identify its
+compatible outer binding and complete oracle before extraction. If the current route cannot install
+or evaluate that region, report the missing integration step before scheduling kernel engineering.
 
 For each GEMM/MoE head, identify the live callable/signature and an `integration_lever` that reaches it.
 A standalone GEMM permits `standalone-gemm-swap` or `dense-linear-env-overlay` only if that backend is

@@ -64,6 +64,11 @@ rankings or restrictions on algorithm/backend choice. Verify unfamiliar APIs bef
 
 ## Output
 
+For serving-origin tasks, include the concrete dispatch/install path and runtime engagement check
+in `report.md`, carrying the supplied binding, env/flags and supported build dependencies with the
+measured source. Report any required outer-region change through existing notes/E2E feedback;
+changes to the frozen task contract require end-to-end planning before implementation.
+
 Write `best_patch.diff`, `worker_result.json` and `report.md` under `OUTPUT_DIR`. The report includes
 approach, changed parameters, all attempted mechanisms, per-case results and limitations. Return the
 same structured result as the disk JSON: the workflow scores the return; the disk file alone is not
