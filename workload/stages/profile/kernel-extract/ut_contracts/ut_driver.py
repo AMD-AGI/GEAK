@@ -71,7 +71,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != HERE]
 
 GATES = ("contract", "inputs", "binding", "launches", "correctness", "server_calls",
-         "compile_variants", "isolation", "replay", "negative_controls", "restore", "timing")
+         "compile_variants", "isolation", "process_state", "replay", "negative_controls",
+         "restore", "timing")
 SENTINEL = "UT_HARNESS_INCOMPLETE"
 DEFAULT_REPLAY_TOL = 0.02
 DEFAULT_CONTROL_MARGIN = 10.0
@@ -742,6 +743,73 @@ def inproc_launches(T, a):
 def gate_isolation(T, a, state):
     _, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     return _inproc(T, cand, "isolation", ("--seed", str(a.seed)))
+
+
+def state_changes(snap):
+    """{key: (before, after)} for every process-wide value a leg changed while it ran."""
+    before, after = snap.get("before") or {}, snap.get("after") or {}
+    return {k: (before.get(k), after.get(k)) for k in set(before) | set(after)
+            if before.get(k) != after.get(k)}
+
+
+def candidate_only_changes(base_snap, cand_snap, allow=()):
+    """What the candidate leg changed that the baseline leg did not change the same way.
+
+    Both legs import the same serving stack, so whatever the stack itself does to process
+    state cancels; what remains is the candidate's. Callable identities are compared by
+    whether they were rebound, not by address, which differs between processes."""
+    base, cand = state_changes(base_snap), state_changes(cand_snap)
+    out, allowed = {}, {}
+    for key, (b, c) in sorted(cand.items()):
+        if key.startswith("callable:"):
+            if key in base:
+                continue
+        elif base.get(key) == (b, c):
+            continue
+        why = next((r for p, r in allow if key.startswith(p)), None)
+        (allowed if why else out)[key] = {"before": b, "after": c, **({"allowed": why} if why else {})}
+    return out, allowed
+
+
+def gate_process_state(T, a, state):
+    """The candidate must not change process-wide state the baseline leaves alone.
+
+    A UT runs the op by itself, so a kernel that flips a process-wide switch (TunableOp, a
+    BLAS backend, a precision flag, an environment variable) or rebinds a shared torch
+    callable passes every other gate, and in a server silently changes how every other op
+    runs. Each leg runs each phase's smallest and largest case once with a snapshot before
+    and after (leg_runner._process_state). A deliberate change is declared in
+    ut_contract.process_state_allow: [{"prefix": "<key prefix>", "why": "..."}]."""
+    base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
+    specs = T.random_specs()
+    if not specs:
+        return {"status": "not_required", "why": "no random cases to execute"}
+    by_phase = {}
+    for s in specs:
+        by_phase.setdefault(s.get("regime", ""), []).append(s)
+    sigs = []
+    for rows in by_phase.values():
+        rows = sorted(rows, key=lambda s: sorted((s.get("axes") or {}).items()))
+        sigs += [r["sig"] for r in (rows[0], rows[-1])]
+    sigs = list(dict.fromkeys(sigs))
+    allow = [(d.get("prefix", ""), d.get("why") or "declared") for d in
+             (T.mc.get("process_state_allow") or []) if isinstance(d, dict) and d.get("prefix")]
+    snaps = {}
+    gpu = (T.gpus or [None])[0]
+    for name, overlay in (("baseline", base), ("candidate", cand)):
+        path = os.path.join(state["scratch"], "process_state.%s.json" % name)
+        env = dict(T.h.gpu_env(gpu), PROCESS_STATE_OUT=path)
+        T.h._run_leg(T.dir, overlay, "oracle", out=os.path.join(state["scratch"], name + ".ps.pt"),
+                     seed=a.seed, draws=1, env_extra=env, sigs=sigs)
+        with open(path) as fh:
+            snaps[name] = json.load(fh)
+    changed, allowed = candidate_only_changes(snaps["baseline"], snaps["candidate"], allow)
+    return {"status": "fail" if changed else "pass", "cases": sigs,
+            "candidate_only_changes": changed, "allowed": allowed,
+            "baseline_changes": sorted(state_changes(snaps["baseline"]))[:50],
+            **({"why": "the candidate changes process-wide state the baseline does not: %s. "
+                       "In a server every other op runs under it, which no UT case exercises."
+                       % ", ".join(sorted(changed)[:8])} if changed else {})}
 
 
 def gate_replay(T, a, state):

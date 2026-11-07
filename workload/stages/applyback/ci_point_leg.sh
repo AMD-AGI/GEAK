@@ -74,9 +74,12 @@ docker run -d --name "$NAME" --device /dev/kfd --device /dev/dri --group-add vid
 finish() { docker logs "$NAME" > "$OUT/server.log" 2>&1; docker rm -f "$NAME" >/dev/null 2>&1; }
 trap finish EXIT
 
+WATCH="$HERE/serving_watch.py"
 ok=0
 for _ in $(seq 1 300); do       # 75 min: a cold page cache plus HiCache admission can take ~40
-  [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ] || { st server_exited; break; }
+  # A rank can abort while the container and its HTTP front end stay up; look at the log too.
+  python3 "$WATCH" scan --container "$NAME" > "$OUT/server_watch.json" \
+    || { st failed "\"error\":\"server died while starting: $(python3 -c "import json;d=json.load(open('$OUT/server_watch.json'));print((d.get('line') or d.get('reason','')).replace('\"',\"'\")[:200])")\""; exit 2; }
   curl -sf -m 5 "http://127.0.0.1:$PORT/health" >/dev/null && { ok=1; break; }
   sleep 15
 done
@@ -102,6 +105,7 @@ if [ -z "$CHUB" ]; then
   ln -sfn "$CI_HF_HUB/$MDIR/snapshots/$SNAP" "$CHUB/$MDIR/snapshots/$SNAP"
   printf %s "$SNAP" > "$CHUB/$MDIR/refs/main"
 fi
+set -m                           # the client gets its own process group, so the watch can stop all of it
 (
   eval "$(python3 -c "
 import json,shlex; d=json.load(open('$OUT/launch.json'))
@@ -114,9 +118,16 @@ print('\n'.join('export %s=%s' % (k, shlex.quote(v)) for k, v in d['client_env']
     --server-metrics "http://127.0.0.1:$PORT/metrics" --output-artifact-dir "$OUT/aiperf_artifacts" \
     --public-dataset semianalysis_cc_traces_weka_062126
   echo "client_exit=$?"
-) > "$OUT/benchmark.log" 2>&1
+) > "$OUT/benchmark.log" 2>&1 &
+CPID=$!
+set +m
+# The server must stay alive for the whole window: stop the client the moment it dies.
+python3 "$WATCH" watch --container "$NAME" --client-pid "$CPID" --out "$OUT/server_watch.json"
+WRC=$?
+wait "$CPID" 2>/dev/null
 CE=$(grep -o 'client_exit=[0-9]*' "$OUT/benchmark.log" | tail -1)
 docker logs "$NAME" > "$OUT/server.log" 2>&1
+[ "$WRC" = 0 ] || { st failed "\"error\":\"server died during the benchmark: $(python3 -c "import json;d=json.load(open('$OUT/server_watch.json'));print((d.get('line') or d.get('reason','')).replace('\"',\"'\")[:200])")\""; exit 3; }
 # Prove the pins from this leg's own records: the server loaded the CI's commit of every repo,
 # and the client ran the CI's recorded argv (plus --tokenizer-revision, which states the commit
 # the CI's `main` resolved to then).

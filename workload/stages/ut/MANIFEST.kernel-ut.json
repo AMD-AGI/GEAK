@@ -1,16 +1,16 @@
 {
   "file_count": 5,
   "files": {
-    "SKILL.md": "c2309692d24d1889896914657a7df00506470a7986cf65a0a6226f1da562d9e9",
+    "SKILL.md": "dbc6acd5083ece22863776d30928d18ba3579d42c046a1f8268341feced18625",
     "references": "symlink:../../profile/kernel-extract/references",
     "scripts": "symlink:../../profile/kernel-extract/scripts",
     "shared": "symlink:../../profile/kernel-extract/shared",
     "ut_contracts": "symlink:../../profile/kernel-extract/ut_contracts"
   },
   "modified_from_origin": false,
-  "note": "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
+  "note": "Gate count in SKILL.md follows the new process_state gate (twelve non-timing gates).",
   "origin": "Local GEAK split profile/UT workflow",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "bf5d66b80f5d899ff69be38c82365ba2d0d203e2ce2a269321b1ae2fa978580c"
+  "tree_sha256": "c8a5e463902aad5934ad373b05510b883a4a1d126d17a1de82f32571fb7fe9c9"
 }

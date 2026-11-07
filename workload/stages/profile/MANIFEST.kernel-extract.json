@@ -1,7 +1,7 @@
 {
-  "file_count": 112,
+  "file_count": 113,
   "files": {
-    "PROVENANCE.json": "948584a69b659350171b7ad3c435182af71c43c15761fac51e18476998379b88",
+    "PROVENANCE.json": "54066a83443c92968988031a3a527d03aeebdab57c7f0399523aca7e56c54ebb",
     "SKILL.md": "8013b00bf01265066bcf3b78e926294b083bffc612453dc82e38438e90cdc1a6",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -14,7 +14,7 @@
     "references/pipeline-handoff.md": "a4c16858cc2305c96bd77620f5ee41e10f6325531379fe6153ffb77f3867b4af",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
     "references/setup.md": "86bb82b0f8ccb621ced5d188533190e6bc02becf811450a57e30bd3487fcbb62",
-    "references/source-delivery-records.md": "36e77c86c33263f1746eb1209af666a3797519ac341d7c06c01c04f854600a6a",
+    "references/source-delivery-records.md": "b2e74721f680f4bf5c34aa5299dc478bdbd52456dbc31a1dea435208c3459c80",
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
     "references/task-authoring.md": "44ada0f8b17a5a7eca1318cb79b3ddc4a612d33b2d1c4bd1c4d087cc2831ef9b",
     "references/ut-lane.md": "48050dbe3a594b459ddc6813804baead36f28d9ece58875a4a6cab6375d119b9",
@@ -48,7 +48,7 @@
     "shared/kernel_extraction_delivery.mjs": "212ee4a108b77fc9fba056a059e0a01a6cd728331a9b0aa9378e30cffb3a44f9",
     "shared/kernel_selection.py": "ae5f5ecc92ae0a66cb0c427d983becb64872c6f5db98fcf2fbb981adfe39bc7c",
     "shared/kernel_source_delivery.mjs": "360a268d26f88c5e9a3a9113d30f5ad2e15c75cab9ef5de21fc33ae0615d22e8",
-    "shared/leg_runner.py": "57f1ff8e12a1458a376984d2e95ac9d4f31304630e5e6ac3b3056f8dd8285f89",
+    "shared/leg_runner.py": "0e6c10017d027564d74dd3312f74d9bd04b1ad986fab442e468eff3988c15ce7",
     "shared/overlay_setup.py": "b3e2dfe4f07c8577c0be36525899d926e09e719cdfe77819f063a27833e663f9",
     "shared/schema.mjs": "19ba9273c7a443138eaf0ae0d072e278ec6f10e4477f2ee5e70b85f5b00454e3",
     "shared/seam_trace.py": "f1a98e0b5acfcd2769df75d47e9811c1367d340d6a2e77bab20b3bd2db23a90b",
@@ -82,7 +82,7 @@
     "tests/test_ut_gpu_queue.py": "d42339c0ccc1d97c629316f7432a5c2f4e7057932242e62f483c97366826520d",
     "tests/test_ut_wave.py": "50bbee1b74af94a85fad4daa679ace072ac84dd45be67ee234a1d2c4f3e4953b",
     "tests/test_vllm_profile.py": "d601f4820648062580eda4e32c2a0586a1464b2ea05127cfbc59fce77f2cfdd5",
-    "ut_contracts/README.md": "c155041c97638be16dd8bb98fc4b86aab4fdbd2b4a36a4a651dd9b9005473dac",
+    "ut_contracts/README.md": "affd31d43cd707942bb5e84e9cde244736eb460fa91fcdcc7ff837bf6610d9a7",
     "ut_contracts/families/act_mul.json": "8c7d3b8bf920796b0f2ad28213de73463c4cfe4c607dbf37b8ba08b4717ff0d0",
     "ut_contracts/families/all_reduce.json": "30215dedd2af7446669f72aae9364251be8b34c011ea288fa85a700f93dcd2a8",
     "ut_contracts/families/dsa_indexer.json": "e7014415b1d48db38d92f47adf2c966dcfc8bbccf71c04b14882a8aa63a31fea",
@@ -106,18 +106,19 @@
     "ut_contracts/templates/unittest.py.tmpl": "1c05c01a3dbfdd085d89378084d4fc374e8d9138480e087682e543c72672eaee",
     "ut_contracts/tests/test_negative_control_search.py": "58c6ef0c65bf6664b221c8149d89882679eb4cf64da75df46a90e96284e2d56a",
     "ut_contracts/tests/test_parallel_gates.py": "b3438be664209f821b9e33f750cfed0129a4fbf906188e50e9f1d9d9b2ded5e2",
+    "ut_contracts/tests/test_process_state.py": "87eb11e0e288f4f595ec7c18f5c321c90c9170648cf47098f253c7a04e253c9a",
     "ut_contracts/tests/test_server_call_accounting.py": "9304a81b8f5eb09a1c30b9177f50701da2b5f16ca2744c78801601f015b2cf57",
     "ut_contracts/tests/test_server_evidence.py": "440c691c1eefaaa94056aed2420fa334d8932e45f0171c413c757e8670c79613",
     "ut_contracts/tests/test_tensor_lifecycle.py": "1d83285dda1db540a6786fcb803e308294804148810c87b7fef95bf130e9d4cc",
     "ut_contracts/tests/test_ut_contracts.py": "77aa302cdc2b180740cc6f49895c08ef4239c7770cd0bda7854e97c77b4e0d70",
     "ut_contracts/tests/test_validation_mode.py": "1a17dcb78230607a15f021778335136e69844bba3b6872008f1c4bb3de915346",
     "ut_contracts/ut_contract.py": "ec06b381b38eb31407a3b90cfc4bd3e05a4d0102c64e44ca9b048d07e7716d57",
-    "ut_contracts/ut_driver.py": "44c0022e8c2a2ab4447521e9afb56d67503eb4b7ac1e19f9095e23d0ca4d1d25"
+    "ut_contracts/ut_driver.py": "ad3604baa8e7e037858f93e3d10bfed4af529ac33b62bf94c90c31e59aec31c9"
   },
-  "modified_from_origin": true,
-  "note": "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge. Integrated the upstream directory/stage reorganization at 480b52b without restoring retired UT paths. Intentional upstream vLLM compatibility update; see PROVENANCE.json and references/vllm.md.",
+  "modified_from_origin": false,
+  "note": "process_state UT gate (leg_runner snapshot + ut_driver gate), on top of the merged profile/UT split; adaptation notes in PROVENANCE.json.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "e9decdbc09066165b4a141a587ab578e372ee78f80f6b8d0024f920bcd1b50bc"
+  "tree_sha256": "94d4285482c70f18093aab0989e0ddfb5adc3070b4fd7b25c2e66f0592e94a48"
 }

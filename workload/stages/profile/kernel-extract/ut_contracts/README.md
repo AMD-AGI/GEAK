@@ -46,11 +46,11 @@ calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass o
 `--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
 including correctness receipts reused later by performance validation.
 
-UT extraction runs `--validation-mode correctness`: all eleven non-timing gates are
+UT extraction runs `--validation-mode correctness`: all twelve non-timing gates are
 required, and no timing gate executes. Reports explicitly name the validation contract,
 mode, required gates and `performance_measured: false`; a pass certifies the UT.
 Optimization runs `--validation-mode performance --reuse` (performance remains the
-bare command's default for existing optimizer callers). It requires all twelve gates,
+bare command's default for existing optimizer callers). It requires all thirteen gates,
 measures timing, and only then reports a weighted speedup. Preserve `timed: true` cases
 and their workload weights even when extraction does not measure them.
 
@@ -212,6 +212,7 @@ baseline leg, the candidate leg and the driver rebuild identical operands.
 | `launches` | baseline, every case once under `torch.profiler` (`meta.expected_launches` only) | a phase never launches a task kernel the server launched in it -- a stage, a dispatch branch or the other phase the UT does not reach -- unless waived (`launch_waivers: [{kernel, phase, why}]`); `seen` records what it did launch |
 | `correctness` | baseline + candidate oracle legs (fresh processes, deployment compile mode applied) | any random case/draw violates its output bound; with `bitwise` determinism, two candidate runs differ |
 | `isolation` | candidate | `call()` modified an input, or two calls share an output buffer |
+| `process_state` | baseline + candidate oracle legs on each phase's smallest and largest case, with a snapshot of process-wide state before and after (`leg_runner._process_state`) | the candidate changes process-wide state the baseline leaves alone: an environment variable, a torch backend/BLAS/precision/determinism switch, TunableOp, or the identity of a shared torch callable. A UT runs the op alone; in a server every other op then runs under that change (a candidate that enabled TunableOp for its own GEMM passed every other gate and faulted all serving ranks, 2026-11-06). A deliberate change is declared in `process_state_allow: [{prefix, why}]` |
 | `replay` | baseline eager refs, candidate graph replay | a graph phase lacks a bundle (exit 3), capture fails, or a replayed case violates its bound |
 | `server_calls` | baseline + candidate replay of `run/server_calls.json` (server evidence only) | the candidate raises or differs from the baseline (beyond `server_call_tol`, default `replay_tol`) on a call the baseline replays; calls the baseline cannot rebuild are listed, and their variants fall to `compile_variants`. `server_call_postprocess: true` (with `server_call_postprocess_why`) applies the task's `cases.server_call_postprocess(call, args, kwargs, ret)` to the return in BOTH legs before the compare, for an entry whose return is only partly defined -- a routed expert kernel allocates its output with `torch.empty` and writes only this rank's rows, the deployed caller masks the rest by the same routing and never reads them, and those elements differ between two identical calls of the unmodified entry. The hook is frozen task source outside the candidate overlay, so it reduces both legs identically and cannot hide a difference in what the caller reads |
 | `compile_variants` | the baseline legs above, under `compile_watch` | a Triton variant in `run/server_variants.json` is built by no baseline leg and not waived (`compile_variant_waivers: [{id, why}]`), or the legs' Triton/torch namespaces differ from the server's (`server_preimports`) |

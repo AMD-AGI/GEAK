@@ -39,7 +39,8 @@
   "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
   "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain.",
   "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
-  "vLLM extraction compatibility, ported from the Nov 2 DeepSeek-V4.1-Flash local experiment after the same log/RPC failure in the Nov 5 Qwen3-8B-FP8 run: bundled opt-in worker observation, iteration JSONL parsing, vLLM launch/metrics/completions/profiler RPCs, and device iteration census. Preserve this branch's task and multi-config contracts; see references/vllm.md."
+  "vLLM extraction compatibility, ported from the Nov 2 DeepSeek-V4.1-Flash local experiment after the same log/RPC failure in the Nov 5 Qwen3-8B-FP8 run: bundled opt-in worker observation, iteration JSONL parsing, vLLM launch/metrics/completions/profiler RPCs, and device iteration census. Preserve this branch's task and multi-config contracts; see references/vllm.md.",
+  "process_state gate (2026-11-07, menghongtao): leg_runner snapshots process-wide state (environment, torch backend/BLAS/precision/determinism switches, TunableOp, identities of shared torch callables) before and after a leg when PROCESS_STATE_OUT is set; ut_driver gate_process_state runs each phase's smallest and largest case in both legs and fails on any change the candidate makes that the baseline does not, unless declared in ut_contract.process_state_allow [{prefix, why}]. A UT runs the op alone, so such a change passes every other gate while changing every other op of a server: a gemm_a8w8 candidate that enabled TunableOp for its own GEMM passed cold verification and faulted all four serving ranks on the first agentic prefill (Muse Spark, 2026-11-06). GATES gains process_state after isolation (twelve non-timing gates); docs updated to match."
  ],
  "files": [
   {
@@ -646,6 +647,11 @@
   },
   {
    "file": "scripts/vllm_observer/sitecustomize.py",
+   "source": null,
+   "added_here": true
+  },
+  {
+   "file": "ut_contracts/tests/test_process_state.py",
    "source": null,
    "added_here": true
   }

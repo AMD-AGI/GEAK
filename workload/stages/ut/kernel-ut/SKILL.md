@@ -118,7 +118,7 @@ Every accepted task needs full correctness, binding/launch, server-call/variant,
 isolation/replay, per-leaf negative controls and restored-source evidence as required
 by its family. Timing is not required for UT generation. The driver records
 `validation_contract: "kernel_ut_validation/v1"`, `validation_mode: "correctness"`,
-all eleven `required_gates`, and `performance_measured: false` in both UT receipts;
+all twelve `required_gates`, and `performance_measured: false` in both UT receipts;
 there is no timing gate or fabricated 1.0 ratio. Keep the weighted timing interface
 executable for the optimizer. Use the real source-delivery verifier to create
 `run/RETURN.json`. A quick pass, missing GPU access or a numerical control that only

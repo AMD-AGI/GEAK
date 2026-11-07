@@ -157,6 +157,68 @@ def _snapshot(out):
         "tensor, or a tuple/list/dict of tensors")
 
 
+# Process-wide knobs a kernel can change from inside its own module. In a UT the op runs
+# alone, so a change here is invisible; in a server every other op then runs under it (a
+# candidate that switched on torch TunableOp for its own GEMM re-routed every GEMM of the
+# process and faulted all ranks on the first real prefill, 2026-11-06).
+_STATE_CALLABLES = (
+    ("torch", ("mm", "bmm", "matmul", "addmm", "baddbmm", "_scaled_mm", "einsum", "softmax")),
+    ("torch.nn.functional", None),
+    ("torch.Tensor", ("matmul", "__matmul__", "mm", "bmm", "softmax")),
+)
+
+
+def _process_state():
+    """A comparable snapshot of process-wide state: environment, torch backend and BLAS
+    selection, TunableOp, precision and determinism switches, and the identity of the shared
+    torch callables other ops dispatch through. Values that cannot be read are recorded as
+    such rather than dropped, so an unreadable knob still shows up if it starts to differ."""
+    state = {"env:" + k: v for k, v in os.environ.items()}
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return state
+
+    def put(key, fn):
+        try:
+            state[key] = repr(fn())
+        except Exception as exc:  # noqa: BLE001
+            state[key] = "<unreadable %s>" % type(exc).__name__
+
+    put("torch.default_dtype", torch.get_default_dtype)
+    put("torch.float32_matmul_precision", torch.get_float32_matmul_precision)
+    put("torch.deterministic_algorithms", torch.are_deterministic_algorithms_enabled)
+    put("torch.num_threads", torch.get_num_threads)
+    m = torch.backends.cuda.matmul
+    for attr in ("allow_tf32", "allow_fp16_reduced_precision_reduction",
+                 "allow_bf16_reduced_precision_reduction"):
+        put("torch.backends.cuda.matmul." + attr, lambda attr=attr: getattr(m, attr))
+    put("torch.backends.cuda.preferred_blas_library", torch.backends.cuda.preferred_blas_library)
+    put("torch.backends.cuda.preferred_linalg_library", torch.backends.cuda.preferred_linalg_library)
+    for attr in ("enabled", "benchmark", "deterministic", "allow_tf32"):
+        put("torch.backends.cudnn." + attr, lambda attr=attr: getattr(torch.backends.cudnn, attr))
+    tunable = getattr(getattr(torch, "cuda", None), "tunable", None)
+    if tunable is not None:
+        for fn in ("is_enabled", "tuning_is_enabled", "record_untuned_is_enabled", "get_filename",
+                   "get_max_tuning_duration", "get_max_tuning_iterations"):
+            if hasattr(tunable, fn):
+                put("torch.cuda.tunable." + fn, getattr(tunable, fn))
+        if hasattr(tunable, "get_results"):
+            put("torch.cuda.tunable.results", lambda: len(tunable.get_results()))
+    for owner, names in _STATE_CALLABLES:
+        try:
+            obj = torch
+            for part in owner.split(".")[1:]:
+                obj = getattr(obj, part)
+        except AttributeError:
+            continue
+        for name in names or [n for n in dir(obj) if not n.startswith("_")]:
+            fn = getattr(obj, name, None)
+            if callable(fn):
+                state["callable:%s.%s" % (owner, name)] = "%s@%x" % (
+                    getattr(fn, "__qualname__", type(fn).__name__), id(fn))
+    return state
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
@@ -189,11 +251,16 @@ def main():
             importlib.import_module(mod)
         except Exception as exc:
             raise SystemExit(f"server_preimports: import {mod} failed: {type(exc).__name__}: {exc}")
+    state_out = os.environ.get("PROCESS_STATE_OUT")
+    before = _process_state() if state_out else None
     try:
         _run(a, task, meta)
     finally:
         if cw is not None:
             cw.dump(watch_out)
+        if state_out:
+            with open(state_out, "w") as fh:
+                json.dump({"before": before, "after": _process_state()}, fh)
 
 
 def _server_calls(a, task, meta):

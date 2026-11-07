@@ -65,8 +65,13 @@ def main(point_dir, out, duration):
     tp = dig(row, KEY)
     per_gpu = dig(row, "request_metrics.throughput.per_gpu.total_tput_tps")
     p90 = dig(row, "request_metrics.latency.intvty.p90")
+    # The window the client actually measured: a server that dies ends it early, and the
+    # configured duration alone cannot show that.
+    export = os.path.join(out, "aiperf_artifacts", "profile_export_aiperf.json")
+    measured = dig(json.load(open(export)), "benchmark_duration.avg") if os.path.exists(export) else None
     summary = {"rc": rc if tp else (rc or 1), "reference": "ci", "throughput": tp,
                "metric_basis": KEY, "repeats": 1, "duration_s": int(duration),
+               "measured_duration_s": measured,
                "ci_duration_s": c["duration"], "row": "e2e/leg.json",
                "secondary": {"p90_interactivity": p90, "per_gpu_total_tok_s": per_gpu},
                "errors": dig(row, "request_accounting.records_error_dropped")}

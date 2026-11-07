@@ -112,6 +112,26 @@ def check_identity(out, run_root):
     return applied, None
 
 
+# A full CI window measures within a few seconds of its configured length (3599-3630 s for
+# 3600 s on 2026-11-06, the CI's own 3618 s); a leg cut short by a dead server falls below.
+MIN_WINDOW_FRACTION = 0.98
+
+
+def server_death(out):
+    """Why the leg's server is known to have died, or None. The leg's own watch record
+    (serving_watch.py) when there is one; otherwise its saved server log, scanned with the
+    same patterns, so a leg measured before the watch existed is held to the same rule."""
+    watch = read_json(os.path.join(out, "server_watch.json"))
+    if watch.get("dead") is True:
+        return watch.get("line") or watch.get("reason") or "serving_watch"
+    log = os.path.join(out, "server.log")
+    if not watch and os.path.exists(log):
+        import serving_watch
+        with open(log, errors="replace") as fh:
+            return serving_watch.fatal_line(fh.read())
+    return None
+
+
 def main():
     out = os.environ.get("OUT")
     if not out:
@@ -250,6 +270,21 @@ def main():
                 and summary["duration_s"] != summary["ci_duration_s"]:
             return fail("the leg ran %ss against the CI's %ss; a shortened leg is a smoke, "
                         "not an A/B" % (summary["duration_s"], summary["ci_duration_s"]))
+        # The server has to have served the whole window. A rank can abort while the container
+        # and its HTTP front end stay up; the client then times out its in-flight requests,
+        # the window ends early, and the row still looks like a measurement (2026-11-06: a
+        # finished c40 leg whose server died of HSA_STATUS_ERROR_OUT_OF_RESOURCES 2 min
+        # before the end of the window, admitted as 1085.68 tok/s).
+        dead = server_death(out)
+        if dead:
+            return fail("the server died during the leg (%s); its row does not measure the "
+                        "candidate serving the CI's traffic" % dead)
+        measured = summary.get("measured_duration_s")
+        want = summary.get("duration_s") or summary.get("ci_duration_s")
+        if measured and want and measured < want * MIN_WINDOW_FRACTION:
+            return fail("the measured window was %.0fs of the configured %ss: the client "
+                        "stopped early, so the row is not a full-window measurement"
+                        % (measured, want))
         ci_key = (historical.get("provenance") or {}).get("throughput_key")
         base = {"throughput": historical.get("throughput"), "metric_basis": ci_key,
                 "provenance": historical.get("provenance"), "admissible": True,
