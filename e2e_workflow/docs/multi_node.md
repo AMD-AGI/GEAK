@@ -129,7 +129,10 @@ process lives. While it is active:
 - `gpu_lock.sh` and `profile_kernel.sh` run on a node through `mn.py exec --env`: a bare
   id on the master, `<engine>:<id>` (e.g. `decode:3`) on that engine's machine. What
   runs there is the copy check staged in `<work_dir>/.mn_tools`, and it locks the pin's
-  card leases (`<shared_fs>/.mn_lease`) instead of `/tmp/team_gpu_locks`.
+  card leases (`<shared_fs>/.mn_lease`) instead of `/tmp/team_gpu_locks`. The multi-GPU
+  forms take the same prefix (`decode:group:0,1`, `decode:pool:2:0,1,2,3`); `gpu_lease.py`
+  names its allocator, request and lease files after the host there, since every machine
+  of the run shares that directory.
 
 Another machine is reached explicitly:
 

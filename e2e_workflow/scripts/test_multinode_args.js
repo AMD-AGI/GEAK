@@ -145,6 +145,8 @@ const verdictTests = (async () => {
 eq(/runMn|\[MN_PY, \.\.\.args\]/.test(src), false, 'the workflow spawns no mn.py itself');
 eq(/BACKEND=\$\{BACKEND\} TP=\$\{SERVING_TP\} GPU=\$\{SERVING_GPU\}\$\{MN \? ` \$\{MN_SERVING_ENV\}` : ''\}/.test(src), true,
   'every role\'s SERVING env line appends the multinode env');
+eq(src.includes('CAPTURE_TP: SERVING_TP, CAPTURE_GPU: SERVING_GPU'), true,
+  'a capture leg is a serving leg: each PD engine keeps the TP its pin records');
 eq(src.includes("${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md and follow it.\\n` : ''}"), true,
   'every role reads the multinode driver rules');
 eq(/MN_SPEC \? \{ MN_NODES: MN_SPEC\.nodes\.length, MN_STATE, MN_SHARED_FS: MN_SPEC\.shared_fs, MN_GPU_EXEC,/.test(src), true,

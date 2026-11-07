@@ -1002,7 +1002,7 @@ def visible_gpus() -> int:
 
 # The kernel tools a node runs (gpu_lock.sh and profile_kernel.sh forward to these copies).
 KERNEL_SCRIPTS = os.path.join(HERE, os.pardir, os.pardir, os.pardir, "kernel_workflow", "scripts")
-TOOLS = ("gpu_lock.sh", "workspace_sources.py", "profile_kernel.sh", "profile_policy.sh")
+TOOLS = ("gpu_lock.sh", "workspace_sources.py", "gpu_lease.py", "profile_kernel.sh", "profile_policy.sh")
 
 
 def stage_tools(work_dir: str) -> str:

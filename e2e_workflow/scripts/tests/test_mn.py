@@ -751,6 +751,27 @@ class ActivePinTest(unittest.TestCase):
         self.assertEqual(self.ancestors({300: shell, 200: ("python3", 1, ["python3", "run_e2e.py"])}), 0)
         self.assertEqual(self.ancestors({300: shell}), 0, "an unreadable ancestor ends the walk")
 
+    def test_the_lease_dir_is_the_one_gpu_lock_and_the_leases_share(self):
+        pin, leases = os.path.join(self.tmp, "mn_state.json"), os.path.join(self.tmp, ".mn_lease")
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump({"shared_fs": self.tmp, "nodes": [], "tools_dir": "/w/run/.mn_tools"}, f)
+        os.environ["GEAK_MN_STATE"] = pin
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            mn.cmd_active_pin(["--lease-dir"])
+        self.assertEqual(out.getvalue().strip(), f"{pin}\t{leases}\t/w/run/.mn_tools")
+        node = {"hostname": "node-fc54.example"}
+        self.assertEqual(mn.lease_file({"shared_fs": self.tmp}, node, 3),
+                         os.path.join(leases, "node-fc54.example.gpu3.lock"))
+        twin = {"hostname": "node-fc54.other"}
+        self.assertNotEqual(mn.lease_file({"shared_fs": self.tmp}, twin, 3),
+                            mn.lease_file({"shared_fs": self.tmp}, node, 3), "same first label, other machine")
+        gpu_lock = open(os.path.join(SCRIPTS_DIR, os.pardir, os.pardir, "kernel_workflow", "scripts",
+                                     "gpu_lock.sh"), encoding="utf-8").read()
+        self.assertIn('LOCK_DIR="$_MN_LEASE_DIR"', gpu_lock)
+        self.assertIn('_host="$(uname -n)"', gpu_lock)
+        self.assertIn('LOCK_PREFIX="${_host}.gpu"', gpu_lock)
+        self.assertIn('"${LOCK_DIR}/${LOCK_PREFIX}${GPU_ID}.lock"', gpu_lock)
+
 
 class TransportTest(unittest.TestCase):
     NODE = {"rank": 1, "node_id": "node-c489/b1", "hostname": "node-c489", "ip": "10.0.0.2"}
@@ -3403,6 +3424,28 @@ class ExecTest(_PinnedEnv):
                                "--", "bash", "-c", 'echo "$PWD"; exit 7'],
                               cwd=work, capture_output=True, text=True, timeout=60)
         self.assertEqual((proc.returncode, proc.stdout.strip()), (7, work), proc.stderr)
+
+    @unittest.skipUnless(HAVE_SH and sys.platform.startswith("linux") and mn.local_identity(), "bash + flock")
+    def test_gpu_lock_holds_the_same_card_lease_as_mn_exec(self):
+        import socket
+        gpu_lock = os.path.realpath(os.path.join(MN, "..", "..", "..", "kernel_workflow", "scripts", "gpu_lock.sh"))
+        lock = mn.lease_file(dict(PD_STATE, shared_fs=self.tmp), {"hostname": socket.gethostname()}, 2)
+        probe = ("import fcntl,sys; f=open(sys.argv[1],'w')\n"
+                 "try: fcntl.flock(f, fcntl.LOCK_EX|fcntl.LOCK_NB); print('free')\n"
+                 "except BlockingIOError: print('held')")
+        # This machine as both nodes: `decode:2`, the bare pool and the group forms all forward back
+        # here through mn.py exec, to the run directory's copy, which finds the leases without
+        # mn.py. A group goes through gpu_lease.py, scoped to this host on the shared lease dir.
+        me = {"node_id": mn.local_identity(), "hostname": socket.gethostname()}
+        self.pin(dict(PD_STATE, nodes=[n | me for n in PD_STATE["nodes"]],
+                      tools_dir=mn.stage_tools(os.path.join(self.tmp, "run"))))
+        env = dict(os.environ, GEAK_GPU_REQUIRE_IDLE="0",
+                   KERNEL_ENV_SKIP_ENUM_REAP="1", KERNEL_ENV_KEEP_ARCH="1")
+        for spec in ("decode:2", "2,9", "group:2", "decode:group:2"):
+            proc = subprocess.run(["bash", gpu_lock, spec, "bash", "-c",
+                                   f'echo "$HIP_VISIBLE_DEVICES"; {shlex.quote(sys.executable)} -c "$0" "$1"',
+                                   probe, lock], cwd=self.tmp, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.stdout.split(), ["2", "held"], (spec, proc.stderr))
 
     def test_bad_usage_is_refused(self):
         for argv in (("--gpu", "all", "--", "true"), ("--script", "x", "--", "true"), ()):

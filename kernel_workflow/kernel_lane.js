@@ -89,7 +89,12 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
-const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
+// A multinode PD lane gets `<engine>:<ids>` (e.g. decode:3): the ids are validated and leased bare,
+// and every GPU_ID handed to gpu_lock.sh carries the engine again so it runs on that machine.
+const GPU_IDS_ARG = String(A.gpu_ids != null ? A.gpu_ids : '0').trim();
+const GPU_ENGINE = (/^([\w.-]+):(?=\d)/.exec(GPU_IDS_ARG) || [])[1] || '';
+const onEngine = spec => (GPU_ENGINE && spec ? `${GPU_ENGINE}:${spec}` : spec);
+const GPU_IDS = GPU_ENGINE ? GPU_IDS_ARG.slice(GPU_ENGINE.length + 1) : GPU_IDS_ARG;
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
 // resolves a comma spec by flocking whichever lane is free AND idle at acquire
@@ -167,9 +172,9 @@ let GPU_POOL = '';
 let GPU_SINGLE = '';
 function applyGpuResource(r) {
   GPU_RESOURCE = r;
-  GPU_JOB = r.jobSpec;
-  GPU_POOL = GPU_JOB || (GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
-  GPU_SINGLE = GPU_JOB || GPU_LIST[0];
+  GPU_JOB = onEngine(r.jobSpec);
+  GPU_POOL = GPU_JOB || onEngine(GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
+  GPU_SINGLE = GPU_JOB || onEngine(GPU_LIST[0]);
 }
 applyGpuResource(resolveGpuRequest(A, GPU_LIST));
 const TASK = A.task || '';
@@ -1575,7 +1580,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? onEngine(GPU_LIST[i % GPU_LIST.length]) : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
