@@ -664,7 +664,9 @@ def _multinode_check(ps_args: dict) -> dict:
     """``mn.py check`` on the workflow's block: probes the machines, writes the pin, returns the verdict.
 
     Run here, not in the workflow: a Workflow script cannot spawn a process. The pointer it
-    writes names this process as the pin's owner, so the pin counts for exactly this run."""
+    writes names this process as the pin's owner, so the pin counts for exactly this run.
+    The caller hands over its machines with its own service still up: the check stops it
+    (GEAK_MN_TAKEOVER, default 1 here) and every leg relaunches from the pods' commands."""
     block = _multinode_block(ps_args)
     if block.get("commands_in_pin"):
         return {"verdict": "refused", "problems": [
@@ -674,7 +676,8 @@ def _multinode_check(ps_args: dict) -> dict:
     try:
         proc = subprocess.run(
             [sys.executable, str(E2E_DIR / "scripts" / "multi_node" / "mn.py"), "check"],
-            env={**os.environ, "GEAK_MN_SPEC": json.dumps(spec)},
+            env={**os.environ, "GEAK_MN_SPEC": json.dumps(spec),
+                 "GEAK_MN_TAKEOVER": os.environ.get("GEAK_MN_TAKEOVER", "1")},
             capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired as exc:
         return {"verdict": "refused", "problems": [f"mn.py check timed out: {exc}"]}
@@ -1385,6 +1388,14 @@ def apply_bench_client(h: dict) -> str:
         client = AGENTX_BENCH_CLIENT
     os.environ["BENCH_CLIENT"] = client
     return client
+
+
+def bench_client_host() -> str:
+    """Where the bench client ran: only the backend's own client, which imports the serving
+    framework, runs on rank0 of a multinode run (adapters/launchers/multinode.sh)."""
+    client = os.environ.get("BENCH_CLIENT", "native").strip().lower()
+    multinode = os.environ.get("BENCH_LAUNCHER", "") == "multinode"
+    return "rank0" if client == "native" and multinode else "driver"
 
 
 # metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
@@ -4611,6 +4622,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "workload_comparability": workload_comparability,
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        "bench_client_host": bench_client_host(),
         "bench_protocol": h.get("bench_protocol") or {},
         "baseline_config": {
             "accepted_flags": h.get("accepted_flags", "") or "",
@@ -4899,6 +4911,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        # "driver" (where GEAK runs, as Hyperloom's rebench) or "rank0" (native on multinode).
+        "bench_client_host": bench_client_host(),
         # Measurement protocol forwarded from the handoff, surfaced at TOP LEVEL
         # (not only inside baseline_basis) so a sweep/validated reuse can pin the
         # SAME num_prompts / random_range_ratio / num_warmups / seed the headline

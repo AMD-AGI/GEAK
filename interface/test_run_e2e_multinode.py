@@ -446,6 +446,21 @@ def test_the_check_hands_back_mn_pys_verdict(monkeypatch, tmp_path) -> None:
     assert (seen["spec"]["tp"], seen["spec"]["work_dir"]) == (8, str(tmp_path))
 
 
+def test_the_check_takes_over_the_callers_service_unless_turned_off(monkeypatch, tmp_path) -> None:
+    tag = rx._mn_module().CHECK_TAG
+    seen = []
+
+    def run(argv, env=None, **_kw):
+        seen.append(env.get("GEAK_MN_TAKEOVER"))
+        return rx.subprocess.CompletedProcess(argv, 0, tag + json.dumps({"verdict": "ok", "spec": {}}), "")
+
+    monkeypatch.delenv("GEAK_MN_TAKEOVER", raising=False)
+    _check(monkeypatch, tmp_path, run)
+    monkeypatch.setenv("GEAK_MN_TAKEOVER", "0")
+    _check(monkeypatch, tmp_path, run)
+    assert seen == ["1", "0"]
+
+
 def test_a_refused_or_silent_or_hung_check_is_refused(monkeypatch, tmp_path) -> None:
     tag = rx._mn_module().CHECK_TAG
     refused = json.dumps({"verdict": "refused", "problems": ["no free VRAM"], "at": "t"})

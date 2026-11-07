@@ -1630,6 +1630,9 @@ function roleAgent(role, phase, intro, inputs) {
   const standaloneExtraction = KERNEL_EXTRACT_ON && role === 'kernel_extractor';
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
+    ...(SERVING_TOPOLOGY ? { SERVING_TOPOLOGY } : {}),
+    ...(MN_SPEC ? { MN_NODES: MN_SPEC.nodes.length, MN_STATE, MN_SHARED_FS: MN_SPEC.shared_fs, MN_GPU_EXEC,
+      ...(MN_SPEC.tp_by_role ? { MN_TP_BY_ROLE: MN_SPEC.tp_by_role } : {}) } : {}),
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
@@ -1662,8 +1665,8 @@ exactly these in its env:
     BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}${MN ? ` ${MN_SERVING_ENV}` : ''}
 NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
 makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
-is a comma-separated set spanning exactly TP GPUs.)
-GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
+is a comma-separated set. Use it VERBATIM, never re-derived from TP: multi-node, it names ONE host's ids.)
+${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md and follow it.\n` : ''}GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.
