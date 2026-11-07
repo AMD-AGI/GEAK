@@ -158,6 +158,41 @@ See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#st
 for the full arg spelling, what the declaration changes, and the two things that surprise people
 (`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
 
+### Example — one server across machines
+
+A TP group that spans two machines, or a prefill/decode pair, is still **one** server to GEAK.
+GEAK runs on a driver that needs no GPU and reaches every node over ssh; the nodes and the driver
+share one filesystem (`shared_fs`). The backend adapter, bench client, metric and acceptance
+contract are the single-host ones, so the tok/s number is comparable to every other GEAK result.
+There are two ways in; both run the same `mn.py check` on the nodes before Setup.
+
+**From an orchestrator (Hyperloom).** The caller names the machines and each pod's launch command
+in a `node_state.json` and points `MULTI_NODE_STATE` at it; `run_e2e.py` checks the nodes before
+Claude starts. Its `user_data_path` is the shared filesystem: every pod and the driver must mount
+that one directory at the same path. A `multinode` field in the handoff is not read.
+
+```bash
+MULTI_NODE_STATE=/shared/run1/node_state.json python interface/run_e2e.py handoff.json result.json
+```
+
+**From Claude Code.** Name the machines in the prompt as a `multinode` block; with no
+`launch_command` on the nodes, GEAK writes the launch commands itself. The driver must see no GPU,
+so on a driver that has GPUs, start Claude with them hidden (`run_e2e.py` does this for the
+orchestrator entry):
+
+```bash
+ROCR_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES= IS_SANDBOX=1 claude --dangerously-skip-permissions
+```
+
+```
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3-8B-FP8, sglang, ISL/OSL=1024/1024,
+conc=8, tp=4, multinode={"topology": "pd_disagg", "shared_fs": "/shared/geak",
+"nodes": [{"host": "10.0.0.1", "role": "prefill"}, {"host": "10.0.0.2", "role": "decode"}]}
+```
+
+See [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md) for every field of the
+block (ssh user, key, container prefix), the environment check, and the failure messages.
+
 ---
 
 ## kernel_workflow — single kernel
