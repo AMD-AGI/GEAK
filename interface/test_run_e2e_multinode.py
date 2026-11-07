@@ -223,6 +223,27 @@ def test_tp_alone_never_implies_multiple_nodes() -> None:
     assert rx.map_args(_handoff(tp=16), timeout_s=3600)["gpu_ids"].count(",") == 15
 
 
+def test_pd_stack_accepted_on_one_engine_seeds_that_engine_only(node_state) -> None:
+    node_state()
+    args = rx.map_args(_handoff(accepted_env_by_role={"decode": "SGLANG_CK_BLOCKSCALE_M_MAX=256",
+                                                      "prefill": " SGLANG_CK_BLOCKSCALE_K_MIN=256 "}),
+                       timeout_s=3600)
+    assert args["initial_extra_env_by_role"] == {
+        "prefill": "SGLANG_CK_BLOCKSCALE_K_MIN=256", "decode": "SGLANG_CK_BLOCKSCALE_M_MAX=256"}
+    assert "initial_extra_server_args_by_role" not in args
+    assert "SGLANG_CK_BLOCKSCALE" not in args["initial_extra_env"]
+
+
+def test_empty_per_engine_stack_adds_nothing() -> None:
+    args = rx.map_args(_handoff(accepted_env_by_role={"prefill": "", "decode": " "}), timeout_s=3600)
+    assert not any(k.endswith("_by_role") for k in args)
+
+
+def test_explicit_gpu_ids_are_never_overridden(node_state) -> None:
+    node_state()
+    assert rx.map_args(_handoff(gpu_ids="2,3,4,5"), timeout_s=3600)["gpu_ids"] == "2,3,4,5"
+
+
 def test_the_block_is_forwarded_to_the_workflow_without_side_effects(monkeypatch, node_state) -> None:
     node_state()
     monkeypatch.setattr(rx.subprocess, "run", lambda *a, **k: pytest.fail("run_e2e ran a command"))

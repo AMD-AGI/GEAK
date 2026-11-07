@@ -236,6 +236,9 @@ your own. It is one of:
    PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
    # final block (full overlay + flags + env), SAME TP=SERVING_TP GPU=SERVING_GPU
+   # PD: also export GEAK_MN_PD_SWEEP_ARGS_* / GEAK_MN_PD_SWEEP_ENV_* from Inputs. Those are
+   # per-engine config; EXTRA_SERVER_ARGS / EXTRA_ENV are the shared layer and must not absorb them.
+   # OVERLAY_PYTHONPATH is the one code tree both engines run.
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/final" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    OVERLAY_PYTHONPATH="$FINAL_OVERLAY" EXTRA_SERVER_ARGS="<final flags>" EXTRA_ENV="<final env>" \
    GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=validation REPLICAS="${REPLICAS:-1}" \
