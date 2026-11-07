@@ -485,9 +485,13 @@ const approachMemoryCase =
     },
     check: ({events, archive}) => {
       assert.ok(events.some(event => event.label === 'tech_lead:replan r1#1'));
+      // Before any source is retained the first plan (and its forced replan) uses greedy's inputs;
+      // every later planning and memory call receives the same EVO policy.
+      const policy = `Read ${path.join(ROOT, 'kernel_workflow/roles/evolution.md')} for the retained-approach policy.`;
       for (const event of events.filter(event => /^tech_lead:(?:plan|replan|memory) /.test(event.label))) {
-        assert.ok(event.prompt.includes(`Read ${path.join(ROOT, 'kernel_workflow/roles/evolution.md')} for the retained-approach policy.`),
-          `${event.label} receives the same EVO policy`);
+        const emptyArchive = /^tech_lead:(?:plan r1|replan r1#)/.test(event.label);
+        assert.equal(event.prompt.includes(policy), !emptyArchive,
+          `${event.label} ${emptyArchive ? 'plans from greedy inputs' : 'receives the same EVO policy'}`);
       }
       assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
     }};
@@ -540,9 +544,12 @@ const cases = [
     check: ({archive, result, events, h}) => {
       const rows = Object.fromEntries(archive.entries.map(row => [row.id, row]));
       assert.equal(archive.entries.length, 6, 'one retained record per attempt');
-      assert.equal(rows.r1_d0.status, 'slower');
-      assert.equal(rows.r1_d0.verified, true);
-      assert.equal(rows.r1_d0.speedup, 0.8);
+      // A trusted below-floor result is retained with its exact source and engineer evidence but is
+      // not independently qualified: it stays selectable as a parent and is never advertised as verified.
+      assert.equal(rows.r1_d0.status, 'unverified');
+      assert.equal(rows.r1_d0.verified, false);
+      assert.equal(rows.r1_d0.speedup, null, 'engineer evidence alone does not qualify a source');
+      assert.ok(rows.r1_d0.patch_ref && rows.r1_d0.engineer, 'slower source and engineer evidence are retained');
       assert.equal(rows.r2_d0.status, 'unverified');
       assert.ok(rows.r2_d0.retention_error);
       assert.equal(rows.r3_d0.status, 'unverified');
@@ -551,7 +558,7 @@ const cases = [
       assert.equal(rows.r4_d0.parent_id, 'r1_d0');
       assert.deepEqual(rows.r4_d0.donor_ids, ['r1_d1']);
       assert.equal(result.stopped_by, 'budget');
-      assert.ok(events.some(e => e.label === 'verify r1_d0'), 'below-floor source independently verified');
+      assert.ok(!events.some(e => e.label === 'verify r1_d0'), 'trusted below-floor source is not sent to Verify');
       const lastPlan = events.find(e => e.label === 'tech_lead:plan r4');
       assert.ok(h.field(lastPlan.prompt, 'EVOLUTION_ENTRIES').some(row => row.id === 'r1_d0'));
       const missing = h.field(events.find(e => e.label === 'tech_lead:memory r2').prompt, 'EVOLUTION_ROUND')[0];
@@ -650,7 +657,8 @@ const cases = [
         'only one cost-two direction fits the budget of three');
       assert.equal(result.budget_used, 2);
       assert.ok(result.budget_used <= result.budget_total);
-      assert.equal(h.field(events.find(e => e.label === 'tech_lead:plan r1').prompt, 'DEEP_COST'), 2);
+      // With an empty archive the first plan uses greedy's inputs; deep cost is charged, not advertised.
+      assert.equal(h.field(events.find(e => e.label === 'tech_lead:plan r1').prompt, 'DEEP_COST'), undefined);
     }},
   {name: 'empty analyzer file list and intermediate commits do not break valid cumulative promotion',
     args: {budget: 2}, modifiableFiles: [], best: 1.8, bestId: 'r2_d0', expected: source(3, 2),
@@ -826,7 +834,7 @@ cases.push({...cases[0], name: 'UTF-8 budget preserves bounded context and exact
       const kept = saved.entries.find(row => row.id === 'r1_d0');
        assert.equal(kept.engineer.notes, unicodeNotes);
        assert.deepEqual(kept.reported_context.engineer.evidence_context.unresolved, ['rival remains']);
-       assert.equal(kept.speedup, 0.8, 'interpretation cannot alter the official fixture score');
+       assert.equal(kept.speedup, null, 'interpretation cannot create an official score for an unqualified source');
       assert.ok(unicodeNotes.length < 16384 && Buffer.byteLength(unicodeNotes, 'utf8') === 16384,
         'payload overhead crosses the byte limit despite fewer UTF-16 code units');
     }}}});
@@ -896,8 +904,10 @@ cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view 
   best: 1.4, bestId: 'r2_d0', expected: fast,
   plans: {r1: plan(direction('slower')), r2: plan(direction('best')), r3: plan(direction('missing'))},
   candidates: {
+    // The engineer's claim clears the floor, so the source is independently verified and the
+    // verifier finds the slower regression whose case evidence this view must carry.
     r1_d0: {files: slow, speed: 0.8,
-      engineer: {status: 'ok', measurement_valid: true, speedup_geomean: 0.8,
+      engineer: {status: 'ok', measurement_valid: true, speedup_geomean: 1.05,
         speedup_weighted: 0.81, speedup_arithmetic: 0.82, per_case: caseViewRows,
         evidence_context: {evidence_refs: caseViewRefs}},
       verifier: {status: 'regression', correctness: 'pass', verified_geomean: 0.8,
@@ -918,6 +928,10 @@ cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view 
     for (const event of events.filter(e => /^tech_lead:(?:plan|memory) /.test(e.label))) {
       const rows = h.field(event.prompt, event.label.startsWith('tech_lead:plan')
         ? 'EVOLUTION_ENTRIES' : 'EVOLUTION_ROUND');
+      if (event.label === 'tech_lead:plan r1') {
+        assert.equal(rows, undefined, 'the first plan has no archive inputs before any retained source');
+        continue;
+      }
       for (const row of rows) {
         assert.equal(Object.hasOwn(row, 'case_evidence'), evolution_case_evidence_view === true);
         if (!row.case_evidence) continue;

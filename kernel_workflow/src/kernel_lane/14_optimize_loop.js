@@ -4,7 +4,7 @@
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
 async function greedyOptimize(start, evo = null, population = null) {
-const planSchema = evo ? {
+const evoPlanSchema = evo ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
       ...PLAN_SCHEMA.properties.directions.items, properties: {
@@ -17,8 +17,10 @@ const planSchema = evo ? {
 } : PLAN_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
-if (evo) history.evolution_archive = evo.path;
-const evolutionInstructions = evo
+// The planner sees the archive, its schema fields and the retained-approach policy once the archive
+// holds retained source; before that its round plans from the same inputs as greedy.
+const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
+const evolutionInstructions = () => archiveHasSource()
   ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
 const citations = [];
 const contextRef = (id, outDir) => {
@@ -59,6 +61,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   round++;
   const remaining = BUDGET - dispatched;
+  if (archiveHasSource()) history.evolution_archive = evo.path;
   phase('Optimize');
   // Retained delivery needs each GEAK source's actual base; EVO sources share the archive base.
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
@@ -68,7 +71,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
-    ...(evo ? {...evo.planInputs(), DEEP_COST} : {}),
+    ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
@@ -111,9 +114,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
-      evolutionInstructions,
+      evolutionInstructions(),
       planInputs(false, await deliveryFactsInput())),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema, ...ENGINEER_CALL });
+    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
@@ -130,9 +133,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
-      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions,
+      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions(),
         planInputs(true, await deliveryFactsInput())),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema, ...ENGINEER_CALL });
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
     left = await secondsLeft(`replan-r${round}`);
   }
   if (engineerCutoffReached(left)) {
@@ -162,7 +165,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
-  if (deepDir && !evo) directions = [deepDir];
+  if (deepDir) directions = [deepDir];
   if (evo) {
     let allocated = 0;
     directions = directions.filter(d => {
@@ -311,12 +314,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const patch = prev.patch || `${d.out_dir}/best_patch.diff`;
       // A failed or missing response can still leave a valid patch. Skip verification
       // only after a valid measurement at or below the floor. Verify checks whether
-      // the patch exists, applies cleanly, and passes the oracle.
+      // the patch exists, applies cleanly, and passes the oracle. In EVO the skipped source stays
+      // retained as unqualified evidence; it is verified before any promotion or delivery.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
         eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
         (!HAS_WORKLOAD || Number.isFinite(primSpeedup(eng))) &&
         (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
-      if (trustworthyBelowBaseline && !evo) {
+      if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
       const recovered = !eng || eng.status === 'failed';
@@ -343,8 +347,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     break;
   }
   const isQualified = r => r.ver && (!r.verification || r.verification_status === true) &&
-    (says(r.ver.status, 'verified') || (evo && says(r.ver.status, 'regression'))) &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR);
+    says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR;
   const verified = clean.filter(isQualified);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
@@ -594,9 +597,9 @@ already verified source, and the host checks the resulting tree. Return JSON {co
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
-    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions, {
+    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(), {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
-      ...(evo ? evo.memoryInputs(clean.map(r => r.d)) : {}),
+      ...(archiveHasSource() ? evo.memoryInputs(clean.map(r => r.d)) : {}),
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),

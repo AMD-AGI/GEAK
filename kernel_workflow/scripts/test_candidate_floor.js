@@ -121,10 +121,10 @@ if (verifiedFilter && qualifiedPredicate) {
     v => v.verified_geomean, (a, b) => a === b).map(r => r.ver.verified_geomean);
   ok(JSON.stringify(admitted(null, 1)) === '[1.2]', 'ordinary verified filter keeps the exact floor boundary');
   ok(JSON.stringify(admitted(null, 0.5)) === '[0.8,1,1.2]', 'ordinary filter honors a lowered floor');
-  ok(JSON.stringify(admitted({}, 1)) === '[0.8,1,1.2]', 'EVO retains slower verified candidates for development');
+  ok(JSON.stringify(admitted({}, 1)) === '[1.2]', 'EVO qualifies candidates with the same floor as greedy');
 }
-ok(/if \(trustworthyBelowBaseline && !evo\)/.test(src),
-   'the trusted below-floor shortcut applies only to ordinary GEAK');
+ok(/if \(trustworthyBelowBaseline\) \{/.test(src) && !/trustworthyBelowBaseline && !evo/.test(src),
+   'the trusted below-floor shortcut applies in both modes');
 
 // `${1.0}` stringifies to "1", which would silently reword a prompt that has always said
 // "geomean>1.0". The default run must render byte-identically.
