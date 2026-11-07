@@ -93,6 +93,15 @@ PY
 }
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
+# ---- multi-node (read by adapters/launchers/multinode.sh) ----
+# vllm's mp executor spans nodes itself (one `vllm serve` per node, torch.distributed
+# rendezvous at --master-addr:--master-port). Only rank0 serves HTTP; the others run --headless.
+# adapter_dist_args RANK NNODES MASTER DIST_PORT
+adapter_dist_args() {
+  local out="--distributed-executor-backend mp --nnodes $2 --node-rank $1 --master-addr $3 --master-port $4"
+  [ "$1" != "0" ] && out="$out --headless"
+  echo "$out"
+}
 
 # adapter_bench NUM_PROMPTS MAX_CONC PROFILE_FLAG
 adapter_bench() {
