@@ -27,6 +27,7 @@ import contextlib
 import datetime
 import errno
 import functools
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -83,6 +85,35 @@ LB_PATTERN = "(sglang:[:]router|sglang_router[.]mini_lb)"
 # A rank's server pid, recorded on its own node (a pid means nothing elsewhere) with the
 # process's start time, so a pid the kernel has since handed to another process is not ours.
 PID_DIR = "/tmp/geak_mn"
+_PROC_STAT = 'sed "s/.*) //" /proc/{pid}/stat 2>/dev/null | cut -d" " -f'
+_START_TIME = _PROC_STAT + "20"
+_PROC_STATE = _PROC_STAT + "1"
+
+
+def record_pid(rank, pid: str = "$SERVER_PID") -> str:
+    return f'mkdir -p {PID_DIR} && echo "{pid} $({_START_TIME.format(pid=pid)})" > {PID_DIR}/rank{rank}.pid'
+
+
+def live_pid(rank, zombie_is_live: bool = False) -> str:
+    """Shell: the recorded pid if that very process runs, `gone` if not, nothing if unrecorded.
+    A zombie leader is `gone`: under a `sleep infinity` PID 1 nothing ever reaps it. Teardown
+    passes `zombie_is_live`, since the dead leader's group may still hold its workers."""
+    alive = f'[ -n "$st" ] && [ "$({_START_TIME.format(pid="$p")})" = "$st" ]'
+    if not zombie_is_live:
+        alive += f' && [ "$({_PROC_STATE.format(pid="$p")})" != Z ]'
+    return (f"if read p st _ < {PID_DIR}/rank{rank}.pid 2>/dev/null; then "
+            f"if {alive}; then echo $p; else echo gone; fi; fi")
+
+
+def session_of(rank) -> str:
+    """Shell: the session the recorded server's workers run in (the pid itself: setsid did not fork)."""
+    return f'read p0 _ < {PID_DIR}/rank{rank}.pid 2>/dev/null && echo "$p0"'
+
+
+def serve_alive(rank) -> str:
+    """Shell: `serve=<n>` by the pid file; the process name only when no pid was recorded."""
+    return (f'p=$({live_pid(rank)}); case "$p" in gone) s=0 ;; "") s=$(pgrep -c -f \'{SERVE_PATTERN}\' || true) ;; *) s=1 ;; esac; '
+            "echo serve=$s pid=${p:-none}")
 
 TOPOLOGIES = ("tp_span", "pd_disagg")
 PD_ROLES = ("prefill", "decode")
@@ -755,6 +786,162 @@ def probe_all(state: dict, nodes: list, ports: list | None = None, cmds: list | 
                       for i, n in enumerate(nodes)])
 
 
+def resolve(state: dict) -> list[dict]:
+    """The pinned machines (state_targets), each confirmed to still be the machine that was
+    pinned. An ssh that does not get through is a RuntimeError (the node may be fine);
+    another machine answering at the pinned IP is a hard stop."""
+    nodes = state_targets(state)
+    for node, res in zip(nodes, ssh_each(state, [(n, IDENTITY_SH, 60) for n in nodes])):
+        if res["rc"] != 0 or not res["out"]:
+            raise RuntimeError(f"pinned rank{node['rank']} {node['hostname']} ({node['ip']}) did not answer "
+                               f"over ssh (rc={res['rc']}): {res.get('err') or 'no output'}")
+        if res["out"] != node["node_id"]:
+            raise SystemExit(
+                f"!!! multinode: pinned rank{node['rank']} {node['hostname']} ({node['ip']}) now answers as {res['out'] or res.get('err') or 'nothing'!r}.\n    {SUBSTITUTION_REFUSAL}")
+    return nodes
+
+
+# The LB is killed even on tp_span: a survivor on the client port answers /health
+# for engines that are gone.
+KILL_OURS = "sleep 3; ".join(
+    "".join(f"pkill {sig}-f '{p}' 2>/dev/null || true; "
+            for p in (SERVE_PATTERN, ENGINE_PATTERN, LB_PATTERN))
+    + f"kill {sig}$({OUR_WORKER_PIDS}) 2>/dev/null || true; "
+    for sig in ("", "-9 ")) + "echo killed"
+
+
+def kill_script(node: dict) -> str:
+    """Kill order: the recorded server's process group (a provided router is found only
+    this way: no name pattern knows every backend's router), then everything of ours by name."""
+    steps = [f'p=$({live_pid(node["rank"], zombie_is_live=True)}); pg=""',
+             'case "$p" in ""|gone) ;; *) pg=$(ps -o pgid= -p "$p" | tr -d " ") ;; esac',
+             'case "$pg" in ""|0|1) pg="" ;; *) kill -TERM -- "-$pg" 2>/dev/null || true ;; esac',
+             KILL_OURS,
+             '[ -z "$pg" ] || kill -9 -- "-$pg" 2>/dev/null || true',
+             f"rm -f {PID_DIR}/rank{node['rank']}.pid"]
+    return "\n".join(steps) + "\n"
+
+
+# role / ssh: the transport picks the node's sshd endpoint from them.
+LAUNCH_NODE_KEYS = ("rank", "node_id", "hostname", "ip", "role", "ssh")
+
+
+def launched_nodes(out_dir: str):
+    """(nodes, router) the launch in `out_dir` spawned on, or None if unrecorded.
+
+    The pin answers where the NEXT launch goes; another run rewriting it must not
+    move this launch's supervisor and teardown onto other boxes."""
+    try:
+        with open(os.path.join(out_dir, "mn_launch.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    nodes = doc.get("nodes")
+    if not nodes or not all(n.get("node_id") for n in nodes):
+        return None
+    return nodes, doc.get("router") or {}
+
+
+def supervised_state(state: dict, out_dir: str) -> dict:
+    launched = launched_nodes(out_dir)
+    return {**state, "nodes": launched[0], "router": launched[1]} if launched else state
+
+
+def teardown(state: dict, wait_idle_s: int = 180, verbose=print) -> list | None:
+    """Kill every rank of a previous launch and wait for the cards to clear.
+    Returns the last probe of every node once clear (launch reads the stack from it), else None.
+
+    Runs before every launch: a surviving scheduler holds the dist-init port
+    while /health still answers 200. It is also what clears the ranks of a
+    supervisor that was killed with -9 (nothing else is left to reap them)."""
+    nodes = resolve(state)
+    ssh_each(state, [(n, kill_script(n), 120) for n in nodes])
+
+    def still_ours(p) -> bool:
+        # Another container's pids are the caller's choice of machines, not ours to wait on.
+        return (bool(p["serve_procs"]) or bool(p.get("worker_procs"))
+                or (p["gpu_pids"] or 0) > (p.get("foreign_gpu_pids") or 0))
+
+    deadline = time.time() + wait_idle_s
+    while True:
+        probes = probe_all(state, nodes)
+        busy = [
+            f"{_short(p['hostname'])}(use={p['max_use']} pids={p['gpu_pids']}"
+            + (f" of which {p['foreign_gpu_pids']} from another container"
+               if p.get("foreign_gpu_pids") else "")
+            + f" serve={p['serve_procs']} workers={p.get('worker_procs', 0)})"
+            for p in probes if still_ours(p)
+        ]
+        if not busy:
+            verbose(f">>> multinode teardown: all {len(nodes)} nodes clear")
+            return probes
+        if time.time() > deadline:
+            foreign = [_short(p["hostname"]) for p in probes if p.get("foreign_gpu_pids")]
+            verbose(f"!!! multinode teardown: still busy after {wait_idle_s}s: "
+                    + ", ".join(busy)
+                    + (f"; {', '.join(foreign)} has a co-tenant we cannot reap"
+                       if foreign else ""))
+            return None
+        verbose(">>> multinode teardown: waiting on " + ", ".join(busy))
+        time.sleep(10)
+
+
+def serve_counts(state: dict) -> list[int]:
+    nodes = resolve(state)
+    results = ssh_each(state, [(n, serve_alive(n["rank"]), 90) for n in nodes])
+    return [int(m.group(1)) if (m := re.search(r"serve=(\d+)", r["out"] or "")) else 0 for r in results]
+
+
+def engine_health(state: dict) -> list[dict]:
+    """Per rank: serve process (by its pid file), scheduler workers, zombies; plus the LB on a PD master.
+
+    Zombie workers behind a live HTTP front end are a dead engine. Only the recorded
+    server's session counts: a container whose PID 1 reaps nothing (`sleep infinity`)
+    keeps every earlier run's zombies. The LB is asked on its client port, not found
+    by name (the router renames itself).
+    A node whose probe does not come back over ssh raises: that is not a dead rank."""
+    nodes = resolve(state)
+    def workers(rank):
+        return (f'case "$p" in ""|gone) k=$(pgrep -c -f \'{SCHED_PATTERN}\' || true); z=0 ;; '
+                f'*) sid=$({session_of(rank)}); k=$(pgrep -c -s "$sid" -f \'{SCHED_PATTERN}\' || true); '
+                "z=$(ps -o stat=,args= -s \"$sid\" | awk '/(sglang|VLLM)::/ && $1 ~ /Z/' | wc -l) ;; esac; "
+                "echo sched=$k zombie=$z")
+    watch_lb = topology_of(state) == "pd_disagg"
+    # A pin without a "pd" block takes pd_config's defaults; reading the raw key would probe port None.
+    lb_port = pd_config(state)["lb_port"] if watch_lb else None
+    lb_probe = (
+        f"echo lb=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 http://127.0.0.1:{lb_port}/health || echo 000)"
+    )
+
+    lb_rank = (lb_node(state) or {}).get("rank") if watch_lb else None
+
+    def is_lb(n):
+        return watch_lb and n["rank"] == lb_rank
+
+    def health_script(n):
+        return "\n".join([serve_alive(n["rank"]), workers(n["rank"]), *([lb_probe] if is_lb(n) else []), "echo ok=1"]) + "\n"
+
+    results = ssh_each(state, [(n, health_script(n), 90) for n in nodes])
+    out = []
+    for node, res in zip(nodes, results):
+        if "ok=1" not in (res["out"] or "").split():
+            raise RuntimeError(f"rank{node['rank']} {node['ip']} did not answer over ssh "
+                               f"(rc={res.get('rc')}): {(res.get('err') or '')[-300:]}")
+        vals = dict(part.split("=", 1) for part in (res["out"] or "").split() if "=" in part)
+        num = lambda key: int(vals[key]) if vals.get(key, "").isdigit() else 0  # noqa: E731
+        entry = {
+            "rank": node["rank"],
+            "host": _short(node["hostname"]),
+            "serve": num("serve"),
+            "pid": vals.get("pid", "none"),
+            "schedulers": num("sched"),
+            "zombies": num("zombie"),
+        }
+        if is_lb(node):
+            entry["lb_http"] = num("lb")
+            entry["lb"] = 1 if entry["lb_http"] == 200 else 0
+        out.append(entry)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1037,6 +1224,25 @@ def active_pin() -> str:
     return str(doc.get("state") or "") if alive else ""
 
 
+def cmd_active_pin(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py active-pin")
+    ap.add_argument("--lease-dir", action="store_true",
+                    help="also print the pin's card-lease directory and kernel-tools copy (tab-separated)")
+    a = ap.parse_args(argv)
+    pin = active_pin()
+    if pin and a.lease_dir:
+        try:
+            with open(pin, encoding="utf-8") as f:
+                doc = json.load(f)
+            print(f"{pin}\t{lease_dir(doc)}\t{doc.get('tools_dir') or ''}")
+        except (OSError, ValueError, KeyError) as exc:
+            sys.stderr.write(f"!!! multinode: the active pin {pin} is unreadable: {exc}\n")
+            return 1
+    elif pin:
+        print(pin)
+    return 0
+
+
 def cmd_check(argv: list) -> int:
     """GEAK_MN_SPEC is args.multinode plus "tp" (the engine TP), as JSON."""
     ap = argparse.ArgumentParser(prog="mn.py check")
@@ -1187,6 +1393,14 @@ def cmd_check(argv: list) -> int:
     _write_json(ACTIVE_PIN, {"state": pin, "pid": owner, "start": _proc_start(owner),
                              "mn_py": os.path.join(HERE, "mn.py")})
     return check_verdict(pin, [], spec)
+
+
+# --------------------------------------------------------------------------
+# LAUNCH  (mn.py launch)
+# --------------------------------------------------------------------------
+# Builds one script per rank (plus the PD front end) and spawns it on the pinned
+# node. Returning 0 means SPAWNED; readiness is bench_e2e.sh's health loop.
+
 # Run-scoped names the launcher sets; a swept EXTRA_ENV must not shadow them.
 _OWNED = {
     "ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
@@ -1195,12 +1409,719 @@ _OWNED = {
 }
 
 
+def accepted_env(raw: str) -> tuple[list[str], list[str]]:
+    """Keep strict IDENTIFIER=VALUE tokens (they become `env` operands, so a bare
+    word would be run as the command) and drop launcher-owned names."""
+    kept, dropped = [], []
+    for tok in (raw or "").split():
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            dropped.append(f"{tok} (not IDENTIFIER=VALUE; would be an env option/command)")
+        elif tok.split("=", 1)[0] in _OWNED:
+            dropped.append(f"{tok} (run-scoped name owned by the multinode launcher)")
+        else:
+            kept.append(tok)
+    return kept, dropped
+
+
+def span_sync_env(kept_env: list[str], spanning: bool) -> list[str]:
+    """TP that spans nodes aborts in graph capture unless this is 1.
+
+    Explicit off is refused: the caller asked for the setting that faults.
+    Absence is filled in, because a config sweep that replaces EXTRA_ENV
+    drops the variable and fails the same way, one launch later.
+    """
+    if not spanning:
+        return list(kept_env)
+    sync = [t.split("=", 1)[1] for t in kept_env
+            if t.startswith("SYNC_TOKEN_IDS_ACROSS_TP=")]
+    if sync and sync[-1] != "1":
+        raise SystemExit(
+            "!!! multinode: EXTRA_ENV turns SYNC_TOKEN_IDS_ACROSS_TP off. With TP\n    spanning nodes every rank then aborts with hipErrorCapturedEvent\n    during graph capture.")
+    if not sync:
+        return [*kept_env, "SYNC_TOKEN_IDS_ACROSS_TP=1"]
+    return list(kept_env)
+
+
+def _role_env(prefix: str, role: str) -> str:
+    return (os.environ.get(f"{prefix}{(role or '').upper()}", "") or "").strip()
+
+
+def pd_rank_swept(role: str, shared_args: str, shared_env: list) -> tuple:
+    """(args, env, dropped) for one engine: GEAK_MN_PD_SWEEP_ARGS_/ENV_<ROLE> is
+    appended after the shared sweep, so last-wins keeps it on this engine only."""
+    extra = " ".join(p for p in ((shared_args or "").strip(),
+                                 _role_env("GEAK_MN_PD_SWEEP_ARGS_", role)) if p)
+    kept, dropped = accepted_env(_role_env("GEAK_MN_PD_SWEEP_ENV_", role))
+    return extra, list(shared_env) + kept, dropped
+
+
+# topology -> the functions the adapter must define
+_ADAPTER_CONTRACT = {
+    "tp_span": ("adapter_dist_args",),
+    "pd_disagg": ("adapter_pd_args", "adapter_pd_lb_launch"),
+}
+
+
+def adapters_dir(shared: str) -> str:
+    """The adapters/ every rank sources on its node: multinode.sh's own (the copy in the run
+    directory) when it set GEAK_MN_ADAPTERS, else the one beside this file."""
+    path = os.path.realpath(os.environ.get("GEAK_MN_ADAPTERS") or os.path.join(HERE, os.pardir, "adapters"))
+    if not under(path, shared):
+        raise SystemExit(f"!!! multinode: the adapters {path} are not under the shared mount {shared}, "
+                         "but every rank sources them on its own node; launch through the eval_dir copy of bench_e2e.sh.")
+    return path
+
+
+def resolve_adapter(backend: str, shared: str, topology: str = "tp_span") -> str:
+    """Locate the backend adapter and check it can speak this topology."""
+    path = os.path.join(adapters_dir(shared), f"{backend}.sh")
+    if not os.path.isfile(path):
+        raise SystemExit(f"!!! multinode: no backend adapter at {path} (BACKEND={backend})")
+    probe = subprocess.run(["bash", "-c", f". {shlex.quote(path)} >/dev/null 2>&1 || exit 3\n"
+                            f"for fn in {' '.join(_ADAPTER_CONTRACT[topology])}; do declare -F $fn >/dev/null || "
+                            '{ echo "missing:$fn"; exit 0; }; done\necho ok'],
+                           capture_output=True, text=True)
+    out = probe.stdout.strip()
+    if probe.returncode != 0 or not out:
+        raise SystemExit(f"!!! multinode: could not read {path}:\n{probe.stderr.strip()}")
+    if out.startswith("missing:"):
+        raise SystemExit(f"!!! multinode: {path} does not define {out[8:]}, so it cannot say how {backend} launches {topology}.")
+    return path
+
+
 def under(path: str, root: str) -> bool:
     try:
         return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) == \
             os.path.realpath(root)
     except ValueError:
         return False
+
+
+def launch_script(head: list, env: dict, adapter: str, call: str, structural: str = "", rank=None) -> str:
+    """The same steps bench_e2e.sh runs locally: export, source the adapter, call it.
+    A rank's server pid is recorded on its node for liveness and teardown.
+
+    Structural flags go LAST (argparse last-wins), so no sweep can change the
+    rank or the PD role."""
+    q = shlex.quote
+    lines = ["set -e", *head, *(f"export {k}={q(str(v))}" for k, v in env.items()),
+             f". {q(adapter)}"]
+    if structural:
+        lines.append(f'EXTRA_SERVER_ARGS="$EXTRA_SERVER_ARGS $({structural})"')
+    lines += [call, *([record_pid(rank)] if rank is not None else []), "echo STARTED_PID=$SERVER_PID"]
+    return "\n".join(lines) + "\n"
+
+
+def rank_env_vars(*, model, tp, gpu, mem_fraction, port, base_url, log, profile_dir,
+                  overlay, pythonpath, extra_env, extra_args) -> dict:
+    """What bench_e2e.sh exports before adapter_launch. GPU is the PER-NODE list."""
+    return {
+        "MODEL": model, "TP": tp, "GPU": gpu, "MEM_FRACTION": mem_fraction,
+        "HOST": "0.0.0.0", "PORT": port, "BASE_URL": base_url,
+        "LOG": log, "PROFILE_DIR": profile_dir,
+        "OVERLAY_PYTHONPATH": overlay, "PYTHONPATH": pythonpath,
+        "EXTRA_ENV": extra_env,
+        "EXTRA_SERVER_ARGS": extra_args,
+        "SERVER_LAUNCH_PREFIX": "setsid",
+    }
+
+
+def rank_head(node: dict, master: str, log: str, profile_dir: str, launch_id: str) -> list:
+    """Node facts from the pin; a NIC that lost its pinned IP fails here, not as a hung collective."""
+    nic, ip, rank = node.get("cluster_if") or "", node["ip"], node["rank"]
+    if not nic:
+        raise SystemExit(
+            f"!!! multinode: the pin has no cluster_if for rank{rank} ({node.get('hostname')}). Re-run mn.py check.")
+    q = shlex.quote
+    lost = f"!!! {nic} no longer has {ip}; fix args.multinode.nodes"
+    banner = f"mn-launch id={launch_id} rank={rank} if={nic} ip={ip} master={master} log={log}"
+    return [
+        f"ip -4 -o addr show dev {q(nic)} | grep -qF {q(f'inet {ip}/')} || {{ echo {q(lost)} >&2; exit 1; }}",
+        f"export NCCL_SOCKET_IFNAME={q(nic)} GLOO_SOCKET_IFNAME={q(nic)} MASTER_ADDR={q(master)}",
+        f"mkdir -p {q(os.path.dirname(log))} {q(profile_dir)}",
+        f"echo {q(banner)}",
+    ]
+
+
+# Read by magpie.sh / the caller's server-phase script when the bench leg sets them.
+MAGPIE_PASSTHROUGH = ("MAX_MODEL_LEN", "RECIPE_ENV_FILE", "PROFILE")
+
+
+def command_script(backend: str, command: str, geak_env: list, adapters: str) -> str:
+    """A caller's launch_command as a Magpie server-phase script. magpie.sh runs it under GEAK's
+    layer (recipe, EXTRA_ENV, GPU mask, overlay PYTHONPATH, profiler dir) and passes GEAK's flags
+    in EXTRA_<BACKEND>_ARGS, appended after the command's own (last-wins). The command's leading
+    env is applied inside, so a name GEAK's EXTRA_ENV also sets is left to GEAK."""
+    q = shlex.quote
+    env, argv = split_command(command)
+    mine = {kv.split("=", 1)[0] for kv in geak_env}
+    base = [kv for kv in env if kv.split("=", 1)[0] not in mine]
+    lines = ["#!/usr/bin/env bash", "# Rendered by mn.py launch from the caller's launch_command.", "prof=()"]
+    if backend == "vllm":
+        # vllm >=0.19 reads the profiler from the command line only; magpie's step bound goes after it.
+        lines.append(f'if [ "${{PROFILE:-0}}" = 1 ]; then pj="$(. {q(os.path.join(adapters, "vllm.sh"))} '
+                     '&& adapter_profiler_args)"; [ -z "$pj" ] || prof=(--profiler-config "$pj"); fi')
+    launch = ["setsid env --", *(q(kv) for kv in base), shlex.join(argv), '${prof[@]+"${prof[@]}"}',
+              f'$EXTRA_{backend.upper()}_ARGS > "$SERVER_LOG" 2>&1 < /dev/null &']
+    lines += ["set -f", " ".join(launch), 'echo $! > "$MAGPIE_SERVER_PID_FILE"']
+    return "\n".join(lines) + "\n"
+
+
+def provided_script(head: list, env: dict, launch_script: str, rank_dir: str, rank, magpie: str) -> str:
+    """A caller's server-phase script under GEAK's layer: magpie.sh maps EXTRA_SERVER_ARGS /
+    EXTRA_ENV / OVERLAY_PYTHONPATH onto it. Structural flags are the caller's, never added here.
+    Backgrounded: the server phase waits for readiness, far past the spawn's timeout. The
+    wrapper's pid is recorded at once, magpie's server pid once its server phase is up."""
+    q = shlex.quote
+    inner = f'. "$GEAK_MN_MAGPIE"; adapter_launch && {record_pid(rank)}'
+    lines = ["set -e", *head, *(f"export {k}={q(str(v))}" for k, v in env.items()),
+             f"export MAGPIE_LAUNCH_SCRIPT={q(launch_script)} OUT_DIR={q(rank_dir)} GEAK_MN_MAGPIE={q(magpie)}",
+             f"mkdir -p {q(rank_dir)}",
+             f"setsid bash -c {q(inner)} >> {q(rank_dir + '/magpie_phase.log')} 2>&1 < /dev/null &",
+             "pid=$!", record_pid(rank, "$pid"), "echo STARTED_PID=$pid"]
+    return "\n".join(lines) + "\n"
+
+
+def pd_lb_script(state, pd, out_dir, launch_id, *, router: str = "", adapter: str = "",
+                 model: str = "", pythonpath: str = "", extra_env: str = "") -> str:
+    """The PD front end, on lb_node. It holds no GPU and joins no collective, so no node
+    facts. `router`: the caller's router launch_command, run as given on its own machine (check
+    proved it names exactly the engines) with its pid recorded, since no name pattern knows
+    every backend's router; else the backend adapter's adapter_pd_lb_launch."""
+    q = shlex.quote
+    urls = {r: " ".join(e["url"] for e in engine_urls(state) if e["role"] == r) for r in pd["roles"]}
+    log, port = os.path.join(out_dir, "mn_lb.log"), pd["lb_port"]
+    head = [f"mkdir -p {q(out_dir)}", f"echo {q(f'mn-launch id={launch_id} role=lb port={port} log={log}')}"]
+    if router:
+        return "\n".join(["set -e", *head,
+                          f"setsid bash -c {q(router)} >> {q(log)} 2>&1 < /dev/null &",
+                          "pid=$!", record_pid("lb", "$pid"), "echo STARTED_PID=$pid"]) + "\n"
+    call = " ".join(q(str(a)) for a in ("0.0.0.0", port, urls["prefill"], pd["bootstrap_port"], urls["decode"]))
+    return launch_script(
+        head,
+        {"MODEL": model, "LOG": log, "PYTHONPATH": pythonpath, "EXTRA_ENV": extra_env,
+         "LB_EXTRA_ARGS": "--mini-lb" if pd["lb"] == "minilb" else "",
+         "SERVER_LAUNCH_PREFIX": "setsid"},
+        adapter, f"adapter_pd_lb_launch {call}")
+
+
+def check_script(rank, script: str) -> None:
+    """Catch a broken script before the spawn, not as a dead rank."""
+    proc = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"!!! multinode: rank{rank}'s rendered script is not valid bash:\n{proc.stderr.strip()}")
+
+
+def _last_line(text: str) -> str:
+    return text.splitlines()[-1] if text else ""
+
+
+def cmd_launch(argv: list) -> int:
+    env = os.environ.get
+    state = load_state()
+    shared = state["shared_fs"]
+    topology = topology_of(state)
+    pd = pd_config(state) if topology == "pd_disagg" else None
+
+    model = env("MODEL", "")
+    if not model:
+        raise SystemExit("!!! multinode: MODEL is required")
+    nnodes = len(state["nodes"])
+    tp = int(env("TP", 0) or 0)
+    mem_fraction = env("MEM_FRACTION", "0.90")
+    extra_args = (env("EXTRA_SERVER_ARGS", "") or "").strip()
+    provided = state.get("mode") == "provided"
+    # A provided script owns the launch line, so no backend adapter speaks for the ranks.
+    adapter = "" if provided else resolve_adapter(env("BACKEND", "sglang"), shared, topology)
+    overlay = (env("OVERLAY_PYTHONPATH", "") or "").strip()
+    profile_dir = env("PROFILE_DIR", "")
+    log_path = env("LOG", "")
+    out_dir = env("OUT_DIR", os.path.dirname(log_path) or shared)
+
+    if any("tp" not in n or "gpus" not in n for n in state["nodes"]):
+        raise SystemExit("!!! multinode: the pin records no per-rank TP/cards; re-run mn.py check.")
+    # The pin's TP is the deployment; a tp_span leg asking for another TP measured another one.
+    if pd is None and tp and tp != state["nodes"][0]["tp"]:
+        raise SystemExit(f"!!! multinode: TP={tp} but the pin was checked for TP={state['nodes'][0]['tp']}; re-run mn.py check for the new TP.")
+    role_of = {n["rank"]: n.get("role") or "" for n in state["nodes"]} if pd is not None else {}
+    backend = state.get("backend") or env("BACKEND", "sglang")
+
+    for name, path in (("LOG", log_path), ("PROFILE_DIR", profile_dir)):
+        if not path:
+            raise SystemExit(f"!!! multinode: {name} is required")
+        if not under(path, shared):
+            raise SystemExit(
+                f"!!! multinode: {name}={path} is not under the shared mount {shared}.\n    Off the shared mount each node writes its own copy and the\n    benchmark host reads nothing. Put OUT_DIR under {shared}.")
+
+    kept_env, dropped_env = accepted_env(env("EXTRA_ENV", ""))
+    for tok in dropped_env:
+        print(f">>> multinode: dropping EXTRA_ENV token: {tok}", file=sys.stderr)
+    # TP across nodes only. Absence is injected: a sweep that replaces EXTRA_ENV drops
+    # the variable and every rank then dies in graph capture.
+    _before_sync = list(kept_env)
+    kept_env = span_sync_env(kept_env, spanning=pd is None and nnodes > 1)
+    if kept_env != _before_sync:
+        print(">>> multinode: injected SYNC_TOKEN_IDS_ACROSS_TP=1 (tp spanning nodes, caller did not set it)", file=sys.stderr)
+
+    pythonpath = env("PYTHONPATH", "")
+
+    launch_id = uuid.uuid4().hex[:10]
+    magpie = os.path.join(adapters_dir(shared), "launchers", "magpie.sh") if provided else ""
+    scripts, effective_by_role, rank_logs, args_dropped = {}, {}, {}, {}
+    for node in state["nodes"]:
+        rank = node["rank"]
+        # rank0's log IS $LOG (bench_e2e.sh's stall/OOM detector reads it).
+        rank_log = log_path if rank == 0 else os.path.join(out_dir, f"server.rank{rank}.log")
+        rank_logs[rank] = rank_log
+        rank_extra, rank_env = extra_args, list(kept_env)
+        master = state["master_ip"]
+        if pd is None:
+            port = state["serve_port"]
+            base_url = f"http://{state['master_ip']}:{port}"
+            structural = (f'adapter_dist_args {rank} {nnodes} "$MASTER_ADDR" {state["dist_init_port"]}')
+        else:
+            role = role_of[rank]
+            engine = next(e for e in engine_urls(state)
+                          if e["role"] == role and e["replica"] == node.get("replica", 0))
+            port, head_node, base_url = engine["port"], engine["node"], engine["url"]
+            structural = (f'adapter_pd_args {role} {pd["bootstrap_port"]} {pd["transfer_backend"]} {pd["ib_device"]}').rstrip()
+            spans = int(node.get("engine_nnodes") or 1) > 1
+            if spans:
+                # One engine over several nodes: its own dist-init world, mastered by its node-rank 0.
+                master = head_node["ip"]
+                structural = (f'echo $({structural}) $(adapter_dist_args {node["engine_rank"]} '
+                              f'{node["engine_nnodes"]} "$MASTER_ADDR" {state["dist_init_port"]})')
+            rank_extra, rank_env, sweep_dropped = pd_rank_swept(role, extra_args, kept_env)
+            for tok in sweep_dropped:
+                print(f">>> multinode: dropping {role} sweep env token: {tok}", file=sys.stderr)
+            if spans:
+                rank_env = span_sync_env(rank_env, spanning=True)
+        if provided:
+            # The caller's command owns its port, model, TP and PD wiring; a swept copy is dropped.
+            rank_extra, args_dropped[rank] = strip_flags(rank_extra, structural_flags(backend))
+            for tok in args_dropped[rank]:
+                print(f">>> multinode: rank{rank}: dropping {tok!r}; the launch_command owns it", file=sys.stderr)
+        if pd is not None:
+            effective_by_role[role] = {"extra_args": rank_extra, "env": " ".join(rank_env)}
+        rank_vars = rank_env_vars(model=model, tp=node["tp"],
+                                  gpu=",".join(str(i) for i in node.get("gpu_ids") or range(node["gpus"])),
+                                  mem_fraction=mem_fraction,
+                                  port=port, base_url=base_url, log=rank_log,
+                                  profile_dir=profile_dir, overlay=overlay,
+                                  pythonpath=pythonpath, extra_env=" ".join(rank_env),
+                                  extra_args=rank_extra)
+        if provided:
+            wrapper = os.path.join(out_dir, f"mn_cmd_rank{rank}.sh")
+            with open(wrapper, "w", encoding="utf-8") as f:
+                f.write(command_script(backend, node["launch_command"], rank_env, adapters_dir(shared)))
+            banner = f"mn-launch id={launch_id} rank={rank} command={wrapper} log={rank_log}"
+            head = [f"mkdir -p {shlex.quote(os.path.dirname(rank_log))} {shlex.quote(profile_dir)}",
+                    f"echo {shlex.quote(banner)}"]
+            rank_vars.update(BACKEND=backend, **{k: env(k) for k in MAGPIE_PASSTHROUGH if env(k)})
+            # The command is the whole recorded launch; magpie must not prepend the recipe's flags again.
+            rank_vars["EFFECTIVE_SERVER_ARGS_COMPLETE"] = "1"
+            scripts[rank] = provided_script(head, rank_vars, wrapper,
+                                            os.path.join(out_dir, f"rank{rank}"), rank, magpie)
+        else:
+            scripts[rank] = launch_script(
+                rank_head(node, master, rank_log, profile_dir, launch_id),
+                rank_vars, adapter, "adapter_launch", structural, rank)
+
+    # The LB is not one of `scripts`: those are the GPU-holding engines.
+    lb_script = None
+    if pd is not None and state.get("router"):
+        lb_script = pd_lb_script(state, pd, out_dir, launch_id, router=state["router"]["launch_command"])
+    elif pd is not None:
+        lb_script = pd_lb_script(state, pd, out_dir, launch_id,
+                                 adapter=adapter,
+                                 model=model, pythonpath=pythonpath, extra_env=" ".join(kept_env))
+
+    rendered = {f"rank{r}": s for r, s in sorted(scripts.items())}
+    if lb_script is not None:
+        rendered["lb"] = lb_script
+    for name, script in rendered.items():
+        check_script(name[4:] if name.startswith("rank") else name, script)
+    for name, script in rendered.items():
+        with open(os.path.join(out_dir, f"mn_{name}.sh"), "w", encoding="utf-8") as f:
+            f.write(script)
+
+    # Before touching the cluster: a dry run must not tear down a live server.
+    if env("GEAK_MN_DRY_RUN") == "1":
+        print(">>> multinode: dry run -- rendered scripts written, nothing launched")
+        for name, script in rendered.items():
+            print(f"--- {name} ---\n{script}")
+        return 0
+
+    probes = teardown(state)
+    if not probes:
+        raise SystemExit(COTENANT_REFUSAL)
+
+    nodes = [n for n in resolve(state) if n["rank"] in scripts]
+    results = ssh_each(state, [(n, scripts[n["rank"]], 300) for n in nodes], merged=True)
+
+    # The LB goes up AFTER the engines; the router polls its workers before serving.
+    lb_result = None
+    if lb_script is not None:
+        lb_result = ssh_run(state, lb_node(state), lb_script, 300, merged=True)
+
+    summary = {
+        "launch_id": launch_id,
+        "launched_at": _utc(),
+        "master": state["master_ip"],
+        "serve_port": state["serve_port"],
+        "dist_init_port": state["dist_init_port"],
+        "base_url": f"http://{state['master_ip']}:{state['serve_port']}",
+        "nnodes": nnodes,
+        "log": log_path,
+        "profile_dir": profile_dir,
+        "overlay_pythonpath": overlay,
+        "extra_server_args": extra_args,
+        "ranks": [
+            {"rank": n["rank"], "hostname": r["hostname"], "ip": r["ip"],
+             "tp": n["tp"], "gpus": n["gpus"], "rc": r["rc"], "out": r["out"],
+             **({"extra_args_dropped": args_dropped[n["rank"]]} if args_dropped.get(n["rank"]) else {})}
+            for n, r in zip(nodes, results)
+        ],
+        # What the supervisor tears down, independent of any later pin.
+        "nodes": [{k: n.get(k) for k in LAUNCH_NODE_KEYS} for n in state["nodes"]],
+        **({"router": {k: state["router"].get(k) for k in LAUNCH_NODE_KEYS}}
+           if (state.get("router") or {}).get("node_id") else {}),
+        "topology": topology,
+        "mode": state.get("mode", "generated"),
+    }
+    if pd is not None:
+        # The commands own their ports and transfer backend; pd_config's would be fiction here.
+        generated_only = ("role_ports", "bootstrap_port", "transfer_backend", "ib_device") if provided else ()
+        summary["pd"] = {
+            **{k: v for k, v in pd.items() if k not in generated_only},
+            "engine_tp_by_role": {role_of[n["rank"]]: n["tp"] for n in state["nodes"]},
+            "effective_args_by_role": effective_by_role,
+            # The profile window and the agents address engines from here (the LB proxies
+            # no profiler). log: the engine's front-end rank log; tp: its rank traces.
+            "engines": [
+                {"role": e["role"], "replica": e["replica"], "rank": e["node"]["rank"],
+                 "host": _short(e["node"]["hostname"]), "ip": e["node"]["ip"],
+                 "port": e["port"], "url": e["url"], "tp": e["node"]["tp"],
+                 "log": rank_logs[e["node"]["rank"]],
+                 **({"bootstrap_port": e["node"]["bootstrap_port"]} if e["node"].get("bootstrap_port") else {}),
+                 **({"node_ranks": [n["rank"] for n in e["nodes"]]} if len(e["nodes"]) > 1 else {})}
+                for e in engine_urls(state)
+            ],
+            "lb_url": f"http://{lb_node(state)['ip']}:{pd['lb_port']}",
+            "lb_host": lb_node(state)["ip"],
+            "lb_log": os.path.join(out_dir, "mn_lb.log"),
+        }
+    _write_json(os.path.join(out_dir, "mn_launch.json"), summary)
+    for r in summary["ranks"]:
+        role = f" ({role_of[r['rank']]})" if pd else ""
+        print(f">>> multinode rank{r['rank']}{role} on {_short(r['hostname'])} rc={r['rc']} :: {_last_line(r['out'])}")
+
+    if any(r["rc"] != 0 for r in summary["ranks"]):
+        return abandon_launch(state)
+
+    if lb_result is not None:
+        print(f">>> multinode lb on {_short(lb_result['hostname'])} rc={lb_result['rc']} :: {_last_line(lb_result['out'])}")
+        if lb_result["rc"] != 0:
+            print(f"!!! multinode: the load balancer spawn failed; see {summary['pd']['lb_log']}.", file=sys.stderr)
+            return abandon_launch(state)
+
+    counts = serve_counts(state)
+    print(f">>> multinode: serve processes per rank = {counts}")
+    if any(c < 1 for c in counts):
+        print("!!! multinode: at least one rank has no serve process after the spawn; see the rank logs.", file=sys.stderr)
+        return abandon_launch(state)
+    return 0
+
+
+def abandon_launch(state: dict) -> int:
+    """No supervisor exists yet, so reap whatever did spawn."""
+    try:
+        teardown(state, wait_idle_s=TEARDOWN_WAIT_S)
+    except Exception as exc:
+        print(f"!!! multinode: reaping the failed launch raised: {exc}", file=sys.stderr)
+    return 1
+
+
+def cmd_stop(argv: list) -> int:
+    """`mn.py stop <out_dir>`: reap the launch in out_dir when no supervisor came up to do it."""
+    out_dir = argv[0] if argv else os.environ.get("OUT_DIR", ".")
+    return 0 if teardown(supervised_state(load_state(), out_dir)) else 1
+
+
+# --------------------------------------------------------------------------
+# SUPERVISE  (mn.py supervise)
+# --------------------------------------------------------------------------
+# The local pid bench_e2e.sh watches and kills. It exits when a rank stops
+# serving (no process, zombie workers, or a dead PD front end) so the bench sees
+# `died_early` within one poll, and its SIGTERM handler reaps the remote ranks
+# (after a kill -9 they hold the cards until the next launch's teardown).
+# It never writes to $LOG (bench_e2e.sh greps it).
+
+SUP_POLL_S = 20
+MISSES = 2          # empty observations before "dead"
+ERR_MISSES = 6      # probe errors before giving up
+# Must finish inside server_teardown.sh's TERM->KILL grace (SERVER_STOP_GRACE_S=90).
+TEARDOWN_WAIT_S = 60
+
+_state = None
+_out_dir = os.environ.get("OUT_DIR", ".")
+_stopping = False
+
+
+def record(verdict: str, detail: dict) -> None:
+    try:
+        _write_json(os.path.join(_out_dir, "mn_supervisor.json"),
+                    {"verdict": verdict, "at": _utc(), **detail})
+    except OSError as exc:
+        log(f"could not write mn_supervisor.json: {exc}")
+
+
+def on_term(signum, _frame):
+    """Reap the remote ranks and exit 0 (a requested stop is not a crash)."""
+    global _stopping
+    if _stopping:
+        return
+    _stopping = True
+    log(f"signal {signum}: tearing down the remote ranks")
+    try:
+        cleared = teardown(_state, wait_idle_s=TEARDOWN_WAIT_S)
+        log("remote ranks reaped" if cleared else
+            "remote teardown did not fully clear; the next launch will wait for the cards")
+        record("torn_down", {"signal": int(signum), "cleared": bool(cleared)})
+    except Exception as exc:
+        log(f"remote teardown raised: {exc}")
+        record("torn_down", {"signal": int(signum), "error": str(exc)})
+    sys.exit(0)
+
+
+def _death_reason(rank: dict) -> str:
+    if rank["serve"] < 1:
+        return "no serve process"
+    if rank["zombies"] > 0:
+        return (f"{rank['zombies']} zombie worker(s) -- the engine aborted while the HTTP front end kept answering")
+    return ("the disaggregation load balancer is gone -- both engines are up but nothing serves the client port")
+
+
+def cmd_supervise(argv: list) -> int:
+    global _state
+    _state = supervised_state(load_state(), _out_dir)
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
+    ranks = [f"rank{n['rank']}@{_short(n['hostname'])}" for n in _state["nodes"]]
+    log(f"watching {', '.join(ranks)} every {SUP_POLL_S}s (dead after {MISSES} empty polls, {ERR_MISSES} failed probes)")
+    record("watching", {"ranks": ranks, "poll_s": SUP_POLL_S})
+
+    # A cold PD boot keeps the LB unhealthy for minutes, longer the bigger the model:
+    # it counts only once it has answered 200.
+    lb_seen = False
+    empty = [0] * len(state_targets(_state))
+    errors = 0
+    while True:
+        time.sleep(SUP_POLL_S)
+        try:
+            health = engine_health(_state)
+            errors = 0
+        except Exception as exc:
+            errors += 1
+            log(f"probe failed ({errors}/{ERR_MISSES}): {exc}")
+            if errors >= ERR_MISSES:
+                record("unobservable", {"error": str(exc), "consecutive_failures": errors})
+                log("giving up: the ranks have been unobservable for too long")
+                return 1
+            continue
+
+        lb_seen = lb_seen or any(rank.get("lb") == 1 for rank in health)
+        for i, rank in enumerate(health):
+            lb_down = lb_seen and rank.get("lb", 1) < 1
+            gone = rank["serve"] < 1 or rank["zombies"] > 0 or lb_down
+            empty[i] = empty[i] + 1 if gone else 0
+
+        dead = [i for i, misses in enumerate(empty) if misses >= MISSES]
+        if dead:
+            names = [f"rank{health[i]['rank']}@{health[i]['host']}" for i in dead]
+            why = "; ".join(f"rank{health[i]['rank']}: {_death_reason(health[i])}" for i in dead)
+            log(f"{why} -- exiting so the benchmark sees a dead server now instead of hanging until the stall window expires")
+            record("rank_died", {"dead_ranks": names, "why": why, "health": health})
+            # Survivors are blocked in a collective that will never complete.
+            try:
+                teardown(_state, wait_idle_s=TEARDOWN_WAIT_S)
+            except Exception as exc:
+                log(f"post-mortem teardown raised: {exc}")
+            return 1
+
+
+# --------------------------------------------------------------------------
+# EXEC  (mn.py exec)
+# --------------------------------------------------------------------------
+# The driver GEAK runs on sees no GPU; this reaches a pinned node for op benches, shape
+# captures, kernel tests and one-card servers. --gpu leases the cards so parallel tasks
+# never share one.
+
+def exec_target(state: dict, name: str) -> dict:
+    """master | rank<N> | prefill | decode | a pinned IP or hostname."""
+    nodes, pd = state["nodes"], topology_of(state) == "pd_disagg"
+    if name == "master":
+        return next((n for n in nodes if n["ip"] == state.get("master_ip")), nodes[0])
+    if re.fullmatch(r"rank\d+", name) and int(name[4:]) < len(nodes):
+        return nodes[int(name[4:])]
+    if pd and name in PD_ROLES and engine_nodes(state, name):
+        return engine_nodes(state, name)[0]
+    for n in nodes:
+        if name in (n["ip"], n["hostname"], _short(n["hostname"])):
+            return n
+    raise SystemExit(f"!!! multinode exec: no pinned node {name!r}; use master, rank0..rank{len(nodes) - 1}"
+                     + (", prefill, decode" if pd else "") + " or a pinned host")
+
+
+def lease_dir(state: dict) -> str:
+    return os.path.join(state["shared_fs"], ".mn_lease")
+
+
+def lease_file(state: dict, node: dict, gpu) -> str:
+    """One lock file per card on the shared mount: exec tasks, gpu_lock.sh and serving legs
+    (multinode.sh) take the same files, so no two GEAK tasks hold one card. gpu_lock.sh
+    writes the same name itself (its LOCK_PREFIX). The full hostname: machines whose first
+    label agrees are different machines."""
+    os.makedirs(lease_dir(state), exist_ok=True)
+    return os.path.join(lease_dir(state), f"{node['hostname']}.gpu{gpu}.lock")
+
+
+@contextlib.contextmanager
+def gpu_lease(state: dict, node: dict, gpus: str):
+    """Exclusive per-card locks held while the command runs; yields the leased id(s)."""
+    ids = sorted({int(g) for g in gpus.split(",") if g})   # one order: no deadlock
+    if not ids:
+        yield ""
+        return
+    try:
+        import fcntl
+    except ImportError:                                 # pragma: no cover - not Linux
+        yield gpus
+        return
+    host = _short(node["hostname"])
+    held = []
+    try:
+        for gpu in ids:
+            f = open(lease_file(state, node, gpu), "w")
+            held.append(f)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f">>> mn exec: waiting for {host} gpu{gpu}, leased by another task",
+                      file=sys.stderr, flush=True)
+                fcntl.flock(f, fcntl.LOCK_EX)
+        yield ",".join(map(str, ids))
+    finally:
+        for f in held:
+            f.close()
+
+
+# Never shipped: this host's own paths and identity (the claude binary included), and card masks.
+LOCAL_ENV = re.compile(r"\w*_VISIBLE_DEVICES|BASH\w*|SHLVL|PATH|HOME|PWD"
+                       r"|OLDPWD|SHELL|USER|LOGNAME|HOSTNAME|TERM|TMPDIR|LANG|LC_\w+|LD_LIBRARY_PATH|LD_PRELOAD"
+                       r"|PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|CONDA_\w+|SSH_\w+|DISPLAY|MAIL\w*|XDG_\w+"
+                       r"|(GEAK_)?CLAUDE_BIN")
+# Credentials stay on the machine GEAK runs on.
+CREDENTIAL_ENV = re.compile(r"\w*(TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL)\w*|ANTHROPIC_\w+|CLAUDE\w*")
+
+
+def exported_env() -> str:
+    return "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(os.environ.items())
+                   if re.fullmatch(r"[A-Z_][A-Z0-9_]*", k) and not LOCAL_ENV.fullmatch(k)
+                   and not CREDENTIAL_ENV.fullmatch(k))
+
+
+# Once the caller's ssh is gone, the command's session gets TERM and, this much later, KILL:
+# room for bench_e2e.sh to tear down a one-card server (TERM->KILL 90s) and a bench to clean up.
+EXEC_GRACE_S = 180
+
+
+def exec_script(body: str, grace: int = EXEC_GRACE_S) -> str:
+    """`body` in its own session on the node, watched for the caller hanging up. GEAK_MN_HOP
+    tells bench_e2e.sh, gpu_lock.sh and profile_kernel.sh they already run on the node.
+    One brace group: bash parses all of it before running any, so the watchdog's `cat`
+    reads only what comes after the script -- nothing, until EOF."""
+    q = shlex.quote
+    watchdog = f'cat >/dev/null; pkill -TERM -s "$1"; sleep {grace}; pkill -KILL -s "$1"'
+    eof = f"GEAK_MN_BODY_{uuid.uuid4().hex}"
+    return ("{\n"
+            "export GEAK_MN_HOP=1\n"
+            'body=$(mktemp) || exit 97\n'
+            f"cat > \"$body\" <<'{eof}'\n{body}\n{eof}\n"
+            'setsid bash "$body" </dev/null &\n'
+            "pid=$!\n"
+            f"setsid bash -c {q(watchdog)} _ \"$pid\" <&0 >/dev/null 2>&1 &\n"
+            'wait "$pid"\n'
+            'rc=$?; rm -f "$body"; exit $rc\n'
+            "}\n")
+
+
+def cmd_exec(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py exec",
+                                 description="Run a command on a pinned node, in this directory.")
+    ap.add_argument("--target", default="", help="master (default) | rank<N> | prefill | decode | a pinned host")
+    ap.add_argument("--gpu", default="",
+                    help="[<target>:]card id(s) on that node, e.g. 3, 0,1 or decode:3: leased, "
+                         "exported as HIP_VISIBLE_DEVICES and GPU_ID")
+    ap.add_argument("--script", default="", help="bash script file to run instead ('-' = stdin)")
+    ap.add_argument("--env", action="store_true", help="also export this shell's environment there")
+    ap.add_argument("cmd", nargs=argparse.REMAINDER)
+    a = ap.parse_args(argv)
+    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    if bool(cmd) == bool(a.script):
+        ap.error("give either a command after -- or --script")
+    spec = re.fullmatch(r"(?:([\w.-]+):)?(\d+(?:,\d+)*)", a.gpu) if a.gpu else None
+    if a.gpu and not spec:
+        ap.error(f"--gpu takes card ids such as 3, 0,1 or decode:3; got {a.gpu!r}")
+    prefix, gpus = spec.groups() if spec else (None, "")
+    if prefix and a.target and prefix != a.target:
+        ap.error(f"--gpu {a.gpu} names {prefix!r} but --target is {a.target!r}")
+    if a.script:
+        with (contextlib.nullcontext(sys.stdin) if a.script == "-" else open(a.script, encoding="utf-8")) as f:
+            body = f.read()
+    else:
+        body = shlex.join(cmd)
+    state = load_state()
+    node = exec_target(state, a.target or prefix or "master")
+    with gpu_lease(state, node, gpus) as leased:
+        script = (f"cd {shlex.quote(os.getcwd())} 2>/dev/null || true\n"
+                  + (exported_env() if a.env else "")
+                  + (f"export HIP_VISIBLE_DEVICES={leased} GPU_ID={leased}\n" if leased else "")
+                  + body + "\n")
+        return ssh_stream(state, node, exec_script(script))
+
+
+# --------------------------------------------------------------------------
+# LEG ENV  (mn.py leg-env)
+# --------------------------------------------------------------------------
+
+def cmd_leg_env(argv: list) -> int:
+    """The pin's facts multinode.sh needs, as `_MN_<NAME>=<value>` lines for eval. Exits 3
+    on a pin it cannot serve from, before multinode.sh takes any lease or lock."""
+    state = load_state()
+    if not state.get("master_ip") or not state.get("serve_port"):
+        sys.stderr.write(f"!!! multinode launcher: {state_path()} has no master_ip/serve_port; re-run mn.py check.\n")
+        return 3
+    topology = topology_of(state)
+    facts = {
+        "HOST": state["master_ip"], "PORT": state["serve_port"], "TOPOLOGY": topology,
+        "NNODES": len(state["nodes"]), "SHARED_FS": state["shared_fs"],
+        # The serving lock is keyed on the pinned node set, so runs on disjoint sets do not serialise.
+        # Full hostnames, hashed: a file name of five FQDNs would pass 255 bytes.
+        "LOCK_KEY": hashlib.sha1("+".join(sorted(n["hostname"].lower() for n in state["nodes"]))
+                                 .encode()).hexdigest()[:12],
+        # One engine per role (replica 0) opens the profile window; health asks every replica.
+        "PD_ENGINES": "\n".join(f"{e['role']}={e['url']}" for e in engine_urls(state) if not e["replica"])
+                      if topology == "pd_disagg" else "",
+        "PD_HEALTH": "\n".join(e["url"] for e in engine_urls(state)) if topology == "pd_disagg" else "",
+        # Once per card: ranks sharing a machine name the same files, and multinode.sh would
+        # block on its own lock taking one twice.
+        "LEASES": "\n".join(dict.fromkeys(lease_file(state, n, g) for n in state["nodes"] for g in range(n["ngpu"]))),
+    }
+    print("".join(f"_MN_{k}={shlex.quote(str(v))}\n" for k, v in facts.items()), end="")
+    return 0
+
 
 # --------------------------------------------------------------------------
 # entry point
@@ -1219,6 +2140,12 @@ def cmd_probe(argv: list) -> int:
 
 COMMANDS = {
     "check": cmd_check,
+    "launch": cmd_launch,
+    "supervise": cmd_supervise,
+    "stop": cmd_stop,
+    "leg-env": cmd_leg_env,
+    "active-pin": cmd_active_pin,
+    "exec": cmd_exec,
     "probe": cmd_probe,
 }
 TAGS = {"supervise": "mn-sup"}

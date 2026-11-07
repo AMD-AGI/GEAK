@@ -1366,6 +1366,14 @@ def apply_bench_client(h: dict) -> str:
     return client
 
 
+def bench_client_host() -> str:
+    """Where the bench client ran: only the backend's own client, which imports the serving
+    framework, runs on rank0 of a multinode run (adapters/launchers/multinode.sh)."""
+    client = os.environ.get("BENCH_CLIENT", "native").strip().lower()
+    multinode = os.environ.get("BENCH_LAUNCHER", "") == "multinode"
+    return "rank0" if client == "native" and multinode else "driver"
+
+
 # metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
 # interactivity bases are absent on purpose: _BASES accepts each one as its own token.
 _E2E_METRIC_FOR_BASIS = {
@@ -4590,6 +4598,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "workload_comparability": workload_comparability,
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        "bench_client_host": bench_client_host(),
         "bench_protocol": h.get("bench_protocol") or {},
         "baseline_config": {
             "accepted_flags": h.get("accepted_flags", "") or "",
@@ -4878,6 +4887,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        # "driver" (where GEAK runs, as Hyperloom's rebench) or "rank0" (native on multinode).
+        "bench_client_host": bench_client_host(),
         # Measurement protocol forwarded from the handoff, surfaced at TOP LEVEL
         # (not only inside baseline_basis) so a sweep/validated reuse can pin the
         # SAME num_prompts / random_range_ratio / num_warmups / seed the headline
