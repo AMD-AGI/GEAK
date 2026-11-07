@@ -123,6 +123,12 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+// A supplied workload in no recognized form would silently turn a weighted task into an unweighted
+// geomean search. Refuse it before any agent starts; an empty list still means "no workload".
+if (WORKLOAD_SPEC && !HAS_WORKLOAD && !(Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length === 0)) {
+  throw new Error('unsupported workload shape: supply op_spec.workload as a non-empty cases list, ' +
+    'a workload-v1 object with kernels[], or a workload_spec_path');
+}
 const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
 if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
     || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
