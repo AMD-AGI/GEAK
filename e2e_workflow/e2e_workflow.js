@@ -236,8 +236,26 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // profile) and kept fixed so deltas stay comparable. Distinct from GPU_LIST, the pool for isolated
 // benchmarks and kernel lanes. Default TP=1; SERVING_GPU defaults to the first TP ids of GPU_LIST.
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
+const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
+// ---- MULTI-NODE (opt-in): args.multinode is run_e2e.py's MULTI_NODE_STATE block, see docs/multi_node.md. mn.py check
+// parses it and writes the pin before Setup: run_e2e.py passes args.multinode_check, else an agent runs it.
+const MN_ARG = A.multinode || (A.state && A.state.multinode) || null;
+const MN = (MN_ARG && typeof MN_ARG === 'object' && Array.isArray(MN_ARG.nodes)
+  && MN_ARG.nodes.length > 0) ? MN_ARG : null;
+const SERVING_TOPOLOGY = MN ? String(MN.topology || 'tp_span').trim() : '';
+const MN_PY = `${WORKFLOW_DIR}/scripts/multi_node/mn.py`;
+let MN_SPEC = null, MN_STATE = '';
+let MN_SERVING_ENV = '', MN_GPU_EXEC = '';
+function useMnSpec(spec) {
+  MN_SPEC = spec;
+  MN_STATE = spec.state;
+  MN_SERVING_ENV = `BENCH_LAUNCHER=multinode GEAK_MN_STATE=${MN_STATE}`;
+  MN_GPU_EXEC = `GEAK_MN_STATE=${MN_STATE} python3 ${MN_PY} exec`;
+}
+// Multi-node: each rank's cards come from the pin; GPU names rank0's local ids only.
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
-  : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+  : MN ? GPU_IDS
+    : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
 // Expert-parallel degree of the BASELINE launch; run_e2e.py always sends it (_resolve_ep). It is a
 // KB addressing dimension beside TP; the Config Tuner may change it mid-run, and the accepted value
 // lives in accepted_config. With launch details but no args.ep, fail rather than guess: a wrong ep
@@ -1069,7 +1087,6 @@ const SETUP_SCHEMA = obj({
   precision: { type: 'string' },
   framework_version: { type: 'string' }, rocm_version: { type: 'string' },
 }, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
-
 // admitHeads adopts entity_kind from these rows, so a row without it silently refuses every head.
 // device_kernel is required on gpu_kernel rows too; admitHeads checks that (no conditional schema here).
 const PROFILE_ROW_SCHEMA = obj({
@@ -1425,8 +1442,6 @@ function noteKernelKB(r, label) {
   return r;
 }
 
-const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
-
 // The ONE place e2e KB identity argv is formatted, for both reader (Module A) and writer (Module B):
 // a one-segment disagreement silently addresses a different page (see kb/identity.py).
 function kbIdentityFlags() {
@@ -1608,6 +1623,7 @@ function kernelExtractBlock(role) {
     `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;
 }
 
+const PD_ROLES = ['prefill', 'decode'];
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -1643,7 +1659,7 @@ Every e2e SERVING benchmark in this run (baseline, config sweep, integrate ref/c
 profiler trace) MUST use the SAME serving config: tensor-parallel TP=${SERVING_TP} on the GPU set
 GPU=${SERVING_GPU}. Whenever you invoke bench_e2e.sh for a SERVING throughput/profile measurement, pass
 exactly these in its env:
-    BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}
+    BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}${MN ? ` ${MN_SERVING_ENV}` : ''}
 NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
 makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
 is a comma-separated set spanning exactly TP GPUs.)
@@ -2264,6 +2280,13 @@ const hasFrozenBaseline = (ext) =>
 // ("pass"/"fail"), so the prose lives in smoke_detail; notes may be unrelated, so read both.
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
+
+async function agentRun(cmd, phase, label, note = '') {
+  const read = await safeAgent(`You run one command. Run exactly this, change nothing, run nothing else${note}:\n\n` +
+    '```bash\n' + cmd + '\n```\n\nReturn its standard output verbatim (stderr appended if it failed) as stdout.',
+    { phase, label, schema: obj({ stdout: { type: 'string' } }, ['stdout']) }, 2);
+  return String((read && read.stdout) || '').trim();
+}
 
 // Re-asserts in pure JS what the shipped envelope must still prove. agentx_kernel_preparation.mjs
 // gated the on-disk RETURN.json while packing, but its output reaches us through an agent (see
@@ -3129,6 +3152,56 @@ let KB_REF_INPUTS = {};
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
+// Prompt entry: no caller ran the check, so an agent does; the pin lives while this process does.
+async function agentMnCheck() {
+  const spec = { ...MN, tp: SERVING_TP, work_dir: ST.eval_dir || EVAL_DIR_OVERRIDE || EXP_ROOT };
+  const out = await agentRun(`GEAK_MN_SPEC=${shq(JSON.stringify(spec))} python3 ${MN_PY} check --owner claude ` +
+    `| grep '^MN_CHECK=' | tail -n 1`, 'Setup', 'mn-check',
+    ', with a 600000 ms Bash timeout (it probes every machine)');
+  try {
+    return JSON.parse(out.slice(out.indexOf('MN_CHECK=') + 'MN_CHECK='.length));
+  } catch (e) {
+    return { verdict: 'refused', problems: [
+      `mn.py check printed no verdict line: ${out.slice(0, 500) || 'the agent returned nothing'}`] };
+  }
+}
+const mnHosts = (ns) => (Array.isArray(ns) ? ns : []).map((n) =>
+  String((n && typeof n === 'object') ? (n.host || n.ip || '') : n).trim()).sort().join(', ');
+// The verdict reaches this script through the main session's relay, which has dropped or rewritten
+// fields (#42). '' when every field used downstream is there, else why not.
+function mnVerdictDefect(v) {
+  if (!v || typeof v !== 'object') return 'no verdict';
+  if (v.verdict !== 'ok') return `verdict is ${JSON.stringify(v.verdict)}`;
+  const s = v.spec;
+  if (!s || typeof s !== 'object') return 'no spec';
+  for (const k of ['state', 'shared_fs']) if (typeof s[k] !== 'string' || !s[k].trim()) return `no spec.${k}`;
+  if (mnHosts(s.nodes) !== mnHosts(MN.nodes)) return `spec.nodes (${mnHosts(s.nodes)}) are not args.multinode's (${mnHosts(MN.nodes)})`;
+  if (SERVING_TOPOLOGY === 'pd_disagg') {
+    const t = s.tp_by_role || {};
+    if (!PD_ROLES.every((r) => Number.isInteger(t[r]) && t[r] > 0)) return `spec.tp_by_role ${JSON.stringify(s.tp_by_role)} is not a TP per engine`;
+  }
+  return '';
+}
+if (MN) {
+  let verdict = A.multinode_check;
+  // A relayed refusal stands: mn.py already ran and said no.
+  const relayed = !verdict ? 'absent' : verdict.verdict === 'refused' ? '' : mnVerdictDefect(verdict);
+  if (relayed) {
+    if (verdict) log(`[multinode] relayed verdict unusable (${relayed}); re-running mn.py check`);
+    verdict = await agentMnCheck();
+  }
+  const defect = verdict && verdict.verdict === 'ok' ? mnVerdictDefect(verdict) : '';
+  if (defect) verdict = { verdict: 'refused', problems: [`mn.py check's verdict is unusable: ${defect}`] };
+  if (!verdict || verdict.verdict !== 'ok' || !verdict.spec) {
+    const problems = (verdict && verdict.problems && verdict.problems.length) ? verdict.problems
+      : ['mn.py check returned no verdict'];
+    log(`[multinode] check refused: ${problems.join('; ')}`);
+    return { status: 'error', error: `mn.py check rejected args.multinode: ${problems.join('; ')}`,
+      multinode_check: { verdict: 'refused', problems } };
+  }
+  useMnSpec(verdict.spec);
+  log(`[multinode] check passed on ${MN_SPEC.nodes.map((n) => n.host).join(', ')}; pin at ${MN_STATE}`);
+}
 // The envelope arrives in the reply: this script cannot read EVAL_DIR (RUNTIME SANDBOX CONTRACT).
 // Every malformed reply THROWS, which arms the caller's repair_delivery retry; an empty queue would
 // read as "nothing to optimize".
@@ -3211,7 +3284,6 @@ async function prepareAgentXKernels(round, throughput) {
     }
   }
 }
-
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -6031,6 +6103,7 @@ if (want('final')) {
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
   backend: BACKEND,
+  ...(MN_SPEC ? { multinode: MN_SPEC } : {}),
   ...(KERNEL_EXTRACT_ON
     ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },
         profile_workload_json: profile ? profile.profile_workload_json || '' : '',
