@@ -1606,43 +1606,6 @@ function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label, dispa
     scope_floor_rank: st.floor_rank, reconsult_next_attempt: current && (kind === 'work_product' || kind === 'non_improvement') });
 }
 
-// eikos v2 E1 (R11 self-heal): a DEFINITIVE not-started commit dispatch (a 4xx/model-capability refusal or a
-// resolved/hard-errored null — the lane could not even START the commit, NOT a timeout) must ESCALATE past
-// the incapable lane so the bounded commit retry never re-dispatches the same model in a loop. Raise the
-// scope's persistent floor to one rank ABOVE the failed lane and mark that lane out of its class-fail budget,
-// so the next FRESH occurrence picks a more-capable lane. No-op at the top lane, when the failed model is
-// unknown, or when routing is off. Pure host policy on the ladder state; __routeReduce is UNTOUCHED
-// (byte-identical; the 388,800-state parity is unaffected).
-function __routeEscalatePastFailedLane(scope, route) {
-  if (!ROUTING_ON) return;
-  const did = route && route.dispatch_id;
-  const rec = did != null ? __routeDispatchById[did] : null;
-  const model = rec && rec.model;
-  const r = model != null ? __routeRank(model) : -1;
-  if (r < 0 || r >= ROUTE_TOP) return;                          // unknown lane, or already at the top: nothing to escalate past
-  const next = r + 1;
-  // eikos v2 E1 (R12 / Astra SHADOW-VERDICT item 2): operate on the ACTIVE decider's ladder. Under LIVE P1
-  // (route_decider=p1) the scope's measured state lives in __p1Ladder, NOT the legacy __routeLadder — reading
-  // __routeLadder made this a NO-OP under live P1 (Astra: the real live-P1 picker between refusals produced
-  // Haiku 5.5 -> Haiku 5.5 -> Haiku 5.5). Raising __p1Ladder[scope].floor_rank + excluding the failed lane via
-  // fails_by_lane makes __p1Reduce drop the incapable lane and pick the next capable one. Eikos/sonnet keep
-  // __routeLadder. Capability/availability escalation stays SEPARATE from earned work_product failures.
-  const st = ROUTE_P1_ON
-    ? (__p1Ladder[scope] || (__p1Ladder[scope] = __p1NewState(__routeScopeClass(scope))))
-    : __routeLadder[scope];
-  if (!st) return;
-  if (typeof st.floor_rank === 'number') st.floor_rank = Math.max(st.floor_rank, next);   // eikos / p1 ladder floor
-  if (st.fails_by_lane) {                                                                  // exclude the incapable lane
-    const cap = (ROUTE_CLASS_MAX_FAILS[st.scope_class] != null) ? ROUTE_CLASS_MAX_FAILS[st.scope_class] : 2;
-    st.fails_by_lane[model] = Math.max(st.fails_by_lane[model] || 0, cap);
-  }
-  if (typeof st.lane === 'number' && st.decider !== 'eikos') {                             // legacy sonnet ladder
-    st.lane = Math.max(st.lane, next); st.fails = 0; st.pending = false;
-  }
-  __routeAudit.push({ event: 'commit_escalate', scope, from_model: model, from_rank: r, to_rank: next,
-                      reason: 'definitive not-started (model-capability/4xx); escalate past the incapable lane' });
-}
-
 // <<P1-ROUTER-START>>  (eikos v2 — E1: the P1 deterministic measured-signal host router)
 // P1 reduces over MEASURED host signals ONLY — class/operator/scope floors, per-lane work_product failure
 // counts and the corrected episode identity (effective_rank is a measured fact, NEVER a floor). It makes
@@ -1953,7 +1916,7 @@ async function agentT(p, o, route) {
   // id written to `route.dispatch_id` above, and the one the abort `receipt_ref` keys on) into the agent
   // timeline event, so the commit's execution evidence is reachable BY DISPATCH ID end-to-end. Routed
   // calls only; routing=false never reaches here (it returned agentTCore(p, o) above with no id).
-  const r = await agentTCore(p, o, pick.dispatch_id || null, route);   // R11: thread the host route as an error-sink (timeout vs resolved/errored null)
+  const r = await agentTCore(p, o, pick.dispatch_id || null);
   // An engineer's cycle is judged by the oracle after verify (see the Optimize round), not here. For
   // every other worker the one deterministic failure visible at this layer is no result at all.
   if (pick.scope && !/^(eng|deep):/.test(pick.scope) && r == null) {
@@ -1970,13 +1933,6 @@ async function agentTCore(p, o) {
   // declaration as its end sentinel, so a signature change would break that slice. null/absent when
   // non-routed (routing=false calls it with no id), so the recorded timeline event stays byte-identical.
   const dispatchId = arguments.length > 2 ? arguments[2] : null;
-  // eikos v2 E1 (R11 self-heal): OPTIONAL 4th arg = the caller's host route object (read via `arguments` so
-  // the declared signature stays two-arg — the in-repo routing test slices the agentT region on this). When
-  // a null is produced by the HANG-GUARD (a true TIMEOUT whose one-shot writer may still be LIVE) we mark
-  // `errSink.timed_out`; a null from a RESOLVED or hard-ERRORED dispatch (agent() settled; the writer never
-  // ran — e.g. a 4xx model-capability refusal) leaves it UNSET. Only the commit path reads this; every other
-  // caller passes no route, so the recorded timeline event + return value stay byte-identical.
-  const errSink = arguments.length > 3 ? arguments[3] : null;
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
@@ -1986,10 +1942,8 @@ async function agentTCore(p, o) {
         const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
-      let timedOut = false;   // R11: set ONLY when the hang-guard fires (true timeout) — not on a resolved/errored null
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
-          timedOut = true;
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
@@ -2000,32 +1954,9 @@ async function agentTCore(p, o) {
         guard,
       ]);
       if (ev && r) ev.ok = true;
-      // R11 self-heal: a null from the HANG-GUARD is a true TIMEOUT (writer may be LIVE) -> AMBIGUOUS; mark it
-      // so the commit classifier quarantines+retains. A resolved null (agent settled) leaves this UNSET ->
-      // NOT_STARTED (safe to re-dispatch). Routing-off / non-route callers pass no sink -> no-op.
-      if (r == null && timedOut && errSink) errSink.timed_out = true;
       return r;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
-      // eikos v2 E1 (R12 / Astra SHADOW-VERDICT item 1): an AUTHORITATIVE PRE-START model-capability
-      // refusal — a 4xx the endpoint returns while VALIDATING the request (e.g. a lane that cannot do the
-      // adaptive thinking the commit dispatch asks for: 'model does not support X' / adaptive-thinking-not-
-      // supported), BEFORE any tokens/work — PROVES the one-shot writer never ran. Mark it on the commit
-      // error-sink so the commit classifier can treat ONLY this as not_started (safe to ESCALATE past the
-      // incapable lane); retrying the SAME lane is pointless, so resolve null now WITHOUT burning retries.
-      // EVERY OTHER error (ordinary/non-capability fault, or a resolved null) stays UNKNOWN -> the classifier
-      // keeps it AMBIGUOUS -> quarantine+RETAIN (no second writer). Routing-off / non-commit callers pass no
-      // sink, so this is a no-op for them (the return value is null either way). Requires BOTH an explicit
-      // capability phrase AND a 4xx signal, so a 401/429/5xx or a bare mid-work error never trips it.
-      const __st = Number((e && (e.status || e.statusCode || e.http_status)) || 0);
-      const __capRefusal =
-        /(does not support|not supported|unsupported|adaptive[\s_-]*thinking|model[_\s-]*capab)/i.test(msg)
-        && (((__st >= 400) && (__st < 500)) || /\b4\d\d\b/.test(msg));
-      if (__capRefusal) {
-        if (errSink) { errSink.capability_refused = true; errSink.capability_reason = msg; }
-        log(`  [capability guard] ${label} hit a PRE-START model-capability refusal (${msg}) — the one-shot writer never ran; NOT retrying this incapable lane.`);
-        return null;
-      }
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
         continue;
@@ -3323,20 +3254,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
     // writer; we QUARANTINE and RETAIN the already-verified winner as RECOVERABLE (fixes the original
     // $31-loss motivation without the concurrent-mutation hazard).
     const __commitExclusiveOwnership = (receipt, atRoute) =>
-      // 'not_started' | 'terminated' | 'ambiguous' — the AUTHORITATIVE dispatch disposition (R12, Astra
-      // SHADOW-VERDICT item 1). not_started: the one-shot writer PROVABLY never ran — the router issued no
-      // dispatch (no dispatch_id), OR the dispatch was rejected PRE-START by a CONFIRMED model-capability
-      // refusal (a 4xx 'does not support'/adaptive-thinking error the endpoint returns BEFORE any tokens/
-      // work; agentTCore marks atRoute.capability_refused). Exclusive ownership is guaranteed -> SAFE to
-      // escalate+retry. terminated: a non-null receipt — agent() RESOLVED, so the one-shot subprocess exited
-      // (exclusive ownership). ambiguous: EVERYTHING ELSE — a resolved null (may follow executed work), an
-      // ordinary/non-capability error, missing structured output, OR a true timeout (hang-guard,
-      // atRoute.timed_out). The writer may be LIVE or have done partial work -> RETAIN QUARANTINE, never a
-      // second writer. (R11 inferred not_started from 'null && !timed_out', wrongly re-dispatching a
-      // resolved-null-after-work / ordinary error; capability failures are now kept APART from earned work.)
-      (!(atRoute && atRoute.dispatch_id)) ? 'not_started'
-        : (receipt != null ? 'terminated'
-           : ((atRoute && atRoute.capability_refused) ? 'not_started' : 'ambiguous'));
+      // 'not_started' | 'terminated' | 'ambiguous'. A non-null receipt means agent() RESOLVED, so the
+      // one-shot writer subprocess exited; a null with no issued dispatch id means the router never launched a
+      // writer; a null WITH a dispatch id is a timed-out/abandoned dispatch whose writer may still be LIVE.
+      (!(atRoute && atRoute.dispatch_id)) ? 'not_started' : (receipt != null ? 'terminated' : 'ambiguous');
     const __retainQuarantine = (stage, atRoute, atReceipt, opts) => {
       // QUARANTINE + RETAIN: persist a recovery reference to the verified integrated winner (its patch lives
       // on disk under round_${round}/integrate|engineer_*) so the verified work is RECOVERABLE, not discarded.
@@ -3397,79 +3318,54 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
     let termRoute = commitRoute, termRes = commitRes, termScope = `commit r${round}`;
     if (ROUTING_ON && !committed && !(commitRes != null && commitRes.committed === false)) {
       // BUG 1 GATE: the FIRST commit dispatch must grant EXCLUSIVE ownership before we launch any salvage
-      // writer. An AMBIGUOUS initial commit (a true timeout, a resolved null, OR an ordinary non-capability
-      // error — the writer may be LIVE or have done work) => retain + quarantine (NEVER a second writer).
-      // R12 (Astra SHADOW item 1): ONLY a CONFIRMED pre-start capability refusal (a 4xx 'does not support',
-      // the writer never ran) is not-started; it falls through to the ESCALATING retry below (safe ownership).
+      // writer. An AMBIGUOUS (timed-out) initial commit => retain + quarantine (never a second writer).
       if (__commitExclusiveOwnership(commitRes, commitRoute) === 'ambiguous') {
         return __retainQuarantine(`commit r${round}`, commitRoute, commitRes);
       }
-      // (1) RETRY the commit — the dispatch is confirmed TERMINATED or (definitively) NOT-STARTED, so a second
-      // writer has EXCLUSIVE ownership. R11 self-heal: when a lane returns a DEFINITIVE not-started (it could
-      // not even START the commit — e.g. requesting adaptive thinking on a lane that does not support it, a
-      // hard 4xx), ESCALATE the commit scope PAST that lane so the retry never re-dispatches the same incapable
-      // model in a loop. BOUNDED by COMMIT_MAX_RETRIES and the 3-lane ladder (haiku -> sonnet -> opus). The
-      // committer request is the BYTE-IDENTICAL hoisted commitPrompt; routing-off never reaches here.
-      const COMMIT_MAX_RETRIES = 2;
-      let prevRoute = commitRoute, prevRes = commitRes;
-      let quarantine = null;
-      for (let ra = 1; ra <= COMMIT_MAX_RETRIES && !committed; ra++) {
-        // escalate the commit scope PAST the lane that just returned a DEFINITIVE not-started (if any), so the
-        // next FRESH occurrence picks a more-capable lane. No-op for a terminated/at-top/unknown case.
-        if (__commitExclusiveOwnership(prevRes, prevRoute) === 'not_started') {
-          __routeEscalatePastFailedLane('commit', prevRoute);
-        }
-        const retryRoute = {};
-        const commitRetry = await agentT(
-          commitPrompt,
-          { phase: 'Merge', label: `commit r${round} retry`, schema: COMMIT_SCHEMA }, retryRoute);
-        // BUG 3 verdict table: committed===true -> success; committed===false (EXPLICIT) -> terminal (NO host
-        // salvage); null / no-verdict -> infra. Each attempt reaches __p1WorkerOutcome, correctly bound.
-        const retryCommitted = commitRetry != null && commitRetry.committed === true;
-        const retryExplicitFail = commitRetry != null && commitRetry.committed === false;
-        __routeAudit.push({ event: 'commit_retry', round, attempt: ra, improved: true, committed: retryCommitted,
-                            explicit_fail: retryExplicitFail, ambiguous: commitRetry == null, source: winner.source,
-                            geomean: winner.geomean, dispatch_id: (retryRoute && retryRoute.dispatch_id) || null,
-                            receipt: commitRetry || null });
-        __commitAttemptOutcome(commitRetry, retryRoute, `commit r${round} retry`);
-        // this retry is now the terminal attempt (Finding 3 residual provenance) unless a later one supersedes.
+      // (1) RETRY the commit dispatch ONCE — the initial dispatch is confirmed TERMINATED or NOT-STARTED, so
+      // a second writer has EXCLUSIVE ownership. BYTE-IDENTICAL committer request (the hoisted commitPrompt):
+      // routing-off request parity is untouched.
+      const retryRoute = {};
+      const commitRetry = await agentT(
+        commitPrompt,
+        { phase: 'Merge', label: `commit r${round} retry`, schema: COMMIT_SCHEMA }, retryRoute);
+      // BUG 3 verdict table: committed===true -> success; committed===false (EXPLICIT) -> terminal (NO host
+      // salvage); null / no-verdict -> AMBIGUOUS (infra). Each attempt reaches __p1WorkerOutcome, correctly bound.
+      const retryCommitted = commitRetry != null && commitRetry.committed === true;
+      const retryExplicitFail = commitRetry != null && commitRetry.committed === false;
+      __routeAudit.push({ event: 'commit_retry', round, improved: true, committed: retryCommitted,
+                          explicit_fail: retryExplicitFail, ambiguous: commitRetry == null, source: winner.source,
+                          geomean: winner.geomean, dispatch_id: (retryRoute && retryRoute.dispatch_id) || null,
+                          receipt: commitRetry || null });
+      __commitAttemptOutcome(commitRetry, retryRoute, `commit r${round} retry`);
+      if (retryCommitted) {
+        committed = true;
+        log(`Round ${round}: commit was AMBIGUOUS/null; the ONE-SHOT RETRY confirmed committed=true — ` +
+            `continuing to director:validate (no abort).`);
+      } else if (retryExplicitFail) {
+        // BUG 3: an EXPLICIT {committed:false} retry is a GENUINE failure. R9 (Finding 2 — shortest route):
+        // there is NO host-side salvage to enter, so this is TERMINAL. Carry THIS attempt (the LAST verdict, e.g.
+        // d2) as the terminal-failure provenance (Finding 3 residual), then fall through to the retained gate
+        // -> abort-and-quarantine (committed stays false).
         termRoute = retryRoute; termRes = commitRetry; termScope = `commit r${round} retry`;
-        if (retryCommitted) {
-          committed = true;
-          log(`Round ${round}: commit was not-started/unconfirmed; the escalating RETRY (attempt ${ra}) ` +
-              `confirmed committed=true — continuing to director:validate (no abort).`);
-          break;
-        }
-        if (retryExplicitFail) {
-          // an EXPLICIT {committed:false} retry is a GENUINE failure. R9 (Finding 2): NO host-side salvage —
-          // this is TERMINAL. term* already points at THIS attempt; fall through to abort-and-quarantine below.
-          log(`Round ${round}: the commit RETRY (attempt ${ra}) returned an EXPLICIT {committed:false} — a ` +
-              `genuine failure; TERMINAL (host-side salvage removed in R9). ABORT-AND-QUARANTINE below.`);
-          break;
-        }
-        if (__commitExclusiveOwnership(commitRetry, retryRoute) === 'ambiguous') {
-          // R12: the retry is AMBIGUOUS — a true timeout, a resolved null, OR an ordinary error; its writer
-          // may be LIVE or have done partial work. Do NOT launch another writer; quarantine + retain.
-          quarantine = __retainQuarantine(`commit r${round} retry`, retryRoute, commitRetry);
-          break;
-        }
-        if (__commitExclusiveOwnership(commitRetry, retryRoute) === 'terminated') {
-          // agent RESOLVED with a receipt but NO committed verdict (not a capability refusal): do NOT keep
-          // escalating — quarantine + retain below (Astra re-review #10, Finding 2: NO host-install path).
-          break;
-        }
-        // DEFINITIVE not-started on this lane too: loop to ESCALATE onto a more-capable lane (capped).
-        prevRoute = retryRoute; prevRes = commitRetry;
-      }
-      if (quarantine) return quarantine;
-      if (!committed && !(termRes != null && termRes.committed === false)) {
-        // the escalating retries were exhausted WITHOUT a committed verdict and WITHOUT a true-timeout: the
-        // verified winner is STILL-UNCONFIRMED. There is NO host-install path (Astra re-review #10, Finding 2);
-        // we do NOT launch another writer and do NOT apply/commit host-side — QUARANTINE + RETAIN it.
-        return __retainQuarantine(termScope, termRoute, termRes,
+        log(`Round ${round}: the commit RETRY returned an EXPLICIT {committed:false} — a genuine failure; ` +
+            `TERMINAL (host-side salvage removed in R9). ABORT-AND-QUARANTINE below.`);
+      } else if (__commitExclusiveOwnership(commitRetry, retryRoute) === 'ambiguous') {
+        // BUG 1: the retry TIMED OUT (receipt-less) — its writer may be live; do NOT launch another writer.
+        return __retainQuarantine(`commit r${round} retry`, retryRoute, commitRetry);
+      } else {
+        // eikos v2 E1 (R9 / Astra re-review #10, Finding 2 — SHORTEST ROUTE): the automatic HOST-SIDE salvage
+        // commit has been REMOVED. The retry is confirmed TERMINATED/NOT-STARTED (exclusive ownership) but
+        // returned WITHOUT a committed verdict — the commit is STILL-UNCONFIRMED. A host-side apply/commit
+        // could only ever be honoured on AGENT-REPORTED evidence (Astra: a patch merely applying does NOT
+        // prove identity with the verified candidate; the committed-tree equivalence was vs the CURRENT HEAD,
+        // not a pinned verified baseline; and acceptance consumed returned flags/strings — accepted with an
+        // empty reported post-HEAD). So there is NO host-install path: we do NOT launch another writer and do
+        // NOT apply/commit anything host-side; we QUARANTINE + RETAIN the already-verified winner as RECOVERABLE.
+        return __retainQuarantine(`commit r${round} retry`, retryRoute, commitRetry,
           { reason: 'commit_unconfirmed_no_verdict',
-            why: 'the escalating retries resolved WITHOUT a committed verdict (still-unconfirmed); host-side salvage removed in R9',
-            note: 'verified winner RETAINED for recovery — commit UNCONFIRMED (escalating retries returned no committed verdict; host-side salvage removed): no live writer, no host-install' });
+            why: 'the retry resolved WITHOUT a committed verdict (still-unconfirmed); host-side salvage removed in R9',
+            note: 'verified winner RETAINED for recovery — commit UNCONFIRMED (retry returned no committed verdict; host-side salvage removed): no second writer, no host-install' });
       }
     }
     // eikos v2 E1 (R3/R4 — SHARED HARNESS, BOTH ARMS): a FAILED commit did NOT install the winner, so the
