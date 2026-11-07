@@ -159,6 +159,18 @@ recovery, before requesting a review; never manufacture a matching identity. Mis
 inconclusive, not a correctness failure. No additional kernel fix/re-measure loops are authorized
 by this review. The normal final Validate phase remains authoritative.
 
+**PD disaggregation (only if `SERVING_ENGINE` is in your inputs): code goes to BOTH engines; only
+config can be one engine's.** Both engines run one code tree, and the kernel's cases already span
+both engines' shapes. So:
+- A code change (patch, rebind, authored kernel) is built from `CURRENT_OVERLAY` exactly as below and
+  passed as `OVERLAY_PYTHONPATH` on both legs, so both engines import it. Never give it to one engine.
+- An `env` / `flag` winner goes in `<ENGINE_ENV_VAR>` / `<ENGINE_ARGS_VAR>` on the candidate leg, merged
+  key by key with the value already in your inputs — not in `EXTRA_ENV` / `EXTRA_SERVER_ARGS`.
+- Engagement is proven in `SERVING_ENGINE`'s front-end log: the `log` of its entry in the leg's
+  `mn_launch.json` `pd.engines` (`ENGINE_LOG` in your inputs says which). The other engine runs the
+  same code; check its log too and say in `note` whether the marker appears there.
+- `accepted_overlay` is the candidate dir (`$CAND`), the new overlay for both engines.
+
 **ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
 For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
 differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
@@ -482,6 +494,10 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   When Inputs contain `GEAK_MN_PD_SWEEP_ARGS_PREFILL` / `_DECODE` or the matching
+   `GEAK_MN_PD_SWEEP_ENV_*`, `final_launch.sh` exports those beside `EXTRA_SERVER_ARGS`. They are config
+   accepted for one engine only. Do not fold them into the shared variables — those are applied to both
+   engines. Code has no per-engine layer: `OVERLAY_PYTHONPATH` and `final_patch.diff` are the same on both.
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 

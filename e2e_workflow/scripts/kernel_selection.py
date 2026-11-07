@@ -519,16 +519,19 @@ def main(argv=None):
 
     trace_paths = list(args.torch_trace)
     attempts = []
+    metas = {}
     for meta_path in args.capture_meta:
         with open(meta_path) as fh:
             meta = json.load(fh)
+        metas[meta_path] = meta
         capture_pid = str(meta.get("process_id") or "")
         matching_traces = trace_paths
         if capture_pid:
+            # A meta that names its host pairs only with that host's traces: pids repeat across machines.
+            process = re.escape(capture_pid) + (rf"\.host-{re.escape(str(meta['host']))}" if meta.get("host") else "")
             matching_traces = [
                 path for path in trace_paths
-                if re.search(rf"\.pid-{re.escape(capture_pid)}(?:\.|$)",
-                             os.path.basename(path))
+                if re.search(rf"\.pid-{process}(?:\.|$)", os.path.basename(path))
             ]
         if not matching_traces:
             verdict = (verify_chain(args.target, args.device_kernel, args.required_device_kernel,
@@ -627,6 +630,10 @@ def main(argv=None):
     ]
     all_paths = [path for _, paths, _ in attempts for path in paths]
     verdict["best_process_meta_file"] = best_process_meta_file
+    # Only rank 0 saves the heavy I/O (capture_shapes._records_oracle): promote the process that has it.
+    oracle_meta_file = next((path for path in [best_process_meta_file, *metas]
+                             if metas[path].get("reference_io_sha256")), best_process_meta_file)
+    verdict["oracle_meta_file"] = oracle_meta_file
     verdict["trace_file"] = all_paths[0] if len(all_paths) == 1 else ""
     verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths
@@ -644,7 +651,7 @@ def main(argv=None):
                 import capture_shapes as _cs
             telemetry = _cs.promote_and_reclaim(
                 task_dir,
-                keep_meta_path=best_process_meta_file if verdict["ok"] else None,
+                keep_meta_path=oracle_meta_file if verdict["ok"] else None,
                 promote=bool(verdict["ok"]),
             )
             verdict["capture_storage"] = telemetry

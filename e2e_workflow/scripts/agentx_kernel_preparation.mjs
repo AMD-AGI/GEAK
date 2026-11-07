@@ -23,18 +23,24 @@ async function within(root, name) {
 
 // Selection is an internal artifact. Read the skill's completed UT deliveries
 // once, then expose only validated tasks to the ordinary optimization queues.
-export async function readPreparedKernels(evalDir, filename) {
+// engines: a PD run's engine names; a task's optional `engine` must be one of them.
+export async function readPreparedKernels(evalDir, filename, { engines = [] } = {}) {
   const root = await fs.realpath(evalDir);
   const deliveryPath = await within(root, filename);
   const delivery = JSON.parse(await fs.readFile(deliveryPath, 'utf8'));
-  return readPreparedDocument(root, delivery, deliveryPath);
+  return readPreparedDocument(root, delivery, deliveryPath, engines);
 }
 
-async function readPreparedDocument(root, delivery, deliveryPath) {
+async function readPreparedDocument(root, delivery, deliveryPath, engines = []) {
   if (!Array.isArray(delivery.tasks)) throw new Error('UT delivery requires tasks[]');
   const workloadPath = await within(root, delivery.workload_json);
   const rankingPath = await within(root, delivery.ranking_json);
   const ranking = JSON.parse(await fs.readFile(rankingPath, 'utf8'));
+  // PD: the cross-engine denominator is `mn.py pd-mass --apply`'s (both engines' GPU-time
+  // mass x ranks) -- never one the extraction agent chose, and never a graded axis.
+  if (engines.length && (ranking.denominators || {}).rule !== 'gpu_time_mass')
+    throw new Error('PD kernel_ranking.json denominators were not written by `mn.py pd-mass --apply`; ' +
+      'run it on the ranking before select_targets.py');
   const output = { head_candidates: [], kernel_candidates: [], config_directions: [],
     profile_workload_json: workloadPath, kernel_ranking_json: rankingPath,
     kernel_extraction_delivery_json: deliveryPath,
@@ -50,6 +56,8 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
       if (!kernel || typeof kernel.device_kernel !== 'string' || !kernel.device_kernel.trim())
         throw new Error('completed UT requires its selected device_kernel');
       if (!['extract', 'extract_op'].includes(task.phase)) throw new Error('UT phase must be extract or extract_op');
+      if (engines.length && kernel.engine && !engines.includes(kernel.engine))
+        throw new Error(`requested_kernel.json engine names no PD engine (${engines.join(' | ')}): ${JSON.stringify(kernel.engine)}`);
       const resultPath = await within(root, task.result_path);
       const bytes = await fs.readFile(resultPath);
       const result = JSON.parse(bytes.toString('utf8'));
@@ -118,7 +126,7 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
 
 // Translate the standalone skill's saved task declarations and returns into the
 // existing workflow envelope. Selection and GPU tests remain owned by the skill.
-export async function packStandaloneTasks(evalDir, manifestPath, outputPath) {
+export async function packStandaloneTasks(evalDir, manifestPath, outputPath, { engines = [] } = {}) {
   const root = await fs.realpath(evalDir);
   const input = await within(root, manifestPath);
   const manifest = JSON.parse(await fs.readFile(input, 'utf8'));
@@ -156,7 +164,7 @@ export async function packStandaloneTasks(evalDir, manifestPath, outputPath) {
   try {
     if ((await fs.lstat(destination)).isSymbolicLink()) throw new Error('handoff output must not be a symlink');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const prepared = await readPreparedDocument(root, delivery, destination);
+  const prepared = await readPreparedDocument(root, delivery, destination, engines);
   const invalid = prepared.failed_tasks.slice((manifest.failed_tasks || []).length);
   if (invalid.length) throw new Error(`completed tasks have invalid evidence: ${JSON.stringify(invalid)}`);
   await fs.writeFile(destination, JSON.stringify(delivery, null, 2) + '\n');
@@ -170,19 +178,20 @@ async function main(argv) {
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     if (key === '--help') {
-      console.log('node agentx_kernel_preparation.mjs --eval-dir EVAL --manifest workflow_tasks.json --out ut_delivery.json [--emit-prepared]');
+      console.log('node agentx_kernel_preparation.mjs --eval-dir EVAL --manifest workflow_tasks.json --out ut_delivery.json [--emit-prepared] [--engines prefill,decode]');
       return;
     }
     // --emit-prepared also prints the workflow envelope this packing already computed. The
     // workflow script cannot read the delivery file itself, so this is how it receives it.
     if (key === '--emit-prepared') { options['--emit-prepared'] = true; continue; }
-    if (!['--eval-dir', '--manifest', '--out'].includes(key) || !argv[i + 1])
+    if (!['--eval-dir', '--manifest', '--out', '--engines'].includes(key) || !argv[i + 1])
       throw new Error(`unknown or incomplete option: ${key}`);
     options[key] = argv[++i];
   }
   if (!options['--eval-dir'] || !options['--manifest'] || !options['--out'])
     throw new Error('--eval-dir, --manifest and --out are required');
-  const packed = await packStandaloneTasks(options['--eval-dir'], options['--manifest'], options['--out']);
+  const engines = options['--engines'] ? options['--engines'].split(',').filter(Boolean) : [];
+  const packed = await packStandaloneTasks(options['--eval-dir'], options['--manifest'], options['--out'], { engines });
   console.log(JSON.stringify(options['--emit-prepared']
     ? packed
     : { delivery_path: packed.delivery_path }));

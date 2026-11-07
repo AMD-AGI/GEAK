@@ -35,6 +35,27 @@ BENCHMARK_CMD="${2:?Missing benchmark command}"
 OUTPUT_DIR="${3:?Missing output directory}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Multinode: the driver sees no GPU, and this wrapper picks the arch and the profiler from the
+# machine it runs on. So all of it goes where gpu_lock.sh would send the command ("<engine>:<id>"
+# to that engine's machine, a bare id to the master), as the run directory's copy, whose
+# gpu_lock.sh is its sibling there. On a node (GEAK_MN_HOP) it runs as is.
+_MN_PY="$SCRIPT_DIR/../../e2e_workflow/scripts/multi_node/mn.py"
+if [ -z "${GEAK_MN_HOP:-}" ] && [ -f "$_MN_PY" ] && { [ -n "${GEAK_MN_STATE:-}" ] || [ -f /tmp/geak_mn/state_path ]; }; then
+    _MN_PIN="" _MN_LEASE_DIR="" _MN_TOOLS=""
+    IFS=$'\t' read -r _MN_PIN _MN_LEASE_DIR _MN_TOOLS < <(python3 "$_MN_PY" active-pin --lease-dir 2>/dev/null) || true
+    if [ -n "$_MN_PIN" ]; then
+        if [ -z "$_MN_TOOLS" ]; then
+            echo "ERROR: profile_kernel.sh: the multinode pin $_MN_PIN has no tools_dir; re-run mn.py check with a work_dir." >&2
+            exit 2
+        fi
+        case "$GPU_ID" in
+            *:*) _MN_TARGET="${GPU_ID%%:*}" GPU_ID="${GPU_ID#*:}" ;;
+            *)   _MN_TARGET=master ;;
+        esac
+        exec env GEAK_MN_STATE="$_MN_PIN" GEAK_MN_LEASE_DIR="$_MN_LEASE_DIR" python3 "$_MN_PY" exec --env \
+            --target "$_MN_TARGET" -- bash "$_MN_TOOLS/profile_kernel.sh" "$GPU_ID" "$BENCHMARK_CMD" "$OUTPUT_DIR"
+    fi
+fi
 GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
 source "$SCRIPT_DIR/profile_policy.sh"
 

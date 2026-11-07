@@ -217,6 +217,7 @@ test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispa
     const WORKFLOW_DIR = ${JSON.stringify(fileURLToPath(new URL('..', import.meta.url)))};
     const roleAgent = () => 'fixture';
     const safeAgent = async () => agent('fixture', {schema: EXTRACT_SCHEMA});
+    const withDiskSelection = async ext => ext;
     ${extraction}
     return extractWithBaseline('kernel_extractor', 'extract', '', {KERNEL: args.kernel});
   `);
