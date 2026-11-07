@@ -231,6 +231,10 @@ def engine_facts(backend: str, command: str) -> dict:
     owned = sorted({kv.split("=", 1)[0] for kv in env} & _OWNED)
     if owned:
         raise ValueError(f"launch_command sets {owned}, which the launcher owns per run")
+    dotted = [t.split("=", 1)[0] for t in argv if t.startswith("--profiler-config.")] if backend == "vllm" else []
+    if dotted:
+        raise ValueError(f"launch_command passes {dotted[0]}: vllm then drops the whole --profiler-config "
+                         "JSON a profile leg adds, and writes no trace; leave the profiler to GEAK")
     model = flag_value(argv, facts["model"])
     if backend == "vllm" and not model and "serve" in argv:
         nxt = argv.index("serve") + 1
@@ -1558,12 +1562,19 @@ def command_script(backend: str, command: str, geak_env: list, adapters: str) ->
     base = [kv for kv in env if kv.split("=", 1)[0] not in mine]
     lines = ["#!/usr/bin/env bash", "# Rendered by mn.py launch from the caller's launch_command.", "prof=()"]
     if backend == "vllm":
-        # vllm >=0.19 reads the profiler from the command line only; magpie's step bound goes after it.
+        # vllm >=0.19 reads the profiler from the command line only.
         lines.append(f'if [ "${{PROFILE:-0}}" = 1 ]; then pj="$(. {q(os.path.join(adapters, "vllm.sh"))} '
                      '&& adapter_profiler_args)"; [ -z "$pj" ] || prof=(--profiler-config "$pj"); fi')
-    launch = ["setsid env --", *(q(kv) for kv in base), shlex.join(argv), '${prof[@]+"${prof[@]}"}',
-              f'$EXTRA_{backend.upper()}_ARGS > "$SERVER_LOG" 2>&1 < /dev/null &']
-    lines += ["set -f", " ".join(launch), 'echo $! > "$MAGPIE_SERVER_PID_FILE"']
+    lines.append("set -f")
+    if backend == "vllm":
+        # Any --profiler-config.<field> (magpie's step bound) makes vllm drop the whole JSON, wherever
+        # it stands; the JSON already carries that bound.
+        lines.append('if [ ${#prof[@]} -gt 0 ]; then ea=(); set -- $EXTRA_VLLM_ARGS; while [ $# -gt 0 ]; do '
+                     'case "$1" in --profiler-config.*=*) shift ;; --profiler-config.*) shift; [ $# -gt 0 ] && shift ;; '
+                     '*) ea+=("$1"); shift ;; esac; done; EXTRA_VLLM_ARGS="${ea[*]}"; fi')
+    launch = ["setsid env --", *(q(kv) for kv in base), shlex.join(argv), f'$EXTRA_{backend.upper()}_ARGS',
+              '${prof[@]+"${prof[@]}"}', '> "$SERVER_LOG" 2>&1 < /dev/null &']
+    lines += [" ".join(launch), 'echo $! > "$MAGPIE_SERVER_PID_FILE"']
     return "\n".join(lines) + "\n"
 
 
@@ -1702,13 +1713,18 @@ def cmd_launch(argv: list) -> int:
             rank_extra, args_dropped[rank] = strip_flags(rank_extra, structural_flags(backend))
             for tok in args_dropped[rank]:
                 print(f">>> multinode: rank{rank}: dropping {tok!r}; the launch_command owns it", file=sys.stderr)
+        rank_profile_dir = profile_dir
         if pd is not None:
             effective_by_role[role] = {"extra_args": rank_extra, "env": " ".join(rank_env)}
+            if backend == "vllm":
+                # vllm fixes its trace dir at launch (/start_profile takes no output_dir), and the
+                # pd_disagg window and trace gate read each engine from PROFILE_DIR/<role>.
+                rank_profile_dir = os.path.join(profile_dir, role)
         rank_vars = rank_env_vars(model=model, tp=node["tp"],
                                   gpu=",".join(str(i) for i in node.get("gpu_ids") or range(node["gpus"])),
                                   mem_fraction=mem_fraction,
                                   port=port, base_url=base_url, log=rank_log,
-                                  profile_dir=profile_dir, overlay=overlay,
+                                  profile_dir=rank_profile_dir, overlay=overlay,
                                   pythonpath=pythonpath, extra_env=" ".join(rank_env),
                                   extra_args=rank_extra)
         if provided:
@@ -1716,7 +1732,7 @@ def cmd_launch(argv: list) -> int:
             with open(wrapper, "w", encoding="utf-8") as f:
                 f.write(command_script(backend, node["launch_command"], rank_env, adapters_dir(shared)))
             banner = f"mn-launch id={launch_id} rank={rank} command={wrapper} log={rank_log}"
-            head = [f"mkdir -p {shlex.quote(os.path.dirname(rank_log))} {shlex.quote(profile_dir)}",
+            head = [f"mkdir -p {shlex.quote(os.path.dirname(rank_log))} {shlex.quote(rank_profile_dir)}",
                     f"echo {shlex.quote(banner)}"]
             rank_vars.update(BACKEND=backend, **{k: env(k) for k in MAGPIE_PASSTHROUGH if env(k)})
             # The command is the whole recorded launch; magpie must not prepend the recipe's flags again.
@@ -1725,7 +1741,7 @@ def cmd_launch(argv: list) -> int:
                                             os.path.join(out_dir, f"rank{rank}"), rank, magpie)
         else:
             scripts[rank] = launch_script(
-                rank_head(node, master, rank_log, profile_dir, launch_id),
+                rank_head(node, master, rank_log, rank_profile_dir, launch_id),
                 rank_vars, adapter, "adapter_launch", structural, rank)
 
     # The LB is not one of `scripts`: those are the GPU-holding engines.
@@ -2138,6 +2154,15 @@ def cmd_probe(argv: list) -> int:
     return 0
 
 
+def _offline(name: str):
+    """trace-gate / topn-merge / pd-mass live in mn_traces.py beside this file. Imported on use:
+    run_e2e loads mn.py by path, where this directory is not on sys.path."""
+    def run(argv: list) -> int:
+        import mn_traces
+        return getattr(mn_traces, name)(argv)
+    return run
+
+
 COMMANDS = {
     "check": cmd_check,
     "launch": cmd_launch,
@@ -2146,6 +2171,10 @@ COMMANDS = {
     "leg-env": cmd_leg_env,
     "active-pin": cmd_active_pin,
     "exec": cmd_exec,
+    "trace-gate": _offline("cmd_trace_gate"),
+    "topn-merge": _offline("cmd_topn_merge"),
+    "pd-mass": _offline("cmd_pd_mass"),
+    "pd-points": _offline("cmd_pd_points"),
     "probe": cmd_probe,
 }
 TAGS = {"supervise": "mn-sup"}

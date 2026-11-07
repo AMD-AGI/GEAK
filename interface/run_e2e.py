@@ -1145,6 +1145,8 @@ def map_args(
         not_after=artifact_cutoff_ts,
     )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
+    if _node_state():
+        tl_paths = _node_state_tracelens(_node_state(), tl_paths)
     if tl_paths:
         ps_args["tracelens"] = tl_paths
     # The caller owns the cluster; _multinode_check hands this block to `mn.py check`, which writes the pin.
@@ -1225,6 +1227,62 @@ def _find_latest_artifact(
     if not candidates:
         return None
     return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+_RANK0_TRACE_RE = re.compile(r"(rank|TP-)0(?!\d)")
+
+
+def _rank0_trace(engine_dir: str) -> str | None:
+    """The engine's TP-0 serving trace at the top of its directory (capture_traces/ is warmup)."""
+    names = sorted(n for n in os.listdir(engine_dir)
+                   if n.endswith((".json", ".json.gz")) and os.path.isfile(os.path.join(engine_dir, n)))
+    return next((os.path.join(engine_dir, n) for n in names if _RANK0_TRACE_RE.search(n)), None)
+
+
+def _node_state_tracelens(doc: dict, tl_paths: dict) -> dict:
+    """The caller's first-round profile (MULTI_NODE_STATE profile_trace) in place of the glob's
+    trace_file: it names exactly that profile, so no glob fallback and no cutoff. pd_disagg traces
+    sit in one <podIP>_<role> directory per engine pod; their rank0 traces become trace_files.
+    A role without any drops analysis_md too: annotating the merged analysis against the other
+    role's traces alone would mark this role's kernels unresolved, and the head refuses those."""
+    root = str(doc.get("profile_trace") or "").strip()
+    if not root:
+        return tl_paths
+    out = {k: v for k, v in tl_paths.items() if k != "trace_file"}
+    if not os.path.isdir(root):
+        sys.stderr.write(f"note: MULTI_NODE_STATE profile_trace {root} does not exist; GEAK profiles on its own\n")
+        return out
+    out["trace_file"] = root
+    if str(doc.get("pd_mode") or "").strip().lower() != "disaggregated":
+        return out
+    pods = {(str(p.get("podIP")), p.get("role")) for p in doc.get("pods") or []
+            if isinstance(p, dict) and p.get("role") in ("prefill", "decode")}
+    found = {}
+    for name in sorted(os.listdir(root)):
+        sub = os.path.join(root, name)
+        if not os.path.isdir(sub):
+            continue
+        ip, _, role = name.rpartition("_")
+        if (ip, role) not in pods:
+            sys.stderr.write(f"note: {sub} names no engine pod of MULTI_NODE_STATE; ignored\n")
+            continue
+        trace = _rank0_trace(sub)
+        if trace:
+            found[trace] = role
+        else:
+            sys.stderr.write(f"note: {sub} has no rank0 trace at its top level\n")
+    steady = str(doc.get("steady_state_trace") or "").strip()
+    traces = sorted(found, key=lambda t: t != steady)
+    if steady and steady not in found and os.path.isfile(steady):
+        traces.insert(0, steady)
+    missing = sorted({r for _, r in pods} - set(found.values()))
+    if missing:
+        sys.stderr.write(f"note: profile_trace has no trace for the {missing} engine(s); the merged "
+                         "analysis.md cannot be checked against them, so GEAK profiles on its own\n")
+        out.pop("analysis_md", None)
+        return out
+    out["trace_files"] = traces
+    return out
 
 
 def resolve_tracelens_report(
