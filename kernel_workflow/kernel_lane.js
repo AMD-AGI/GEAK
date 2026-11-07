@@ -2660,9 +2660,10 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
   if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
   const dir = `${EVAL_DIR}/delivery`, rows = [];
   const digest = async (file) => ((await hostRun('sha256sum', ['--', file])) || '').slice(0, 64);
-  let best = null;
+  // incumbentEvidence: verifier-bound re-measurement of the already-committed program; it raises the bar.
+  let best = null, incumbentEvidence = 0;
   for (const c of [...retainedSources].sort((a, b) => b.evidence - a.evidence)) {
-    if (!(c.evidence > Math.max(cumulative, best ? best.primary : 0))) continue;
+    if (!(c.evidence > Math.max(cumulative, incumbentEvidence, best ? best.primary : 0))) continue;
     const row = {key: c.key, id: c.id, basis: c.ver ? 'verifier' : 'engineer_local', evidence: c.evidence,
       status: 'unmeasured', source: c.source, base_commit: c.base, original_patch: c.original_patch,
       archive: c.archived ? evo.path : null};
@@ -2696,6 +2697,9 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
     } catch (error) { log(`[delivery] ${c.key}: ${String(error)}`); promo = null; }
     if (!promo) { row.status = 'assembly_failed'; continue; }
     if (promo.tree === ((await git(CANONICAL, 'rev-parse', 'HEAD^{tree}')) || '').trim()) {
+      if (c.ver && c.verification) incumbentEvidence = Math.max(incumbentEvidence, c.evidence);
+      // A selected source that does not beat the incumbent's verified evidence is not delivered.
+      if (best && best.primary <= incumbentEvidence) { best.row.status = 'below_incumbent'; best = null; }
       row.status = 'already_committed'; continue;
     }
     let ver = c.ver;
@@ -2729,13 +2733,14 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
     }
     Object.assign(row, {status: !ver ? 'unmeasured' : ok ? 'qualified' : String(ver.status || 'unknown'),
       primary: ok ? primSpeedup(ver) : null, source_sha256: src.sha256, tree: promo.tree});
-    if (ok && row.primary > cumulative && (!best || row.primary > best.primary)) {
+    if (ok && row.primary > Math.max(cumulative, incumbentEvidence) && (!best || row.primary > best.primary)) {
       best = {c, ver, promo, primary: row.primary, row};
     }
   }
   // Qualification has settled; only the host commit uses the existing Report allowance.
   if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
-  if (best && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
+  if (best && best.primary > Math.max(cumulative, incumbentEvidence)
+      && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
     best.row.status = 'delivered';
     cumulative = best.primary;
     bestPerCase = best.ver.per_case && best.ver.per_case.length ? best.ver.per_case : bestPerCase;
@@ -2747,11 +2752,13 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
         best.c.eng, best.ver, best.promo.patch)};
     roundsCommitted += 1;
     if (evo && !await evo.selectBest(best.c.id)) best.row.archive_selection_status = 'failed';
-  } else if (best) best.row.status = 'commit_failed';
-  history.delivery = {reserve_s: DELIVERY_RESERVE_S, candidates: rows,
+  } else if (best) {
+    best.row.status = best.primary > Math.max(cumulative, incumbentEvidence) ? 'commit_failed' : 'below_incumbent';
+  }
+  history.delivery = {reserve_s: DELIVERY_RESERVE_S, candidates: rows, incumbent_evidence: incumbentEvidence,
     delivered: rows.find(row => row.status === 'delivered')?.key || null};
   const unresolved = [...deliveryIncomplete, ...rows.filter(row => row.basis === 'verifier'
-    && row.evidence > cumulative && !['delivered', 'already_committed'].includes(row.status))];
+    && row.evidence > Math.max(cumulative, incumbentEvidence) && !['delivered', 'already_committed'].includes(row.status))];
   if (best && best.row.archive_selection_status === 'failed') unresolved.push(best.row);
   history.delivery.incomplete = unresolved;
   const receipt = `${dir}/outcome.json`;
