@@ -1,5 +1,5 @@
 {
-  "_comment": "Muse Spark on the chip's currently published InferenceX curve, as one campaign. No run id is pinned: the baseline adopts the newest AgentX date the site publishes for this hardware/framework/precision, and the EP group that owns that curve's Optimal-Only peak tok/s/chip (a campaign covers one EP group). What was resolved is written to baseline/out/resolution.json and into baseline.json, so the campaign stays reproducible; pin ci.run_id (and select.ep) to freeze it instead. target.image is deliberately not declared \u2014 it is a consequence of the resolved run, and is recorded rather than asserted; the model stays a hard guard. Profile extracts each config from its own CI serving log and merges them so each task gets ONE UT in which every config weighs the same; applyback measures the group's lowest- and highest-concurrency configs against their own CI numbers.",
+  "_comment": "Muse Spark on the chip's currently published InferenceX curve, as one campaign. No run id is pinned: the baseline adopts the newest AgentX date the site publishes for this hardware/framework/precision, and the EP group that owns that curve's Optimal-Only peak tok/s/chip (a campaign covers one EP group). What was resolved is written to baseline/out/resolution.json and into baseline.json, so the campaign stays reproducible; pin ci.run_id (and select.ep) to freeze it instead. target.image is deliberately not declared \u2014 it is a consequence of the resolved run, and is recorded rather than asserted; the model stays a hard guard. Profile extracts each config from its own CI serving log and merges them so each task gets ONE UT in which every config weighs the same; applyback measures every config a UT covered against its own CI number (applyback/points.py).",
   "run_root": "workload/runs/agentx_musespark_latest_multicfg",
   "target": {
     "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
@@ -72,16 +72,16 @@
         "point_serving_env": {},
         "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file.",
         "agent_budget_sec": 54000,
-        "_note_agent_budget_sec": "10 points x one CI-length leg (~25 min server start + 60 min) is ~14 h; the agent session is capped at 15 h. A shorter allocation resumes: measured points are kept.",
+        "_note_agent_budget_sec": "Every UT-covered point x repeats x one CI-length leg (~25 min server start + 60 min): 6 EP4 points x 3 is ~26 h, more than one 15 h session. Points are measured in points.py order and kept; a later session resumes with the rest, and until every covered point is measured the verdict stays incomplete (2026-11-06 run: c10, c40 x3 and c24 x1 in one session).",
         "reference": "ci",
-        "points": "all",
+        "points": "covered",
         "ci": {
           "hf_hub": "/shared_nfs/yueliu14/muse_spark_opt_1021/e2e_ab/hf_hub",
           "model_mounts": "/mnt/hf_cache:/mnt/hf_cache:ro",
           "agentx_bin": "/shared_nfs/yueliu14/musespark_c8_opt_1023_hongtaom/e2e/client-venv/bin/agentx",
           "inferencex_path": "/shared_nfs/ethany/home/DS4P_E2E_1021/rig/InferenceX/inferencex-e2e"
         },
-        "_note_reference": "Against each point's official CI number, measured with that point's own CI launch (ci_point_leg.sh): an A/B is admitted only with an ALIGNED alignment.json. points=all measures every adopted point, each EP group's low/mid/high concurrency first."
+        "_note_reference": "Against each point's official CI number, measured with that point's own CI launch (ci_point_leg.sh): an A/B is admitted only with an ALIGNED alignment.json. points=covered (default) measures every config a UT case names, each EP group's low/mid/high concurrency first; a covered config left unmeasured makes the verdict incomplete."
       }
     },
     "roofline": {

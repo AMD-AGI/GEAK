@@ -170,9 +170,15 @@ image optimize built and cold-verified the kernels in -- never on the host's Pyt
    a script's own directory goes first on `sys.path`, and a task directory's `unittest.py` then
    shadows the stdlib `unittest` and `import sglang` fails. Save `shadow_check.json`.
 2. **Measure each point with `../ci_point_leg.sh <baseline/out/points/<pid>> $OUT/points/<pid>
-   $OUT/overlay`**, in the order `params.points` asks for: `representative` (each group's two
-   ends) or `all` (`baseline.json` `measure_order`: each EP group's lowest, middle and highest
-   concurrency, then the rest). The leg reads the point's `server_logs/logs/config.yaml` --
+   $OUT/overlay`**, in the order `python3 ../points.py` prints. **Every config a UT case names
+   (`tasks/<k>/meta.json` `workload.cases[].config_id`) is measured**: it priced the kernels that
+   were kept, so leaving it out hides a regression there. `params.points` defaults to `covered`;
+   `all` adds points no UT covered; `representative` (each group's two ends) is a screening run
+   whose left-out covered points make the verdict `incomplete`. The order is each EP group's
+   lowest, middle and highest concurrency first, then the rest -- `points.py` recomputes it when
+   an older baseline has no `measure_order`, so nothing is narrowed silently. If the budget
+   cannot hold every covered point, measure in that order and stop: finalize names the points
+   not reached and the verdict stays `incomplete` until a later session measures them. The leg reads the point's `server_logs/logs/config.yaml` --
    image, every server arg, every server env var, the client's concurrency, duration and AIPERF
    env -- launches a fresh server container from it with the overlay as `PYTHONPATH` (the only
    difference), writes `alignment.json` from `docker inspect` of what actually runs
@@ -193,7 +199,7 @@ image optimize built and cold-verified the kernels in -- never on the host's Pyt
 
 The finalizer judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
 row's own metric key, refuses a point without an ALIGNED `alignment.json`, a PROVEN `pins.json` or with a
-shortened duration, and folds them (`../aggregate_points.py`): any regression makes the verdict
+shortened duration, marks every selected point that has no measurement as unmeasured, and folds them (`../aggregate_points.py`): any regression makes the verdict
 `regression`, a gain needs a gain somewhere and no regression, a point without an A/B makes it
 `incomplete`. Each point's `ab.json` also carries p90 interactivity and per-GPU total throughput
 from the same row. What remains different from the CI is the node itself (CPU count and host

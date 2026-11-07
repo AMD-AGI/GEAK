@@ -9,7 +9,7 @@ An InferenceX workload is a curve, not a point: the run's search space is severa
 deployments (TP / EP / speculative decoding / KV offload) each swept over a concurrency
 list. This baseline keeps all of them. The rest of the pipeline then extracts kernels from
 every config, gives each task ONE unit test that weights every config equally, and
-measures end-to-end at a few representative points.
+measures end-to-end at every point a UT covered (`applyback/points.py`).
 
 **The reference is the CI's own number.** `throughput` is the run's
 `request_metrics.throughput.output.tokens_per_second` for that point; `measured` is true

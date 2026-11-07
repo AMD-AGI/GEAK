@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Per-point A/Bs -> one ab.json + result.json for a multi-config baseline.
 
-The baseline stage marked a few representative configs (adopt-ci-artifacts: each group's
-lowest and highest concurrency). Applyback measures every one of them in `$OUT/points/<pid>/`; the slot's finalize.py
-judges each against its own baseline and then calls this. This folds them:
+Applyback measures the points points.py selects -- by default every config a UT case names --
+in `$OUT/points/<pid>/`; the slot's finalize.py judges each against its own baseline and then
+calls this. This folds them:
 
   verdict  regression  if any point regressed beyond its noise band
            gain        if some point gained and none regressed
            no_change   if every point stayed inside its band
-           incomplete  if a point produced no A/B (its own result.json says why)
+           incomplete  if a point produced no A/B (its own result.json says why), including a
+                       config the UT covered that was left out of the measurement
 
 A gain at one concurrency is not allowed to hide a regression at another: the point of
 measuring the curve's ends is to see both. `e2e_delta_pct` at the top is the geometric
@@ -68,10 +69,21 @@ def main():
         json.dump(ab, f, indent=1)
     per = "; ".join("%s %+.3f%% (%s)" % (p, a["e2e_delta_pct"], a["verdict"])
                     for p, a in points.items())
-    notes = "%d representative points: %s." % (len(pids), per or "none measured")
+    sel = json.loads(os.environ.get("APPLYBACK_POINT_SELECTION") or "{}")
+    notes = "%d points: %s." % (len(pids), per or "none measured")
     if missing:
         notes += " Without an A/B: %s." % "; ".join("%s: %s" % kv for kv in missing.items())
+    if sel.get("ut_configs_without_baseline"):
+        notes += (" The UT also covered %s, which this baseline has no CI point for, so no "
+                  "end-to-end number exists for them." % ", ".join(sel["ut_configs_without_baseline"]))
     metrics = {"points": len(pids), "points_measured": len(points), "verdict": verdict}
+    if sel:
+        ab["point_selection"] = {k: sel.get(k) for k in
+                                 ("spec", "required", "unmeasured_covered",
+                                  "ut_configs_without_baseline")}
+        with open(os.path.join(out, "ab.json"), "w") as f:
+            json.dump(ab, f, indent=1)
+        metrics["points_ut_covered"] = len(sel.get("required") or [])
     if geo:
         metrics["e2e_delta_pct_geomean"] = ab["e2e_delta_pct"]
     for p, a in points.items():
