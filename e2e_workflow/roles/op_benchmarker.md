@@ -209,6 +209,10 @@ runs with now; absent when there is no server, e.g. a standalone kernel_workflow
    ```
    Pass `CURRENT_ENV` verbatim as one argument (quote it for the shell); drop `--server-env` when
    `CURRENT_ENV` is absent.
+   On a multinode run (the shared block gives you an `mn.py exec` line) this machine sees no GPU and the
+   nodes have no `$SKILL_DIR`: copy `$SKILL_DIR/scripts/op_bench.py` and `harness_lib.py` into
+   `<OP_TASK_DIR>`, then run that copy on a node card, same flags:
+   `<that mn.py exec> --target master --gpu <GPU_ID> -- python3 "<OP_TASK_DIR>/op_bench.py" --task "<OP_TASK_DIR>" ...`
    Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
    `isolated_speedup` vs the live BLAS default (`live_blas_default`: `TORCH_BLAS_PREFER_HIPBLASLT` or
    `TORCH_BLAS_PREFER_CUBLASLT` in `CURRENT_ENV` when set there, else torch's default on this image,
