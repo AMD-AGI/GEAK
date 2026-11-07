@@ -1968,7 +1968,7 @@ let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy. Choose an affordable direction count from the supplied evidence and service facts.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
 const citations = [];
 const contextRef = (id, outDir) => {
   if (evo) return {path: evo.path, entry_id: id, field: 'reported_context'};

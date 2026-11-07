@@ -77,8 +77,6 @@ Return JSON:
 ## PHASE=plan_round
 
 Read `SKILL_DIR/docs/eval_archive_contract.md` for source capture and reported evidence.
-Use `EVALUATION_SERVICE` and qualified `DELIVERY_FACTS` to choose an affordable direction count
-when EVO is active; configured pools are not live availability and waiting consumes the same window.
 
 Inputs: `ROUND`, `BUDGET_REMAINING`, `CUMULATIVE_SPEEDUP`, `BASELINE_GEOMEAN_MS`, current per-case
 table, `PROFILE_SUMMARY`, `HISTORY`, knowledge pointers and optional `DEEP_SEARCH_BRIEF`.
