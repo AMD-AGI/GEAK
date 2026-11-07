@@ -285,7 +285,10 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
       }
       return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
         ...native, external_evaluation: ids(id), primary_speedup: score,
-        ...(id === 'final' ? {validation_status: 'accepted', correctness: 'pass', patch_sha256: patchHash} : {}),
+        // The host reader is the authority for candidate status/correctness (reader facts are never
+        // taken from a role report), so a conformant reader states them for every evaluation.
+        status: 'verified', correctness: 'pass',
+        ...(id === 'final' ? {validation_status: 'accepted', patch_sha256: patchHash} : {}),
         native_reproducible_gain: gain, timing_basis: 'external_whole_call_ut',
         development_geomean_speedup: dev,
         per_case: [{name: 'c1', baseline_ms: 8, optimized_ms: 8 / dev, speedup: dev}]
