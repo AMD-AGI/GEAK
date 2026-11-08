@@ -3056,7 +3056,7 @@ function boundedContext(value, fullRef, limit = 16384) {
 function caseEvidenceReport(value) {
   if (!value) return null;
   const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
-    'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
+    'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
     'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
     'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
     'variance_note', 'graph_safe'];
@@ -3150,7 +3150,7 @@ async function createEvolution(start) {
   const evidence = (value) => {
     if (!value) return null;
     const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
-      'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
+      'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',
       'per_case', ...(EXTERNAL_OBJECTIVE ? ['observed_evidence', 'reported_per_case'] : []), 'native_reproducible_gain',
