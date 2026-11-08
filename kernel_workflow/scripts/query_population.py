@@ -161,8 +161,10 @@ def legacy_score(evidence, objective):
     need(isinstance(evidence, dict) and says(evidence.get("correctness"), "pass")
          and (says(evidence.get("status"), "verified") or says(evidence.get("status"), "regression")),
          "legacy verifier did not pass source correctness")
-    weighted = evidence.get("verified_weighted", evidence.get("speedup_weighted"))
-    geomean = evidence.get("verified_geomean", evidence.get("speedup_geomean"))
+    weighted = (evidence["verified_weighted"] if evidence.get("verified_weighted") is not None
+                else evidence.get("speedup_weighted"))
+    geomean = (evidence["verified_geomean"] if evidence.get("verified_geomean") is not None
+               else evidence.get("speedup_geomean"))
     score = weighted if objective["kind"] == "time_weighted" else geomean
     need(positive(score), "legacy verifier has no finite positive score")
     return score
