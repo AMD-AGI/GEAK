@@ -141,6 +141,16 @@ Inputs: round verified results (including claimed/measured values and status), i
 winner, profile shift and prior `HISTORY`.
 Write `EVAL_DIR/insight_log.md` and return durable findings plus one ledger row per attempted direction:
 expected/actual speedup, verdict and lesson. Preserve failed/invalid/missing measurements as such.
+For labelled handoffs, `verified_primary` is the verifier-returned primary, not a validity or
+source-custody verdict. Retain its status and existing verification evidence when recording the ledger's
+`actual`; failed/invalid/missing measurements remain such. Keep `claimed_primary` as the engineer claim
+and retain `metric` with the row. Missing or unsupported measurements stay null/unknown, never zero.
+`claimed`/`verified` are legacy geomean aliases;
+`WINNER.geomean` is a legacy primary alias. Use `WINNER.primary`, `geomean_unweighted` and `weighted`
+for explicit comparisons. `INTEGRATE.claimed_primary` labels integration-stage evidence: it is provisional
+on the legacy path, where separate verification remains authoritative; external mode keeps its existing
+host-reader facts and identity checks. For older history without metric labels, consult the source report rather than
+assuming its legacy fields have the same meaning as the current primary.
 Avoid repeating confirmed dead ends without new evidence or a changed hypothesis.
 
 When `STATE_DIR` is supplied, update `STATE.json` every round with

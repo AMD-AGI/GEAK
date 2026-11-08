@@ -1966,6 +1966,27 @@ const evoPlanSchema = evo ? {
 } : PLAN_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
+// Additive prompt/history fields: legacy aliases keep their existing metric meaning.
+// A speedup ratio must be finite and positive; absent/unsupported evidence is null.
+const handoffMetric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
+const handoffScore = value => Number.isFinite(value) && value > 0 ? value : null;
+const roundScores = (eng, ver) => ({
+  metric: handoffMetric,
+  claimed_primary: handoffScore(primSpeedup(eng)), verified_primary: handoffScore(primSpeedup(ver)),
+  claimed_geomean: handoffScore(eng?.speedup_geomean), verified_geomean: handoffScore(ver?.verified_geomean),
+  claimed: handoffScore(eng?.speedup_geomean), verified: handoffScore(ver?.verified_geomean),
+});
+const winnerScores = winner => ({
+  metric: handoffMetric, primary: handoffScore(winner.geomean),
+  geomean: handoffScore(winner.geomean), // Legacy alias for the primary, not the unweighted diagnostic.
+  geomean_unweighted: handoffScore(winner.geomean_unweighted), weighted: handoffScore(winner.weighted),
+});
+const integrationScores = best => ({
+  metric: handoffMetric,
+  claimed_primary: handoffScore(primSpeedup(EXTERNAL_OBJECTIVE ? best : {
+    verified_weighted: best?.weighted, verified_geomean: best?.geomean})),
+  claimed_geomean: handoffScore(best?.geomean), claimed_weighted: handoffScore(best?.weighted),
+});
 // The planner sees the archive, its schema fields and the retained-approach policy once the archive
 // holds retained source; before that its round plans from the same inputs as greedy.
 const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
@@ -2017,7 +2038,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   // --- (a) Plan the round (TechLead) ------------------------------------
   const planInputs = (forbidStop, facts = {}) => ({
-    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
+    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
@@ -2293,7 +2314,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const retained = await evo.record(r.d, r.eng, binding === true ? r.ver : null, patch);
       await retainResult(r.d, r.eng, r.ver, patch, evo, roundBase, retained, r.verification);
     }
-    history.rounds.push({round, status: 'deadline', improved: false, cumulative,
+    history.rounds.push({round, metric: handoffMetric, status: 'deadline', improved: false, cumulative,
       directions: directionHistory});
     deadlineHit = true;
     break;
@@ -2325,9 +2346,10 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
-        BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
+        BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)), PRIMARY_METRIC: handoffMetric,
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          verified_primary: handoffScore(primSpeedup(r.ver)),
           ...externalFields(r.ver),
           files: r.d.focus_files || [], patch: r.patch,
           reported_context: boundedContext(candidates.find(c => c.id === r.d.id).reported_context,
@@ -2509,9 +2531,9 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       }
       const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
       if (atDeadline) {
-        history.rounds.push({round, status, cumulative, improved: false,
+        history.rounds.push({round, metric: handoffMetric, status, cumulative, improved: false,
           directions: directionHistory,
-          winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
+          winner: {source: winner.source, ...winnerScores(winner), patch: winner.patch}, recovery});
         plannerStopReason = status;
         log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
         break;
@@ -2550,19 +2572,19 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(), {
-      EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
+      EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, PRIMARY_METRIC: handoffMetric,
       ...(archiveHasSource() ? evo.memoryInputs(clean.map(r => r.d)) : {}),
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
-        expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
-        verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+        expected: r.d.expected_speedup, ...roundScores(r.eng, r.ver),
+        status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '', reported_context: boundedContext(
           reportedEvidence(r.d, r.eng, r.ver, r.patch), contextRef(r.d.id, r.d.out_dir), 2048) })),
       ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
         engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
-      INTEGRATE: integrate ? {...integrate, ...(integrate.best ? {best: {...integrate.best,
+      INTEGRATE: integrate ? {...integrate, ...integrationScores(integrate.best), ...(integrate.best ? {best: {...integrate.best,
         reported_context: boundedContext(integrate.best.reported_context,
           contextRef(`r${round}_integrated`, `${EVAL_DIR}/round_${round}/integrate`), 8192)}} : {})} : null,
-      WINNER: winner ? {source: winner.source, geomean: winner.geomean,
+      WINNER: winner ? {source: winner.source, ...winnerScores(winner),
         reported_context: boundedContext(winner.reported_context, contextRef(winner.id, `${EVAL_DIR}/round_${round}`), 2048)} : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -2623,15 +2645,16 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     }
   }
   history.rounds.push({
-    round,
+    round, metric: handoffMetric,
     ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directionHistory,
-    results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+    results: clean.map(r => ({ id: r.d.id, ...roundScores(r.eng, r.ver),
+      status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
       ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
-    integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0,
+    integrate: integrate ? { conclusion: integrate.conclusion, ...integrationScores(integrate.best),
+      geomean: handoffScore(integrate.best?.geomean),
       ...(!EXTERNAL_OBJECTIVE ? {verification: integrate.verification || null} : {}) } : null,
-    winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
+    winner: winner ? { source: winner.source, ...winnerScores(winner) } : null,
     improved, cumulative,
   });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
