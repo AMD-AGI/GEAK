@@ -15,6 +15,17 @@ be partial or left over from an earlier call. A copy and its hash prove only the
 bytes present at observation, not freshness, oracle use, or a native UT verdict.
 Zero matching calls are recorded as ``not_observed``.
 
+Generic frozen UTs are observed at the same boundary: exact-task
+``harness_lib.py:_run_leg`` calls in ``oracle`` or ``server_calls`` mode copy
+that call's ``out`` file, and ``ut_driver.py:_inproc`` in ``replay-ref`` mode
+copies its ``--refs`` file. Each call has a separate archive directory, including
+calls that overwrite the same output path. New worker threads are observed too;
+pre-existing threads and direct writes outside these functions are not covered.
+No subprocess arguments, environment, return objects or exceptions are rewritten
+for these native legs. A replay helper can return a failure dictionary, so its
+copy errors are deferred until the next oracle call or entry exit, allowing the
+native caller to consume that dictionary unchanged.
+
 Direct calls are observed in the entry process. The supported subprocess bridge
 is the inspected untimed ``subprocess.run([sys.executable, script], ...)`` form,
 where script is an absolute regular ``TASK/run/correctness_*.py`` file containing
@@ -160,6 +171,8 @@ class Observation:
     def __init__(self, task, destination=None, *, session=None, process_dir=None, wrap_diagnostics=True, provenance=None):
         self.task = Path(task).resolve()
         self.harness = str(self.task / "harness_lib.py")
+        self.driver = str(self.task / "ut_driver.py")
+        self.lock = threading.Lock()
         self.destination = destination
         self.session = session
         self.process_dir = process_dir
@@ -187,13 +200,15 @@ class Observation:
         else:
             self.process_dir = Path(self.process_dir)
         self.previous_profile = sys.getprofile()
+        self.previous_thread_profile = threading.getprofile()
         self.previous_run = subprocess.run
         self.record(False, None)
-        if self.previous_profile is not None:
+        if self.previous_profile is not None or self.previous_thread_profile is not None:
             self.errors.append("existing sys profiler prevents safe oracle observation")
             self.record(True, None)
             raise OracleArchiveFailure(self.errors[-1])
         sys.setprofile(self.callback)
+        threading.setprofile(self.callback)
         if self.wrap_diagnostics:
             subprocess.run = self.run_diagnostic
         return self
@@ -214,6 +229,9 @@ class Observation:
         current = sys.getprofile()
         displaced = current is not self.callback and not (current is None and isinstance(error, OracleArchiveFailure))
         sys.setprofile(self.previous_profile)
+        if threading.getprofile() is not self.callback:
+            displaced = True
+        threading.setprofile(self.previous_thread_profile)
         if self.wrap_diagnostics:
             subprocess.run = self.previous_run
         if displaced:
@@ -230,29 +248,55 @@ class Observation:
                 raise OracleArchiveFailure(self.errors[0])
         return False
 
+    def output_call(self, frame):
+        """Declared output at an inspected producer boundary; never a timing leg."""
+        loc, name = frame.f_locals, frame.f_code.co_name
+        filename = os.path.realpath(frame.f_code.co_filename)
+        if filename == self.harness and name == "baseline_random_outputs":
+            return self.task / "_baseline_random.pt", loc.get("task_dir", self.task), None
+        if filename == self.harness and name == "_run_leg" and loc.get("mode") in ("oracle", "server_calls"):
+            return Path(loc.get("out") or ""), loc.get("task_dir"), loc["mode"]
+        if filename == self.driver and name == "_inproc" and loc.get("mode") == "replay-ref":
+            extra = loc.get("extra", ())
+            if not isinstance(extra, (list, tuple)) or extra.count("--refs") != 1:
+                raise ValueError("replay-ref requires one --refs output")
+            return Path(extra[extra.index("--refs") + 1]), loc["T"].dir, loc["mode"]
+        return None
+
     def profile(self, frame, event, argument):
         if (os.getpid() != self.pid or event not in ("call", "return")
-                or frame.f_code.co_name != "baseline_random_outputs"
-                or os.path.realpath(frame.f_code.co_filename) != self.harness):
+                or frame.f_code.co_name not in ("baseline_random_outputs", "_run_leg", "_inproc")):
             return
         if event == "call":
-            if self.errors:
-                raise OracleArchiveFailure("refusing another oracle generation after archival failure")
             try:
-                source = self.task / "_baseline_random.pt"
+                target = self.output_call(frame)
+                if target is None:
+                    return
+                if self.errors:
+                    raise OracleArchiveFailure("refusing another oracle generation after archival failure")
+                source, task_dir, mode = target
+                if not source.is_absolute():
+                    raise ValueError("generated oracle path must be absolute")
                 if source.is_symlink():
                     raise ValueError("generated oracle path must not be a symlink")
-                if Path(frame.f_locals.get("task_dir", self.task)).resolve() != self.task:
+                if Path(task_dir).resolve() != self.task:
                     raise ValueError("oracle function was called for a different task")
-            except (OSError, TypeError, ValueError) as exc:
+            except (OSError, TypeError, ValueError, IndexError) as exc:
                 self.errors.append(str(exc))
                 raise OracleArchiveFailure(self.errors[-1]) from exc
-            self.sequence += 1
-            self.active[id(frame)] = self.sequence
+            with self.lock:
+                self.sequence += 1
+                self.active[id(frame)] = (self.sequence, source, mode)
             return
-        sequence = self.active.pop(id(frame), None)
+        with self.lock:
+            active = self.active.pop(id(frame), None)
+        if active is None:
+            return                         # e.g. an unobserved timing/resolve leg
+        sequence, source, mode = active
         row = {"call": sequence, "seed": frame.f_locals.get("seed"), "draws": frame.f_locals.get("draws"),
                "pid": self.pid, "returned_none": argument is None, "copied": False,
+               "function": frame.f_code.co_name, "mode": mode, "source": str(source),
+               "thread": threading.get_ident(),
                "caller_file": frame.f_back.f_code.co_filename if frame.f_back else None}
         self.rows.append(row)
         invalid_scalars = False
@@ -268,20 +312,19 @@ class Observation:
                 raise ValueError("oracle seed/draw metadata is not scalar")
             directory = self.process_dir / ("call-%04d" % sequence)
             directory.mkdir()
-            source = self.task / "_baseline_random.pt"
             digest = hashlib.sha256()
             with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as incoming:
                 before = os.fstat(incoming.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise ValueError("generated oracle is not a regular file")
-                with (directory / "_baseline_random.pt").open("xb") as outgoing:
+                with (directory / source.name).open("xb") as outgoing:
                     for chunk in iter(lambda: incoming.read(1 << 20), b""):
                         outgoing.write(chunk)
                         digest.update(chunk)
                 after = os.fstat(incoming.fileno())
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                 raise ValueError("generated oracle changed during synchronous copy")
-            row.update(copied=True, path=str((directory / "_baseline_random.pt").relative_to(self.session)),
+            row.update(copied=True, path=str((directory / source.name).relative_to(self.session)),
                        size=before.st_size, mtime_ns=before.st_mtime_ns, copy_sha256=digest.hexdigest())
             write(directory / "copy.json", row)
         except (OSError, ValueError) as exc:
@@ -290,7 +333,7 @@ class Observation:
             self.errors.append("oracle copy failed: " + str(exc))
             # A non-None return proves normal function return. During exception
             # unwinding preserve the original failure; the next CALL is refused.
-            if argument is not None:
+            if argument is not None and mode != "replay-ref":
                 raise OracleArchiveFailure(self.errors[-1])
 
     def run_diagnostic(self, *popenargs, **kwargs):
