@@ -44,6 +44,31 @@ Check applicability to a child and verify every combined source independently. L
 are unavailable unless shared; use bounded-context overflow references where relevant. These
 records guide the next experiment and never change the official evaluator or candidate score.
 
+### Measurement conditions and repeated observations
+
+In the report and returned `evidence_context`, label each timing observation's
+`execution_mode` (for example, the actual native compiled path or eager execution),
+`buffer_policy` (reuse, rotation and reset), `timing_boundary` (what the clock includes,
+units and repeats), and source/evaluation receipt bindings. Use strings or nested objects;
+extra top-level result fields need not survive the archive projection. Associate each
+`per_case` row with its observation's context or receipt reference, including the baseline
+and candidate bindings. Preserve the producer's exact labels; unspecified conditions are
+`UNKNOWN`, not inferred from source equality, correctness or a kernel name.
+
+An archive entry holds the latest verifier verdict for a candidate; recording that candidate
+again replaces its verifier evidence. Before remeasurement, preserve the complete earlier
+result, case rows and conditions under a distinct report/JSON filename in the existing role
+output directory. Save the new observation separately and carry both retained paths and
+available hashes in `evidence_context.evidence_refs` on the next return. Do not overwrite the
+only copy or assume the archive supplies a multi-protocol history. References to unavailable
+artifacts remain explicitly unavailable.
+
+Keep native-compiled/native-buffer and eager/rotated-buffer observations separately labelled,
+even for identical source. Apply the declared repeat reduction only within matching conditions;
+do not pool incompatible observations or select a faster protocol as the official score.
+Historical observations and author-supplied conditions do not replace the required independent
+verification, establish deployment engagement or change promotion.
+
 ## Reusing prepared ORIGINAL evidence
 
 For supplied `PREPARED_ORIGINAL_REF={path,sha256}`, verify exact bytes, successful producer role
