@@ -243,8 +243,16 @@ async function runCase(sc) {
             assert.ok(Buffer.byteLength(JSON.stringify(evolution.selected_evidence)) <= 16384);
           }
         } else {
-          assert.match(prompt, /never go below baseline/);
-          assert.doesNotMatch(prompt, /retain useful slower approaches|roles\/evolution\.md/);
+          if (sc.args?.evolution_preserve_founder_attempts === true) {
+            assert.match(prompt, /retain useful slower approaches/);
+            assert.match(prompt, /Return the best correct implementation of the requested realization even when it is slower/);
+            assert.match(prompt, /does not qualify or promote the source/);
+            assert.match(prompt, /Preserve failed or unfinished attempts separately under OUTPUT_DIR/);
+          } else {
+            assert.match(prompt, /never go below baseline/);
+            assert.doesNotMatch(prompt, /retain useful slower approaches/);
+          }
+          assert.doesNotMatch(prompt, /roles\/evolution\.md/);
           assert.equal(h.field(prompt, 'EVOLUTION_ARCHIVE'), undefined);
         }
         const anchor = evolution ? evolution.workspace_base_commit
@@ -264,10 +272,11 @@ async function runCase(sc) {
           assert.notEqual(git(workspace, 'rev-parse', 'HEAD').trim(), anchor);
         }
         writeSources(workspace, spec.files);
-        if (!spec.noPatch) {
+        if (!spec.noPatch || spec.separateAttempt) {
           // The ordinary engineer's save instruction includes new editable sources.
           git(workspace, 'add', '-N', '--', ...Object.keys(spec.files));
-          fs.writeFileSync(path.join(h.field(prompt, 'OUTPUT_DIR'), 'best_patch.diff'),
+          fs.writeFileSync(path.join(h.field(prompt, 'OUTPUT_DIR'),
+            spec.separateAttempt ? 'unfinished_attempt.diff' : 'best_patch.diff'),
             git(workspace, 'diff', '--binary', anchor, '--', '.'));
         }
         if (sc.expireAfterEngineer === id) now = deadline;
@@ -343,6 +352,11 @@ async function runCase(sc) {
       }
       if (label.startsWith('storage:reclaim')) {
         const keep = Number(label.match(/r(\d+)$/)[1]);
+        if (sc.nativeReclaim) {
+          command('bash', [path.join(ROOT, 'kernel_workflow/scripts/reclaim_eval_artifacts.sh'),
+            '--eval-dir', evalDir, '--keep-round', String(keep)]);
+          return {ok: true, note: 'ordinary source-preserving cleanup'};
+        }
         for (let round = 1; round < keep; round++) {
           fs.rmSync(path.join(evalDir, `round_${round}`), {recursive: true, force: true});
         }
@@ -719,6 +733,48 @@ const cases = [
 ];
 const externalLineage = cases[cases.length - 1];
 cases.push(approachMemoryCase);
+cases.push(...[undefined, false, true, 'true'].map(evolution_preserve_founder_attempts => ({...cases[0],
+  name: `founder-preservation policy ${JSON.stringify(evolution_preserve_founder_attempts)}`,
+  args: {...cases[0].args, ...(evolution_preserve_founder_attempts !== undefined
+    ? {evolution_preserve_founder_attempts} : {})},
+  check: info => {
+    cases[0].check(info);
+    const founder = info.events.find(event => event.label.startsWith('eng '));
+    assert.equal(info.h.field(founder.prompt, 'EVOLUTION'), undefined,
+      'preserving source does not enable founder evolution context');
+    const firstPlan = info.events.find(event => event.label === 'tech_lead:plan r1');
+    assert.equal(info.h.field(firstPlan.prompt, 'EVOLUTION_ENTRIES'), undefined,
+      'preserving source does not change initial planner context');
+    assert.doesNotMatch(firstPlan.prompt, /roles\/evolution\.md/);
+  },
+})));
+cases.push({name: 'founder-preservation keeps failed attempt evidence separate from the accepted program',
+  nativeReclaim: true,
+  args: {budget: 2, evolution_preserve_founder_attempts: true},
+  best: 1.4, bestId: 'r2_d0', expected: fast,
+  plans: {r1: plan(direction('unfinished')), r2: plan(direction('correct'))},
+  candidates: {
+    r1_d0: {files: slow, noPatch: true, separateAttempt: true,
+      engineer: {status: 'failed', measurement_valid: false,
+        notes: 'Unfinished source: round_1/engineer_0/unfinished_attempt.diff; no correctness or timing established.'}},
+    r2_d0: {files: fast, speed: 1.4},
+  },
+  check: ({archive, events, temp}) => {
+    const failed = archive.entries.find(row => row.id === 'r1_d0');
+    assert.equal(failed.verified, false);
+    assert.equal(failed.status, 'unverified');
+    assert.equal(failed.patch_ref, null, 'unfinished files are not a qualified returned patch');
+    assert.equal(failed.engineer.measurement_valid, false);
+    assert.match(failed.engineer.notes, /Unfinished source:/);
+    const replay = path.join(temp, 'unfinished-source-replay');
+    writeSources(replay, original);
+    initRepo(replay);
+    git(replay, 'apply', '--', path.join(temp, 'eval/round_1/engineer_0/unfinished_attempt.diff'));
+    assert.deepEqual(readSources(replay), slow,
+      'the actual failed implementation survives cleanup as separate source evidence');
+    assert.ok(!events.some(event => event.label === 'commit r1'), 'a failed founder is never promoted');
+  },
+});
 cases.push(...[true, false, 'true'].map(evolution_evidence_handoff => ({...cases[0],
   name: `selected evidence handoff with ${JSON.stringify(evolution_evidence_handoff)}`,
   args: {...cases[0].args, evolution_evidence_handoff}})));

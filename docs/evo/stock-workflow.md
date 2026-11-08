@@ -42,6 +42,7 @@ paths and GPU ID are placeholders for the caller's environment.
 | `min_improve` | `0.02` | Required relative improvement over the current best for promotion. |
 | `evolution_evidence_handoff` | `false` | Boolean `true` adds selected parent/donor evidence to engineer prompts. |
 | `evolution_case_evidence_view` | `false` | Boolean `true` adds retained case evidence to planning and round-memory inputs. |
+| `evolution_preserve_founder_attempts` | `false` | Boolean `true` asks EVO engineers to return correct slower founding implementations while archive/continuation context remains deferred. Failed or unfinished attempts stay separate evidence; qualification and promotion are unchanged. |
 
 GEAK-EVO can verify and retain slower candidates without promoting them. It also
 allows parallel deep engineers. Account for these choices when comparing search

@@ -41,6 +41,8 @@ const laneArgs = (wfArgs) => {
       ? { evolution_case_evidence_view: A.evolution_case_evidence_view } : {}),
     ...(A.evolution_evidence_handoff !== undefined
       ? { evolution_evidence_handoff: A.evolution_evidence_handoff } : {}),
+    ...(A.evolution_preserve_founder_attempts !== undefined
+      ? { evolution_preserve_founder_attempts: A.evolution_preserve_founder_attempts } : {}),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };

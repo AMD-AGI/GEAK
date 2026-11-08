@@ -832,7 +832,8 @@ def map_args(
     if "optimizer" in h:
         ps_args["optimizer"] = h["optimizer"]
     # Evidence views use literal boolean true in the worker; preserve caller values.
-    for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff"):
+    for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff",
+                 "evolution_preserve_founder_attempts"):
         if flag in h:
             ps_args[flag] = h[flag]
     if "kernel_budget" in h:

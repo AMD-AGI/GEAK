@@ -127,7 +127,8 @@ check("invalid optimizer is rejected before workflow dispatch",
 # assembled workflows are regenerated. The generated call-site checks above remain.
 source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
 source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
-evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff")
+evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
+                  "evolution_preserve_founder_attempts")
 evidence_cases = [{"optimizer": "evo"}]
 evidence_cases += [{"optimizer": "evo", flag: value}
                   for flag in evidence_flags for value in (False, True, "true", "false", None, 0, 1)]
@@ -136,7 +137,8 @@ const fs = require('node:fs'), vm = require('node:vm');
 const {boundary, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
 const results = cases.map(A => vm.runInNewContext(boundary + `
 ({inherited: laneArgs({kernel_path: "/task"}),
-  overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false})})`, {
+  overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false,
+    evolution_preserve_founder_attempts: false})})`, {
   A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,
 }));
 console.log(JSON.stringify(results));
