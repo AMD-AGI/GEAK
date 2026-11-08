@@ -134,14 +134,16 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   });
 
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
+  // Stable attempt identity and noclobber preserve the first observation across resume/replay.
   const recordProposedPlan = async (attempt, proposed) => {
-    const path = `${EVAL_DIR}/planner_r${round}_${attempt}_${Date.now()}.json`;
+    const path = `${EVAL_DIR}/planner_r${round}_${attempt}.json`;
     let saved = null;
-    try { saved = await writeFile(path, JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n',
-      { timeoutMs: 1000, graceMs: 0 }); }
+    try { saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', path],
+      { input: JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n',
+        timeoutMs: 1000, graceMs: 0 }); }
     catch (_) { /* Observation failure must not change the search decision. */ }
     if (saved === null)
-      log(`Round ${round}: proposed-plan artifact unavailable (${attempt}).`);
+      log(`Round ${round}: proposed-plan artifact unavailable or already recorded (${attempt}).`);
   };
 
   let plan = await agentT(
