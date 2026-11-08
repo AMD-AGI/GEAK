@@ -77,6 +77,11 @@ If non-empty TraceLens artifact paths exist, read `hot_kernels[]`, cross-check m
 `source_hint`, `launcher_hint`, `bound_type`. Report disagreements; do not replace measured rankings
 or trust prior shapes without live verification.
 
+Before ranking, read a matching `gpu_timeline_csv` when present: computation, exposed
+communication/copies, busy UNION and idle describe that report's GPU envelope, not
+kernel SUM, critical-path savings or roofline attainment. Exposed communication can
+include collective synchronization or waiting, as well as data transfer.
+
 If `ANALYSIS_SKILL_DIR` is non-empty and `profile_roofline_json` EXISTS, read it; otherwise skip.
 Preserve its field names (`roofline_pct`, `attainable_speedup`, `expected_e2e_gain_pct`,
 `headroom_class`, confidence), but explain their scope:
