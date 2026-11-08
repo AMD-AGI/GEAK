@@ -33,6 +33,13 @@ not a failed test. Route a confirmed defect to its owner now, hold affected depe
 work and resume after verified repair. Do not wait for final evaluation or blindly retry
 `blocked` work. Keep the active location in `STATE.md` and leave a pointer after migration.
 
+At the user's reporting cadence (otherwise `report.interval_sec` or its existing default),
+send a short **Plan / Finish** update to the user: **Plan** — next actions, running work
+and blockers; **Finish** — verified completions since the last update, linked to evidence.
+Say when nothing new has finished. Record the update and next reporting time in `STATE.md`
+and continue monitoring between reports. Background logs do not replace this user-facing
+update.
+
 Changing an implementation does not change its module's acceptance contract. Kernel
 Workflow and native tools (OOB) share the same frozen-task and cold-verification rules.
 System changes use their declared quality and serving checks; they need no artificial UT.
@@ -49,5 +56,4 @@ A completed call is not an optimization win. Adoption requires integration/effec
 quality evidence plus every required objective; a throughput verdict alone is insufficient.
 An E2E claim requires the declared serving comparison. Stop on demonstrated goal attainment,
 user stop, exhausted budget or unavailable prerequisites; preserve progress and distinguish these
-outcomes. Meeting a floor does not prove a higher goal. Report at the task's requested
-cadence; the standard recipe's automatic reporting remains available.
+outcomes. Meeting a floor does not prove a higher goal.
