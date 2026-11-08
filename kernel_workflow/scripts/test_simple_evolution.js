@@ -521,22 +521,6 @@ const approachMemoryCase =
       assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
     }};
 const cases = [
-  {name: 'zero-byte retained parent initializes and dispatches its child',
-    args: {budget: 2}, best: 1.4, bestId: 'r2_d0', expected: fast,
-    plans: {r1: plan(direction('unchanged')),
-      r2: plan(direction('develop-unchanged', {parent_id: 'r1_d0'}))},
-    candidates: {r1_d0: {files: original, speed: 1},
-      r2_d0: {files: fast, inherited: original, speed: 1.4}},
-    check: ({archive, events}) => {
-      const parent = archive.entries.find(row => row.id === 'r1_d0');
-      const child = archive.entries.find(row => row.id === 'r2_d0');
-      assert.equal(fs.statSync(parent.patch_ref.path).size, 0);
-      assert.equal(parent.verified, false, 'unchanged source retention is not qualification');
-      assert.equal(child.parent_id, parent.id);
-      assert.equal(child.evolution_context.initialization.status, 'ready');
-      assert.ok(events.some(event => event.label === 'eng r2_d0:memory'),
-        'an explicitly selected unchanged parent must reach its engineer');
-    }},
   {name: 'slower-parent, donor identity, failures, cumulative new-file patch and retained source',
     args: {budget: 6, max_no_improve: 6}, best: 1.8, bestId: 'r4_d0', expected: child,
     plans: {r1: plan(direction('slow'), direction('fast')),
@@ -921,6 +905,22 @@ cases.push({...cases[0], name: 'UTF-8 budget preserves bounded context and exact
       assert.ok(unicodeNotes.length < 16384 && Buffer.byteLength(unicodeNotes, 'utf8') === 16384,
         'payload overhead crosses the byte limit despite fewer UTF-16 code units');
     }}}});
+cases.push({name: 'zero-byte retained parent initializes and dispatches its child',
+    args: {budget: 2}, best: 1.4, bestId: 'r2_d0', expected: fast,
+    plans: {r1: plan(direction('unchanged')),
+      r2: plan(direction('develop-unchanged', {parent_id: 'r1_d0'}))},
+    candidates: {r1_d0: {files: original, speed: 1},
+      r2_d0: {files: fast, inherited: original, speed: 1.4}},
+    check: ({archive, events}) => {
+      const parent = archive.entries.find(row => row.id === 'r1_d0');
+      const child = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(fs.statSync(parent.patch_ref.path).size, 0);
+      assert.equal(parent.verified, false, 'unchanged source retention is not qualification');
+      assert.equal(child.parent_id, parent.id);
+      assert.equal(child.evolution_context.initialization.status, 'ready');
+      assert.ok(events.some(event => event.label === 'eng r2_d0:memory'),
+        'an explicitly selected unchanged parent must reach its engineer');
+    }});
 cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalLineage, report,
   name: `external cumulative parent and child survive ${report} Report patch`})),
   {...externalLineage, name: 'host patch binds unstaged final edit and staged binary instead of HEAD',
