@@ -198,6 +198,16 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
         return {status: 'completed', code: invalidFinal === 'patch-capture-failed' ? 1 : 0,
           group_cleared: true, stdout: capturedPatch};
       }
+      if (opts.cmd === 'sh' && /^\/eval\/planner_r[1-9][0-9]*_(initial|replan[1-9][0-9]*)\.json$/.test(opts.args[3])) {
+        assert.deepEqual(opts.args, ['-c', 'set -C; cat > "$1"', 'sh', opts.args[3]]);
+        assert.equal(activePhase, 'Optimize');
+        assert.equal(opts.timeoutMs, 1000);
+        assert.equal(opts.graceMs, 0);
+        const {round, attempt, plan} = JSON.parse(opts.input);
+        assert.equal(opts.args[3], `/eval/planner_r${round}_${attempt}.json`);
+        assert.ok(plan && Array.isArray(plan.directions));
+        return {status: 'completed', code: 0, group_cleared: true, stdout: ''};
+      }
       if (opts.cmd === 'sh') {
         assert.deepEqual(opts.args, ['-c', 'cat > "$1"', 'sh', hostPatchPath]);
         assert.equal(opts.input, capturedPatch, 'every host write restores the frozen bytes, including an empty patch');
