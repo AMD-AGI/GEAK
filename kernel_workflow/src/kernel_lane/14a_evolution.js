@@ -418,7 +418,9 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
       const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
       if (parentRef) {
-        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        // A zero-byte cumulative diff is the already-materialized archive base.
+        const parentSize = (await run('stat', ['-L', '-c', '%s', '--', parentRef.path])).trim();
+        if (parentSize !== '0') await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
         if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
       }
       await run('git', ['-C', workspace, 'add', '-A']);
