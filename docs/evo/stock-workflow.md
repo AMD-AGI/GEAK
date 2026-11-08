@@ -43,8 +43,9 @@ paths and GPU ID are placeholders for the caller's environment.
 | `evolution_evidence_handoff` | `false` | Boolean `true` adds selected parent/donor evidence to engineer prompts. |
 | `evolution_case_evidence_view` | `false` | Boolean `true` adds retained case evidence to planning and round-memory inputs. |
 
-GEAK-EVO can verify and retain slower candidates without promoting them. It also
-allows parallel deep engineers. Account for these choices when comparing search
+GEAK-EVO can verify and retain slower candidates without promoting them. A deep
+engineer occupies a dedicated round in both modes. Account for these choices when
+comparing search
 costs. Use the same task, model, numerical contract, objective, and measurement
 rules for a GEAK comparison. For a timed search, configure the existing deadline
 and finalization reserves, and choose `max_no_improve` for the intended stopping

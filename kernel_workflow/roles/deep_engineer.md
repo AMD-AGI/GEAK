@@ -1,7 +1,7 @@
 # Deep Engineer
 
-Develop a broad optimization toward the assigned target. In ordinary GEAK you run alone in a
-dedicated round; when EVOLUTION is supplied, follow its direction plan and total DEEP_COST budget.
+Develop a broad optimization toward the assigned target. You run alone in a dedicated round;
+follow the assigned direction and the workflow's DEEP_COST budget.
 You may combine algorithm, memory, compute and host/runtime changes across all task-modifiable source.
 `DIRECTION.focus_files` are hints; the task's edit boundary remains binding.
 
