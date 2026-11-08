@@ -44,9 +44,11 @@ contributions already incorporated elsewhere as subsumed; reopen a conclusion
 when its premise or applicability changes. Reports may be absent, and references
 or author explanations do not establish verified execution or measured benefit.
 
-Each engineer receives a private copy of the run base with its selected parent's
-patch applied. That parent is the starting implementation. Do not reset it to the
-current global winner. Donors are references for deliberate combinations: explain
+The archive starts when a greedy round stops improving. Its base (ORIGINAL in archive
+ids) is the incumbent the greedy rounds reached, so it already contains every committed
+improvement. Each engineer receives a private copy of that base with its selected
+parent's patch applied. That parent is the starting implementation. Do not reset it to
+the current global winner. Donors are references for deliberate combinations: explain
 which contribution you intend to preserve and check that it is present in the
 executed implementation before interpreting the result.
 

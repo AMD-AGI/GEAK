@@ -101,7 +101,8 @@ Promise.all(cases.map(async A => {
       A: child, cumulative: 1, bestSeen: 1, bestPerCase: {}, finalWinner: null,
       profileSummary: '', history: {},
       createEvolution: async () => { calls.push('createEvolution'); return 'evolution'; },
-      greedyOptimize: async (_start, evolution) => { calls.push(evolution || 'ordinary'); },
+      greedyOptimize: async (_start, plan) => { calls.push(plan.archive
+        || (plan.start ? 'evolution_after_first_stall' : 'ordinary')); },
       nativeDeliveryBoundary: async work => work(),
       applyOptimizeResult: () => {},
     });
@@ -118,8 +119,8 @@ for i, optimizer in enumerate(("greedy", "evo"), 1):
           results[i].get("optimizer") == optimizer and results[i].get("kernel_path") == "/task")
 check("omitted and greedy selectors enter the ordinary worker policy",
       all(result.get("policy_calls") == ["ordinary"] for result in results[:2]))
-check("evo selector enters the existing evolution policy in the shared loop",
-      results[2].get("policy_calls") == ["createEvolution", "evolution"])
+check("evo selector runs the shared loop and roots evolution after its first non-improving round",
+      results[2].get("policy_calls") == ["evolution_after_first_stall"])
 check("invalid optimizer is rejected before workflow dispatch",
       all(result.get("error") == "optimizer must be greedy or evo" for result in results[3:]))
 
@@ -128,7 +129,7 @@ check("invalid optimizer is rejected before workflow dispatch",
 source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
 source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
 evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                  "evolution_preserve_founder_attempts")
+                  "evolution_preserve_founder_attempts", "evolution_start")
 evidence_cases = [{"optimizer": "evo"}]
 evidence_cases += [{"optimizer": "evo", flag: value}
                   for flag in evidence_flags for value in (False, True, "true", "false", None, 0, 1)]
@@ -138,7 +139,7 @@ const {boundary, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
 const results = cases.map(A => vm.runInNewContext(boundary + `
 ({inherited: laneArgs({kernel_path: "/task"}),
   overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false,
-    evolution_preserve_founder_attempts: false})})`, {
+    evolution_preserve_founder_attempts: false, evolution_start: false})})`, {
   A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,
 }));
 console.log(JSON.stringify(results));

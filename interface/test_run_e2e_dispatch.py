@@ -295,7 +295,7 @@ class TestMapArgs(_RunE2ECase):
 
     def test_kernel_evidence_flags_are_optional_and_not_coerced(self):
         flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                 "evolution_preserve_founder_attempts")
+                 "evolution_preserve_founder_attempts", "evolution_start")
         omitted = rx.map_args(self._handoff(optimizer="evo"))
         for flag in flags:
             self.assertNotIn(flag, omitted)

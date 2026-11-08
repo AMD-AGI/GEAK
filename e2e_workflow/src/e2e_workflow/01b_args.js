@@ -43,6 +43,8 @@ const laneArgs = (wfArgs) => {
       ? { evolution_evidence_handoff: A.evolution_evidence_handoff } : {}),
     ...(A.evolution_preserve_founder_attempts !== undefined
       ? { evolution_preserve_founder_attempts: A.evolution_preserve_founder_attempts } : {}),
+    // The worker validates the EVO schedule selector itself.
+    ...(A.evolution_start !== undefined ? { evolution_start: A.evolution_start } : {}),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };

@@ -17,9 +17,17 @@ const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path]
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
 applyOptimizeResult(await nativeDeliveryBoundary(async () => {
-  // Publication owns an archive; only EVO receives archive planning inputs.
+  // Publication owns an archive. EVO runs the greedy rounds unchanged until one neither improves nor
+  // advances, then roots its own evolution archive at the incumbent those rounds reached.
+  // evolution_start=search_start keeps the archive from the first round (the earlier EVO schedule).
   const populationArchive = A.population_lineage ? await createEvolution(optimizeStart) : null;
-  return OPTIMIZER === 'evo'
-    ? await greedyOptimize(optimizeStart, populationArchive || await createEvolution(optimizeStart), populationArchive)
-    : await greedyOptimize(optimizeStart, null, populationArchive);
+  const fromStart = OPTIMIZER === 'evo' && A.evolution_start === 'search_start';
+  if (OPTIMIZER === 'evo' && ![undefined, 'first_stall', 'search_start'].includes(A.evolution_start)) {
+    throw new Error('evolution_start must be first_stall or search_start');
+  }
+  return await greedyOptimize(optimizeStart, {
+    archive: fromStart ? populationArchive || await createEvolution(optimizeStart) : null,
+    start: OPTIMIZER === 'evo' && !fromStart ? (state) => createEvolution(state,
+      {name: 'evolution_continuation', lineage: null, origin: 'greedy_incumbent'}) : null,
+  }, populationArchive);
 }));

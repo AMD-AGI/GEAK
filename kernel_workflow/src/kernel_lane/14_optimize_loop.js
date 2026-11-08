@@ -3,8 +3,11 @@
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start, evo = null, population = null) {
-const evoPlanSchema = evo ? {
+async function greedyOptimize(start, evolutionPlan = {}, population = null) {
+// EVO: rounds run the stock greedy path (evo === null) until a round neither improves nor advances;
+// evolutionPlan.start then roots an archive at the incumbent and every later round develops from it.
+let evo = null, evolution = evolutionPlan.archive || null, startEvolution = evolutionPlan.start || null;
+const evoPlanSchema = evolution || startEvolution ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
       ...PLAN_SCHEMA.properties.directions.items, properties: {
@@ -78,9 +81,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
 
   // Peers are deliberate planner references; refresh preserves this lineage's local best and budget.
-  if (population && evo) await population.refreshPeers();
+  // Peer checkpoints share the lineage's initial base, so they enter only an archive rooted there.
+  if (population && evolution === population) await population.refreshPeers();
 
   round++;
+  evo = evolution;
+  // The first round that differs from greedy is this round's plan call.
+  if (evo && history.evolution_start && history.evolution_start.first_round == null) {
+    history.evolution_start.first_round = round;
+  }
   const remaining = BUDGET - dispatched;
   if (archiveHasSource()) history.evolution_archive = evo.path;
   phase('Optimize');
@@ -750,6 +759,16 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       schema: { type: 'object', additionalProperties: true,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
+  if (startEvolution && !evolution && noImprove > 0) {
+    try {
+      evolution = await startEvolution({cumulative, finalWinner});
+      history.evolution_start = {after_round: round, cumulative, archive: evolution.path};
+      log(`Round ${round} did not improve: later rounds develop an evolution archive rooted at the ${cumulative.toFixed(2)}x incumbent.`);
+    } catch (error) {
+      startEvolution = null;
+      log(`[evolution] could not root an archive at the incumbent (${String(error)}); continuing greedy rounds.`);
+    }
+  }
 }
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
 if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
@@ -887,8 +906,9 @@ return {
 // proposed tree in a private Git index, then diff it against the current winner.
 // This avoids applying an old parent's patch to a different canonical source.
 async function evolutionPromotionPatch(evo, winner, round) {
+  const dir = evo.path.replace(/\/archive\.json$/, '');
   return promotionPatch(evo.baseCommit, evo.entries.find(row => row.id === winner.id)?.patch_ref,
-    `${EVAL_DIR}/evolution/promotion-${round}.index`, `${EVAL_DIR}/evolution/promotion-${round}.diff`);
+    `${dir}/promotion-${round}.index`, `${dir}/promotion-${round}.diff`);
 }
 // The same construction for any pinned source {path, sha256} on its recorded base commit.
 async function promotionPatch(base, source, index, patch) {
@@ -950,7 +970,7 @@ async function nativeDeliveryBoundary(call) {
   return await call();
 }
 function nativeDeliveryError(reason) {
-  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archive ${EVAL_DIR}/evolution/archive.json`),
+  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archives ${EVAL_DIR}/evolution*/archive.json`),
     {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
 }
 const retainedSources = [], deliveryIncomplete = [], PINS = new Map();

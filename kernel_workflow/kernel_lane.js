@@ -1952,8 +1952,11 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start, evo = null, population = null) {
-const evoPlanSchema = evo ? {
+async function greedyOptimize(start, evolutionPlan = {}, population = null) {
+// EVO: rounds run the stock greedy path (evo === null) until a round neither improves nor advances;
+// evolutionPlan.start then roots an archive at the incumbent and every later round develops from it.
+let evo = null, evolution = evolutionPlan.archive || null, startEvolution = evolutionPlan.start || null;
+const evoPlanSchema = evolution || startEvolution ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
       ...PLAN_SCHEMA.properties.directions.items, properties: {
@@ -2027,9 +2030,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
 
   // Peers are deliberate planner references; refresh preserves this lineage's local best and budget.
-  if (population && evo) await population.refreshPeers();
+  // Peer checkpoints share the lineage's initial base, so they enter only an archive rooted there.
+  if (population && evolution === population) await population.refreshPeers();
 
   round++;
+  evo = evolution;
+  // The first round that differs from greedy is this round's plan call.
+  if (evo && history.evolution_start && history.evolution_start.first_round == null) {
+    history.evolution_start.first_round = round;
+  }
   const remaining = BUDGET - dispatched;
   if (archiveHasSource()) history.evolution_archive = evo.path;
   phase('Optimize');
@@ -2699,6 +2708,16 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       schema: { type: 'object', additionalProperties: true,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
+  if (startEvolution && !evolution && noImprove > 0) {
+    try {
+      evolution = await startEvolution({cumulative, finalWinner});
+      history.evolution_start = {after_round: round, cumulative, archive: evolution.path};
+      log(`Round ${round} did not improve: later rounds develop an evolution archive rooted at the ${cumulative.toFixed(2)}x incumbent.`);
+    } catch (error) {
+      startEvolution = null;
+      log(`[evolution] could not root an archive at the incumbent (${String(error)}); continuing greedy rounds.`);
+    }
+  }
 }
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
 if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
@@ -2836,8 +2855,9 @@ return {
 // proposed tree in a private Git index, then diff it against the current winner.
 // This avoids applying an old parent's patch to a different canonical source.
 async function evolutionPromotionPatch(evo, winner, round) {
+  const dir = evo.path.replace(/\/archive\.json$/, '');
   return promotionPatch(evo.baseCommit, evo.entries.find(row => row.id === winner.id)?.patch_ref,
-    `${EVAL_DIR}/evolution/promotion-${round}.index`, `${EVAL_DIR}/evolution/promotion-${round}.diff`);
+    `${dir}/promotion-${round}.index`, `${dir}/promotion-${round}.diff`);
 }
 // The same construction for any pinned source {path, sha256} on its recorded base commit.
 async function promotionPatch(base, source, index, patch) {
@@ -2899,7 +2919,7 @@ async function nativeDeliveryBoundary(call) {
   return await call();
 }
 function nativeDeliveryError(reason) {
-  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archive ${EVAL_DIR}/evolution/archive.json`),
+  return Object.assign(new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: ${reason}; retained sources ${EVAL_DIR}/delivery; archives ${EVAL_DIR}/evolution*/archive.json`),
     {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
 }
 const retainedSources = [], deliveryIncomplete = [], PINS = new Map();
@@ -3119,9 +3139,11 @@ function boundedCaseEvidence(rows, fullRef, limit = 16384) {
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
-async function createEvolution(start) {
-  const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
-  const population = A.population_lineage || null;
+// `name` and `lineage` let EVO root a second archive at a later incumbent without publishing it.
+async function createEvolution(start, {name = 'evolution', lineage = A.population_lineage || null,
+  origin = 'optimize_start'} = {}) {
+  const path = `${EVAL_DIR}/${name}`, base = `${path}/base`, archive = `${path}/archive.json`;
+  const population = lineage;
   if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
       || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
       || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
@@ -3132,7 +3154,7 @@ async function createEvolution(start) {
   }
   const entries = [];
   let baseCommit, baseTree, baseSourceId = null, sourcePaths = null, bestId = 'ORIGINAL', queue = Promise.resolve();
-  let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin: 'optimize_start'};
+  let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin};
   const run = async (cmd, args, opts) => {
     const result = await hostRun(cmd, args, opts);
     if (result === null) throw new Error(`evolution ${cmd} failed`);
@@ -3553,11 +3575,19 @@ const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path]
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
 applyOptimizeResult(await nativeDeliveryBoundary(async () => {
-  // Publication owns an archive; only EVO receives archive planning inputs.
+  // Publication owns an archive. EVO runs the greedy rounds unchanged until one neither improves nor
+  // advances, then roots its own evolution archive at the incumbent those rounds reached.
+  // evolution_start=search_start keeps the archive from the first round (the earlier EVO schedule).
   const populationArchive = A.population_lineage ? await createEvolution(optimizeStart) : null;
-  return OPTIMIZER === 'evo'
-    ? await greedyOptimize(optimizeStart, populationArchive || await createEvolution(optimizeStart), populationArchive)
-    : await greedyOptimize(optimizeStart, null, populationArchive);
+  const fromStart = OPTIMIZER === 'evo' && A.evolution_start === 'search_start';
+  if (OPTIMIZER === 'evo' && ![undefined, 'first_stall', 'search_start'].includes(A.evolution_start)) {
+    throw new Error('evolution_start must be first_stall or search_start');
+  }
+  return await greedyOptimize(optimizeStart, {
+    archive: fromStart ? populationArchive || await createEvolution(optimizeStart) : null,
+    start: OPTIMIZER === 'evo' && !fromStart ? (state) => createEvolution(state,
+      {name: 'evolution_continuation', lineage: null, origin: 'greedy_incumbent'}) : null,
+  }, populationArchive);
 }));
 const {report, finalPatch, validation, externalPromotion, finalGeomean, finalWeighted, finalPrimary} =
   await nativeDeliveryBoundary(async () => {

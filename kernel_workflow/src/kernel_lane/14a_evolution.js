@@ -84,9 +84,11 @@ function boundedCaseEvidence(rows, fullRef, limit = 16384) {
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
-async function createEvolution(start) {
-  const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
-  const population = A.population_lineage || null;
+// `name` and `lineage` let EVO root a second archive at a later incumbent without publishing it.
+async function createEvolution(start, {name = 'evolution', lineage = A.population_lineage || null,
+  origin = 'optimize_start'} = {}) {
+  const path = `${EVAL_DIR}/${name}`, base = `${path}/base`, archive = `${path}/archive.json`;
+  const population = lineage;
   if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
       || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
       || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
@@ -97,7 +99,7 @@ async function createEvolution(start) {
   }
   const entries = [];
   let baseCommit, baseTree, baseSourceId = null, sourcePaths = null, bestId = 'ORIGINAL', queue = Promise.resolve();
-  let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin: 'optimize_start'};
+  let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin};
   const run = async (cmd, args, opts) => {
     const result = await hostRun(cmd, args, opts);
     if (result === null) throw new Error(`evolution ${cmd} failed`);

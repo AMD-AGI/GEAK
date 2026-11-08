@@ -404,7 +404,7 @@ async function runCase(sc) {
   let observed, passed = false;
   try {
     const body = h.instrument(laneSource);
-    const args = {...h.BASE_ARGS, optimizer: 'evo', kernel_path: task,
+    const args = {...h.BASE_ARGS, optimizer: 'evo', evolution_start: 'search_start', kernel_path: task,
       editable_source_paths: [...new Set([...Object.keys(original), ...Object.keys(finalFiles)])],
       workflow_dir: path.join(ROOT, 'kernel_workflow'), ...sc.args,
       ...(sc.external ? {objective, external_measurement_command: ['/cpu-fixture/external-evaluate'],
