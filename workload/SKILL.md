@@ -20,10 +20,18 @@ Repeat:
    [invocation contract](stages/CONTRACT.md#direct-module-calls).
 3. **Act.** Call the selected skill or tool. Modules may repeat, skip or combine.
    Parallel work gets separate candidate copies and outputs; measurements use isolated
-   resources. Retain handles and evidence for work that reports later.
+   resources. Retain handles and evidence for work that reports later; the controller
+   owns the next inspection and recovery, including after resource or storage migration.
 4. **Report.** Read the module's native results and `REPORT.md`, including failures.
    Record what changed, what was established and what remains uncertain. Adopt, reject,
    investigate further or wait; then return to reasoning.
+
+Inspect ongoing work at the requested cadence: progress, native validity, resources and
+remaining scope. A heartbeat alone proves none of these. Investigate suspect results
+against evidence from the same invocation, source and harness; a large score alone is
+not a failed test. Route a confirmed defect to its owner now, hold affected dependent
+work and resume after verified repair. Do not wait for final evaluation or blindly retry
+`blocked` work. Keep the active location in `STATE.md` and leave a pointer after migration.
 
 Changing an implementation does not change its module's acceptance contract. Kernel
 Workflow and native tools (OOB) share the same frozen-task and cold-verification rules.

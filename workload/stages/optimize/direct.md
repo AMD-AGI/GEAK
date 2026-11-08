@@ -6,6 +6,12 @@ are [Kernel Workflow](geak-kernel-workflow/SKILL.md) and
 method. They share the frozen-task, budget and cold-verification contract in [README.md](README.md).
 For a serving configuration or implementation experiment use [system OOB](system-oob/SKILL.md).
 
+Before dispatch, compare `source_tree.py editable <task>` with the qualified UT contract.
+A callable's binding adapter is not necessarily its editable computation. Missing delivery
+proof or conflicting source permissions returns to UT; a passing test alone cannot admit it.
+Budget attempts around observed full-test and method-completion costs. An attempt cap is
+not permission to replace the selected method or bypass its verification and integration.
+
 For a scoped kernel call, prepare separate working copies of the qualified tasks named
 in the plan. Give the existing scheduler that task directory and a fresh work root;
 keep all configured worker limits and verification reservations. Cold-test the retained

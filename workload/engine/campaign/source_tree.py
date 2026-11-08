@@ -58,7 +58,7 @@ def editable_sources(task):
     meta_path = task / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     leaves = []
-    for section in ("kernel_extraction", "candidate_bind"):
+    for section in ("kernel_extraction", "ut_contract", "candidate_bind"):
         obj = meta.get(section) or {}
         if not isinstance(obj, dict):
             raise ValueError(f"{section} must be an object")
