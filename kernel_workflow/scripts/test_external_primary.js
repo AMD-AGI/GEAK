@@ -198,6 +198,12 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
         return {status: 'completed', code: invalidFinal === 'patch-capture-failed' ? 1 : 0,
           group_cleared: true, stdout: capturedPatch};
       }
+      if (opts.cmd === 'sh' && /^\/eval\/planner_r\d+_(initial|replan\d+)_\d+\.json$/.test(opts.args[3])) {
+        // Proposed-plan audit artifacts are written before round filters; they are not host patches.
+        const record = JSON.parse(opts.input);
+        assert.ok(Number.isInteger(record.round) && typeof record.attempt === 'string' && 'plan' in record);
+        return {status: 'completed', code: 0, group_cleared: true, stdout: ''};
+      }
       if (opts.cmd === 'sh') {
         assert.deepEqual(opts.args, ['-c', 'cat > "$1"', 'sh', hostPatchPath]);
         assert.equal(opts.input, capturedPatch, 'every host write restores the frozen bytes, including an empty patch');
