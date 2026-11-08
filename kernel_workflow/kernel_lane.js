@@ -2067,11 +2067,22 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
   });
 
+  const recordProposedPlan = async (attempt, proposed) => {
+    const path = `${EVAL_DIR}/planner_r${round}_${attempt}_${Date.now()}.json`;
+    try {
+      if (await writeFile(path, JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n') === null)
+        log(`Round ${round}: proposed-plan artifact unavailable (${attempt}).`);
+    } catch {
+      log(`Round ${round}: proposed-plan artifact unavailable (${attempt}).`);
+    }
+  };
+
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
       evolutionInstructions(),
       planInputs(false, await deliveryFactsInput())),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+  await recordProposedPlan('initial', plan);
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
@@ -2091,6 +2102,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions(),
         planInputs(true, await deliveryFactsInput())),
       { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+    await recordProposedPlan(`replan${forcedReplans}`, plan);
     left = await secondsLeft(`replan-r${round}`);
   }
   if (engineerCutoffReached(left)) {
