@@ -13,7 +13,7 @@ async function hostRun(cmd, args, opts = {}) {
 // Finished by itself, and nothing it started can still be running.
 const processClean = (r) => r.status === 'completed' && !r.strays_killed && r.group_cleared && !r.stdio_held;
 const git = (dir, ...args) => hostRun('git', ['-C', dir, ...args]);
-const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { input: text });
+const writeFile = (path, text, opts = {}) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { ...opts, input: text });
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
 applyOptimizeResult(await nativeDeliveryBoundary(async () => {
