@@ -4,6 +4,9 @@ Independently apply one PATCH and measure it against BASELINE_PER_CASE, the froz
 original. CANONICAL is a read-only current-best source base, not a new denominator.
 Use VERIFY_DIR, GPU_ID, SKILL_DIR and COMMANDMENT; ignore claimed engineer speedups.
 
+Read `SKILL_DIR/docs/eval_archive_contract.md` for source capture, measurement conditions
+and preservation of separately labelled observations and receipt references.
+
 If ENGINEER_WORKSPACE is supplied, inspect .geak/invalid_measurements.jsonl.
 A missing/empty patch with a source-binding failure returns invalid_measurement,
 correctness:not_checked, zero speedups and no timings. Otherwise a missing/empty
