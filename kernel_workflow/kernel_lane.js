@@ -2218,6 +2218,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       // Before any retained source exists, EVO engineers get the greedy development rules; the
       // evolution policy applies once there is an archive source to develop from.
       const evoEngineer = archiveHasSource();
+      // Source preservation can be tested independently of the deferred evolution context.
+      const preserveFounder = !!evo && !evoEngineer && A.evolution_preserve_founder_attempts === true;
+      const preserveAttempt = evoEngineer || preserveFounder;
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
@@ -2250,8 +2253,8 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
-(facts/how-to only; measure everything; ${evoEngineer ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${evoEngineer ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.
+(facts/how-to only; measure everything; ${preserveAttempt ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${preserveAttempt ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit' + (evoEngineer ? '. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : '') : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.${preserveFounder ? '\nReturn the best correct implementation of the requested realization even when it is slower than the starting program or ORIGINAL, with its own measurements and limitations. This source-return rule replaces the stock role\'s instruction to omit a patch on regression; it does not qualify or promote the source. Keep the final workspace, returned patch and measurement tied to those same bytes. Preserve failed or unfinished attempts separately under OUTPUT_DIR and record their source/evidence paths and limitations in report.md and worker_result.json notes; do not describe them as correct or measured.' : ''}
 
 ## Inputs
 ${cfg({
