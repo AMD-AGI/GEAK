@@ -209,7 +209,12 @@ None of this is checked by code; all of it decides whether the evidence means an
 - Routed MoE inputs must preserve observed expert occupancy and the local/global routing
   scope. Replacing captured routing with an all-local synthetic case changes the work
   being optimized even if every output comparison passes.
-- For short collectives, qualify device timing under the serving graph/replay lifecycle.
+- Inspect the scored call, including rank workers: keep fixture-only staging, control
+  traffic and output checks outside it; retain the target's own dispatch, allocation
+  and copies. Device events do not exclude host waits inside that call. Timing and
+  correctness must use the same computation, preserving sampled outputs for native
+  checks before later calls overwrite them.
+  For short collectives, qualify timing under the serving eager/graph lifecycle.
   Host-issued single-call timing can hide kernel changes behind launch overhead. Establish
   repeatability with unchanged source and verify that the timer responds to device work;
   if batching is needed, report its count and per-call normalization. A timing repair
