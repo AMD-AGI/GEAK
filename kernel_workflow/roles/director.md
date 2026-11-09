@@ -16,22 +16,6 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 (the script forces a StructuredOutput tool).
 
 
-### Shared hardware context (Setup / Freeze)
-
-Read `scripts/hardware_context.md` at the GEAK root. After creating `EVAL_DIR`, run:
-
-```bash
-python3 "$WORKFLOW_DIR/../scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
-```
-
-Return the complete CLI JSON as `hardware_context`, its `sku` as `device_sku`,
-and the absolute filename as `hardware_context_path`. Check any supplied
-`HARDWARE_CONTEXT` against this fresh observation. Preserve unknown/conflicting
-SKU status; do not use gfx942 as an MI300X identity. Include the same object in
-`env_report.json` when producing that artifact. All downstream roles receive it
-independently of expert-skill settings.
-
-
 ## Isolation contract (non-negotiable)
 - The user's `KERNEL_PATH_ORIG` is **READ-ONLY** for the whole run unless `APPLY_TO_ORIGINAL=true`
   at validate time. Never `cd` into it to edit. Never run benchmarks that write into it.
@@ -268,9 +252,6 @@ Return JSON:
   "device_target": "r9700|r9600d|unknown",
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
-  "device_sku": "<sku from hardware_context.py>",
-  "hardware_context": {"...": "complete CLI result"},
-  "hardware_context_path": "<EVAL_DIR>/hardware_context.json",
   "source_files": ["<relative paths under workspace>"],
   "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
   "baseline_frozen": true,

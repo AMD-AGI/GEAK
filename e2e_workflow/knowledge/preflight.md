@@ -145,8 +145,9 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
 Downstream phases read `env_report.json`: the Profiler picks its trace sources from `trace_sources`,
 the Architect routes using `model_arch_class` + `available_backends`, the bake-off ladder uses
 `available_backends`, and tuning priors are gated on `gfx`. `device_sku` records the product for
-explicit local planning with `kernel_tools/calc_perf.py --sku`; the run also records `hardware_context` and `hardware_context_path`. The legacy
-e2e resolver uses this observed scope; native TraceLens retains its own calibration. Never infer R9700 from gfx1201.
+explicit local planning with `kernel_tools/calc_perf.py --sku`. With
+`use_hardware_context=true` (default: false), Setup also records `hardware_context`
+and `hardware_context_path`; the legacy e2e resolver then uses this observed scope; native TraceLens retains its own calibration. Never infer R9700 from gfx1201.
 Local `--arch` defaults in `perf_knowledge/hardware/data/sku.json` are labelled planning assumptions;
 gfx1201 has no default peak. The **Op Benchmarker gates its `author_plan`
 on `available_backends`** (a backend in `absent_backends` is NOT emitted as an author lane — it is

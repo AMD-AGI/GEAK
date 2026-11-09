@@ -294,30 +294,57 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["expected_physical_cu_count"], 256)
         self.assertEqual(ps["backend"], "sglang")
 
+    def test_hardware_context_is_opt_in_even_with_stale_state(self):
+        from unittest.mock import patch
+        for option in (None, False, 'false', '0', 'no', ''):
+            with self.subTest(option=option), patch.object(rx._hardware_context, 'build',
+                    side_effect=AssertionError('disabled must not build')), patch.object(
+                    rx._hardware_context, 'load', side_effect=AssertionError('disabled must not load')):
+                handoff = self._handoff(hardware_context='invalid',
+                    state={'hardware_context': 'also invalid'})
+                if option is not None:
+                    handoff['use_hardware_context'] = option
+                    handoff['state']['use_hardware_context'] = True
+                ps = rx.map_args(handoff)
+                self.assertIs(ps['use_hardware_context'], False)
+                self.assertNotIn('hardware_context', ps)
+                self.assertNotIn('expected_sku', ps)
+                self.assertEqual(ps['expected_gfx'], 'gfx950')
+
+    def test_hardware_option_normalization_and_resume(self):
+        for option in (True, 'true', 1, '1', ' YES '):
+            with self.subTest(option=option):
+                ps = rx.map_args(self._handoff(use_hardware_context=option))
+                self.assertIs(ps['use_hardware_context'], True)
+                self.assertEqual(ps['hardware_context']['sku'], 'mi355x')
+        for h in (self._handoff(state={'use_hardware_context': True}),
+                  self._handoff(use_hardware_context=None, state={'use_hardware_context': True})):
+            self.assertIs(rx.map_args(h)['use_hardware_context'], True)
+
     def test_hardware_context_enrichment_and_resume(self):
         c = rx._hardware_context.build({"gfx":"gfx950", "marketing_name":"AMD Instinct MI355X",
             "physical_cu_count":256, "memory_bytes":288 * 1024**3})
-        for handoff in (self._handoff(hardware_context=c, hardware_context_path='/tmp/hw.json'),
-                        self._handoff(state={"hardware_context":c})):
+        for handoff in (self._handoff(use_hardware_context=True, hardware_context=c, hardware_context_path='/tmp/hw.json'),
+                        self._handoff(use_hardware_context=True, state={"hardware_context":c})):
             ps = rx.map_args(handoff)
             self.assertEqual(ps['expected_sku'], 'mi355x')
             self.assertEqual(ps['hardware_context'], c)
-        self.assertEqual(rx.map_args(self._handoff())['hardware_context']['sku'], 'mi355x')
+        self.assertEqual(rx.map_args(self._handoff(use_hardware_context=True))['hardware_context']['sku'], 'mi355x')
         incompatible = rx._hardware_context.build({"gfx":"gfx942", "marketing_name":"AMD Instinct MI308X",
             "physical_cu_count":80})
         with self.assertRaisesRegex(ValueError, 'hardware_context'):
-            rx.map_args(self._handoff(hardware_context=incompatible))
+            rx.map_args(self._handoff(use_hardware_context=True, hardware_context=incompatible))
         # A legacy ISA pin does not fabricate a SKU; a supplied context is still checked.
         pins = dict(expected_gfx='gfx942', expected_target='unknown')
-        self.assertNotIn('hardware_context', rx.map_args(self._handoff(**pins)))
+        self.assertNotIn('hardware_context', rx.map_args(self._handoff(use_hardware_context=True, **pins)))
         with self.assertRaisesRegex(ValueError, 'hardware_context'):
-            rx.map_args(self._handoff(**pins, hardware_context=c))
+            rx.map_args(self._handoff(use_hardware_context=True, **pins, hardware_context=c))
 
     def test_reported_partition_is_not_discarded_before_table_selection(self):
         os.environ['GEAK_GPU_IDENTITY_JSON'] = json.dumps({
             'gfx':'gfx942', 'target':'unknown', 'marketing_name':'AMD Instinct MI300X',
             'physical_cu_count':304, 'compute_partition':'CPX'})
-        ps = rx.map_args(self._handoff())
+        ps = rx.map_args(self._handoff(use_hardware_context=True))
         self.assertEqual(ps['hardware_context']['observed']['compute_partition'], 'CPX')
         self.assertEqual(ps['expected_sku'], 'unknown')
 
