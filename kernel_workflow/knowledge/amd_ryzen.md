@@ -16,10 +16,17 @@ rocminfo | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'
 
 | Part | Arch | CU | Memory | Peak BW | fp8 matrix |
 |---|---|---|---|---|---|
-| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | 0.212 TB/s measured (0.256 datasheet) | none |
+| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | 0.256 TB/s theoretical | none |
 
 Memory is a BIOS-configured slice of system LPDDR5X shared with the CPU, not a fixed VRAM pool. The
 cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of DRAM. Single die.
+
+Measured bandwidth depends on the experiment. The shared
+[`sku.json`](../../perf_knowledge/hardware/data/sku.json) retains a historical 212 GB/s report
+for `AI_MAX_395`; its tool version was not recorded and its source is no longer available.
+The [2026-11-06 Radeon 8060S campaign](../../perf_knowledge/hardware/rdna35_gfx1151/peak_tables.md)
+measured 230.5–233.3 GB/s reads under the documented conditions. Re-measure on the target box
+before using either as an attainable ceiling; neither is an architecture-wide calibration.
 
 ## 1. Machine model
 
@@ -63,6 +70,11 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   unit, at a fraction of the bf16 rate. A measurement taken that way describes the emulation.
 - **Roofline denominators** are in
   `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md` (`gfx1151` section).
+- **Measured long form.** `$SKILL_DIR/../perf_knowledge/hardware/rdna35_gfx1151/` (start at
+  `arch.md`) holds what was measured on a Radeon 8060S — achievable bandwidth, compute peaks by
+  shape, clock and power under load, operand-path levers, profiler defects — and the scripts that
+  re-take each number. Read it when a number here needs its achievable value or its measurement
+  conditions.
 - **Memory-utilization readings include the Infinity Cache.** The 32 MiB tier serves the working set
   before DRAM is reached, so a low DRAM-side reading can reflect cache residency. Compare against the
   working-set size before attributing it to bandwidth.
