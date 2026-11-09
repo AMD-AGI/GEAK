@@ -19,22 +19,6 @@ The serving stack is **pluggable**: `BACKEND` (sglang|vllm; default sglang) sele
 driven through `bench_e2e.sh` with `BACKEND=<backend>` so the stack stays a swappable detail.
 
 
-### Shared hardware context (Setup / Freeze)
-
-Read `scripts/hardware_context.md` at the GEAK root. After creating `EVAL_DIR`, run:
-
-```bash
-python3 "$SKILL_DIR/../scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
-```
-
-Return the complete CLI JSON as `hardware_context`, its `sku` as `device_sku`,
-and the absolute filename as `hardware_context_path`. Check any supplied
-`HARDWARE_CONTEXT` against this fresh observation. Preserve unknown/conflicting
-SKU status; do not use gfx942 as an MI300X identity. Include the same object in
-`env_report.json` when producing that artifact. All downstream roles receive it
-independently of expert-skill settings.
-
-
 ## Isolation contract (non-negotiable)
 - The user's model weights and the installed serving-stack packages (sglang/vllm/aiter/…) are
   **READ-ONLY**. Never edit site-packages. Every change reaches the server through a reversible
@@ -99,11 +83,6 @@ Steps:
    infer either product from gfx1201. Hard-stop if it disagrees with
    `EXPECTED_GFX`, a non-empty `EXPECTED_TARGET`, or a positive
    `EXPECTED_PHYSICAL_CU_COUNT`.
-   Copy its separate `sku` field into `env_report.json` as `device_sku` next to
-   `device_target`; it records product identity for explicit local planning with
-   `kernel_tools/calc_perf.py --sku`. The shared hardware context constrains legacy e2e and local calculator
-   selection. Native TraceLens retains its own numerical model/calibration, with
-   the adapter checking their product and resource scope.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
@@ -189,9 +168,6 @@ Return JSON:
   "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
-  "device_sku": "<sku from hardware_context.py>",
-  "hardware_context": {"...": "complete CLI result"},
-  "hardware_context_path": "<EVAL_DIR>/hardware_context.json",
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
   "framework_version": "<BACKEND version, e.g. 0.26.0 — or \"\" if not established>",
   "rocm_version": "<ROCm <major>.<minor>, e.g. 7.2 — or \"\" if not established>",
