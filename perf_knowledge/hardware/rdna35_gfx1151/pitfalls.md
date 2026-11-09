@@ -7,7 +7,7 @@ regimes: [both]
 updated: 2026-11-06
 sources:
   - ../rdna4_gfx1201/pitfalls.md
-  - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
+  - ../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md
   - repro/pmc_slots.sh
   - repro/pmc_work.py
   - repro/blas_backend.sh
@@ -18,7 +18,7 @@ sources:
 
 RDNA-wide items (CDNA PMC names may be absent, check `rocprofv3-avail list --pmc`, no MFMA / MX /
 FNUZ) are in [`rdna4_gfx1201/pitfalls.md`](../rdna4_gfx1201/pitfalls.md) and
-[`platform-known-issues.md`](../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md)
+[`platform-known-issues.md`](../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md)
 and apply here. These are the ones specific to gfx1151. Measured on a Radeon 8060S, ROCm 7.2.3,
 2026-11-06; the one-line checks are in [repro/README.md](repro/README.md).
 
