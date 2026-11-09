@@ -2398,7 +2398,7 @@ async function createEvolution(start) {
   const evidence = (value) => {
     if (!value) return null;
     const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
-      'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
+      'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes'];
     return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
@@ -2491,7 +2491,10 @@ async function createEvolution(start) {
       await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
       const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
       if (parentRef) {
-        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        // A zero-byte cumulative diff is the already-materialized archive base.
+        if (parentRef.sha256 !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+          await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        }
         if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
       }
       await run('git', ['-C', workspace, 'add', '-A']);

@@ -259,6 +259,10 @@ async function runCase(sc) {
         assert.deepEqual(readSources(h.field(prompt, 'CANONICAL')), original, 'verifier uses ORIGINAL');
         assert.deepEqual(h.field(prompt, 'BASELINE_PER_CASE'), h.perCase(1));
         if (spec.noPatch) return {status: 'apply_failed', notes: 'patch absent'};
+        if (spec.emptyPatch) {
+          assert.equal(fs.statSync(h.field(prompt, 'PATCH')).size, 0);
+          return {status: 'apply_failed', notes: 'empty diff does not qualify a new implementation'};
+        }
         assert.deepEqual(copyAndApply(h.field(prompt, 'CANONICAL'), h.field(prompt, 'PATCH'),
           h.field(prompt, 'VERIFY_DIR')), spec.files, `${id} cumulative patch reconstructs exact source`);
         if (spec.mutateAfterVerification) {
@@ -395,7 +399,8 @@ const approachMemoryCase =
         prompt: 'Resolve question-a using the retained source and report.'}))},
     candidates: {
       r1_d0: {files: slow, speed: 0.8, engineer: {status: 'ok', measurement_valid: true,
-        speedup_geomean: 0.8, strategies_tried: ['realized-a', 'unresolved-a']}},
+        speedup_geomean: 0.8, strategies_tried: ['realized-a', 'unresolved-a'],
+        source_identity: {source_id: 'cpu-fixture-approach-a', source_paths: ['k.py', 'inherited.py']}}},
       r1_d1: {files: fast, speed: 1.4},
       r2_d0: {files: child, inherited: slow, speed: 1.8, inspect: ({h, prompt}) => {
         assert.match(h.field(prompt, 'DIRECTION').prompt, /question-a/,
@@ -417,6 +422,8 @@ const approachMemoryCase =
       }
       if (round !== 1) return {insights: [], ledger: []};
       assert.deepEqual(saved.entries[0].engineer.strategies_tried, ['realized-a', 'unresolved-a']);
+      assert.deepEqual(saved.entries[0].engineer.source_identity,
+        {source_id: 'cpu-fixture-approach-a', source_paths: ['k.py', 'inherited.py']});
       return {insights: ['question-a remains open'], ledger: [{approach: 'approach-a',
         direction: 'r1_d0', patch_ref: attempted[0].patch_ref, report_path: attempted[0].report_path,
         next_question: 'question-a', verdict: 'partial'}]};
@@ -654,6 +661,22 @@ cases.push({...cases[0], name: 'UTF-8 budget omits the whole payload and preserv
       assert.ok(unicodeNotes.length < 16384 && Buffer.byteLength(unicodeNotes, 'utf8') === 16384,
         'payload overhead crosses the byte limit despite fewer UTF-16 code units');
     }}}});
+cases.push({name: 'zero-byte retained parent initializes and dispatches its child',
+    args: {budget: 2}, best: 1.4, bestId: 'r2_d0', expected: fast,
+    plans: {r1: plan(direction('unchanged')),
+      r2: plan(direction('develop-unchanged', {parent_id: 'r1_d0'}))},
+    candidates: {r1_d0: {files: original, speed: 1, emptyPatch: true},
+      r2_d0: {files: fast, inherited: original, speed: 1.4}},
+    check: ({archive, events}) => {
+      const parent = archive.entries.find(row => row.id === 'r1_d0');
+      const child = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(fs.statSync(parent.patch_ref.path).size, 0);
+      assert.equal(parent.verified, false, 'unchanged source retention is not qualification');
+      assert.equal(child.parent_id, parent.id);
+      assert.equal(child.evolution_context.initialization.status, 'ready');
+      assert.ok(events.some(event => event.label === 'eng r2_d0:memory'),
+        'an explicitly selected unchanged parent must reach its engineer');
+    }});
 cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalLineage, report,
   name: `external cumulative parent and child survive ${report} Report patch`})),
   {...externalLineage, name: 'host patch binds unstaged final edit and staged binary instead of HEAD',
