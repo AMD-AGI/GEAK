@@ -65,16 +65,19 @@ def cli_command(text):
 
 
 def argv_map(toks):
+    """A flag takes every value up to the next flag (a list when there are several): the CI's
+    `--server-metrics <server>/metrics <gpu-exporter>/metrics` is one flag, not a flag plus a
+    positional (2026-11-09: the second URL read as a positional failed every leg's pins)."""
     out, i = {}, 0
     while i < len(toks):
         t = toks[i]
         if t.startswith("--"):
-            if i + 1 < len(toks) and not toks[i + 1].startswith("--"):
-                out[t] = toks[i + 1]
-                i += 2
-            else:
-                out[t] = True
-                i += 1
+            j = i + 1
+            while j < len(toks) and not toks[j].startswith("--"):
+                j += 1
+            vals = toks[i + 1:j]
+            out[t] = True if not vals else vals[0] if len(vals) == 1 else vals
+            i = j
         else:
             out.setdefault("_positional", []).append(t)
             i += 1
