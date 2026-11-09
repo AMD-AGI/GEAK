@@ -243,7 +243,16 @@ function mustInclude(hay, needle, msg) {
     },
   );
 
-  const captureRef = { path: '/tmp/captured-gpu-identity.json', sha256: 'ab'.repeat(32) };
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-rdna4-capture-'));
+  const writeCapture = (name, gfx, marketingName, computeUnits) => {
+    const file = path.join(captureDir, name);
+    fs.writeFileSync(file, ['*******', 'Agent 1', '*******', '  Name:                    AMD EPYC',
+      '  Marketing Name:          AMD EPYC', '  Device Type:             CPU', '*******', 'Agent 2',
+      '*******', `  Name:                    ${gfx}`, `  Marketing Name:          ${marketingName}`,
+      `  Compute Unit:            ${computeUnits}`, '  Device Type:             GPU', ''].join('\n'));
+    return { path: file, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
+  };
+  const captureRef = writeCapture('mi350x.txt', 'gfx950', 'AMD Instinct MI350X', 256);
   const captureIdentity = {
     deviceTarget: 'mi350x', deviceName: 'AMD Instinct MI350X', physicalCuCount: 256,
     expectedTarget: 'mi350x', expectedDeviceName: 'AMD Instinct MI350X',
@@ -293,21 +302,29 @@ function mustInclude(hay, needle, msg) {
       ...captureIdentity, ...incompleteIdentity,
     }), /^Error: captured GPU identity requires complete expected identity/);
   }
-  for (const [actualGfx, differentIdentity] of [
+  for (const [directorGfx, directorIdentity] of [
     ['gfx942', {}],
-    ['gfx950', { deviceTarget: 'mi355x' }],
-    ['gfx950', { deviceTarget: 'mi350x', expectedTarget: 'unknown' }],
-    ['gfx950', { deviceName: 'AMD Instinct MI355X' }],
-    ['gfx950', { physicalCuCount: 128 }],
-    ['gfx950', { physicalCuCount: '256' }],
+    ['gfx950', { deviceTarget: 'mi355x', deviceName: 'AMD Instinct MI355X', physicalCuCount: 128 }],
+    ['gfx950', { physicalCuCount: 0 }],
+    ['gfx950', { omitGfx: true, omitTarget: true }],
   ]) {
-    await assert.rejects(run(actualGfx, 'gfx950', {
-      ...captureIdentity, ...differentIdentity,
-    }), /^Error: captured GPU identity differs from expected identity/);
+    const verified = await run(directorGfx, 'gfx950', { ...captureIdentity, ...directorIdentity });
+    const analyze = verified.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(analyze, '- GFX: gfx950', 'verified capture ISA was not used');
+    mustInclude(analyze, '- PHYSICAL_CU_COUNT: 256', 'verified capture CU count was not used');
   }
-  await assert.rejects(run('gfx950', 'gfx950', {
-    ...captureIdentity, physicalCuCount: 0,
-  }), /positive physical_cu_count/);
+  for (const [badRef, message] of [
+    [{ ...captureRef, sha256: 'cd'.repeat(32) }, /native captured GPU identity verification failed/],
+    [{ path: path.join(captureDir, 'absent.txt'), sha256: captureRef.sha256 }, /native captured GPU identity verification failed/],
+    [writeCapture('cu0.txt', 'gfx950', 'AMD Instinct MI350X', 0), /native captured GPU identity verification failed/],
+    [writeCapture('mi355x.txt', 'gfx950', 'AMD Instinct MI355X', 256), /native captured GPU identity differs from expected identity/],
+    [writeCapture('cu128.txt', 'gfx950', 'AMD Instinct MI350X', 128), /native captured GPU identity differs from expected identity/],
+    [writeCapture('gfx942.txt', 'gfx942', 'AMD Instinct MI300X', 304), /native captured GPU identity differs from expected identity/],
+  ]) {
+    await assert.rejects(run('gfx950', 'gfx950', { ...captureIdentity, gpuIdentityCaptureRef: badRef }), message,
+      `unverifiable or different capture was accepted: ${badRef.path}`);
+  }
+  fs.rmSync(captureDir, { recursive: true, force: true });
 
   const rooflineOnly = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'unknown',
