@@ -109,7 +109,17 @@ def test_pack_path_is_a_shim(tool):
     """The pack file is a thin shim; the implementation lives only in kernel_tools."""
     body = (PACK_SCRIPTS / f"{tool}.py").read_text()
     assert "kernel_workflow" in body and "kernel_tools" in body
-    assert len(body.splitlines()) < 40, f"{tool}.py in the pack is not a shim"
+    if tool == "probe":
+        # Relocation and legacy CLI compatibility need more lines; verify that
+        # both planning and measurement still execute the shared implementation.
+        code = ("import runpy\nfrom pathlib import Path\n"
+                f"api = runpy.run_path({str(PACK_SCRIPTS / 'probe.py')!r})\n"
+                f"expected = Path({str(KT / 'probe.py')!r}).resolve()\n"
+                "for name in ('plan_vgpr', 'cmd_measure'):\n"
+                " assert Path(api[name].__code__.co_filename).resolve() == expected\n")
+        _ok(run(sys.executable, "-c", code))
+    else:
+        assert len(body.splitlines()) < 40, f"{tool}.py in the pack is not a shim"
     assert (KT / f"{tool}.py").is_file()
 
 

@@ -180,6 +180,10 @@ Onboarding â€” what Gluon is versus Triton, explicit layouts, MFMA intrinsics â€
 layer does not: why a migration opens mechanically, what it costs, and the order the explicit layers are
 climbed in.
 
+Use [compiler layout interfaces](references/gluon/compiler-layouts.md) for native
+layout/scale APIs and actual version capabilities; hardware ISA queries are an
+optional independent source, not a replacement compiler-layout generator.
+
 **The opening move is deterministic.** The layouts plain Triton's compiler inferred are recorded in the
 champion's `.ttgir`, so the first Gluon version is a re-expression, not a design: `ttgir_bridge.py` hands the
 TTGIR to the compiler's own parser and upstream's `layoutToGluon()`, so there is no mapping table to fall

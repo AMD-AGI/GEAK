@@ -2,8 +2,8 @@
 # env_gate.sh — the CHEAP environment gate: disk / scratch / SOL profiler. Seconds, installs
 # nothing, exits non-zero on a hard blocker so a caller (e.g. a GEAK role before its first measurement) can gate on it.
 #
-# Why this ships INSIDE the pack: a pack is distributed self-contained, and a gate that lives only in
-# a repo the container may not have is a gate that gets skipped. In GEAK the repo-level counterpart is
+# This entry stays beside pack callers; its shared tools require a full GEAK checkout.
+# In GEAK the repo-level counterpart is
 # `geak/bootstrap.py` (check_environment(): DETECT-only -- ROCm, a profiler, a serving backend), and
 # the two agree on the profiler rule: a missing profiler, or rocprof-compute refusing the arch
 # (RDNA4/gfx1201 "Unsupported arch", kernel_workflow/knowledge/amd_rdna4.md), DEGRADES the profiling
@@ -171,13 +171,11 @@ if [ -f "$HERE/hw_sources.sh" ]; then
   if bash "$HERE/hw_sources.sh" preflight; then
     ok "hardware sources: every question class has an answerer"
   else
-    warn "HW SOURCES: a tier above needs repair — the [!] lines name who repairs it and how."
-    warn "  Not a launch blocker: in-pack databases still answer, and the other tiers have a"
-    warn "  documented fallback. It BECOMES one if this kernel needs a cdna1/2/3 or rdna3/4"
-    warn "  operand layout, since the calculator is the only source for those."
-    warn "  If you are a GEAK engineer (e.g. the deep_engineer), the repair is NOT yours: return blocked_environment"
-    warn "  naming the line. Installing into a shared container is the thing the project rule"
-    warn "  forbids, and a preflight that only printed the command is how that gets done anyway."
+    warn "HW SOURCES: an optional hardware-query provider is unavailable; see the [!] details."
+    warn "  Not a launch blocker: native Triton layout APIs and committed ISA facts remain usable."
+    warn "  Use ttgir_bridge.py capabilities --json in the workload environment for compiler layouts."
+    warn "  If a required hardware fact has no available source, report that specific evidence gap."
+    warn "  Calculator preparation is an explicit setup step; this gate never installs dependencies."
   fi
 else
   warn "hw_sources.sh is absent from this pack — the hardware-source tier cannot be checked."
