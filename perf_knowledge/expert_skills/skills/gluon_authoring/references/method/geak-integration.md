@@ -54,7 +54,12 @@ acceptance and the immutable oracle. `toolctl` is optional bookkeeping inside th
 | Roofline / full counters | shared `roofline.sh` | Optional external `kernel-roofline` runner; preserve its output and provenance |
 | Existing diagnostic analyzer output | `rocprof_compute_probe.sh --workload DIR` | Offline analyzer in its original tool environment; no GPU lease |
 
-Pack shims call the shared tools; there is one implementation. Use `--help` for CLI syntax and
+Run the canonical `profile_kernel.sh` inside the workload environment. Its existing command-string
+contract does not implement remote container orchestration. The task-level `capture.sh` and explicit
+compute diagnostic adapter support the configured host/container locus; keep those outputs' identity
+and measurement scope explicit.
+
+Pack shims call the shared tools; there is one implementation for each promoted tool. Use `--help` for CLI syntax and
 `--selftest` where supported. Native availability is tested before execution; missing tools are
 reported explicitly. Do not install optional profilers for CPU-only or existing-trace work.
 

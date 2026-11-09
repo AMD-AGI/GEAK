@@ -28,8 +28,12 @@ artifacts and no longer starts rocprof-compute automatically. `profile_kernel.sh
 explicit diagnostic collection; its whole-process kernel selection does not implement the native
 measured-window contract. A local diagnostic cannot fill missing native model coverage.
 
-GEAK infrastructure is the single owner of the profiler entry and the GPU lock. All paths below are
-relative to the GEAK repo root.
+GEAK infrastructure owns the profiler entry and shared GPU locks/leases. Run `profile_kernel.sh`
+inside the workload environment, as GEAK normally does; it rejects an external
+`TILE_KERNEL_CONTAINER` selection. For a host driving a separate container, use the shared
+`capture.sh` task wrapper or explicit compute diagnostic adapter with configured `locus.sh` paths.
+All paths below are relative to the GEAK repo root unless an absolute variable is shown.
+Set `GEAK_ROOT` to the absolute checkout root before running examples from a task workspace.
 
 | what | where | notes |
 | --- | --- | --- |
@@ -59,8 +63,9 @@ disagreed, the resolution is stated in place.
   profiler command. Measured reason: a wrapper that exported `HIP_VISIBLE_DEVICES=0` **inside** an
   outer `ROCR_VISIBLE_DEVICES=N` made rocprofv3 abort; the campaign recorded "TCC counters hang
   rocprofv3 indefinitely" and withdrew every derived figure — with the inner variable unset, TCC
-  returned in ~80 s. `rocprofv3_safe.sh` unsets `HIP_VISIBLE_DEVICES` only when **both** it and
-  `ROCR_VISIBLE_DEVICES` are set (an unconditional unset mis-numbers the GPU).
+  returned in ~80 s. the shared rocprofv3 environment adapter resolves HIP indices inside ROCR to the selected
+  ROCR devices, then clears both HIP/CUDA aliases for that child process. With HIP alone it
+  preserves the selected mask; an unconditional unset would change the allocation.
 - **A hard timeout** (`--timeout`, default `PMC_TIMEOUT=150` s; exit **124** = timed out, reported as
   a **degraded layer, never as a zero**). What a counter group the box cannot schedule does —
   replay, abort (SIGABRT) or **hang while holding the GPU flock** — is **version-dependent**; the

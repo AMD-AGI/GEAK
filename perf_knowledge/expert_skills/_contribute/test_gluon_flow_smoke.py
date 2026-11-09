@@ -89,8 +89,9 @@ for ext, text in {'ttgir': 'module {}', 'llir': 'define void @kernel()',
     }
 
 
+@pytest.mark.parametrize('entry', ['shared', 'legacy'])
 @pytest.mark.parametrize('mutation', ['none', 'source_changed', 'locus_mismatch', 'lease_override'])
-def test_payload_to_capture_preserves_execution_contract(tmp_path, mutation):
+def test_payload_to_capture_preserves_execution_contract(tmp_path, mutation, entry):
     data = payload_fixture(tmp_path)
     if mutation == 'source_changed':
         (tmp_path / 'work' / data['source']['path']).write_text('raise RuntimeError("must not execute")')
@@ -103,8 +104,11 @@ def test_payload_to_capture_preserves_execution_contract(tmp_path, mutation):
     root = PACK.parents[3]
     env = dict(os.environ)
     env.pop('TILE_KERNEL_CONTAINER', None)
-    result = subprocess.run(['bash', str(root / 'kernel_workflow/scripts/kernel_tools/capture.sh'),
-        '--payload', str(payload)], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    capture_script = root / 'kernel_workflow/scripts/kernel_tools/capture.sh'
+    command = (['bash', str(capture_script), '--payload', str(payload)] if entry == 'shared' else
+               [sys.executable, str(SCRIPTS / 'profile_payload.py'), 'capture',
+                '--payload', str(payload), '--capture-script', str(capture_script)])
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     if mutation != 'none':
         assert result.returncode == 2, result.stdout + result.stderr
         assert not (tmp_path / 'work/executed').exists()
