@@ -19,21 +19,24 @@ sources:
 > This file is the MI300X numbers and worked examples.
 
 ## TL;DR
-> Occupancy = resident waves/SIMD, capped at **8** (32/CU). It is the **minimum** of the VGPR limit
-> (`floor(512/roundup8(N))`), the LDS limit (`floor(65536/L)`), and the wave-slot cap. **Register pressure is
-> the #1 killer**; attention/softmax are usually **LDS**-limited. HBM-bound kernels want ≥4 waves/CU;
-> MFMA-bound GEMM often runs 1–2 wg/CU and hides latency with double-buffered LDS instead.
+> The static occupancy bound combines register, LDS and wave-slot limits after
+> converting them to the same units using the actual launch. The register cap is
+> **8 waves/SIMD** (32/CU); LDS is counted in workgroups/CU. Measured occupancy may
+> be lower. A pipelined GEMM can perform well with few resident workgroups.
 
 ## Concepts
 
 ### Inputs
-1. **N** = VGPRs/wave counted over **ArchVGPR + AGPR combined** (`alignTo(arch, 4) + agpr` when AGPRs
-   are used; ISA `.vgpr_count` + `.agpr_count`), **rounded up to a multiple of 8** — `vgpr_alloc_granule`
-   in [`../data/hw_constants.json`](../data/hw_constants.json) (compiler-derived).
+1. **N** = combined register count. AMDHSA `.vgpr_count` and
+   `.amdhsa_next_free_vgpr` already include AGPRs; do not add `.agpr_count` again.
+   For separate LLVM `NumVgprs` / `NumAgprs`, use `alignTo(arch, 4) + agpr`
+   when AGPRs are used. Round the result up to 8 (`vgpr_alloc_granule` in
+   [`../data/hw_constants.json`](../data/hw_constants.json), compiler-derived).
 2. **L** = LDS bytes/workgroup.
-3. **nW** = waves/workgroup = `ceil(threads_per_block / 64)`.
+3. **nW** = waves/workgroup = `ceil(actual_threads_per_block / 64)`.
+   `.max_flat_workgroup_size` is a compile-time bound, not the observed launch.
 
-### Limits (MI300X)
+### Static bounds (MI300X; balanced waves across four SIMDs)
 ```
 occ_vgpr (waves/SIMD)    = floor(512 / roundup8(N))  # cap 8; unified ArchVGPR+AGPR file
 occ_lds  (workgroups/CU) = floor(65536 / L)          # 64 KiB LDS

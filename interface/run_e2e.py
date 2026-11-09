@@ -783,6 +783,11 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    hardware_option = h.get('use_hardware_context')
+    if hardware_option is None:
+        hardware_option = (h.get('state') or {}).get('use_hardware_context', False)
+    hardware_enabled = str(hardware_option).strip().lower() in ('true', '1', 'yes')
+    ps_args['use_hardware_context'] = hardware_enabled
     if gpu_identity is not None:
         ps_args.update({
             "expected_gfx": gpu_identity["gfx"],
@@ -790,24 +795,25 @@ def map_args(
             "expected_device_name": gpu_identity["marketing_name"],
             "expected_physical_cu_count": gpu_identity["physical_cu_count"],
         })
-        # Old explicit pins can omit CU/name; keep them as expectations, not facts.
-        context = None
-        if gpu_identity["physical_cu_count"] > 0:
-            context = _hardware_context.build(gpu_identity)
-        supplied = h.get("hardware_context") or (h.get("state") or {}).get("hardware_context")
-        if supplied is not None:
-            supplied = _hardware_context.load(supplied)
-            observed = supplied["observed"]
-            if (observed["gfx"] != gpu_identity["gfx"] or
-                    (gpu_identity["marketing_name"] and observed["marketing_name"] != gpu_identity["marketing_name"]) or
-                    (context and not _hardware_context.same_device_scope(context, supplied, allow_enrichment=True))):
-                raise ValueError("hardware_context disagrees with expected GPU identity")
-            context = supplied
-        if context is not None:
-            ps_args["hardware_context"] = context
-            ps_args["expected_sku"] = context["sku"]
-        if h.get("hardware_context_path"):
-            ps_args["hardware_context_path"] = h["hardware_context_path"]
+        if hardware_enabled:
+            # Old explicit pins can omit CU/name; keep them as expectations, not facts.
+            context = None
+            if gpu_identity["physical_cu_count"] > 0:
+                context = _hardware_context.build(gpu_identity)
+            supplied = h.get("hardware_context") or (h.get("state") or {}).get("hardware_context")
+            if supplied is not None:
+                supplied = _hardware_context.load(supplied)
+                observed = supplied["observed"]
+                if (observed["gfx"] != gpu_identity["gfx"] or
+                        (gpu_identity["marketing_name"] and observed["marketing_name"] != gpu_identity["marketing_name"]) or
+                        (context and not _hardware_context.same_device_scope(context, supplied, allow_enrichment=True))):
+                    raise ValueError("hardware_context disagrees with expected GPU identity")
+                context = supplied
+            if context is not None:
+                ps_args["hardware_context"] = context
+                ps_args["expected_sku"] = context["sku"]
+            if h.get("hardware_context_path"):
+                ps_args["hardware_context_path"] = h["hardware_context_path"]
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
     # Launch identity for the execution tracker. A nonce allocated HERE -- before
