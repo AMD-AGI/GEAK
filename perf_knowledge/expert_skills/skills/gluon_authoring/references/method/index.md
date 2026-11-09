@@ -247,8 +247,8 @@ DSL-neutral hard rules. They bind every round, whether or not this page is resid
   Code physically blocks other source access. Correct the documentation when the request demonstrates a
   documentation defect. Tools are invoked by the paths in the table above.
 - Benchmark hygiene is mandatory: isolate source roots, imports, caches, artifacts, harness, shape stream,
-  and timing configuration; match the production boundary. Acceptance timing is GEAK's `harness_lib`
-  contract; GPU access goes through `kernel_workflow/scripts/gpu_lock.sh`, never an inline
+  and timing configuration; match the production boundary. Acceptance uses GEAK's frozen task
+  contract (`harness_lib` for extracted-task runners); GPU access goes through `kernel_workflow/scripts/gpu_lock.sh`, never an inline
   `HIP_VISIBLE_DEVICES` ([`benchmark-hygiene.md`](benchmark-hygiene.md)).
 - **An arm is not disposed of until its record has been re-read.** When a round fanned work out to parallel
   arms, re-read each arm's record *at the moment you rank them* — the file on disk, not the copy you

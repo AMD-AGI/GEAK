@@ -33,7 +33,7 @@ Validated expert recipes remain separately opt-in with `use_expert_skills=true`.
 | launch | Optimize — plan | `tech_lead` | gate **G0** launch args ([`index.md`](index.md), [`entry.md`](entry.md)); dispatch **one** `deep_explore` direction for the port, no specialists beside it |
 | entry assertion → transcribe → recover → evidence → climb | Optimize — execute | `deep_engineer` (`specialty=deep_explore`) | the whole track in one engineer's own measure → profile → rewrite loop ([`## The deep_engineer's method boundary`](#the-deep_engineers-method-boundary)) |
 | measure (acceptance) | Verify | `verify_engineer` | independent re-benchmark of `best_patch.diff` in a clean workspace using frozen `COMMANDMENT.md` commands; its number is the round result |
-| commit | Merge | `tech_lead` commit gate | `MIN_IMPROVE` (default 2%) over the cumulative best; a measured noise band only makes it stricter |
+| commit | Merge | `tech_lead` commit gate | `MIN_IMPROVE` (default 2%) over the cumulative best; noise checks belong to supplementary screening before verification |
 | re-profile, memory | Optimize — after merge | `profile_engineer` (`reprofile`), `tech_lead` (`update_memory`) | the next round plans from the new bottleneck and from the deep_engineer's notes (requests, closure self-review) |
 | close | Report, Validate | the deep_engineer states the verdict and writes the closure self-review; Director validates and arbitrates | [`close.md`](close.md); Director quotes the self-review's strongest counter-evidence |
 
