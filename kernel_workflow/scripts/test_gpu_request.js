@@ -103,7 +103,16 @@ ok(/setup\.gpu_requirement\)\);\n  if \(GPU_RESOURCE\.warning\) log\(/.test(lane
 ok(lane.indexOf('applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement))') <
    lane.indexOf("phase('Author')"), 'resizing happens before the first GPU phase');
 ok(/GPU_MODE === 'pin' && !GPU_JOB/.test(lane), 'pinned placement does not split a group');
-ok(/return base \+ expertSkillsBlock\(role\) \+ multiGpuBlock\(role\);/.test(lane), 'role prompts get the multi-GPU block');
+// Execute the real prompt builder: adding another skill block must not hide the
+// GPU requirements, but its presence need not preserve one exact return statement.
+const roleSource = lane.match(/function roleAgent\(role, phase, intro, inputs\) \{[\s\S]*?\n\}\n/);
+if (!roleSource) throw new Error('roleAgent not found');
+const rolePrompt = new Function('WORKFLOW_DIR', 'cfg', 'expertSkillsBlock', 'gluonSkillBlock',
+  'multiGpuBlock', `${roleSource[0]}; return roleAgent;`)(
+  '/workflow', JSON.stringify, () => '\nEXPERT', () => '\nGLUON', () => '\nMULTI_GPU');
+const renderedRole = rolePrompt('engineer', 'optimize', 'test', {GPU_ID: 'group:0,1'});
+ok(renderedRole.includes('group:0,1') && renderedRole.endsWith('\nMULTI_GPU'),
+  'role prompts get the multi-GPU block');
 ok(/function multiGpuBlock\(role\) \{\n  if \(!GPU_JOB\) return '';/.test(lane), 'single-GPU prompts are unchanged');
 ok(/mode=bakeoff does not support gpus_per_job/.test(dispatcher), 'bakeoff rejects multi-GPU jobs');
 ok(/gpus_per_job: A\.gpus_per_job, job_gpu_ids: A\.job_gpu_ids/.test(e2e),

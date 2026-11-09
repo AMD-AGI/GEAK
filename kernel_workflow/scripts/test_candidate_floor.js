@@ -112,7 +112,9 @@ ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfu
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
 console.log('\n# the commit gate is NOT loosened by any of this');
-ok(/const improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
+// The commit-confirmation guard may reset `improved` after a failed apply.
+// Either declaration must retain the same threshold before attempting a commit.
+ok(/(?:const|let) improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
    'banking still requires beating cumulative by MIN_IMPROVE');
 ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
