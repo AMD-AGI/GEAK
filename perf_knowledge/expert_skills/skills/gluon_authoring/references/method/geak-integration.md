@@ -51,7 +51,7 @@ acceptance and the immutable oracle. `toolctl` is optional bookkeeping inside th
 | Recovery / context / records | pack `scripts/toolctl.py`, `recover_gluon.py`, `recordctl.py` | Workspace artifacts; stage-specific refs; no independent agent loop |
 | Search timing | shared `ab_bench.py` | Screening only; GEAK harness/oracle decides acceptance |
 | Trace / ATT / raw PMC | GEAK `profile_kernel.sh`, shared `capture.sh` | Supplementary diagnostics, explicit extra passes; GPU lease/source guard |
-| Roofline / full counters | shared `roofline.sh` | Delegate to GEAK native `kernel-roofline`; preserve engine output and provenance |
+| Roofline / full counters | shared `roofline.sh` | Optional external `kernel-roofline` runner; preserve its output and provenance |
 | Existing diagnostic analyzer output | `rocprof_compute_probe.sh --workload DIR` | Offline analyzer in its original tool environment; no GPU lease |
 
 Pack shims call the shared tools; there is one implementation. Use `--help` for CLI syntax and
@@ -68,9 +68,15 @@ preparation, not runtime skill tools. A CLI or decoder load check is not GPU val
 
 ## Native TraceLens handoff
 
-`$KT` below means `kernel_workflow/scripts/kernel_tools`. The native skill is discovered under
-GEAK's e2e analysis-skill index as `kernel-roofline`. Check its current installation and runner
-guidance; a checkout without it returns unavailable (adapter exit 3), with no substitute calculator.
+`$KT` below means `kernel_workflow/scripts/kernel_tools`. This checkout does not include the
+native `kernel-roofline` runner. To use the adapter, install that external skill and set
+`GEAK_KERNEL_ROOFLINE_DIR` to its directory; check its version and runner guidance. Without it,
+the adapter returns unavailable (exit 3).
+
+GEAK's existing e2e `roofline` analysis remains the default, and the e2e profiler can separately
+consume matching upstream TraceLens artifacts. Neither route installs the native runner. Keep
+legacy advisory results, local planning estimates and native calibration/report provenance distinct;
+missing native coverage does not disable GEAK's public profiler or its measured Top-N.
 
 ```bash
 # Offline reporting from an existing measurement: no GPU lock.
@@ -126,8 +132,9 @@ receipt records success or failure; a failed receipt cannot satisfy a required
 transition artifact. Choosing a stage reference is a record view, not proof of
 measured admission or completion of that stage.
 
-`capture.sh --payload profile_payload.json` calls the pack's
-`scripts/profile_payload.py` adapter, which invokes shared positional capture.
+`capture.sh --payload profile_payload.json` calls the shared
+`kernel_workflow/scripts/kernel_tools/profile_payload.py` validator and execution adapter.
+The pack's `scripts/profile_payload.py` remains a compatibility entry point.
 The adapter applies `execution.argv`, `execution.env_allowlist` and the declared
 host/container working directories. Relative source paths resolve against the
 host working directory. Configure `TILE_KERNEL_CONTAINER` for a container

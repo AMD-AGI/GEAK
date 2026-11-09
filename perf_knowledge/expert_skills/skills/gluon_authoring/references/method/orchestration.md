@@ -32,7 +32,7 @@ Validated expert recipes remain separately opt-in with `use_expert_skills=true`.
 | budget, baseline evidence | Profile | `profile_engineer` (`kernel_workflow/scripts/profile_kernel.sh`, baseline) | the four dials ([`profile.md`](profile.md)); `hw_budget.py` before authoring ([`budget.md`](budget.md)) |
 | launch | Optimize — plan | `tech_lead` | gate **G0** launch args ([`index.md`](index.md), [`entry.md`](entry.md)); dispatch **one** `deep_explore` direction for the port, no specialists beside it |
 | entry assertion → transcribe → recover → evidence → climb | Optimize — execute | `deep_engineer` (`specialty=deep_explore`) | the whole track in one engineer's own measure → profile → rewrite loop ([`## The deep_engineer's method boundary`](#the-deep_engineers-method-boundary)) |
-| measure (acceptance) | Verify | `verify_engineer` | independent re-benchmark of `best_patch.diff` in a clean workspace (`harness_lib`); its number is the round result |
+| measure (acceptance) | Verify | `verify_engineer` | independent re-benchmark of `best_patch.diff` in a clean workspace using frozen `COMMANDMENT.md` commands; its number is the round result |
 | commit | Merge | `tech_lead` commit gate | `MIN_IMPROVE` (default 2%) over the cumulative best; a measured noise band only makes it stricter |
 | re-profile, memory | Optimize — after merge | `profile_engineer` (`reprofile`), `tech_lead` (`update_memory`) | the next round plans from the new bottleneck and from the deep_engineer's notes (requests, closure self-review) |
 | close | Report, Validate | the deep_engineer states the verdict and writes the closure self-review; Director validates and arbitrates | [`close.md`](close.md); Director quotes the self-review's strongest counter-evidence |
@@ -122,20 +122,12 @@ cd <workspace> && bash kernel_workflow/scripts/gpu_lock.sh <gpu_id|pool> <comman
 
 This serializes benchmark access per GPU, so GEAK engineers sharing GPUs do not corrupt each other's timing.
 
-### GPU broker (opt-in)
+### Multi-GPU tasks
 
-`scheduler/` (in this pack) is a per-box broker that adds what flock cannot: a queue with priority bands
-(`interactive` 10 < `wake` 20 < `verify` 30 < `measure` 40 < `sweep` 50 < `bulk` 60, aging one band per
-`--aging-s`, default 30 s), per-kernel fair share, first-class RESIDENT leases with a short exclusive
-`wake()` window per reading, TTL reclaim of wedged holders, and a journal (`wait_s` / `hold_s`, audited
-with `scheduler/audit_journal.py`). There is deliberately no shared-compute lease kind.
-
-It is **off by default** in GEAK: enable it with `GEAK_GPU_BROKER=1` (autostart stays off,
-`GEAK_GPU_BROKER_AUTOSTART=0`, unless you set it); its locks are shared with GEAK at
-`/tmp/team_gpu_locks` (the same directory `gpu_lock.sh` flocks). With no daemon listening,
-`gpu_lock.sh` takes the flock path and every call site behaves exactly as before; the broker's failure
-posture is degrade, never block. Fair-share key: `GEAK_GPU_GROUP` if set, else inferred
-(`GEAK_GPU_REQUIRE_GROUP=1` fails rather than guessing). Full operating notes: `scheduler/README.md`.
+GEAK's shared `gpu_lock.sh` delegates fixed groups and pool allocations to `gpu_lease.py`.
+Those leases already provide all-or-none acquisition, ordering for overlapping requests and
+process-group cleanup. Use the GPU specification supplied by the task; the single-GPU examples
+above apply to single-GPU kernels. The authoring pack does not start a scheduling daemon.
 
 ---
 
@@ -367,8 +359,8 @@ read — the largest single tool result was 51 KB while sessions reached 355 K t
 - [`records.md`](records.md) — the ledger templates; the Experiment contract.
 - [`close.md`](close.md) — hard stops, the closure self-review, `final_report` schema.
 - `kernel_workflow/roles/{tech_lead,deep_engineer,verify_engineer,director}.md`, `kernel_workflow/kernel_lane.js`.
-- `kernel_workflow/scripts/gpu_lock.sh` — per-GPU serialization (`scripts/gpu_lock.sh` shim);
-  `scheduler/README.md` — the opt-in broker.
+- `kernel_workflow/scripts/gpu_lock.sh` — shared GPU ownership (`scripts/gpu_lock.sh` shim),
+  backed by `gpu_lease.py` for group allocations.
 
 ## Sources
 
@@ -380,7 +372,7 @@ from `kernel_workflow/kernel_lane.js` (phases, `EXPERT_SKILL_ROLES`, `ENG_SCHEMA
 `kernel_workflow/roles/{tech_lead,deep_engineer,verify_engineer,director}.md`,
 `kernel_workflow/roles/_fragments/expert_skills.md`, `kernel_workflow/scripts/gpu_lock.sh`;
 `runtime/stages/*.json`, `runtime/context-*.schema.json`, `runtime/resume-capsule.schema.json`,
-`scripts/toolctl.py --help`, `scripts/pack_facts.json`, `scheduler/README.md`.
+`scripts/toolctl.py --help`, `scripts/pack_facts.json`.
 
 Dropped, with reason (this skill adds no roles and no agents; GEAK's phases are the stage machine):
 
@@ -412,7 +404,7 @@ Dropped, with reason (this skill adds no roles and no agents; GEAK's phases are 
   GPU and workspace (`GPU_ID`, `KERNEL_PATH`, `OUTPUT_DIR`); the `work_root/dir_<id>/` layout is replaced by
   GEAK's `round_N/engineer_i/`.
 - Earlier merge notes kept in effect: `gpu_lock.sh` is GEAK's (`flock -w 1200`, pool wait 1200 s), never
-  inline `HIP_VISIBLE_DEVICES`; min-over-repeats is a screening statistic and acceptance numbers are
-  `harness_lib` medians; the broker is opt-in (`GEAK_GPU_BROKER=1`, autostart off, lock dir
-  `/tmp/team_gpu_locks`); no `.geak_gpu_group` marker or `kernel_fleet.js` is claimed; hard stops are owned
+  inline `HIP_VISIBLE_DEVICES`; search statistics do not replace the frozen task runner. Verify
+  executes `COMMANDMENT.md`; extracted-task runners use the shared harness protocol. GPU locks
+  and multi-GPU leases remain GEAK-owned; hard stops are owned
   by [`close.md`](close.md#hard-stops).

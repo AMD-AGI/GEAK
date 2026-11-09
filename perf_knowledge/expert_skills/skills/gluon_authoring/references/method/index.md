@@ -24,7 +24,7 @@ merely because they exist.
 | who drives | GEAK `kernel_workflow` injects this skill (`use_gluon_skill=auto`, on supported Triton/Gluon lanes) into its existing roles; GEAK's phases (Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine. tech_lead dispatches **one** `deep_explore` direction; the deep_engineer carries entry → climb in its own loop |
 | the skill's role | advisory: what to measure, which layer, which gate a round owes, the record contract |
 | acceptance timing | `verify_engineer` / `measure_legs` via `e2e_workflow/scripts/harness_lib.py`; commit gate `MIN_IMPROVE` = 2% (a measured noise band only stricter); Director validates and arbitrates; `ab_bench.py` is screening only |
-| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; the pack's broker (`scheduler/`) only with `GEAK_GPU_BROKER=1` |
+| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; existing multi-GPU leases when the task requires them |
 | requests (`resweep_request`, `structure_suspect`) and the closure self-review | in the deep_engineer's `worker_result`; tech_lead turns a request into the next round's direction, Director quotes the self-review when arbitrating |
 
 The evidence owed is the same in every round: **budget / roofline before authoring**, and a **re-profile

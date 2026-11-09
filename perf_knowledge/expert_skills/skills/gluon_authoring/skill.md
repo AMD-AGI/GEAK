@@ -277,7 +277,7 @@ holds" is not a gate; it is the claim the gate tests.
 | G2 | **equivalence** — the anchor is the champion | `ttgir_bridge.py verify` + oracle + determinism + asm parity | before recovery | n/a (nothing transcribed) |
 | G3 | **parity** — the debt is paid, and if not, who owes it | `$SKILL/scripts/parity_gate.py …` | before the first climb | **must not be run as a gate**; diagnostic only, say so |
 | G4 | occupancy is not already lost | `$KT/probe.py measure --dir ir/<tag>/ --arch gfx950` | yes | yes |
-| G5 | **attribution** — the number is a number | `ab_bench.py` screen in the engineer's loop; acceptance = `verify_engineer` (`harness_lib` legs) | every kept round | every kept round |
+| G5 | **attribution** — the number is a number | `ab_bench.py` screen in the engineer's loop; acceptance = `verify_engineer` executing frozen task commands | every kept round | every kept round |
 
 On failure: **G0** stop before dispatch. **G1** stop, edit nothing, report `blocked` — a gate failure is the
 front end's to fix. **G2** do not recover on a wrong anchor. **G3** exit 2 = **do not climb**; the round's
@@ -417,7 +417,7 @@ is reported missing, never as a zero.
 | **A** occupancy & registers | `next_free_vgpr`/`agpr`/`spill` → waves/SIMD → **wg/CU**; LDS bytes/WG from the Triton cache `shared` (KD and rocprof-compute report a structural 0) | `$KT/asm_loop_audit.py`, `$KT/probe.py`, `$KT/amd_occupancy.py` |
 | **B** instruction stream | observed inter-MFMA issue intervals by instruction class, LDS-vs-global split, per-opcode histogram diff, MFMA operand-layout facts | `$KT/mfma_efficiency.py` (ATT), `$KT/asm_loop_audit.py --opcodes`, `$KT/amd_isa.py --arch <target>` |
 | **C** memory side | does a roofline apply at all; achieved fabric BW and L2 (every route, as a range); intensity vs ridge; the in-shape ceiling; the floor probe before calling anything memory-bound | `$KT/hw_budget.py`, `$KT/parse_pmc.py`, `$KT/mem_bw_probe.py` |
-| **D** timing & correctness | correctness gating before timing; same-window interleaved A/B; a default-off knob must not move the shipped instruction stream | GEAK `harness_lib` (acceptance), `$KT/ab_bench.py` (screening) |
+| **D** timing & correctness | correctness gating before timing; same-window interleaved A/B; a default-off knob must not move the shipped instruction stream | GEAK frozen task runner (acceptance), `$KT/ab_bench.py` (screening) |
 
 **Profiler entry is GEAK's** `kernel_workflow/scripts/profile_kernel.sh <gpu_id> <cmd> <out>` under
 `gpu_lock.sh` (optional PMC / ATT modes; parsers in `$KT`); never pin `HIP_VISIBLE_DEVICES` inline.
@@ -575,7 +575,7 @@ infrastructure owns locking, profiling entry and timing.
 | transcribe | `$SKILL/scripts/ttgir_bridge.py`, `recover_gluon.py`, `ttgir_to_gluon.py`, `smoke_test_recover.sh`; `$KT/dump_ir.sh`, `probe.py`, `amd_occupancy.py` |
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` |
 | evidence | GEAK `kernel_workflow/scripts/profile_kernel.sh` (+ `gpu_lock.sh`); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `amd_isa.py --arch <target>`, `hw_sources.sh` |
-| measure | GEAK `e2e_workflow/scripts/harness_lib.py` (acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py` |
+| measure | GEAK frozen runner (`harness_lib.py` for extracted tasks); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py` |
 | climb | `pipeline_examples_cdna4.py` (gfx950 reference), `pipeline_examples_cdna3.py` (gfx942 downgrade) |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `wait_for.sh` |
 
@@ -589,7 +589,7 @@ No new roles and no extra agents: the method maps onto `kernel_workflow`'s exist
 | entry | Setup / Benchmark — `benchmark_engineer` (harness, `COMMANDMENT`, baseline); tech_lead | pin the comparator at the tuned plain config; G0 launch args; the champion assertion (G1) |
 | budget, evidence | Profile — `profile_engineer` (`kernel_workflow/scripts/profile_kernel.sh`); the deep_engineer re-profiles in its own loop | `hw_budget.py` before authoring; the four dials every round |
 | transcribe → recover → climb | Optimize — tech_lead dispatches **one** `deep_explore` direction; `deep_engineer` runs it | the whole track in one engineer's loop: faithful anchor + equivalence, attributed recovery to parity, one coupled layer per round, hand-written pipeline; no config sweep, no branch — a suspect structure/config comes back as `structure_suspect` / `resweep_request` in its result for tech_lead's next round |
-| measure | in-loop screening by the deep_engineer (`ab_bench.py`, under `gpu_lock.sh`); Verify — `verify_engineer` | acceptance numbers only from the independent re-benchmark (`harness_lib`) |
+| measure | in-loop screening by the deep_engineer (`ab_bench.py`, under `gpu_lock.sh`); Verify — `verify_engineer` | acceptance numbers from independent verification of the frozen `COMMANDMENT.md` commands |
 | close | Report / Validate — tech_lead, Director | the closure self-review travels with the result; Director arbitrates and quotes it |
 
 The deep_engineer's return is GEAK's worker result, carrying in its notes and artifacts: champion/gate
@@ -597,8 +597,8 @@ references, anchor and best measurements vs `champion_ms`, recovery state (`pari
 checkpoint, rounds spent, and any `structure_suspect` / blocker / deferred work. The pack's record tools
 (`toolctl.py`, `canonical_record.py`, `round_record.py`, `close_audit.py`; stage cards in `runtime/`) are
 **optional bookkeeping** the engineer may use for those records — not a separate run mode. GPU access is
-always GEAK's `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`); the broker in
-`scheduler/` is opt-in (`GEAK_GPU_BROKER=1`).
+always GEAK's `kernel_workflow/scripts/gpu_lock.sh` and existing multi-GPU leases (shared lock
+directory `/tmp/team_gpu_locks`). This pack does not provide a separate GPU scheduler.
 
 ## Sources
 
@@ -630,7 +630,7 @@ always GEAK's `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_loc
   the coexec scheduling strategy is default-on only for gfx1250, opt-in on gfx950 / gfx942.
 - **Where GEAK infrastructure owns a concern, it wins.** GPU locking (`kernel_workflow/scripts/gpu_lock.sh`,
   one lock dir for every tree), the profiler entry (`kernel_workflow/scripts/profile_kernel.sh` +
-  `profile_policy.sh`), acceptance timing and correctness (`e2e_workflow/scripts/harness_lib.py`), GPU
+  `profile_policy.sh`), frozen task measurement contracts (`harness_lib.py` for extracted tasks), GPU
   identity (`scripts/gpu_identity.py`) and the commit gate (`MIN_IMPROVE`). The pack's equivalents were merged
   into those or reduced to shims; `ab_bench.py` remains as a screening instrument on `harness_lib`'s timer.
   Tools with no GEAK counterpart — ISA/asm audit, occupancy, IR dump, ATT and PMC parsers, rocprof wrappers,

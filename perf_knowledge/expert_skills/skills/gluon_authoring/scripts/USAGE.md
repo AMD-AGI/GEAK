@@ -277,7 +277,7 @@ the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowl
 | `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py` | rocprof-compute parse; per-kernel time/bound breakdown; hot-PC ranking from ATT |
 | `att_to_perfetto.py`, `att_merge_perfetto.py`, `att_timeline.py`, `att_opclass.py`, `tile_trace.py`, `serve_traces.py` | ATT warp-trace views and op-class rollups; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
 | `asm_loop_audit.py [--opcodes] [--meta <ir_dir>] [--kernel <substr>]` | static hot-loop audit (A1, A3, B3): `next_free_vgpr`/AGPR/spill, LDS bytes/WG from the cache metadata (not `group_segment_fixed_size`, a structural 0), per-opcode histogram + diff |
-| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: ranked inter-MFMA bubble ownership, LDS-vs-global feed split, schedule views for agent analysis |
+| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: observed inter-matrix issue intervals, LDS-vs-global instruction split, schedule views for agent analysis |
 | `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | MFMA operand-layout facts (B4); the offline gfx950 ISA (other targets `--arch cdna3\|rdna3\|rdna4`); fetching primary sources |
 
 ## Measure
@@ -291,7 +291,7 @@ baseline and the `MIN_IMPROVE` commit gate.
 | **`$KT/ab_bench.py --module <adapter>.py [--permute] [--control auto] [--cache cold\|hot] [--min-improve-pct 2] [--json F]`** | **screening — a pre-filter in the deep_engineer's loop before GEAK verify).** Same-window interleaved A/B on `harness_lib.time_op` — read-evict **cold by default** (`hot` is search-only), **median** headline with min as an extra field, oracle before timing. A screen pass needs a delta beyond the measured noise band **and** the 2% gate; a measured band can only make the verdict stricter. Refuses: a non-finite metric (`NaN > tol` is False — add an `outputs(name)` hook and it scans tensors itself); duplicate `fingerprint(name)` values (two variants differing only by a `gl.constexpr` share a cache entry); arms reporting different `toolchain(name)` identities (one process per patched variant). A flat set across 3+ arms is a **collision suspect**; `--permute` reverses the order and reports whether each number followed the code or the position |
 | `$KT/create_harness.py --kernel-name <k> --output <harness.py> [--kernel-type triton\|gluon]` | a harness on `harness_lib`: `h.time_op` timing, `h.check_correct_multi` correctness, one `GEAK_RESULT_LATENCY_MS=<ms> case_id=<id>` line per case (+ `GEAK_RESULT_GEOMEAN_MS`), rc 2 `HARNESS_UNFILLED` until filled |
 | `$KT/parse_correctness.py [--parse geak --exit-code N] [--tol T]` | correctness verdicts from a log: GEAK unittest exit codes 0/1/2/3, `UT_HARNESS_INCOMPLETE`, per-case `max_rel_err` JSON; `--tol` can only make a pass stricter |
-| `gpu_lock.sh <gpu_id\|pool> <cmd>` | shim → `kernel_workflow/scripts/gpu_lock.sh` (one lock namespace for every tree; `--help`, `--selftest`). The broker in `../scheduler/` is opt-in: `GEAK_GPU_BROKER=1` and a live socket |
+| `gpu_lock.sh <gpu_id\|pool> <cmd>` | shim → `kernel_workflow/scripts/gpu_lock.sh` (one lock namespace for every tree; `--help`, `--selftest`). Uses GEAK's existing single-GPU locks and multi-GPU leases |
 | `locus.sh`, `runtime_env.sh` | only when the comparator was measured in a container: record/verify the execution locus (host vs container) the comparator was measured at; per-run runtime dirs under `$WORK/.tile-runtime/` |
 
 ## Climb
@@ -312,7 +312,7 @@ Schemas: `../runtime/*.schema.json`. Method: `references/method/close.md`, `refe
 ## Selftests — offline, no GPU
 
 ```bash
-bash "$SKILL/scripts/selftest_all.sh"          # everything: pack scripts, $KT tools, core runtime, scheduler, refs
+bash "$SKILL/scripts/selftest_all.sh"          # everything: pack scripts, $KT tools, core runtime, refs
 bash "$SKILL/scripts/smoke_test_recover.sh"    # the port toolchain only
 python3 "$SKILL/scripts/check_pack_refs.py"    # every link / heading / runtime reference resolves
 ```
@@ -388,7 +388,9 @@ Two things are not portable — plus one failure below that reads like a version
 
 See [`../references/method/geak-integration.md`](../references/method/geak-integration.md) for
 Triton/Gluon default discovery, Claude Code role routing and script boundaries.
-`$KT/roofline.sh --help` describes the native TraceLens adapter. The default `tl-only` engine reads
+`$KT/roofline.sh --help` describes an adapter to the optional external native TraceLens runner.
+That runner is not shipped here: set `GEAK_KERNEL_ROOFLINE_DIR` after installing it, or the adapter
+returns unavailable (exit 3). GEAK's existing e2e roofline and TraceLens-prior paths remain separate. The default `tl-only` engine reads
 existing measurement artifacts offline; `measure` and `rocprof` use the GEAK lease/source guard.
 `capture.sh` supplies supplementary ATT/ISA/trace artifacts and does not automatically collect full
 rocprof-compute counters. `rocprof_compute_probe.sh` delegates new collection to the native runner;

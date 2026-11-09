@@ -2421,7 +2421,10 @@ def check_knob_probe_reproducible(root, facts, out):
 
 
 def check_measurement_arbitration(root, facts, out):
-    """16. A broker was up and none of the readings held a window on it.
+    """16. Audit imported resident-backend receipts, when supplied.
+
+    These optional records come from an external producer. GEAK authoring uses its
+    shared GPU locks/leases; this check does not require or start a broker.
 
     `exclusive_window` per reading and `exclusive_window_rate` in the aggregate answer the one
     question a lease cannot answer for itself: did the lease land on the pool that owns THIS run's
@@ -2450,7 +2453,7 @@ def check_measurement_arbitration(root, facts, out):
                      f"{win['lane_mismatch']} of {win['readings']} readings were refused with 'no "
                      f"such lane': the broker these leases went to owns none of this run's lanes, so "
                      f"it is not this run's pool and those readings were NOT arbitrated. Point "
-                     f".geak_gpu_sock / GEAK_GPU_BROKER_SOCK at the broker that owns them",
+                     f"the external producer at its allocated GPUs and remeasure through GEAK ownership",
                      [ref], severity="high")
         elif rate == 0:
             result["unarbitrated"].append(ref)

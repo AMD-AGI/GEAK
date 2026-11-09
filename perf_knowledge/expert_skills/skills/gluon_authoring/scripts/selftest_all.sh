@@ -10,8 +10,7 @@
 #      context_query harness_stub_env recordctl report_lint round_record run_state served_envelope
 #      source_excerpt stage_context toolctl) -- asserted present, so a deleted core tool FAILS here
 #      instead of silently dropping out of the discovered set
-#   4. G/scheduler/tests/test_*.py, with a PRIVATE GEAK_GPU_LOCK_DIR (never /tmp/team_gpu_locks)
-#   5. check_term_index.py --pack G and check_pack_refs.py (every pointer in the pack resolves)
+#   4. check_term_index.py --pack G and check_pack_refs.py (every pointer in the pack resolves)
 #
 # Usage: bash scripts/selftest_all.sh [--list] [--keep-going] [-k <substring>]
 #   --list        print what would run, run nothing
@@ -41,7 +40,6 @@ done
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gluon_selftest_all.XXXXXX")"
 export GEAK_GPU_LOCK_DIR="$TMP/locks"      # hermetic: tests never flock the team namespace
 export PYTHONDONTWRITEBYTECODE=1           # never write .pyc into the (possibly shared) pack dir
-export GEAK_GPU_BROKER=0
 mkdir -p "$GEAK_GPU_LOCK_DIR"
 
 CORE="canonical_record close_audit context_contracts context_query harness_stub_env recordctl
@@ -80,13 +78,7 @@ for f in "$KT"/*.py "$KT"/*.sh; do
   add "kt:$b" "$(runner_for "$b") '$f' --selftest"
 done
 
-# 4. scheduler tests (each is a plain script with a __main__ runner)
-for f in "$PACK"/scheduler/tests/test_*.py; do
-  [ -f "$f" ] || continue
-  add "scheduler:$(basename "$f")" "python3 '$f'"
-done
-
-# 5. pointer checks
+# 4. pointer checks
 add "refs:check_term_index" "python3 '$HERE/check_term_index.py' --pack '$PACK'"
 add "refs:check_pack_refs" "python3 '$HERE/check_pack_refs.py' --pack '$PACK'"
 

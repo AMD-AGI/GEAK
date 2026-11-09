@@ -410,21 +410,6 @@
       "reason": "library, demo, graph/visualization, migration, or build helper"
     },
     {
-      "name": "audit_journal",
-      "classification": "internal",
-      "path": "scheduler/audit_journal.py",
-      "command": [
-        "python3",
-        "scheduler/audit_journal.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "calc_perf",
       "classification": "internal",
       "path": "scripts/calc_perf.py",
@@ -656,21 +641,6 @@
       "description": "Select one named bounded slice or exact artifact reference from a stage-context package."
     },
     {
-      "name": "core",
-      "classification": "internal",
-      "path": "scheduler/core.py",
-      "command": [
-        "python3",
-        "scheduler/core.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "create_harness",
       "classification": "internal",
       "path": "scripts/create_harness.py",
@@ -810,57 +780,12 @@
       "reason": "legacy or unverified command contract"
     },
     {
-      "name": "gpu_broker",
-      "classification": "internal",
-      "path": "scheduler/gpu_broker.py",
-      "command": [
-        "python3",
-        "scheduler/gpu_broker.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "gpu_client",
-      "classification": "internal",
-      "path": "scheduler/gpu_client.py",
-      "command": [
-        "python3",
-        "scheduler/gpu_client.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "gpu_lock",
       "classification": "internal",
       "path": "scripts/gpu_lock.sh",
       "command": [
         "bash",
         "scripts/gpu_lock.sh"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "group_identity",
-      "classification": "internal",
-      "path": "scheduler/group_identity.py",
-      "command": [
-        "python3",
-        "scheduler/group_identity.py"
       ],
       "flags": [],
       "interface": {
@@ -1334,21 +1259,6 @@
       }
     },
     {
-      "name": "residency",
-      "classification": "internal",
-      "path": "scheduler/residency.py",
-      "command": [
-        "python3",
-        "scheduler/residency.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "rocprof_compute_probe",
       "classification": "internal",
       "path": "scripts/rocprof_compute_probe.sh",
@@ -1571,51 +1481,6 @@
         "*"
       ],
       "description": "Build one bounded, hash-addressed stage-context package from explicitly named metadata references."
-    },
-    {
-      "name": "test_broker_integration",
-      "classification": "internal",
-      "path": "scheduler/tests/test_broker_integration.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_broker_integration.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "test_foreign_accounting",
-      "classification": "internal",
-      "path": "scheduler/tests/test_foreign_accounting.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_foreign_accounting.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "test_scheduler_core",
-      "classification": "internal",
-      "path": "scheduler/tests/test_scheduler_core.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_scheduler_core.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
     },
     {
       "name": "tile_trace",

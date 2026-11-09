@@ -71,20 +71,20 @@ three-evidence discipline.
 flowchart LR
   D["发现/分析<br/>timeline Amdahl → floor-probe 定阶段 → kernel_breakdown 取证"]
   C["分类<br/>agent 综合 SKU/roofline、profile、ISA/IR 提出假设"]
-  P["优先级<br/>ranked bubble-ownership → ranked census 沿栈下降 #1→#2→#3"]
+  P["优先级<br/>agent 结合证据与不确定性排列待验证假设"]
   L["lever<br/>agent 选择改写 + capability-matrix 核对可用性"]
-  V["验证<br/>重跑 breakdown → bubble 收缩 + 边界 timing 仲裁 + 三证据闭环"]
+  V["验证<br/>重测预期指标变化 + 边界 timing 仲裁 + 三证据闭环"]
   D --> C --> P --> L --> V
   V -->|未达标 / 资源触底| C
 ```
 
-Evidence source per stage is unified by `scripts/kernel_breakdown.py`: dynamic PMC
-(rocprofv3 / rocprof-compute) ⊕ static ISA (`asm_loop_audit.py`) ⊕ analytic budget
-(`roofline-models.md` feeds-and-speeds), with a degraded (static-only, bubble-inferred)
-path when PMC is blind (`../method/profile.md ## Profiler-capability preflight`).
+Use `scripts/kernel_breakdown.py` for dynamic PMC and static ISA observations, alongside
+the analytic budget (`roofline-models.md`). It preserves their units and sources; static-only
+output does not infer runtime bubble percentages. Missing counters remain unavailable
+(`../method/profile.md ## Profiler-capability preflight`).
 
-Stage → owner: 发现 = timeline/Amdahl + floor-probe + `kernel_breakdown`; 分类 = agent analysis of the evidence; 优先级 = ranked bubble-ownership → ranked census
-(`../method/profile.md`, `../method/climb.md ## Fallback ladder`); lever = agent hypothesis + `capability-matrix.md` availability checks; 验证 = re-run breakdown (bubble shrinks) +
+Stage → owner: 发现 = timeline/Amdahl + floor-probe + `kernel_breakdown`; 分类 = agent analysis of the evidence; 优先级 = agent ranks testable hypotheses from the evidence
+(`../method/profile.md`, `../method/climb.md ## Fallback ladder`); lever = agent hypothesis + `capability-matrix.md` availability checks; 验证 = remeasure the predicted signal +
 boundary timing + three-evidence (`../method/close.md`).
 
 ## Bound-class decision tree (exhaustive, ordered, defaulted)
@@ -376,12 +376,9 @@ not establish that latency is hidden. The detailed discussions remain in their s
 ## Pipeline-breakdown -> lever (ATT ground-truth, per round)
 
 When a decoded ATT dir exists, `scripts/mfma_efficiency.py` (or `scripts/kernel_breakdown.py --att`)
-attributes the **cycles between consecutive MFMA** to op-class buckets -- this IS the ground-truth
-**ranked bubble-ownership** and supersedes the inferred bubble of the static+PMC breakdown. ATT is
-a **per-round VERIFY instrument**, not a one-shot classifier: each round run it, attack the #1
-bucket, re-run, confirm THAT bucket shrank (closes the 验证 step of the spine). `scripts/att_opclass.py`
-gives the same signal per op-class (active vs stall). Read the buckets against the budget / floor
-per the reference-free section below -- qualitative / relative only.
+reports observed inter-issue intervals. They are not causal stall ownership or an automatic tactic
+ranking. The table below suggests hypotheses to investigate with counters, ISA dependencies and
+controlled changes; a large interval alone does not establish any row's proposed cause.
 
 | inter-MFMA bucket (top of the rollup) | reads as | lever |
 | --- | --- | --- |
@@ -408,22 +405,22 @@ the real overlap headroom) and the **occupancy-gates-latency** law (`## Lever ga
 
 ### Per-round record: rocprof-compute SOL (aggregate) + ATT (per-instruction) -> one ranked stack
 
-Each optimization round assembles ONE record from the three evidence layers and ranks the bubble
-owners:
-- **aggregate "which block is the ceiling"** -- `kernel_workflow/scripts/kernel_tools/rocprof_compute_probe.sh` (under `gpu_lock.sh`) runs
+Each optimization round assembles ONE record from the three evidence layers. The agent ranks
+hypotheses from that evidence and records the supporting measurements:
+- **aggregate "which block is the ceiling"** -- `kernel_workflow/scripts/kernel_tools/rocprof_compute_probe.sh --diagnostic` (under `gpu_lock.sh`) runs
   rocprof-compute (`profile --no-roof` then `analyze --block 2 3 6`) -> System SOL block %-of-peak
   (MFMA / VALU / VMEM / LDS), the memory chart (vL1D / L2 hit + L2-Fabric latency), and the SPI /
   Workgroup Manager occupancy-limiter (Insufficient VGPR/LDS; empty = not resource-capped). It is
   the Nsight-Compute analog and the richest aggregate source; **degrade to `rocprofv3 --pmc`
-  (`parse_pmc.py`)** when it is absent or PMC-blind. Bubble = 100 - MFMA %-of-peak.
-- **per-instruction bubble owners** -- the ATT inter-MFMA rollup above (`mfma_efficiency.py`).
+  (`parse_pmc.py`)** when it is absent. An MFMA percentage-of-peak is not a measured idle-time fraction.
+- **per-instruction evidence** -- the observed ATT inter-issue intervals above (`mfma_efficiency.py`).
 - **static schedule** -- `asm_loop_audit.py` (waitcnt quality / s_nop / interleave).
 
 `att/mfma_eff.txt` + `ir/asm_audit.txt` folds all three (+ budget + boundary timing) into `round_<n>/record.json`
-(6 groups: config / budget / sol / att / static / decision, incl. the ranked bubble-ownership stack
+(6 groups: config / budget / sol / att / static / decision, incl. the agent's ranked hypotheses
 and `delta_vs_prev`) and emits the must-have figures (bubble decomposition, ranked bottleneck stack,
-round trend). The ranked stack is the **priority** input to the census: attack #1, re-profile,
-confirm THAT bucket shrank vs the previous round (temporal self-reference). rocprof-compute is
+round trend). The agent selects a hypothesis, changes the kernel and re-profiles to test its predicted effect
+against the previous round. The scripts do not select the next tactic. rocprof-compute is
 **multi-pass replay** -> run it per round (not per micro-tweak); cost-control by filtering to the
 dominant kernel. Numbers live in the record, never in this doc.
 
