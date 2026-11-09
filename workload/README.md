@@ -7,7 +7,19 @@ step. A module defines a capability and its input/output/acceptance contract; on
 more implementation skills or tools provide the method. Replacing a method does not
 replace the criterion. Read [PRINCIPLES.md](PRINCIPLES.md) before changing the workflow.
 
-`Reasoning → Plan → Module(s) → Report → Reasoning`
+```mermaid
+flowchart TD
+    R["Reasoning<br/>Objective, evidence, running work"] --> P["Plan<br/>Question, scope, budget, decisive check"]
+    P --> M
+    subgraph Call["Module call — repeat or combine as needed"]
+        M["Choose module(s)<br/>Setup · Baseline · Profile · UT<br/>Roofline · Optimize · Apply back · Evaluate"]
+        M --> I["Choose implementation<br/>e.g. Optimize: Kernel Workflow / OOB / another skill"]
+        I --> A["Execute with isolated outputs and resources"]
+    end
+    A --> T["Report<br/>Native evidence, outcome, open questions"]
+    T --> R
+    R -->|Goal met or stop condition| F["Finish with evidence"]
+```
 
 The [standard recipe](recipes/standard.md) retains the existing five-stage route and
 its configured budgets. It is one possible plan. A diagnostic call can return a trace
