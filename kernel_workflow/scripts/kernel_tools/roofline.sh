@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GEAK execution adapter for the upstream native kernel-roofline skill.
+# GEAK execution adapter for an optional, separately installed kernel-roofline skill.
 # Numerical models, reporting, dispatch windows and calibration belong to that skill.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +34,7 @@ case "$ENGINE" in
 esac
 NATIVE="${GEAK_KERNEL_ROOFLINE_DIR:-$KT_REPO/e2e_workflow/knowledge/analysis_skills/kernel-roofline}"
 if [ ! -f "$NATIVE/scripts/$SCRIPT" ]; then
-  echo "kernel-roofline unavailable in this checkout: $NATIVE. Integrate GEAK's native TraceLens skill first; no local calculator fallback." >&2
+  echo "kernel-roofline unavailable in this checkout: $NATIVE. Install the external runner and set GEAK_KERNEL_ROOFLINE_DIR; no local calculator fallback." >&2
   exit 3
 fi
 # Native --gpu would override the outer lease, possibly selecting an unrelated device.

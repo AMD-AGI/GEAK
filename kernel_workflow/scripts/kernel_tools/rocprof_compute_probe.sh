@@ -1,43 +1,23 @@
 #!/usr/bin/env bash
-# tile-programming: rocprof-compute per-round probe (the aggregate "which block is the
-# ceiling / which memory level binds / occupancy-limiter" layer of the per-round record).
+# Shared optional roofline adapter and explicit rocprof-compute diagnostics.
 #
-# rocprof-compute is the Nsight-Compute analog: A diagnostic report gives System Speed-of-Light
-# (block-level %-of-peak), the memory chart (per-cache hit/BW/latency), and the SPI /
-# Workgroup Manager occupancy-limiter -- data that hand-picked `rocprofv3 --pmc` only
-# covers partially. Use it per optimization round (not per micro-tweak: it is a MULTI-PASS
-# replay, so it re-runs the app once per counter group).
+# Default collection delegates to the separately installed kernel-roofline runner.
+# GEAK main and this PR do not ship that runner. Configure GEAK_KERNEL_ROOFLINE_DIR;
+# absent runner => exit 3. This does not replace e2e's existing legacy roofline skill
+# or its upstream TraceLens-prior import path.
 #
-# (GEAK shared kernel tool; the Gluon pack's scripts/rocprof_compute_probe.sh is a shim to this file.)
-#
-# Usage:
-#   bash rocprof_compute_probe.sh <name> <out_dir> [--roof] [--full] [--kernel <substr>] [--dev N] -- <app cmd...>
-#   bash rocprof_compute_probe.sh <name> <out_dir> [...] --cmd "<shell string>"          # run as bash -c
-#   bash rocprof_compute_probe.sh <name> <out_dir> --workload <existing_workload_dir>   # analyze-only
-#
-# GEAK conventions: collection runs under gpu_lock.sh -- invoke it inside the lock, or pass --dev <id>
-# and it re-execs itself under `gpu_lock.sh <id>`; with neither it refuses. The device is the one the
-# lock exported (HIP_VISIBLE_DEVICES), never an inline override. A stale workloads/<name> is moved
-# aside, never rm'd. Payload timeout: TILE_ROCPROF_PAYLOAD_TIMEOUT_S (default 900, 0 = none -- use 0
-# for e2e serving payloads, whose startup + finalize are legitimately long).
-#
-# GOTCHAS baked in (learned on gfx942/MI325X):
-#   * argv-JSON breaks: rocprof-compute re-execs the app command and strips the quotes in a
-#     JSON argv -> pass a CONFIG-EMBEDDED wrapper script (no JSON on argv). See rc_bench*.py.
-#   * deps: rocprof-compute needs its python reqs (plotext/astunparse/dash/...). If import
-#     fails, repair its isolated analyzer environment; see profiling-dependencies.md.
-#     (path varies; the tool prints the requirements.txt location on --version).
-#   * MI200+ only; roofline (--roof) needs MI200+ and runs micro-benchmarks (extra time). On gfx95x
-#     (gfx950 MI350X/MI355X) `--roof-only` needs rocprof-compute >= 3.6.0; and on gfx950 the
-#     FETCH_SIZE / TCC_BUBBLE-derived read bytes UNDER-count, so a counter-based memory numerator
-#     there is a lower bound (cross-check with parse_pmc's independent routes / an in-shape probe).
-#   * cost control: filter to the dominant kernel; keep the app's rep count small.
-#   * PMC blind (JIT kernels) / rocprof-compute absent (or 'Unsupported arch', e.g. RDNA4) -> DEGRADE
-#     to GEAK's kernel_workflow/scripts/profile_kernel.sh <gpu> <cmd> <out> --pmc [--att]
-#     (rocprofv3 counters + ATT) + the static ISA layer. This probe is the aggregate layer, not the only one.
-#
-# Emits: <out_dir>/rc_analyze.txt (blocks 2/3/6) and <out_dir>/rc_metrics.json (parsed SOL /
-# memory / LDS / SPI), consumed by round_report.py.
+# Ordinary profiling: use ../profile_kernel.sh <gpu> <cmd> <out> [--pmc|--att|--spi].
+# Explicit whole-process diagnostic / existing workload analysis:
+#   rocprof_compute_probe.sh NAME OUT --diagnostic [--full] [--dev N] -- CMD...
+#   rocprof_compute_probe.sh NAME OUT --workload DIR [--full]
+# Native optional runner:
+#   rocprof_compute_probe.sh NAME OUT [--roof|--full] [--dev N] -- CMD...
+#   (measured-window command and frozen ROOFLINE_MIBENCH_CACHE required)
+# `--cmd SHELL_STRING` remains a compatibility form. A supplied --workload is
+# analyze-only. Outputs are rc_analyze.txt and rc_metrics.json, not native reports.
+# Collection uses the existing GEAK GPU lease and the same execution locus as
+# the workload. Profiler packages belong to that environment; see
+# profiling-dependencies.md. No ATT decoder is required for compute diagnostics.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
@@ -85,7 +65,7 @@ source "$HERE/_kt_common.sh"   # gpu_lock routing, move-aside, and the pack's lo
 
 if [ "${1:-}" = "--help" ]; then
   echo 'Usage: rocprof_compute_probe.sh NAME OUT [--roof|--full] [--kernel REGEX] [--dev GPU] -- CMD...'
-  echo 'Default: native kernel-roofline runner, measured-window command and frozen peaks required.'
+  echo 'Default: optional external kernel-roofline runner (not bundled); measured-window command and frozen peaks required.'
   echo 'Optional: --workload DIR analyzes existing diagnostic data; --diagnostic explicitly collects whole-process diagnostics without roofline.'
   exit 0
 fi
@@ -176,7 +156,7 @@ if ! locus_have rocprof-compute; then
 fi
 if ! locus_run rocprof-compute --version >/dev/null 2>&1; then
   echo "[rocprof_compute_probe] rocprof-compute present but its python deps are missing." >&2
-  echo "  Use the analyzer environment for this rocprof-compute version (3.4 needs pandas<3); see the native kernel-roofline installation guidance. Do not upgrade the shared workload environment blindly." >&2
+  echo "  Use the analyzer environment for this rocprof-compute version (3.4 needs pandas<3); see kernel_tools/profiling-dependencies.md. Do not upgrade the shared workload environment blindly." >&2
   exit 3
 fi
 
@@ -265,7 +245,7 @@ if [ -z "$WORKLOAD" ]; then
         else
           # arm-A F6: under a container locus the log can be written container-side and not fetched,
           # so do not point at a path that may not exist here. Say what actually happened.
-          echo "profile failed (after 1 retry) and no readable rc_profile.log on this side -> rocprof-compute likely ran in the container locus (analyze/profile ROCm-version or workdir mismatch). FIX the locus first (gluon_authoring references/method/profile.md ### Execution locus) -- SOL is stable + parallel-safe when wired right and worth collecting; fall back to ATT + static only if this box is genuinely PMC-blind." >&2
+          echo "profile failed (after 1 retry) and no readable rc_profile.log on this side -> rocprof-compute likely ran in the container locus (analyze/profile ROCm-version or workdir mismatch). FIX the locus first (kernel_tools/profiling-dependencies.md) -- SOL is stable + parallel-safe when wired right and worth collecting; fall back to ATT + static only if this box is genuinely PMC-blind." >&2
         fi
         exit 4
       fi
@@ -314,6 +294,6 @@ echo "--- parse SOL/memory/LDS/SPI -> rc_metrics.json ---"
 # parse_rc.py refuses to write a zero-row metrics file and searches rc_analyze* siblings, so a
 # by-hand recovery that landed next door is still picked up rather than silently ignored.
 python3 "$HERE/parse_rc.py" "$OUT/rc_analyze.txt" --out-json "$OUT/rc_metrics.json" \
-  || echo "parse produced no metrics (rc_analyze.txt still available for a human read)" >&2
+  || { echo "parse produced no metrics (rc_analyze.txt remains available); analysis unavailable" >&2; exit 4; }
 
 echo "=== done -> $OUT (rc_analyze.txt, rc_metrics.json). Feed to round_report.py --rc-metrics ==="

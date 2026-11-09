@@ -153,5 +153,6 @@ unavailable; this does not invent Triton IR for HIP or replace their build tooli
 
 Profiling parsers, ATT/Perfetto rendering, GPU guards and native roofline delegation
 are shared. `profile_payload.py` and campaign decisions remain optional Gluon
-adapters. TraceLens owns measured roofline, frozen calibration and acceptance;
+adapters. An optionally installed TraceLens runner owns its roofline models and calibration;
+GEAK retains benchmark acceptance;
 static resource estimates are planning evidence and never a fallback roofline engine.

@@ -53,7 +53,7 @@ from pathlib import Path
 out = Path(sys.argv[sys.argv.index('-d') + 1])
 out.mkdir(parents=True, exist_ok=True)
 (out / 'test_kernel_trace.csv').write_text(
-    'Kernel_Name,Other\\nother_kernel,' + os.environ['SMOKE_OTHER_COLUMN'] + '\\n')
+    'Kernel_Name,Other,Start_Timestamp,End_Timestamp\\nother_kernel,' + os.environ['SMOKE_OTHER_COLUMN'] + ',1,2\\n')
 ''')
     profiler.chmod(0o755)
     env = dict(os.environ, PATH=f'{tmp_path}:{os.environ["PATH"]}',

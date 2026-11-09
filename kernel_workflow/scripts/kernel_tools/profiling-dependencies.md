@@ -72,8 +72,12 @@ Keep its Python requirements in the corresponding analyzer environment. For 3.4,
 is not a GEAK-wide or TraceLens requirement. CLI success still requires a small
 real collection and analyzer run before a batch is considered validated.
 
-Where the native `kernel-roofline` skill is installed, its `references/installation.md`
-owns TraceLens setup, frozen versions and calibration requirements. TL-only does
+The native `kernel-roofline` runner is not bundled by this PR or by the reviewed
+GEAK main. `roofline.sh` looks under `GEAK_KERNEL_ROOFLINE_DIR` (default:
+`e2e_workflow/knowledge/analysis_skills/kernel-roofline`) for its scripts and
+returns 3 when missing. Install a compatible external runner explicitly; its
+versioned `references/installation.md` owns TraceLens setup and calibration.
+The existing e2e legacy roofline and TraceLens-prior import remain separate paths. TL-only does
 not need compute or ATT. Shared `roofline.sh` preserves that separation; this
 dependency check does not add a counter pass, change frozen peaks or supply a
 replacement roofline calculator. Use the existing GEAK GPU lease for actual
@@ -86,3 +90,31 @@ trace, any required PMC groups, ATT decoding, and the selected analyzer. Check
 actual dispatch/decoded output, target and device identity, errors and coverage.
 For ATT, loadability or CLI support alone is explicitly unverified. Keep these GPU
 results alongside the image digest and tool versions; CPU smoke cannot supply them.
+
+## Shared collection and task payloads
+
+`profile_kernel.sh` remains the public baseline/reprofile entry. Its optional
+PMC/ATT/SPI layers and `capture.sh` use `rocprofv3_safe.sh` for rocprofv3 execution,
+including allocation checks, timeout and one ATT SIMD retry. Run the main
+`profile_kernel.sh` inside the workload environment, as main already requires;
+it refuses `TILE_KERNEL_CONTAINER` to prevent mixing a host baseline with
+container optional layers. External-container capture goes through `capture.sh`
+and the shared primitive's locus routing. A successful process must also produce matching valid artifacts. Read
+`rocprofv3_safe.json` and `profile_layers.json`: collected, partial, unavailable
+and failed are different outcomes; a failed optional layer does not fail the
+main profile. A dispatch trace does not establish hardware-counter support.
+
+`capture.sh --payload FILE` uses the public
+[`profile_payload.py`](profile_payload.py) and
+[`profile_payload.schema.json`](profile_payload.schema.json). Its existing
+`tile.profile-payload/1` schema identifier is retained for compatibility. Language
+packs supply payloads and may keep forwarding shims; no public collector imports
+a pack. The validator checks source SHA, execution locus, allowed host roots and
+argv; payload environment entries cannot override device/allocation/locus control.
+The PCI BDF and image inventory fields are supplied provenance, not independently
+verified hardware attestation. For a live identity check use hardware_context.py.
+
+`kernel_breakdown.py` displays static instructions, profiler metrics and ATT
+observations in their own units. It does not invent idle-cycle estimates or rank
+optimizations. Ideal matrix-instruction cadence is unknown unless the caller
+provides a reference for that instruction and architecture.

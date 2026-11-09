@@ -16,7 +16,6 @@
 KT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KT_GPU_LOCK="$(cd "$KT_DIR/.." && pwd)/gpu_lock.sh"
 KT_REPO="$(cd "$KT_DIR/../../.." && pwd)"
-KT_PACK_DIR="${GEAK_GLUON_PACK_DIR:-$KT_REPO/perf_knowledge/expert_skills/skills/gluon_authoring}"
 
 # kt_move_aside <path>: move an existing file/dir out of the way (never delete).
 kt_move_aside() {
@@ -32,7 +31,15 @@ kt_under_lock() { [ -n "${GEAK_GPU_LOCK_HELD:-}" ] || [ "${GEAK_GPU_LEASE_ACTIVE
 # `bash <self> <args...>` under gpu_lock.sh <gpu_id>; with no id, refuse (exit 2).
 kt_ensure_lock() {
   local gpu="$1" self="$2"; shift 2
-  kt_under_lock && return 0
+  local ownership_rc=0
+  python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "$gpu" || ownership_rc=$?
+  case "$ownership_rc" in
+    0)
+      python3 "$KT_DIR/../workspace_sources.py" check --workspace "$PWD" || exit 2
+      return 0 ;;
+    1) ;;  # No inherited ownership: acquire the outer lock below.
+    *) exit 2 ;;  # Never bypass a conflicting allocation, even in test mode.
+  esac
   if [ "${KT_ALLOW_UNLOCKED:-0}" = "1" ]; then
     echo "[$(basename "$self")] WARNING: KT_ALLOW_UNLOCKED=1 -- running WITHOUT gpu_lock.sh; any number" \
          "this produces is unserialized against other tenants (tests / profiler-less dry runs only)." >&2
