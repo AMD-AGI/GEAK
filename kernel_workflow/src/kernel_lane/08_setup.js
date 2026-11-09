@@ -24,12 +24,96 @@ if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
   }
 }
 phase('Setup');
+// Fresh assigned workspaces use the same materializer and initial Git commit as
+// the Director recipe, but their existence no longer depends on its response.
+// Author and saved-state setup have different contracts and retain their route.
+let MATERIALIZED_SETUP = null;
+if (EVAL_DIR_OVERRIDE && MODE === 'optimize' && !STATE_DIR
+    && A.prepared_original_ref === undefined && A.prepare_only !== true
+    && A.canonical_selection_resume !== true && !A.population_lineage?.imports?.length) {
+  if (typeof runProcess !== 'function') {
+    throw new Error('assigned fresh Setup requires the native runProcess capability');
+  }
+  const materialized = await runProcess({cmd: 'python3', args: ['-c', String.raw`
+import json, os, pathlib, subprocess, sys
+stage = 'preflight'
+class SetupPreflightError(Exception):
+    pass
+def require(condition, reason):
+    if not condition:
+        raise SetupPreflightError(reason)
+try:
+    source_arg, eval_arg, workflow_arg = sys.argv[1:]
+    require(pathlib.Path(source_arg).is_dir(), 'source_unavailable')
+    source = pathlib.Path(source_arg).resolve(strict=True)
+    evaluation = pathlib.Path(eval_arg)
+    require(evaluation.is_absolute() and str(evaluation) == eval_arg, 'eval_path_not_canonical_absolute')
+    require(evaluation.parent.is_dir(), 'eval_parent_unavailable')
+    require(evaluation.parent.resolve(strict=True) == evaluation.parent, 'eval_parent_not_canonical')
+    require(not evaluation.exists() and not evaluation.is_symlink(), 'eval_path_already_exists')
+    require(not (evaluation == source or evaluation in source.parents or source in evaluation.parents), 'eval_source_overlap')
+    materializer = pathlib.Path(workflow_arg) / 'scripts/materialize_workspace.sh'
+    require(materializer.is_file(), 'materializer_unavailable')
+    evaluation.mkdir()
+    (evaluation / 'original_kernel_path.txt').write_text(source_arg + '\n')
+    for name in ('baseline', 'workspace'):
+        stage = 'materialize_' + name
+        subprocess.run(['bash', str(materializer), '--src', source_arg,
+                        '--dst', str(evaluation / name), '--shared-root', str(evaluation / '_shared'),
+                        '--link-aiter'], check=True, stdout=sys.stderr)
+    workspace = evaluation / 'workspace'
+    # Preserve the Director recipe's source-path link text before Git records it.
+    reference_arg = source_arg + '/reference_io.pt'
+    if pathlib.Path(reference_arg).exists():
+        stage = 'link_reference_io'
+        subprocess.run(['ln', '-sfn', reference_arg, str(workspace / 'reference_io.pt')],
+                       check=True, stdout=sys.stderr)
+    stage = 'initialize_repository'
+    ignore = workspace / '.gitignore'
+    require(ignore.resolve(strict=False).is_relative_to(workspace), 'gitignore_outside_workspace')
+    with ignore.open('a') as stream:
+        stream.write('\nbuild/\n__pycache__/\n*.pyc\nresults.*\n*.so\n.torch_ext/\n.rocprofv3/\n*.o\n/.geak/\n')
+    git_env = dict(os.environ, GIT_PAGER='cat', GIT_TERMINAL_PROMPT='0', GIT_EDITOR='true')
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY'):
+        git_env.pop(key, None)
+    git = ['git', '-C', str(workspace), '-c', 'user.email=team@workflow', '-c', 'user.name=team']
+    for command in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'baseline']):
+        subprocess.run(git + command, env=git_env, check=True, stdout=sys.stderr)
+    top = subprocess.check_output(git + ['rev-parse', '--show-toplevel'], env=git_env, text=True).strip()
+    require(pathlib.Path(top).resolve(strict=True) == workspace, 'git_root_differs_from_workspace')
+    commit = subprocess.check_output(git + ['rev-parse', 'HEAD'], env=git_env, text=True).strip()
+    print(json.dumps({'ok': True, 'eval_dir': eval_arg, 'workspace': str(workspace),
+                      'baseline_dir': str(evaluation / 'baseline'), 'initial_commit': commit}))
+except Exception as error:
+    # Only fixed codes raised above are exposed; never OS, Git or environment text.
+    reason = str(error) if type(error) is SetupPreflightError else 'unknown'
+    print(json.dumps({'ok': False, 'stage': stage, 'error_type': type(error).__name__, 'reason': reason}))
+    sys.exit(1)
+`, KERNEL_PATH_ORIG, EVAL_DIR_OVERRIDE, WORKFLOW_DIR], timeoutMs: AGENT_TIMEOUT_MS, graceMs: 2000});
+  let result = null;
+  try { result = JSON.parse(materialized.stdout.trim()); } catch { /* retain typed failure below */ }
+  if (materialized.status !== 'completed' || materialized.code !== 0 || materialized.strays_killed
+      || !materialized.group_cleared || materialized.stdio_held || result?.ok !== true
+      || result.eval_dir !== EVAL_DIR_OVERRIDE || result.workspace !== `${EVAL_DIR_OVERRIDE}/workspace`
+      || result.baseline_dir !== `${EVAL_DIR_OVERRIDE}/baseline`
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(result.initial_commit || '')) {
+    throw new Error('assigned Setup materialization failed; partial preparation retained: ' + JSON.stringify({
+      status: materialized.status, code: materialized.code, strays_killed: materialized.strays_killed,
+      group_cleared: materialized.group_cleared, stdio_held: materialized.stdio_held,
+      stage: result?.stage || 'unknown', error_type: result?.error_type || 'unknown',
+      reason: result?.reason || 'unknown' }));
+  }
+  MATERIALIZED_SETUP = result;
+}
 const setup = await agentT(
-  roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
+  roleAgent('director', 'setup', MATERIALIZED_SETUP
+    ? 'Inspect the materialized evaluation environment and return verified metadata; do not rematerialize or reset it.'
+    : 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC, EXPECTED_GFX, EXPECTED_TARGET,
     EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
+    ...(MATERIALIZED_SETUP ? { MATERIALIZED_SETUP } : {}),
     ...(GPU_IDENTITY_CAPTURE_REF !== undefined ? { GPU_IDENTITY_CAPTURE_REF } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
@@ -37,17 +121,21 @@ const setup = await agentT(
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
-if (A.population_lineage) {
+if (A.population_lineage || MATERIALIZED_SETUP) {
   if (EVAL_DIR !== A.eval_dir || CANONICAL !== `${A.eval_dir}/workspace`) {
     throw new Error('population Setup must use its assigned private eval_dir/workspace; ' +
       JSON.stringify({ expected_eval_dir: A.eval_dir, expected_workspace: `${A.eval_dir}/workspace`,
         actual_eval_dir: EVAL_DIR, actual_workspace: CANONICAL }));
   }
   const isolation = await runProcess({cmd: 'python3', args: ['-c',
-    'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:])\n' +
+    'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:4])\n' +
     'assert w.parent == e and not (w == o or w in o.parents or o in w.parents), "population workspace is not isolated"\n' +
-    'assert pathlib.Path(subprocess.check_output(["git","-C",str(w),"rev-parse","--show-toplevel"],text=True).strip()).resolve() == w, "population workspace needs its own repository"',
-    EVAL_DIR, CANONICAL, KERNEL_PATH_ORIG], timeoutMs: 30000, graceMs: 2000});
+    'assert pathlib.Path(subprocess.check_output(["git","-C",str(w),"rev-parse","--show-toplevel"],text=True).strip()).resolve() == w, "population workspace needs its own repository"\n' +
+    'if len(sys.argv)>4:\n' +
+    ' assert subprocess.check_output(["git","-C",str(w),"rev-parse","HEAD"],text=True).strip() == sys.argv[4], "materialized initial commit changed"\n' +
+    ' subprocess.check_call(["git","-C",str(w),"diff","--quiet","HEAD","--"])',
+    EVAL_DIR, CANONICAL, KERNEL_PATH_ORIG,
+    ...(MATERIALIZED_SETUP ? [MATERIALIZED_SETUP.initial_commit] : [])], timeoutMs: 30000, graceMs: 2000});
   if (isolation.status !== 'completed' || isolation.code !== 0 || isolation.strays_killed
       || !isolation.group_cleared || isolation.stdio_held) throw new Error('population Setup failed source isolation checks');
 }
@@ -138,4 +226,3 @@ if (!hasBaseline) {
     final_geomean: 0, final_patch: '', validation_status: 'no_baseline', reason,
   };
 }
-

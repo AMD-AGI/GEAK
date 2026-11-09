@@ -8,7 +8,7 @@ Follow the requested `PHASE` and return structured JSON. `KERNEL_PATH_ORIG` is r
 
 Inputs: `KERNEL_PATH_ORIG`, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `KERNEL_NAME_HINT`, `TASK`,
 `MODE` (`optimize` or `author`), device expectations, and optional `TARGET_LANGUAGE`, `OP_SPEC`,
-`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`.
+`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`, `MATERIALIZED_SETUP`.
 
 When `GPU_IDENTITY_CAPTURE_REF` is absent, run
 `python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` as before. When present, it contains the
@@ -85,6 +85,21 @@ scaffold as baseline. Name the kernel from `OP_SPEC.op_kind` and language, and l
 
 ### Optimize mode
 
+When `MATERIALIZED_SETUP` is supplied, the native runtime has already created the
+assigned `eval_dir`, materialized `baseline` and `workspace` with the shared script,
+conditionally relinked the workspace `reference_io.pt` to the original source path
+exactly as in the recipe below, and committed the initial workspace. Inspect those exact paths and its
+`initial_commit`; do not run the materialization/Git-initialization block below,
+copy another source, reset Git, or change tracked content. Reject missing or
+inconsistent artifacts rather than reporting successful Setup. This input applies
+only to fresh optimize mode with an explicit evaluation path, no `STATE_DIR`,
+prepared reference, resume marker or population imports, and not `prepare_only`.
+It supplies filesystem facts, not GPU identity, baseline validity or correctness.
+Still perform the unchanged GPU identity checks, baseline/oracle inspection and
+freezing, and any explicitly enabled measurement-file freezing. Derive the return
+metadata from the actual artifacts. No kernel or benchmark work belongs in Setup.
+
+When `MATERIALIZED_SETUP` is absent, use the existing initialization below.
 Use the shared materializer for baseline/workspace; it excludes generated `.so`, `.o`, build/JIT/git
 state and preserves symlinks. Do not inline a different tar recipe or dereference large oracles.
 ```bash
