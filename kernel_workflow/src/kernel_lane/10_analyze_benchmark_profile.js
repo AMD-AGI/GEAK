@@ -41,7 +41,10 @@ if (EXTERNAL_OBJECTIVE) {
   bench.baseline_per_case = bench.per_case;
   bench.baseline_geomean_ms = null;
 }
-if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+if (!bench || !bench.baseline_per_case || (!EXTERNAL_OBJECTIVE && (bench.reliable !== true
+    || !Array.isArray(bench.baseline_per_case) || !bench.baseline_per_case.length))) {
+  throw new Error('Benchmark setup failed: no reliable non-empty baseline recorded');
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);

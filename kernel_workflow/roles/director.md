@@ -8,7 +8,11 @@ Follow the requested `PHASE` and return structured JSON. `KERNEL_PATH_ORIG` is r
 
 Inputs: `KERNEL_PATH_ORIG`, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `KERNEL_NAME_HINT`, `TASK`,
 `MODE` (`optimize` or `author`), device expectations, and optional `TARGET_LANGUAGE`, `OP_SPEC`,
-`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`, `MATERIALIZED_SETUP`, `VERIFIED_GPU_IDENTITY`.
+`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`, `MATERIALIZED_SETUP`, `VERIFIED_GPU_IDENTITY`,
+`PREPARED_ORIGINAL_REF`.
+
+When `PREPARED_ORIGINAL_REF` is supplied, follow the prepared-evidence reuse contract
+in `SKILL_DIR/docs/eval_archive_contract.md` for Setup facts; keep the existing Setup schema and obligations.
 
 When `VERIFIED_GPU_IDENTITY` is supplied, the native runtime has already hashed and parsed
 the owner-bound capture with the shared helper and checked all four identity fields against

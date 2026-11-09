@@ -55,7 +55,7 @@ function answer(label) {
   };
   if (label === 'tech_lead:analyze') return { kernel_type: 'gemm', modifiable_files: ['kernel.py'] };
   if (label === 'benchmark_engineer') return {
-    commandment_path: `${evalDir}/COMMANDMENT.md`, baseline_per_case: perCase(1),
+    commandment_path: `${evalDir}/COMMANDMENT.md`, baseline_per_case: perCase(1), reliable: true,
     baseline_geomean_ms: 2, correctness_cmd: 'fixture correctness', benchmark_cmd: 'fixture benchmark',
   };
   if (label === 'profile_engineer:baseline' || label.startsWith('reprofile ')) {

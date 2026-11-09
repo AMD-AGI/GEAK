@@ -150,6 +150,7 @@ const setup = await agentT(
     EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
     ...(MATERIALIZED_SETUP ? { MATERIALIZED_SETUP } : {}),
     ...(GPU_IDENTITY_CAPTURE_REF !== undefined ? { GPU_IDENTITY_CAPTURE_REF } : {}),
+    ...(A.prepared_original_ref !== undefined ? { PREPARED_ORIGINAL_REF: A.prepared_original_ref } : {}),
     ...(VERIFIED_GPU_IDENTITY ? { VERIFIED_GPU_IDENTITY } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),

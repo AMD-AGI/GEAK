@@ -107,7 +107,7 @@ async function runIn(evalDir, deviceGfx, expectedGfx, extras) {
       if (options.label === 'benchmark_engineer') {
         return {
           commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
-          baseline_per_case: [{ name: 'x', latency_ms: 1 }],
+          baseline_per_case: [{ name: 'x', latency_ms: 1 }], reliable: true,
           baseline_geomean_ms: 1,
         };
       }

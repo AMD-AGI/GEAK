@@ -123,7 +123,7 @@ function answers(sc) {
     };
     if (label === 'tech_lead:analyze') return { kernel_type: 'gemm', roadmap_summary: 'r', modifiable_files: ['k.py'] };
     if (label === 'benchmark_engineer') return {
-      commandment_path: EVAL + '/COMMANDMENT.md', baseline_per_case: perCase(1), baseline_geomean_ms: 2.83,
+      commandment_path: EVAL + '/COMMANDMENT.md', baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, reliable: true,
       correctness_cmd: 'python3 t.py --correctness', benchmark_cmd: 'python3 t.py --benchmark',
     };
     if (label === 'profile_engineer:baseline') return { bottleneck: 'memory', top_opportunities: [], summary_path: EVAL + '/p0.md' };

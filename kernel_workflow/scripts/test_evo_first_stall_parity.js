@@ -97,7 +97,8 @@ async function runMode(mode, scenario, template) {
       modifiable_files: ['k.py'], bottleneck_guess: 'memory', roadmap_summary: 'fixture roadmap',
       candidate_directions: [], kk_operator: null, kk_language: 'triton', kk_refs: []};
     if (label === 'benchmark_engineer') return {commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
-      baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, correctness_cmd: 'c', benchmark_cmd: 'b'};
+      baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, correctness_cmd: 'c', benchmark_cmd: 'b',
+      reliable: true, ...(scenario.bench || {})};
     if (label === 'profile_engineer:baseline') return {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
     if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
       const key = label.split(' ')[1];
@@ -419,6 +420,22 @@ const FALLBACK = 'Development fallback';
     const bad = await runMode('greedy', {...sc, name: 'stall_sources_greedy', args: {evolution_import_stall_sources: true}}, TEMPLATE);
     assert.match(bad.error || '', /evolution_import_stall_sources requires optimizer=evo/);
     console.log('  ok: stall-round sources enter the first-stall archive only when enabled; delivery stays consistent');
+  }
+  {
+    // Common preparation contract: search refuses an empty or unreliable native baseline, as
+    // preparation already does, and a supplied prepared reference also reaches the Director.
+    for (const bench of [{reliable: false}, {baseline_per_case: []}, {reliable: undefined}]) {
+      const r = await runMode('greedy', {...SCENARIOS[0], name: 'bench_contract', bench}, TEMPLATE);
+      assert.match(r.error || '', /no reliable non-empty baseline recorded/, JSON.stringify(bench));
+      assert.ok(!r.calls.some(c => c.label.startsWith('tech_lead:plan')), 'no search starts');
+    }
+    const ref = {path: '/prepared/original.json', sha256: 'a'.repeat(64)};
+    const withRef = await runMode('greedy', {...SCENARIOS[0], name: 'prepared_ref', args: {prepared_original_ref: ref}}, TEMPLATE);
+    const setupPrompt = c => c.calls.find(x => x.label === 'director:setup').prompt;
+    assert.deepEqual(field(setupPrompt(withRef), 'PREPARED_ORIGINAL_REF'), ref, 'the Director receives the supplied reference');
+    const plain = await runMode('greedy', {...SCENARIOS[0], name: 'prepared_ref_off'}, TEMPLATE);
+    assert.equal(field(setupPrompt(plain), 'PREPARED_ORIGINAL_REF'), undefined, 'no reference, no input');
+    console.log('  ok: baseline contract and prepared-reference Setup input');
   }
   const evo = (await runMode('evo', SCENARIOS[1], TEMPLATE));
   const rows = Object.fromEntries(evo.continuation_archive.entries.map(r => [r.id, r]));

@@ -82,7 +82,7 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         kernel_name: 'fixture', device_gfx: 'gfx950', device_target: 'unknown',
         physical_cu_count: 256, baseline_frozen: true, source_files: ['k.py']};
       if (label === 'tech_lead:analyze') return {kernel_type: 'gemm', modifiable_files: ['k.py']};
-      if (label === 'benchmark_engineer') return {baseline_per_case: perCase,
+      if (label === 'benchmark_engineer') return {baseline_per_case: perCase, reliable: true,
         baseline_geomean_ms: 8, commandment_path: '/eval/COMMANDMENT.md',
         correctness_cmd: 'fixture-correctness', benchmark_cmd: 'fixture-benchmark'};
       if (label.includes('profile')) return {bottleneck: 'memory', top_opportunities: []};
