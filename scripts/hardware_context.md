@@ -8,9 +8,15 @@ The identity allowlist now comes from the registry instead of a second CU table.
 Entry points: [shared CLI](hardware_context.py), [workflow contract](hardware_context_workflow.js),
 [SKU registry](../perf_knowledge/hardware/data/sku.json).
 
-Setup and Freeze run the probe in the workload environment, after the run directory
-exists, and return its complete JSON as `hardware_context`, its `sku` as
-`device_sku`, and the absolute filename as `hardware_context_path`:
+Automatic workflow integration is **off by default**. Set
+`use_hardware_context: true` in workflow arguments or the interface handoff JSON
+to enable it. This option is independent of expert-skill selection. When disabled,
+workflows do not add hardware prompts/schema fields, validate saved contexts, or
+request a context artifact. Direct CLI calls remain available without this option.
+
+When enabled, Setup and Freeze run the probe in the workload environment, after
+the run directory exists, and return its complete JSON as `hardware_context`, its
+`sku` as `device_sku`, and the absolute filename as `hardware_context_path`:
 
 ```bash
 python3 "$GEAK_ROOT/scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
@@ -19,9 +25,12 @@ python3 "$GEAK_ROOT/scripts/hardware_context.py" --check "$GEAK_HARDWARE_CONTEXT
 ```
 
 The workflow validates the returned identity against Setup/Freeze and any supplied
-expectations, forwards the object to every role and child lane, and retains it in
-e2e resume state. This applies with expert skills disabled and to HIP, Triton,
-Gluon, backend tuning and serving configuration. The JS runtime cannot access
+expectations, forwards the object to hardware-relevant planning/profiling/engineering
+roles and child lanes, and retains the opt-in and context in e2e resume state.
+Clock, file-writing, report and final validation calls receive no hardware prelude.
+Explicit `use_hardware_context: false` overrides a saved opt-in; a saved context
+alone never enables it. Enabled integration applies to HIP, Triton, Gluon,
+backend tuning and serving configuration, including with expert skills disabled. The JS runtime cannot access
 files, so the existing roles perform the CLI/file work; Python consumers validate
 the catalog hash and content again before using numeric specifications.
 
@@ -47,14 +56,18 @@ matching its name does not certify those rates. R9600D cache stays unknown.
 
 The old `resolve_peaks(path, gfx, ...)` call signature remains available. New
 callers pass `hardware_context=FILE_OR_OBJECT` (or export `GEAK_HARDWARE_CONTEXT`),
-or pass `identity=GPU_IDENTITY_JSON`. Arch-only resolution returns `None`.
-Explicit legacy product-only lookups are low-confidence reference data. All local
+or pass `identity=GPU_IDENTITY_JSON`. Bare gfx942/gfx950 retain the generated
+architecture reference with `sku=unknown`, `reference_sku`, and low confidence.
+For other non-client targets with no table, the legacy device-property derivation
+remains available. Neither fallback establishes product identity. Supplied CU
+counts constrain the reference; invalid, conflicting or named unknown contexts
+never fall back. Explicit legacy product-only lookups are low-confidence references. All local
 specification estimates remain planning-only and cannot establish acceptance.
 
 The legacy API also accepts `cu=` (or CLI `--cu`) for compatibility with physical-CU
 gated gfx115x callers. `roofline_tools.py --peaks gfx1151 --cu 40` reads the generated
 AI Max 395 reference: 59.4 BF16 TFLOPS / 256 GB/s. It retains `sku=unknown`, records
-`reference_sku=AI_MAX_395`, and sets `scope=explicit_arch_cu_reference_only`,
+`reference_sku=AI_MAX_395`, and sets `scope=arch_cu_reference_only`,
 `confidence=low`, `may_gate=false`. It does not identify an unnamed GPU as that
 product: the 495 also has 40 CUs and different reference values. The count must
 come from rocminfo; 32/16-CU devices, Torch's 20 WGPs and invalid counts are refused.
@@ -67,7 +80,8 @@ No serving, profiler-order or automatic-routing policy is changed by this API.
 variable. Product-based tools select the matched SKU and reject a conflicting `--sku`;
 `calc_perf.py` also rejects conflicting `--arch`/`--cus`. `amd_occupancy.py` selects
 the observed architecture and rejects conflicting CLI or assembly targets.
-Unresolved contexts cannot supply product peaks; architecture-only resource
+The unvalidated gfx908 register model is left unknown rather than reusing the
+CDNA2-4 combined VGPR/AGPR model. Unresolved contexts cannot supply product peaks; architecture-only resource
 analysis remains available. `mem_bw_probe.py` checks live device scope before measurement.
 Outside a run context, explicit `--arch` keeps the existing labelled reference
 lookup for compatibility; it is not a detected product.
