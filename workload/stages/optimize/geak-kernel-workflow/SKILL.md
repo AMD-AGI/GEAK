@@ -69,6 +69,8 @@ implementation, so replacing the implementation does not require rewriting them.
 ## Preconditions
 
 - `kernel_workflow/kernel_workflow.js` exists in the GEAK repository.
+- When isolating the runtime, preserve its relative dependencies, including sibling
+  packages; keep writable outputs outside the pinned source snapshot.
 - A working runner (`runners/CONTRACT.md`). With credentials missing the runner returns
   78 and the worker stops immediately, rather than spending the time budget on retries
   that cannot succeed.
