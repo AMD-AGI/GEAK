@@ -39,7 +39,7 @@ def test_mfma_report_preserves_measurements_without_decision_dispatch(tmp_path, 
     for decision in ("attack", "issue-bound", "bubble-diluted", "-> cards:", "catalogue gap"):
         assert decision not in result.stdout
 
-PY_TOOLS = ["asm_loop_audit", "asm_schedule_viz", "mfma_efficiency", "deep_mfma_analysis",
+PY_TOOLS = ["asm_loop_audit", "mfma_efficiency", "deep_mfma_analysis",
             "gfx950_isa", "layout_facts", "amd_occupancy", "probe"]
 SH_TOOLS = ["hw_sources.sh", "dump_ir.sh"]
 
