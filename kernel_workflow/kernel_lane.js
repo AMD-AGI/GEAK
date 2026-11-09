@@ -1883,6 +1883,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
               arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              verifier_report: ver,
               ...(EXTERNAL_OBJECTIVE ? {reported_per_case: ver.reported_per_case ?? null} : {}),
               ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
@@ -2360,6 +2361,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    // Preserve the settled report; native fields remain role-reported, not host evidence.
+    verifier_report: r.ver,
     ...(EXTERNAL_OBJECTIVE ? {reported_per_case: r.ver.reported_per_case ?? null} : {}),
     reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
@@ -2427,6 +2430,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        verifier_report: integrate.best,
         reported_per_case: integrate.best.reported_per_case ?? null,
         ...externalFields(integrate.best),
       });
@@ -2543,8 +2547,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       // by its pinned bytes (EVO archive row or GEAK snapshot), never by the current promotion file.
       if (!EXTERNAL_OBJECTIVE) keepForDelivery({key: `round_${round}_winner`, id: winner.id, d: null, eng: null,
         reported_context: winner.reported_context,
-        ver: {status: 'verified', correctness: 'pass', verified_geomean: winner.geomean_unweighted,
-          verified_weighted: winner.weighted, per_case: winner.per_case},
+        ver: winner.verifier_report,
         evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
         base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
@@ -2787,6 +2790,8 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
         }),
         { phase: 'Verify', label: `verify ${c.id} (delivery)`, schema: VERIFY_SCHEMA }); }
       finally { setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); }
+      // This native path also strips role-authored host provenance before retaining the report.
+      ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, frozen);
       // The result binds only to the bytes it measured.
       if (ver && (await digest(frozen) !== frozenSha || await digest(src.path) !== src.sha256)) {
         row.status = 'source_changed'; continue;
@@ -2814,6 +2819,7 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
       geomean: best.primary, geomean_unweighted: best.ver.verified_geomean,
       weighted: best.ver.verified_weighted != null ? best.ver.verified_weighted : null,
       per_case: best.ver.per_case || [], patch: best.promo.patch, source_tree: best.promo.tree,
+      verifier_report: best.ver,
       reported_context: reportedEvidence({...best.c.d, id: best.c.id, reported_context: best.c.reported_context},
         best.c.eng, best.ver, best.promo.patch)};
     roundsCommitted += 1;
@@ -3320,9 +3326,11 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
-        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
+        // Native checkpoints retain the role report, without upgrading its legacy authority.
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : checked?.verifier_report || {
           status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
-          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+          verified_weighted: checked?.weighted ?? null,
+          per_case: checked?.per_case ?? (round === 0 && !start.finalWinner ? BASELINE_PER_CASE : null)}};
       await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
       const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
         checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};

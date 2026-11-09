@@ -265,9 +265,11 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
-        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
+        // Native checkpoints retain the role report, without upgrading its legacy authority.
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : checked?.verifier_report || {
           status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
-          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+          verified_weighted: checked?.weighted ?? null,
+          per_case: checked?.per_case ?? (round === 0 && !start.finalWinner ? BASELINE_PER_CASE : null)}};
       await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
       const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
         checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};
