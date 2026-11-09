@@ -13,8 +13,8 @@ reports SIGNALS ONLY -- the structural-vs-schedulable VERDICT stays with the age
       ``s_wait_alu depctr_*`` / ``s_delay_alu`` are ALU-dependency waits, not memory
       drains -- they are counted on their own line and kept OUT of the drain ratio;
   (3) producer<->consumer sync barriers per iteration;
-  (4) ``s_nop`` count + requested stall cycles = the exposed FIXED-latency hazard
-      (e.g. MFMA/WMMA-write -> VALU-read), hidden by unroll/occupancy, never by reorder.
+  (4) ``s_nop`` instruction count, raw immediate sum and per-immediate counts.
+      These are static encoding observations, not measured stall time or a causal diagnosis.
 
 Matrix engines: CDNA MFMA (``v_mfma`` / ``v_smfmac``) and RDNA WMMA (``v_wmma``) are
 both classified as "mfma" — the audit treats any matrix-multiply instruction the same
@@ -31,14 +31,14 @@ Input forms (both accepted):
   (b) ``llvm-objdump -d`` of a prebuilt ``.hsaco`` / ``.co`` — labels are
       ``<hexaddr> <name>:``. Use this for a **prebuilt comparator** (e.g. a vendor asm
       kernel) where no ``.amdgcn`` source exists. Such a dump is the WHOLE function with
-      nested back-edges, so auto-detect may pick an *outer* loop; pass ``--loop-label``
-      with the inner MFMA loop's label to pin it.
+      nested back-edges; check the automatically selected scope and pass ``--loop-label``
+      to pin the intended loop when needed.
 
 Usage:
   python3 asm_loop_audit.py <file.s> [--loop-label .LBB0_5] [--max-stream 400]
 
-If --loop-label is omitted the hottest back-edge loop (most MFMA, tie-break longest)
-is auto-detected.
+If --loop-label is omitted, prefer innermost back-edge loops, then most matrix instructions,
+then the shortest body. With no back-edge, a bounded whole-kernel body is audited explicitly.
 """
 from __future__ import annotations
 
@@ -527,7 +527,8 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     opc: Counter = Counter()
     stream: list[str] = []
     relaxed = full_drain = unknown_wait = alu_waits = barriers = 0
-    nops = nop_cycles = 0
+    nops = nop_immediate_sum = 0
+    nop_immediates: Counter = Counter()
     waitcnt_detail: Counter = Counter()
     alu_detail: Counter = Counter()
     for ln in lines[start:end]:
@@ -544,7 +545,9 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
             nops += 1
             m = re.search(r"^s_nop\s+(?:0x([0-9a-fA-F]+)|(\d+))", ln.strip())
             if m:
-                nop_cycles += int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                immediate = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                nop_immediate_sum += immediate
+                nop_immediates[immediate] += 1
         if name == "aluwait":
             alu_waits += 1
             alu_detail[re.split(r";|//", ln, 1)[0].strip()] += 1
@@ -629,16 +632,21 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     print("   against per-unit busy (PMC) + overhead classes; a long VALU-only run is an")
     print("   exposed stretch no MFMA hides. Use kernel_breakdown.py to merge with PMC.)")
     print()
-    print("s_nop (exposed fixed-latency hazard, e.g. MFMA-write -> VALU-read):")
-    print(f"  count: {nops}   requested stall cycles: {nop_cycles}")
-    print("  (high s_nop => a fixed-latency hazard is NOT hidden; the fix is more")
-    print("   unroll/occupancy to fill it, NOT reorder -- reorder cannot create slack)")
+    print("s_nop (static encoding observations):")
+    print(f"  count: {nops}   raw immediate sum: {nop_immediate_sum}")
+    if nop_immediates:
+        counts = ", ".join(f"{value}={count}" for value, count in sorted(nop_immediates.items()))
+        print(f"  raw immediate counts: {counts}")
+    if nops != sum(nop_immediates.values()):
+        print(f"  unparsed immediates: {nops - sum(nop_immediates.values())}")
+    print("  (raw immediates are not measured stall time; no architecture-specific duration")
+    print("   formula is applied. Static presence alone does not establish a cause or fix.)")
     print()
-    print("VERDICT IS YOURS (signals only): scan the stream for an exposed single-class")
-    print("run with no interleaved M; ask whether any independent ready op could fill it")
-    print("(no => structural/no-slack; yes => scheduling miss). Many full drains =>")
-    print("conservative-waitcnt; barriers scaling with depth => excess-sync; high s_nop")
-    print("=> unhidden fixed-latency hazard (unroll/occupancy, not reorder). See")
+    print("VERDICT IS YOURS (signals only): inspect single-class runs and whether")
+    print("independent operations could be ready. For full drains, inspect outstanding")
+    print("dependencies; for barrier counts, inspect the synchronization protocol.")
+    print("Correlate these observations with runtime evidence before attributing a cause")
+    print("or choosing a change. Interpret s_nop with the target ISA and dependency context. See")
     print("compiler-contract.md ## Auditing the hot-loop schedule.")
 
 
