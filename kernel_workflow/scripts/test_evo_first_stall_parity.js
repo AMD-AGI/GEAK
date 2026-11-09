@@ -81,6 +81,8 @@ async function runMode(mode, scenario, template) {
       ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)])) : v;
   const args = {...subst(args0), optimizer: mode,
     kernel_path: task, eval_dir: evalDir, exp_root: path.join(root, 'exp'), workflow_dir: WORKFLOW,
+    // This fixture creates its canonical repository above; it does not exercise fresh Setup.
+    canonical_selection_resume: true,
     deadline_epoch: OUTER, settlement_deadline_epoch: OUTER, editable_source_paths: ['k.py'],
     population_lineage: {...args0.population_lineage, id: 'lane', root: path.join(root, 'population')},
     ...(scenario.args || {})};

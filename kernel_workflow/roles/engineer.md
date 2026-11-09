@@ -75,9 +75,11 @@ Write `best_patch.diff`, `worker_result.json` and `report.md` under `OUTPUT_DIR`
 approach, changed parameters, all attempted mechanisms, per-case results and limitations. Return the
 same structured result as the disk JSON: the workflow scores the return; the disk file alone is not
 a submission. `measurement_valid:true` requires current-candidate source checks and successful
-measurement commands. No correct improvement uses failed/partial status with no `patch_file` and a
-reason; unresolved source binding uses the recovery rule above. Independent verification decides the
-round winner.
+measurement commands. When `UNVERIFIED_SOURCE_RECOVERY:true` is supplied, follow the unverified
+source recovery contract in `docs/eval_archive_contract.md`; that explicitly permits saving and
+returning an unmeasured attempt before any speedup exists. Otherwise, no correct improvement uses
+failed/partial status with no `patch_file` and a reason. Unresolved source binding uses the recovery
+rule above. Independent verification decides the round winner.
 
 ```json
 {

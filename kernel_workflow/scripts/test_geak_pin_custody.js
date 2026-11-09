@@ -110,8 +110,12 @@ async function lane(sc) {
             execFileSync('bash', [path.join(__dirname, 'save_candidate_patch.sh'), ws,
               path.join(out, 'best_patch.diff'), 'HEAD', 'k.py', 'backend.hip', 'impl.s', 'module.py']);
             assert.ok(prompt.includes('save_candidate_patch.sh'), 'native engineer receives the capture tool');
-          } else fs.writeFileSync(path.join(out, 'best_patch.diff'), patchFor(`measured ${i}`));
-          return {status: 'ok', measurement_valid: true, speedup_geomean: sc.speeds[i]};
+          } else if (!sc.omitPatch) fs.writeFileSync(path.join(out, 'best_patch.diff'), patchFor(`measured ${i}`));
+          if (sc.workspaceMutation) {
+            fs.mkdirSync(path.join(out, 'workspace'), {recursive: true});
+            fs.writeFileSync(path.join(out, 'workspace/k.py'), `measured ${i}\n`);
+          }
+          return sc.engineerReturn || {status: 'ok', measurement_valid: true, speedup_geomean: sc.speeds[i]};
         }
         if (label.startsWith('verify ')) {
           const measured = field(prompt, 'PATCH');
@@ -122,6 +126,19 @@ async function lane(sc) {
           assert.notEqual(measured, pin, 'the verifier never receives a custody file');
           assert.equal(sha(fs.readFileSync(measured)), obs.custodyBeforeVerify[i].sha256,
             'the disposable input begins with the pinned bytes');
+          if (sc.engineerReturn?.measurement_valid === false) {
+            const receipt = JSON.parse(fs.readFileSync(`${pin}.json`, 'utf8'));
+            assert.equal(receipt.evidence, null, 'unmeasured source has no fitness before verification');
+            assert.equal(receipt.eng.status, 'partial');
+            assert.ok(!label.includes('(delivery)'), 'partial source uses ordinary round verification');
+          }
+          if (sc.workspaceMutation) {
+            const workspace = field(prompt, 'ENGINEER_WORKSPACE');
+            fs.writeFileSync(path.join(workspace, 'k.py'), 'later unmeasured iteration\n');
+            fs.writeFileSync(path.join(path.dirname(workspace), 'best_patch.diff'), patchFor('later unmeasured iteration'));
+            assert.equal(sha(fs.readFileSync(pin)), obs.custodyBeforeVerify[i].sha256,
+              'later worker changes cannot overwrite the host source pin');
+          }
           if (sc.newFiles) {
             const ws = path.join(temp, `verify_${i}`);
             execFileSync('git', ['clone', '-q', canonical, ws]);
@@ -216,6 +233,32 @@ function checkVerifierIsolation(r) {
   assert.equal(delivery(r).delivered, null);
 }
 const cases = [
+  {name: 'pre-latch partial source uses ordinary verification without inherited fitness', sourceRecovery: true,
+    speeds: [2], engineerReturn: {status: 'partial', measurement_valid: false, speedup_geomean: 0, per_case: []},
+    check: r => {
+      assert.equal(r.committed, 'measured 0\n');
+      assert.equal(r.obs.cumulative, 2);
+      assert.equal(r.snapshots[0].receipt.evidence, 2, 'only the independent verifier assigns fitness');
+      assert.equal(r.snapshots[0].receipt.eng.measurement_valid, false);
+    }},
+  {name: 'pre-latch partial return without a patch cannot win', sourceRecovery: true,
+    speeds: [2], omitPatch: true,
+    engineerReturn: {status: 'partial', measurement_valid: false, speedup_geomean: 0, per_case: []},
+    check: r => {
+      assert.equal(r.committed, 'baseline\n');
+      assert.equal(r.obs.cumulative, 1);
+      assert.deepEqual(r.obs.verified, {}, 'missing source never reaches a verifier model call');
+      assert.deepEqual(r.pins, []);
+      assert.equal(r.value.warm_start.rounds_committed, 0);
+    }},
+  {name: 'immutable measured pin survives later unmeasured workspace and return-file changes', sourceRecovery: true,
+    speeds: [2], workspaceMutation: true,
+    check: r => {
+      assert.equal(r.committed, 'measured 0\n');
+      assert.equal(r.obs.cumulative, 2);
+      assert.equal(r.snapshots[0].sha256, r.obs.custodyBeforeVerify[0].sha256);
+      assert.equal(r.snapshots[0].receipt.source.sha256, r.snapshots[0].sha256);
+    }},
   ...[false, true].map(obstruction => ({name: `new source capture → pin → verifier → export; obstruction=${obstruction}`,
     speeds: [2], newFiles: true, obstruction, check: r => {
       assert.equal(r.committed, 'measured 0\n'); assert.equal(r.obs.cumulative, 2);
@@ -288,7 +331,8 @@ const cases = [
 (async () => {
   console.log(`lane: ${lanePath} (sha256 ${sha(laneSource)})`);
   let failed = 0;
-  const selectedCases = cases.filter(sc => !process.argv.includes('--new-source-only') || sc.newFiles);
+  const selectedCases = cases.filter(sc => (!process.argv.includes('--new-source-only') || sc.newFiles)
+    && (!process.argv.includes('--source-recovery-only') || sc.sourceRecovery));
   for (const sc of selectedCases) {
     const r = await lane(sc);
     const summary = {committed: r.committed.trim(), cumulative: r.obs.cumulative,

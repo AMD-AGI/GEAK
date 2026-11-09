@@ -44,6 +44,29 @@ Check applicability to a child and verify every combined source independently. L
 are unavailable unless shared; use bounded-context overflow references where relevant. These
 records guide the next experiment and never change the official evaluator or candidate score.
 
+### Unverified source recovery
+
+When `UNVERIFIED_SOURCE_RECOVERY:true` is supplied, this rule replaces save-only-on-improvement
+instructions for an implementation whose evaluation has not completed. Before entering a potentially
+blocking GPU evaluation, save the concrete changed source with `save_candidate_patch.sh`. Use the
+initial private-workspace commit from `OUTPUT_DIR/workspace_base_commit.txt`, never a later HEAD.
+If no correct measured development beyond the starting program is saved, use `best_patch.diff` so
+the ordinary verifier can qualify it even after an interrupted engineer call. Never overwrite a
+saved correct measured development with an unmeasured iteration; retain that additional attempt
+under a distinct patch/report filename instead. Do not change the canonical incumbent.
+
+If returning an unmeasured attempt, leave the workspace at its saved bytes and return the same
+`worker_result.json` through StructuredOutput: `status:partial`, `measurement_valid:false`, empty
+`per_case`, no inherited evaluation IDs or scores, and required numeric speedups as zero placeholders.
+State explicitly that timing is unavailable, not measured zero. Preserve any completed correctness
+result with its source and receipt; otherwise correctness is unknown. Never infer a pass from missing timing.
+Record the immutable base, source/patch paths, available hashes, evaluation failure/timeout evidence
+and next required qualification in `evidence_context.evidence_refs` and `notes`. Keep a known
+correctness failure distinct from an evaluation that did not execute. Available evaluation remains
+required; source recovery does not justify stopping early or consuming final-validation reserves.
+The host's existing source pin and independent verifier decide custody and qualification. An
+unmeasured source has no fitness and cannot replace the incumbent or enter delivery as a gain.
+
 ### Measurement conditions and repeated observations
 
 In the report and returned `evidence_context`, label each timing observation's
