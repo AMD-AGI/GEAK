@@ -298,10 +298,16 @@ def resolve_sku(sku=None, dtype="fp16", peak_tflops=None, peak_hbm_bw=None,
         base.update({"arch": None, "lds_per_cu_kib": None, "vgpr_per_simd": None,
                      "vgpr_per_wave": None, "wave_size": None})
         label = "manual-peaks"
+    memory = _hwdata.memory_peak(base)
+    base["peak_hbm_tb_s"] = memory["value_tb_s"]
+    base["peak_hbm_basis"] = memory["basis"]
+    base["peak_hbm_source_field"] = memory["source_field"]
     if peak_tflops is not None:
         base["peak_tflops_fp16"] = peak_tflops
     if peak_hbm_bw is not None:
         base["peak_hbm_tb_s"] = peak_hbm_bw
+        base["peak_hbm_basis"] = "hand-entered"
+        base["peak_hbm_source_field"] = None
     if lds_per_cu is not None:
         base["lds_per_cu_kib"] = lds_per_cu
     if vgpr_per_simd is not None:
