@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Triton-family harness generator (adapted from perf-geak; defaults to Gluon).
+"""Triton-family search harness skeleton generator.
 
 A GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/; the Gluon pack keeps a shim at
 scripts/create_harness.py).
 
 Generates an isolated test-harness skeleton for a Triton/Gluon kernel with four
 modes (--correctness / --profile / --benchmark / --full-benchmark) plus --sweep-one.
-The generated harness includes a Gluon layout-factory skeleton and TODO sections the
+The generated harness includes a layout-factory skeleton only for Gluon, and TODOs the
 agent must fill (reference shapes, oracle, launch). It does NOT auto-edit the user's kernel.
 
 Measurement and correctness are NOT implemented in the skeleton: it calls GEAK's
 e2e_workflow/scripts/harness_lib.py (`time_op(detail=True)`: CUDA events, per-sample sync,
 read-evict flush, median; `check_correct_multi` / `correct`). The generated file emits, per
 case, `GEAK_RESULT_LATENCY_MS=<float> case_id=<id>` (kernel_workflow/roles/benchmark_engineer.md),
-and per-case correctness JSON with exit 0 pass | 1 fail | 2 not runnable (unfilled skeleton:
-HARNESS_UNFILLED, rc 2). Its numbers are search/screening numbers; acceptance comes from GEAK
+and per-case correctness JSON with exit 0 pass | 1 fail | 2 environment error | 3 incomplete skeleton (unfilled skeleton:
+UT_HARNESS_INCOMPLETE, rc 3). Its numbers are search/screening numbers; acceptance comes from GEAK
 verify (harness_lib.measure_legs).
 
 Usage:
@@ -51,11 +51,14 @@ def extract_triton_kernels(kernel_path: str):
     return out
 
 
+GLUON_LAYOUT = '# --- Gluon layout factory skeleton (host-side; pass as gl.constexpr) -----\ndef make_blocked_layout(size_per_thread, threads_per_warp, warps_per_cta, order):\n    # from triton.experimental.gluon import language as gl\n    # return gl.BlockedLayout(size_per_thread, threads_per_warp, warps_per_cta, order)\n    raise NotImplementedError("TODO: build the BlockedLayout for the load tile")\n\n\n'
+
+
 TEMPLATE = '''#!/usr/bin/env python3
 """Auto-generated tile-programming harness for `{kernel_name}` ({kernel_type}).
 
 Fill every TODO before use. Keep imports/cache/shapes IDENTICAL across the plain
-baseline, the Gluon anchor, and every candidate (benchmark hygiene).
+baseline and every candidate (benchmark hygiene).
 
 Timing and correctness go through GEAK's e2e_workflow/scripts/harness_lib.py -- the single
 owner of measurement in GEAK: CUDA-event device time, a sync per sample, a read-evict cache
@@ -65,12 +68,12 @@ beside this file, then the GEAK checkout this skeleton was generated from.
 
 Output contract (kernel_workflow/roles/benchmark_engineer.md):
   --correctness      one JSON line per case {{"case", "correct", "max_rel_err"}}, then
-                     CORRECTNESS PASS|FAIL; exit 0 pass | 1 fail | 2 not runnable
+                     CORRECTNESS PASS|FAIL; exit 0 pass | 1 fail | 2 environment error | 3 incomplete skeleton
   --benchmark        one `GEAK_RESULT_LATENCY_MS=<ms> case_id=<id>` line PER CASE (30 iters,
   --full-benchmark   10 warmup / 100 iters, 10 warmup) + `GEAK_RESULT_GEOMEAN_MS=<ms>`
   --profile          one launch, minimal allocations, for a profiler attach
   --sweep-one        one config (PA_* env) -> PA_METER + one GEAK_RESULT_LATENCY_MS line
-An unfilled skeleton REFUSES every mode: HARNESS_UNFILLED on stderr, exit 2.
+An unfilled skeleton REFUSES every mode: UT_HARNESS_INCOMPLETE on stderr, exit 3.
 These numbers are SEARCH/SCREENING numbers. Acceptance numbers come from GEAK verify
 (harness_lib.measure_legs: fresh process per leg, interleaved pairs).
 """
@@ -80,7 +83,11 @@ import math
 import os
 import sys
 
-import torch
+try:
+    import torch
+except ImportError as exc:
+    print(f"HARNESS_ENV_ERROR: {{exc}}", file=sys.stderr)
+    raise SystemExit(2) from exc
 
 # --- imports -------------------------------------------------------------
 # Plain Triton:
@@ -95,13 +102,7 @@ DEVICE = "cuda"  # ROCm exposes HIP devices through the torch cuda API
 _GEN_HARNESS_LIB = {harness_lib_path!r}
 
 
-# --- Gluon layout factory skeleton (host-side; pass as gl.constexpr) -----
-def make_blocked_layout(size_per_thread, threads_per_warp, warps_per_cta, order):
-    # from triton.experimental.gluon import language as gl
-    # return gl.BlockedLayout(size_per_thread, threads_per_warp, warps_per_cta, order)
-    raise NotImplementedError("TODO: build the BlockedLayout for the load tile")
-
-
+{layout_factory}
 # The kernel's OWN default for every knob the sweep may pin. Filling this is what lets a sweep
 # certify a one-knob winner: `plain_autotune.py`'s widest exhaustive phase is the default + one-knob
 # floor, whose entries name a single knob and leave the rest at these values -- values the sweeper
@@ -174,6 +175,7 @@ def _load_harness_lib():
 def check_correctness():
     """harness_lib.check_correct_multi (built on harness_lib.correct): every case's output is kept
     live until all are compared, which also catches an aliased/static output buffer."""
+    _require_filled()
     h = _load_harness_lib()
     cases = []
     for i, shape in enumerate(SHAPES_QUICK or SHAPES_FULL):
@@ -197,6 +199,7 @@ def _time(inp, warmup, repeats):
 
 def benchmark(full=False):
     shapes = SHAPES_FULL if full else SHAPES_QUICK
+    _require_filled(shapes)
     warmup, repeats = (10, 100) if full else (10, 30)
     repeats = int(os.environ.get("BENCH_REPEATS", repeats))
     _load_harness_lib()   # fail fast (rc 2, HARNESS_LIB_UNAVAILABLE) before building any input
@@ -269,17 +272,18 @@ def sweep_one():
     print(f"GEAK_RESULT_LATENCY_MS={{ms:.6f}} case_id={{case_id(shape, 0)}}")   # the marker plain_autotune parses
 
 
-def _require_filled():
+def _require_filled(shapes=None):
     """Refuse to run while this is still the generated skeleton.
 
     Both shape lists ship empty and every mode loops over them, so an unfilled harness printed
     nothing and exited 0 -- indistinguishable from a clean benchmark whose marker the caller
     missed. --correctness was worse: zero shapes checked still printed CORRECTNESS PASS.
     """
-    if not (SHAPES_QUICK or SHAPES_FULL):
-        print("HARNESS_UNFILLED: SHAPES_QUICK and SHAPES_FULL are both empty -- this is still "
-              "the generated skeleton. Fill the TODOs before measuring anything.", file=sys.stderr)
-        raise SystemExit(2)
+    selected = (SHAPES_QUICK or SHAPES_FULL) if shapes is None else shapes
+    if not selected:
+        print("UT_HARNESS_INCOMPLETE: the selected shape list is empty -- fill "
+              "the TODOs before measuring anything.", file=sys.stderr)
+        raise SystemExit(3)
 
 
 def main():
@@ -305,20 +309,25 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except NotImplementedError as exc:
+        print(f"UT_HARNESS_INCOMPLETE: fill launch/reference/input TODOs: {{exc}}", file=sys.stderr)
+        raise SystemExit(3) from exc
 '''
 
 
 def default_harness_lib() -> str:
     """e2e_workflow/scripts/harness_lib.py of the GEAK checkout this generator lives in."""
-    return str((Path(__file__).resolve().parents[3] / "e2e_workflow" / "scripts"
-                / "harness_lib.py"))
+    return str(Path(__file__).resolve().parents[3] / "e2e_workflow" / "scripts"
+                / "harness_lib.py")
 
 
 def render(kernel_name, kernel_type, kernel_path, harness_lib_path=None) -> str:
     return TEMPLATE.format(kernel_name=kernel_name, kernel_type=kernel_type,
                            kernel_path=kernel_path,
-                           harness_lib_path=harness_lib_path or default_harness_lib())
+                           harness_lib_path=harness_lib_path or default_harness_lib(),
+                           layout_factory=GLUON_LAYOUT if kernel_type == "gluon" else "")
 
 
 def selftest() -> int:
@@ -350,22 +359,21 @@ def selftest() -> int:
             assert banned not in body, f"hand-rolled timing/write-evict left in the template: {banned}"
 
         # Before the guard, --benchmark exited 0 having printed nothing and --correctness exited 0
-        # printing CORRECTNESS PASS on zero shapes checked. rc 2 + HARNESS_UNFILLED, every mode.
+        # printing CORRECTNESS PASS on zero shapes checked. rc 3 + UT_HARNESS_INCOMPLETE, every mode.
         assert_refuses(harness, ["--correctness", "--benchmark", "--full-benchmark",
                                  "--profile", "--sweep-one"])
 
-        # A filled harness must NOT be refused -- guards against a future check that is so eager
-        # it blocks the real thing.
+        # Shapes alone do not finish a skeleton: unfilled launch/input/reference TODOs remain incomplete.
         filled = harness.read_text().replace("SHAPES_QUICK = [", "SHAPES_QUICK = [dict(M=1),")
         harness.write_text(filled)
         rc, out = run_skeleton(harness, ["--benchmark"])
-        assert "HARNESS_UNFILLED" not in out, f"filled harness still refused\n{out}"
+        assert rc == 3 and "input TODOs" in out, f"unfilled launch was not refused\n{out}"
 
         # An explicit GEAK_HARNESS_LIB that does not exist is an error (rc 2), not a fallback.
         import os as _os
         import subprocess as _sp
         env = dict(_os.environ, PYTHONPATH=str(d), GEAK_HARNESS_LIB=str(d / "nope"))
-        r = _sp.run([sys.executable, str(harness), "--benchmark"], capture_output=True, text=True,
+        r = _sp.run([sys.executable, str(harness), "--benchmark"], capture_output=True, text=True, check=False,
                     env=env, cwd=str(d), timeout=60)
         assert r.returncode == 2 and "HARNESS_LIB_UNAVAILABLE" in r.stderr, (r.returncode, r.stderr)
 
@@ -393,19 +401,19 @@ def selftest() -> int:
         harness.write_text(filled)
         env = dict(_os.environ, PYTHONPATH=str(d))
         env.pop("GEAK_HARNESS_LIB", None)
-        r = _sp.run([sys.executable, str(harness), "--benchmark"], capture_output=True,
+        r = _sp.run([sys.executable, str(harness), "--benchmark"], capture_output=True, check=False,
                     text=True, env=env, cwd=str(d), timeout=60)
         lat = [ln for ln in r.stdout.splitlines() if ln.startswith("GEAK_RESULT_LATENCY_MS=")]
         assert r.returncode == 0 and len(lat) == 2, (r.returncode, r.stdout, r.stderr)
         assert all("case_id=M=" in ln for ln in lat), lat
         assert "GEAK_RESULT_GEOMEAN_MS=" in r.stdout and '"read-evict"' in r.stdout, r.stdout
-        r = _sp.run([sys.executable, str(harness), "--correctness"], capture_output=True,
+        r = _sp.run([sys.executable, str(harness), "--correctness"], capture_output=True, check=False,
                     text=True, env=env, cwd=str(d), timeout=60)
         assert r.returncode == 1 and "CORRECTNESS FAIL" in r.stdout, (r.returncode, r.stdout, r.stderr)
         from parse_correctness import parse_geak
         verdict = parse_geak(r.stdout, r.returncode)
         assert verdict["status"] == "fail" and len(verdict["cases"]) == 2, verdict
-        r = _sp.run([sys.executable, str(harness), "--sweep-one"], capture_output=True,
+        r = _sp.run([sys.executable, str(harness), "--sweep-one"], capture_output=True, check=False,
                     text=True, env=env, cwd=str(d), timeout=60)
         assert r.returncode == 0 and r.stdout.count("GEAK_RESULT_LATENCY_MS=") == 1, (r.stdout, r.stderr)
         assert '"cache": "read-evict"' in r.stdout, r.stdout
