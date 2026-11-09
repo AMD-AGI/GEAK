@@ -74,11 +74,11 @@ def _json_docs(text):
 
 
 def _cases_in(obj, out):
-    """Collect per-case dicts (anything carrying `correct` or `max_rel_err`) from a JSON value."""
+    """Collect verdict/metric dicts, including children of a summary carrying its own verdict."""
     if isinstance(obj, dict):
         if "correct" in obj or "max_rel_err" in obj:
             out.append(obj)
-            return out
+        # A summary's correct=true must not hide a failed or invalid nested case.
         for v in obj.values():
             _cases_in(v, out)
     elif isinstance(obj, list):
