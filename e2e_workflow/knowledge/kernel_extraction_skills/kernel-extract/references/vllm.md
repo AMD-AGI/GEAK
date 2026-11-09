@@ -71,6 +71,22 @@ including shape and detailed phase annotations on builds that expose them.
 On builds without the per-request profiler fields, use the existing time-bounded
 vLLM serving adapter and explicitly account for that alternative capture scope.
 
+Every probe invocation sends a fresh `cache_salt` on its completion requests.
+This requires vLLM's completion API to support prefix-cache salting. It preserves
+the reproducible `--seed` while preventing earlier points (or an earlier attempt
+at the same point) from satisfying the prompt through prefix-cache reuse. It does
+not flush the server's cache or disable caching for the measured baseline.
+
+For vLLM PREFILL, `new_tokens` is the aggregate scheduled-token count of a step;
+`running` includes resident decode requests and must not multiply that count.
+The probe sends one uncached prompt of `new_tokens` tokens. Exact phase/token-count
+verification remains mandatory. The result's `capture_scope` and journal record
+that this is an aggregate-token diagnostic: it does **not** reproduce the original
+request mixture or cached attention context. In particular, a passing M check is
+not evidence that attention costs represent the measured workload's context or
+that a mixed step has been faithfully replayed. Use a separate context/mix-aware
+capture before making those claims.
+
 The trace directory above is a point subdirectory of the server's configured
 profiler root. vLLM writes prefix-named files to that root; the probe links the
 current point's new traces into its subdirectory. Request and window limits remain

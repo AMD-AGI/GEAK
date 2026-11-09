@@ -45,6 +45,7 @@ import json
 import os
 import random
 import re
+import secrets
 import sys
 from pathlib import Path
 import time
@@ -68,6 +69,7 @@ FRAMEWORK = "sglang"
 SERVED_MODEL = None
 ITERATION_LOG_DIR = None
 ID_HI = 150000
+CACHE_SALT = None
 
 
 def scrape_metrics(base, timeout=30):
@@ -139,15 +141,21 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
         endpoint = "/v1/completions"
         body = {"model": SERVED_MODEL, "prompt": ids, "max_tokens": max_new_tokens,
                 "temperature": 0.0, "ignore_eos": True}
+        if CACHE_SALT is not None:
+            # Isolate this invocation without flushing the live server's prefix cache.
+            # The seed stays reproducible, including when retrying the same point.
+            body["cache_salt"] = CACHE_SALT
     t0 = time.time()
     try:
         post(base, endpoint, body, timeout=timeout)
         journal.append({"event": "request_done", "label": label,
                         "prompt_tokens": len(ids), "max_new_tokens": max_new_tokens,
                         "wall_s": round(time.time() - t0, 2)})
+        return True
     except Exception as exc:
         journal.append({"event": "request_failed", "label": label, "error": str(exc),
                         "wall_s": round(time.time() - t0, 2)})
+        return False
 
 
 def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0):
@@ -377,8 +385,24 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
 
 # --------------------------------------------------------------------------- #
 def drive_prefill(base, point, args, journal):
-    """One request per intended sequence, each long enough to produce the token count."""
+    """Drive the aggregate scheduled-token target; retain reconstruction limits."""
     toks = int(point["new_tokens"])
+    if FRAMEWORK == "vllm":
+        # new_tokens is the whole scheduler step's M, including mixed steps.
+        # running counts resident requests, not the number of new prompts. Sending
+        # running copies of M multiplies the target and triggers chunk splitting.
+        # A single uncached prompt targets M reliably, but does not recreate the
+        # original sequence mixture or its cached attention context.
+        scope = {"kind": "aggregate_token_prefill", "verified_axes": ["phase", "new_tokens"],
+                 "prompt_requests": 1, "prompt_tokens": toks,
+                 "planned_running": point.get("running"),
+                 "planned_cached_tokens": point.get("cached_tokens"),
+                 "reproduces_request_mix": False, "reproduces_cached_context": False}
+        journal.append({"event": "request_geometry", **scope})
+        if not generate(base, rand_ids(toks, args.seed), 1, journal,
+                        "prefill_aggregate", args.request_timeout):
+            raise RuntimeError("vLLM aggregate prefill request failed; see request_failed")
+        return scope
     nseq = int(point.get("running") or 1)
     # max_new_tokens=1 keeps the request in prefill: we are measuring the context
     # forward, and a long generation would mix decode into the window.
@@ -428,9 +452,10 @@ def main():
     ap.add_argument("--vocab-size", type=int)
     ap.add_argument("--expect-files", type=int, default=1)
     args = ap.parse_args()
-    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI
+    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI, CACHE_SALT
     FRAMEWORK, SERVED_MODEL = args.framework, args.served_model
     ITERATION_LOG_DIR = args.iteration_log_dir
+    CACHE_SALT = secrets.token_hex(16) if FRAMEWORK == "vllm" else None
     if FRAMEWORK == "vllm" and not SERVED_MODEL:
         ap.error("--served-model is required for vLLM")
     if args.vocab_size is not None and args.vocab_size < 1:
@@ -438,7 +463,8 @@ def main():
     ID_HI = min(150000, args.vocab_size - 1) if args.vocab_size else 31999
     os.makedirs(args.trace_dir, exist_ok=True)
 
-    plan = json.load(open(args.points))
+    with open(args.points) as fh:
+        plan = json.load(fh)
     pts = [p for p in plan["points"] if p["point_id"] == args.point_id]
     if not pts:
         raise SystemExit("serving_probe: no point %r in %s. Have: %s"
@@ -448,6 +474,7 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
+                "request_seed": args.seed, "cache_salt": CACHE_SALT,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
     server_dir = args.server_trace_dir or args.trace_dir
@@ -455,6 +482,7 @@ def main():
     ok = False
     verify = {}
     ex = None
+    capture_scope = None
 
     try:
         if phase == "DECODE":
@@ -491,7 +519,7 @@ def main():
             # there is no resident state to confirm. The window is still bounded by
             # num_steps and still closed explicitly.
             start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
-            drive_prefill(args.base_url, point, args, journal)
+            capture_scope = drive_prefill(args.base_url, point, args, journal)
         ok = True
     except Exception as exc:
         journal.append({"event": "probe_failed", "error": "%s: %s"
@@ -526,6 +554,7 @@ def main():
         "verify_reason": verify.get("reason"),
         "wall_s": round(time.time() - t_start, 1),
         "traces": written[:12],
+        "capture_scope": capture_scope,
         "journal": journal,
     }
     with open(args.out, "w") as fh:

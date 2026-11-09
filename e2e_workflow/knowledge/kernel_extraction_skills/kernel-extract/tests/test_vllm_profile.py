@@ -42,6 +42,8 @@ class VllmProfileTest(unittest.TestCase):
         patch.object(probe, "FRAMEWORK", "vllm").start()
         patch.object(probe, "SERVED_MODEL", "served-model").start()
         patch.object(probe, "ITERATION_LOG_DIR", None).start()
+        patch.object(probe, "CACHE_SALT", None).start()
+        patch.object(probe, "ID_HI", 150000).start()
 
     def test_observer_preserves_return_and_records_geometry_without_payloads(self):
         result = object()
@@ -187,6 +189,89 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(args[2], {"model": "served-model", "prompt": [1, 2, 3],
                                    "max_tokens": 8, "temperature": 0.0, "ignore_eos": True})
         self.assertEqual(journal[0]["event"], "request_done")
+
+    def test_prefill_uses_step_token_total_not_running_request_multiplier(self):
+        point = {"phase": "PREFILL", "new_tokens": 4244, "running": 8,
+                 "cached_tokens": 558533}
+        args = types.SimpleNamespace(seed=1234, request_timeout=30)
+        journal = []
+        with patch.object(probe, "post", return_value="{}") as post:
+            scope = probe.drive_prefill("http://server", point, args, journal)
+        post.assert_called_once()
+        body = post.call_args.args[2]
+        self.assertEqual(len(body["prompt"]), 4244)
+        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual(scope["planned_running"], 8)
+        self.assertEqual(scope["prompt_requests"], 1)
+        self.assertFalse(scope["reproduces_request_mix"])
+        self.assertFalse(scope["reproduces_cached_context"])
+        self.assertEqual(journal[0]["event"], "request_geometry")
+
+    def test_prefill_request_error_is_not_a_successful_capture(self):
+        args = types.SimpleNamespace(seed=1234, request_timeout=30)
+        journal = []
+        with patch.object(probe, "post", side_effect=RuntimeError("HTTP 400")):
+            with self.assertRaisesRegex(RuntimeError, "prefill request failed"):
+                probe.drive_prefill("http://server", {"new_tokens": 4244, "running": 8}, args, journal)
+        self.assertEqual(journal[-1]["event"], "request_failed")
+
+    def test_cli_isolates_prefix_cache_across_points_and_same_seed_retries(self):
+        """A short prompt is a prefix of the long one; every invocation must recompute it."""
+        plan = self.root / "points.json"
+        plan.write_text(json.dumps({"points": [
+            {"point_id": "long", "phase": "PREFILL", "new_tokens": 16384, "running": 8},
+            {"point_id": "short", "phase": "PREFILL", "new_tokens": 4244, "running": 8}]}))
+        cache, bodies, computed = {}, [], []
+        def cached_server(base, endpoint, body, **kwargs):
+            salt, prompt = body.get("cache_salt"), body["prompt"]
+            matched = 0
+            for old in cache.get(salt, []):
+                common = 0
+                for a, b in zip(old, prompt):
+                    if a != b:
+                        break
+                    common += 1
+                matched = max(matched, (common // 16) * 16)
+            computed.append(len(prompt) - matched)
+            cache.setdefault(salt, []).append(prompt)
+            bodies.append(body)
+            return "{}"
+        with patch.object(probe, "post", side_effect=cached_server), \
+                patch.object(probe, "start_profile"), patch.object(probe, "stop_profile"), \
+                patch.object(probe, "traces_written", return_value=[{"path": "test.trace.json", "bytes": 1}]), \
+                patch.object(probe, "verify_trace", return_value={"verified": True, "reason": "test"}), \
+                patch.object(sys, "stdout", new_callable=io.StringIO):
+            for index, pid in enumerate(("long", "short", "short")):
+                out = self.root / (str(index) + ".json")
+                argv = ["serving_probe.py", "--framework", "vllm", "--served-model", "model",
+                        "--points", str(plan), "--point-id", pid, "--seed", "1234",
+                        "--trace-dir", str(self.root / "traces"), "--out", str(out)]
+                with patch.object(sys, "argv", argv):
+                    self.assertEqual(probe.main(), 0)
+                result = json.loads(out.read_text())
+                self.assertEqual(result["journal"][0]["cache_salt"], bodies[-1]["cache_salt"])
+                self.assertFalse(result["capture_scope"]["reproduces_cached_context"])
+        self.assertEqual(computed, [16384, 4244, 4244])
+        self.assertEqual(bodies[0]["prompt"][:4244], bodies[1]["prompt"])
+        self.assertEqual(bodies[1]["prompt"], bodies[2]["prompt"])
+        self.assertEqual(len({body["cache_salt"] for body in bodies}), 3)
+
+    def test_wrong_prefill_shape_stays_partial(self):
+        trace = self.root / "cached.trace.json"
+        trace.write_text(json.dumps({"traceEvents": [
+            {"name": "execute_4_context_1(sq4sk4244)_generation_0(sq0sk0)",
+             "cat": "gpu_user_annotation", "ph": "X", "ts": 0, "dur": 10, "pid": 1, "tid": 1},
+            {"name": "kernel", "cat": "kernel", "ph": "X", "ts": 1, "dur": 1, "pid": 1, "tid": 1}]}))
+        result = probe.verify_trace([{"path": str(trace)}], "PREFILL", "new_tokens", 4244, [])
+        self.assertEqual(result["verified"], "partial")
+        self.assertFalse(result["exact_shape_present"])
+
+    def test_sglang_request_does_not_receive_vllm_cache_salt(self):
+        with patch.object(probe, "FRAMEWORK", "sglang"), patch.object(probe, "CACHE_SALT", "salt"), \
+                patch.object(probe, "post", return_value="{}") as post:
+            probe.generate("http://server", [1, 2], 1, [], "sglang")
+        self.assertEqual(post.call_args.args[1], "/generate")
+        self.assertNotIn("cache_salt", post.call_args.args[2])
 
     def test_profile_rpc_uses_vllm_fields(self):
         with patch.object(probe, "post", return_value="{}") as post:
