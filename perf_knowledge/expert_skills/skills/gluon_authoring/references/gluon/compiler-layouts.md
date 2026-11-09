@@ -76,6 +76,8 @@ Choose WMMA constructor arguments from the installed signature. For padding,
 use `compute_efficient_padded_shared_layout` only when available and applicable to
 CDNA4. Treat a `None` result as unsupported for those inputs. Validate the selected
 layout with the actual load/store/async-copy path; construction alone is insufficient.
+The [gfx950 validation procedure](gfx950-validation.md) provides a runnable native
+GEMM smoke and a separate shared-memory candidate survey with per-case results.
 
 ## Independent hardware queries
 
