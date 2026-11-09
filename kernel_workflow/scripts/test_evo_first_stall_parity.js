@@ -238,7 +238,20 @@ const SCENARIOS = [
       r1: {stop: false, reasoning: 'r1', directions: [d('r1_d0', 'memory')]},
       r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute')]}},
     onPlan: cutAt('r3'), eng: {r1_d0: {speed: 0.90}, r2_d0: {speed: 1.25}}, verify: {r1_d0: 0.90, r2_d0: 1.25}},
+  // Default-off factor: after the stall an engineer returns its unmeasured final implementation.
+  {name: 'development_fallback', divergeAt: 'tech_lead:plan r3', incumbent: 1.30,
+    args: {evolution_return_development: true}, plans: {
+      r1: {stop: false, reasoning: 'r1', directions: [d('r1_d0', 'memory')]},
+      r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute')]},
+      r3: {stop: false, reasoning: 'r3', directions: [d('r3_d0', 'algorithm')]},
+      r4: {stop: false, reasoning: 'r4', directions: [d('r4_d0', 'memory', {parent_id: 'r3_d0', approach: 'continue'})]}},
+    onPlan: cutAt('r5'), eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.29}, r4_d0: {speed: 1.45},
+      r3_d0: {speed: 1.20, engineer: {status: 'partial', measurement_valid: false, speedup_geomean: 0,
+        speedup_weighted: 0, speedup_arithmetic: 0, per_case: [], strategy: 'fixture unmeasured attempt',
+        notes: 'unmeasured development fallback; zeros are required sentinels, not measurements'}}},
+    verify: {r1_d0: 1.30, r2_d0: 1.29, r4_d0: 1.45}},
 ];
+const FALLBACK = 'Development fallback';
 (async () => {
   for (const sc of SCENARIOS) {
     const g = await runMode('greedy', sc, TEMPLATE), e = await runMode('evo', sc, TEMPLATE);
@@ -266,7 +279,42 @@ const SCENARIOS = [
       assert.equal(field(e.calls[first].prompt, 'HISTORY').evolution_start.first_round, firstEvoRound,
         `${sc.name}: the first differentiated round is recorded`);
     }
+    if (sc.args?.evolution_return_development !== true) {
+      assert.ok(![...g.calls, ...e.calls].some(c => c.prompt.includes(FALLBACK)), `${sc.name}: fallback is off by default`);
+    }
     console.log(`  ok: ${sc.name} (${g.calls.length}/${e.calls.length} calls, first divergence ${first === null ? 'none' : e.calls[first].label})`);
+  }
+  {
+    const sc = SCENARIOS.find(s => s.name === 'development_fallback');
+    const g = await runMode('greedy', sc, TEMPLATE), e = await runMode('evo', sc, TEMPLATE);
+    assert.ok(!g.calls.some(c => c.prompt.includes(FALLBACK)), 'greedy never receives the fallback');
+    const engineer = id => e.calls.find(c => /^(eng|deep) /.test(c.label) && c.label.split(' ')[1].startsWith(`${id}:`));
+    for (const id of ['r1_d0', 'r2_d0']) assert.ok(!engineer(id).prompt.includes(FALLBACK), `${id}: no fallback before the stall`);
+    for (const id of ['r3_d0', 'r4_d0']) assert.ok(engineer(id).prompt.includes(FALLBACK), `${id}: fallback after the stall`);
+    assert.match(engineer('r3_d0').prompt, /never justifies skipping an available evaluation/);
+    assert.match(engineer('r3_d0').prompt, /a correct measured but slower source stays under the existing return rules/);
+    assert.match(engineer('r3_d0').prompt, /a re-measured unchanged starting program is not such development/);
+    assert.match(engineer('r3_d0').prompt, /Never edit the canonical incumbent/);
+    assert.match(engineer('r3_d0').prompt, /native reproducible-gain requirements for qualified export and delivery remain unchanged/);
+    const plan = r => e.calls.find(c => c.label === `tech_lead:plan ${r}`).prompt;
+    assert.doesNotMatch(plan('r3'), /roles\/evolution\.md/, 'empty archive: the first post-stall plan has no archive policy');
+    assert.match(plan('r4'), /roles\/evolution\.md/, 'the returned attempt makes the next plan archive-aware');
+    assert.ok(e.calls.some(c => c.label === 'verify r3_d0'), 'an unmeasured return is still sent to the ordinary verifier');
+    const rows = Object.fromEntries(e.continuation_archive.entries.map(r => [r.id, r]));
+    const attempt = rows.r3_d0;
+    assert.ok(attempt.patch_ref && attempt.patch_ref.sha256 !== sha(''), 'the actual attempt is a retained non-empty source');
+    assert.equal(attempt.retention_error, null);
+    assert.equal(attempt.verified, false);
+    assert.equal(attempt.status, 'unverified');
+    assert.equal(attempt.speedup, null, 'no fitness without verification');
+    assert.equal(attempt.engineer.measurement_valid, false);
+    const child = rows.r4_d0;
+    assert.equal(child.parent_id, 'r3_d0');
+    assert.equal(child.evolution_context.initialization.parent_patch_ref.sha256, attempt.patch_ref.sha256,
+      'the unverified attempt is materialized as the selected parent');
+    assert.equal(child.verified, true);
+    assert.equal(e.result.final_speedup, 1.45, 'only the verified descendant is delivered');
+    console.log('  ok: development_fallback returns the unmeasured attempt as an unverified selectable row');
   }
   const evo = (await runMode('evo', SCENARIOS[1], TEMPLATE));
   const rows = Object.fromEntries(evo.continuation_archive.entries.map(r => [r.id, r]));
