@@ -93,6 +93,13 @@ see the disagreement rather than a single blended number that hides it.
    scope returns no numerical reference; emit unknown headroom. Exact MI308X
    uses its own derived reference with low confidence and cannot rank (§6 L1).
    Old explicit product-only calls remain low-confidence reference lookups.
+   For an explicit gfx115x reference, `resolve_peaks(..., cu=physical_cu_count)`
+   requires rocminfo's physical CU count. The generated 40-CU gfx1151 reference
+   is available at low confidence; other/missing/invalid counts are unknown.
+   It returns `scope=explicit_arch_cu_reference_only`, `sku=unknown` and
+   `reference_sku=AI_MAX_395`: a planning assumption, not proof of product identity.
+   A supplied context constrains the request; conflicting or named unknown devices
+   cannot fall back to this reference. Torch's 20 WGPs must not be passed as 40 CUs.
    Local SKU estimates are planning-only; native TraceLens retains independent
    models, calibration and report semantics. Use `peak_flops_for()` for precision
    lookup; a missing precision stays unknown.
@@ -243,7 +250,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | level | trigger | behavior |
 |---|---|---|
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
+| **L1** | no compatible product/resource reference | Emit unknown headroom; do not derive a device peak from ISA alone. Explicit reference lookups remain low-confidence, planning-only. |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
 | **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
@@ -266,15 +273,11 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
-One measured product override is available through
-`roofline_tools.target_eff_for(op_class, product)`:
-
-| product / class | `target_eff` | evidence |
-|---|---:|---|
-| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
-
-This override does not change dense-GEMM compute efficiency or paged-attention
-priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
+Every product uses the same generic op-class prior: `roofline_tools.TARGET_EFF`.
+The compatibility accessor `target_eff_for(op_class, product)` returns that same
+prior, including MoE 0.90 and elementwise 0.875 on R9700 and R9600D. A copy result
+from one board does not become a permanent product override. Keep measured
+calibration and its provenance separate from these planning assumptions.
 
 ### Routing table (the actual point of this skill)
 
