@@ -4,8 +4,8 @@
 WHY THIS EXISTS. The AMD Matrix Instruction Calculator (Tier 2 of
 kernel_workflow/scripts/kernel_tools/isa_tools.md) *generates* the operand layout table for cdna1/2/3 and
 rdna3/4 — but it has NO cdna4/gfx950 support, so for the one chip this pack targets by default
-the Tier-2 answer was a tool-gap and the only path was "render the PDF and read it by eye".
-This script closes that gap for the whole document, not just for matrix layout.
+hardware queries need a different provider. This script exposes committed PDF/XML
+facts; Triton separately supplies compiler layouts for its supported operations.
 
 Three committed databases, split by what each source can faithfully express:
 
@@ -39,9 +39,8 @@ HOW MUCH TO TRUST IT. The DB carries its own verification record and this tool s
 rather than hiding it. The layout rules matched the Matrix Instruction Calculator on
 11776/11776 elements across 10 CDNA3 instructions — the one check with no PDF in its chain —
 and 91/91 of the document's own worked examples. But that cross-check only covers what CDNA4
-INHERITS from CDNA3. Every genuinely new surface (the F8F6F4 opcodes, E8M0 scaling, 6-bit
-packing, the K=128 shapes, the new sparse shapes) rests on a single reading of one document,
-and `sparse`/`hazards` are marked "needs review". Commands print the applicable caveat; do not
+INHERITS from CDNA3. New F8F6F4, E8M0, 6-bit and sparse rules retain their recorded
+verification limits; `sparse`/`hazards` are marked "needs review". Commands print the applicable caveat; do not
 strip it when you quote the answer. Validate a low-precision layout numerically before you
 ship a kernel on it.
 
@@ -100,7 +99,7 @@ def _db_path(name):
 # Which databases exist per architecture, and therefore which subcommands can answer.
 #
 # gfx950 needs all three because the Matrix Instruction Calculator has no CDNA4 support, so
-# without them the ONLY path to any CDNA4 hardware fact was rendering the PDF. The other arches
+# they provide a queryable source for CDNA4 hardware facts. The other arches
 # are not in that position for layout: the calculator generates their chapter-7 tables exactly,
 # on demand, from the hardware rules -- so building a layout DB for them would be transcribing
 # something a tool already derives. What the calculator does NOT answer is chapters 12-13, and
@@ -460,7 +459,7 @@ def caveats_for(db, rec):
                    or (rec.get("in_type_a") or "") in ("f8f6f4", "fp6", "bf6", "fp4")
                    or (rec.get("k") or 0) >= 64)
     if new_surface:
-        out.append("CDNA4-NEW SURFACE: single-source evidence. " + v["standing_caveat"])
+        out.append("CDNA4-NEW SURFACE: " + v["standing_caveat"])
     if rec.get("sparse"):
         out.append(f"sparse[] verdict: {v['array_verdicts']['sparse']}")
     return out
@@ -493,6 +492,20 @@ def cmd_list(db, args):
 
 def cmd_facts(db, args):
     r = find_instr(db, args.instr)
+    as_fmt = getattr(args, "as_fmt", None)
+    variable_format = r.get("in_type_a") == "f8f6f4" or r.get("in_type_b") == "f8f6f4"
+    if as_fmt and not variable_format:
+        gap("facts --as applies only to format-selectable F8F6F4 instructions")
+    # Reuse the actual operand table, rather than maintaining another packing formula.
+    format_vg = {}
+    if as_fmt:
+        for operand in ("A", "B"):
+            guard_dense(db, r, operand)
+            eb = elem_bits_for(r, as_fmt, operand)
+            cells = {}
+            for block in range(r.get("blocks") or 1):
+                cells.update(_table(db, r, operand, eb, block, set(range(64))))
+            format_vg[operand] = max(fragment[0] for fragment in cells) + 1
     src = r.get("_src") or {}
     print(f"## {r['name']}  ({arch_label()})")
     print(f"  dims        M={r['m']} N={r['n']} K={r['k']} blocks={r.get('blocks')}"
@@ -508,14 +521,25 @@ def cmd_facts(db, args):
             xml_vg = _enc_vgprs(_enc_instr(r["name"]))
     parts = []
     for k in ("A", "B", "C/D"):
-        if vg[k] is not None:
+        if k in format_vg:
+            parts.append(f"{k}={format_vg[k]}")
+        elif variable_format and k in ("A", "B"):
+            parts.append(f"{k}=?")
+        elif vg[k] is not None:
             parts.append(f"{k}={vg[k]}")
         elif xml_vg.get(k) is not None:
             parts.append(f"{k}={xml_vg[k]}*")
         else:
             parts.append(f"{k}=?")
     print(f"  vgprs       {' '.join(parts)}"
-          + ("    (* from the ISA XML OperandSize, not the PDF)" if xml_vg else ""))
+          + ("    (* XML OperandSize declaration, not compiler allocation)" if "*" in " ".join(parts) else ""))
+    if variable_format:
+        print("  xml_operand_vgprs " + " ".join(f"{k}={xml_vg.get(k, '?')}" for k in ("A", "B"))
+              + " (encoding declaration; not format-specific usage)")
+        if as_fmt:
+            print(f"  format      A=B={as_fmt}; operand register span derived from layout/packing rules, not compiled allocation")
+        else:
+            print("  format      unspecified; use facts --as fp4|fp6|fp8 for equal A/B formats, or layout/locate separately for mixed formats")
     print(f"  flags       sparse={r.get('sparse')} scale={r.get('scale')} "
           f"cbsz_abid={r.get('cbsz_abid')} blgp={r.get('blgp')} opsel={r.get('opsel')}")
     print(f"  rules       A={r.get('layout_rule_a')} B={r.get('layout_rule_b')} "
@@ -1088,13 +1112,21 @@ def cmd_tables(db, args):
     sub = (args.substr or "").lower()
     # The compare-operation tables (59-62) live in the encoding DB because they are chapter-12
     # material; a caller asking for "Table 60" does not care which file it landed in.
-    pool = (fdb.get("tables") or []) + ((edb or {}).get("tables") or [])
+    pool = ((fdb.get("tables") or []) + ((edb or {}).get("tables") or [])
+            + [r for r in (db or {}).get("layout_rules", []) if r.get("verbatim_table")])
     rows = [r for r in pool
             if not sub or sub in json.dumps(r, ensure_ascii=False).lower()]
     if not rows:
         gap(f"no table matches {args.substr!r} among {len(pool)} transcribed tables")
     for r in rows:
         src = r.get("_src") or {}
+        if r.get("verbatim_table"):
+            print(f"## {r['id']} (source table excerpt; not a generated Gluon layout)")
+            for field in ("applies_to", "params", "placement", "verbatim_header", "verbatim_table", "notes"):
+                if r.get(field) is not None:
+                    print(f"  {field}: {json.dumps(r[field], ensure_ascii=False)}")
+            print(f"  # provenance: CDNA4 ISA p{src.get('printed_page')} (pdf p{src.get('pdf_page')}); conf={r.get('_conf')}\n")
+            continue
         print(f"## {r.get('number')}  {r.get('title') or ''}   [{r.get('id')}]")
         cols = r.get("columns") or []
         rows_ = r.get("rows") or []
@@ -1464,6 +1496,8 @@ def main(argv):
 
     s = sub.add_parser("facts", help="dims/cycles/dtypes/rules + trust verdict")
     s.add_argument("instr")
+    s.add_argument("--as", dest="as_fmt", choices=["fp4", "fp6", "fp8"],
+                   help="equal A/B formats for F8F6F4 operand register spans; mixed formats use layout/locate")
     s.set_defaults(fn=cmd_facts)
 
     s = sub.add_parser("layout", help="full lane/VGPR/bit table for one operand")

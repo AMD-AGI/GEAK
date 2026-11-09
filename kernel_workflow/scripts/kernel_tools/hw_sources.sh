@@ -143,8 +143,9 @@ if [ "${1:-}" = "preflight" ]; then
   if [ -n "$calcwhy" ]; then
     rc=1
     printf '  [!] Matrix Instruction Calculator %s\n' "$calcwhy"
-    printf '      It is the ONLY layout source for cdna1/2/3 and rdna3/4 (it has no cdna4\n'
-    printf '      support, which is why gfx950 ships a DB instead).\n'
+    printf '      This optional provider answers hardware matrix queries for cdna1/2/3 and rdna3/4.\n'
+    printf '      Gluon compiler layouts use installed Triton APIs; they do not require this provider.\n'
+    printf '      The calculator has no cdna4 support; gfx950 hardware queries use committed data.\n'
     printf '      Prepare the pinned calculator explicitly with prepare_matrix.py (dependencies.md),\n'
     printf '      or use preinstalled assets. Set TILE_HW_SEED or TILE_HW_TOOLS to\n'
     printf '      its asset root (containing amd_matrix_instruction_calculator/).\n'
