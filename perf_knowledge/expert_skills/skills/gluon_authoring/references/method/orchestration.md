@@ -100,7 +100,7 @@ its `GPU_ID`; every compile / correctness / timing / profile command of the deep
 bounded experiments — runs under that one id.
 
 ```bash
-cd <workspace> && bash kernel_workflow/scripts/gpu_lock.sh <gpu_id|pool> <command...>
+cd <workspace> && bash "$GEAK_ROOT/kernel_workflow/scripts/gpu_lock.sh" <gpu_id|pool> <command...>
 ```
 
 - **Single id** — `flock -x -w 1200` on that GPU for the whole command (error after 1200 s).
@@ -115,8 +115,9 @@ cd <workspace> && bash kernel_workflow/scripts/gpu_lock.sh <gpu_id|pool> <comman
   `PYTORCH_ROCM_ARCH` to the selected GPU's arch (ROCR-scoped), reaps orphaned `rocm_agent_enumerator`
   processes, and runs a source-provenance guard before and after the command — exit 86 /
   `GEAK_SOURCE_INVALID` means discard all measurement output from that invocation, even if it printed PASS.
-- Long runs: `bash scripts/wait_for.sh --run --log "$LOG" -- bash kernel_workflow/scripts/gpu_lock.sh <gpu_id> <cmd>`
-  (paths from the GEAK repo root; the pack-relative `scripts/gpu_lock.sh` shim resolves to the same script).
+- Long runs: `bash "$SKILL/scripts/wait_for.sh" --run --log "$LOG" -- bash "$GEAK_ROOT/kernel_workflow/scripts/gpu_lock.sh" <gpu_id> <cmd>`
+  (`GEAK_ROOT` and `SKILL` are absolute paths to the checkout and this pack; the Gluon lock shim
+  resolves to the same public script).
 - Profiling goes through `kernel_workflow/scripts/profile_kernel.sh <gpu_id> <cmd> <out>`, which takes the
   same lock ([`profile.md`](profile.md)).
 
@@ -164,7 +165,7 @@ profiler-degraded-mode classification). It reuses the existing timing / harness 
 rewrites timing, and returns the [records.md `### Experiment result`](records.md) shape into its own
 records. On compile / OOM / GPU-busy / import error it records the exact cause, runs the runnable subset and
 continues. A `ship` recommendation from such an experiment is a screening result: **acceptance numbers come
-only from `verify_engineer`** (`harness_lib`). A config the experiment shows is mis-tuned is a
+only from `verify_engineer`** executing the frozen task commands. A config the experiment shows is mis-tuned is a
 `resweep_request`, not something to sweep inside the track.
 
 **One process per patched variant:** a variant that patches the toolchain runs in its own process; there is

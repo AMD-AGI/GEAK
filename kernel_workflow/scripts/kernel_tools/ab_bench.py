@@ -5,11 +5,14 @@ The median is the ranking key. Optional identical-code controls measure a noise
 band; rotated arm order and --permute test sensitivity to order/window effects.
 A screen pass requires correctness evidence, valid device-timer receipts, complete
 rotation, and a speedup above both the noise floor and --min-improve-pct (default 2).
-That threshold is caller-configurable; final acceptance uses GEAK verify / measure_legs
-and the workflow's own deployment, workload and improvement requirements.
+That threshold is caller-configurable. GEAK verify runs the task's frozen COMMANDMENT
+commands for final acceptance, preserving its oracle, deployment, workload and improvement
+requirements. E2e-extracted tasks use harness_lib.measure_legs inside their immutable UT;
+other tasks retain their existing runner.
 
 Adapter contract (--module adapter.py):
   variants() -> {name: zero_argument_callable}. Construct/compile outside timing.
+    Names are non-empty strings; the __control__ prefix is reserved for internal controls.
   oracle(name) -> non-empty dict of numeric, finite, non-negative error metrics.
     Every metric must be <= --tol. Failed variants are excluded before timing.
   outputs(name), reference(name) -> tensors or matching nested tensor containers.
@@ -229,11 +232,11 @@ def collision_suspect(res, baseline):
 
 
 # --------------------------------------------------------------------------- the instrument
-# GEAK's harness_lib is the single owner of timing in GEAK. This file never times a kernel itself:
-# every sample comes from `harness_lib.time_op(detail=True)`, the same CUDA-event / per-sample sync /
-# read-evict / median instrument GEAK verify uses, so a screen and an acceptance number cannot
-# disagree because of the METER. (They still differ by process: acceptance is a fresh process per
-# leg, this is one process per window -- which is exactly why this is screening only.)
+# Every reported sample comes from `harness_lib.time_op(detail=True)`: CUDA events,
+# per-sample sync, read-evict and median. Reusing this primitive does not align the task's
+# deployment graph/compile mode, workload weighting or process isolation automatically.
+# Final acceptance uses the frozen COMMANDMENT through GEAK verify; e2e-extracted UTs
+# use fresh-process measure_legs internally, while other tasks retain their existing runner.
 _REPO_HARNESS_LIB = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
     "e2e_workflow", "scripts", "harness_lib.py"))
@@ -297,12 +300,12 @@ HOT_SAMPLES = 5
 def _time_cell(fn, hl, iters, budget_ms, cold, sync, warmup=1):
     """One cell's reading through harness_lib: (ms_per_call, effort, receipt).
 
-    cold (default, the acceptance protocol): `time_op(inner=1, repeats=iters)` -- one launch per
+    cold (default screening protocol): `time_op(inner=1, repeats=iters)` -- one launch per
       sample, a read-evict flush before every sample, CUDA-event device time, median.
     hot (SEARCH-ONLY diagnostic): `time_op(inner=N, repeats=HOT_SAMPLES)` with N sized from the
       budget -- each sample is one read-evict and then N back-to-back launches, so all but the first
-      read warm data. It is still harness_lib's events/sync/median; it is NOT what acceptance
-      measures, and a hot ranking may disagree with a cold one (measured: on a per-token quant
+      read warm data. It is still harness_lib's events/sync/median; a hot ranking may disagree
+      with the task's frozen benchmark or with a cold screen (measured: on a per-token quant
       kernel hot preferred the tuned config, cold the shipped one).
     Raises RuntimeError when time_op returns None (the variant raised under timing)."""
     if cold:
@@ -339,11 +342,20 @@ def gate_toolchain(mod, names):
     if len(set(ids.values())) > 1:
         return ids, ("arms need different toolchains " + json.dumps(ids, sort_keys=True) + " -- run "
                      "ONE window per toolchain (one process per toolchain-patched variant) and compare "
-                     "across them through GEAK verify / harness_lib.measure_legs, never in-process")
+                     "across them through the task's frozen commands in GEAK verify, never in-process")
     return ids, None
 
 
 CONTROL_PREFIX = "__control__"
+
+
+def validate_variant_names(names):
+    """Keep user variants distinct from synthetic controls before any gates or timing."""
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ValueError("variant names must be non-empty strings")
+        if name.startswith(CONTROL_PREFIX):
+            raise ValueError(f"variant name {name!r} uses reserved prefix {CONTROL_PREFIX!r}")
 
 
 def control_name(of: str) -> str:
@@ -372,6 +384,8 @@ def with_control(fns: dict, names: list, of: str) -> tuple[dict, list]:
     about any other position effect. So the control is a FIRST-CLASS member of `names` and rides
     the same per-cell rotation as every real arm -- see `rotation_coverage()` for the check that
     the rotation actually completed."""
+    validate_variant_names(fns)
+    validate_variant_names(names)
     if of not in fns:
         raise KeyError(of)
     cn = control_name(of)
@@ -567,8 +581,8 @@ def _selftest():
     assert math.isclose(fast_ms, 0.02) and math.isclose(slow_ms, 0.4)
     assert n_fast > n_slow * 3, (n_fast, n_slow)
 
-    # 0b. EVERY reading goes through harness_lib.time_op(detail=True). Cold = the acceptance
-    # protocol: ONE launch per sample (inner=1), `iters` samples, read-evict inside time_op.
+    # 0b. EVERY reading goes through harness_lib.time_op(detail=True). Cold screening uses
+    # ONE launch per sample (inner=1), `iters` samples, read-evict inside time_op.
     hl = _MockHL()
     ms, effort, rec = _time_cell(lambda: 0.25, hl, iters=7, budget_ms=100.0, cold=True, sync=nop)
     assert ms == 0.25 and effort == {"inner": 1, "repeats": 7}, (ms, effort)
@@ -757,7 +771,7 @@ def _selftest():
         assert payload["cache"] == "cold" and payload["instrument"]["timer"].startswith(
             "harness_lib.time_op"), payload
         assert payload["results"]["cand"]["screen"] == "pass", payload["results"]["cand"]
-        assert "measure_legs" in payload["role"], payload["role"]
+        assert "frozen COMMANDMENT" in payload["role"], payload["role"]
         env["GEAK_HARNESS_LIB"] = os.path.join(td, "missing")
         p = subprocess.run([sys.executable, os.path.abspath(__file__), "--module", adapter],
                            capture_output=True, text=True, check=False, env=env, timeout=120)
@@ -781,10 +795,11 @@ def main():
                     help="hot mode only: size each burst from the kernel's own measured duration "
                          "(default 100). 0 sizes it from --iters")
     ap.add_argument("--cache", choices=("cold", "hot"), default="cold",
-                    help="cold (default) = the acceptance protocol: harness_lib.time_op, one launch "
+                    help="cold (default) = harness_lib.time_op, one launch "
                          "per sample, a read-evict flush before every sample. hot = SEARCH-ONLY "
                          "diagnostic: one read-evict then a back-to-back burst per sample. Not a scale "
-                         "factor -- it can REVERSE a ranking, and acceptance is always read-evict")
+                         "factor -- it can REVERSE a ranking. Final acceptance uses the task's "
+                         "frozen benchmark commands")
     ap.add_argument("--flush-mb", type=int, default=None,
                     help="size of harness_lib's read-evict buffer (sets HARNESS_CACHE_FLUSH_MB; "
                          "default: harness_lib's own, 512)")
@@ -846,11 +861,15 @@ def main():
     names = list(fns.keys())
     if not names:
         sys.exit("variants() returned nothing")
+    try:
+        validate_variant_names(names)
+    except ValueError as e:
+        ap.error(str(e))
     sync = getattr(mod, "sync", _default_sync)
 
     proto = ("cold: harness_lib.time_op, 1 launch/sample, read-evict" if a.cache == "cold" else
              "HOT (search-only): read-evict + burst/sample")
-    print(f"=== ab_bench (SCREENING; acceptance = GEAK verify / harness_lib.measure_legs): "
+    print(f"=== ab_bench (SCREENING; acceptance = GEAK verify with frozen task commands): "
           f"{len(names)} variants, {a.cells} interleaved cells, {proto} ===")
     print(f"    instrument: {harness_lib_path()}")
 
@@ -958,7 +977,7 @@ def main():
         if res[n].get("note"):
             print(f"\n  {n}: {res[n]['note']}")
     if any(res[n].get("screen") == "pass" for n in passed):
-        print("\n  screen pass = worth a GEAK verify run (fresh process per leg, measure_legs). It "
+        print("\n  screen pass = worth a GEAK verify run using the frozen task commands. It "
               "is NOT an acceptance number and must not be recorded as one.")
 
     suspect = collision_suspect(res, baseline)
@@ -1000,8 +1019,9 @@ def main():
         print("\nSCREEN VALID: final results may be sent to GEAK verify; acceptance remains separate.")
 
     payload = {"schema_version": 2, "validity": {"valid": not invalid, "reasons": invalid},
-               "windows": windows, "role": ("search/screening -- acceptance numbers come from GEAK verify / "
-                        "e2e_workflow/scripts/harness_lib.py:measure_legs"),
+               "windows": windows, "role": ("search/screening -- acceptance comes from GEAK verify "
+                        "using the task's frozen COMMANDMENT commands; e2e-extracted UTs use "
+                        "harness_lib.measure_legs internally"),
                "instrument": {"timer": "harness_lib.time_op(detail=True)",
                               "path": harness_lib_path(), "receipts": receipts},
                "baseline": baseline, "cells": a.cells, "iters": a.iters, "tol": a.tol,

@@ -14,8 +14,11 @@ e2e_workflow/scripts/harness_lib.py (`time_op(detail=True)`: CUDA events, per-sa
 read-evict flush, median; `check_correct_multi` / `correct`). The generated file emits, per
 case, `GEAK_RESULT_LATENCY_MS=<float> case_id=<id>` (kernel_workflow/roles/benchmark_engineer.md),
 and per-case correctness JSON with exit 0 pass | 1 fail | 2 environment error | 3 incomplete skeleton (unfilled skeleton:
-UT_HARNESS_INCOMPLETE, rc 3). Its numbers are search/screening numbers; acceptance comes from GEAK
-verify (harness_lib.measure_legs).
+UT_HARNESS_INCOMPLETE, rc 3). Its numbers are search/screening numbers. GEAK verify executes
+the task's frozen COMMANDMENT commands for acceptance; e2e-extracted UTs use measure_legs
+internally. Reuse an existing task runner or immutable UT before creating a search skeleton.
+This generator refuses to overwrite an existing output file. It does not import workload
+weights or deployment graph/compile settings, or generate the complete random/replay suite.
 
 Usage:
   python3 create_harness.py --kernel-path /path/to/kernel.py \
@@ -60,9 +63,9 @@ TEMPLATE = '''#!/usr/bin/env python3
 Fill every TODO before use. Keep imports/cache/shapes IDENTICAL across the plain
 baseline and every candidate (benchmark hygiene).
 
-Timing and correctness go through GEAK's e2e_workflow/scripts/harness_lib.py -- the single
-owner of measurement in GEAK: CUDA-event device time, a sync per sample, a read-evict cache
-flush before every sample, median. Do not hand-roll a timing loop here. Resolution order for
+Timing and basic correctness checks use GEAK's e2e_workflow/scripts/harness_lib.py:
+CUDA-event device time, a sync per sample, a read-evict cache flush before every sample,
+median. Do not hand-roll a timing loop here. Resolution order for
 harness_lib: $GEAK_HARNESS_LIB (file or dir; must exist when set), a vendored harness_lib.py
 beside this file, then the GEAK checkout this skeleton was generated from.
 
@@ -74,8 +77,11 @@ Output contract (kernel_workflow/roles/benchmark_engineer.md):
   --profile          one launch, minimal allocations, for a profiler attach
   --sweep-one        one config (PA_* env) -> PA_METER + one GEAK_RESULT_LATENCY_MS line
 An unfilled skeleton REFUSES every mode: UT_HARNESS_INCOMPLETE on stderr, exit 3.
-These numbers are SEARCH/SCREENING numbers. Acceptance numbers come from GEAK verify
-(harness_lib.measure_legs: fresh process per leg, interleaved pairs).
+These numbers are SEARCH/SCREENING numbers. GEAK verify executes the task's frozen
+COMMANDMENT commands for acceptance; e2e-extracted UTs use harness_lib.measure_legs internally.
+Reuse an existing runner or immutable UT. This skeleton does not import workload weights or
+deployment graph/compile settings, or implement the complete random/replay correctness suite.
+Keep the task's oracle, tolerance, workload and deployment requirements in its frozen harness.
 """
 import argparse
 import json
@@ -430,7 +436,7 @@ def main():
     ap.add_argument("--kernel-path", required=True)
     ap.add_argument("--kernel-name", default=None)
     ap.add_argument("--kernel-type", default=None, choices=["triton", "gluon", "hip", "unknown"])
-    ap.add_argument("--output", required=True)
+    ap.add_argument("--output", required=True, help="new skeleton path; existing paths are never overwritten")
     ap.add_argument("--harness-lib", default=None,
                     help="GEAK e2e_workflow/scripts/harness_lib.py to bake in as the last-resort "
                          "location (default: this checkout's); $GEAK_HARNESS_LIB overrides at run time")
@@ -448,7 +454,12 @@ def main():
     if not Path(hl).is_file():
         sys.exit(f"harness_lib not found at {hl} -- pass --harness-lib <path to "
                  f"e2e_workflow/scripts/harness_lib.py>; the generated harness times through it")
-    out.write_text(render(kname, ktype, a.kernel_path, hl))
+    body = render(kname, ktype, a.kernel_path, hl)
+    try:
+        with out.open("x") as f:
+            f.write(body)
+    except FileExistsError:
+        ap.error(f"refusing to overwrite {out}; reuse the existing runner/UT or choose a new --output")
     print(f"wrote harness skeleton -> {out}  (kernel_type={ktype}, kernel={kname})")
     print("Fill every TODO before use; keep imports/cache/shapes identical across "
           "baseline and candidates.")

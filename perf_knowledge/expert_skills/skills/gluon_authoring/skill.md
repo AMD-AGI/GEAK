@@ -427,11 +427,12 @@ counters `VALUBusy` / `MfmaUtil`, not duty-cycle `VALUUtilization`. A PMC-blind 
 not a failed run. Full dial table and caveats:
 [`references/method/profile.md`](references/method/profile.md).
 
-**Acceptance timing is GEAK's `harness_lib`** — CUDA events with a sync per sample, read-evict cache flush,
-median, a fresh process per leg, the same-window baseline — and the commit gate is `MIN_IMPROVE`. `ab_bench.py`
+**Acceptance is GEAK verify executing the frozen `COMMANDMENT.md` commands.** Extracted-task
+runners use `harness_lib` and `measure_legs`; other tasks retain their existing protocol. The
+commit gate uses configured `MIN_IMPROVE`. `ab_bench.py`
 is a **screening** instrument on the same timer (read-evict cold by default, median headline, min as an extra
 field): its control arm, `--permute` and compiled-artifact `fingerprint()` catch cache collisions and position
-effects, and a screen pass needs both a delta beyond the measured noise band and the 2% gate. [`references/method/benchmark-hygiene.md`](references/method/benchmark-hygiene.md).
+effects, and a screen pass needs a delta beyond the measured noise band and the configured screening threshold (default 2%). [`references/method/benchmark-hygiene.md`](references/method/benchmark-hygiene.md).
 
 ### 6. Climb — one coupled layer per round, depth only
 

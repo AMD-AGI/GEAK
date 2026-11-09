@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 KT = Path(__file__).resolve().parents[1] / 'kernel_tools'
+GLUON_SCRIPTS = KT.parents[2] / 'perf_knowledge/expert_skills/skills/gluon_authoring/scripts'
 sys.path.insert(0, str(KT))
 import ab_bench as ab
 import amd_artifacts as artifacts
@@ -46,6 +47,40 @@ def test_geak_null_metric_and_missing_verdict():
     assert correctness.parse_geak('{"correct":true}', None)['status'] == 'pass'
 
 
+@pytest.mark.parametrize('summary', [{'correct': True}, {'max_rel_err': 0.0}])
+@pytest.mark.parametrize('child', [
+    {'case': 'bad', 'correct': False, 'max_rel_err': 0.4},
+    {'case': 'invalid', 'correct': True, 'max_rel_err': 'bad'},
+])
+def test_geak_summary_cannot_hide_nested_failure(summary, child):
+    text = json.dumps(dict(summary, report={'cases': [child]}))
+    result = correctness.parse_geak(text, 0)
+    assert result['status'] == 'fail'
+    assert child in result['cases']
+    assert correctness.parse_geak(text, 2)['status'] == 'unknown'
+    assert correctness.parse_geak(text, 3)['status'] == 'harness_incomplete'
+
+
+@pytest.mark.parametrize('scripts', [KT, GLUON_SCRIPTS], ids=['shared', 'gluon-shim'])
+@pytest.mark.parametrize('document,want_rc,want_status', [
+    ({'eager': [{'case': 'a', 'correct': True, 'max_rel_err': 0.001},
+                {'case': 'output_independence', 'correct': True, 'max_rel_err': None}],
+      'random': [{'case': 'r0', 'correct': True, 'max_rel_err': 0.002}]}, 0, 'pass'),
+    ({'correct': True, 'cases': [{'case': 'bad', 'correct': False}]}, 1, 'fail'),
+    ({'correct': False, 'cases': [{'case': 'good', 'correct': True}]}, 1, 'fail'),
+])
+def test_geak_parser_shared_and_legacy_cli(tmp_path, scripts, document, want_rc, want_status):
+    log, output = tmp_path / 'ut.log', tmp_path / 'correctness.json'
+    log.write_text(json.dumps(document))
+    proc = subprocess.run([sys.executable, str(scripts / 'parse_correctness.py'), '--log', str(log),
+                           '--parse', 'geak', '--exit-code', '0', '--out', str(output)],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == want_rc, proc.stderr
+    result = json.loads(output.read_text())
+    assert result['schema'] == 'correctness' and result['status'] == want_status
+    assert result['exit_code'] == 0
+
+
 def test_correctness_cli_emits_strict_json(tmp_path):
     log = tmp_path / 'check.log'
     log.write_text('{"correct": true, "max_rel_err": NaN}')
@@ -76,7 +111,35 @@ def test_invalid_oracle_is_not_timed(result):
     assert not passed
 
 
-def ab_cli(tmp_path, *, oracle=True, timer='cuda_event', reverse=False, cells=3, tiny=False):
+def test_control_cannot_overwrite_a_real_variant():
+    base, candidate = lambda: 10, lambda: 8
+    fns = {'base': base, '__control__base': candidate}
+    names = list(fns)
+    with pytest.raises(ValueError, match='reserved prefix'):
+        ab.with_control(fns, names, 'base')
+    assert fns['__control__base'] is candidate
+    assert names == ['base', '__control__base']
+
+
+@pytest.mark.parametrize('scripts', [KT, GLUON_SCRIPTS], ids=['shared', 'gluon-shim'])
+@pytest.mark.parametrize('control', [[], ['--control', 'auto']], ids=['no-control', 'auto-control'])
+@pytest.mark.parametrize('reserved', ['__control__base', '__control__other'])
+def test_reserved_variant_rejected_before_hooks(tmp_path, scripts, control, reserved):
+    adapter, output = tmp_path / 'adapter.py', tmp_path / 'result.json'
+    adapter.write_text(f"def variants(): return {{'base': lambda: None, {reserved!r}: lambda: None}}\n"
+                       "def oracle(name): raise RuntimeError('oracle must not run')\n"
+                       "def fingerprint(name): raise RuntimeError('fingerprint must not run')\n")
+    output.write_text('{"validity":{"valid":true},"results":{"cand":{"screen":"pass"}}}')
+    proc = subprocess.run([sys.executable, str(scripts / 'ab_bench.py'), '--module', str(adapter),
+                           '--json', str(output), *control], capture_output=True, text=True, check=False)
+    assert proc.returncode == 2
+    assert 'reserved prefix' in proc.stderr and 'must not run' not in proc.stderr
+    result = json.loads(output.read_text())
+    assert result['schema_version'] == 2
+    assert result['validity']['valid'] is False and result['results'] == {}
+
+
+def ab_cli(tmp_path, *, oracle=True, timer='cuda_event', reverse=False, cells=3, tiny=False, scripts=KT):
     adapter = tmp_path / 'adapter.py'
     adapter.write_text("def base(): return 'base'\ndef cand(): return 'cand'\n"
                        "def variants(): return {'base': base, 'cand': cand}\n"
@@ -90,12 +153,24 @@ def ab_cli(tmp_path, *, oracle=True, timer='cuda_event', reverse=False, cells=3,
                   f"    return {{'ms': ms, 'timer': {timer!r}, 'primed': True, "
                   "'cache_condition': {'mode': 'read-evict'}}\n")
     output = tmp_path / 'result.json'
-    args = [sys.executable, str(KT / 'ab_bench.py'), '--module', str(adapter), '--json', str(output),
+    args = [sys.executable, str(scripts / 'ab_bench.py'), '--module', str(adapter), '--json', str(output),
             '--cells', str(cells), '--iters', '1', '--warmup', '0', '--control', 'auto', '--permute']
     p = subprocess.run(args, text=True, capture_output=True, check=False,
                        env=dict(os.environ, GEAK_HARNESS_LIB=str(hl)))
     assert output.exists(), p.stderr
     return p, json.loads(output.read_text())
+
+
+@pytest.mark.parametrize('scripts', [KT, GLUON_SCRIPTS], ids=['shared', 'gluon-shim'])
+def test_ab_shared_and_legacy_json_contract(tmp_path, scripts):
+    proc, data = ab_cli(tmp_path, scripts=scripts)
+    assert proc.returncode == 0, proc.stderr
+    assert data['schema_version'] == 2 and data['validity']['valid'] is True
+    assert data['results']['cand']['screen'] == 'pass'
+    assert data['results']['cand']['median'] == 8 and data['results']['cand']['min'] == 8
+    assert len(data['windows']) == 2 and data['rotation']['complete'] is True
+    assert 'frozen COMMANDMENT' in data['role']
+    assert data['excluded_failing_oracle'] == []
 
 
 @pytest.mark.parametrize('kwargs,valid', [({}, True), ({'reverse': True}, False),
@@ -136,6 +211,29 @@ def test_harness_selected_mode_must_have_shapes(tmp_path, mode, quick, full):
 def test_layout_factory_only_in_gluon():
     assert 'def make_blocked_layout' not in generator.render('k', 'triton', 'k.py')
     assert 'def make_blocked_layout' in generator.render('k', 'gluon', 'k.py')
+
+
+@pytest.mark.parametrize('scripts', [KT, GLUON_SCRIPTS], ids=['shared', 'gluon-shim'])
+@pytest.mark.parametrize('kind', ['file', 'symlink', 'dangling-symlink'])
+def test_generator_preserves_existing_runner(tmp_path, scripts, kind):
+    kernel, output, target = tmp_path / 'kernel.py', tmp_path / 'unittest.py', tmp_path / 'oracle.py'
+    kernel.write_text('@triton.jit\ndef k(x): pass\n')
+    original = '# immutable oracle; do not replace\n'
+    if kind == 'file':
+        output.write_text(original)
+    else:
+        if kind == 'symlink':
+            target.write_text(original)
+        output.symlink_to(target)
+    proc = subprocess.run([sys.executable, str(scripts / 'create_harness.py'), '--kernel-path', str(kernel),
+                           '--output', str(output)], capture_output=True, text=True, check=False)
+    assert proc.returncode == 2 and 'refusing to overwrite' in proc.stderr
+    if kind == 'dangling-symlink':
+        assert output.is_symlink() and not target.exists()
+    else:
+        assert output.read_text() == original
+    if kind == 'symlink':
+        assert output.is_symlink() and target.read_text() == original
 
 
 def multi_kernel_text():

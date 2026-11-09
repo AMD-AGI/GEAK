@@ -38,8 +38,9 @@ otherwise geomean) beats the cumulative best by
 `MIN_IMPROVE` — **2 %** by default (`kernel_workflow/kernel_lane.js`, knob `min_improve`; tested in
 `kernel_workflow/scripts/test_candidate_floor.js`). A candidate below that can be **tracked**
 (`candidate_floor`) but never **banked**. A noise band measured in this window (a control arm, an
-in-window same-arm repeat, `speedup_spread`) **may only make the verdict stricter**: the effective keep
-threshold is `max(MIN_IMPROVE, measured band)`. Nothing on this page lowers it.
+in-window same-arm repeat, `speedup_spread`) can reject an unresolved comparison during supplementary
+screening before verification. The workflow commit gate itself uses configured `MIN_IMPROVE`; it
+does not automatically combine that value with these noise estimates.
 
 ### Who owns what in GEAK
 
@@ -514,8 +515,8 @@ compute, stay plain (`entry.md`, escalation gate).
 | `0.1` to `< 1 ms` | `>= 10` | `>= 50` | `~3%` |
 | `>= 1 ms` | `>= 5` | `>= 20` | `~2%` |
 
-No row lowers the commit gate: the keep threshold is `max(MIN_IMPROVE = 2 %, the row's band, the
-measured band)`. Alternate measurement order, rerun near-noise results, run same-code/baseline
+Use these rows as supplementary screening guidance; they do not change GEAK's configured
+`MIN_IMPROVE` commit gate. Alternate measurement order, rerun near-noise results, run same-code/baseline
 controls, isolate noisy buckets, record timing method. Judge by repeat-stable A/B movement, not one best
 absolute latency. Below ~a few µs, raise `time_op`'s `inner` (per-window overhead divides away) and
 apply the instrument floor (`## The largest additive term is usually your own instrument, and you can
@@ -1221,9 +1222,9 @@ clue the model was recovered from. Quote a multiple only once the effect is know
 | Gate | Must include | Use for |
 | --- | --- | --- |
 | Quick | fixed ordered subset, correctness, enough reps for obvious regressions, per-shape JSON | search + early rejection (`ab_bench.py`, quick harness mode) |
-| Full | contracted stream, same boundary, per-shape map, aggregate metric, repeat for small/noisy deltas — timed under the binding protocol (events, per-sample sync, read-evict, median, fresh process per leg, same-window baseline) | final acceptance (`verify_engineer` / `measure_legs`, the `harness_lib`-timed full benchmark) |
+| Full | contracted stream, same boundary, per-shape map, aggregate metric, repeat for small/noisy deltas — timed under the binding protocol (events, per-sample sync, read-evict, median, fresh process per leg, same-window baseline) | final acceptance through Verify and frozen `FULL_BENCHMARK`; the listed protocol applies to extracted-task runners |
 
-Small-gain policy: an aggregate below `MIN_IMPROVE` (**2 %**) is not committed — it may be tracked, never
+Small-gain policy: an aggregate below configured `MIN_IMPROVE` (**2 %** by default) is not committed — it may be tracked, never
 banked; a gain at or just above the threshold (or inside this window's measured band, whichever is
 larger) needs ≥1 independent full repeat; all-shape tasks report best/worst per-shape movement;
 aggregate-only wins need dispatch/fallback for repeated losers; disagreeing repeats = noise, not a keep.

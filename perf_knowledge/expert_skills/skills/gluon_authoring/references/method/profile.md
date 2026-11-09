@@ -69,8 +69,9 @@ disagreed, the resolution is stated in place.
   there is normal).
 - **Always filter by kernel** (`--kernel-include-regex`): it took one real run from >7 min to ~80 s,
   and unfiltered collection sweeps up torch/CK/cutlass helpers whose rows you would then average.
-- Scripts accept `bash -c` command strings, write no `rm` (move stale dirs aside), and keep timing
-  and profiling in **separate runs** (`benchmark-hygiene.md`).
+- GEAK's public profile entry accepts a command string, and `rocprofv3_safe --cmd` preserves that
+  interface. Task capture and structured payloads use argv/config files; do not wrap their payload
+  in `bash -c/-lc`. Keep timing and profiling in **separate runs** (`benchmark-hygiene.md`).
 
 ## Profiler-capability preflight (verify ONCE — do not assume PMC is visible)
 
@@ -81,10 +82,11 @@ dispatches** of a JIT-launched kernel (only torch helper kernels), silently yiel
 ```bash
 bash kernel_workflow/scripts/gpu_lock.sh <gpu_id> \
   rocprofv3 --kernel-trace -f csv -d /tmp/kt -- python your_bench.py   # then:
-grep -c <your_kernel_name> /tmp/kt/*/*kernel_trace.csv   # 0 => PMC is blind on this box
+grep -c <your_kernel_name> /tmp/kt/*/*kernel_trace.csv   # 0 => target was not observed in this trace
 ```
 
-- **>0 dispatches** → PMC/ATT below is live; use it.
+- **>0 dispatches** establishes target trace visibility only. Validate the requested counters and
+  ATT decoder/decoded artifacts separately; a trace does not prove those capabilities.
 - **0 dispatches** → fall back to the **native ISA path** (`kernel_tools/dump_ir.sh` →
   `.amdgcn`/`.s` → `asm_loop_audit.py`, with VGPR/AGPR/spill from the `.amdgcn` / compile stats)
   **+ the floor probe** (`### Rule: floor probe (quantify overlap headroom exactly)`). No
@@ -204,8 +206,8 @@ report a missing number as missing — never as a zero) is in `climb.md ## 3. Th
 
 | | what you must know | tool | bad-value tell |
 | --- | --- | --- | --- |
-| B1 | **ranked inter-MFMA bubble ownership in measured cycles**, plus measured cadence and its reference | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
-| B2 | the feed bucket **resolved: LDS (lgkmcnt) vs global (vmcnt)** | same rollup | the two halves are one bucket over two resources with **opposite** fixes (layout/swizzle vs coalescing/async copy) |
+| B1 | **observed inter-matrix issue intervals by preceding op class**, plus any explicit cadence reference | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
+| B2 | the feed instructions **separated: LDS vs global memory** | same rollup | inspect the matching dependencies and test a hypothesis; this grouping does not establish stalls or overlap |
 | B3 | **per-opcode hot-loop histogram + diff vs last round** | `asm_loop_audit.py --opcodes` | op-class ("valu 64.5%") is one level too coarse: a dtype-conversion sequence, an address chain and a layout permute all land there. Keep `s_waitcnt` in the diff — it moves when only the *schedule* moved (D3) — and read the whole histogram, not the mnemonic you came to count |
 | B4 | MFMA operand-layout facts **before** picking a tile | `layout_facts.py` | two shapes with equal MAC/cycle can differ 4× in accumulator GPR/lane |
 
@@ -698,8 +700,8 @@ tile-programming-flydsl; **not** the ncu CSV `hotspot_analyzer.py` in tile-progr
 
 ```bash
 cd <workspace>    # the GEAK workspace (KERNEL_PATH)
-bash kernel_workflow/scripts/profile_kernel.sh <gpu_id> "python3 harness.py --profile" /tmp/gluon_prof --att
-python3 kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
+bash "$GEAK_ROOT/kernel_workflow/scripts/profile_kernel.sh" <gpu_id> "python3 harness.py --profile" /tmp/gluon_prof --att
+python3 "$GEAK_ROOT/kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py" /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
 ```
 
 ATT needs a debug-info build when source mapping matters. Visualize with `att_to_perfetto.py` (merge
@@ -1227,9 +1229,9 @@ Rewritten / demoted (GEAK infrastructure and the conflict rules win):
   Total, dependency wait = latency C1, issue wait = latency C2, memory-bound only on high HBM/VMEM busy
   plus a C4 floor probe; compute-bound read on busy counters (`VALUBusy`/`MfmaUtil`), not
   `VALUUtilization`.
-- D1 "stable-min **and** median" from `ab_bench.py` → acceptance timing from `harness_lib.py`
-  (median, read-evict, fresh process per leg, same-window baseline, `MIN_IMPROVE=2%`); `ab_bench.py`
-  demoted to search/screening (median + spread, min supplementary).
+- D1 "stable-min **and** median" from `ab_bench.py` → frozen task commands executed by Verify
+  for acceptance (`harness_lib`/`measure_legs` for extracted tasks). A/B remains search/screening
+  (median + spread, min supplementary); promotion uses configured `MIN_IMPROVE`.
 - "Rule: equal registers+occupancy but lower MfmaUtil": the fix "re-inject plain's TTGIR pipeliner
   (Route-1)" → hand-written pipeline first; re-injection demoted to a below-parity diagnostic / last
   resort with numbers labelled "injected", never on an incumbent.
