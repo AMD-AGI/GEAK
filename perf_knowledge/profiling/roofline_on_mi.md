@@ -9,10 +9,22 @@ updated: 2026-11-05
 
 ## Engine and evidence ownership
 
-GEAK's native `kernel-roofline` analysis skill owns roofline reporting and its associated full-counter
-measurement lifecycle. It is discovered through the e2e analysis-skill index. Default to `tl-only`;
-use `rocprof` only when requested. If the native skill is absent from a checkout, report unavailable
-and continue the existing profile. Do not substitute the legacy calculator or a local model.
+GEAK currently has two delivered e2e paths: the default legacy
+`e2e_workflow/knowledge/analysis_skills/roofline` skill and an optional upstream
+TraceLens-prior import in the e2e profiler. The latter reuses matching baseline
+artifacts; it does not install a TraceLens engine. These paths remain in place.
+
+`kernel_workflow/scripts/kernel_tools/roofline.sh` is an adapter for a **separately
+installed** `kernel-roofline` runner. It is not bundled in this checkout or listed
+in the current analysis-skill index. Set `GEAK_KERNEL_ROOFLINE_DIR` to that external
+skill root. Missing scripts return exit 3; ordinary profiling continues through
+`profile_kernel.sh`. Do not present the optional adapter as an already completed
+migration of the e2e legacy skill.
+
+For the optional runner, default to `tl-only`; request GPU measurement or rocprof
+explicitly. Native models, reference calibration and report semantics belong to
+that external runner. The adapter does not silently fall back to the legacy
+calculator or relabel local planning estimates as native measurements.
 
 Existing-trace TraceLens analysis is offline and does not need a GPU lease. New UT or counter runs
 must use GEAK's outer GPU lease and source guard, preserve the measured window and dispatch checks,
@@ -46,7 +58,7 @@ ATT, ISA, layout and static occupancy remain useful supplementary diagnostics.
 
 ## Dependencies and execution environment
 
-Use the native skill's installation instructions and freeze the resolved TraceLens commit. Existing
+When installing an external runner, use that version's installation instructions and freeze the resolved TraceLens commit. Existing
 trace reporting does not require ATT or rocprof. Keep the workload in its framework environment;
 constrain rocprof-compute analyzer dependencies for its installed version (3.4 requires `pandas<3`).
 Do not install unconstrained profiler requirements into a shared workload/report environment.
