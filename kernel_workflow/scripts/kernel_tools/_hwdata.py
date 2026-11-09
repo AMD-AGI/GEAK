@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import os
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def peak_key(dtype: str, arch: str) -> str:
     if key.startswith("mxfp") and arch != "gfx950":
         return key
     return PEAK_ALIASES.get(key, key)
+
+
+def memory_peak(row: dict) -> dict:
+    """Default specification bandwidth in TB/s, with its basis and catalog field.
+
+    Historical measurements never become a default specification. Callers may
+    explicitly supply a measured ceiling through their existing calibration API.
+    Derived specification values retain their basis instead of becoming datasheet.
+    """
+    if row.get("datasheet_hbm_tb_s") is not None:
+        field, basis = "datasheet_hbm_tb_s", "datasheet"
+    elif row.get("peak_hbm_basis") in ("datasheet", "orc-derived"):
+        field, basis = "peak_hbm_tb_s", row["peak_hbm_basis"]
+    else:
+        return {"value_tb_s": None, "basis": "unknown", "source_field": None}
+    value = row.get(field)
+    if value is None:
+        return {"value_tb_s": None, "basis": "unknown", "source_field": field}
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError(f"{field} must be a finite positive bandwidth")
+    return {"value_tb_s": value, "basis": basis, "source_field": field}
 
 
 def _candidates(name: str):
