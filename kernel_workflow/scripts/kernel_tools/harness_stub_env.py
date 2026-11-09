@@ -56,8 +56,8 @@ class _Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 sys.meta_path.insert(0, _Finder())
 '''
 
-REFUSAL = "HARNESS_UNFILLED"
-REFUSAL_RC = 2
+REFUSAL = "UT_HARNESS_INCOMPLETE"
+REFUSAL_RC = 3
 
 
 def run_skeleton(harness, args, timeout=60):
@@ -66,7 +66,7 @@ def run_skeleton(harness, args, timeout=60):
     (harness.parent / "sitecustomize.py").write_text(STUB_SITE)
     env = dict(os.environ, PYTHONPATH=str(harness.parent))
     r = subprocess.run([sys.executable, str(harness)] + list(args),
-                       capture_output=True, text=True, timeout=timeout, env=env,
+                       capture_output=True, text=True, check=False, timeout=timeout, env=env,
                        cwd=str(harness.parent))
     return r.returncode, r.stdout + r.stderr
 

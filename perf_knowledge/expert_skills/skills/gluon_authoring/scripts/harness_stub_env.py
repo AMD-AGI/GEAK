@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Compatibility entry point for the GEAK shared kernel tools."""
 import importlib.util
-from pathlib import Path
 import runpy
 import sys
+from pathlib import Path
 
 _shared = Path(__file__).resolve().parents[5] / 'kernel_workflow/scripts/kernel_tools'
 sys.path.insert(0, str(_shared))
