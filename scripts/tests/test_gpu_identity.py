@@ -292,3 +292,86 @@ def test_missing_physical_cu_count_fails_closed() -> None:
     )
     with pytest.raises(gpu_identity.IdentityError, match="physical Compute Unit"):
         gpu_identity.parse_rocminfo(text)
+
+
+@pytest.fixture
+def planning_tools(monkeypatch):
+    # This file is already in L0 CI. Exercise the actual consumers of the product
+    # resolved by gpu_identity, so a shared catalog cannot hide diverging defaults.
+    root = SCRIPT.parents[1]
+    monkeypatch.syspath_prepend(str(root / "scripts"))
+    monkeypatch.syspath_prepend(str(root / "kernel_workflow/scripts/kernel_tools"))
+    monkeypatch.syspath_prepend(str(root / "e2e_workflow/knowledge/analysis_skills/roofline"))
+    import hardware_context
+    import calc_perf
+    import hw_budget
+    import extract_sku
+    import mem_bw_probe
+    import roofline_tools
+    return hardware_context, calc_perf, hw_budget, extract_sku, mem_bw_probe, roofline_tools
+
+
+@pytest.mark.parametrize("name,bw,basis", [
+    ("AI_MAX_395", 0.256, "datasheet"),
+    ("MI308X", 5.3, "orc-derived"),
+    ("MI355X", 8.0, "datasheet"),
+    ("R9700", 0.64, "datasheet"),
+])
+def test_resolved_product_has_consistent_planning_bandwidth(planning_tools, name, bw, basis):
+    hc, calc, budget, extract, _, roofline = planning_tools
+    row = hc.catalog()[0][name]
+    identity = {"gfx": row["arch"], "marketing_name": row["product"], "physical_cu_count": row["cus"]}
+    context = hc.build(identity)
+    assert context["status"] == "matched"
+    peaks = hc.planning_peaks(context)
+    e2e = roofline.resolve_peaks("unused.md", row["arch"], hardware_context=context)
+    _, cfg = calc.resolve_sku(sku=name, dtype="bf16", hardware_context=context)
+    result = budget.budget(name, "gemm", {"M": 4096, "N": 4096, "K": 4096}, "bf16", measured_ms=10)
+    workload = result["workload"]
+    assert peaks["hbm_bw_bytes_s"] == e2e["hbm_bw_bytes_s"] == bw * 1e12
+    assert peaks["memory_basis"] == e2e["memory_basis"] == cfg["peak_hbm_basis"] == basis
+    assert cfg["peak_hbm_tb_s"] == result["resources"]["hbm"]["peak_tb_s"] == bw
+    assert workload["hbm_ceiling_tb_s"] == [bw, bw]
+    assert workload["hbm_ceiling_source"] == workload["denominator_basis"] == basis
+    assert workload["compute_ceiling_source"] == row["basis"]
+    assert extract.peaks_entry(name, row)["hbm_bw_bytes_s"] == bw * 1e12
+    assert extract.ridge_for(row, "bf16") == workload["ridge_ops_per_byte"] == round(row["peak_tflops"]["bf16"] / bw, 1)
+    assert peaks["may_gate"] is e2e["may_gate"] is workload["may_gate"] is False
+    assert workload["calibrated"] is False
+    assert workload["pct_of_hbm_ceiling"] is None
+    assert workload["prize_is_upper_bound"]
+    # Resolving a default must not mutate the source row or its historical evidence.
+    assert hc.catalog()[0][name] == row == calc.SKU_PEAKS[name]
+
+
+def test_explicit_memory_measurements_keep_their_provenance(planning_tools):
+    hc, calc, budget, _, probe, _ = planning_tools
+    row = hc.catalog()[0]["AI_MAX_395"]
+    assert row["peak_hbm_tb_s"] == 0.212 and row["peak_hbm_basis"] == "measured"
+    for measured, refs, basis in [(0.212, None, "empirical@hand-entered"),
+                                  (0.232, ["run/probe.json"], "in-shape probe")]:
+        result = budget.budget("AI_MAX_395", "gemm", {"M": 4096, "N": 4096, "K": 4096},
+                               "bf16", measured_hbm_tb_s=[measured], ceiling_source_ref=refs)
+        w = result["workload"]
+        assert w["hbm_ceiling_tb_s"] == [measured, measured]
+        assert w["denominator_basis"] == basis and w["may_gate"] is False
+        assert w["ceiling_provenance"]["refs"] == (refs or [])
+        _, cfg = calc.resolve_sku(sku="AI_MAX_395", peak_hbm_bw=measured)
+        assert cfg["peak_hbm_tb_s"] == measured and cfg["peak_hbm_basis"] == "hand-entered"
+    assert probe.verdict(0.232, row, 2048)["ok"]
+    assert not probe.verdict(0.260, row, 2048)["ok"]
+
+
+def test_historical_measurement_cannot_replace_missing_specification(planning_tools, monkeypatch):
+    hc, calc, budget, extract, probe, _ = planning_tools
+    row = {**hc.catalog()[0]["AI_MAX_395"], "datasheet_hbm_tb_s": None}
+    monkeypatch.setitem(calc.SKU_PEAKS, "AI_MAX_395", row)
+    with pytest.raises(SystemExit, match="no peak on record"):
+        calc.resolve_sku(sku="AI_MAX_395")
+    assert extract.ridge_for(row) is None
+    assert not probe.verdict(0.200, row, 2048)["ok"]
+    real_load = budget._load
+    monkeypatch.setattr(budget, "_load", lambda name: {"skus": {"AI_MAX_395": row}}
+                        if name == "sku.json" else real_load(name))
+    with pytest.raises(SystemExit, match="no specification bandwidth"):
+        budget.budget("AI_MAX_395")

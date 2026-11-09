@@ -262,7 +262,7 @@ def test_fp8_rate_does_not_imply_native_mxfp8_support(name, calc_perf, sku, extr
     ("MI355X", [], "datasheet", "datasheet"),
     ("MI355X", ["--peak-hbm-bw", "4"], "datasheet", "hand-entered"),
     ("MI308X", [], "orc-derived", "orc-derived"),
-    ("AI_MAX_395", [], "derived", "measured"),
+    ("AI_MAX_395", [], "derived", "datasheet"),
 ])
 def test_reference_sources_are_preserved_per_axis(name, extra, compute, memory):
     result = run(sys.executable, KT / "calc_perf.py", "roofline", "--sku", name,

@@ -13,7 +13,7 @@
     "l2_mb": "aggregate L2 (= l2_per_xcd_mb x xcds on CDNA)",
     "l2_per_xcd_mb": "L2 one XCD's CUs share (CDNA)",
     "mall_mb": "memory-side LLC / Infinity Cache, see _mall_doc",
-    "peak_hbm_tb_s": "the external-memory ceiling consumers divide by",
+    "peak_hbm_tb_s": "recorded external-memory value; may be historical measured data. Default planning bandwidth is selected by _hwdata.memory_peak, preferring datasheet_hbm_tb_s and never defaulting to historical measurements",
     "peak_hbm_basis": "datasheet | measured | orc-derived",
     "datasheet_hbm_tb_s": "pin rate, present when peak_hbm_basis != datasheet",
     "peak_tflops": "Dense matrix-engine TFLOP/s (TOPS for int), with FP32 vector rate on RDNA as noted in source; absent dtype = no rate.",
@@ -21,13 +21,13 @@
     "basis": "compute basis: datasheet | derived | orc-derived",
     "basis_note": "how a derived number was derived",
     "source": "provenance of the row",
-    "measured_ceilings": "[{metric, value, tool, tool_version, source}] -- empirical ceilings; a denominator taken from one is empirical@tool-version",
+    "measured_ceilings": "[{metric, value, tool, tool_version, source}] -- historical empirical evidence; use only through an explicit measured-ceiling input with provenance, never as a default specification",
     "sources": "Field-scoped official source records: url, fields, checked_on and optional notes. Architectural equivalences and unpublished rates are explicitly noted, not independently vendor-quoted.",
     "source_conflicts": "Unresolved field-level source disagreements; the canonical field is null until resolved.",
     "memory_gb": "Vendor-advertised device memory capacity in GB, where sourced.",
     "board_power_w": "Vendor-advertised board power in watts, where sourced."
   },
-  "_no_derived_ridge": "The ridge (ops/byte at which the compute and memory ceilings cross) is NOT stored here, and must not be re-added. It is peak_tflops[dtype] / peak_hbm_tb_s, so it is a different number for every dtype -- on MI325X it is 218 at fp16, 436 at fp8 and 27 at fp32. A stored ridge is a cache of that division taken at ONE dtype, and it WAS read back for every dtype, which put every fp32 kernel with an intensity between 27 and 218 on the wrong side of the crossover. hw_budget.py computes it per call from the dtype's own peak.",
+  "_no_derived_ridge": "The ridge (ops/byte at which the compute and memory ceilings cross) is NOT stored here, and must not be re-added. It is peak_tflops[dtype] / the default specification bandwidth from _hwdata.memory_peak, so it is a different number for every dtype -- on MI325X it is 218 at fp16, 436 at fp8 and 27 at fp32. A stored ridge is a cache of that division taken at ONE dtype, and it WAS read back for every dtype, which put every fp32 kernel with an intensity between 27 and 218 on the wrong side of the crossover. hw_budget.py computes it per call from the dtype's own peak.",
   "_lds_doc": "RDNA rows deliberately leave lds_per_cu_kib null. Do not divide a WGP pool by two and describe the result as a per-CU allocation. hw_constants.json distinguishes the per-CU pool on CDNA, the per-WGP occupancy pool where its scope is established on RDNA, and the per-workgroup allocation cap. RDNA3.5 gfx1151 has no verified per-WGP scope in this catalog; its occupancy pool remains unknown. Consumers must preserve an unknown scope rather than borrowing geometry from another architecture.",
   "skus": {
     "MI355X": {
