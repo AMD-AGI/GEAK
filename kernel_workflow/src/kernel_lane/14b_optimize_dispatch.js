@@ -25,6 +25,9 @@ applyOptimizeResult(await nativeDeliveryBoundary(async () => {
   if (OPTIMIZER === 'evo' && ![undefined, 'first_stall', 'search_start'].includes(A.evolution_start)) {
     throw new Error('evolution_start must be first_stall or search_start');
   }
+  if (A.evolution_import_stall_sources === true && (OPTIMIZER !== 'evo' || fromStart)) {
+    throw new Error('evolution_import_stall_sources requires optimizer=evo with evolution_start=first_stall');
+  }
   return await greedyOptimize(optimizeStart, {
     archive: fromStart ? populationArchive || await createEvolution(optimizeStart) : null,
     start: OPTIMIZER === 'evo' && !fromStart ? (state) => createEvolution(state,

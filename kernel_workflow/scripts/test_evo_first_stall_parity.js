@@ -140,6 +140,7 @@ async function runMode(mode, scenario, template) {
         arithmetic: spec.speed, weighted: spec.speed, per_case: perCase(spec.speed), patch_file: patch}};
     }
     if (label.startsWith('commit ')) {
+      if (scenario.commitFail === label.slice(7)) return {committed: false, notes: 'fixture commit failure'};
       const block = prompt.match(/```bash\n([\s\S]*?)\n```/);
       command('bash', ['-e', '-c', block[1]]);
       return {committed: true, current_best_diff: evalDir + '/current_best.diff'};
@@ -317,6 +318,107 @@ const FALLBACK = 'Development fallback';
     assert.equal(child.verified, true);
     assert.equal(e.result.final_speedup, 1.45, 'only the verified descendant is delivered');
     console.log('  ok: development_fallback returns the unmeasured attempt as an unverified selectable row');
+  }
+  {
+    // Default-off stall-source import: the stall round's retained sources become archive rows.
+    const plans = {r1: {stop: false, reasoning: 'r1', directions: [d('r1_d0', 'memory')]},
+      r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute'), d('custom_alt', 'algorithm')]},
+      r3: {stop: false, reasoning: 'r3', directions: [d('r3_d0', 'memory', {parent_id: 'r2_d0', approach: 'requalify'})]}};
+    // r2_d0 reports a valid local 1.40 but its verifier fails; custom_alt verifies 1.31, under the commit margin.
+    const sc = {name: 'stall_sources', plans, onPlan: cutAt('r4'),
+      eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.40}, custom_alt: {speed: 1.31}, r3_d0: {speed: 1.45}},
+      verify: {r1_d0: 1.30, custom_alt: 1.31, r3_d0: 1.45}};
+    const lr = {...sc, name: 'stall_sources_on', args: {evolution_import_stall_sources: true}};
+    const g = await runMode('greedy', sc, TEMPLATE), off = await runMode('evo', sc, TEMPLATE);
+    const on = await runMode('evo', lr, TEMPLATE);
+    for (const r of [g, off, on]) assert.equal(r.error, null, r.error);
+    const divergence = (a, b) => {
+      for (let i = 0; i < Math.max(a.calls.length, b.calls.length); i++) {
+        if (a.calls[i]?.label !== b.calls[i]?.label || a.calls[i]?.prompt_sha256 !== b.calls[i]?.prompt_sha256) return b.calls[i]?.label;
+      }
+      return null;
+    };
+    assert.equal(divergence(g, off), 'tech_lead:plan r3');
+    assert.equal(divergence(off, on), 'tech_lead:plan r3', 'the import changes nothing before the first post-stall plan');
+    const plan = (r, k) => r.calls.find(c => c.label === `tech_lead:plan ${k}`).prompt;
+    assert.doesNotMatch(plan(off, 'r3'), /roles\/evolution\.md/, 'off: the first post-stall archive is empty');
+    assert.match(plan(on, 'r3'), /roles\/evolution\.md/, 'on: the first post-stall plan sees the stall sources');
+    const rowsOf = r => Object.fromEntries(r.continuation_archive.entries.map(x => [x.id, x]));
+    const rows = rowsOf(on), offRows = rowsOf(off);
+    assert.ok(!Object.keys(rows).some(id => id.startsWith('r1_')), 'older rounds have another base and stay out');
+    const pin = fs.readFileSync(path.join(OUT, 'runs', 'stall_sources_on', 'evo', 'eval', 'delivery', 'sources',
+      'round_2_engineer_0.diff'));
+    assert.equal(rows.r2_d0.parent_id, 'ORIGINAL');
+    assert.equal(rows.r2_d0.verified, false);
+    assert.equal(rows.r2_d0.status, 'unverified');
+    assert.equal(rows.r2_d0.speedup, null, 'a failed verification gives no fitness');
+    assert.equal(rows.r2_d0.engineer.measurement_valid, true, 'the engineer report travels with the row');
+    assert.equal(rows.r2_d0.patch_ref.sha256, sha(pin), 'the pinned stall-round source, not the mutable workspace patch');
+    assert.match(rows.r2_d0.original_patch, /delivery\/sources\/round_2_engineer_0\.diff$/);
+    assert.equal(rows.r2_d1.title, 'T custom_alt', 'a planner-chosen id is renamed by its engineer slot');
+    assert.equal(rows.r2_d1.verified, true);
+    assert.equal(rows.r2_d1.speedup, 1.31, 'settled verification keeps its fitness');
+    assert.equal(on.continuation_archive.best_id, 'r3_d0', 'imports never take the best or default-parent rank');
+    assert.equal(rows.r3_d0.parent_id, 'r2_d0');
+    assert.equal(rows.r3_d0.evolution_context.initialization.parent_patch_ref.sha256, rows.r2_d0.patch_ref.sha256,
+      'the unverified stall source is materialized as the selected parent');
+    assert.equal(offRows.r3_d0.parent_id, 'ORIGINAL', 'off: the same request falls back to the incumbent');
+    assert.ok(offRows.r3_d0.evolution_context.reference_errors.length > 0);
+    assert.ok(!Object.keys(offRows).some(id => id.startsWith('r2_')));
+    assert.ok(on.logs.some(m => m.includes('stall-round sources on the archive base')));
+    assert.ok(!off.logs.some(m => m.includes('stall-round sources on the archive base')));
+    for (const r of [g, off, on]) assert.equal(r.result.final_speedup, 1.45);
+    // A verified stall source above the incumbent is still delivered, now through its archive row.
+    const dv = {name: 'stall_sources_delivery', onPlan: cutAt('r4'), plans: {
+        r1: plans.r1, r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute')]},
+        r3: {stop: false, reasoning: 'r3', directions: [d('r3_d0', 'algorithm')]}},
+      eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.31}, r3_d0: {speed: 1.20}},
+      verify: {r1_d0: 1.30, r2_d0: 1.31, r3_d0: 1.20}};
+    const dOff = await runMode('evo', dv, TEMPLATE);
+    const dOn = await runMode('evo', {...dv, name: 'stall_sources_delivery_on',
+      args: {evolution_import_stall_sources: true}}, TEMPLATE);
+    for (const r of [dOff, dOn]) {
+      assert.equal(r.error, null, r.error);
+      assert.equal(r.result.final_speedup, 1.31, 'end-of-run delivery keeps the verified stall source');
+      assert.equal(r.result.delivery.delivered, 'round_2_engineer_0');
+      assert.ok(r.result.delivery.candidates.every(c => c.archive_record_status !== 'failed'
+        && c.archive_selection_status !== 'failed'), 'delivery records and selects the same row');
+      assert.equal(r.continuation_archive.best_id, 'r2_d0');
+    }
+    assert.equal(rowsOf(dOn).r2_d0.parent_id, 'ORIGINAL');
+    // The switch can be the last event before the search deadline: no later round adopts the archive.
+    const late = {name: 'stall_sources_late', plans: {r1: plans.r1,
+        r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute')]}},
+      onPlan: (k, c) => (k === 'r2' ? c.processDeadline - 960 : null),
+      stepFor: label => (label === 'storage:reclaim r2' ? 1000 : 60),
+      eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.31}}, verify: {r1_d0: 1.30, r2_d0: 1.31}};
+    for (const args of [{}, {evolution_import_stall_sources: true}]) {
+      const r = await runMode('evo', {...late, name: `stall_sources_late_${Object.keys(args).length}`, args}, TEMPLATE);
+      assert.equal(r.error, null, r.error);
+      assert.ok(r.continuation_archive, 'the switch happened');
+      assert.ok(!r.calls.some(c => c.label === 'tech_lead:plan r3'), 'no round starts after the switch');
+      assert.equal(r.result.final_speedup, 1.31, 'delivery still uses the pinned stall source');
+    }
+    // A failed commit leaves round 2 on the same base, and its progress defers the switch to round 3:
+    // only the stall round itself is imported.
+    const prior = {name: 'stall_sources_prior', onPlan: cutAt('r4'), commitFail: 'r2', plans: {
+        r1: plans.r1, r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute')]},
+        r3: {stop: false, reasoning: 'r3', directions: [d('r3_d0', 'algorithm')]}},
+      eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.40}, r3_d0: {speed: 1.31}},
+      verify: {r1_d0: 1.30, r2_d0: 1.40, r3_d0: 1.31}};
+    const pOn = await runMode('evo', {...prior, name: 'stall_sources_prior_on',
+      args: {evolution_import_stall_sources: true}}, TEMPLATE);
+    assert.equal(pOn.error, null, pOn.error);
+    assert.ok(pOn.logs.some(m => m.includes('Round 2: commit failed')), 'round 2 kept the base');
+    const r4 = pOn.calls.find(c => c.label === 'tech_lead:plan r4').prompt;
+    assert.equal(field(r4, 'HISTORY').evolution_start.after_round, 3, 'the switch follows round 3');
+    assert.deepEqual(field(r4, 'EVOLUTION_ENTRIES').map(x => x.id), ['r3_d0'], 'only the stall round is imported');
+    assert.ok(pOn.logs.some(m => m.includes('round_3_engineer_0 -> r3_d0: imported')));
+    assert.ok(!pOn.logs.some(m => m.includes('round_2_engineer_0 ->')), 'the same-base earlier round stays delivery-only');
+    assert.equal(pOn.result.final_speedup, 1.40, 'delivery still finds the earlier verified source');
+    const bad = await runMode('greedy', {...sc, name: 'stall_sources_greedy', args: {evolution_import_stall_sources: true}}, TEMPLATE);
+    assert.match(bad.error || '', /evolution_import_stall_sources requires optimizer=evo/);
+    console.log('  ok: stall-round sources enter the first-stall archive only when enabled; delivery stays consistent');
   }
   const evo = (await runMode('evo', SCENARIOS[1], TEMPLATE));
   const rows = Object.fromEntries(evo.continuation_archive.entries.map(r => [r.id, r]));

@@ -2914,6 +2914,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       startEvolution = null;
       log(`[evolution] could not root an archive at the incumbent (${String(error)}); continuing greedy rounds.`);
     }
+    if (evolution && A.evolution_import_stall_sources === true) await importStallSources(evolution, round);
   }
 }
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
@@ -3124,6 +3125,36 @@ function nativeDeliveryError(reason) {
     {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
 }
 const retainedSources = [], deliveryIncomplete = [], PINS = new Map();
+// The stall round's retained sources were built on the incumbent the first-stall archive is rooted at.
+// With evolution_import_stall_sources they enter it as ordinary rows: a verified result keeps its
+// fitness, any other source is selectable but unranked. Earlier rounds stay delivery-only, even when
+// a failed commit left them on the same base. The retained descriptor takes the row's id and lineage,
+// so delivery records and selects that row; it keeps its pinned source, which stays valid if no
+// later round adopts the archive.
+async function importStallSources(evo, round) {
+  const rows = [];
+  for (const c of [...retainedSources]) {
+    const slot = /^round_([1-9][0-9]*)_(?:engineer_([0-9]+)|integrate)$/.exec(c.key || '');
+    if (!slot || Number(slot[1]) !== round || !c.d || c.archived || c.retention_error
+        || c.base !== evo.baseCommit || !c.source
+        || c.source.sha256 === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') continue;
+    // The engineer slot names the row, so a planner-chosen direction id cannot collide.
+    const id = slot[2] === undefined ? `r${slot[1]}_integrated` : `r${slot[1]}_d${slot[2]}`;
+    const d = {...c.d, id, parent_id: 'ORIGINAL', donor_ids: [], reported_context: c.reported_context};
+    let status = 'source_changed';
+    try {
+      if (((await hostRun('sha256sum', ['--', c.source.path])) || '').slice(0, 64) === c.source.sha256) {
+        // A verifier result whose custody check never settled does not become fitness here.
+        const kept = await evo.record(d, c.eng, c.ver && !c.verification ? c.ver : null, c.source.path);
+        status = kept && !kept.retention_error && !kept.last_record_error
+          && kept.patch_ref?.sha256 === c.source.sha256 ? 'imported' : 'record_failed';
+        if (status === 'imported') keepForDelivery({...c, id, d});
+      }
+    } catch (error) { status = `record_failed (${String(error)})`; }
+    rows.push(`${c.key} -> ${id}: ${status}`);
+  }
+  if (rows.length) log(`[evolution] stall-round sources on the archive base: ${rows.join('; ')}`);
+}
 function keepForDelivery(entry) {
   const index = retainedSources.findIndex(c => c.key === entry.key);
   if (index >= 0) retainedSources[index] = entry;
@@ -3878,6 +3909,9 @@ applyOptimizeResult(await nativeDeliveryBoundary(async () => {
   const fromStart = OPTIMIZER === 'evo' && A.evolution_start === 'search_start';
   if (OPTIMIZER === 'evo' && ![undefined, 'first_stall', 'search_start'].includes(A.evolution_start)) {
     throw new Error('evolution_start must be first_stall or search_start');
+  }
+  if (A.evolution_import_stall_sources === true && (OPTIMIZER !== 'evo' || fromStart)) {
+    throw new Error('evolution_import_stall_sources requires optimizer=evo with evolution_start=first_stall');
   }
   return await greedyOptimize(optimizeStart, {
     archive: fromStart ? populationArchive || await createEvolution(optimizeStart) : null,
