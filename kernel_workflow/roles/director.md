@@ -8,9 +8,17 @@ Follow the requested `PHASE` and return structured JSON. `KERNEL_PATH_ORIG` is r
 
 Inputs: `KERNEL_PATH_ORIG`, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `KERNEL_NAME_HINT`, `TASK`,
 `MODE` (`optimize` or `author`), device expectations, and optional `TARGET_LANGUAGE`, `OP_SPEC`,
-`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`, `MATERIALIZED_SETUP`.
+`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`, `MATERIALIZED_SETUP`, `VERIFIED_GPU_IDENTITY`.
 
-When `GPU_IDENTITY_CAPTURE_REF` is absent, run
+When `VERIFIED_GPU_IDENTITY` is supplied, the native runtime has already hashed and parsed
+the owner-bound capture with the shared helper and checked all four identity fields against
+the declared expectations. Use those measured facts as authoritative. Do not reprobe,
+substitute expected values, or copy identity fields into your Setup response; they are
+optional telemetry on this route and the runtime uses its verified values directly.
+Continue the filesystem, baseline and oracle inspections below.
+
+The helper invocation and field-copy instructions below apply only when
+`VERIFIED_GPU_IDENTITY` is absent. When `GPU_IDENTITY_CAPTURE_REF` is absent, run
 `python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` as before. When present, it contains the
 owner-supplied absolute `path` and `sha256` of captured **raw rocminfo stdout**. Use the supplied
 `WORKFLOW_DIR` and reference values to run:
@@ -95,8 +103,8 @@ inconsistent artifacts rather than reporting successful Setup. This input applie
 only to fresh optimize mode with an explicit evaluation path, no `STATE_DIR`,
 prepared reference, resume marker or population imports, and not `prepare_only`.
 It supplies filesystem facts, not GPU identity, baseline validity or correctness.
-Still perform the unchanged GPU identity checks, baseline/oracle inspection and
-freezing, and any explicitly enabled measurement-file freezing. Derive the return
+Use `VERIFIED_GPU_IDENTITY` when supplied; otherwise perform the GPU identity checks above.
+Still perform baseline/oracle inspection and freezing, and any explicitly enabled measurement-file freezing. Derive the return
 metadata from the actual artifacts. No kernel or benchmark work belongs in Setup.
 
 When `MATERIALIZED_SETUP` is absent, use the existing initialization below.
@@ -161,7 +169,7 @@ fi   # end GEAK_FREEZE_HARNESS
 List source/config files under the workspace for downstream roles. All git operations must be
 noninteractive with explicit identity and no pager/editor.
 
-Return JSON:
+Return JSON (omit the four device identity fields when `VERIFIED_GPU_IDENTITY` is supplied):
 ```json
 {
   "eval_dir": "<EVAL_DIR>",

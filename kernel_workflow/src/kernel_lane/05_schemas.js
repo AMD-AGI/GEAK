@@ -53,7 +53,9 @@ const SETUP_SCHEMA = obj({
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
   }, []),
-}, ['eval_dir', 'workspace', 'kernel_name', 'device_gfx', 'device_target', 'physical_cu_count']);
+}, ['eval_dir', 'workspace', 'kernel_name',
+  ...(A.gpu_identity_capture_ref === undefined
+    ? ['device_gfx', 'device_target', 'physical_cu_count'] : [])]);
 
 const AUTHOR_SCHEMA = obj({
   authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },

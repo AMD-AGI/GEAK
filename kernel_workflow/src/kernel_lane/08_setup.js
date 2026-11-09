@@ -105,6 +105,41 @@ except Exception as error:
   }
   MATERIALIZED_SETUP = result;
 }
+// Captured identity is deterministic runtime input. Never make a model
+// retranscribe it before the workflow may use the verified measurements.
+const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+let VERIFIED_GPU_IDENTITY = null;
+if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
+  if (typeof runProcess !== 'function') {
+    throw new Error('captured GPU identity requires the native runProcess capability');
+  }
+  const measured = await runProcess({cmd: 'python3', args: [
+    `${WORKFLOW_DIR}/../scripts/gpu_identity.py`, '--input', GPU_IDENTITY_CAPTURE_REF.path,
+    '--input-sha256', GPU_IDENTITY_CAPTURE_REF.sha256,
+  ], timeoutMs: AGENT_TIMEOUT_MS > 0 ? Math.min(30000, AGENT_TIMEOUT_MS) : 30000, graceMs: 2000});
+  let identity = null;
+  try { identity = JSON.parse(measured.stdout.trim()); } catch { /* fail closed below */ }
+  if (measured.status !== 'completed' || measured.code !== 0 || measured.strays_killed
+      || !measured.group_cleared || measured.stdio_held
+      || !identity || typeof identity !== 'object' || Array.isArray(identity)
+      || typeof identity.gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(identity.gfx)
+      || typeof identity.target !== 'string'
+      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(identity.target)
+      || typeof identity.marketing_name !== 'string' || !identity.marketing_name.trim()
+      || !Number.isSafeInteger(identity.physical_cu_count) || identity.physical_cu_count <= 0
+      || !Number.isSafeInteger(identity.visible_gpu_agents) || identity.visible_gpu_agents <= 0) {
+    throw new Error('native captured GPU identity verification failed; no live-probe or expected-value fallback');
+  }
+  if (identity.gfx !== EXPECTED_GFX || identity.target !== EXPECTED_TARGET
+      || normalizeDeviceName(identity.marketing_name) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)
+      || identity.physical_cu_count !== EXPECTED_PHYSICAL_CU_COUNT) {
+    throw new Error('native captured GPU identity differs from expected identity');
+  }
+  VERIFIED_GPU_IDENTITY = {
+    device_gfx: identity.gfx, device_target: identity.target,
+    device_name: identity.marketing_name, physical_cu_count: identity.physical_cu_count,
+  };
+}
 const setup = await agentT(
   roleAgent('director', 'setup', MATERIALIZED_SETUP
     ? 'Inspect the materialized evaluation environment and return verified metadata; do not rematerialize or reset it.'
@@ -115,6 +150,7 @@ const setup = await agentT(
     EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
     ...(MATERIALIZED_SETUP ? { MATERIALIZED_SETUP } : {}),
     ...(GPU_IDENTITY_CAPTURE_REF !== undefined ? { GPU_IDENTITY_CAPTURE_REF } : {}),
+    ...(VERIFIED_GPU_IDENTITY ? { VERIFIED_GPU_IDENTITY } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -139,10 +175,11 @@ if (A.population_lineage || MATERIALIZED_SETUP) {
   if (isolation.status !== 'completed' || isolation.code !== 0 || isolation.strays_killed
       || !isolation.group_cleared || isolation.stdio_held) throw new Error('population Setup failed source isolation checks');
 }
-const GFX = String(setup.device_gfx || '').trim().toLowerCase();
-const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
-const SETUP_DEVICE_NAME = String(setup.device_name || '').trim();
-const SETUP_PHYSICAL_CU_COUNT = Number(setup.physical_cu_count);
+const deviceSetup = VERIFIED_GPU_IDENTITY || setup;
+const GFX = String(deviceSetup.device_gfx || '').trim().toLowerCase();
+const DEVICE_TARGET = String(deviceSetup.device_target || '').trim().toLowerCase();
+const SETUP_DEVICE_NAME = String(deviceSetup.device_name || '').trim();
+const SETUP_PHYSICAL_CU_COUNT = Number(deviceSetup.physical_cu_count);
 if (!GFX) {
   throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
 }
@@ -152,11 +189,10 @@ if (!DEVICE_TARGET) {
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
-const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 if (GPU_IDENTITY_CAPTURE_REF !== undefined
     && (GFX !== EXPECTED_GFX || DEVICE_TARGET !== EXPECTED_TARGET
       || normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)
-      || !Number.isSafeInteger(setup.physical_cu_count)
+      || !Number.isSafeInteger(deviceSetup.physical_cu_count)
       || SETUP_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT)) {
   throw new Error('captured GPU identity differs from expected identity');
 }
