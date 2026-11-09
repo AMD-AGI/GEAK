@@ -156,10 +156,11 @@ profile failure, and analyze failure as distinct conditions; a missing profiler 
 unsupported on RDNA4 is reported as a **degrade**, not a hard fail.
 
 **Shared ownership (host ⇄ container) — why you occasionally cannot write into `exp/`.** The `exp/`
-tree is written by TWO principals on the SAME bind-mounted path: the host (you edit your records /
-the kernel as your login uid) and the kernel container (the profiler runs as **root** via
-`locus.sh`). ROCm profilers (`rocprofv3` / `rocprof-compute`) **must run as root** — running them as
-a non-root `--user` aborts (signal 6), so we cannot equalize by dropping root. Instead make your
+tree may be written by two principals on the same bind-mounted path: the host (you edit records /
+the kernel as your login uid) and a container configured to run its profiler as root via
+`locus.sh`. A non-root profiler aborted with signal 6 in a previously tested image; that observation
+is specific to its permissions and configuration, not a universal ROCm root requirement. Keep the
+user/device permissions validated for the selected image. When using a root container, make your
 `exp/` tree **group-writable + setgid with the bind-mount's shared gid** (`umask 0002` + `chmod
 g+rwxs` + `chgrp` to the **bind-mount parent dir's gid** — nothing hardcoded, and NOT `id -g` which
 is `0` inside a root container; the parent gid is the same non-zero host gid seen from either
