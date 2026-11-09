@@ -335,36 +335,6 @@
       "reason": "legacy or unverified command contract"
     },
     {
-      "name": "asm_schedule_viz",
-      "classification": "developer_only",
-      "path": "scripts/asm_schedule_viz.py",
-      "command": [
-        "python3",
-        "scripts/asm_schedule_viz.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
-      "name": "att_merge_perfetto",
-      "classification": "developer_only",
-      "path": "scripts/att_merge_perfetto.py",
-      "command": [
-        "python3",
-        "scripts/att_merge_perfetto.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
       "name": "att_opclass",
       "classification": "internal",
       "path": "scripts/att_opclass.py",
@@ -378,36 +348,6 @@
         "describe": "unavailable"
       },
       "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "att_timeline",
-      "classification": "developer_only",
-      "path": "scripts/att_timeline.py",
-      "command": [
-        "python3",
-        "scripts/att_timeline.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
-      "name": "att_to_perfetto",
-      "classification": "developer_only",
-      "path": "scripts/att_to_perfetto.py",
-      "command": [
-        "python3",
-        "scripts/att_to_perfetto.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
     },
     {
       "name": "calc_perf",
@@ -1348,21 +1288,6 @@
       "description": "Fleet-only generator and verifier for isolated container runtime environment contracts."
     },
     {
-      "name": "serve_traces",
-      "classification": "developer_only",
-      "path": "scripts/serve_traces.py",
-      "command": [
-        "python3",
-        "scripts/serve_traces.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
       "name": "served_envelope",
       "classification": "internal",
       "path": "scripts/served_envelope.py",
@@ -1481,21 +1406,6 @@
         "*"
       ],
       "description": "Build one bounded, hash-addressed stage-context package from explicitly named metadata references."
-    },
-    {
-      "name": "tile_trace",
-      "classification": "developer_only",
-      "path": "scripts/tile_trace.py",
-      "command": [
-        "python3",
-        "scripts/tile_trace.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
     },
     {
       "name": "toolctl",

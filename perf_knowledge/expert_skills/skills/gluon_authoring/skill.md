@@ -575,7 +575,7 @@ infrastructure owns locking, profiling entry and timing.
 | budget | `$KT/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`, `extract_sku.py`; data `perf_knowledge/hardware/data/` |
 | transcribe | `$SKILL/scripts/ttgir_bridge.py`, `recover_gluon.py`, `ttgir_to_gluon.py`, `smoke_test_recover.sh`; `$KT/dump_ir.sh`, `probe.py`, `amd_occupancy.py` |
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` |
-| evidence | GEAK `kernel_workflow/scripts/profile_kernel.sh` (+ `gpu_lock.sh`); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `amd_isa.py --arch <target>`, `hw_sources.sh` |
+| evidence | GEAK `kernel_workflow/scripts/profile_kernel.sh` (+ `gpu_lock.sh`); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `amd_isa.py --arch <target>`, `hw_sources.sh` |
 | measure | GEAK frozen runner (`harness_lib.py` for extracted tasks); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py` |
 | climb | `pipeline_examples_cdna4.py` (gfx950 reference), `pipeline_examples_cdna3.py` (gfx942 downgrade) |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `wait_for.sh` |

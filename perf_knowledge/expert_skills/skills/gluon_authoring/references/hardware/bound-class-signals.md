@@ -32,7 +32,7 @@ gfx942 deltas are called out per row and in `cdna3-gfx942.md`.
 - **Entry:** one profiler entry point, GEAK's `kernel_workflow/scripts/profile_kernel.sh`
   (+ `profile_policy.sh`), run **under** `kernel_workflow/scripts/gpu_lock.sh` — no inline
   `HIP_VISIBLE_DEVICES`. The PMC / rocprof-compute / ATT parsers it feeds (`parse_pmc.py`,
-  `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`) live in
+  `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`) live in
   `kernel_workflow/scripts/kernel_tools/`; the same names under this pack's `scripts/` are shims.
 - **Wavefront ratios are fractions of `Total Wave Cycles`, never subtracted from each other.**
   High **Dependency Wait** = a serial dependency chain (latency **C1**) — it is **not** by itself

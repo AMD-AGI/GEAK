@@ -28,7 +28,7 @@ examples use `--arch gfx950`, the main line, with gfx942 as the downgrade.
 | budget | `$KT/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`, `extract_sku.py` | the prize, the floor, the bound-class prior |
 | transcribe | `$SKILL/scripts/ttgir_bridge.py`, `recover_gluon.py`, `ttgir_to_gluon.py`; `$KT/dump_ir.sh`, `probe.py`, `amd_occupancy.py` | a faithful, equivalence-checked anchor |
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` | who owes the gap; parity |
-| evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `tile_trace.py`, `serve_traces.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
+| evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
 | measure | GEAK frozen task runner (acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | is the difference real |
 | climb | `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | compiled examples for the agent's chosen hypothesis |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `context_contracts.py`, `source_excerpt.py`, `profile_payload.py`, `debt.py`, `skill_index.py`, `wait_for.sh`, `locus.sh`, `runtime_env.sh` | the auditable record |
@@ -274,9 +274,9 @@ the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowl
 | `rocprof_compute_probe.sh --dev <gpu> …` | Optional external native runner by default; explicit `--diagnostic` collects a whole-process no-roof report, and `--workload DIR` analyzes existing data |
 | `parse_pmc.py` | PMC groups and their parse: busy counters (`VALUBusy`, `MfmaUtil` — not duty-cycle `VALUUtilization`), C1 achieved DRAM bandwidth by independent routes (as a range). gfx950 `FETCH_SIZE`/`TCC_BUBBLE` under-count reads — compare routes |
 | `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py` | rocprof-compute parse; static and available PMC observations without tactic ranking; decoded hot-PC summaries |
-| `att_to_perfetto.py`, `att_merge_perfetto.py`, `att_timeline.py`, `att_opclass.py`, `tile_trace.py`, `serve_traces.py` | ATT warp-trace views and op-class rollups; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
+| `att_opclass.py` | Decoded ATT op-class statistics; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
 | `asm_loop_audit.py [--opcodes] [--meta <ir_dir>] [--kernel <substr>]` | static hot-loop audit (A1, A3, B3): `next_free_vgpr`/AGPR/spill, LDS bytes/WG from the cache metadata (not `group_segment_fixed_size`, a structural 0), per-opcode histogram + diff |
-| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: observed inter-matrix issue intervals, LDS-vs-global instruction split, schedule views for agent analysis |
+| `mfma_efficiency.py`, `deep_mfma_analysis.py` | B1/B2: observed inter-matrix issue intervals, LDS-vs-global instruction split for agent analysis |
 | `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | MFMA operand-layout facts (B4); the offline gfx950 ISA (other targets `--arch cdna3\|rdna3\|rdna4`); fetching primary sources |
 
 ## Measure

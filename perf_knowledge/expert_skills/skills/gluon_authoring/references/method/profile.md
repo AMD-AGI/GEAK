@@ -42,8 +42,8 @@ Set `GEAK_ROOT` to the absolute checkout root before running examples from a tas
 | one-command evidence capture | `kernel_workflow/scripts/kernel_tools/capture.sh` | ATT rollup + static ISA audit + IR in one go (preflight → validated trace / optional decoded ATT, with per-layer status); per-joint scripts + degrade table: `scripts/USAGE.md` |
 | safe rocprofv3 | `kernel_workflow/scripts/kernel_tools/rocprofv3_safe.sh --kernel <regex> --out <dir> [--pmc "A B C"] [--timeout 150] -- <cmd...>` | never call `rocprofv3` bare (`### Wrapper conventions`) |
 | rocprof-compute per round | `kernel_workflow/scripts/kernel_tools/rocprof_compute_probe.sh <name> <out> -- python <wrapper>` → `parse_rc.py` | `### rocprof-compute per-round (aggregate SOL + memory chart + occupancy limiter)` |
-| parsers / ATT | `kernel_tools/parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `att_timeline.py`, `att_to_perfetto.py`, `att_merge_perfetto.py`, `tile_trace.py`, `serve_traces.py` | |
-| static ISA / occupancy | `kernel_tools/dump_ir.sh`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `probe.py`, `amd_occupancy.py`, `gfx950_isa.py` | |
+| parsers / ATT | `kernel_tools/parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py` | |
+| static ISA / occupancy | `kernel_tools/dump_ir.sh`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `probe.py`, `amd_occupancy.py`, `gfx950_isa.py` | |
 | screening / harness | `kernel_tools/ab_bench.py`, `create_harness.py`, `parse_correctness.py` (timing and correctness through `e2e_workflow/scripts/harness_lib.py`) | method in `benchmark-hygiene.md` |
 | budget / roofline | `kernel_tools/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`; peaks from `perf_knowledge/hardware/data/sku.json`, cutoffs from `perf_knowledge/hardware/data/thresholds.json` | method in `budget.md` |
 | pack-only | `scripts/served_envelope.py`, `scripts/env_gate.sh`, `scripts/locus.sh` (optional: kernel in a separate container) | the old `scripts/<name>` paths of moved tools are shims and still resolve |
@@ -710,8 +710,9 @@ bash "$GEAK_ROOT/kernel_workflow/scripts/profile_kernel.sh" <gpu_id> "python3 ha
 python3 "$GEAK_ROOT/kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py" /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
 ```
 
-ATT needs a debug-info build when source mapping matters. Visualize with `att_to_perfetto.py` (merge
-several with `att_merge_perfetto.py`; timeline with `att_timeline.py`) → Perfetto.
+ATT needs a debug-info build when source mapping matters. Read decoded op-class statistics with
+`att_opclass.py`, matrix-instruction issue intervals with `mfma_efficiency.py`, and assembly/source
+hotspots with `hotspot_analyzer.py`; retain the decoded JSON as the underlying evidence.
 
 **ATT decoder (required for `--att`).** `librocprof-trace-decoder.so` is **not vendored**: point
 `ROCPROF_ATT_LIBRARY_PATH` at it (rocprofv3 `--att-library-path`). It is bundled on ROCm >= 7.13; on
@@ -788,8 +789,8 @@ verdict is yours):
   full-drain (`(0)`, serialized handoff = conservative) — verifies whether the loop is **actually
   pipelined or serialized**;
 - **producer<->consumer barriers per iteration** — excess-sync if it scales with pipeline depth;
-- **`s_nop` + requested stall cycles** — an exposed **fixed-latency hazard** (e.g. MFMA-write ->
-  VALU-read) hidden only by unroll/occupancy, never by reorder.
+- **`s_nop` count and raw immediates** — static encoding observations, not measured stall cycles.
+  Interpret them with target ISA and dependency context; they do not prescribe a fix.
 
 Use it as **bottleneck/optimization verification** at both ends of a step: on **plain** it confirms
 the bound class and whether the auto-pipeliner already covered the loop (a serialized /
@@ -797,8 +798,8 @@ the bound class and whether the auto-pipeliner already covered the loop (a seria
 relaxed-waitcnt stream argues stay-plain — `entry.md`); on **Gluon** the same read supplies the
 **IR/asm signal** of three-evidence layer closure (`close.md ## IR acceptance (final)`). The deep
 structural-vs-schedulable verdict and any sanctioned schedule fix live in
-`../tile-programming/compiler-contract.md ## Auditing the hot-loop schedule`;
-`asm_schedule_viz.py` renders the schedule.
+`../tile-programming/compiler-contract.md ## Auditing the hot-loop schedule`.
+Read the instruction stream and class counts from `asm_loop_audit.py` directly.
 
 ### Reading the machine code of a JIT comparator you have no source for
 
