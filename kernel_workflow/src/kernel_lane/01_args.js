@@ -4,6 +4,8 @@
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
+  throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
   throw new Error('prepare_only must be a boolean');
 if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'

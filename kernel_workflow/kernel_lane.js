@@ -25,6 +25,8 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
+  throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
   throw new Error('prepare_only must be a boolean');
 if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
@@ -2256,11 +2258,31 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       log(`Round ${round}: proposed-plan artifact unavailable or already recorded (${attempt}).`);
   };
 
-  let plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
-      evolutionInstructions(),
-      planInputs(false, await deliveryFactsInput())),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+  const callPlanner = async (attempt, intro, forbidStop, label) => {
+    const inputs = planInputs(forbidStop, await deliveryFactsInput());
+    const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
+    const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
+    if (A.record_planner_inputs === true) {
+      let saved = null;
+      try {
+        // Serialize before any recording/call await: HISTORY and archive fields may later mutate.
+        // This is the supplied role prompt, before agentT/runtime additions or adaptive tool reads.
+        const snapshot = JSON.stringify({schema: 'geak.planner-inputs/1', stage: 'before_agentT',
+          round, attempt, label, inputs, role_prompt: prompt, response_schema: schema,
+          prepared_original_ref: A.prepared_original_ref ?? null}, null, 2) + '\n';
+        saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh',
+          `${EVAL_DIR}/planner_r${round}_${attempt}_inputs.json`],
+          {input: snapshot, timeoutMs: 1000, graceMs: 0});
+      } catch (_) { /* Observation failure must not change the search decision. */ }
+      if (saved === null)
+        log(`Round ${round}: planner-input artifact unavailable or already recorded (${attempt}).`);
+    }
+    return agentT(prompt, { phase: 'Optimize', label, schema, ...ENGINEER_CALL });
+  };
+
+  let plan = await callPlanner('initial',
+    'Decide this round\'s orthogonal directions (or stop).' + evolutionInstructions(), false,
+    `tech_lead:plan r${round}`);
   await recordProposedPlan('initial', plan);
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
@@ -2277,10 +2299,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
          (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
-    plan = await agentT(
-      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions(),
-        planInputs(true, await deliveryFactsInput())),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+    plan = await callPlanner(`replan${forcedReplans}`,
+      'Your stop was refused: plan at least one direction.' + evolutionInstructions(), true,
+      `tech_lead:replan r${round}#${forcedReplans}`);
     await recordProposedPlan(`replan${forcedReplans}`, plan);
     left = await secondsLeft(`replan-r${round}`);
   }

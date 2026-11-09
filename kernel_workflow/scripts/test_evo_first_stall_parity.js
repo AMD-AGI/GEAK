@@ -63,8 +63,7 @@ async function runMode(mode, scenario, template) {
   const task = path.join(root, 'task'), evalDir = path.join(root, 'eval'), canonical = path.join(evalDir, 'workspace');
   fs.mkdirSync(task); fs.writeFileSync(path.join(task, 'k.py'), 'A = 0\nB = 0\n');
   git(task, 'init', '-q'); git(task, 'add', '-A'); git(task, 'commit', '-qm', 'ORIGINAL');
-  fs.mkdirSync(evalDir);
-  command('git', ['clone', '-q', task, canonical]);
+  // Fresh assigned Setup owns creation of eval/workspace (22fa and later).
   // Clock: deterministic fake time. Runtime semantics: initial process deadline = outer - cleanup.
   const T0 = 1000000;
   let now = T0;
@@ -99,6 +98,7 @@ async function runMode(mode, scenario, template) {
     if (label === 'profile_engineer:baseline') return {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
     if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
       const key = label.split(' ')[1];
+      if (scenario.failPlan === key) throw new Error('fixture planner failure');
       const p = scenario.plans[key];
       if (scenario.onPlan) { const t = scenario.onPlan(key, {now, processDeadline}); if (t != null) now = t; }
       return p || {stop: true, reasoning: 'fixture stop', directions: []};
@@ -162,7 +162,7 @@ async function runMode(mode, scenario, template) {
     const dispatched = neutralizeForBackend(o.schema ? p + schemaInstruction(o.schema) : p, 'codex');
     rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0,
       process_deadline_minus_now: processDeadline - now,
-      prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched))});
+      prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched)), role_prompt: norm(p)});
     const r = await answer(label, p, o);
     now += step(label);
     return r === undefined ? null : JSON.parse(JSON.stringify(r));
@@ -171,6 +171,8 @@ async function runMode(mode, scenario, template) {
   Object.defineProperty(agent, 'processDeadlineActive', {get: () => true});
   const runProcess = async (req) => {
     rec.host.push(norm([req.cmd, ...(req.args || [])].join(' ')).slice(0, 300));
+    if (scenario.failPlannerInputWrite && /\/planner_r\d+_(initial|replan\d+)_inputs\.json$/.test(req.args?.at(-1) || ''))
+      throw new Error('fixture planner-input write failure');
     const r = spawnSync(req.cmd, req.args, {encoding: 'utf8', timeout: 20000, input: req.input,
       cwd: req.cwd, env: {...ENV, ...(req.env || {})}});
     return {status: r.error ? 'failed' : 'completed', code: r.status, stdout: r.stdout || '',
@@ -202,6 +204,8 @@ async function runMode(mode, scenario, template) {
     ? JSON.parse(norm(fs.readFileSync(path.join(evalDir, name, 'archive.json'), 'utf8'))) : null;
   rec.archive = readArchive('evolution');
   rec.continuation_archive = readArchive('evolution_continuation');
+  rec.planner_inputs = fs.readdirSync(evalDir).filter(n => /^planner_r\d+_(initial|replan\d+)_inputs\.json$/.test(n))
+    .map(n => JSON.parse(norm(fs.readFileSync(path.join(evalDir, n), 'utf8'))));
   return rec;
 }
 
@@ -321,6 +325,38 @@ const FALLBACK = 'Development fallback';
   assert.equal(rows.r4_d0.parent_id, 'r3_d0', 'a slower retained alternative is developed as a parent');
   assert.equal(rows.r3_d0.status, 'correct');
   assert.equal(evo.result.final_speedup, 1.45, 'delivery keeps the developed improvement');
+  {
+    // One observation check exercises a failed planner call, its forced replan, later
+    // history mutation, and failed recording without changing any native decisions.
+    const sc = {...SCENARIOS[0], name: 'planner_inputs', failPlan: 'r1', plans: {
+      ...SCENARIOS[0].plans, 'r1#1': SCENARIOS[0].plans.r1}};
+    const off = await runMode('greedy', sc, TEMPLATE);
+    const on = await runMode('greedy', {...sc, args: {record_planner_inputs: true}}, TEMPLATE);
+    const failed = await runMode('greedy', {...sc, args: {record_planner_inputs: true},
+      failPlannerInputWrite: true}, TEMPLATE);
+    for (const actual of [off, on, failed]) assert.equal(actual.error, null, actual.error);
+    for (const actual of [on, failed]) {
+      assert.deepEqual(actual.calls, off.calls, 'recording success/failure preserves every dispatched prompt and call');
+      assert.deepEqual(actual.result, off.result, 'recording success/failure preserves native outcomes');
+    }
+    assert.deepEqual(off.planner_inputs, [], 'default off makes no input artifact');
+    assert.deepEqual(failed.planner_inputs, [], 'failed recording does not claim an artifact');
+    assert.ok(failed.logs.some(s => s.includes('planner-input artifact unavailable')), 'recording failure is explicit');
+    const first = on.planner_inputs.find(r => r.round === 1 && r.attempt === 'initial');
+    const replan = on.planner_inputs.find(r => r.round === 1 && r.attempt === 'replan1');
+    const later = on.planner_inputs.find(r => r.round === 2 && r.attempt === 'initial');
+    assert.ok(first && replan && later, 'failed initial call, forced replan and later plan are retained');
+    for (const row of on.planner_inputs) {
+      assert.equal(row.stage, 'before_agentT');
+      assert.equal(row.role_prompt, on.calls.find(c => c.label === row.label).role_prompt);
+      for (const [key, value] of Object.entries(row.inputs))
+        assert.deepEqual(field(row.role_prompt, key), value, `${row.label}: exact ${key} input`);
+    }
+    assert.equal(first.inputs.HISTORY.rounds.length, 0, 'initial snapshot survives later history mutation');
+    assert.ok(later.inputs.HISTORY.rounds.length > 0, 'the live history actually changed');
+    assert.ok(replan.inputs.STOP_NOT_PERMITTED, 'replan snapshot retains its different input');
+    console.log('  ok: planner input snapshots survive mutation/failed calls; recording failures preserve decisions');
+  }
   fs.rmSync(OUT, {recursive: true, force: true});
   console.log('PASS: EVO stays byte-identical to greedy until its first non-improving round, then evolves from that incumbent. CPU fixture only.');
 })().catch(error => { console.error(error); process.exit(1); });
