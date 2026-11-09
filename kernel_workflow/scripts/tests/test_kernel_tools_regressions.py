@@ -16,7 +16,6 @@ sys.path.insert(0, str(KT))
 import ab_bench as ab
 import amd_artifacts as artifacts
 import amd_resources as resources
-import asm_schedule_viz as viz
 import create_harness as generator
 import deep_mfma_analysis as deep
 import mfma_efficiency as wave
@@ -260,15 +259,12 @@ def test_multi_kernel_identity_and_cli(tmp_path):
         assert resources.analyze('\n'.join(lines))['vgpr_combined'] == vgpr
         assert artifacts.assembly_kernel_name('\n'.join(lines)) == n
         assert sum(sc == 'mfma' for _, sc in deep.hot_ops(asm, None, n)[1]) == count
-        assert viz.hot_loop_ops(asm, None, 160, n)[1].count('mfma') == count
         p = subprocess.run([sys.executable, str(KT / 'asm_loop_audit.py'), str(asm), '--kernel', n],
                            capture_output=True, text=True, check=False)
         assert p.returncode == 0, p.stderr
         assert f'[kernel: {n}]' in p.stdout
     with pytest.raises(SystemExit, match='select one kernel'):
         deep.hot_ops(asm, None)
-    with pytest.raises(SystemExit, match='select one kernel'):
-        viz.hot_loop_ops(asm, None, 160)
     (tmp_path / 'two.json').write_text(json.dumps({'name': 'second', 'shared': 1024}))
     with pytest.raises(ValueError, match='identity mismatch'):
         artifacts.inspect_artifact(asm, kernel='first')

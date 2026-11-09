@@ -18,14 +18,13 @@ PACK = SCRIPTS.parents[1] / "perf_knowledge/expert_skills/skills/gluon_authoring
 TOOLS = [
     "locus.sh", "capture.sh", "rocprof_compute_probe.sh", "rocprofv3_safe.sh",
     "parse_pmc.py", "parse_rc.py", "kernel_breakdown.py", "hotspot_analyzer.py",
-    "att_to_perfetto.py", "att_merge_perfetto.py", "att_timeline.py", "att_opclass.py",
-    "tile_trace.py", "serve_traces.py",
+    "att_opclass.py",
 ]
 
 
 def _run(path, tmp_path):
     cmd = (["bash", str(path)] if path.suffix == ".sh" else [sys.executable, str(path)]) + ["--selftest"]
-    env = dict(os.environ, TMPDIR=str(tmp_path), MPLBACKEND="Agg")
+    env = dict(os.environ, TMPDIR=str(tmp_path))
     env.pop("GEAK_GPU_LOCK_HELD", None)
     return subprocess.run(cmd, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
 

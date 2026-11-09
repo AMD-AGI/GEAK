@@ -151,8 +151,8 @@ application argv after `--`, pins the requested kernel, and archives old evidenc
 before collecting again. Non-Triton applications may report the static IR layer
 unavailable; this does not invent Triton IR for HIP or replace their build tooling.
 
-Profiling parsers, ATT/Perfetto rendering, GPU guards and native roofline delegation
-are shared. `profile_payload.py` and campaign decisions remain optional Gluon
-adapters. An optionally installed TraceLens runner owns its roofline models and calibration;
+Profiling parsers, decoded ATT analysis, GPU guards and native roofline delegation
+are shared. `profile_payload.py` and its schema are shared capture interfaces;
+language packs supply payloads and keep their campaign records. An optionally installed TraceLens runner owns its roofline models and calibration;
 GEAK retains benchmark acceptance;
 static resource estimates are planning evidence and never a fallback roofline engine.

@@ -8,7 +8,6 @@ ISA/IR evidence, changes the kernel and verifies it through the existing workflo
 | --- | --- | --- |
 | `asm_loop_audit.py` | Matrix/VALU/memory/wait mix, hot loop, register and LDS context | Python; AMD assembly or disassembly |
 | `deep_mfma_analysis.py` | Matrix bursts and instructions strictly between bursts | Python; AMD assembly |
-| `asm_schedule_viz.py` | Plot instruction order by class | Above + `matplotlib` when rendering |
 | `mfma_efficiency.py` | Observed matrix cadence and intervening issue intervals | Python; already decoded wave/code JSON |
 | `ab_bench.py` | Interleaved, controlled A/B screening | Kernel's runtime + GEAK `harness_lib` |
 | `create_harness.py` | Generate an editable search harness skeleton | Python to generate; PyTorch/kernel runtime to execute |
@@ -16,8 +15,7 @@ ISA/IR evidence, changes the kernel and verifies it through the existing workflo
 
 `amd_artifacts.py` and `amd_resources.py` share kernel identity and resource parsing;
 `harness_stub_env.py` supports CPU-only skeleton tests and is not a benchmark runtime.
-Use Python 3.10+. Static tools have no GPU requirement. Install optional rendering with
-`python -m pip install matplotlib` in the analysis environment. No matrix-layout,
+Use Python 3.10+. Static tools have no GPU requirement. No matrix-layout,
 rocprof, ATT decoder or new mandatory GEAK dependency is required by these CLIs.
 The wave reader consumes existing decoded artifacts; collection stays in the profiling
 workflow. Native roofline/calibration remains owned by TraceLens.
@@ -29,7 +27,6 @@ Run from the GEAK checkout (replace the example paths and kernel name):
 ```bash
 python kernel_workflow/scripts/kernel_tools/asm_loop_audit.py kernel.s --kernel my_kernel
 python kernel_workflow/scripts/kernel_tools/deep_mfma_analysis.py kernel.s --kernel my_kernel
-python kernel_workflow/scripts/kernel_tools/asm_schedule_viz.py kernel.s --kernel my_kernel --out schedule.png
 python kernel_workflow/scripts/kernel_tools/create_harness.py --kernel-path kernel.py --kernel-type triton --output harness.py
 python kernel_workflow/scripts/kernel_tools/ab_bench.py --module adapter.py --baseline base --control auto --cells 6 --permute --json screen.json
 python kernel_workflow/scripts/kernel_tools/parse_correctness.py --log unittest.log --parse geak --exit-code 0 --out correctness.json
@@ -85,7 +82,7 @@ unrecognizable stripped excerpts cannot supply a trusted kernel identity.
 - **Loop scope:** The audit prefers innermost loops, then most matrix instructions and
   the shortest body; `--loop-label` selects an explicit back-edge. With no loop,
   `asm_loop_audit.py` can report a bounded whole-kernel body, labelled as per-thread totals.
-  `deep_mfma_analysis.py` and `asm_schedule_viz.py` require a back-edge loop.
+  `deep_mfma_analysis.py` requires a back-edge loop.
 
 The existing [Gluon script paths](../../../perf_knowledge/expert_skills/skills/gluon_authoring/scripts/)
 forward to these shared tools. This layer adds no automatic Claude Code routing; skill
@@ -100,6 +97,5 @@ python -m pytest -q kernel_workflow/scripts/tests/test_kernel_tools_bench.py \
   kernel_workflow/scripts/tests/test_shared_amd_tools.py
 ```
 
-These tests run without GPU, network or profiling installations. Rendering is exercised
-by the visualizer selftest when matplotlib is installed. GPU correctness/performance and
-real decoded-trace validation must be recorded separately from these offline checks.
+These tests run without GPU, network or profiling installations. GPU correctness/performance
+and real decoded-trace validation must be recorded separately from these offline checks.
