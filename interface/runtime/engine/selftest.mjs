@@ -115,6 +115,36 @@ async function testSchemaAgent() {
   try { await rt.agent('FAKE_BADJSON', { schema: sch }); } catch { threw = true; }
   ok(threw, 'agent schema throws after retries exhausted');
   eq(b.calls - before, 3, 'schema retried schemaRetries+1 = 3 times');
+
+  // A report-format error must not dispatch the original measured work again.
+  const action = 'FAKE_MEASURE_ONCE';
+  const first = JSON.stringify({ score: 0.75, patch_file: null });
+  const second = JSON.stringify({ score: '0.75', notes: 'a StructuredOutput tool is forced' });
+  const fixed = { score: 0.75, notes: 'a StructuredOutput tool is forced' };
+  const requests = [];
+  let executions = 0;
+  const repairBackend = { name: 'codex', runAgent: async (request) => {
+    requests.push(request);
+    if (request.prompt.includes(action)) executions++;
+    return { text: [first, second, JSON.stringify(fixed)][requests.length - 1] };
+  } };
+  const repairRuntime = createRuntime({ backend: repairBackend, schemaRetries: 2, log: silent });
+  const repairSchema = { type: 'object', required: ['score'], properties: {
+    score: { type: 'number' }, patch_file: { type: 'string' }, notes: { type: 'string' },
+  } };
+  const context = { cwd: '/fixture', env: { FIXTURE: '1' }, model: 'fixture-model' };
+  eq(await repairRuntime.agent(action, { schema: repairSchema, ...context }), fixed,
+    'format repairs preserve measured facts and return through the original schema');
+  eq(executions, 1, 'schema retries do not redispatch the original task');
+  ok(requests[1].prompt.includes(JSON.stringify(first)) && requests[1].prompt.includes('$.patch_file'),
+    'first repair receives the previous response and its validation error');
+  ok(requests[2].prompt.includes(JSON.stringify(second)) && requests[2].prompt.includes('$.score'),
+    'later repair receives the latest response unchanged, including backend-specific words');
+  for (const request of requests) {
+    eq({ cwd: request.cwd, env: request.env, model: request.model }, context,
+      'format repair preserves the invocation context');
+  }
+  eq(repairRuntime.state.schemaFails, 2, 'repair responses still pass the existing validator');
 }
 
 async function testRunScriptAndNesting() {

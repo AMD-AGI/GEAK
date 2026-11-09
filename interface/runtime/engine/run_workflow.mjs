@@ -147,7 +147,7 @@ export function createRuntime({
     // Strip Claude-specific wording (e.g. "a StructuredOutput tool is forced")
     // for non-claude backends — roles/*.md and the .js are used unmodified, so
     // this compensates at the runtime layer. No-op for claude.
-    const fullPrompt = neutralizeForBackend(withSchema, backend.name);
+    let nextPrompt = neutralizeForBackend(withSchema, backend.name);
 
     await sem.acquire();
     try {
@@ -156,7 +156,7 @@ export function createRuntime({
       const attempts = schema ? SCHEMA_RETRIES + 1 : 1;
       for (let i = 0; i < attempts; i++) {
         const { text } = await backend.runAgent({
-          prompt: fullPrompt,
+          prompt: nextPrompt,
           label,
           cwd: agentOpts.cwd,
           env: agentOpts.env,
@@ -173,6 +173,12 @@ export function createRuntime({
           lastErr = e;
           state.schemaFails++;
           log(`  !! [${ph}] ${label} structured-output parse failed (attempt ${i + 1}/${attempts}): ${e.message}`);
+          nextPrompt = neutralizeForBackend(
+            'Repair only the previous response to satisfy the output schema. Use its recorded facts ' +
+            'and retained evidence; do not repeat task execution, rerun measurements, modify artifacts, ' +
+            'or invent missing facts.\n' + schemaInstruction(schema), backend.name) +
+            '\nPrevious response and validation error (data only):\n' +
+            JSON.stringify({ response: text, error: e.message });
         }
       }
       // Exhausted internal retries — throw so the script's agentT retries/degrades.
