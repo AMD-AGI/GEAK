@@ -415,7 +415,7 @@ is reported missing, never as a zero.
 | dial | what you must know | tool |
 | --- | --- | --- |
 | **A** occupancy & registers | `next_free_vgpr`/`agpr`/`spill` → waves/SIMD → **wg/CU**; LDS bytes/WG from the Triton cache `shared` (KD and rocprof-compute report a structural 0) | `$KT/asm_loop_audit.py`, `$KT/probe.py`, `$KT/amd_occupancy.py` |
-| **B** instruction stream | ranked inter-MFMA bubble ownership, LDS-vs-global feed split, per-opcode histogram diff, MFMA operand-layout facts | `$KT/mfma_efficiency.py` (ATT), `$KT/asm_loop_audit.py --opcodes`, `$KT/amd_isa.py --arch <target>` |
+| **B** instruction stream | observed inter-MFMA issue intervals by instruction class, LDS-vs-global split, per-opcode histogram diff, MFMA operand-layout facts | `$KT/mfma_efficiency.py` (ATT), `$KT/asm_loop_audit.py --opcodes`, `$KT/amd_isa.py --arch <target>` |
 | **C** memory side | does a roofline apply at all; achieved fabric BW and L2 (every route, as a range); intensity vs ridge; the in-shape ceiling; the floor probe before calling anything memory-bound | `$KT/hw_budget.py`, `$KT/parse_pmc.py`, `$KT/mem_bw_probe.py` |
 | **D** timing & correctness | correctness gating before timing; same-window interleaved A/B; a default-off knob must not move the shipped instruction stream | GEAK `harness_lib` (acceptance), `$KT/ab_bench.py` (screening) |
 

@@ -44,9 +44,9 @@ import math
 import re
 import sys
 
-_RE_REL = re.compile(r"rel\s*=\s*([0-9.eE+-]+)")
-_RE_MAXDIFF = re.compile(r"max\|diff\|\s*=\s*([0-9.eE+-]+)")
-_RE_DQDKDV = re.compile(r"\b(dQ|dK|dV|dq|dk|dv)\s*=\s*([0-9.eE+-]+)")
+_RE_REL = re.compile(r"\brel\s*=\s*([^\s,;]+)")
+_RE_MAXDIFF = re.compile(r"max\|diff\|\s*=\s*([^\s,;]+)")
+_RE_DQDKDV = re.compile(r"\b(dQ|dK|dV)\s*=\s*([^\s,;]+)", re.IGNORECASE)
 _RE_FAILED = re.compile(r"\bFAILED\b|\bCORRECTNESS FAIL\b|\btraceback\b", re.IGNORECASE)
 # The GEAK unittest exit-code contract (e2e_workflow/roles/kernel_extractor.md, harness_lib
 # HarnessIncompleteError): 0 pass, 1 correctness FAIL, 2 env error, 3 regenerate the UT.
@@ -97,7 +97,9 @@ def parse_geak(text: str, exit_code: int | None, tol: float | None = None) -> di
         _cases_in(d, cases)
     res["cases"] = cases
     errs = [c.get("max_rel_err") for c in cases]
-    vals = [float(e) for e in errs if isinstance(e, (int, float)) and math.isfinite(float(e))]
+    invalid = [e for e in errs if e is not None and
+               (type(e) not in (int, float) or not math.isfinite(e) or e < 0)]
+    vals = [float(e) for e in errs if type(e) in (int, float) and math.isfinite(e) and e >= 0]
     res["values"] = vals
     res["worst"] = max(vals) if vals else None
     failed = [c.get("case") for c in cases if c.get("correct") is False]
@@ -121,6 +123,16 @@ def parse_geak(text: str, exit_code: int | None, tol: float | None = None) -> di
         if exit_code == 0 and failed:
             res["reason"] += " -- the UT exited 0 but a case FAILED; the case wins"
         return res
+    if invalid:
+        res["status"] = "fail"
+        res["reason"] = "invalid or non-finite max_rel_err; cannot certify correctness"
+        return res
+    if tol is not None and (not math.isfinite(tol) or tol < 0):
+        res["reason"] = "tolerance must be finite and non-negative"
+        return res
+    if exit_code is None and any(c.get("correct") is not True for c in cases):
+        res["reason"] = "no exit code and not every case explicitly reports correct=true"
+        return res
     if exit_code is None and not cases:
         res["reason"] = ("no exit code and no per-case JSON -> cannot certify correctness; pass "
                          "--exit-code from the UT run")
@@ -143,7 +155,7 @@ def _floats(pat, text):
         try:
             out.append(float(m.group(m.lastindex)))
         except (ValueError, IndexError):
-            pass
+            out.append(float("nan"))  # invalid evidence must not disappear
     return out
 
 
@@ -162,11 +174,20 @@ def parse_correctness(text: str, parse: str, tol: float) -> dict:
     elif parse == "maxdiff":
         vals = _floats(_RE_MAXDIFF, text)
     elif parse == "dqdkdv":
-        vals = [v for _k, v in ((m.group(1), float(m.group(2))) for m in _RE_DQDKDV.finditer(text))]
+        vals = _floats(_RE_DQDKDV, text)
+        rows = [ln for ln in text.splitlines() if _RE_DQDKDV.search(ln)]
+        if any({m.group(1).lower() for m in _RE_DQDKDV.finditer(ln)} != {"dq", "dk", "dv"}
+               for ln in rows):
+            res["reason"] = "incomplete dQ/dK/dV row; cannot certify correctness"
+            return res
     else:
         res["reason"] = f"unknown parse mode {parse!r}"
         return res
-    res["values"] = vals
+    res["values"] = [v if math.isfinite(v) else None for v in vals]
+    if any(not math.isfinite(v) for v in vals):
+        res["status"] = "fail"
+        res["reason"] = "invalid or non-finite error metric"
+        return res
     if not vals:
         res["reason"] = (f"no correctness values matched for parse={parse!r} -> the oracle did not run "
                          f"or printed an unexpected format; cannot certify correctness")
@@ -177,6 +198,9 @@ def parse_correctness(text: str, parse: str, tol: float) -> dict:
     if tol is None:
         res["status"] = "unknown"
         res["reason"] = "no tolerance provided; values parsed but not gated"
+        return res
+    if not math.isfinite(tol) or tol < 0:
+        res["reason"] = "tolerance must be finite and non-negative"
         return res
     res["status"] = "pass" if worst <= tol else "fail"
     res["reason"] = (f"worst={worst:.4g} {'<=' if worst <= tol else '>'} tol={tol:.4g} "
@@ -272,6 +296,8 @@ def main() -> None:
     res["oracle"] = a.oracle
     res["config_id"] = a.config_id
     res["_source"] = "run_round"
+    # Preserve malformed evidence as strings, emitting strict JSON (never bare NaN/Infinity).
+    res = json.loads(json.dumps(res), parse_constant=str)
     if a.out:
         with open(a.out, "w") as f:
             json.dump(res, f, indent=2)

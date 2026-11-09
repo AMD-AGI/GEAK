@@ -9,9 +9,8 @@ For a hot-loop .s/.amdgcn, reports:
   3. top interleaved mnemonics
 
 This is the STATIC (issue-order) companion to mfma_efficiency.py (which does the
-cycle-accurate ATT version). Reuses the hot-loop finder + classifier from the
-skill's *_loop_audit.py (asm_loop_audit for gluon/tilelang, isa_loop_audit for
-flydsl). Stdlib only, no GPU.
+decoded-wave interval version). Reuses the hot-loop finder + classifier from the
+shared asm_loop_audit.py. Stdlib only, no GPU.
 
 Usage: python3 deep_mfma_analysis.py <a.s> [--loop-label L]
        python3 deep_mfma_analysis.py --compare a.s=ASM b.s=TRI ...
@@ -24,12 +23,10 @@ import os
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import asm_loop_audit as _A  # gluon / tilelang
-except ModuleNotFoundError:
-    import isa_loop_audit as _A  # flydsl
+import asm_loop_audit as _A
 
 # fine-grained VALU sub-class (order matters, first match wins)
 _SUB = [
@@ -55,14 +52,17 @@ _SUB = [
 
 
 def sub_class(mn):
+    base, _ = _A.classify(mn)
+    if base != "valu":
+        return {"lds_read": "lds", "lds_write": "lds", "gld": "gmem", "gst": "gmem"}.get(base, base)
     for name, rx in _SUB:
         if rx.match(mn):
             return name
     return "other"
 
 
-def hot_ops(path, loop_label):
-    lines = open(path).read().splitlines()
+def hot_ops(path, loop_label, kernel=None):
+    lines, _ = _A.select_kernel(Path(path).read_text().splitlines(), kernel)
     loops = _A.find_loops(lines)
     picked = _A.pick_loop(lines, loops, loop_label)
     if picked is None:
@@ -87,20 +87,25 @@ def analyze(ops):
     in_stream = False   # have we seen the first MFMA yet
     gap_len = []
     cur_gap = 0
+    pending_hist, pending_mnem = Counter(), Counter()
     for mn, sc in ops:
         if sc == "mfma":
             if cur == 0 and in_stream:
                 gap_len.append(cur_gap)
+                gap_hist.update(pending_hist)
+                gap_mnem.update(pending_mnem)
             cur += 1
             in_stream = True
             cur_gap = 0
+            pending_hist.clear()
+            pending_mnem.clear()
         else:
             if cur > 0:
                 runs.append(cur)
                 cur = 0
             if in_stream:
-                gap_hist[sc] += 1
-                gap_mnem[mn] += 1
+                pending_hist[sc] += 1
+                pending_mnem[mn] += 1
                 cur_gap += 1
     if cur > 0:
         runs.append(cur)
@@ -119,7 +124,7 @@ def report(lab, ops):
     if gl:
         print(f"  inter-MFMA gap length (instr between MFMA bursts): mean={statistics.mean(gl):.1f} "
               f"max={max(gl)}")
-    tot_gap = sum(gh.values()) or 1
+    tot_gap = sum(gh.values())
     print(f"  what breaks the MFMA stream ({tot_gap} inter-MFMA instr):")
     for sc, n in gh.most_common():
         print(f"      {sc:16s} {n:5d}  ({100*n/tot_gap:4.1f}%)")
@@ -179,19 +184,20 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("asm", nargs="?")
     ap.add_argument("--loop-label")
+    ap.add_argument("--kernel", help="select one kernel (also applies to each --compare input)")
     ap.add_argument("--compare", nargs="+", help="path=LABEL[,loop-label]")
     a = ap.parse_args()
     if a.compare:
         for e in a.compare:
             p, _, rest = e.partition("=")
             label, _, ll = rest.partition(",")
-            lab, ops = hot_ops(p, ll or None)
+            lab, ops = hot_ops(p, ll or None, a.kernel)
             print(f"\n=== {label or p} ===")
             report(lab, ops)
     else:
         if not a.asm:
             ap.error("provide <a.s> or --compare a.s=LABEL ...")
-        lab, ops = hot_ops(a.asm, a.loop_label)
+        lab, ops = hot_ops(a.asm, a.loop_label, a.kernel)
         print(f"\n=== {a.asm} ===")
         report(lab, ops)
 

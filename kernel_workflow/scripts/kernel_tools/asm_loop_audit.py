@@ -49,6 +49,7 @@ import os
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 
 
 def _load_amd_occupancy():
@@ -161,79 +162,7 @@ def _mnemonic(line: str) -> str | None:
 # A module may hold SEVERAL kernels. `.type <name>,@function` opens each one; an objdump-style
 # disasm has no `.type`, so `.amdhsa_kernel <name>` is the fallback anchor. The `.amdgpu_metadata`
 # YAML tail repeats every name and is NOT an anchor -- it would invent a second span per kernel.
-_KSTART_RE = re.compile(r"^\s*(?:\.type\s+([A-Za-z_$][\w$.]*)\s*,\s*@function"
-                        r"|\.amdhsa_kernel\s+([A-Za-z_$][\w$.]*))")
-_MD_TAIL_RE = re.compile(r"^\s*\.amdgpu_metadata\b")
-
-
-def kernels_in_asm(lines: list[str]) -> list[tuple[str, int, int]]:
-    """Every kernel in the dump as (name, start_idx, end_idx_exclusive), in file order.
-
-    Returns [] when the file names no kernel at all -- callers must treat that as "one
-    unnamed object", never as "zero kernels", because a hand-trimmed excerpt is still
-    auditable; it just cannot be labelled.
-    """
-    anchors: list[tuple[str, int]] = []
-    for i, ln in enumerate(lines):
-        if _MD_TAIL_RE.match(ln):
-            break
-        m = _KSTART_RE.match(ln)
-        if m:
-            name = m.group(1) or m.group(2)
-            if not anchors or anchors[-1][0] != name:
-                anchors.append((name, i))
-    if not anchors:
-        return []
-    # Dedupe: `.type f,@function` then `.amdhsa_kernel f` are two markers for ONE kernel.
-    uniq: list[tuple[str, int]] = []
-    for name, i in anchors:
-        if not any(n == name for n, _ in uniq):
-            uniq.append((name, i))
-    end_all = next((i for i, ln in enumerate(lines) if _MD_TAIL_RE.match(ln)), len(lines))
-    out = []
-    for k, (name, start) in enumerate(uniq):
-        end = uniq[k + 1][1] if k + 1 < len(uniq) else end_all
-        out.append((name, start, end))
-    return out
-
-
-def select_kernel(lines: list[str], want: str | None) -> tuple[list[str], str | None]:
-    """Narrow `lines` to ONE kernel, or exit listing the candidates.
-
-    The failure this exists to prevent is the quiet one. With several kernels in a module,
-    every whole-file reading silently mixes them -- the register budget maxes across them, the
-    loop picker scores loops from all of them together, and the heading names the FILE. The
-    result is a complete, internally consistent report about a kernel the reader did not ask
-    for, with nothing in it that looks wrong. So when the object is ambiguous the tool refuses
-    and lists what it found, on the same principle that the LDS divisor has no default: a
-    withheld answer is recoverable, a confident wrong one is not.
-    """
-    ks = kernels_in_asm(lines)
-    # `.amdgcn_target` is a MODULE fact that sits above the first kernel. Carry it into every
-    # slice, or narrowing the audit silently costs the arch -- and with it the occupancy verdict.
-    preamble = [ln for ln in lines[:ks[0][1]] if ".amdgcn_target" in ln] if ks else []
-    if not ks:
-        if want:
-            sys.exit(f"--kernel {want!r}: this dump names no kernel (no `.type ...,@function` "
-                     f"and no `.amdhsa_kernel`), so the name cannot be checked. Drop --kernel "
-                     f"to audit the file as one object.")
-        return lines, None
-    if want:
-        exact = [k for k in ks if k[0] == want]
-        part = exact or [k for k in ks if want in k[0]]
-        if len(part) != 1:
-            names = "\n".join(f"    {n}" for n, _, _ in ks)
-            sys.exit(f"--kernel {want!r} matches {len(part)} of {len(ks)} kernels in this dump."
-                     f" Candidates:\n{names}")
-        name, s, e = part[0]
-        return preamble + lines[s:e], name
-    if len(ks) == 1:
-        name, s, e = ks[0]
-        return preamble + lines[s:e], name
-    names = "\n".join(f"    {n}" for n, _, _ in ks)
-    sys.exit(f"this dump contains {len(ks)} kernels and no --kernel was given. Auditing all of "
-             f"them together would report one kernel's schedule under another's name, so pick "
-             f"one:\n{names}\n\n  re-run with `--kernel <name>` (a unique substring is enough).")
+from amd_artifacts import kernels_in_asm, select_kernel
 
 
 def _is_cdna_family(arch) -> bool:
@@ -337,7 +266,7 @@ def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for p in sorted(cands):
         try:
-            d = json.load(open(p))
+            d = json.loads(Path(p).read_text())
         except (OSError, ValueError):
             continue
         if (isinstance(d, dict) and type(d.get("shared")) is int and d["shared"] >= 0
@@ -484,7 +413,7 @@ def kernel_body_span(lines: list[str]) -> tuple[str, int, int] | None:
             if not m:
                 continue
             lab = m.group("obj") or m.group("asm")
-            if lab.startswith(".LBB") or lab.startswith(".Lfunc"):
+            if lab.startswith((".LBB", ".Lfunc")):
                 continue          # a basic-block label, not the kernel entry
             start, name = i + 1, lab
             break
@@ -549,7 +478,7 @@ def parse_opcodes(path: str) -> dict[str, int]:
     out: dict[str, int] = {}
     inside = False
     try:
-        txt = open(path, errors="ignore").read()
+        txt = Path(path).read_text(errors="ignore")
     except OSError:
         return out
     for ln in txt.splitlines():
@@ -823,7 +752,7 @@ def _selftest() -> int:
         raise AssertionError("multi-kernel resource analysis must refuse instead of mixing counts")
     # a unique substring selects; the label comes from the same call that narrows the lines
     _sel, _nm = select_kernel(_two, "tail")
-    assert _nm == "k_tail" and len(_sel) == len(_two[_ks[1][1]:_ks[1][2]]), (_nm, _sel)
+    assert _nm == "k_tail" and kd_regs(_sel)["vgpr"] == 16, (_nm, _sel)
     # ambiguity and absence both REFUSE rather than pick
     for _bad in (None, "k_"):
         try:
@@ -925,7 +854,7 @@ def main() -> None:
     a = ap.parse_args()
 
     try:
-        lines = open(a.asm).read().splitlines()
+        lines = Path(a.asm).read_text().splitlines()
     except OSError as e:
         sys.exit(f"cannot read {a.asm!r}: {e}")
 
@@ -957,7 +886,7 @@ def main() -> None:
     if not a.meta:
         from amd_artifacts import inspect_artifact
         try:
-            _name, metadata, _bound = inspect_artifact(a.asm)
+            _name, metadata, _bound = inspect_artifact(a.asm, kernel=a.kernel)
         except (ValueError, OSError) as exc:
             ap.error(str(exc))
         records = []

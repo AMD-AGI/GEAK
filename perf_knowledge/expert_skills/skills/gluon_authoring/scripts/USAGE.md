@@ -393,3 +393,12 @@ existing measurement artifacts offline; `measure` and `rocprof` use the GEAK lea
 `capture.sh` supplies supplementary ATT/ISA/trace artifacts and does not automatically collect full
 rocprof-compute counters. `rocprof_compute_probe.sh` delegates new collection to the native runner;
 its `--diagnostic` option explicitly requests a separate whole-process no-roof report.
+
+## Shared analysis and screening contracts
+
+- The [shared tools guide](../../../../../kernel_workflow/scripts/kernel_tools/README.md) documents
+  A/B schema v2, correctness rc/sentinel handling, kernel selection and optional dependencies.
+- `ab_bench.py` uses GEAK timing and median screening. Invalid or unverified windows cannot
+  report a screen pass; acceptance still requires GEAK verify / `measure_legs`.
+- `mfma_efficiency.py` reads existing decoded wave/code artifacts. Inter-issue intervals are
+  evidence to interpret; they do not establish stall causality or select optimization tactics.

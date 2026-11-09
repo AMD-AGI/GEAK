@@ -6,8 +6,8 @@ timestamps. But the assembler hot loop IS the compiler/author's issue ORDER, so
 plotting each instruction (x = program index) on its op-class lane directly shows
 the interleave / ping-pong pattern:
 
-  * MFMA and VALU lanes alternating tightly  -> interleaved (ping-pong / good overlap)
-  * MFMA lane empty over a long run while VALU is solid -> exposed serial VALU (bubble)
+  * MFMA and VALU lanes alternating tightly  -> interleaved in program order (overlap needs runtime evidence)
+  * MFMA lane empty over a long run while VALU is solid -> a VALU run (a possible scheduling concern)
 
 Optionally weights each instruction by an approximate issue latency (cyc/op) to get
 an analytic cycle-x-axis. Requires matplotlib; reuses the skill's *_loop_audit.py.
@@ -22,27 +22,25 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import asm_loop_audit as _A  # gluon / tilelang
-except ModuleNotFoundError:
-    import isa_loop_audit as _A  # flydsl
+import asm_loop_audit as _A
 
 # approximate issue/occupy latency per op-class (gfx9xx, wave64), cycles.
 _CYC = {"mfma": 16, "valu": 4, "exp": 4, "lds_read": 4, "lds_write": 4,
         "gld": 4, "gst": 4, "waitcnt": 1, "barrier": 4, "nop": 1,
         "scalar": 1, "other": 1}
 _LANES = ["mfma", "valu", "exp", "lds_read", "lds_write", "gld", "gst",
-          "waitcnt", "barrier", "nop", "scalar", "other"]
+          "waitcnt", "aluwait", "atomic", "barrier", "nop", "scalar", "other"]
 _COLOR = {"mfma": "#d62728", "valu": "#1f77b4", "exp": "#9467bd",
           "lds_read": "#2ca02c", "lds_write": "#98df8a", "gld": "#ff7f0e",
           "gst": "#ffbb78", "waitcnt": "#c7c7c7", "barrier": "#8c564b",
-          "nop": "#e377c2", "scalar": "#7f7f7f", "other": "#cccccc"}
+          "aluwait": "#bcbd22", "atomic": "#17becf", "nop": "#e377c2", "scalar": "#7f7f7f", "other": "#cccccc"}
 
 
-def hot_loop_ops(asm_path, loop_label, max_instr):
-    lines = open(asm_path).read().splitlines()
+def hot_loop_ops(asm_path, loop_label, max_instr, kernel=None):
+    lines, _ = _A.select_kernel(Path(asm_path).read_text().splitlines(), kernel)
     loops = _A.find_loops(lines)
     picked = _A.pick_loop(lines, loops, loop_label)
     if picked is None:
@@ -77,11 +75,11 @@ def _plot_one(ax, ops, title, cycles):
     ax.set_yticklabels(list(reversed(_LANES)), fontsize=7)
     ax.set_xlim(0, x)
     ax.set_title(f"{title}   (n={len(ops)} instr, MFMA<->VALU transitions={trans}, "
-                 f"x={'cycles(approx)' if cycles else 'issue index'})", fontsize=9)
+                 f"x={'heuristic weights' if cycles else 'issue index'})", fontsize=9)
     ax.grid(axis="x", linestyle=":", alpha=0.4, zorder=0)
 
 
-def render(specs, out, cycles, loop_label=None, max_instr=160):
+def render(specs, out, cycles, loop_label=None, max_instr=160, kernel=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.patches as mpatches
@@ -89,10 +87,10 @@ def render(specs, out, cycles, loop_label=None, max_instr=160):
     n = len(specs)
     fig, axes = plt.subplots(n, 1, figsize=(14, 2.6 * n + 0.6), squeeze=False)
     for i, (path, label) in enumerate(specs):
-        lab, ops = hot_loop_ops(path, loop_label, max_instr)
+        lab, ops = hot_loop_ops(path, loop_label, max_instr, kernel)
         _plot_one(axes[i][0], ops, f"{label}  [loop {lab}]", cycles)
         if i == n - 1:
-            axes[i][0].set_xlabel("cycles (approx, latency-weighted)" if cycles else "instruction issue order")
+            axes[i][0].set_xlabel("heuristic instruction weights (not measured cycles)" if cycles else "instruction issue order")
     handles = [mpatches.Patch(color=_COLOR[c], label=c) for c in _LANES]
     fig.legend(handles=handles, ncol=6, fontsize=7, loc="lower center")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
@@ -156,8 +154,9 @@ def main():
     ap.add_argument("--label", default="kernel")
     ap.add_argument("--compare", nargs="+", help="path=LABEL entries for stacked compare")
     ap.add_argument("--loop-label")
+    ap.add_argument("--kernel", help="select one kernel in each input")
     ap.add_argument("--max", type=int, default=160)
-    ap.add_argument("--cycles", action="store_true", help="latency-weighted x-axis")
+    ap.add_argument("--cycles", action="store_true", help="legacy heuristic weights; not architecture-specific cycles")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     if a.compare:
@@ -167,7 +166,11 @@ def main():
             specs.append((p, l or os.path.basename(p)))
     else:
         specs = [(a.asm, a.label)]
-    render(specs, a.out, a.cycles, a.loop_label, a.max)
+    if not a.compare and not a.asm:
+        ap.error("provide an assembly path or --compare")
+    if a.max <= 0:
+        ap.error("--max must be positive")
+    render(specs, a.out, a.cycles, a.loop_label, a.max, a.kernel)
 
 
 if __name__ == "__main__":
