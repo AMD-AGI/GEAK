@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# capture.sh - one-click evidence capture (joint 1 of the decision pipeline).
+# capture.sh - source-scoped trace/ATT/IR task wrapper.
 #
-# preflight (is the kernel PMC-visible?) -> branch:
-#   PMC-live   : supplementary rocprofv3 --att (native roofline/full counters are separate)
-#                (auto-widen CU/SE, retry on code:null) + dump_ir.sh
-#   PMC-blind  : native-ISA degrade (dump_ir.sh .s + note the floor-probe path)
+# Shared rocprofv3_safe.sh collects and validates trace/ATT evidence. A matching
+# dispatch trace does not establish PMC support. Missing profiler layers remain
+# unavailable; static IR capture is independent. Counter/roofline runs are separate.
 #
 # (GEAK shared kernel tool; the Gluon pack's scripts/capture.sh is a shim to this file.)
 #
@@ -32,7 +31,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Shared host<->container ownership: never write root-owned .pyc into the bind-mounted skill dir,
 # and make artifacts group-writable so the host uid can edit what the (root) container wrote. See
-# gluon_authoring references/method/profile.md ### Execution locus (shared ownership).
+# kernel_tools/profiling-dependencies.md.
 export PYTHONDONTWRITEBYTECODE=1
 umask 0002
 # Profiler runs WHERE the kernel runs: when TILE_KERNEL_CONTAINER is set, locus_run wraps the
@@ -116,20 +115,15 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 # shellcheck source=_kt_common.sh
-source "$HERE/_kt_common.sh"   # gpu_lock routing, move-aside, ATT decoder probe, pack locus.sh if present
+source "$HERE/_kt_common.sh"   # gpu_lock routing, move-aside, ATT decoder probe, shared locus.sh
 
 if [ "${1:-}" = "--payload" ]; then
   PAYLOAD="${2:-}"
   [ -n "$PAYLOAD" ] || { echo "capture: --payload needs a path" >&2; exit 2; }
   shift 2
   [ "$#" = 0 ] || { echo "capture: --payload cannot be combined with legacy arguments" >&2; exit 2; }
-  # profile_payload.py is a pack runtime tool (it stays in gluon_authoring/scripts).
-  [ -f "$KT_PACK_DIR/scripts/profile_payload.py" ] || {
-    echo "[capture] --payload needs the Gluon pack's scripts/profile_payload.py, not found under" \
-         "$KT_PACK_DIR (set GEAK_GLUON_PACK_DIR). Use the positional form instead:" \
-         "capture.sh <name> <out_dir> --kernel <substr> --source <kernel.py> -- <cmd>" >&2; exit 2; }
   export LOCUS_ENV
-  exec python3 "$KT_PACK_DIR/scripts/profile_payload.py" capture --payload "$PAYLOAD" \
+  exec python3 "$HERE/profile_payload.py" capture --payload "$PAYLOAD" \
     --capture-script "$HERE/capture.sh"
 
 fi
@@ -160,7 +154,7 @@ done
 PREFLIGHT_MODE=profile
 [ "$ISA_ONLY" = yes ] && PREFLIGHT_MODE=compile-only
 if ! locus_preflight "$PREFLIGHT_MODE"; then
-  echo "[capture] LOCUS PREFLIGHT FAILED (${LOCUS_DEGRADE_CAUSE:-?}): the task specifies a container but the profiler cannot run in it -> FIX the locus or escalate (gluon_authoring references/method/triage.md, 'Profiler layer unavailable')." >&2
+  echo "[capture] LOCUS PREFLIGHT FAILED (${LOCUS_DEGRADE_CAUSE:-?}): the task specifies a container but the profiler cannot run in it -> FIX the locus or escalate (kernel_tools/profiling-dependencies.md)." >&2
   # Fail CLOSED (exit 4). Continuing would run every layer below on the HOST and write the results
   # into the same capture.json the container round reads -- host evidence filed under a container
   # kernel, which is worse than no evidence because nothing downstream can tell the difference.
@@ -190,7 +184,7 @@ done
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd -P)"
 # A reused output directory must never attach evidence from an earlier source.
-for artifact in rc att ir kt kt_probe.log capture.json att_dependencies.json; do
+for artifact in rc att ir kt kt_probe.log capture.json att_dependencies.json att_run.log trace_selection.json; do
   kt_move_aside "$OUT/$artifact"
 done
 mkdir -p "$OUT/rc" "$OUT/att" "$OUT/ir"
@@ -227,168 +221,65 @@ if [ -n "$EXPECTED_SOURCE_SHA" ] && [ "$SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ];
 fi
 COMMAND_SHA="$(printf '%s\0' "${CMD[@]}" | sha256sum | awk '{print $1}')"
 
-# preflight.txt is the ONLY capture artifact a worker reads as narration (no parser consumes it;
-# the machine-readable outputs are capture.json / rc_metrics.json / mfma_eff.txt / asm_audit.txt).
-# rocprofv3 --att prints ~100 lines of internal chatter per invocation (simple_timer, "Opened
-# result file", "SQLite3 generation", HSA/ldconfig init) that carried ~84% of preflight.txt straight
-# into the worker's context every round. Route the raw ATT stream to a side log kept on disk for
-# debugging, and fold only the SIGNAL lines (real warnings/errors + trace-quality notices) into
-# preflight.txt. CAPTURE_VERBOSE=1 restores the full inline dump.
-: "${CAPTURE_VERBOSE:=0}"
-ATT_RAW_LOG="$OUT/att/att_run.log"
-# fold_att_signal <raw-log-file>: append only worker-relevant lines from a raw rocprofv3 stream to
-# preflight.txt (dropping the pure-noise families), unless CAPTURE_VERBOSE=1.
-fold_att_signal() {
-  local raw="$1"
-  [ -f "$raw" ] || return 0
-  if [ "$CAPTURE_VERBOSE" = "1" ]; then
-    cat "$raw" >>"$OUT/preflight.txt"; return 0
-  fi
-  # keep: capture-run errors, trace-quality warnings (Wave incomplete / Data Lost), the app's own
-  # stdout (e.g. aiter import line, Time_(ms)); drop: rocprofv3 timers/file-opens/sqlite/init noise.
-  grep -vE 'simple_timer\.cpp|output_stream\.cpp:[0-9]+\] Opened result file|SQLite3 generation ::|generateRocpd\.cpp|tool\.cpp:[0-9]+\] HSA version|/sbin/ldconfig' "$raw" \
-    >>"$OUT/preflight.txt" 2>/dev/null || true
-  local raw_n
-  raw_n=$(wc -l <"$raw" 2>/dev/null || echo 0)
-  echo "[capture] (ATT profiler chatter: $raw_n lines -> filtered to signal only; full log in att/$(basename "$raw"), set CAPTURE_VERBOSE=1 to inline)" >>"$OUT/preflight.txt"
-}
-
-echo "=== [capture] preflight: is kernel '$KERNEL' PMC-visible? ===" | tee "$OUT/preflight.txt"
-PMC_LIVE="no"
-# --isa-only skips the probe entirely. The probe is a full profiled run of the app, so paying for
-# it in the tier whose whole purpose is to be too cheap to skip would defeat the tier.
-if [ "$ISA_ONLY" = "yes" ]; then
-  echo "[capture] --isa-only: skipping the PMC-visibility probe (no profiler runs in this tier)" \
-    | tee -a "$OUT/preflight.txt"
-# Probe the profiler IN THE LOCUS: the tool has to exist where the kernel runs, and under a
-# container locus the host's answer is unrelated to that. See locus.sh locus_have.
-elif locus_have rocprofv3; then
-  kt_move_aside "$OUT/kt"
-  # F12: keep the probe's own stdout/stderr instead of discarding it, so an APP crash (which leaves
-  # no trace file) is not later misreported as a wrong --kernel filter. See the no-trace branch below.
-  locus_run rocprofv3 --kernel-trace -f csv -d "$LOCUS_OUT/kt" -- "${CMD[@]}" >"$OUT/kt_probe.log" 2>&1 || true
-  locus_fetch "$LOCUS_OUT/kt" "$OUT"
-  if ! find "$OUT/kt" -name '*kernel_trace.csv' 2>/dev/null | grep -q .; then
-    echo "[capture] no kernel_trace file produced -> the app/profiler FAILED before any GPU dispatch (this is NOT a --kernel mismatch). Tail of the probe log:" | tee -a "$OUT/preflight.txt"
-    tail -8 "$OUT/kt_probe.log" 2>/dev/null | sed 's/^/    /' | tee -a "$OUT/preflight.txt"
-  fi
-  # Match only emitted kernel names; a match in another CSV column is not a dispatch.
-  N=$(python3 - "$OUT/kt" "$KERNEL" <<'PY'
-import csv, re, sys
-from pathlib import Path
-try:
-    pattern = re.compile(sys.argv[2])
-    count = 0
-    for path in Path(sys.argv[1]).rglob('*kernel_trace.csv'):
-        with path.open() as stream:
-            count += sum(bool(pattern.search(row.get('Kernel_Name') or row.get('kernel_name') or ''))
-                         for row in csv.DictReader(stream))
-    print(count)
-except (OSError, re.error, csv.Error) as exc:
-    print(f'[capture] cannot select kernel dispatches: {exc}', file=sys.stderr)
-    sys.exit(2)
-PY
-) || exit 2
-  echo "kernel-trace dispatch count for '$KERNEL' = ${N:-0}" | tee -a "$OUT/preflight.txt"
-  if [ "${N:-0}" -gt 0 ]; then
-    PMC_LIVE="yes"
-  elif ! find "$OUT/kt" -name '*kernel_trace.csv' 2>/dev/null | grep -q .; then
-    # (case a) no trace file -> already reported above as an app/profiler failure; do NOT print the
-    # candidate-kernel listing, which would falsely blame the --kernel filter.
-    :
+# Task identity/IR orchestration remains here. The shared collection primitive
+# owns all rocprofv3 execution, dependencies, timeouts, retry and artifact checks.
+echo "=== [capture] preflight: is kernel '$KERNEL' visible in a dispatch trace? ===" | tee "$OUT/preflight.txt"
+TRACE_STATE=not_attempted
+ATT_STATE=not_attempted
+TRACE_LIVE=no
+if [ "$ISA_ONLY" != yes ] && locus_have rocprofv3; then
+  trace_rc=0
+  bash "$HERE/rocprofv3_safe.sh" --kernel . --out "$OUT/kt" --kernel-trace \
+    --timeout "${PROFILE_PMC_TIMEOUT:-150}" -- "${CMD[@]}" > "$OUT/kt_probe.log" 2>&1 || trace_rc=$?
+  TRACE_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$OUT/kt/rocprofv3_safe.json" 2>/dev/null || echo error)"
+  if [ "$trace_rc" = 0 ]; then
+    if python3 "$HERE/profiler_artifacts.py" --out "$OUT/kt" --mode trace --kernel "$KERNEL" \
+        > "$OUT/trace_selection.json"; then
+      TRACE_LIVE=yes
+    else
+      echo "[capture] requested kernel selector matched no dispatch; correct --kernel and recapture." | tee -a "$OUT/preflight.txt" >&2
+      python3 - "$HERE" "$OUT/kt" <<'PY_CANDIDATES' | tee -a "$OUT/preflight.txt"
+import sys
+sys.path.insert(0, sys.argv[1])
+import parse_pmc
+candidate = parse_pmc.top_kernel_from_trace(sys.argv[2])
+print("Candidate device kernel: " + (candidate[0] if candidate else "none"))
+PY_CANDIDATES
+      exit 2
+    fi
   else
-    # (case c) trace exists but 0 rows match the substring. `--kernel` must match the EMITTED DEVICE
-    # name, not the wrapper/op name. List candidates for correction, but do not profile a
-    # different implementation under the requested source/kernel identity.
-    echo "[capture] '$KERNEL' matched 0 dispatches -> candidate device kernels (torch/reference helpers excluded); listing:" | tee -a "$OUT/preflight.txt"
-    TOPCAND="$(python3 - "$OUT/kt" 2>>"$OUT/preflight.txt" <<'PY'
-import csv, glob, os, sys, collections, re
-c = collections.Counter()
-for f in glob.glob(os.path.join(sys.argv[1], "**", "*kernel_trace.csv"), recursive=True):
-    try:
-        for r in csv.DictReader(open(f)):
-            n = (r.get("Kernel_Name") or r.get("kernel_name") or "").strip()
-            if n:
-                c[n[:120]] += 1
-    except OSError:
-        pass
-# torch/aten/library helper kernels pollute the trace (reference/oracle calls) - exclude from the pick
-def is_helper(n):
-    nl = n.lower()
-    # plain substrings that never collide with a real Triton/Gluon device-kernel name
-    if any(t in nl for t in ("at::", "aten", "elementwise_kernel", "vectorized_elementwise",
-                             "reduce_kernel", "cutlass", "gemm_universal", "cublas", "hipblas",
-                             "rocblas", "_copy_kernel", "fill_kernel", "cast_kernel")):
-        return True
-    # 'ck_' (Composable Kernel) MUST be a word-boundary prefix, not a bare substring: a Triton kernel
-    # named '..._kernel_BLOCK...' contains the substring 'ck_' (kernel_) and was wrongly flagged as a
-    # CK helper, hiding the real target from the suggested candidates.
-    # Match CK only at a name start or after a non-alnum separator (ck_gemm, _ck_..., /ck_...).
-    return re.search(r"(?:^|[^a-z0-9])ck_", nl) is not None
-listing = c.most_common(12)
-for n, k in listing:
-    tag = "  [helper]" if is_helper(n) else ""
-    print(f"    {k:6d} x  {n}{tag}", file=sys.stderr)
-if not c:
-    print("    (no kernel_trace rows parsed - is the app dispatching a GPU kernel?)", file=sys.stderr)
-cand = [(n, k) for n, k in c.most_common() if not is_helper(n)]
-if cand:
-    print(cand[0][0])   # stdout = suggested candidate; the caller must explicitly select it
-PY
-)"
-    echo "[capture] requested kernel selector matched no dispatch; correct --kernel and recapture. Suggested candidate: ${TOPCAND:-none}." | tee -a "$OUT/preflight.txt" >&2
-    exit 2
+    echo "[capture] trace $TRACE_STATE (rc=$trace_rc); see kt_probe.log. Counter availability remains unknown." | tee -a "$OUT/preflight.txt"
   fi
-else
-  echo "rocprofv3 not found in the kernel's locus (${TILE_KERNEL_CONTAINER:+container $TILE_KERNEL_CONTAINER}${TILE_KERNEL_CONTAINER:-host})" | tee -a "$OUT/preflight.txt"
+elif [ "$ISA_ONLY" != yes ]; then
+  TRACE_STATE=unavailable
 fi
 
-BRANCH="native-isa"
-if [ "$ISA_ONLY" = "yes" ]; then
-  BRANCH="isa-only"
-  echo "=== [capture] --isa-only -> IR dump + static ISA audit, NO profiler (seconds) ===" | tee -a "$OUT/preflight.txt"
-elif [ "$LITE" = "yes" ]; then
-  BRANCH="lite"
-  echo "=== [capture] --lite -> kernel-trace timing + static ISA only (skip rocprof-compute + ATT) ===" | tee -a "$OUT/preflight.txt"
-elif [ "$PMC_LIVE" = "yes" ]; then
-  BRANCH="pmc-live"
-  echo "=== [capture] PMC-live -> supplementary ATT/ISA diagnostics; native full counters are separate ===" | tee -a "$OUT/preflight.txt"
-  echo "[capture] roofline/full-counter evidence: use roofline.sh with the measured-window runner; this capture does not start a second rocprof-compute collection." | tee -a "$OUT/preflight.txt"
-  KT_ATT_ARGS=()
-  if [ "$WANT_ATT" = "yes" ] && ! kt_att_prepare locus "$OUT/att_dependencies.json"; then
-    ATT_STATE="${KT_ATT_STATUS:-dependency_probe_failed}"
-    echo "[capture] ATT layer DEGRADED: $ATT_STATE; see att_dependencies.json and kernel_tools/profiling-dependencies.md." \
-      | tee -a "$OUT/preflight.txt"
-    WANT_ATT="no"
-  fi
-  if [ "$WANT_ATT" = "yes" ] && locus_have rocprofv3; then
-    echo "=== [capture] ATT (auto-widen CU/SE) ===" | tee -a "$OUT/preflight.txt"
-    kt_move_aside "$OUT/att"; mkdir -p "$OUT/att"
-    locus_run rocprofv3 --att "${KT_ATT_ARGS[@]}" --att-target-cu 0 --att-shader-engine-mask 0xF \
-      --kernel-include-regex "$KERNEL" -d "$LOCUS_OUT/att" -- "${CMD[@]}" >"$ATT_RAW_LOG" 2>&1 || true
-    fold_att_signal "$ATT_RAW_LOG"
-    locus_fetch "$LOCUS_OUT/att" "$OUT"
-    ATTDIR="$(find "$OUT/att" -maxdepth 2 -type d -name 'ui_output_agent_*' 2>/dev/null | head -1)"
-    # retry wider if the traced CU caught no waves (code:null)
-    if [ -n "$ATTDIR" ] && grep -q '"code": *null' "$ATTDIR/code.json" 2>/dev/null; then
-      echo "[capture] code:null -> retry with wider capture" | tee -a "$OUT/preflight.txt"
-      kt_move_aside "$OUT/att"; mkdir -p "$OUT/att"
-      locus_run rocprofv3 --att "${KT_ATT_ARGS[@]}" --att-target-cu 0 --att-shader-engine-mask 0xF --att-simd-select 0xF \
-        --kernel-include-regex "$KERNEL" -d "$LOCUS_OUT/att" -- "${CMD[@]}" >"$ATT_RAW_LOG" 2>&1 || true
-      fold_att_signal "$ATT_RAW_LOG"
-      locus_fetch "$LOCUS_OUT/att" "$OUT"
-      ATTDIR="$(find "$OUT/att" -maxdepth 2 -type d -name 'ui_output_agent_*' 2>/dev/null | head -1)"
-    fi
-    if [ -n "$ATTDIR" ]; then
-      # fold the inter-MFMA rollup for normalize warpstate (needs a wave + code.json)
-      WV="$(ls "$ATTDIR"/se*_wv0.json 2>/dev/null | head -1)"
-      [ -n "$WV" ] && python3 "$HERE/mfma_efficiency.py" "$WV" "$ATTDIR/code.json" --ideal-cadence 16 \
-        > "$OUT/att/mfma_eff.txt" 2>/dev/null || true
+BRANCH=trace-unavailable
+if [ "$ISA_ONLY" = yes ]; then
+  BRANCH=isa-only
+elif [ "$LITE" = yes ]; then
+  BRANCH=lite
+elif [ "$TRACE_LIVE" = yes ]; then
+  BRANCH=trace-live
+  echo "[capture] dispatch trace matched; PMC support was not tested. Optional ATT/ISA diagnostics follow." | tee -a "$OUT/preflight.txt"
+  echo "[capture] use profile_kernel.sh for counter diagnostics; roofline.sh requires a separately installed native runner." | tee -a "$OUT/preflight.txt"
+  if [ "$WANT_ATT" = yes ]; then
+    att_rc=0
+    bash "$HERE/rocprofv3_safe.sh" --kernel "$KERNEL" --out "$OUT/att" --att \
+      --timeout "${PROFILE_ATT_TIMEOUT:-600}" -- "${CMD[@]}" > "$OUT/att_run.log" 2>&1 || att_rc=$?
+    ATT_STATE="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("collected" if d["state"] == "ok" else d["state"])' "$OUT/att/rocprofv3_safe.json" 2>/dev/null || echo error)"
+    [ ! -f "$OUT/att/att_dependencies.json" ] || cp "$OUT/att/att_dependencies.json" "$OUT/att_dependencies.json"
+    echo "[capture] ATT $ATT_STATE (rc=$att_rc); see att/rocprofv3_safe.json and att_run.log." | tee -a "$OUT/preflight.txt"
+    if [ "$ATT_STATE" = collected ] || [ "$ATT_STATE" = partial ]; then
+      ATTDIR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("att_dispatch", ""))' "$OUT/att/rocprofv3_safe.json")"
+      WV="$(find "$ATTDIR" -maxdepth 1 -name 'se*_wv*.json' 2>/dev/null | head -1)"
+      # Without an instruction/architecture-specific reference, report observed cadence only.
+      [ -z "$WV" ] || python3 "$HERE/mfma_efficiency.py" "$WV" "$ATTDIR/code.json" \
+        > "$OUT/att/mfma_eff.txt" 2> "$OUT/att/mfma_eff.err" || true
     fi
   fi
-else
-  echo "=== [capture] PMC-blind -> native-ISA degrade (dump_ir + floor-probe path) ===" | tee -a "$OUT/preflight.txt"
 fi
+export CAPTURE_TRACE_STATE="$TRACE_STATE"
 
 # ISA dump always (static audit works in both branches; best-effort for non-triton apps)
 echo "=== [capture] dump_ir.sh (.amdgcn for the static ISA audit) ===" | tee -a "$OUT/preflight.txt"
@@ -474,7 +365,8 @@ export CAPTURE_ATT_STATE="${ATT_STATE:-}"
 python3 - "$OUT" "$NAME" "$KERNEL" "$BRANCH" "$SOURCE" "$SOURCE_SHA" "$DEV" "$COMMAND_SHA" <<'PY'
 import json, os, re, sys, glob
 out, name, kernel, branch, source, source_sha, device, command_sha = sys.argv[1:9]
-attdir = next(iter(glob.glob(os.path.join(out, "att", "ui_output_agent_*"))), None)
+attdir = (next(iter(glob.glob(os.path.join(out, "att", "ui_output_agent_*"))), None)
+          if os.environ.get("CAPTURE_ATT_STATE") in ("collected", "partial") else None)
 rc_analyze = os.path.join(out, "rc", "rc_analyze.txt")
 rc_metrics = os.path.join(out, "rc", "rc_metrics.json")
 
@@ -505,13 +397,13 @@ def sol_state():
         if crashed is None and ("PermissionError" in txt
                                 or "Traceback (most recent call last)" in txt):
             crashed = (f"{os.path.basename(p)} holds a failure, not a report. On a box that ships "
-                       f"rocprof-compute this is a wiring bug to FIX (gluon_authoring "
-                       f"references/method/profile.md), not a degrade to accept")
+                       f"rocprof-compute this is a wiring issue to investigate; see "
+                       f"kernel_tools/profiling-dependencies.md")
     if crashed:
         return "crashed", crashed
     if seen:
         return "crashed", "an rc_analyze artifact exists but holds no report"
-    return "not_attempted", "native roofline/full counters are collected separately; no diagnostic rocprof-compute probe in this capture"
+    return "not_attempted", "counter diagnostics are collected separately; native roofline is optional and requires an external runner"
 
 state, why = sol_state()
 cap = {
@@ -534,7 +426,9 @@ cap = {
     "sol_note": why,
     "att_dir": attdir,
     # collected | decoder_absent (ROCPROF_ATT_LIBRARY_PATH holds no rocprof-trace-decoder) | not_attempted
-    "att_state": ("collected" if attdir else (os.environ.get("CAPTURE_ATT_STATE") or "not_attempted")),
+    "att_state": os.environ.get("CAPTURE_ATT_STATE") or "not_attempted",
+    "trace_state": os.environ.get("CAPTURE_TRACE_STATE") or "not_attempted",
+    "pmc_state": "not_attempted",
     "att_mfma_eff": os.path.join(out, "att", "mfma_eff.txt") if os.path.exists(os.path.join(out, "att", "mfma_eff.txt")) else None,
     "asm_audit": os.path.join(out, "ir", "asm_audit.txt") if os.path.exists(os.path.join(out, "ir", "asm_audit.txt")) else None,
 }

@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
-"""Unified kernel breakdown + pipeline analyzer (the one-command entry).
+"""Display static ISA and dynamic profiler evidence without ranking optimizations.
 
-Merges the STATIC ISA audit (asm_loop_audit.py: op-class % + waitcnt quality + s_nop +
-MFMA<->VALU interleave) with the DYNAMIC PMC (parse_pmc.py: per-unit busy + bubble =
-100-MfmaUtil) into ONE table, and emits a RANKED bubble-ownership stack (the 优先级 input
-for the ranked census, gluon_authoring references/method/profile.md ## Bound classification -> primary metric).
+Instruction counts, wait instructions, measured counters and ATT events retain
+separate units and provenance. No static proxy is promoted to a busy-time ratio.
+The agent interprets this evidence and validates changes with GEAK's benchmarks.
 
-No single vendor tool gives all of this: rocprofv3 has only the dynamic half and is blind
-on JIT kernels (e.g. TileLang); rocprof-compute is the richest dynamic tool but same
-blindness + no static schedule signals; nsight is NVIDIA-only. So this tool merges the two
-halves and DEGRADES gracefully: when PMC is missing/blind it emits static-only columns and
-an INFERRED bubble (from s_nop cycles + full-drain% + longest VALU-only run).
-
-Covers MFMA (CDNA) AND WMMA (RDNA) -- asm_loop_audit classifies v_wmma as the matrix class,
-so util/bubble apply on gfx1201 too.
-
-Usage:
-  python3 kernel_breakdown.py <kernel.s> [--pmc <rocprof_csv_dir>] [--kernel <substr>] [--loop-label L]
-  python3 kernel_breakdown.py --compare a.s b.s c.s [--pmc-dirs da db dc] [--kernel <substr>]
-  python3 kernel_breakdown.py --selftest
-
-Stdlib only, no GPU. GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/; the Gluon pack's
-scripts/ copy is a shim). Reuses asm_loop_audit.py + parse_pmc.py from this kernel_tools/ dir; the
---pmc dir is what `profile_kernel.sh <gpu> <cmd> <out> --pmc` writes under <out>/pmc/.
-PMC reads follow GEAK's profiling_guide.md: busy counters (MfmaUtil / VALUBusy) are throughput;
-VALUUtilization is a lane duty-cycle and is shown, never ranked as a bound.
+Usage: kernel_breakdown.py kernel.s [--pmc DIR] [--kernel SUBSTRING] [--att DIR]
+       kernel_breakdown.py --compare a.s b.s [--pmc-dirs da db]
+Stdlib only. All collectors and parsers are GEAK shared tools.
 """
 from __future__ import annotations
 
@@ -89,37 +72,6 @@ def static_analyze(path: str, loop_label: str | None = None) -> dict:
     }
 
 
-def ranked_stack(stat: dict, dyn: dict | None) -> list[tuple[str, float, str]]:
-    """Ranked bubble-ownership: (label, magnitude, source). Approximate, for prioritization.
-
-    Dynamic magnitudes when PMC present; else static proxies. This feeds -- does not
-    replace -- the ranked census; timing at the boundary remains the keep/revert arbiter.
-    """
-    p = stat["pct"]
-    rows: list[tuple[str, float, str]] = []
-    if dyn and dyn.get("MfmaUtil") is not None:
-        rows.append(("compute-idle (bubble=100-MfmaUtil)", dyn["bubble_mfma_idle"], "PMC"))
-        if dyn.get("LDSBankConflict") is not None:
-            rows.append(("LDS-bank-conflict", dyn["LDSBankConflict"], "PMC"))
-        if dyn.get("MemUnitStalled") is not None:
-            rows.append(("mem-stall", dyn["MemUnitStalled"], "PMC"))
-        # (No "VALUUtilization - VALUBusy" row: VALUUtilization is lane occupancy DURING VALU
-        # cycles -- a duty-cycle, not throughput -- so the difference is not a stall measure.
-        # Dependency stalls are read from the warp-state buckets / ATT, per profiling_guide.md.)
-        src = "PMC+static"
-    else:
-        # degraded: bubble INFERRED from static schedule + overhead classes
-        inferred = stat["full_drain_pct"] * 0.5 + min(100.0, stat["nop_cycles"] / 5.0)
-        rows.append(("compute-idle (INFERRED: full-drain%+s_nop+long-VALU-run)", inferred, "static"))
-        src = "static"
-    # static overhead classes (always shown -- these own real cycles regardless of PMC)
-    rows.append((f"address/scalar-arith (scalar% {p.get('scalar', 0):.0f})", p.get("scalar", 0.0), src))
-    rows.append((f"LDS-read traffic (R% {p.get('lds_read', 0):.0f})", p.get("lds_read", 0.0), src))
-    rows.append((f"s_nop hazard ({stat['nop_cycles']} cyc)", min(100.0, stat["nop_cycles"] / 5.0), src))
-    rows.sort(key=lambda r: (r[1] if r[1] is not None else -1), reverse=True)
-    return rows
-
-
 def one(path: str, pmc_dir: str | None, kfilter: str, loop_label: str | None) -> dict:
     stat = static_analyze(path, loop_label)
     dyn = None
@@ -147,12 +99,10 @@ def print_one(res: dict) -> None:
         print(f"PMC busy:    MfmaUtil={_fmt(d['MfmaUtil'])}  VALUBusy={_fmt(d['VALUBusy'])}"
               f"  VALUUtil={_fmt(d['VALUUtilization'])}  LDSbankconf={_fmt(d['LDSBankConflict'])}"
               f"  MemStall={_fmt(d['MemUnitStalled'])}  occ={_fmt(d['occupancy'])}")
-        print(f"bubble:      {_fmt(d['bubble_mfma_idle'])}%  (MFMA idle)")
     else:
-        print("PMC busy:    (blind / not supplied) -> degraded mode, bubble INFERRED")
-    print("ranked bubble-ownership (attack #1 first, descend to #2/#3):")
-    for i, (label, mag, src) in enumerate(ranked_stack(s, d), 1):
-        print(f"  #{i} {label:52s} {_fmt(mag):>6}  [{src}]")
+        print("PMC metrics: unavailable / not supplied")
+    print("Static op-class percentages count instructions, not elapsed cycles; "
+          "compare measured counters only with their declared denominators.")
     print()
 
 
@@ -169,15 +119,11 @@ def print_compare(results: list[dict]) -> None:
     row("MFMA<->VALU trans", lambda r: str(r['static']['mv_transitions']))
     row("MfmaUtil (PMC)", lambda r: _fmt(r['dynamic']['MfmaUtil']) if r['dynamic'] else "n/a")
     row("VALUBusy (PMC)", lambda r: _fmt(r['dynamic']['VALUBusy']) if r['dynamic'] else "n/a")
-    row("bubble MFMA-idle", lambda r: _fmt(r['dynamic']['bubble_mfma_idle']) if r['dynamic'] else "INFER")
     print()
 
 
-def att_section(att_dir: str, ideal_cadence: int = 16) -> None:
-    """ATT ground-truth fold-in (per-instruction): per-op active/stall + inter-MFMA
-    cycle rollup = the ground-truth ranked bubble-ownership (supersedes the inferred
-    bubble above). Requires a decoded ATT ui_output dir (rocprof-trace-decoder, not vendored:
-    ROCPROF_ATT_LIBRARY_PATH; collected by `profile_kernel.sh ... --att` or capture.sh)."""
+def att_section(att_dir: str, ideal_cadence: int | None = None) -> None:
+    """Display decoded per-instruction samples; ideal cadence needs an explicit reference."""
     import glob
     code = os.path.join(att_dir, "code.json")
     if not os.path.exists(code):
@@ -186,7 +132,7 @@ def att_section(att_dir: str, ideal_cadence: int = 16) -> None:
         return
     import att_opclass
     import mfma_efficiency
-    print("=== ATT ground-truth (per-instruction; supersedes the inferred bubble above) ===")
+    print("=== ATT observations (decoded per-instruction samples) ===")
     att_opclass.report(att_opclass.analyze(code), "ATT per-op-class active/stall")
     waves = sorted(glob.glob(os.path.join(att_dir, "se*_wv0.json")))
     if waves:
@@ -237,19 +183,14 @@ def _selftest() -> int:
             fails.append(f"s_nop 3 -> 3 cycles, got {st['nop_cycles']}")
         if not dy or dy["MfmaUtil"] != 62.0 or dy["bubble_mfma_idle"] != 38.0:
             fails.append(f"dynamic half: MfmaUtil 62 -> bubble 38, got {dy}")
-        labels = [lab for lab, _m, _s in ranked_stack(st, dy)]
-        if labels[0] != "compute-idle (bubble=100-MfmaUtil)":
-            fails.append(f"bubble must rank first here: {labels}")
-        if any("VALUUtil" in lab for lab in labels):
-            fails.append("VALUUtilization (a duty-cycle) must not be ranked as a stall")
         if one(asm, None, "my_kern", None)["dynamic"] is not None:
-            fails.append("no --pmc -> dynamic half must be None (degraded, inferred bubble)")
+            fails.append("no --pmc -> dynamic half must be None (unavailable dynamic evidence)")
         wave, code = _att_fixture.write(td)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             print_one(r)
             att_section(td, 16)
-        if "ATT ground-truth" not in buf.getvalue() or "waitcnt" not in buf.getvalue():
+        if "ATT observations" not in buf.getvalue() or "waitcnt" not in buf.getvalue():
             fails.append("ATT fold-in did not render from a decoded fixture")
     for f in fails:
         print("FAIL", f)
@@ -269,9 +210,11 @@ def main() -> None:
     ap.add_argument("--compare", nargs="+", help="multiple .s files for a column comparison")
     ap.add_argument("--pmc-dirs", nargs="+", help="PMC dirs aligned with --compare files")
     ap.add_argument("--att", help="decoded ATT ui_output dir -> fold in per-instruction ground-truth")
-    ap.add_argument("--ideal-cadence", type=int, default=16,
-                    help="theoretical MFMA cadence for the ATT fold-in (fp16 ~16, fp8 ~32)")
+    ap.add_argument("--ideal-cadence", type=int,
+                    help="explicit instruction/architecture-specific cadence reference; default unknown")
     a = ap.parse_args()
+    if a.ideal_cadence is not None and a.ideal_cadence <= 0:
+        ap.error("--ideal-cadence must be positive")
 
     if a.compare:
         pmc_dirs = a.pmc_dirs or [None] * len(a.compare)

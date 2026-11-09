@@ -30,8 +30,7 @@ def test_raw_counts_do_not_become_absolute_utilization():
         assert d[field] is None
     assert d['raw_activity']['values']['SQ_VALU_MFMA_BUSY_CYCLES'] == 10
     breakdown = load('kernel_breakdown')
-    rows = breakdown.ranked_stack({'pct': {}, 'full_drain_pct': 0, 'nop_cycles': 0}, d)
-    assert not any(source == 'PMC' for _, _, source in rows)
+    assert not hasattr(breakdown, 'ranked_stack'), 'evidence tools must not prescribe an optimization ranking'
 
 
 def test_real_zero_utilization_and_occupancy_are_preserved():
@@ -72,7 +71,7 @@ def test_gpu_work_requires_lease_and_preserves_existing_selection(tmp_path):
     env = native_env(tmp_path)
     result = call(env, '--engine', 'measure', '--', '--output', 'out')
     assert result.returncode == 2 and 'gpu_lock' in result.stderr
-    env.update(GEAK_GPU_LEASE_ACTIVE='1', HIP_VISIBLE_DEVICES='2,3')
+    env.update(GEAK_GPU_LEASE_ACTIVE='1', GEAK_GPU_LEASE_IDS='2,3', HIP_VISIBLE_DEVICES='2,3')
     result = call(env, '--engine', 'measure', '--', '--output', 'out')
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['hip'] == '2,3'
@@ -155,7 +154,7 @@ def test_offline_hardware_binding_before_native_reporting(tmp_path, bad):
 
 def test_measure_live_scope_and_relative_context_survive_workspace_change(tmp_path):
     env, context, c = scoped_env(tmp_path)
-    env.update(GEAK_GPU_LEASE_ACTIVE='1', GEAK_HARDWARE_CONTEXT=context.name)
+    env.update(GEAK_GPU_LEASE_ACTIVE='1', GEAK_GPU_LEASE_IDS='0', HIP_VISIBLE_DEVICES='0', GEAK_HARDWARE_CONTEXT=context.name)
     workspace = tmp_path / 'workspace'; workspace.mkdir()
     script = Path(env['GEAK_KERNEL_ROOFLINE_DIR']) / 'scripts/case_runner_template.py'
     script.write_text("import json,pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir()\n"
@@ -173,7 +172,7 @@ def test_measure_live_scope_and_relative_context_survive_workspace_change(tmp_pa
 
 def test_scoped_rocprof_requires_bound_original_calibration(tmp_path):
     env, context, c = scoped_env(tmp_path)
-    env['GEAK_GPU_LEASE_ACTIVE'] = '1'
+    env.update(GEAK_GPU_LEASE_ACTIVE='1', GEAK_GPU_LEASE_IDS='0', HIP_VISIBLE_DEVICES='0')
     cache = tmp_path / 'frozen.csv'; cache.write_text('HBMBw,MFMABF16Flops\n4200,230000\n')
     env['ROOFLINE_MIBENCH_CACHE'] = str(cache)
     result = call(env, '--engine', 'rocprof', '--', '--mode', 'full')

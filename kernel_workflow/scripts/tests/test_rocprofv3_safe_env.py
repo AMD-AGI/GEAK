@@ -19,6 +19,8 @@ SAFE = SCRIPTS / "kernel_tools" / "rocprofv3_safe.sh"
 FAKE = """#!/usr/bin/env bash
 out=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && out="$2"; [ "$1" = "--" ] && { shift; break; }; shift; done
 mkdir -p "$out"; echo "HIP=${HIP_VISIBLE_DEVICES-unset} ROCR=${ROCR_VISIBLE_DEVICES-unset}" > "$out/env_seen.txt"
+printf 'Kernel_Name,Start_Timestamp,End_Timestamp\nk,1,2\n' > "$out/test_kernel_trace.csv"
+printf 'Kernel_Name,Counter_Name,Counter_Value\nk,SQ_WAVES,1\n' > "$out/test_counter_collection.csv"
 [ -n "${FAKE_HANG:-}" ] && sleep 30
 "$@"
 """
