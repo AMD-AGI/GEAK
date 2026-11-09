@@ -30,8 +30,8 @@ from __future__ import annotations
 import csv
 import glob
 import json
-import re
 import os
+import re
 import sys
 from collections import defaultdict
 

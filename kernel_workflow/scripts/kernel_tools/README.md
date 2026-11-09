@@ -77,9 +77,15 @@ unrecognizable stripped excerpts cannot supply a trusted kernel identity.
   metrics remain valid for nonnumeric checks. Legacy text formats are compatibility inputs.
 - **Evidence limits:** Static instruction order does not measure overlap. The visualizer's
   legacy `--cycles` option uses heuristic weights, not measured or arch-specific cycles.
+  `s_nop` counts and raw immediates are encoding observations, not measured stall time
+  or evidence of a specific hazard or remedy.
   The wave reader cannot infer stall causality or chip utilization from issue intervals.
   Dtype-only hardware constants cannot establish a shape-specific ideal cadence; supply
   `--ideal-cadence` only with evidence for the actual instruction and architecture.
+- **Loop scope:** The audit prefers innermost loops, then most matrix instructions and
+  the shortest body; `--loop-label` selects an explicit back-edge. With no loop,
+  `asm_loop_audit.py` can report a bounded whole-kernel body, labelled as per-thread totals.
+  `deep_mfma_analysis.py` and `asm_schedule_viz.py` require a back-edge loop.
 
 The existing [Gluon script paths](../../../perf_knowledge/expert_skills/skills/gluon_authoring/scripts/)
 forward to these shared tools. This layer adds no automatic Claude Code routing; skill

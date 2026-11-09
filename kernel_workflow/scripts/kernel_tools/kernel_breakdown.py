@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Display static ISA and dynamic profiler evidence without ranking optimizations.
 
+This is a back-edge-loop tool: straight-line / fully unrolled kernels are refused.
+--loop-label selects a discovered back-edge; it does not select an arbitrary block.
 Instruction counts, wait instructions, measured counters and ATT events retain
 separate units and provenance. No static proxy is promoted to a busy-time ratio.
 The agent interprets this evidence and validates changes with GEAK's benchmarks.
@@ -23,16 +25,16 @@ import parse_pmc as ppmc      # noqa: E402
 
 
 def static_analyze(path: str, loop_label: str | None = None) -> dict:
-    """Static half: op-class histogram %, waitcnt full-drain %, s_nop cycles, interleave."""
+    """Static half: op-class histogram %, waitcnt full-drain %, s_nop operand sum, interleave."""
     lines = open(path).read().splitlines()
     loops = ala.find_loops(lines)
     picked = ala.pick_loop(lines, loops, loop_label)
     if picked is None:
-        raise SystemExit(f"{path}: no back-edge loop found (pass --loop-label).")
+        raise SystemExit(f"{path}: no back-edge loop found; straight-line/unrolled kernels are outside this loop-only tool. --loop-label must name an existing back-edge.")
     lab, start, end = picked
     hist: Counter = Counter()
     stream: list[str] = []
-    relaxed = full_drain = barriers = nops = nop_cycles = 0
+    relaxed = full_drain = barriers = nops = nop_immediate_sum = 0
     for ln in lines[start:end]:
         mn = ala._mnemonic(ln)
         if mn is None:
@@ -46,7 +48,7 @@ def static_analyze(path: str, loop_label: str | None = None) -> dict:
             nops += 1
             m = re.search(r"^s_nop\s+(?:0x([0-9a-fA-F]+)|(\d+))", ln.strip())
             if m:
-                nop_cycles += int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                nop_immediate_sum += int(m.group(1), 16) if m.group(1) else int(m.group(2))
         if name == "waitcnt":
             # both ISA spellings + ALU-dep waits excluded -- same classifier the standalone
             # audit uses, so the merged view cannot disagree with it
@@ -67,7 +69,7 @@ def static_analyze(path: str, loop_label: str | None = None) -> dict:
     return {
         "loop": lab, "instrs": total, "pct": pct,
         "full_drain_pct": (100.0 * full_drain / wc) if wc else 0.0,
-        "nop_cycles": nop_cycles, "barriers": barriers,
+        "nop_count": nops, "nop_immediate_sum": nop_immediate_sum, "barriers": barriers,
         "mv_transitions": transitions, "longest_v_run": longest_v,
     }
 
@@ -93,7 +95,7 @@ def print_one(res: dict) -> None:
     print("op-class %:  " + "  ".join(
         f"{k}={p.get(k, 0):.1f}" for k in ("mfma", "valu", "exp", "lds_read", "scalar",
                                            "waitcnt", "nop") if p.get(k)))
-    print(f"pipeline:    full-drain={s['full_drain_pct']:.0f}%  s_nop_cyc={s['nop_cycles']}"
+    print(f"pipeline:    full-drain={s['full_drain_pct']:.0f}%  s_nop_count={s['nop_count']} s_nop_immediate_sum={s['nop_immediate_sum']}"
           f"  MFMA<->VALU transitions={s['mv_transitions']}  longest-VALU-run={s['longest_v_run']}")
     if d:
         print(f"PMC busy:    MfmaUtil={_fmt(d['MfmaUtil'])}  VALUBusy={_fmt(d['VALUBusy'])}"
@@ -103,6 +105,7 @@ def print_one(res: dict) -> None:
         print("PMC metrics: unavailable / not supplied")
     print("Static op-class percentages count instructions, not elapsed cycles; "
           "compare measured counters only with their declared denominators.")
+    print("s_nop immediate sum is an encoded-operand statistic, not elapsed or stall cycles.")
     print()
 
 
@@ -115,7 +118,8 @@ def print_compare(results: list[dict]) -> None:
     for cls in ("mfma", "valu", "lds_read", "scalar", "nop"):
         row(f"op {cls} %", lambda r, c=cls: f"{r['static']['pct'].get(c, 0):.1f}")
     row("full-drain %", lambda r: f"{r['static']['full_drain_pct']:.0f}")
-    row("s_nop cyc", lambda r: str(r['static']['nop_cycles']))
+    row("s_nop count", lambda r: str(r['static']['nop_count']))
+    row("s_nop immediate sum", lambda r: str(r['static']['nop_immediate_sum']))
     row("MFMA<->VALU trans", lambda r: str(r['static']['mv_transitions']))
     row("MfmaUtil (PMC)", lambda r: _fmt(r['dynamic']['MfmaUtil']) if r['dynamic'] else "n/a")
     row("VALUBusy (PMC)", lambda r: _fmt(r['dynamic']['VALUBusy']) if r['dynamic'] else "n/a")
@@ -179,8 +183,8 @@ def _selftest() -> int:
         st, dy = r["static"], r["dynamic"]
         if st["loop"] != ".LBB0_1" or not st["pct"].get("mfma"):
             fails.append(f"static half did not find the loop / mfma: {st}")
-        if st["nop_cycles"] != 3:
-            fails.append(f"s_nop 3 -> 3 cycles, got {st['nop_cycles']}")
+        if st["nop_immediate_sum"] != 3:
+            fails.append(f"s_nop 3 -> operand sum 3, got {st['nop_immediate_sum']}")
         if not dy or dy["MfmaUtil"] != 62.0 or dy["bubble_mfma_idle"] != 38.0:
             fails.append(f"dynamic half: MfmaUtil 62 -> bubble 38, got {dy}")
         if one(asm, None, "my_kern", None)["dynamic"] is not None:
@@ -206,7 +210,7 @@ def main() -> None:
     ap.add_argument("asm", nargs="?", help="kernel .s / .amdgcn (single-kernel mode)")
     ap.add_argument("--pmc", help="rocprofv3/rocprof-compute CSV output dir (dynamic half)")
     ap.add_argument("--kernel", default="_attn_fwd", help="kernel-name substring filter for PMC")
-    ap.add_argument("--loop-label", help="force a loop back-edge label")
+    ap.add_argument("--loop-label", help="select a discovered loop back-edge (not an arbitrary basic block)")
     ap.add_argument("--compare", nargs="+", help="multiple .s files for a column comparison")
     ap.add_argument("--pmc-dirs", nargs="+", help="PMC dirs aligned with --compare files")
     ap.add_argument("--att", help="decoded ATT ui_output dir -> fold in per-instruction ground-truth")

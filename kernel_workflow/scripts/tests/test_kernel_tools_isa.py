@@ -64,6 +64,24 @@ def _ok(result):
                                    if ln.strip().startswith(("FAIL", "[FAIL"))), out[-3000:]
 
 
+@pytest.mark.parametrize('arch', ['gfx942', 'gfx950', 'gfx1201', None], ids=['cdna3', 'cdna4', 'rdna4', 'unspecified'])
+@pytest.mark.parametrize('scripts', [KT, REPO / 'perf_knowledge/expert_skills/skills/gluon_authoring/scripts'],
+                         ids=['shared', 'gluon-shim'])
+def test_s_nop_reports_raw_encoding_without_duration_or_cause(tmp_path, arch, scripts):
+    asm = tmp_path / 'nop.s'
+    target = f'.amdgcn_target "amdgcn-amd-amdhsa--{arch}"\n' if arch else ''
+    asm.write_text(target + '.type k,@function\nk:\n.L_loop:\n'
+                   ' s_nop 0\n s_nop 3\n s_cbranch_scc0 .L_loop\n s_endpgm\n.size k, .-k\n')
+    result = run(sys.executable, scripts / 'asm_loop_audit.py', asm, '--kernel', 'k')
+    _ok(result)
+    assert 'count: 2   raw immediate sum: 3' in result.stdout
+    assert 'raw immediate counts: 0=1, 3=1' in result.stdout
+    assert 'not measured stall time' in result.stdout
+    for claim in ('requested stall cycles', 'exposed fixed-latency hazard',
+                  'unhidden fixed-latency hazard', 'high s_nop =>', 'the fix is more'):
+        assert claim not in result.stdout
+
+
 @pytest.mark.parametrize("where", ["kt", "shim"])
 @pytest.mark.parametrize("tool", PY_TOOLS)
 def test_python_tool_selftest(tool, where):

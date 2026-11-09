@@ -118,3 +118,8 @@ verified hardware attestation. For a live identity check use hardware_context.py
 observations in their own units. It does not invent idle-cycle estimates or rank
 optimizations. Ideal matrix-instruction cadence is unknown unless the caller
 provides a reference for that instruction and architecture.
+
+`kernel_breakdown.py` requires a loop back-edge. Fully unrolled / straight-line
+kernels are outside its scope; `--loop-label` only chooses an already discovered
+back-edge. Its `s_nop` count and immediate sum describe encoded instructions,
+not elapsed cycles or measured stalls.

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+
 def payload_fixture(tmp_path):
     work = tmp_path / 'work'
     work.mkdir()
@@ -52,7 +53,7 @@ def test_payload_to_capture_preserves_execution_contract(tmp_path, mutation):
     env = dict(os.environ, GEAK_GLUON_PACK_DIR=str(tmp_path / 'absent-pack'))
     env.pop('TILE_KERNEL_CONTAINER', None)
     result = subprocess.run(['bash', str(root / 'kernel_workflow/scripts/kernel_tools/capture.sh'),
-        '--payload', str(payload)], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+        '--payload', str(payload)], cwd=tmp_path, env=env, check=False, capture_output=True, text=True, timeout=30)
     if mutation != 'none':
         assert result.returncode == 2, result.stdout + result.stderr
         assert not (tmp_path / 'work/executed').exists()
@@ -73,7 +74,7 @@ def test_payload_cannot_override_execution_controls(tmp_path, key):
     payload = tmp_path / 'payload.json'; payload.write_text(json.dumps(data))
     capture = Path(__file__).resolve().parents[1] / 'kernel_tools/capture.sh'
     result = subprocess.run(['bash', str(capture), '--payload', str(payload)],
-                            capture_output=True, text=True, timeout=30)
+                            check=False, capture_output=True, text=True, timeout=30)
     assert result.returncode == 2 and 'may not override' in result.stderr
     assert not (tmp_path / 'work/executed').exists()
 
@@ -88,5 +89,5 @@ def test_payload_refuses_shell_and_path_prefix_escape(tmp_path, mutation):
     tool = Path(__file__).resolve().parents[1] / 'kernel_tools/profile_payload.py'
     payload = tmp_path / 'payload.json'; payload.write_text(json.dumps(data))
     result = subprocess.run([sys.executable, str(tool), 'validate', '--payload', str(payload)],
-                            capture_output=True, text=True, timeout=30)
+                            check=False, capture_output=True, text=True, timeout=30)
     assert result.returncode == 1 and not json.loads(result.stdout)['ok']
