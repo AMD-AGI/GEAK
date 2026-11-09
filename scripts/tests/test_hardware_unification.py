@@ -70,6 +70,22 @@ def test_standalone_budget_sku_case_preserves_result(sku):
     assert data['workload']['may_gate'] is False
 
 
+@pytest.mark.parametrize('args', [
+    ['roofline', '--M', '4096', '--N', '4096', '--K', '4096', '--dtype', 'bf16', '--json'],
+    ['budget', '--bm', '64', '--bn', '64', '--bk', '32', '--num-warps', '4'],
+    ['occ', '--vgpr', '128'],
+])
+@pytest.mark.parametrize('with_context', [False, True])
+def test_calculator_cli_accepts_identity_sku_case(tmp_path, args, with_context):
+    extra = ['--hardware-context', context_file(tmp_path)] if with_context else []
+    reference = run(KT / 'calc_perf.py', *args, '--sku', 'MI308X', *extra)
+    assert reference.returncode == 0, reference.stderr
+    for sku in ('mi308x', 'Mi308X'):
+        result = run(KT / 'calc_perf.py', *args, '--sku', sku, *extra)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == reference.stdout
+
+
 def test_bandwidth_probe_accepts_mixed_case_sku_before_measurement(monkeypatch):
     # Exercise CLI parsing and planning, stopping at the GPU measurement boundary.
     monkeypatch.syspath_prepend(str(KT))

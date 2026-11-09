@@ -846,7 +846,7 @@ def main():
 
     def common(sp):
         sp.add_argument('--hardware-context', help='validated run context; defaults to GEAK_HARDWARE_CONTEXT')
-        sp.add_argument("--sku", default=None, choices=list(SKU_PEAKS),
+        sp.add_argument("--sku", default=None, type=str.upper, choices=list(SKU_PEAKS),
                         help="SKU key from perf_knowledge/hardware/data/sku.json (preferred). "
                              "Without --sku/--arch/--peak-* the tool REFUSES (no gfx950 default)")
         sp.add_argument("--peak-tflops", type=float, default=None)
