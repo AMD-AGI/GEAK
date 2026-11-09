@@ -23,7 +23,8 @@ Repeat:
    resources. Retain handles and evidence for work that reports later; the controller
    owns the next inspection and recovery, including after resource or storage migration.
 4. **Report.** Read the module's native results and `REPORT.md`, including failures.
-   Match receipts to their invocations; a failed call may leave earlier output files.
+   Match receipts to their invocations and retain them before reusing an output path;
+   failed calls and later exports can expose another invocation's files.
    Record what changed, what was established and what remains uncertain. Adopt, reject,
    investigate further or wait; then return to reasoning.
 

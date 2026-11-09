@@ -25,7 +25,9 @@ and decisions, not a second copy of measured numbers or worker counters. Existin
 manufacture a kernel artifact. A new implementation does not redefine the module's gates.
 
 The current stage finalizers remain authoritative for deliveries that meet their full
-contract. Applyback verifies kernel integration and delegates the same serving comparison
+contract. Supply their [calling environment](#1-calling-convention) and
+[output artifacts](#3-finishing-outresultjson), including in direct module calls.
+Applyback verifies kernel integration and delegates the same serving comparison
 to Evaluate; direct system experiments use their own effect/quality evidence. Preserve
 native invalidity and the configured comparison basis in either route.
 
