@@ -310,6 +310,12 @@ def _unwrap(d: dict | None) -> dict | None:
 
 # Benchmark / correctness output the integrator writes next to the overlay sources; not part of the overlay.
 _OVERLAY_OUTPUT_DIRS = {"__pycache__", "cand", "ref", "correctness"}
+# The integrator's A/B records, written into the candidate dir during and after the A/B
+# (roles/e2e_integrator.md: CB=$EVAL_DIR/overlay/cand_<short>). Records, not overlay content.
+_AB_RECORDS = {"integrate_result.json", "e2e_validation.json", "manifests.json"}
+# What the server imports or loads. Only these must be unchanged since the A/B's candidate leg: the
+# integrator may still write records next to them.
+_CODE_SUFFIXES = (".py", ".so", ".hip", ".cu", ".cpp", ".cc", ".h", ".hpp", ".hsaco", ".co")
 _ABS_PATH = re.compile(r"""["'](/[^"'\s]+)["']""")
 
 
@@ -318,7 +324,7 @@ def _overlay_files(root: Path) -> dict[str, Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _OVERLAY_OUTPUT_DIRS]
         for f in filenames:
-            if f.endswith((".pyc", ".log", ".out")) or f == "integrate_result.json":
+            if f.endswith((".pyc", ".log", ".out")) or f in _AB_RECORDS:
                 continue
             p = Path(dirpath) / f
             out[str(p.relative_to(root))] = p
@@ -345,7 +351,9 @@ def validate_overlay(kf_overlay: str, initial_overlay: str, kf_dir: Path) -> dic
        and the initial sitecustomize.py is either kept as is or copied under another name that the new
        sitecustomize.py imports;
     5. it is the overlay the A/B measured: an integrate_result.json accepted exactly this directory with a
-       complete A/B, and no overlay source changed after that A/B's candidate leg finished.
+       complete A/B, and no code in it (_CODE_SUFFIXES) changed after that A/B's candidate leg finished. The
+       A/B's own records (e2e_validation.json, manifests.json, ...) land here after the A/B and are not
+       overlay content.
     Returns {"ok", "problems", "manifest_sha256", "files"}."""
     problems: list[str] = []
     kf_dir = Path(kf_dir).resolve()
@@ -399,7 +407,7 @@ def validate_overlay(kf_overlay: str, initial_overlay: str, kf_dir: Path) -> dic
     else:
         leg = Path(((rec.get("measurement_evidence") or {}).get("cand_summary")) or "")
         stamp = (leg if leg.is_file() else rec_path).stat().st_mtime
-        changed = [r for r, p in files.items() if p.stat().st_mtime > stamp + 2]
+        changed = [r for r, p in files.items() if r.endswith(_CODE_SUFFIXES) and p.stat().st_mtime > stamp + 2]
         if changed:
             problems.append(f"overlay sources changed after the A/B measured it: {', '.join(sorted(changed)[:5])}")
     h = hashlib.sha256()
