@@ -21,24 +21,29 @@ round. When the kernel under test lives in a separate container, the pack's exec
 
 ## Profiler entry and tool locations
 
-Read [`geak-integration.md`](geak-integration.md) for analysis ownership. The native `kernel-roofline`
-runner owns roofline and its full-counter passes. `capture.sh` supplies supplementary trace/ATT/ISA
+Read [`geak-integration.md`](geak-integration.md) for analysis ownership. The external native
+`kernel-roofline` runner, when installed, owns its own models and full-counter passes; it is not
+shipped in this checkout. Existing e2e roofline analysis and imported TraceLens priors remain separate. `capture.sh` supplies supplementary trace/ATT/ISA
 artifacts and no longer starts rocprof-compute automatically. `profile_kernel.sh --pmc` remains an
 explicit diagnostic collection; its whole-process kernel selection does not implement the native
 measured-window contract. A local diagnostic cannot fill missing native model coverage.
 
-GEAK infrastructure is the single owner of the profiler entry and the GPU lock. All paths below are
-relative to the GEAK repo root.
+GEAK infrastructure owns the profiler entry and shared GPU locks/leases. Run `profile_kernel.sh`
+inside the workload environment, as GEAK normally does; it rejects an external
+`TILE_KERNEL_CONTAINER` selection. For a host driving a separate container, use the shared
+`capture.sh` task wrapper or explicit compute diagnostic adapter with configured `locus.sh` paths.
+All paths below are relative to the GEAK repo root unless an absolute variable is shown.
+Set `GEAK_ROOT` to the absolute checkout root before running examples from a task workspace.
 
 | what | where | notes |
 | --- | --- | --- |
 | profiler entry | `kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<benchmark_cmd>" <output_dir>` (+ `profile_policy.sh`) | warms up, takes `kernel_workflow/scripts/gpu_lock.sh` for every run, picks the best available profiler by arch, dumps **raw** output to `<output_dir>/profile_report.txt` (+ native artifacts). Optional modes: **`--pmc`** (memory counters + derived compute/occupancy metrics + optional SPI pass — `## Derived metrics (direct \`rocprofv3 --pmc\` read)`) and **`--att`** (thread trace — `## rocprofv3 ATT (optional \`--att\`)`), merged from the pack's former profiler |
 | GPU lock | `kernel_workflow/scripts/gpu_lock.sh <gpu_id\|pool> <command...>` (lock dir `/tmp/team_gpu_locks`) | every other wrapper below runs under it: `bash kernel_workflow/scripts/gpu_lock.sh <gpu> bash kernel_workflow/scripts/kernel_tools/capture.sh …` |
-| one-command evidence capture | `kernel_workflow/scripts/kernel_tools/capture.sh` | ATT rollup + static ISA audit + IR in one go (preflight → PMC-live / PMC-blind branch); per-joint scripts + degrade table: `scripts/USAGE.md` |
+| one-command evidence capture | `kernel_workflow/scripts/kernel_tools/capture.sh` | ATT rollup + static ISA audit + IR in one go (preflight → validated trace / optional decoded ATT, with per-layer status); per-joint scripts + degrade table: `scripts/USAGE.md` |
 | safe rocprofv3 | `kernel_workflow/scripts/kernel_tools/rocprofv3_safe.sh --kernel <regex> --out <dir> [--pmc "A B C"] [--timeout 150] -- <cmd...>` | never call `rocprofv3` bare (`### Wrapper conventions`) |
 | rocprof-compute per round | `kernel_workflow/scripts/kernel_tools/rocprof_compute_probe.sh <name> <out> -- python <wrapper>` → `parse_rc.py` | `### rocprof-compute per-round (aggregate SOL + memory chart + occupancy limiter)` |
-| parsers / ATT | `kernel_tools/parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `att_timeline.py`, `att_to_perfetto.py`, `att_merge_perfetto.py`, `tile_trace.py`, `serve_traces.py` | |
-| static ISA / occupancy | `kernel_tools/dump_ir.sh`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `probe.py`, `amd_occupancy.py`, `gfx950_isa.py` | |
+| parsers / ATT | `kernel_tools/parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py` | |
+| static ISA / occupancy | `kernel_tools/dump_ir.sh`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `probe.py`, `amd_occupancy.py`, `gfx950_isa.py` | |
 | screening / harness | `kernel_tools/ab_bench.py`, `create_harness.py`, `parse_correctness.py` (timing and correctness through `e2e_workflow/scripts/harness_lib.py`) | method in `benchmark-hygiene.md` |
 | budget / roofline | `kernel_tools/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`; peaks from `perf_knowledge/hardware/data/sku.json`, cutoffs from `perf_knowledge/hardware/data/thresholds.json` | method in `budget.md` |
 | pack-only | `scripts/served_envelope.py`, `scripts/env_gate.sh`, `scripts/locus.sh` (optional: kernel in a separate container) | the old `scripts/<name>` paths of moved tools are shims and still resolve |
@@ -58,8 +63,9 @@ disagreed, the resolution is stated in place.
   profiler command. Measured reason: a wrapper that exported `HIP_VISIBLE_DEVICES=0` **inside** an
   outer `ROCR_VISIBLE_DEVICES=N` made rocprofv3 abort; the campaign recorded "TCC counters hang
   rocprofv3 indefinitely" and withdrew every derived figure — with the inner variable unset, TCC
-  returned in ~80 s. `rocprofv3_safe.sh` unsets `HIP_VISIBLE_DEVICES` only when **both** it and
-  `ROCR_VISIBLE_DEVICES` are set (an unconditional unset mis-numbers the GPU).
+  returned in ~80 s. the shared rocprofv3 environment adapter resolves HIP indices inside ROCR to the selected
+  ROCR devices, then clears both HIP/CUDA aliases for that child process. With HIP alone it
+  preserves the selected mask; an unconditional unset would change the allocation.
 - **A hard timeout** (`--timeout`, default `PMC_TIMEOUT=150` s; exit **124** = timed out, reported as
   a **degraded layer, never as a zero**). What a counter group the box cannot schedule does —
   replay, abort (SIGABRT) or **hang while holding the GPU flock** — is **version-dependent**; the
@@ -68,8 +74,9 @@ disagreed, the resolution is stated in place.
   there is normal).
 - **Always filter by kernel** (`--kernel-include-regex`): it took one real run from >7 min to ~80 s,
   and unfiltered collection sweeps up torch/CK/cutlass helpers whose rows you would then average.
-- Scripts accept `bash -c` command strings, write no `rm` (move stale dirs aside), and keep timing
-  and profiling in **separate runs** (`benchmark-hygiene.md`).
+- GEAK's public profile entry accepts a command string, and `rocprofv3_safe --cmd` preserves that
+  interface. Task capture and structured payloads use argv/config files; do not wrap their payload
+  in `bash -c/-lc`. Keep timing and profiling in **separate runs** (`benchmark-hygiene.md`).
 
 ## Profiler-capability preflight (verify ONCE — do not assume PMC is visible)
 
@@ -80,10 +87,11 @@ dispatches** of a JIT-launched kernel (only torch helper kernels), silently yiel
 ```bash
 bash kernel_workflow/scripts/gpu_lock.sh <gpu_id> \
   rocprofv3 --kernel-trace -f csv -d /tmp/kt -- python your_bench.py   # then:
-grep -c <your_kernel_name> /tmp/kt/*/*kernel_trace.csv   # 0 => PMC is blind on this box
+grep -c <your_kernel_name> /tmp/kt/*/*kernel_trace.csv   # 0 => target was not observed in this trace
 ```
 
-- **>0 dispatches** → PMC/ATT below is live; use it.
+- **>0 dispatches** establishes target trace visibility only. Validate the requested counters and
+  ATT decoder/decoded artifacts separately; a trace does not prove those capabilities.
 - **0 dispatches** → fall back to the **native ISA path** (`kernel_tools/dump_ir.sh` →
   `.amdgcn`/`.s` → `asm_loop_audit.py`, with VGPR/AGPR/spill from the `.amdgcn` / compile stats)
   **+ the floor probe** (`### Rule: floor probe (quantify overlap headroom exactly)`). No
@@ -148,10 +156,11 @@ profile failure, and analyze failure as distinct conditions; a missing profiler 
 unsupported on RDNA4 is reported as a **degrade**, not a hard fail.
 
 **Shared ownership (host ⇄ container) — why you occasionally cannot write into `exp/`.** The `exp/`
-tree is written by TWO principals on the SAME bind-mounted path: the host (you edit your records /
-the kernel as your login uid) and the kernel container (the profiler runs as **root** via
-`locus.sh`). ROCm profilers (`rocprofv3` / `rocprof-compute`) **must run as root** — running them as
-a non-root `--user` aborts (signal 6), so we cannot equalize by dropping root. Instead make your
+tree may be written by two principals on the same bind-mounted path: the host (you edit records /
+the kernel as your login uid) and a container configured to run its profiler as root via
+`locus.sh`. A non-root profiler aborted with signal 6 in a previously tested image; that observation
+is specific to its permissions and configuration, not a universal ROCm root requirement. Keep the
+user/device permissions validated for the selected image. When using a root container, make your
 `exp/` tree **group-writable + setgid with the bind-mount's shared gid** (`umask 0002` + `chmod
 g+rwxs` + `chgrp` to the **bind-mount parent dir's gid** — nothing hardcoded, and NOT `id -g` which
 is `0` inside a root container; the parent gid is the same non-zero host gid seen from either
@@ -203,8 +212,8 @@ report a missing number as missing — never as a zero) is in `climb.md ## 3. Th
 
 | | what you must know | tool | bad-value tell |
 | --- | --- | --- | --- |
-| B1 | **ranked inter-MFMA bubble ownership in measured cycles**, plus the cadence verdict (issue-bound vs bubble-diluted) | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
-| B2 | the feed bucket **resolved: LDS (lgkmcnt) vs global (vmcnt)** | same rollup | the two halves are one bucket over two resources with **opposite** fixes (layout/swizzle vs coalescing/async copy) |
+| B1 | **observed inter-matrix issue intervals by preceding op class**, plus any explicit cadence reference | `mfma_efficiency.py` (ATT, auto via `capture.sh`) | a lever that "worked" without moving its own bucket did something else — re-read this after every change |
+| B2 | the feed instructions **separated: LDS vs global memory** | same rollup | inspect the matching dependencies and test a hypothesis; this grouping does not establish stalls or overlap |
 | B3 | **per-opcode hot-loop histogram + diff vs last round** | `asm_loop_audit.py --opcodes` | op-class ("valu 64.5%") is one level too coarse: a dtype-conversion sequence, an address chain and a layout permute all land there. Keep `s_waitcnt` in the diff — it moves when only the *schedule* moved (D3) — and read the whole histogram, not the mnemonic you came to count |
 | B4 | MFMA operand-layout facts **before** picking a tile | `layout_facts.py` | two shapes with equal MAC/cycle can differ 4× in accumulator GPR/lane |
 
@@ -227,7 +236,7 @@ ranks only, and local estimates remain planning-only; GEAK measured evidence gov
 
 | | what you must know | tool | bad-value tell |
 | --- | --- | --- | --- |
-| D1 | a timing you can compare: **acceptance** numbers from GEAK's harness (`e2e_workflow/scripts/harness_lib.py`: CUDA events with per-sample sync, read-evict flush, **median**, fresh process per leg, same-window baseline; commit gate `MIN_IMPROVE=2%`); **search/screening** numbers from a same-window **interleaved** A/B with median **and** spread (min as a supplementary column) | acceptance: harness_lib (`verify_engineer` / `measure_legs`); screening: `scripts/ab_bench.py` (control arm, `--permute`) | spread wide enough to contain your claimed delta. Two numbers from two different windows are not comparable on a clock-unstable box — an acceptance leg is a fresh process, but its baseline is measured in the same window. A measured noise band may only make a verdict **stricter** than 2%, never looser (`benchmark-hygiene.md`) |
+| D1 | a timing you can compare: **acceptance** numbers from GEAK verify executing the frozen task commands (`harness_lib.py`/`measure_legs` for extracted tasks; configured `MIN_IMPROVE` commit gate); **search/screening** numbers from a same-window **interleaved** A/B with median **and** spread (min as a supplementary column) | acceptance: `verify_engineer` / frozen task runner; screening: `scripts/ab_bench.py` (control arm, `--permute`) | spread wide enough to contain your claimed delta. Two numbers from two different windows are not comparable on a clock-unstable box — extracted-task legs use fresh processes with a same-window baseline; other tasks retain their frozen protocol. A measured noise band may require **stricter supplementary screening** than configured `MIN_IMPROVE` (default 2%); GEAK does not automatically incorporate that band into its commit gate (`benchmark-hygiene.md`) |
 | D2 | correctness oracle **in-process, gating before timing** | your harness; the champion's own oracle command | any timing recorded for a variant whose oracle did not run |
 | D3 | after adding a default-off `constexpr` knob: the shipped kernel's **filtered instruction stream still hashes to the pre-knob value** | strip directives / labels / comments, join, hash; compare against the same file with the branch **deleted**, not set to 0 | a knob is free by semantics, not by schedule: one spelling added **6 `s_waitcnt`** to the shipped config with A1, B3 and the oracle all passing, after which the timing table no longer described the kernel (`benchmark-hygiene.md ### A knob that is off still has to prove the shipped stream did not move`) |
 
@@ -490,10 +499,9 @@ measurements.
 
 ### Rule: decompose a saturated VALU before picking a lever
 
-> Lever single source: `../hardware/bound-class-signals.md ## Lever cards (bound-class ×
-> applicability)` (+ `../hardware/lever-cards.json`, filtered by your measured bound; query with
-> `scripts/lever_index.py`). The recipes in this and the next two subsections are the how-to detail
-> behind those cards, not a second lever registry.
+> The recipes below are reference material. The agent must establish applicability from the
+> current SKU/roofline, profile and ISA/IR evidence, then modify and validate the kernel;
+> a bound label does not dispatch a recipe.
 
 "VALU-bound" is not one thing. When **`VALUBusy`** is the binding metric (genuinely
 VALU-throughput-bound — confirmed by the busy-counter rule above, not a `VALUUtilization` ~100% stall
@@ -698,12 +706,13 @@ tile-programming-flydsl; **not** the ncu CSV `hotspot_analyzer.py` in tile-progr
 
 ```bash
 cd <workspace>    # the GEAK workspace (KERNEL_PATH)
-bash kernel_workflow/scripts/profile_kernel.sh <gpu_id> "python3 harness.py --profile" /tmp/gluon_prof --att
-python3 kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
+bash "$GEAK_ROOT/kernel_workflow/scripts/profile_kernel.sh" <gpu_id> "python3 harness.py --profile" /tmp/gluon_prof --att
+python3 "$GEAK_ROOT/kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py" /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
 ```
 
-ATT needs a debug-info build when source mapping matters. Visualize with `att_to_perfetto.py` (merge
-several with `att_merge_perfetto.py`; timeline with `att_timeline.py`) → Perfetto.
+ATT needs a debug-info build when source mapping matters. Read decoded op-class statistics with
+`att_opclass.py`, matrix-instruction issue intervals with `mfma_efficiency.py`, and assembly/source
+hotspots with `hotspot_analyzer.py`; retain the decoded JSON as the underlying evidence.
 
 **ATT decoder (required for `--att`).** `librocprof-trace-decoder.so` is **not vendored**: point
 `ROCPROF_ATT_LIBRARY_PATH` at it (rocprofv3 `--att-library-path`). It is bundled on ROCm >= 7.13; on
@@ -716,18 +725,18 @@ caught no waves), widen the capture with `--att-target-cu 0 --att-shader-engine-
 
 ### ATT per-instruction ground-truth (the per-round VERIFY loop)
 
-`hotspot_analyzer.py` gives source-line stall; two more tools turn the decoded ATT into the
-ground-truth breakdown/pipeline (they SUPERSEDE `kernel_breakdown.py`'s INFERRED bubble):
+`hotspot_analyzer.py` summarizes decoded source/PC evidence. The following tools expose
+recorded op-class data and observed issue intervals; neither infers causal stall ownership:
 
 - `kernel_tools/att_opclass.py <dir>/code.json` — per-op-class **active vs stall/bubble** (measured
   cycles).
-- `kernel_tools/mfma_efficiency.py <dir>/se*_wv0.json <dir>/code.json` — MFMA cadence +
-  **inter-MFMA CYCLE rollup** (softmax / lds / addressing / WAIT / SYNC) = the ground-truth ranked
-  bubble-ownership (B1/B2). `kernel_breakdown.py --att <dir>` folds both into the one command.
+- `kernel_tools/mfma_efficiency.py <dir>/se*_wv0.json <dir>/code.json` — observed matrix-instruction
+  intervals grouped by preceding op class. The grouping does not establish a stall cause. Ideal
+  cadence stays unknown unless an explicit architecture/instruction-shape reference is supplied.
+  `kernel_breakdown.py --att <dir>` includes this evidence beside the other measurements.
 
-Run it as a **per-round loop**: attribute -> attack the #1 bucket
-(`../hardware/bound-class-signals.md ## Pipeline-breakdown -> lever (ATT ground-truth, per round)`) ->
-re-run -> confirm THAT bucket shrank
+Run it as a **per-round loop**: inspect the evidence, state a hypothesis and expected metric change,
+modify the kernel, then re-run to test that hypothesis
 (this closes the 验证 / verify step). Before spending an overlap lever, apply the
 **structural-vs-schedulable** check (WAIT + `deep_mfma_analysis.py` run-length + occupancy; reorder
 is inert at ~1 wave). Read everything **reference-free** (budget + floor-probe + absolute ceilings +
@@ -737,8 +746,9 @@ gold / vendor kernel at runtime)`.
 
 ### rocprof-compute per-round (aggregate SOL + memory chart + occupancy limiter)
 
-Use `$KT/roofline.sh --engine rocprof --gpu <allocated-id> --workspace <workspace> -- ...` for
-native measured-window counter collection; pass native `--mode full` for the full-counter companion.
+When the external native runner is installed, use
+`$KT/roofline.sh --engine rocprof --gpu <allocated-id> --workspace <workspace> -- ...` for
+its measured-window counter collection; pass native `--mode full` for the full-counter companion.
 A readable frozen `ROOFLINE_MIBENCH_CACHE` and the native runner's measured-window command are required.
 See [`geak-integration.md`](geak-integration.md). This is separately requested profiling, not a
 mandatory extra launch every round. Reuse matching reports with their provenance.
@@ -762,9 +772,10 @@ think. Run it on the **plain** kernel's `.amdgcn`/`.s` **and** on the Gluon vari
 verification tool in **both** tiers, not a Stage-Gluon-only step.
 
 **One-command entry:** `kernel_tools/kernel_breakdown.py <variant>.s [--pmc <csv_dir>]` merges this
-static audit with the PMC busy/bubble table into one view + a **ranked bubble-ownership** stack
-(feeds the ranked census); it auto-degrades to static-only with an INFERRED bubble when PMC is blind,
-and `--compare a.s b.s c.s` produces a multi-kernel column table. The underlying static tool:
+static audit and available PMC observations into an evidence table with units and sources. It
+reports missing counters explicitly; static instruction counts are not converted into runtime
+bubble percentages or optimization priorities. `--compare a.s b.s c.s` produces a multi-kernel
+column table. The underlying static tool:
 
 `kernel_tools/asm_loop_audit.py <variant>.s` (dump via `kernel_tools/dump_ir.sh`; strip per
 `../tile-programming/compiler-contract.md ## IR dump workflow`) reports **signals only** (the
@@ -778,8 +789,8 @@ verdict is yours):
   full-drain (`(0)`, serialized handoff = conservative) — verifies whether the loop is **actually
   pipelined or serialized**;
 - **producer<->consumer barriers per iteration** — excess-sync if it scales with pipeline depth;
-- **`s_nop` + requested stall cycles** — an exposed **fixed-latency hazard** (e.g. MFMA-write ->
-  VALU-read) hidden only by unroll/occupancy, never by reorder.
+- **`s_nop` count and raw immediates** — static encoding observations, not measured stall cycles.
+  Interpret them with target ISA and dependency context; they do not prescribe a fix.
 
 Use it as **bottleneck/optimization verification** at both ends of a step: on **plain** it confirms
 the bound class and whether the auto-pipeliner already covered the loop (a serialized /
@@ -787,8 +798,8 @@ the bound class and whether the auto-pipeliner already covered the loop (a seria
 relaxed-waitcnt stream argues stay-plain — `entry.md`); on **Gluon** the same read supplies the
 **IR/asm signal** of three-evidence layer closure (`close.md ## IR acceptance (final)`). The deep
 structural-vs-schedulable verdict and any sanctioned schedule fix live in
-`../tile-programming/compiler-contract.md ## Auditing the hot-loop schedule`;
-`asm_schedule_viz.py` renders the schedule.
+`../tile-programming/compiler-contract.md ## Auditing the hot-loop schedule`.
+Read the instruction stream and class counts from `asm_loop_audit.py` directly.
 
 ### Reading the machine code of a JIT comparator you have no source for
 
@@ -880,14 +891,11 @@ Stats above) before picking a lever. For a multi-stage / fused operator, profile
 sub-stage**, not just the matmul — the dominant stage can be a non-matmul one (selection / reduction
 / dequant), and that is where the lever is.
 
-**Classify → prioritize handoff.** Naming the bound class is only step "分类" (classify); the "优先级"
-(prioritize) step reads the **ranked bottleneck stack** to decide *which* to attack first
-(`../hardware/bound-class-signals.md ## Methodology spine (发现 → 分类 → 优先级 → lever → 验证)`). The
-standard source of that stack is `kernel_breakdown.py` (the ranked bubble-ownership list — each
-resource's share of the bubble / loop time, plus absolute numbers; see `## Output`). Enter via
-`../hardware/bound-class-signals.md ## Bound-class decision tree (exhaustive, ordered, defaulted)`,
-then descend the stack #1 → #2 → #3 (`climb.md ## Fallback ladder (escalate scope only after the
-finer scope is exhausted)`).
+**Classify → prioritize handoff.** The agent forms and ranks hypotheses from SKU/planning context,
+profile measurements and ISA/IR evidence. `kernel_breakdown.py` supplies observations, not a
+bound-to-tactic mapping or a ranked strategy. State the supporting measurements, missing coverage
+and expected effect of each proposed change; validate the effect with the frozen task contract.
+Revisit the ranking after each round rather than mechanically choosing the largest printed value.
 
 **Bottleneck shift after a round.** Compare before/after on the same readings and write the shift
 (`kernel_workflow/knowledge/profiling_guide.md` "Bottleneck Shift Analysis"):
@@ -1039,8 +1047,8 @@ same 0-15 ladder).
 **Worksheet [D] is the plain-stage BRANCH screen — FIVE STRUCTURAL AXES (+2 conditional) + ③ (layer-0)
 cards.** The bound class is advisory; override it in the plan with evidence when the live profile
 disagrees. [D] is anchored by **five workload-agnostic structural axes** worth considering for every
-non-trivial kernel (`decision.prescan_candidates` with `axis_seed:true`), plus two that fire
-conditionally. The five: **`computation_dag_reformulation`** (a different decomposition of the op
+non-trivial kernel, plus two conditional axes for the agent to assess. No decision script
+seeds or selects these candidates. The five: **`computation_dag_reformulation`** (a different decomposition of the op
 itself?), **`parallel_ownership_decomposition`** (a different parallel axis / who owns which
 output?), **`kernel_boundary_topology`** (fuse vs defuse, and where the kernel boundaries fall),
 **`intermediate_materialization_recompute`** (materialize an intermediate or recompute it?), and
@@ -1184,9 +1192,10 @@ profile/<round>/{trace.csv, att/, counters.txt}        # in GEAK: profile_kernel
 gluon_anchor_metrics.json (after transcription) ; per-round profile JSON
 ```
 
-Record a **ranked top-3 bottleneck list with absolute numbers** in the per-round profile JSON (not
-just "the binding class"). The **standard source** of this ranked stack is `kernel_breakdown.py`
-(static ⊕ PMC) or, for a full per-round record, reading them together — rocprof-compute SOL
+Record the **agent's ranked bottleneck hypotheses with supporting measurements** in the per-round
+profile JSON (not just "the binding class"). The ranking is the agent's analysis;
+`kernel_breakdown.py` supplies static and PMC evidence without assigning priorities. Read it
+together with rocprof-compute SOL
 (`rocprof_compute_probe.sh`, optional) ⊕ the ATT inter-MFMA rollup ⊕ the static audit ⊕ budget +
 timing into `round_<n>/record.json` (6-group schema) plus the 3 must-have figures (bubble
 decomposition, ranked stack, round trend). The layer loop descends this stack: when #1 hits its floor
@@ -1227,9 +1236,9 @@ Rewritten / demoted (GEAK infrastructure and the conflict rules win):
   Total, dependency wait = latency C1, issue wait = latency C2, memory-bound only on high HBM/VMEM busy
   plus a C4 floor probe; compute-bound read on busy counters (`VALUBusy`/`MfmaUtil`), not
   `VALUUtilization`.
-- D1 "stable-min **and** median" from `ab_bench.py` → acceptance timing from `harness_lib.py`
-  (median, read-evict, fresh process per leg, same-window baseline, `MIN_IMPROVE=2%`); `ab_bench.py`
-  demoted to search/screening (median + spread, min supplementary).
+- D1 "stable-min **and** median" from `ab_bench.py` → frozen task commands executed by Verify
+  for acceptance (`harness_lib`/`measure_legs` for extracted tasks). A/B remains search/screening
+  (median + spread, min supplementary); promotion uses configured `MIN_IMPROVE`.
 - "Rule: equal registers+occupancy but lower MfmaUtil": the fix "re-inject plain's TTGIR pipeliner
   (Route-1)" → hand-written pipeline first; re-injection demoted to a below-parity diagnostic / last
   resort with numbers labelled "injected", never on an incumbent.

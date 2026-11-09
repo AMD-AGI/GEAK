@@ -39,6 +39,7 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]
 usage() {
   cat <<'EOF'
 Usage:
+  bash dump_ir.sh --variant <name> --out <ir_dir> [options] -- <compile_cmd ...>
   bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir>
       [--knobs "COEXEC EXPERT AGPR PLUGIN"] [--emit-gluon layouts|anchor|pipeline]
       [--kernel module.path:object] [--kernel-name <substring>] [--arch gfx950]
@@ -47,6 +48,8 @@ Usage:
 Any token that is not one of the flags above is part of <compile_cmd>, so the
 compile command may appear before, after or around the flags -- but it must not
 START with '--' (an unknown flag before the command is refused as a typo).
+Use '--' before the compile command to preserve all its arguments, including
+names shared with this wrapper, such as --arch, --out, --variant or --help.
 
   --kernel       module.path:object, handed to recover_gluon.py for --emit-gluon anchor|pipeline
   --kernel-name  substring that PINS which compiled kernel's IR is copied (multi-kernel ops)
@@ -96,6 +99,7 @@ KERNEL_NAME=""
 CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --)            shift; CMD+=("$@"); break;;
     -h|--help)     usage; exit 0;;
     --variant)     VARIANT="$2"; shift 2;;
     --out)         OUT_DIR="$2"; shift 2;;
@@ -124,8 +128,7 @@ done
 
 # `--kernel` is `module.path:object` for the translator; `--kernel-name` is the substring that PINS
 # which compiled kernel gets copied. Passing a bare name to `--kernel` is the one mistake that
-# defeats the multi-kernel guard below WITHOUT any symptom: nothing pins, the freshest artifact
-# wins, and every layout recovered from it is confidently wrong for the body you meant. Refuse it
+# used to leave multi-kernel selection ambiguous. Refuse it
 # here rather than let it through -- a doc that says "pass --kernel <substring> to pin it" has
 # already sent one run into exactly that. (Overloading `--kernel` as the pin instead, as upstream
 # does, breaks the other half: `--kernel mod.path:obj` for --emit-gluon anchor|pipeline then greps
@@ -137,24 +140,8 @@ case "$KERNEL" in
      exit 1;;
 esac
 
-# Strip CORRECTNESS/BENCH-only flags from the compile CMD: the IR dump only needs the kernel to
-# COMPILE, not to run its oracle. A stray `--check` (a correctness flag) that a kernel's driver does
-# not recognize used to CRASH the dump (v6: `prof_driver.py: error: unrecognized arguments: --check`)
-# -> no asm_audit -> the static op-mix went empty -> the reduction router silently dropped the
-# structural T0 directions (defuse / two-pass / packed-atomic). Removing these from a real compile
-# command is harmless.
-_CLEAN=()
-_skip_next=""
-for _tok in "${CMD[@]}"; do
-  if [ -n "$_skip_next" ]; then _skip_next=""; continue; fi
-  case "$_tok" in
-    --check|--correctness) continue;;                 # correctness-only: drop
-    --backends) _skip_next=1; continue;;              # bench-selector `--backends <sel>`: drop flag+value
-    --backends=*) continue;;                          # `--backends=<sel>` form: drop
-    *) _CLEAN+=("$_tok");;
-  esac
-done
-[ ${#_CLEAN[@]} -gt 0 ] && CMD=("${_CLEAN[@]}")
+# The compile command belongs to its caller; preserve every argument verbatim.
+# In particular, --backends/--check may choose the kernel or configuration being inspected.
 
 # Arch: only --emit-gluon consumes it (recover_gluon.py --arch). Not given -> read it off the
 # device (printed, so it is never silent); still unknown -> --emit-gluon refuses BEFORE the
@@ -169,10 +156,22 @@ if [ -n "$EMIT_GLUON" ] && [ -z "$ARCH" ]; then
   exit 4
 fi
 
+case "$EMIT_GLUON" in
+  ""|layouts|anchor|pipeline) ;;
+  *) echo "ERROR: invalid --emit-gluon mode '$EMIT_GLUON'" >&2; exit 2;;
+esac
+
+case "$VARIANT" in
+  ""|.|..|*/*) echo 'ERROR: --variant must be a single directory name' >&2; exit 2;;
+esac
 DEST="$OUT_DIR/$VARIANT"
+if [ -e "$DEST" ]; then
+  mv "$DEST" "$DEST.previous.$(date +%s).$$"
+fi
 mkdir -p "$DEST"
 CACHE_PARENT="${TILE_HW_CACHE:-$OUT_DIR/.tile-runtime/tile-hw}"
 mkdir -p "$CACHE_PARENT"
+CACHE_PARENT="$(cd "$CACHE_PARENT" && pwd)"
 CACHE="$(mktemp -d "$CACHE_PARENT/dump_ir_${VARIANT}.XXXX")"
 # mktemp -d is fresh, so this never fires in practice; if it ever does, MOVE the stale cache
 # aside (no `rm` in a script GEAK roles run) and start from an empty one.
@@ -215,61 +214,13 @@ else
   "${CMD[@]}"
 fi
 
-# Collect the freshest IR artifacts from the cache. Both @triton.jit AND @gluon.jit
-# populate TRITON_CACHE_DIR, but the cache nesting depth can differ (gluon.jit may nest
-# deeper than one level) -> try the one-level glob first, then a recursive fallback so a
-# gluon.jit kernel is not silently missed (feedback: dump was Triton-biased).
-#
-# "Freshest" is only safe when the op compiles ONE kernel. A multi-kernel op -- e.g. an
-# attention decode that compiles the attention body AND a split-K reduce, or an MLA op
-# whose reduce kernel compiles LAST -- has the last-compiled kernel win, and every layout,
-# warp count and tile extent recovered from it is then confidently wrong for the body that
-# was meant. Silently: the dump looks fine. `--kernel-name` pins the selection (distinct
-# from `--kernel`, which is `module.path:object` for the translator), and when more than
-# one kernel is present and nothing was pinned this says so with the candidate list.
-for ext in ttgir llir amdgcn; do
-  _cands="$(find "$CACHE" -name "*.$ext" -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)"
-  [ -n "$_cands" ] || continue
-  if [ -n "$KERNEL_NAME" ]; then
-    _hit="$(printf '%s\n' "$_cands" | grep -F "$KERNEL_NAME" | head -1 || true)"
-    if [ -z "$_hit" ]; then
-      echo "  ! --kernel-name '$KERNEL_NAME' matched none of the .$ext in the cache:" >&2
-      printf '      %s\n' $(printf '%s\n' "$_cands" | xargs -r -n1 basename) >&2
-      continue
-    fi
-    f="$_hit"
-  else
-    f="$(printf '%s\n' "$_cands" | head -1)"
-    _n="$(printf '%s\n' "$_cands" | xargs -r -n1 basename | sort -u | wc -l)"
-    if [ "$_n" -gt 1 ]; then
-      echo "  ! $_n DISTINCT kernels compiled; took the FRESHEST: $(basename "$f")" >&2
-      echo "    This op is multi-kernel. If that is not the body you meant, every layout" >&2
-      echo "    recovered from it is wrong for your body -- and it will still look fine." >&2
-      echo "    Re-run with --kernel-name <substring>. Candidates:" >&2
-      printf '      %s\n' $(printf '%s\n' "$_cands" | xargs -r -n1 basename | sort -u) >&2
-    fi
-  fi
-  cp "$f" "$DEST/$VARIANT.$ext" && echo "  + $DEST/$VARIANT.$ext ($(basename "$f"))"
-done
-if ! ls "$DEST/$VARIANT".{ttgir,llir,amdgcn} >/dev/null 2>&1; then
-  echo "  ! no ttgir/llir/amdgcn in the cache for variant=$VARIANT. For a @gluon.jit kernel make sure it actually compiled (not a cache hit from a prior run); TRITON_ALWAYS_COMPILE=1 forces a fresh compile." >&2
-fi
-
-# Kernel METADATA (<kernel>.json) carries `shared` = LDS bytes/workgroup -- the ONLY correct LDS
-# source for a Triton kernel (the KD's group_segment_fixed_size and rocprof-compute 7.1.8 are
-# structurally 0, because Triton sizes shared memory dynamically at launch). Copy EVERY kernel's
-# metadata (not just the freshest): a multi-kernel dump needs the max to drive occupancy.
-# `__grp__*.json` is launcher group metadata with no `shared` -- skipped.
-_n_meta=0
-while IFS= read -r m; do
-  [ -n "$m" ] || continue
-  cp "$m" "$DEST/meta_$(basename "$m")" && _n_meta=$((_n_meta+1))
-done < <(find "$CACHE" -name '*.json' ! -name '__grp__*' 2>/dev/null)
-[ "$_n_meta" -gt 0 ] && echo "  + $DEST/meta_*.json ($_n_meta kernel metadata -> LDS bytes/WG)" \
-  || echo "  ! no kernel metadata json in the cache -> asm_loop_audit will report LDS UNAVAILABLE (it will NOT substitute a 0)." >&2
+# Select ONE compilation group (cache directory + kernel stem), then copy its IR and
+# matching metadata together. Multiple kernels/configurations require an explicit selection;
+# missing outputs are failures, never a reason to reuse a previous dump.
+python3 "$(dirname "$SELF")/collect_ir.py" "$CACHE" "$DEST" "$VARIANT" --kernel-name "$KERNEL_NAME"
 
 # Echo the config the dumped IR was compiled with, so it can be confirmed to match
-# the pinned autotune-winning config (gluon_authoring references/method/transcribe.md, step 0).
+# the pinned autotune-winning config (see isa_tools.md: pin one compilation configuration).
 if [ -f "$DEST/$VARIANT.ttgir" ]; then
   NW="$(grep -oE '"ttg.num-warps"[^,}]*' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"
   NS="$(grep -oE 'num_stages[^,}]*[0-9]+' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"
@@ -301,27 +252,13 @@ if [ -n "$EMIT_GLUON" ]; then
     echo "  ! --emit-gluon needs recover_gluon.py from the gluon_authoring pack, and it was not found" >&2
     echo "    (\$GEAK_GLUON_PACK_DIR/scripts, perf_knowledge/expert_skills/skills/gluon_authoring/scripts)." >&2
     echo "    The IR dump above SUCCEEDED ($DEST). Transcription happens on the gluon side: hand the" >&2
-    echo "    champion over per gluon_authoring references/method/entry.md and run --emit-gluon there." >&2
+    echo "    champion into a Gluon-enabled environment and run --emit-gluon there." >&2
     exit 3
   fi
-  TTGIR="$DEST/$VARIANT.ttgir"
-  if [ -f "$TTGIR" ]; then
-    RG_ARGS=(--ttgir "$TTGIR" --out "$DEST/$VARIANT.gluon.py" --arch "$ARCH")
-    case "$EMIT_GLUON" in
-      layouts)  ;;                                   # layouts-only (default, methodology-preserving)
-      anchor)   RG_ARGS+=(--with-skeleton);  [ -n "$KERNEL" ] && RG_ARGS+=(--kernel "$KERNEL");;
-      pipeline) RG_ARGS+=(--with-skeleton --with-pipeline); [ -n "$KERNEL" ] && RG_ARGS+=(--kernel "$KERNEL");;
-      *) echo "  ! unknown --emit-gluon mode '$EMIT_GLUON' (use layouts|anchor|pipeline)" >&2;;
-    esac
-    python3 "$SCRIPT_DIR/recover_gluon.py" "${RG_ARGS[@]}"
-    # Auto-fill the experiment-records transcribe record.
-    python3 "$SCRIPT_DIR/recover_gluon.py" --record --ttgir "$TTGIR" \
-        > "$DEST/$VARIANT.transcribe_record.txt" 2>/dev/null \
-        && echo "  + $DEST/$VARIANT.transcribe_record.txt"
-    echo "  hint: verify layout-equivalence after recompiling the anchor:"
-    echo "        python3 $SCRIPT_DIR/recover_gluon.py --verify --ttgir $TTGIR --anchor-ttgir <anchor>.ttgir [--harness '<cmd> --correctness']"
-  else
-    echo "  ! --emit-gluon set but $TTGIR not found (no .ttgir dumped)" >&2
-  fi
+  # Only the optional language adapter owns transcription and Gluon mode semantics.
+  [ -f "$SCRIPT_DIR/emit_gluon.py" ] || { echo 'ERROR: Gluon transcription adapter unavailable' >&2; exit 3; }
+  python3 "$SCRIPT_DIR/emit_gluon.py" --mode "$EMIT_GLUON" --dir "$DEST" \
+    --variant "$VARIANT" --arch "$ARCH" --kernel "$KERNEL"
+
 fi
 echo "=== done -> $DEST ==="

@@ -2,115 +2,14 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
-
 const fs = require('fs');
-const path = require('path');
-
-const wfDir = path.resolve(__dirname, '..');
-const geakRoot = path.resolve(wfDir, '..');
-const body = fs.readFileSync(path.join(wfDir, 'kernel_lane.js'), 'utf8')
-  .replace(/^export const meta/m, 'const meta');
-
-async function run(deviceGfx, expectedGfx = '', extras = {}) {
-  const prompts = [];
-  const logs = [];
-  const {
-    deviceName = '',
-    deviceTarget,
-    physicalCuCount,
-    omitGfx = false,
-    omitTarget = false,
-    expectedTarget = '',
-    expectedDeviceName = '',
-    expectedPhysicalCuCount = 0,
-    budget = 0,
-    planDirections = null,
-  } = extras;
-  const globals = {
-    args: {
-      kernel_path: '/tmp/kernel',
-      workflow_dir: wfDir,
-      budget,
-      expected_gfx: expectedGfx,
-      expected_target: expectedTarget,
-      expected_device_name: expectedDeviceName,
-      expected_physical_cu_count: expectedPhysicalCuCount,
-      use_expert_skills: 'false',
-      ...(extras.language ? {target_language: extras.language} : {}),
-      ...(extras.useGluon === undefined ? {} : {use_gluon_skill: extras.useGluon}),
-      use_learned_kb: 'true',
-    },
-    phase: () => {},
-    log: (message) => logs.push(String(message)),
-    workflow: async () => null,
-    parallel: async (items) => Promise.all(items.map((item) => item())),
-    pipeline: async (items, ...stages) => Promise.all(items.map(async (item) => {
-      let result = item;
-      for (const stage of stages) result = await stage(result);
-      return result;
-    })),
-    budget: { total: null, spent: () => 0, remaining: () => budget },
-    agent: async (prompt, options) => {
-      prompts.push({ label: options.label, prompt });
-      if (options.label === 'director:setup') {
-        const setup = {
-          eval_dir: '/tmp/eval',
-          workspace: '/tmp/eval/workspace',
-          baseline_dir: '/tmp/eval/baseline',
-          kernel_name: 'kernel',
-          device_name: deviceName || 'fixture',
-          baseline_frozen: true,
-          source_files: ['kernel.py'],
-        };
-        if (!omitGfx) setup.device_gfx = deviceGfx;
-        if (!omitTarget) {
-          setup.device_target = deviceTarget != null
-            ? deviceTarget
-            : 'unknown';
-        }
-        setup.physical_cu_count = physicalCuCount != null
-          ? physicalCuCount
-          : (deviceGfx === 'gfx1201' ? 64 : 256);
-        return setup;
-      }
-      if (options.label === 'tech_lead:analyze') {
-        return {
-          kernel_type: 'triton',
-          modifiable_files: ['kernel.py'],
-          kk_operator: 'dense_gemm',
-          kk_language: extras.sourceLanguage || 'triton',
-          kk_refs: ['optimization/mfma_scheduling.md'],
-        };
-      }
-      if (options.label === 'benchmark_engineer') {
-        return {
-          commandment_path: '/tmp/eval/COMMANDMENT.md',
-          baseline_per_case: [{ name: 'x', latency_ms: 1 }],
-          baseline_geomean_ms: 1,
-        };
-      }
-      if (options.label === 'profile_engineer:baseline') {
-        return { bottleneck: 'unknown', device: deviceGfx, summary_path: '', profile_roofline_json: '/tmp/native-evidence.json' };
-      }
-      if (options.label.startsWith('tech_lead:plan')) {
-        return { stop: false, directions: planDirections || [] };
-      }
-      if (options.label === 'update_experience') {
-        return { action: 'skipped', card_path: '', key: '', note: 'test' };
-      }
-      return null;
-    },
-  };
-  const fn = new Function(
-    ...Object.keys(globals),
-    `return (async () => { ${body} })();`,
-  );
-  return { result: await fn(...Object.values(globals)), prompts, logs };
-}
-
-
 const assert = require('assert');
-(async () => {
+const path = require('path');
+const geakRoot = path.resolve(__dirname, '../..');
+const {run} = require('./hardware_context_test_harness');
+module.exports = {run};
+
+if (require.main === module) (async () => {
   const marker = '## Triton/Gluon method (automatic language reference)';
   for (const gfx of ['gfx942', 'gfx950', 'gfx1201', 'gfx1151']) {
     for (const language of ['triton', 'gluon', 'hip', 'flydsl']) {
@@ -145,7 +44,7 @@ const assert = require('assert');
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   const laneArgsSource = e2e.match(/const laneArgs = \(wfArgs\) => \{[\s\S]*?^\};/m)[0];
   for (const setting of ['auto', 'false']) {
-    const deps = {LANE_USE_LEARNED_KB:'false', USE_GLUON_SKILL:setting, A:{}, RDNA4_ISOLATE:false,
+    const deps = {HARDWARE_CONTEXT:null, HARDWARE_CONTEXT_PATH:'', LANE_USE_LEARNED_KB:'false', USE_GLUON_SKILL:setting, A:{}, RDNA4_ISOLATE:false,
       EXPECTED_GFX:'', EXPECTED_TARGET:'', EXPECTED_DEVICE_NAME:'', EXPECTED_PHYSICAL_CU_COUNT:0,
       ablLaneArgs:()=>({})};
     const laneArgs = new Function(...Object.keys(deps), laneArgsSource+'; return laneArgs;')(...Object.values(deps));

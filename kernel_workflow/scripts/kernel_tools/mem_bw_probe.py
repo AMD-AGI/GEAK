@@ -180,7 +180,10 @@ def verdict(bw_tb_s, sku, footprint_mb, reference_tb_s=None, l2_margin=4.0, ref_
     # The physical limit is the PIN RATE. A row whose own ceiling is a measurement (sku.json
     # peak_hbm_basis=measured, e.g. gfx1151's 0.212 TB/s vs the 0.256 pin rate) must not be used
     # as the impossibility bound: a better probe legitimately lands between the two.
-    peak = sku.get("datasheet_hbm_tb_s") or sku.get("peak_hbm_tb_s")
+    memory = _hwdata.memory_peak(sku)
+    peak = memory["value_tb_s"]
+    if peak is None:
+        reasons.append("no specification bandwidth: a historical measurement is not a physical limit")
     # The cache the footprint has to CLEAR is the last one in front of DRAM, and on these parts that
     # is the MEMORY-SIDE cache behind the fabric (AMD Infinity Cache), not the per-XCD L2. They
     # differ by ~8x, so barring on the L2 admits a footprint that clears the L2 and still lives
@@ -191,7 +194,7 @@ def verdict(bw_tb_s, sku, footprint_mb, reference_tb_s=None, l2_margin=4.0, ref_
         llc_mb, llc_name = sku.get("l2_mb"), "L2 (memory-side LLC capacity UNKNOWN for this SKU)"
     if peak and bw_tb_s > peak:
         reasons.append(
-            f"{bw_tb_s:.3f} TB/s EXCEEDS this SKU's datasheet peak {peak} TB/s -- no DRAM stream "
+            f"{bw_tb_s:.3f} TB/s EXCEEDS this SKU's {memory['basis']} peak {peak} TB/s -- no DRAM stream "
             f"can do that, so some of the footprint was served from cache (or the byte accounting "
             f"double-counts addresses). REJECTED: a too-high ceiling shrinks every gap computed "
             f"from it.")
@@ -311,7 +314,7 @@ def _emit(sku_name, sku, p, readings, requested_mb, label, out_json, reference_t
     print(f"  footprint  {p['moved_bytes']/MIB:.1f} MiB moved "
           f"({p['read_bytes']/MIB:.1f} read + {p['write_bytes']/MIB:.1f} write), "
           f"span {p['span_bytes']/MIB:.1f} MiB")
-    print(f"  readings   " + ", ".join(f"{r:.3f}" for r in readings) + " TB/s")
+    print("  readings   " + ", ".join(f"{r:.3f}" for r in readings) + " TB/s")
     if not v["ok"]:
         print("  *** REJECTED ***")
         for r in v["reasons"]:
@@ -320,15 +323,15 @@ def _emit(sku_name, sku, p, readings, requested_mb, label, out_json, reference_t
     else:
         print(f"  IN-SHAPE CEILING = {rng['lo_tb_s']}-{rng['hi_tb_s']} TB/s "
               f"(median {rng['median_tb_s']}, spread {rng['spread_pct']}% over {rng['n']} reads)")
-        _pin = sku.get("datasheet_hbm_tb_s") or sku.get("peak_hbm_tb_s")
-        print(f"  datasheet peak   = {_pin} TB/s "
+        _memory = _hwdata.memory_peak(sku)
+        _pin = _memory["value_tb_s"]
+        print(f"  specification peak = {_pin} TB/s [{_memory['basis']}] "
               f"-> reachable fraction {100*rng['median_tb_s']/_pin:.0f}%")
         print(f"  feed the budget: --measured-hbm-tb-s {rng['lo_tb_s']},{rng['hi_tb_s']}")
         print(f"  a gap smaller than the {rng['spread_pct']}% spread is inside the error bar and "
               f"is not a reason to open a round.")
         # An UNDER-saturating probe is dangerous in the same direction as an over-reading one:
         # a too-low ceiling also shrinks the computed gap and closes the campaign early.
-        _pin = sku.get("datasheet_hbm_tb_s") or sku.get("peak_hbm_tb_s")
         frac = rng["median_tb_s"] / _pin if _pin else None
         if frac is not None and frac < 0.6:
             print(f"  WARNING: {100*frac:.0f}% of peak is low even for a shaped access. Either this "
@@ -349,7 +352,9 @@ def _emit(sku_name, sku, p, readings, requested_mb, label, out_json, reference_t
            "denominator_basis": "in-shape probe",
            "tool": "mem_bw_probe.py", "tool_versions": _tool_versions(),
            "linear_reference_tb_s": reference_tb_s,
-           "datasheet_peak_tb_s": sku.get("datasheet_hbm_tb_s") or sku.get("peak_hbm_tb_s"),
+           "datasheet_peak_tb_s": (_hwdata.memory_peak(sku)["value_tb_s"]
+                                   if _hwdata.memory_peak(sku)["basis"] == "datasheet" else None),
+           "specification_memory_peak": _hwdata.memory_peak(sku),
            "sku_peak_hbm_basis": sku.get("peak_hbm_basis")}
     if out_json:
         with open(out_json, "w") as f:
@@ -363,6 +368,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sku", help="SKU key from perf_knowledge/hardware/data/sku.json (for the "
                                   "refusals), e.g. MI355X")
+    ap.add_argument("--hardware-context", help="validated run context; defaults to GEAK_HARDWARE_CONTEXT")
     ap.add_argument("--footprint-mb", type=float, default=2048.0,
                     help="unique MiB MOVED per pass (binary, to match how cache capacity is "
                          "quoted); must be several x the MEMORY-SIDE LLC (sku.json mall_mb), not "
@@ -390,6 +396,14 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(_selftest())
+    try:
+        a.sku, context = _hwdata.run_sku(a.sku, a.hardware_context)
+        if context:
+            import hardware_context as hc
+            if not hc.same_device_scope(context, hc.probe()):
+                ap.error("live GPU differs from the run hardware context")
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
+        ap.error(str(e))
     if not a.sku:
         ap.error("--sku is required: the physical-limit and cache-residency refusals are not "
                  "optional, and both need the SKU's peak/L2 (or --selftest)")
@@ -464,7 +478,7 @@ def _selftest():
             pass
 
     # the three gates, and what each one actually catches
-    sku = {"peak_hbm_tb_s": 8.0, "l2_mb": 32, "mall_mb": 256}
+    sku = {"peak_hbm_tb_s": 8.0, "peak_hbm_basis": "datasheet", "l2_mb": 32, "mall_mb": 256}
     assert verdict(5.31, sku, 2048)["ok"]
     # gate 1 is the plan audit above -- and it is the ONLY gate that catches an over-read which
     # stays UNDER the datasheet peak: the peak bound passes it, and so does the footprint bound.
@@ -483,7 +497,7 @@ def _selftest():
     assert verdict(5.0, sku, 4 * sku["mall_mb"])["ok"], "clearing 4x the memory-side cache passes"
     # a SKU whose memory-side capacity was never established cannot certify a ceiling at all: the
     # bar silently degrades to the L2, so say so instead of returning a clean ok
-    v_unk = verdict(5.31, {"peak_hbm_tb_s": 8.0, "l2_mb": 32}, 2048)
+    v_unk = verdict(5.31, {"peak_hbm_tb_s": 8.0, "peak_hbm_basis": "datasheet", "l2_mb": 32}, 2048)
     assert not v_unk["ok"] and any("mall_mb is null" in r for r in v_unk["reasons"]), v_unk
     # gate 3: no shaped access beats a linear stream at the same mix/parallelism
     v_ref = verdict(5.90, sku, 2048, reference_tb_s=5.50)

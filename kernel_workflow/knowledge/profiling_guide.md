@@ -1,5 +1,9 @@
 # Profiling Analysis Guide
 
+For static ISA queries, compilation capture and occupancy bounds, use the
+[shared ISA tool guide](../scripts/kernel_tools/isa_tools.md). These inputs inform
+optimization; achieved utilization and roofline measurements come from the profiler.
+
 ## Reading the raw profiler dump (START HERE — the script does NOT parse for you)
 
 `scripts/profile_kernel.sh` is intentionally thin: it warms up, picks the best available profiler, runs
@@ -104,7 +108,7 @@ HIP-inside-ROCR guard) under `gpu_lock.sh`; nothing sets `HIP_VISIBLE_DEVICES` i
 |---|---|---|---|
 | `--pmc` | the `kernel_tools/parse_pmc.py` `PMC_GROUPS` (memory, memory_ea, sol, stall, waitbusy, lds_raw), one rocprofv3 pass per group, bisected on abort/timeout | `pmc/pmc_<group>/`, `pmc/pmc_summary.txt`, `pmc/pmc_collection.json` (passes + dropped counters) | `parse_pmc.py <out>/pmc "" --arch <gfx>` (busy counters, bubble = 100 − MfmaUtil, C1 achieved DRAM bandwidth by independent routes); `kernel_breakdown.py <kernel.s> --pmc <out>/pmc` merges it with the static ISA audit |
 | `--derived` | only the derived busy/stall groups (sol, stall) — the cheap subset | `pmc/` | as `--pmc` |
-| `--att` | rocprofv3 advanced thread trace of the selected kernel (one CU; retried over all SIMDs when the traced CU caught no waves) | `att/ui_output_agent_*`, `att/hotspots.txt` | `hotspot_analyzer.py`, `att_opclass.py`, `att_timeline.py`, `att_to_perfetto.py` (all in `kernel_tools/`); `kernel_breakdown.py --att <ui_output dir>` |
+| `--att` | rocprofv3 advanced thread trace of the selected kernel (one CU; retried over all SIMDs when the traced CU caught no waves) | `att/ui_output_agent_*`, `att/hotspots.txt` | `hotspot_analyzer.py`, `att_opclass.py`, `mfma_efficiency.py` (all in `kernel_tools/`); `kernel_breakdown.py --att <ui_output dir>` |
 | `--spi` | occupancy-limiter evidence: `rocprof-compute analyze --block 6.2 2.1.15` on the main step's workload, else `PROFILE_SPI_COUNTERS` (build-specific raw SPI counters) | `spi/` | the SPI "Insufficient …" rows name the binding resource; cross-check the analytic occupancy below |
 | `--kernel R` | the kernel-name regex for all of the above (default: the dominant non-helper kernel of a kernel-trace pass, written to `kernel_select/selected_kernel.txt`) | | |
 
@@ -120,10 +124,9 @@ both abort and timeout bisect the group and drop only the counters that fail alo
 (`pmc_collection.json` lists them). Never read a dropped counter as zero.
 
 Other shared tools in `kernel_workflow/scripts/kernel_tools/` (the Gluon pack keeps shims at its old
-`scripts/` paths): `capture.sh` (one-shot evidence capture: preflight, rocprof-compute `--full`, ATT,
-IR dump + static audit, `capture.json`), `rocprof_compute_probe.sh` + `parse_rc.py` (rocprof-compute
-SOL/memory/warp-state/SPI → `rc_metrics.json`), `tile_trace.py` / `att_merge_perfetto.py` /
-`serve_traces.py` (Perfetto traces). All GPU-touching wrappers run under `gpu_lock.sh` (pass `--dev`/
+`scripts/` paths): `capture.sh` (source-linked trace/optional ATT capture,
+available IR + static audit, `capture.json`), `rocprof_compute_probe.sh` + `parse_rc.py` (rocprof-compute
+SOL/memory/warp-state/SPI → `rc_metrics.json`). All GPU-touching wrappers run under `gpu_lock.sh` (pass `--dev`/
 `--gpu <id>` and they lock themselves). rocprof-compute version caveats: on gfx95x `--roof-only` needs
 rocprof-compute >= 3.6.0, and on gfx950 FETCH_SIZE / TCC_BUBBLE-derived read bytes **under-count**
 (treat a counter-based byte numerator there as a lower bound; `parse_pmc.py --arch gfx950` stamps it).

@@ -44,6 +44,78 @@ if (typeof _rawArgs === 'string') {
   }
 }
 const A = _rawArgs || {};
+// BEGIN GENERATED hardware_context_workflow.js
+// Shared pure workflow contract. Embedded because GEAK workflow JS has no FS/import API.
+// Edit here, then run scripts/sync_hardware_context_workflow.py.
+function parseHardwareContext(value) {
+  if (!value) return null;
+  const c = typeof value === 'string' ? JSON.parse(value) : value;
+  const o = c.observed || {};
+  if (c.schema_version !== 1 || !/^gfx[0-9a-f]+$/.test(o.gfx || '') ||
+      !Number.isInteger(o.physical_cu_count) || o.physical_cu_count <= 0 ||
+      !['matched', 'conflict', 'unknown'].includes(c.status) ||
+      !/^[a-f0-9]{64}$/.test(c.catalog_sha256 || '') ||
+      c.may_gate !== false || c.analysis_role !== 'planning') {
+    throw new Error('invalid hardware_context: use scripts/hardware_context.py');
+  }
+  if (c.status === 'matched') {
+    const s = c.specification || {};
+    if (!c.sku || c.sku === 'unknown' || c.sku !== c.candidate_sku ||
+        s.arch !== o.gfx || s.cus !== o.physical_cu_count || s.product !== o.marketing_name) {
+      throw new Error('hardware_context SKU/resource mismatch');
+    }
+  } else if (c.sku !== 'unknown' || c.specification !== null) {
+    throw new Error('unresolved hardware_context must not provide product peaks');
+  }
+  return c;
+}
+let HARDWARE_CONTEXT = parseHardwareContext((A.state || {}).hardware_context);
+let HARDWARE_CONTEXT_PATH = String(A.hardware_context_path || (A.state || {}).hardware_context_path || '');
+function adoptHardwareContext(value, gfx, name, cu, path, declaredSku) {
+  const next = parseHardwareContext(value) || HARDWARE_CONTEXT;
+  if (next) {
+    const o = next.observed;
+    if (o.gfx !== gfx || o.physical_cu_count !== cu || (name && o.marketing_name !== name)) {
+      throw new Error('hardware_context disagrees with setup GPU identity');
+    }
+    if (HARDWARE_CONTEXT) {
+      const previous = HARDWARE_CONTEXT.observed;
+      for (const k of ['gfx', 'marketing_name', 'physical_cu_count', 'compute_partition', 'memory_partition', 'memory_bytes']) {
+        if (previous[k] != null && previous[k] !== o[k]) throw new Error('hardware_context changed across workflow handoff: ' + k);
+      }
+      if (HARDWARE_CONTEXT.catalog_sha256 !== next.catalog_sha256 || HARDWARE_CONTEXT.sku !== next.sku) {
+        throw new Error('hardware_context catalog or SKU changed across workflow handoff');
+      }
+    }
+  }
+  if (A.expected_sku && A.expected_sku !== 'unknown' && (!next || next.sku !== A.expected_sku)) {
+    throw new Error('expected_sku disagrees with hardware_context');
+  }
+  if (declaredSku && (!next || declaredSku !== next.sku)) {
+    throw new Error('setup device_sku disagrees with hardware_context');
+  }
+  HARDWARE_CONTEXT = next;
+  HARDWARE_CONTEXT_PATH = String(path || HARDWARE_CONTEXT_PATH);
+}
+function hardwareInputs() {
+  return { DEVICE_SKU: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown',
+    HARDWARE_CONTEXT, HARDWARE_CONTEXT_PATH };
+}
+const initialHardwareContext = parseHardwareContext(A.hardware_context) || HARDWARE_CONTEXT;
+if (initialHardwareContext) {
+  const o = initialHardwareContext.observed;
+  adoptHardwareContext(initialHardwareContext, A.expected_gfx || o.gfx,
+    A.expected_device_name || o.marketing_name, Number(A.expected_physical_cu_count || o.physical_cu_count));
+}
+function hardwarePrelude() {
+  return '\n## Shared GEAK hardware context\n' + JSON.stringify(hardwareInputs()) + '\n' +
+    'Read scripts/hardware_context.md under the GEAK repository root. This applies to every language and optimization role, independently of expert-skill switches. ' +
+    'Setup/Freeze must run scripts/hardware_context.py in the workload environment, write EVAL_DIR/hardware_context.json, and return hardware_context plus hardware_context_path. ' +
+    'Before numerical planning, validate that file with scripts/hardware_context.py --check FILE. ' +
+    'Use observed visible CUs for grid sizing; use verified resource scope for memory/cache planning. Missing facts stay unknown; never promote an ISA default to a product. ' +
+    'Export GEAK_HARDWARE_CONTEXT to that file for local and native roofline tools. TraceLens retains native models/calibration; local specification values are planning-only.\n\n';
+}
+// END GENERATED hardware_context_workflow.js
 // LLM accounting (args.llm_stats="false" disables): records each agent call's role/phase/attempt.
 // No timestamps (no Date.now() here); scripts/llm_ledger.py takes durations from the transcripts.
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
@@ -123,6 +195,8 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
+    hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
+    expected_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : "unknown",
     use_learned_kb: LANE_USE_LEARNED_KB,
     use_gluon_skill: USE_GLUON_SKILL,
     ...ablLaneArgs(),
@@ -908,10 +982,12 @@ const _agentxEnvPairs = () => {
     ['CONC', String(CONC)],
     ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
     ['AGENTX_DATASET', AGENTX.corpus],
-    // The reference the run is compared against; overriding the corpus or window doesn't move it
-    // (so such a replay is non-canonical). Declare canonical_corpus / canonical_duration_s to move it.
+    // The reference the run is compared against; overriding the corpus, entry count or window
+    // doesn't move it (so such a replay is non-canonical). Declare canonical_corpus /
+    // canonical_num_entries / canonical_duration_s to move it.
     ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
     ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
+    ['AGENTX_CANONICAL_NUM_ENTRIES', AGENTX.canonical_num_entries || AGENTX_DEFAULTS.num_entries],
     ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
     ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX_DEFAULTS.duration_s],
     ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
@@ -1068,6 +1144,8 @@ const SETUP_SCHEMA = obj({
   // service has no DELETE, so a wrong page is permanent.
   gfx: { type: 'string' }, device_target: { type: 'string' },
   device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
+  device_sku: { type: 'string' }, hardware_context: { type: 'object', additionalProperties: true },
+  hardware_context_path: { type: 'string' },
   precision: { type: 'string' },
   framework_version: { type: 'string' }, rocm_version: { type: 'string' },
 }, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
@@ -1851,6 +1929,7 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTim
 const ABANDONED_RUNS = new Map();
 
 async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) {
+  prompt = hardwarePrelude() + prompt;
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
@@ -3260,6 +3339,9 @@ if (want('setup')) {
   const divergence = evalDirDivergence(EVAL_DIR_OVERRIDE, setup.eval_dir);
   if (divergence) throw new Error(`Setup failed: ${divergence}`);
   EVAL_DIR = setup.eval_dir;
+  adoptHardwareContext(setup.hardware_context, EXPECTED_GFX || detectedGfx,
+    EXPECTED_DEVICE_NAME || setup.device_name, EXPECTED_PHYSICAL_CU_COUNT || detectedPhysicalCuCount,
+    setup.hardware_context_path || `${EVAL_DIR}/hardware_context.json`, setup.device_sku);
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
   NOISE_BAND = gateNoiseBand(setup.noise_band_pct);
@@ -6032,6 +6114,7 @@ if (want('final')) {
 
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
+  hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
   backend: BACKEND,
   ...(KERNEL_EXTRACT_ON
     ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },

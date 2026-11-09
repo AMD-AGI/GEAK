@@ -89,6 +89,8 @@ ok(retryFor({ agent_timeout_retry: 'false' }) === false, "agent_timeout_retry='f
 ok(retryFor({ agent_timeout_retry: 'true' }) === true, "agent_timeout_retry='true' keeps it on");
 
 const loopSrc = between('function agentBounded(', '// --- FlyDSL provisioning gate');
+const hardwareSrc = between('// BEGIN GENERATED hardware_context_workflow.js',
+  '// END GENERATED hardware_context_workflow.js');
 ok(!!loopSrc && loopSrc.includes('async function safeAgent('), 'agentBounded + safeAgent located');
 if (!loopSrc) process.exit(1);
 const harness = (retry, agentImpl, inReserve = false) => {
@@ -97,7 +99,7 @@ const harness = (retry, agentImpl, inReserve = false) => {
   const { safeAgent, ABANDONED_RUNS } = new Function(
     'withProcessSafety', 'ablEffortFor', 'ablEvent', 'agentTimeoutFor', 'agent', 'log', 'ABL', 'tlAgent',
     'LLM_TL', 'AGENT_TIMEOUT_RETRY', 'atReserveFloor',
-    `${loopSrc}\nreturn { safeAgent, ABANDONED_RUNS };`)(
+    `const A = {};\n${hardwareSrc}\n${loopSrc}\nreturn { safeAgent, ABANDONED_RUNS };`)(
     (p) => p, () => null, () => {}, () => 5,
     (...a) => { calls.agent++; return agentImpl(...a); },
     (m) => logs.push(m), () => false, () => null, { nested: [] }, retry, () => inReserve);

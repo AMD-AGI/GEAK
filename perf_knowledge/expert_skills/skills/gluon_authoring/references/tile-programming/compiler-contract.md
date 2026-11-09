@@ -5,17 +5,12 @@ co-design. In Gluon the author writes independent AC/LR/DOT and the register
 budget; the compiler interleaves, allocates, and peepholes. An optimization is
 **not landed** until the IR/asm confirms it.
 
-> **Dispatch entry vs detail.** This file is the **detail reference** for the
-> `compiler_interleave` branch of the layer-1.5 scheduling-model choice
-> (`scheduling-model.md`) and for the LLVM-tier lever cards
-> (`../hardware/lever-cards.json`, route=compiler-stack). The **card** is what you dispatch —
-> the measured bound emits it per round, probe-gated + default-off — carrying the *when/what*
-> (gate / expected direction / risk). This file carries the *how*: the mechanism, the
-> throughput model, and the Scenario B authoring loop. Keep the
-> generalizable decision logic on the card and the mechanism here; do not bake
-> experiment-run numbers into either (numbers are measured fresh each round; arch
-> constants live in `perf_knowledge/hardware/data/hw_constants.json`, read through
-> `kernel_workflow/scripts/kernel_tools/_hwdata.py`).
+> **Detail reference.** The agent chooses a compiler experiment from the current
+> SKU/roofline, profile and ISA/IR evidence, then uses this page for the mechanism,
+> throughput model and Scenario B authoring loop. No measured bound dispatches a card.
+> Experiment results are measured fresh; architecture constants live in
+> `perf_knowledge/hardware/data/hw_constants.json`, read through
+> `kernel_workflow/scripts/kernel_tools/_hwdata.py`.
 >
 > **Canonical split of the LLVM co-design material.** This page owns scope and sanction, toolchain
 > identity, the upstream 3.8.0 capability table (`## What upstream 3.8.0 actually gives you`), the

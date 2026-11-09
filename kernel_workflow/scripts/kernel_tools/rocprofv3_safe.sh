@@ -40,7 +40,7 @@
 # traced CU that caught no waves, i.e. code.json "code": null).
 #
 # Exit codes: 0 ok | 124 TIMED OUT (degraded layer, never a zero) | 2 usage / not under gpu_lock |
-#             3 ATT decoder absent (degraded) |
+#             3 unavailable dependency/locus | 4 no usable matching artifacts | 5 partial artifacts |
 #             other = rocprofv3's (134 / signal = counter-slot abort -> bisect the group)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,29 +48,7 @@ SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck source=_kt_common.sh
 source "$HERE/_kt_common.sh"
 
-# Collapse HIP-inside-ROCR to a single ROCR device (GUARD 2). Pure function of the environment.
-_rv3_fix_visible_devices() {
-  [ -n "${ROCR_VISIBLE_DEVICES:-}" ] && [ -n "${HIP_VISIBLE_DEVICES:-}" ] || return 0
-  local -a rocr hip selected=()
-  local idx
-  IFS=',' read -r -a rocr <<< "$ROCR_VISIBLE_DEVICES"
-  if [[ ! "$HIP_VISIBLE_DEVICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-    echo "[rocprofv3_safe] invalid HIP indices inside ROCR; refusing to widen the GPU allocation" >&2
-    return 2
-  fi
-  IFS=',' read -r -a hip <<< "$HIP_VISIBLE_DEVICES"
-  for idx in "${hip[@]}"; do
-    idx=$((10#$idx))
-    if [ "$idx" -ge "${#rocr[@]}" ] || [ -z "${rocr[$idx]}" ]; then
-      echo "[rocprofv3_safe] HIP index $idx is outside ROCR; refusing to widen the GPU allocation" >&2
-      return 2
-    fi
-    selected+=("${rocr[$idx]}")
-  done
-  export ROCR_VISIBLE_DEVICES="$(IFS=,; echo "${selected[*]}")"
-  echo "[rocprofv3_safe] collapsed HIP indices to ROCR_VISIBLE_DEVICES=$ROCR_VISIBLE_DEVICES" >&2
-  unset HIP_VISIBLE_DEVICES
-}
+source "$HERE/rocprofv3_env.sh"
 
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
@@ -78,24 +56,30 @@ if [ "${1:-}" = "--selftest" ]; then
   cat > "$t/bin/rocprofv3" <<'EOF'
 #!/usr/bin/env bash
 # fake rocprofv3: report the device env it saw, honour -d, optionally hang
+case "${1:-}" in
+  --version) echo 'fixture sdk'; exit 0;;
+  --help) echo '--att --att-library-path --kernel-trace --pmc'; exit 0;;
+esac
 out=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && out="$2"; [ "$1" = "--" ] && { shift; break; }; shift; done
 echo "HIP=${HIP_VISIBLE_DEVICES-unset} ROCR=${ROCR_VISIBLE_DEVICES-unset}" > "$out/env_seen.txt"
+printf 'Kernel_Name,Start_Timestamp,End_Timestamp\nk,1,2\n' > "$out/test_kernel_trace.csv"
+printf 'Kernel_Name,Counter_Name,Counter_Value\nk,SQ_WAVES,1\n' > "$out/test_counter_collection.csv"
 [ -n "${FAKE_HANG:-}" ] && sleep 30
 "$@"
 EOF
   chmod +x "$t/bin/rocprofv3"
-  _run() { PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD=selftest bash "$SELF" "$@" >/dev/null 2>&1; }
+  _run() { PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD="${GEAK_GPU_LOCK_HELD:-${HIP_VISIBLE_DEVICES:-0}}" bash "$SELF" "$@" >/dev/null 2>&1; }
   # HIP only (the gpu_lock.sh case): HIP must survive.
   ( unset ROCR_VISIBLE_DEVICES
     HIP_VISIBLE_DEVICES=3 _run --kernel k --out "$t/o1" --kernel-trace --cmd "true" )
   grep -q "HIP=3 ROCR=unset" "$t/o1/env_seen.txt" 2>/dev/null \
     || { echo "FAIL: HIP-only env was altered: $(cat "$t/o1/env_seen.txt" 2>/dev/null)"; fail=1; }
   # HIP inside ROCR: collapse to the same device.
-  ( ROCR_VISIBLE_DEVICES=4,6 HIP_VISIBLE_DEVICES=1 _run --kernel k --out "$t/o2" --pmc "SQ_WAVES" -- true )
+  ( ROCR_VISIBLE_DEVICES=4,6 HIP_VISIBLE_DEVICES=1 GEAK_GPU_LOCK_HELD=1 _run --kernel k --out "$t/o2" --pmc "SQ_WAVES" -- true )
   grep -q "HIP=unset ROCR=6" "$t/o2/env_seen.txt" 2>/dev/null \
     || { echo "FAIL: HIP-in-ROCR not collapsed to ROCR=6: $(cat "$t/o2/env_seen.txt" 2>/dev/null)"; fail=1; }
   # timeout -> 124 + degraded state file
-  ( export FAKE_HANG=1; PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD=selftest \
+  ( export FAKE_HANG=1; PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD=0 HIP_VISIBLE_DEVICES=0 \
       bash "$SELF" --kernel k --out "$t/o3" --pmc "SQ_WAVES" --timeout 1 -- true >/dev/null 2>&1; echo $? > "$t/rc3" )
   [ "$(cat "$t/rc3")" = 124 ] && grep -q '"state":"timeout"' "$t/o3/rocprofv3_safe.json" \
     || { echo "FAIL: timeout did not degrade to 124 + state=timeout"; fail=1; }
@@ -104,13 +88,13 @@ EOF
       bash "$SELF" --kernel k --out "$t/o4" --kernel-trace -- true >/dev/null 2>&1; echo $? > "$t/rc4" )
   [ "$(cat "$t/rc4")" = 2 ] || { echo "FAIL: outside gpu_lock with no --gpu must refuse (rc 2)"; fail=1; }
   # --att with no decoder anywhere -> exit 3, decoder_absent (degraded, not failed)
-  ( PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD=selftest ROCPROF_ATT_LIBRARY_PATH="$t/none" KT_ATT_SYSTEM_DIRS="$t/none" \
+  ( PATH="$t/bin:$PATH" GEAK_GPU_LOCK_HELD=0 HIP_VISIBLE_DEVICES=0 ROCPROF_ATT_LIBRARY_PATH="$t/none" KT_ATT_SYSTEM_DIRS="$t/none" \
       bash "$SELF" --kernel k --out "$t/o6" --att -- true >/dev/null 2>&1; echo $? > "$t/rc6" )
   [ "$(cat "$t/rc6")" = 3 ] && grep -q decoder_absent "$t/o6/rocprofv3_safe.json" \
     || { echo "FAIL: --att without a decoder must degrade with rc 3"; fail=1; }
   # an existing --out is moved aside, not deleted
   mkdir -p "$t/o5"; echo keep > "$t/o5/old.txt"
-  _run --kernel k --out "$t/o5" --kernel-trace -- true
+  HIP_VISIBLE_DEVICES=0 _run --kernel k --out "$t/o5" --kernel-trace -- true
   ls -d "$t"/o5.old_* >/dev/null 2>&1 || { echo "FAIL: existing --out was not moved aside"; fail=1; }
   [ "$fail" = 0 ] && echo "ROCPROFV3_SAFE SELFTEST PASS" || echo "ROCPROFV3_SAFE SELFTEST FAIL"
   exit "$fail"
@@ -146,57 +130,93 @@ fi
 [ "$MODE" != "pmc" ] || [ -n "$PMC" ] || { echo "--pmc \"<counters>\" is required unless --kernel-trace/--att" >&2; exit 2; }
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "--timeout must be whole seconds (0 = none)" >&2; exit 2; }
 
+# Validate the configured execution environment before any collection. A missing
+# container must never silently redirect profiling to the host.
+locus_preflight || exit 3
 kt_ensure_lock "$GPU" "$SELF" "${ORIG_ARGS[@]}"
-
 kt_move_aside "$OUT"
-mkdir -p "$OUT" || { echo "[rocprofv3_safe] cannot create --out $OUT" >&2; exit 2; }
+mkdir -p "$OUT" || exit 2
+OUT="$(cd "$OUT" && pwd -P)"
+if ! locus_workdir_shared "$OUT"; then
+  echo "[rocprofv3_safe] output is not shared with the execution locus: $OUT" >&2
+  exit 3
+fi
+LOCUS_OUT="$(locus_path "$OUT")"
+RV3_UNSET_HIP=0
+_rv3_fix_visible_devices || exit $?
+export LOCUS_ENV="${LOCUS_ENV:-} HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES"
+DEVICE_ENV=()
+[ "$RV3_UNSET_HIP" = 0 ] || DEVICE_ENV=(env -u HIP_VISIBLE_DEVICES -u CUDA_VISIBLE_DEVICES)
 
-_rv3_fix_visible_devices || exit $?   # GUARD 2, scoped to this process
-
-_json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
-ARGS=(--kernel-include-regex "$KERNEL" -d "$OUT" -f csv)
+# Only this primitive owns rocprofv3 arguments, timeouts and the ATT retry.
+ARGS=(--kernel-include-regex "$KERNEL" -d "$LOCUS_OUT" -f csv)
 case "$MODE" in
   trace) ARGS=(--kernel-trace "${ARGS[@]}") ;;
   att|att-wide)
-    if ! _dec="$(kt_att_decoder_dir)"; then
-      echo "[rocprofv3_safe] ATT DEGRADED: rocprof-trace-decoder not found (GEAK does not vendor it)." \
-           "Install it and export ROCPROF_ATT_LIBRARY_PATH=<dir>; every other layer is unaffected." >&2
-      echo "{\"state\":\"decoder_absent\",\"kernel\":$(_json_str "$KERNEL")}" >"$OUT/rocprofv3_safe.json"
+    if ! kt_att_prepare locus "$OUT/att_dependencies.json"; then
+      python3 - "$OUT" "${KT_ATT_STATUS:-dependency_probe_failed}" <<'PY_STATE'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1], 'rocprofv3_safe.json').write_text(json.dumps(
+    {'state': sys.argv[2], 'rc': 3, 'reason': sys.argv[2]}))
+PY_STATE
+      echo "[rocprofv3_safe] ATT unavailable: ${KT_ATT_STATUS:-dependency_probe_failed}" >&2
       exit 3
     fi
-    export ROCPROF_ATT_LIBRARY_PATH="$_dec"
-    ARGS=(--att --att-target-cu 0 --att-shader-engine-mask 0xF --kernel-include-regex "$KERNEL" -d "$OUT")
-    [ "$MODE" = "att-wide" ] && ARGS+=(--att-simd-select 0xF) ;;
+    ARGS=(--att "${KT_ATT_ARGS[@]}" --att-target-cu 0 --att-shader-engine-mask 0xF --kernel-include-regex "$KERNEL" -d "$LOCUS_OUT")
+    [ "$MODE" = att-wide ] && ARGS+=(--att-simd-select 0xF) ;;
   *)
     # shellcheck disable=SC2206
     ARGS=(--pmc $PMC "${ARGS[@]}") ;;
 esac
-
-# Multi-rank jobs need the same signal-handler policy as profile_kernel.sh.
-if [[ "${GEAK_GPU_LEASE_IDS:-}" == *,* ]]; then
+if [[ "${GEAK_GPU_LEASE_IDS:-${HIP_VISIBLE_DEVICES:-${ROCR_VISIBLE_DEVICES:-}}}" == *,* ]]; then
   ARGS+=(--disable-signal-handlers true)
 fi
-
-echo "[rocprofv3_safe] timeout ${TIMEOUT}s (0=none) | kernel='$KERNEL' | mode=$MODE ${PMC:+| pmc='$PMC'}" >&2
-if [ "$TIMEOUT" = 0 ]; then
-  rocprofv3 "${ARGS[@]}" -- "${CMD[@]}"
-else
-  timeout -k 10 "$TIMEOUT" rocprofv3 "${ARGS[@]}" -- "${CMD[@]}"
+_rv3_run() {
+  if [ "$TIMEOUT" = 0 ]; then
+    locus_run "${DEVICE_ENV[@]}" rocprofv3 "${ARGS[@]}" -- "${CMD[@]}"
+  else
+    # The timeout runs INSIDE the container, so it stops the payload, not only docker exec.
+    locus_run timeout -k 10 "$TIMEOUT" "${DEVICE_ENV[@]}" rocprofv3 "${ARGS[@]}" -- "${CMD[@]}"
+  fi
+}
+_rv3_inspect() {
+  locus_fetch "$LOCUS_OUT" "$(dirname "$OUT")"
+  python3 "$HERE/profiler_artifacts.py" --out "$OUT" --mode "$MODE" --kernel "$KERNEL" --pmc "$PMC" \
+    > "$OUT/collection_artifacts.json"
+}
+echo "[rocprofv3_safe] timeout=${TIMEOUT}s kernel='$KERNEL' mode=$MODE" >&2
+attempts=1
+_rv3_run
+profiler_rc=$?
+_rv3_inspect || true
+# A successful narrow capture with code:null may have missed all waves on that
+# SIMD. Retry exactly once here, shared by profile_kernel and task capture.
+if [ "$MODE" = att ] && [ "$profiler_rc" = 0 ] && \
+    python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("reason") != "code_null")' "$OUT/collection_artifacts.json"; then
+  kt_move_aside "$OUT"
+  mkdir -p "$OUT"
+  kt_att_prepare locus "$OUT/att_dependencies.json" || exit 3
+  ARGS+=(--att-simd-select 0xF)
+  attempts=2
+  _rv3_run
+  profiler_rc=$?
+  _rv3_inspect || true
 fi
-rc=$?
-if [ "$rc" -eq 124 ]; then
-  # A hang is a DEGRADED LAYER, not an empty result. Say so in a form a reader cannot mistake for
-  # "the counters were zero", and name the next move: bisect the group -- the per-pass counter
-  # budget is box- and version-dependent and is found by halving.
-  echo "[rocprofv3_safe] TIMED OUT after ${TIMEOUT}s -- this collection did not finish on this box." \
-       "It is a DEGRADED LAYER, not a zero. Bisect --pmc and keep the half that returns; drop only" \
-       "the counters that fail alone. (Serving runs: use --no-timeout, a long finalize is normal.)" >&2
-  echo "{\"state\":\"timeout\",\"kernel\":$(_json_str "$KERNEL"),\"pmc\":$(_json_str "$PMC"),\"timeout_s\":$TIMEOUT}" \
-    >"$OUT/rocprofv3_safe.json"
-  exit 124
-fi
-state=error; [ "$rc" -eq 0 ] && state=ok
-{ [ "$rc" -eq 134 ] || [ "$rc" -gt 128 ]; } && state=aborted
-echo "{\"state\":\"$state\",\"rc\":$rc,\"kernel\":$(_json_str "$KERNEL"),\"pmc\":$(_json_str "$PMC")}" \
-  >"$OUT/rocprofv3_safe.json"
+# Artifact inspection is independent of the process status: even a complete CSV
+# does not turn a failed workload into a successful collection.
+python3 - "$OUT" "$profiler_rc" "$attempts" "$KERNEL" "$PMC" "$TIMEOUT" <<'PY_STATE'
+import json, pathlib, sys
+out, rc, attempts, kernel, pmc, timeout = sys.argv[1:]
+rc = int(rc)
+report = json.loads(pathlib.Path(out, 'collection_artifacts.json').read_text())
+state = report['state']
+if rc:
+    state = 'timeout' if rc == 124 else ('aborted' if rc < 0 or rc > 128 else 'error')
+result = {**report, 'state': state, 'rc': rc if rc else {'ok': 0, 'partial': 5, 'unavailable': 4}[state],
+          'profiler_rc': rc, 'attempts': int(attempts), 'kernel': kernel, 'pmc': pmc,
+          'timeout_s': int(timeout)}
+pathlib.Path(out, 'rocprofv3_safe.json').write_text(json.dumps(result, separators=(',', ':')))
+PY_STATE
+rc="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rc"])' "$OUT/rocprofv3_safe.json")"
+[ "$rc" = 0 ] || echo "[rocprofv3_safe] collection incomplete; see $OUT/rocprofv3_safe.json" >&2
 exit "$rc"

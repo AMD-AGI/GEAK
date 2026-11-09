@@ -9,10 +9,16 @@ baselines are `plain_baseline` (the target line) and `gluon_anchor` (the working
 `recover.md`); the rules below apply to any A/B pair. Record schemas align with `records.md`,
 `budget.md`, `profile.md` and the `final_report.json` in `close.md`.
 
-## The binding rule: GEAK's harness owns acceptance timing
+## The binding rule: GEAK's frozen task contract owns acceptance
 
-One owner. **Every acceptance number** — a keep, a commit, a champion, a close — is
-measured the way `e2e_workflow/scripts/harness_lib.py` measures it:
+**Verify and Director execute the correctness and performance commands frozen in
+`COMMANDMENT.md`.** Reuse the task's existing runner and immutable oracle, including its metric,
+workload weights and deployment requirements. Search helpers do not replace that contract.
+
+The table below describes GEAK's extracted-task route through
+`e2e_workflow/scripts/harness_lib.py`. References to `measure_legs`, cache receipts and fresh
+processes in this chapter describe that route, not every standalone GEAK task. A task with its own
+runner retains its frozen commands; sharing `time_op` does not prove identical measurement conditions.
 
 | property | what `harness_lib` does | where |
 | --- | --- | --- |
@@ -27,12 +33,14 @@ measured the way `e2e_workflow/scripts/harness_lib.py` measures it:
 | correctness | `correct(out, ref, tol)`; `check_correct_multi` keeps every returned tensor live before comparing (catches a shared `static_out`); `assert_independent_outputs`; `check_random_vs_baseline` validates against the **live** baseline on several random value draws at the same shapes (correctness gates, its speedup is report-only) | `harness_lib` |
 | e2e sanity | `amdahl_ceiling` / `amdahl_check`: an observed e2e delta far above the ceiling a kernel at `pct_gpu` can produce is box drift / measurement error, not the kernel | `harness_lib` |
 
-**Commit gate.** GEAK banks a round winner only if its verified geomean beats the cumulative best by
+**Commit gate.** GEAK banks a round winner only if its verified primary metric (workload-weighted when supplied,
+otherwise geomean) beats the cumulative best by
 `MIN_IMPROVE` — **2 %** by default (`kernel_workflow/kernel_lane.js`, knob `min_improve`; tested in
 `kernel_workflow/scripts/test_candidate_floor.js`). A candidate below that can be **tracked**
 (`candidate_floor`) but never **banked**. A noise band measured in this window (a control arm, an
-in-window same-arm repeat, `speedup_spread`) **may only make the verdict stricter**: the effective keep
-threshold is `max(MIN_IMPROVE, measured band)`. Nothing on this page lowers it.
+in-window same-arm repeat, `speedup_spread`) can reject an unresolved comparison during supplementary
+screening before verification. The workflow commit gate itself uses configured `MIN_IMPROVE`; it
+does not automatically combine that value with these noise estimates.
 
 ### Who owns what in GEAK
 
@@ -43,9 +51,9 @@ GEAK's `kernel_workflow` injects this skill into its existing roles; GEAK's phas
 | --- | --- |
 | who owns the round loop / acceptance | GEAK: round loop (tech_lead plans, the deep_engineer runs the `deep_explore` direction), `verify_engineer` re-benchmark + Director validation, `MIN_IMPROVE` commit gate |
 | harness / baseline | `benchmark_engineer` (COMMANDMENT, baseline timing); `scripts/create_harness.py` emits a `harness_lib`-timed harness when one has to be authored |
-| acceptance numbers come from | `verify_engineer` / `measure_legs` (`harness_lib`, fresh process per leg, same-window baseline) — never from `ab_bench.py` |
+| acceptance numbers come from | `verify_engineer` executing the frozen task commands; extracted-task runners use `measure_legs`. A/B screening is supplementary |
 | `scripts/ab_bench.py`, `plain_autotune.py`, in-process sweeps | **search / screening only** in the deep_engineer's own loop — rank, reject early, measure the window's noise band |
-| GPU access | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; optional broker only with `GEAK_GPU_BROKER=1` |
+| GPU access | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; existing multi-GPU leases when required |
 
 ### Search metric vs acceptance metric — where pack techniques sit
 
@@ -56,12 +64,12 @@ instruments. Each is labelled where it appears; the summary:
 | --- | --- | --- |
 | `min` over repeats as the kernel floor | **search/screening only (ab_bench)**; report it beside the median as a supplementary column | acceptance statistic is the `harness_lib` median; switching estimator mid-campaign invalidates history (`## Repeatability + measurement order`) |
 | batched wall-clock timing (one sync around N calls) | **diagnostic cross-check only** | rejected by the per-sample-sync measurement above; wall-clock is floored by Python dispatch on decode shapes |
-| hot-cache protocol (`--cache hot`) | **search/screening only (ab_bench)** for compute-bound kernels with real reuse | acceptance is always read-evict |
-| one process timing all variants, interleaved cells | **search/screening only (ab_bench)**, and never for variants that patch the toolchain | acceptance = fresh process per leg; a patched variant always gets its own process |
+| hot-cache protocol (`--cache hot`) | **search/screening only (ab_bench)** for compute-bound kernels with real reuse | the extracted-task harness uses read-evict; other runners retain their frozen protocol |
+| one process timing all variants, interleaved cells | **search/screening only (ab_bench)**, and never for variants that patch the toolchain | extracted-task acceptance uses fresh processes; a patched search variant also needs its own process |
 | write-evict flush | **not used** | inflates speedups through writeback contention (1.40 vs 1.12) |
 | fixed iteration count vs time budget (`--budget-ms`) | screening protocol choice | acceptance sample count is the harness's `repeats`, widened by `measure_legs` pairs |
 | control arm (`--control`), `--permute`, `fingerprint()`, `--preload` | **kept** — stricter supplementary checks | they can only void or tighten a verdict |
-| UUID / PCI anchoring, sustained idle window, sub-ms warmup table, graph-served kernel-only metric | **kept** (pack-only techniques; the warmup table is screening guidance) | GEAK has no counterpart; none conflicts |
+| UUID / PCI anchoring, sustained idle window, sub-ms warmup table, graph-served kernel-only metric | **kept** (pack-only techniques; the warmup table is screening guidance) | supplementary evidence; reuse GEAK device identity and deployment checks where available |
 
 **Chapter map (execution order).** Build the harness (`## Toolchain pin` → `## Profiler output hygiene
 (do not pollute the repo)`) → before timing, the box and the device (`## Shared-box contention
@@ -216,16 +224,18 @@ Which boundary is the right one is decided by how production serves the kernel
 
 ## Generate the harness
 
-Use `scripts/create_harness.py` (defaulted to Gluon imports + a layout-factory skeleton). It generates
-a per-case `GEAK_RESULT_LATENCY_MS=<float>` line timed with `harness_lib.time_op` and judged with
-`harness_lib.correct()`, so a harness authored here measures the same way GEAK's acceptance does;
-`scripts/parse_correctness.py` reads its result (unittest exit codes and per-case JSON). Modes:
+Prefer the task's existing runner or immutable unittest. Only when a search scaffold is needed,
+use `scripts/create_harness.py` (Gluon imports and layout factory only for a Gluon target). It emits
+per-case `GEAK_RESULT_LATENCY_MS=<float>` lines using `harness_lib.time_op` and checks with
+`check_correct_multi`. Fill its case and launch TODOs; it does not automatically implement the
+full random/replay/deployment correctness suite or serving weights. It refuses to overwrite an
+existing output. `scripts/parse_correctness.py` adapts the recorded results. Modes:
 
 ```text
 --correctness     validate against the reference oracle
 --profile         single run for profiling (minimal allocations)
 --benchmark       quick benchmark (fewer iters)
---full-benchmark  authoritative benchmark (more iters), emits a latency marker
+--full-benchmark  fuller search benchmark (more iters), emits a latency marker
 ```
 
 Emit a parseable marker (e.g. `GEAK_RESULT_LATENCY_MS=<float>`) or JSON; document the exact stdout
@@ -505,8 +515,8 @@ compute, stay plain (`entry.md`, escalation gate).
 | `0.1` to `< 1 ms` | `>= 10` | `>= 50` | `~3%` |
 | `>= 1 ms` | `>= 5` | `>= 20` | `~2%` |
 
-No row lowers the commit gate: the keep threshold is `max(MIN_IMPROVE = 2 %, the row's band, the
-measured band)`. Alternate measurement order, rerun near-noise results, run same-code/baseline
+Use these rows as supplementary screening guidance; they do not change GEAK's configured
+`MIN_IMPROVE` commit gate. Alternate measurement order, rerun near-noise results, run same-code/baseline
 controls, isolate noisy buckets, record timing method. Judge by repeat-stable A/B movement, not one best
 absolute latency. Below ~a few µs, raise `time_op`'s `inner` (per-window overhead divides away) and
 apply the instrument floor (`## The largest additive term is usually your own instrument, and you can
@@ -1132,8 +1142,8 @@ clue the model was recovered from. Quote a multiple only once the effect is know
 - **noise-floor gate:** first measure the repeat spread of a *fixed* config (same knob, repeated — the
   `--control` arm), then treat that spread as the noise band. A candidate-vs-baseline delta **smaller
   than the noise band is not a win or a finding** — report it as "within noise", do not act on it. (This
-  is what turned an apparent decode "trough" / "lift" into noise once measured properly.) The band only
-  ever raises the keep threshold above `MIN_IMPROVE` (2 %), never lowers it. **Measure that band *before*
+  is what turned an apparent decode "trough" / "lift" into noise once measured properly.) The band may raise the supplementary screening threshold above configured
+  `MIN_IMPROVE` (default 2 %), never lower it; GEAK does not automatically apply this noise band to its commit gate. **Measure that band *before*
   spending the comparison, and hold the effect you expect against it.** A fixed config run against
   itself on the same shape gives this run's smallest resolvable effect; if what you are going looking for
   is predicted to be smaller than that, the run cannot produce evidence in either direction and the cost
@@ -1212,9 +1222,9 @@ clue the model was recovered from. Quote a multiple only once the effect is know
 | Gate | Must include | Use for |
 | --- | --- | --- |
 | Quick | fixed ordered subset, correctness, enough reps for obvious regressions, per-shape JSON | search + early rejection (`ab_bench.py`, quick harness mode) |
-| Full | contracted stream, same boundary, per-shape map, aggregate metric, repeat for small/noisy deltas — timed under the binding protocol (events, per-sample sync, read-evict, median, fresh process per leg, same-window baseline) | final acceptance (`verify_engineer` / `measure_legs`, the `harness_lib`-timed full benchmark) |
+| Full | contracted stream, same boundary, per-shape map, aggregate metric, repeat for small/noisy deltas — timed under the binding protocol (events, per-sample sync, read-evict, median, fresh process per leg, same-window baseline) | final acceptance through Verify and frozen `FULL_BENCHMARK`; the listed protocol applies to extracted-task runners |
 
-Small-gain policy: an aggregate below `MIN_IMPROVE` (**2 %**) is not committed — it may be tracked, never
+Small-gain policy: an aggregate below configured `MIN_IMPROVE` (**2 %** by default) is not committed — it may be tracked, never
 banked; a gain at or just above the threshold (or inside this window's measured band, whichever is
 larger) needs ≥1 independent full repeat; all-shape tasks report best/worst per-shape movement;
 aggregate-only wins need dispatch/fallback for repeated losers; disagreeing repeats = noise, not a keep.
@@ -1937,17 +1947,17 @@ Rewritten / demoted under the benchmark rule (nothing silently dropped):
   diagnostic cross-check; acceptance = events with per-sample sync (batching rejected on measurement in
   `harness_lib`).
 - **hot-cache protocol for compute-bound kernels** (`Hot or cold cache`) → *search/screening only
-  (ab_bench)*; acceptance is always read-evict. "Flush a buffer" made explicit as **read**-evict;
+  (ab_bench)*; the extracted-task harness uses read-evict; other runners retain their frozen protocol. "Flush a buffer" made explicit as **read**-evict;
   write-evict not used (GEAK measurement 1.40 vs 1.12).
 - **graph-timing "one sync around many replays"** → kept for wall-clock graph timing; acceptance
   `time_op(graph=True)` uses events per replay with sync/flush outside the window.
 - **one process / interleaved cells for all variants** → screening only; acceptance = fresh process per
   leg; patched variants always in their own process; the in-process per-variant cache-tag interleave is
   not used.
-- **Small-gain policy "<2% needs a repeat"** → rewritten to the GEAK commit gate (<2 % is never banked; a
-  measured band only raises the bar).
+- **Small-gain policy "<2% needs a repeat"** → use the configured GEAK `MIN_IMPROVE` commit gate
+  (default 2 %); noise may require stricter supplementary screening and another measurement.
 - **Sub-ms warmup/reps/noise table** → kept as screening guidance and launch-floor evidence; cannot lower
-  the 2 % gate.
+  the configured `MIN_IMPROVE` gate (default 2 %).
 - **LDS pre-screen** rewritten gfx950-first (160 KiB / 64 banks) with gfx942 (64 KiB / 32 banks) as the
   downgrade; data path → `perf_knowledge/hardware/data/hw_constants.json`.
 - **JSON schema** `latency: mean / min / max` → adds `median (acceptance)` and the `harness_lib` receipt

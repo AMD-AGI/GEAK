@@ -26,7 +26,7 @@ Onboarding is not here — read GEAK's language layer first if you have not writ
 | **close** — outcome enum, final report, closure self-review, cost discipline | [`references/method/close.md`](references/method/close.md) | [`references/method/records.md`](references/method/records.md) |
 | per-shape dispatch delivery — measured/inferred/default rows, numerics, boundary policy | [`references/method/dispatch-table.md`](references/method/dispatch-table.md) | [`references/method/close.md`](references/method/close.md) |
 | runtime failure, deadlock, missing doc | [`references/method/triage.md`](references/method/triage.md) | — |
-| which GEAK role runs which stage, GPU lock / broker, optional record tools (toolctl) | [`references/method/orchestration.md`](references/method/orchestration.md) | `skill.md ## Roles in GEAK` |
+| which GEAK role runs which stage, shared GPU locks / leases, optional record tools (toolctl) | [`references/method/orchestration.md`](references/method/orchestration.md) | `skill.md ## Roles in GEAK` |
 
 ## By layer (`skill.md ## Mechanism`, Layer Backbone)
 
@@ -74,7 +74,7 @@ Onboarding is not here — read GEAK's language layer first if you have not writ
 | the gfx942 downgrade in one page | [`references/hardware/cdna3-gfx942.md`](references/hardware/cdna3-gfx942.md) |
 | what the hardware actually does (ISA mechanisms, primary sources) | [`isa-mechanisms.md`](references/hardware/isa-mechanisms.md), [`primary-sources.md`](references/hardware/primary-sources.md) |
 | SKU tables | `references/hardware/amd-*-skus.md` |
-| AMD lever cards (data) and the term index | `references/hardware/lever-cards.json` (via `scripts/lever_index.py`), [`term-index.md`](references/hardware/term-index.md) |
+| Historical lever notes and the term index | `references/hardware/lever-cards.json` (reference only; no decision routing), [`term-index.md`](references/hardware/term-index.md) |
 | GEAK's own hardware cards | [`perf_knowledge/hardware/`](../../../hardware/) (`cdna4_mi350/`, `cdna3_mi300/`, `shared/`) |
 
 ## Tools

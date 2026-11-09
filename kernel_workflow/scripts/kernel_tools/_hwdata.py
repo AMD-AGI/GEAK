@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import os
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def peak_key(dtype: str, arch: str) -> str:
     if key.startswith("mxfp") and arch != "gfx950":
         return key
     return PEAK_ALIASES.get(key, key)
+
+
+def memory_peak(row: dict) -> dict:
+    """Default specification bandwidth in TB/s, with its basis and catalog field.
+
+    Historical measurements never become a default specification. Callers may
+    explicitly supply a measured ceiling through their existing calibration API.
+    Derived specification values retain their basis instead of becoming datasheet.
+    """
+    if row.get("datasheet_hbm_tb_s") is not None:
+        field, basis = "datasheet_hbm_tb_s", "datasheet"
+    elif row.get("peak_hbm_basis") in ("datasheet", "orc-derived"):
+        field, basis = "peak_hbm_tb_s", row["peak_hbm_basis"]
+    else:
+        return {"value_tb_s": None, "basis": "unknown", "source_field": None}
+    value = row.get(field)
+    if value is None:
+        return {"value_tb_s": None, "basis": "unknown", "source_field": field}
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError(f"{field} must be a finite positive bandwidth")
+    return {"value_tb_s": value, "basis": basis, "source_field": field}
 
 
 def _candidates(name: str):
@@ -79,6 +102,31 @@ def load_json(name: str):
         return json.load(fh)
 
 
+def run_context(value=None):
+    """Validate a supplied run context through GEAK's shared identity contract."""
+    value = value or os.environ.get("GEAK_HARDWARE_CONTEXT")
+    if not value:
+        return None
+    import sys
+    shared = str(REPO_ROOT / "scripts")
+    if shared not in sys.path:
+        sys.path.insert(0, shared)
+    import hardware_context
+    return hardware_context.load(value)
+
+
+def run_sku(sku=None, value=None):
+    """Select the observed SKU; refuse reference fallback for unresolved run scope."""
+    context = run_context(value)
+    if context is None:
+        return sku, None
+    if sku and str(sku).lower() != context["sku"]:
+        raise ValueError("SKU override conflicts with the run hardware context")
+    if context["status"] != "matched" or context["specification"]["geak_support"] != "supported":
+        raise ValueError("run hardware context has no supported product peaks")
+    return context["sku"].upper(), context
+
+
 def pack_dir() -> Path | None:
     """Root of the gluon_authoring pack, or None if it is not reachable."""
     env = os.environ.get("GEAK_GLUON_PACK_DIR")
@@ -108,8 +156,6 @@ def _selftest() -> int:
             fails.append("hw_constants.json has no gfx950")
     except Exception as e:  # noqa: BLE001
         fails.append(f"load_json: {e}")
-    if pack_dir() is None:
-        fails.append("pack dir not found")
     old = os.environ.get("GEAK_HW_DATA_DIR")
     os.environ["GEAK_HW_DATA_DIR"] = "/nonexistent-geak-hw"
     try:

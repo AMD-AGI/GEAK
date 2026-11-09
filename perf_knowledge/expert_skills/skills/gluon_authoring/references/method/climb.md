@@ -362,32 +362,10 @@ way is a coin flip wearing a decimal point. Two instruments, two jobs ([`benchma
 
 ## 5. AMD-only levers: from a bubble to a tactic
 
-`../hardware/lever-cards.json` holds the levers that are **AMD-specific** — an ISA or microarchitectural
-fact that does not exist on NVIDIA or means something different there — plus any lever that is the named
-destination of a bucket the profiler actually reports. Generic GPU tactics are deliberately absent: you
-already know those.
-
-This pack ships the cards this tier can **express** (`expressible_in` includes `gluon`). A plain-only card
-is not missing — it is the front end's, and it is already disposed in the champion.
-
-**Index them by the bound YOUR profile named:**
-
-```bash
-python3 scripts/lever_index.py --bound <class> --arch gfx950 [--sub <sub>] [--occupancy-waves N]
-```
-
-Chip-absent levers are excluded (arch availability is measured fact), gating-law-forbidden ones are
-flagged, and the rest carry the `gate` to check against your own read. Experience, not verdict.
-`--list-bounds` prints the bound vocabulary. The gating laws themselves are
-`../hardware/bound-class-signals.md ## Lever gating laws (single source of truth)`.
-
-The rollup's bucket lines carry the cards registered against each bucket (`bubble_bucket`). That pointer
-and `lever_index.py` are the routed paths into the catalogue. Use it **both ways**: before inventing a
-lever, check the bucket; after inventing one, check it anyway — the catalogue records what has already
-been tried on AMD, which is the one thing the profile in front of you cannot tell you.
-
-A card that does not fit is a named N/A, not a spent round. **A ranked bucket with no card behind it is a
-catalogue gap — report it.**
+Use SKU/roofline, profile and ISA/IR evidence to formulate a hypothesis for this kernel.
+The agent chooses the change and checks its applicability; no bound-to-card lookup or fixed
+priority decides it. Apply the change and verify correctness, generated code and measured
+performance using the existing procedure. Historical lever notes are reference material only.
 
 ## Record what you decided
 
@@ -415,8 +393,7 @@ Merged from: `references/phases/layer-loop.md` (all sections); `references/metho
 `### Stage-Climb: one search kind, and it is depth`, `## 5. AMD-only levers: from a bubble to a tactic`;
 the compressed copies of the same sections in `tile-programming-gluon.md` (distinct facts unioned: the
 one-sided occupancy measurement in trap 1, the `num_warps >= 8` silent-absence gate on layer 1.5, the
-three-origin wording of trap 9); `tile-programming-gluon.md` "Standing references" paragraph on
-`lever_index.py`.
+three-origin wording of trap 9); `tile-programming-gluon.md` "Standing references" paragraph (its legacy decision-index routing is removed).
 
 Conflicts resolved (contract rules):
 - **Pipeline priority.** Layer-4 cell, trap 4 and the Stage-Climb layer-4 paragraph previously routed a

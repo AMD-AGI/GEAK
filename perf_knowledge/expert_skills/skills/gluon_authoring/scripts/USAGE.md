@@ -9,11 +9,10 @@ KT=kernel_workflow/scripts/kernel_tools                       # GEAK's shared ke
 
 Three owners, and the skill defers to the first two:
 
-- **GEAK infrastructure** — `kernel_workflow/scripts/gpu_lock.sh` (the only GPU lock; lock dir
+- **GEAK infrastructure** — `kernel_workflow/scripts/gpu_lock.sh` (shared GPU ownership; lock dir
   `/tmp/team_gpu_locks`, override `GEAK_GPU_LOCK_DIR`), `kernel_workflow/scripts/profile_kernel.sh` +
-  `profile_policy.sh` (the profiler entry), `e2e_workflow/scripts/harness_lib.py` (acceptance timing and
-  correctness), `scripts/gpu_identity.py` (`gfx`, `target`, `sku`).
-- **`$KT`** — tools with no GEAK counterpart that GEAK now shares across workflows. Their data is
+  `profile_policy.sh` (the profiler entry), the frozen task runner (acceptance; `harness_lib.py` for extracted tasks), `scripts/gpu_identity.py` (`gfx`, `target`, `sku`).
+- **`$KT`** — shared diagnostics and search helpers, including tools promoted from existing Gluon entry points. Their data is
   `perf_knowledge/hardware/data/` (resolved by `$KT/_hwdata.py`; override `GEAK_HW_DATA_DIR`).
 - **`$SKILL/scripts`** — Gluon-specific tools and the pack runtime. Every tool that moved to `$KT` keeps a
   **shim** here, so `$SKILL/scripts/<tool>` and `import <tool>` still work.
@@ -29,9 +28,9 @@ examples use `--arch gfx950`, the main line, with gfx942 as the downgrade.
 | budget | `$KT/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`, `extract_sku.py` | the prize, the floor, the bound-class prior |
 | transcribe | `$SKILL/scripts/ttgir_bridge.py`, `recover_gluon.py`, `ttgir_to_gluon.py`; `$KT/dump_ir.sh`, `probe.py`, `amd_occupancy.py` | a faithful, equivalence-checked anchor |
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` | who owes the gap; parity |
-| evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `tile_trace.py`, `serve_traces.py`, `asm_loop_audit.py`, `asm_schedule_viz.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
-| measure | `harness_lib.py` (GEAK, acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | is the difference real |
-| climb | `$SKILL/scripts/lever_index.py`, `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | which AMD lever applies to the named bound |
+| evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
+| measure | GEAK frozen task runner (acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | is the difference real |
+| climb | `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | compiled examples for the agent's chosen hypothesis |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `context_contracts.py`, `source_excerpt.py`, `profile_payload.py`, `debt.py`, `skill_index.py`, `wait_for.sh`, `locus.sh`, `runtime_env.sh` | the auditable record |
 | pack hygiene | `$SKILL/scripts/selftest_all.sh`, `smoke_test_recover.sh`, `check_pack_refs.py`, `check_term_index.py` | the toolchain and the references are sound offline |
 
@@ -270,35 +269,35 @@ the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowl
 
 | `$KT` tool | gives you |
 | --- | --- |
-| `capture.sh` | one command → the anchor's evidence bundle (kernel trace, PMC, ATT, static asm audit); runs under `gpu_lock.sh`, moves old outputs aside |
+| `capture.sh` | one command → supplementary kernel trace, optional decoded ATT, IR and static audit; runs under `gpu_lock.sh`, moves old outputs aside |
 | `rocprofv3_safe.sh --dev <gpu> --kernel <re> [--att] -- <cmd>` | rocprofv3 with a timeout, a mandatory kernel filter and the HIP/ROCR guard (touches `HIP_VISIBLE_DEVICES` only when ROCR is also set); `--no-timeout` for e2e serving, whose finalize is legitimately slow; exits 3 = degraded |
-| `rocprof_compute_probe.sh --dev <gpu> …` | rocprof-compute SOL (memory block, `warp_state`, coalescing) into `rc_metrics.json` via `parse_rc.py`. `--roof-only` on gfx95x needs rocprof-compute ≥ 3.6.0 |
+| `rocprof_compute_probe.sh --dev <gpu> …` | Optional external native runner by default; explicit `--diagnostic` collects a whole-process no-roof report, and `--workload DIR` analyzes existing data |
 | `parse_pmc.py` | PMC groups and their parse: busy counters (`VALUBusy`, `MfmaUtil` — not duty-cycle `VALUUtilization`), C1 achieved DRAM bandwidth by independent routes (as a range). gfx950 `FETCH_SIZE`/`TCC_BUBBLE` under-count reads — compare routes |
-| `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py` | rocprof-compute parse; per-kernel time/bound breakdown; hot-PC ranking from ATT |
-| `att_to_perfetto.py`, `att_merge_perfetto.py`, `att_timeline.py`, `att_opclass.py`, `tile_trace.py`, `serve_traces.py` | ATT warp-trace views and op-class rollups; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
+| `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py` | rocprof-compute parse; static and available PMC observations without tactic ranking; decoded hot-PC summaries |
+| `att_opclass.py` | Decoded ATT op-class statistics; decoder via `ROCPROF_ATT_LIBRARY_PATH` (not vendored) |
 | `asm_loop_audit.py [--opcodes] [--meta <ir_dir>] [--kernel <substr>]` | static hot-loop audit (A1, A3, B3): `next_free_vgpr`/AGPR/spill, LDS bytes/WG from the cache metadata (not `group_segment_fixed_size`, a structural 0), per-opcode histogram + diff |
-| `mfma_efficiency.py`, `deep_mfma_analysis.py`, `asm_schedule_viz.py` | B1/B2: ranked inter-MFMA bubble ownership, LDS-vs-global feed split, schedule views; routes buckets to lever cards |
+| `mfma_efficiency.py`, `deep_mfma_analysis.py` | B1/B2: observed inter-matrix issue intervals, LDS-vs-global instruction split for agent analysis |
 | `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | MFMA operand-layout facts (B4); the offline gfx950 ISA (other targets `--arch cdna3\|rdna3\|rdna4`); fetching primary sources |
 
 ## Measure
 
-**Acceptance is GEAK's** — `harness_lib`: CUDA-event device time with a sync per sample, a read-evict cache
-flush before every sample, the median, a fresh process per leg (`measure_legs`), against the same-window
-baseline and the `MIN_IMPROVE` commit gate.
+**Acceptance is GEAK's** — Verify executes the commands frozen in `COMMANDMENT.md`, preserving
+the task's oracle, workload metric and deployment requirements. Extracted tasks use
+`harness_lib`/`measure_legs`; other tasks retain their runner. Shared A/B is supplementary search.
+GEAK's configured `MIN_IMPROVE` controls promotion.
 
 | command | gives you |
 | --- | --- |
-| **`$KT/ab_bench.py --module <adapter>.py [--permute] [--control auto] [--cache cold\|hot] [--min-improve-pct 2] [--json F]`** | **screening — a pre-filter in the deep_engineer's loop before GEAK verify).** Same-window interleaved A/B on `harness_lib.time_op` — read-evict **cold by default** (`hot` is search-only), **median** headline with min as an extra field, oracle before timing. A screen pass needs a delta beyond the measured noise band **and** the 2% gate; a measured band can only make the verdict stricter. Refuses: a non-finite metric (`NaN > tol` is False — add an `outputs(name)` hook and it scans tensors itself); duplicate `fingerprint(name)` values (two variants differing only by a `gl.constexpr` share a cache entry); arms reporting different `toolchain(name)` identities (one process per patched variant). A flat set across 3+ arms is a **collision suspect**; `--permute` reverses the order and reports whether each number followed the code or the position |
-| `$KT/create_harness.py --kernel-name <k> --output <harness.py> [--kernel-type triton\|gluon]` | a harness on `harness_lib`: `h.time_op` timing, `h.check_correct_multi` correctness, one `GEAK_RESULT_LATENCY_MS=<ms> case_id=<id>` line per case (+ `GEAK_RESULT_GEOMEAN_MS`), rc 2 `HARNESS_UNFILLED` until filled |
+| **`$KT/ab_bench.py --module <adapter>.py [--permute] [--control auto] [--cache cold\|hot] [--min-improve-pct 2] [--json F]`** | **screening — a pre-filter in the deep_engineer's loop before GEAK verify).** Same-window interleaved A/B on `harness_lib.time_op` — read-evict **cold by default** (`hot` is search-only), **median** headline with min as an extra field, oracle before timing. A screen pass needs a delta beyond the measured noise band **and** the configured screening threshold (default 2%); a measured band can only make the verdict stricter. Refuses: a non-finite metric (`NaN > tol` is False — add an `outputs(name)` hook and it scans tensors itself); duplicate `fingerprint(name)` values (two variants differing only by a `gl.constexpr` share a cache entry); arms reporting different `toolchain(name)` identities (one process per patched variant). A flat set across 3+ arms is a **collision suspect**; `--permute` reverses the order and reports whether each number followed the code or the position |
+| `$KT/create_harness.py --kernel-path <kernel.py> --kernel-name <k> --output <harness.py> [--kernel-type triton\|gluon]` | a harness on `harness_lib`: `h.time_op` timing, `h.check_correct_multi` correctness, one `GEAK_RESULT_LATENCY_MS=<ms> case_id=<id>` line per case (+ `GEAK_RESULT_GEOMEAN_MS`), unfilled/empty skeleton: rc 3 `UT_HARNESS_INCOMPLETE`; existing output refused: rc 2 |
 | `$KT/parse_correctness.py [--parse geak --exit-code N] [--tol T]` | correctness verdicts from a log: GEAK unittest exit codes 0/1/2/3, `UT_HARNESS_INCOMPLETE`, per-case `max_rel_err` JSON; `--tol` can only make a pass stricter |
-| `gpu_lock.sh <gpu_id\|pool> <cmd>` | shim → `kernel_workflow/scripts/gpu_lock.sh` (one lock namespace for every tree; `--help`, `--selftest`). The broker in `../scheduler/` is opt-in: `GEAK_GPU_BROKER=1` and a live socket |
+| `gpu_lock.sh <gpu_id\|pool> <cmd>` | shim → `kernel_workflow/scripts/gpu_lock.sh` (one lock namespace for every tree; `--help`, `--selftest`). Uses GEAK's existing single-GPU locks and multi-GPU leases |
 | `locus.sh`, `runtime_env.sh` | only when the comparator was measured in a container: record/verify the execution locus (host vs container) the comparator was measured at; per-run runtime dirs under `$WORK/.tile-runtime/` |
 
 ## Climb
 
 | command | gives you |
 | --- | --- |
-| `lever_index.py --bound <class> --arch gfx950` | the AMD lever cards (`references/hardware/lever-cards.json`) expressible in Gluon for the bound your profile named — chip-absent levers excluded, gating-law-forbidden flagged. Experience, not verdict; a ranked bucket with no card is a catalogue gap |
 | `pipeline_examples_cdna4.py` | **the gfx950 reference** for authored overlap: sync-staging control plus the async forms (and a warp-pipeline case), numerics-checked; each case reports per-lane access width, whether it compiled, `ds_write` count and a numeric verdict, so an unsupported width separates from a layout that does not cover the tile. Needs a GPU |
 | `pipeline_examples_cdna3.py` | **the gfx942 downgrade** set: sync staging and the `warp_pipeline_stage` hint (async only at 32 bits with `order=[1, 0]`). Needs a GPU; does not run on Triton 3.6.0 |
 
@@ -313,7 +312,7 @@ Schemas: `../runtime/*.schema.json`. Method: `references/method/close.md`, `refe
 ## Selftests — offline, no GPU
 
 ```bash
-bash "$SKILL/scripts/selftest_all.sh"          # everything: pack scripts, $KT tools, core runtime, scheduler, refs
+bash "$SKILL/scripts/selftest_all.sh"          # everything: pack scripts, $KT tools, core runtime, refs
 bash "$SKILL/scripts/smoke_test_recover.sh"    # the port toolchain only
 python3 "$SKILL/scripts/check_pack_refs.py"    # every link / heading / runtime reference resolves
 ```
@@ -389,8 +388,19 @@ Two things are not portable — plus one failure below that reads like a version
 
 See [`../references/method/geak-integration.md`](../references/method/geak-integration.md) for
 Triton/Gluon default discovery, Claude Code role routing and script boundaries.
-`$KT/roofline.sh --help` describes the native TraceLens adapter. The default `tl-only` engine reads
+`$KT/roofline.sh --help` describes an adapter to the optional external native TraceLens runner.
+That runner is not shipped here: set `GEAK_KERNEL_ROOFLINE_DIR` after installing it, or the adapter
+returns unavailable (exit 3). GEAK's existing e2e roofline and TraceLens-prior paths remain separate. The default `tl-only` engine reads
 existing measurement artifacts offline; `measure` and `rocprof` use the GEAK lease/source guard.
 `capture.sh` supplies supplementary ATT/ISA/trace artifacts and does not automatically collect full
 rocprof-compute counters. `rocprof_compute_probe.sh` delegates new collection to the native runner;
 its `--diagnostic` option explicitly requests a separate whole-process no-roof report.
+
+## Shared analysis and screening contracts
+
+- The [shared tools guide](../../../../../kernel_workflow/scripts/kernel_tools/README.md) documents
+  A/B schema v2, correctness rc/sentinel handling, kernel selection and optional dependencies.
+- `ab_bench.py` uses GEAK timing and median screening. Invalid or unverified windows cannot
+  report a screen pass; acceptance requires GEAK verify executing the frozen task commands.
+- `mfma_efficiency.py` reads existing decoded wave/code artifacts. Inter-issue intervals are
+  evidence to interpret; they do not establish stall causality or select optimization tactics.

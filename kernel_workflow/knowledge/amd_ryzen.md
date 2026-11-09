@@ -16,10 +16,17 @@ rocminfo | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'
 
 | Part | Arch | CU | Memory | Peak BW | fp8 matrix |
 |---|---|---|---|---|---|
-| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | 0.212 TB/s measured (0.256 datasheet) | none |
+| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | 0.256 TB/s theoretical | none |
 
 Memory is a BIOS-configured slice of system LPDDR5X shared with the CPU, not a fixed VRAM pool. The
 cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of DRAM. Single die.
+
+Measured bandwidth depends on the experiment. The shared
+[`sku.json`](../../perf_knowledge/hardware/data/sku.json) retains a historical 212 GB/s report
+for `AI_MAX_395`; its tool version was not recorded and its source is no longer available.
+The [2026-11-06 Radeon 8060S campaign](../../perf_knowledge/hardware/rdna35_gfx1151/peak_tables.md)
+measured 230.5–233.3 GB/s reads under the documented conditions. Re-measure on the target box
+before using either as an attainable ceiling; neither is an architecture-wide calibration.
 
 ## 1. Machine model
 
@@ -31,7 +38,7 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
 | Register file | 1536 VGPR/SIMD, 256 addressable per wave |
 | VGPR granule / waves | granule 24, up to 16 waves/SIMD |
 | SIMDs | 2 per CU; CUs pair into a WGP |
-| LDS | 128 KB per WGP, 64 KB max per workgroup |
+| LDS | 64 KiB max per workgroup; occupancy-pool scope unverified |
 | Memory | LPDDR5X, shared with the CPU |
 
 ## 2. Applying these numbers
@@ -54,8 +61,8 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   was idle.
 - **Backend availability is a probe result, not an arch inference.** aiter, CK and hipBLASLt all
   build for gfx11. Probe the install rather than inferring availability from the arch.
-- **No LDS-per-CU number is defined** — shared memory is 128 KB per WGP with a 64 KB per-workgroup
-  cap, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. `perf_knowledge/hardware/data/hw_constants.json` records only
+- **No LDS-per-CU number is defined** — the per-workgroup cap is 64 KiB, but the
+  occupancy-pool scope is not established here, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. `perf_knowledge/hardware/data/hw_constants.json` records only
   `lds_per_wg_kib` for gfx1151; `lds_per_wgp_kib` is deliberately absent (its `_lds_basis` explains
   why the per-WGP scope is not established for RDNA3.5), so LDS occupancy is reported as not priced
   rather than derived. Do not fill it in from gfx1100 / gfx1200.
@@ -64,6 +71,11 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   unit, at a fraction of the bf16 rate. A measurement taken that way describes the emulation.
 - **Roofline denominators** are in
   `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md` (`gfx1151` section).
+- **Measured long form.** `$SKILL_DIR/../perf_knowledge/hardware/rdna35_gfx1151/` (start at
+  `arch.md`) holds what was measured on a Radeon 8060S — achievable bandwidth, compute peaks by
+  shape, clock and power under load, operand-path levers, profiler defects — and the scripts that
+  re-take each number. Read it when a number here needs its achievable value or its measurement
+  conditions.
 - **Memory-utilization readings include the Infinity Cache.** The 32 MiB tier serves the working set
   before DRAM is reached, so a low DRAM-side reading can reflect cache residency. Compare against the
   working-set size before attributing it to bandwidth.

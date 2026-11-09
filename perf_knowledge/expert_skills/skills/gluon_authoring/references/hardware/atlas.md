@@ -36,7 +36,7 @@ rendered from it (`kernel_workflow/scripts/kernel_tools/extract_sku.py --sync-do
 | MI325X | gfx942 | 304 | peak 2100 | 6 | 32 / 256 | 1307.4 | 2614.9 | — | — | 2614.9 | — | 653.7 | 163.4 | 163.4 (vec 81.7) | datasheet | yes |
 | MI308X | gfx942 | 80 | — | 5.3 orc-derived | 16 / — | 344 | 688 | — | — | — | — | — | 43 | — | orc-derived | yes |
 | R9700 | gfx1201 | 64 | game 2350 / boost 2920 | 0.64 | 8 / 64 | 191 | 383 | — | — | 383 | 766 | — | 47.8 | — | datasheet | yes |
-| AI_MAX_395 | gfx1151 | 40 | boost 2900 | 0.212 measured (0.256 datasheet) | 2 / 32 | 59.4 | — | — | — | 59.4 | 118.8 | — | 29.7 | — | derived | yes |
+| AI_MAX_395 | gfx1151 | 40 | boost 2900 | 0.256 (0.212 historical measured) | 2 / 32 | 59.4 | — | — | — | 59.4 | 118.8 | — | 29.7 | — | derived | yes |
 | AI_MAX_495 | gfx1151 | 40 | boost 3000 | 0.273 | 2 / 32 | 61.4 | — | — | — | 61.4 | 122.9 | — | 30.7 | — | derived | yes |
 | RX9070XT | gfx1201 | 64 | game 2400 / boost 2970 | 0.64 | 8 / 64 | 195 | 389 | — | — | 389 | 779 | — | 48.7 | — | datasheet | reference only |
 | RX9070 | gfx1201 | 56 | game 2070 / boost 2520 | 0.64 | 8 / 64 | 145 | 289 | — | — | 289 | 578 | — | 36.1 | — | datasheet | reference only |

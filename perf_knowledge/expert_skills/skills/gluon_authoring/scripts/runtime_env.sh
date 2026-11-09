@@ -140,7 +140,6 @@ env = {
     "TILE_KERNEL_CONTAINER_WORKDIR": container_root,
     "HOME": container["home"],
     "XDG_CACHE_HOME": container["xdg_cache"],
-    "MPLCONFIGDIR": os.path.join(container["home"], "matplotlib"),
     "TMPDIR": container["tmp"],
     "TMP": container["tmp"],
     "TEMP": container["tmp"],

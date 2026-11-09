@@ -123,21 +123,11 @@ def _sole_arch(kernels) -> str | None:
 
 WAVE = 64
 MAX_WAVES_PER_SIMD = 8
-SIMDS_PER_CU = 4           # CDNA and RDNA alike; needed to convert wg/CU -> waves/SIMD
 
 
-def arch_model(arch: str | None) -> dict:
-    """Register-file geometry for `arch`, falling back to the CDNA constants above (with the
-    fallback named in `label`) when the arch is unknown or the shared model is unreachable."""
-    m = _OCC.model_for(arch) if (_OCC and arch) else None
-    if m:
-        return m
-    return {"wave_size": WAVE, "vgpr_file_per_simd": VGPR_PER_SIMD,
-            "vgpr_per_wave": VGPR_PER_SIMD,   # they coincide on CDNA; see amd_occupancy.MODELS
-            "vgpr_alloc_granule": VGPR_GRANULE, "max_waves_per_simd": MAX_WAVES_PER_SIMD,
-            "family": "cdna",
-            "label": f"CDNA wave64 fallback (512/SIMD, granule 8, cap 8) -- no model for "
-                     f"{arch!r}; pass --arch"}
+def arch_model(arch: str | None) -> dict | None:
+    """Use the shared architecture model; unsupported targets have no numeric fallback."""
+    return _OCC.model_for(arch) if (_OCC and arch) else None
 
 
 def vgpr_budget_at(model: dict, target_waves: int) -> int:
@@ -150,26 +140,13 @@ def vgpr_budget_at(model: dict, target_waves: int) -> int:
     return min(budget, cap) if cap else budget
 
 
-def waves_by_vgpr(total_vgpr: int, arch: str | None = None) -> int:
-    m = arch_model(arch)
-    if not total_vgpr:
-        return m["max_waves_per_simd"]
-    gran = m["vgpr_alloc_granule"]
-    alloc = ((total_vgpr + gran - 1) // gran) * gran
-    return min(m["max_waves_per_simd"], m["vgpr_file_per_simd"] // alloc)
+def waves_by_vgpr(total_vgpr: int, arch: str | None = None) -> int | None:
+    if _OCC is None:
+        return None
+    return _OCC.waves_by_vgpr(total_vgpr, arch)[0]
 
 
 # --------------------------------------------------------------------------- measure
-_RE = {
-    "vgpr": re.compile(r"^\s*\.vgpr_count:\s*(\d+)", re.M),
-    "agpr": re.compile(r"^\s*\.agpr_count:\s*(\d+)", re.M),
-    "spill": re.compile(r"^\s*\.private_segment_fixed_size:\s*(\d+)", re.M),
-    "kd_vgpr": re.compile(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)", re.M),
-    "kd_spill": re.compile(r"^\s*\.amdhsa_private_segment_fixed_size\s+(\d+)", re.M),
-    # Needed ONLY to convert the LDS limiter's wg/CU into waves/SIMD. Without it the two
-    # quantities cannot be compared and we must not pretend otherwise -- see _waves_by_lds.
-    "wg_size": re.compile(r"^\s*\.max_flat_workgroup_size:\s*(\d+)", re.M),
-}
 
 
 def _waves_by_lds(lds_bytes: int, wg_size: int | None, arch: str | None,
@@ -178,31 +155,15 @@ def _waves_by_lds(lds_bytes: int, wg_size: int | None, arch: str | None,
 
     LDS is allocated per WORKGROUP and capped per CU, so it bounds wg/CU -- NOT waves/SIMD.
     Converting needs the workgroup's wave count, which is only knowable from
-    `.max_flat_workgroup_size`. When the dump does not carry it we return None and say so,
+    actual launch metadata (num_warps and the supported wave size). When it is absent we return None,
     because reporting a wg/CU figure in a waves/SIMD field is the exact unit error this pack
     warns about; a missing number is recoverable, a wrong one in the right-looking slot is not.
     """
-    if not lds_bytes:
-        return None, "no LDS metadata"
-    if not wg_size:
-        return None, "no .max_flat_workgroup_size in the dump -- cannot convert wg/CU to waves/SIMD"
-    # An explicitly supplied figure wins: the caller read it off the part, we only inferred it.
-    cap = cap_override or lds_per_cu(arch)
-    if not cap:
-        # LDS/CU is 64 KiB on gfx94* and 160 KiB on gfx95*, so guessing it wrong moves the
-        # limiter by 2.5x. Refuse rather than guess -- and name the fix.
-        if not arch:
-            return None, ("target not named in the dump -- LDS/CU is 64 vs 160 KiB across "
-                          "CDNA3/4; re-dump with the target named, or pass --lds-per-cu <bytes>")
-        return None, (f"no LDS/CU figure for {arch} in the shared occupancy model -- "
-                      f"pass --lds-per-cu <bytes>")
-    m = arch_model(arch)
-    wave = m.get("wave_size") or WAVE
-    waves_per_wg = max(1, -(-wg_size // wave))
-    wgs_by_lds = cap // lds_bytes
-    if wgs_by_lds < 1:
-        return 0, "LDS/WG exceeds the whole CU budget"
-    return (wgs_by_lds * waves_per_wg) // SIMDS_PER_CU, "ok"
+    if lds_bytes and not wg_size:
+        return None, "no actual workgroup size -- compiler max-flat is only an upper bound"
+    if _OCC is None:
+        return None, "shared occupancy model unavailable"
+    return _OCC.waves_by_lds(lds_bytes, arch, wg_size, capacity=cap_override)
 
 
 def _match_lds(name: str, lds: dict[str, int]) -> int | None:
@@ -222,54 +183,22 @@ def _match_lds(name: str, lds: dict[str, int]) -> int | None:
 
 
 def _from_asm(path: str, lds_bytes: int | None = None,
-              cap_override: int | None = None, arch_hint: str | None = None) -> dict | None:
+              cap_override: int | None = None, arch_hint: str | None = None,
+              workgroup_size: int | None = None, num_warps: int | None = None,
+              kernel_name: str | None = None) -> dict | None:
     try:
-        txt = open(path, errors="ignore").read()
+        with open(path, errors="ignore") as stream:
+            txt = stream.read()
     except OSError:
         return None
-    g = {k: (int(m.group(1)) if (m := rx.search(txt)) else None) for k, rx in _RE.items()}
-    total = g["vgpr"] if g["vgpr"] is not None else g["kd_vgpr"]
-    if total is None:
+    from amd_resources import analyze
+    r = analyze(txt, arch=arch_hint, lds_bytes=lds_bytes, workgroup_size=workgroup_size,
+                num_warps=num_warps, lds_per_cu=cap_override)
+    if r['vgpr_combined'] is None:
         return None
-    # .vgpr_count is the ARCH count and .agpr_count is separate; .amdhsa_next_free_vgpr is
-    # already the combined budget. Normalize to "combined" either way.
-    combined = total + (g["agpr"] or 0) if g["vgpr"] is not None else total
-    spill = g["spill"] if g["spill"] is not None else g["kd_spill"]
-    # The artifact names its own target, so `measure` never has to be told the arch. When LLVM
-    # left its `; Occupancy:` in the dump it beats any model here FOR THE REGISTER TERM -- the
-    # backend computes it against the LDS it can see at compile time, which on a launch-sized
-    # group segment is zero. So the register term is NOT the kernel's occupancy, and
-    # `waves_per_simd` below is min(register term, LDS term) whenever the LDS term is derivable.
-    # min() is right under BOTH hypotheses, which is why the open question "does the emitter fold
-    # in statically-allocated LDS" does not have to be answered first: if it already folded LDS
-    # in, its number is already <= the LDS term and the min is a no-op; if it did not, the min
-    # corrects it. When the LDS term is NOT derivable we return the register term and say so in
-    # `waves_warning` rather than silently shipping a figure that can be 3x high.
-    # The dump's own target wins; `--arch` (arch_hint) only fills a dump that names none. With
-    # neither there is NO default: the register model differs 2-3x between CDNA and RDNA, so
-    # the register term is withheld instead of computed on a CDNA guess.
-    arch = (_OCC.arch_from_asm(txt) if _OCC else None) or arch_hint
-    llvm_occ = _OCC.llvm_occupancy(txt) if _OCC else None
-    if llvm_occ is not None:
-        reg_term, src = llvm_occ, "llvm-comment"
-    elif arch:
-        reg_term, src = waves_by_vgpr(combined, arch), "model"
-    else:
-        reg_term, src = None, "unknown"
-    lds_waves, why = _waves_by_lds(lds_bytes or 0, g["wg_size"], arch, cap_override)
-    if reg_term is None:
-        waves, warn = None, ("target not named in the dump and no --arch: register term WITHHELD "
-                             "(no default arch) -- pass --arch gfx950 (or the dump's real target)")
-    elif lds_waves is None:
-        waves, warn = reg_term, f"register term only ({why})"
-    else:
-        waves, src, warn = min(reg_term, lds_waves), src + "+lds", None
-    return {"name": os.path.basename(path), "vgpr_arch": g["vgpr"], "agpr": g["agpr"],
-            "vgpr_combined": combined, "spill_bytes": spill, "arch": arch,
-            "waves_per_simd": waves,
-            "waves_by_vgpr_term": reg_term, "waves_by_lds_term": lds_waves,
-            "lds_bytes_per_wg": lds_bytes, "wg_size": g["wg_size"],
-            "waves_source": src, "waves_warning": warn}
+    r['name'] = os.path.basename(path)
+    r['kernel_name'] = kernel_name or r['kernel_name']
+    return r
 
 
 def _lds_from_meta(d: str) -> dict[str, int]:
@@ -279,15 +208,17 @@ def _lds_from_meta(d: str) -> dict[str, int]:
     out = {}
     for root, _dirs, files in os.walk(d):
         for f in files:
-            if not f.endswith(".json") or f.startswith("__grp__") or f.startswith("meta___grp__"):
+            if not f.endswith(".json") or f.startswith(("__grp__", "meta___grp__")):
                 continue
             try:
-                j = json.load(open(os.path.join(root, f)))
+                with open(os.path.join(root, f)) as stream:
+                    j = json.load(stream)
             except (OSError, ValueError):
                 continue
             if isinstance(j, dict) and isinstance(j.get("shared"), int):
-                out[str(j.get("name") or f)[:44]] = j["shared"]
-    return out
+                key = str(j.get("name") or os.path.splitext(f)[0])
+                out[key] = None if key in out else j["shared"]
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def _num_warps_from_meta(d: str) -> dict[str, int | None]:
@@ -296,7 +227,7 @@ def _num_warps_from_meta(d: str) -> dict[str, int | None]:
     out = {}
     for root, _dirs, files in os.walk(d):
         for f in files:
-            if not f.endswith(".json") or f.startswith("__grp__") or f.startswith("meta___grp__"):
+            if not f.endswith(".json") or f.startswith(("__grp__", "meta___grp__")):
                 continue
             try:
                 with open(os.path.join(root, f)) as fh:
@@ -305,17 +236,18 @@ def _num_warps_from_meta(d: str) -> dict[str, int | None]:
                 continue
             if isinstance(j, dict) and isinstance(j.get("shared"), int):
                 nw = j.get("num_warps")
-                out[str(j.get("name") or f)[:44]] = nw if isinstance(nw, int) else None
+                key = str(j.get("name") or os.path.splitext(f)[0])
+                out[key] = None if key in out else (nw if type(nw) is int and nw > 0 else None)
     return out
 
 
-def _simds_per_cu(arch: str | None) -> int:
-    """SIMDs/CU from the shared per-arch reference when it states one, else SIMDS_PER_CU."""
+def _simds_per_cu(arch: str | None) -> int | None:
+    """SIMDs/CU from the shared per-arch reference, or unknown."""
     if arch and _OCC is not None and hasattr(_OCC, "simds_per_cu"):
         v = _OCC.simds_per_cu(arch)
         if v:
             return int(v)
-    return SIMDS_PER_CU
+    return None
 
 
 def _waves_for(meta_name: str, kernels: list[dict]):
@@ -333,15 +265,15 @@ def _waves_for(meta_name: str, kernels: list[dict]):
     silently withheld exactly the half it exists to make un-missable.
 
     Asm names carry a file extension and may carry a dump suffix, and the metadata name is
-    truncated to 44 chars, so match the stem exactly first, then by prefix in either direction.
+    kept at full length. Match the stem exactly first, then by a unique prefix.
     Ambiguity returns None: a guess here is a wrong limiter.
     """
     stems = {}
     for k in kernels:
-        stem = re.sub(r"\.(amdgcn|s)$", "", k["name"])
+        stem = k.get("kernel_name") or re.sub(r"\.(amdgcn|s)$", "", k["name"])
         stem = re.sub(r"_final_isa$", "", stem)
         w = k.get("waves_by_vgpr_term", k.get("waves_per_simd"))
-        if w:
+        if w is not None:
             stems[stem] = w
     if meta_name in stems:
         return stems[meta_name]
@@ -376,7 +308,7 @@ def _limiter_row(name, shared_b, num_warps, waves, cap, simds, cap_src=None):
     else:
         lds_unknown = not cap
         by_lds = None if lds_unknown else cap // shared_b
-    by_reg = (waves * simds) // num_warps if (waves and num_warps) else None
+    by_reg = (waves * simds) // num_warps if (waves is not None and num_warps and simds) else None
     if lds_unknown:
         cell = " = WITHHELD"
     elif by_lds is None:
@@ -399,18 +331,26 @@ def _limiter_row(name, shared_b, num_warps, waves, cap, simds, cap_src=None):
 
 
 def cmd_measure(a):
+    from amd_artifacts import inspect_artifact
     asms = []
     for root, _dirs, files in os.walk(a.dir):
         asms += [os.path.join(root, f) for f in files
-                 if f.endswith((".amdgcn", ".s")) or f.endswith("_final_isa.s")]
-    # LDS first: the occupancy a kernel row reports is min(register term, LDS term), so the
-    # limiter has to be in hand BEFORE the rows are built, not printed in a separate block
-    # underneath them. Keeping the two halves apart is what let the register term be read as
-    # the occupancy for as long as it was.
-    lds = _lds_from_meta(a.dir)
-    kernels = [r for r in (_from_asm(p, _match_lds(os.path.basename(p), lds), a.lds_per_cu,
-                                     a.arch)
-                           for p in sorted(asms)) if r]
+                 if f.endswith((".amdgcn", ".s"))]
+    # Bind launch data by the artifact's manifest or same-stem cache sidecar.
+    # A global name match cannot distinguish two compilations of the same kernel.
+    kernels = []
+    for path in sorted(asms):
+        name, metadata, _bound = inspect_artifact(path)
+        shared = metadata.get('shared') if metadata else None
+        warps = metadata.get('num_warps') if metadata else None
+        shared = shared if type(shared) is int and shared >= 0 else None
+        warps = warps if type(warps) is int and warps > 0 else None
+        r = _from_asm(path, shared, a.lds_per_cu, a.arch,
+                      num_warps=warps, kernel_name=name)
+        if r:
+            r['sources']['kernel_identity'] = 'assembly' if name else 'unavailable'
+            r['artifact_path'] = os.path.relpath(path, a.dir)
+            kernels.append(r)
 
     print(f"=== probe measure: {a.dir} ===")
     if not kernels:
@@ -433,37 +373,30 @@ def cmd_measure(a):
                   f"LDS allows {k['waves_by_lds_term']} (lds/WG={k['lds_bytes_per_wg']} B, "
                   f"wg={k['wg_size']}) -- spending registers here buys nothing.")
     print()
-    if lds:
-        # Per-arch divisor or none at all. Labelling a guessed divisor does not make it safe --
-        # it makes it quotable. With no target named, print the bytes (a measured fact) and
-        # WITHHOLD the WGs/CU verdict (a derived one), naming the flag that would supply it.
-        #
-        # The arch is taken from the dumps only when EVERY dump names the SAME one. Picking the
-        # first kernel that happens to name a target and dividing every other kernel's LDS by it
-        # is the same borrowing error `_match_lds` refuses: one dump's fact is not another's, and
-        # a dir holding both a gfx94* and a gfx95* dump has no single divisor at all.
-        _archs = {k["arch"] for k in kernels}
-        _arch = _sole_arch(kernels)
-        _cap = a.lds_per_cu or lds_per_cu(_arch)
-        _src = "--lds-per-cu" if a.lds_per_cu else _arch
-        # Both limiters per row, in WGs/CU, joined to the kernel BY NAME (see `_limiter_row`):
-        # the LDS figure alone advertises headroom a register-bound kernel does not have.
-        _nw = _num_warps_from_meta(a.dir)
-        _simds = _simds_per_cu(_arch)
-        for n, b in sorted(lds.items(), key=lambda kv: -kv[1]):
-            print(_limiter_row(n, b, _nw.get(n), _waves_for(n, kernels), _cap, _simds, _src))
-        if not _cap:
-            _why = ("the dumps here do not all name the same target"
-                    if len(_archs) > 1 else
-                    f"no LDS/CU divisor for {_arch or 'an unnamed target'}")
-            print(f"  ^ {_why}: LDS/CU is 64 KiB on gfx94* and 160 KiB on gfx95*, a 2.5x "
-                  f"spread. Re-dump with the target named, or pass --lds-per-cu <bytes>, rather "
-                  f"than reading a WGs/CU number off a guess.")
-    else:
-        print("  lds/WG UNAVAILABLE -- no Triton cache metadata under this dir. Do NOT read LDS "
-              "from the KD or rocprof-compute: both are structurally 0 for Triton kernels.")
+    lds = {}
+    for k in kernels:
+        shared = k['lds_bytes_per_wg']
+        if shared is None:
+            continue
+        name = k['kernel_name']
+        if name:
+            lds[name] = shared if name not in lds or lds[name] == shared else None
+        arch = k['arch']
+        wave = k['wave_size']
+        warps = k['wg_size'] // wave if k['wg_size'] and wave else None
+        model = arch_model(arch)
+        # Even a compiler occupancy comment cannot establish unsupported wave geometry.
+        simds = _simds_per_cu(arch) if model and wave == model['wave_size'] else None
+        cap = a.lds_per_cu or lds_per_cu(arch)
+        print(_limiter_row(k['artifact_path'], shared, warps, k['waves_by_vgpr_term'],
+                           cap, simds, '--lds-per-cu' if a.lds_per_cu else arch))
+    lds = {name: shared for name, shared in lds.items() if shared is not None}
+    if not any(k['lds_bytes_per_wg'] is not None for k in kernels):
+        print("  lds/WG UNAVAILABLE -- no verified launch metadata or nonzero static LDS. "
+              "A zero descriptor does not establish Triton's dynamic LDS allocation.")
     if a.json:
-        json.dump({"kernels": kernels, "lds_bytes_per_wg": lds}, open(a.json, "w"), indent=2)
+        with open(a.json, "w") as stream:
+            json.dump({"kernels": kernels, "lds_bytes_per_wg": lds}, stream, indent=2)
         print(f"\nwrote {a.json}")
     return 0
 
@@ -495,7 +428,10 @@ def plan_vgpr(tiles, warps: int, acc_bits: int = 32, operand_bits: int = 16,
     """Resident VGPR/lane of a tile plan, before temporaries/addressing/staging (a LOWER bound).
     `tiles` = {"acc": [(name,m,n),...], "operand": [(name,m,n),...]}. Returns
     {total, waves_by_resident, rows:[(name,kind,m,n,vgpr)]}. Importable; `cmd_plan` renders it."""
-    wave = arch_model(arch)["wave_size"]
+    model = arch_model(arch)
+    if model is None:
+        raise ValueError(f"unsupported --arch {arch!r}; no register model")
+    wave = model["wave_size"]
     rows = []
     for name, m, n in tiles.get("acc", []):
         rows.append((name, "acc", m, n, tensor_vgpr(m, n, warps, acc_bits, wave)))
@@ -507,6 +443,10 @@ def plan_vgpr(tiles, warps: int, acc_bits: int = 32, operand_bits: int = 16,
 
 def cmd_plan(a):
     model = arch_model(a.arch)
+    if model is None:
+        raise ValueError(f"unsupported --arch {a.arch!r}; no register model")
+    if min(a.warps, a.acc_bits, a.dtype_bits, a.target_waves) <= 0:
+        raise ValueError("warps, precisions and target-waves must be positive")
     wave = model["wave_size"]
     file_size = model["vgpr_file_per_simd"]
     lanes = a.warps * wave
@@ -559,10 +499,10 @@ def cmd_plan(a):
 
 
 def _selftest():
-    assert waves_by_vgpr(256) == 2 and waves_by_vgpr(257) == 1, "512-file boundary"
-    assert waves_by_vgpr(128) == 4 and waves_by_vgpr(0) == 8
+    assert waves_by_vgpr(256, "gfx950") == 2 and waves_by_vgpr(257, "gfx950") == 1, "512-file boundary"
+    assert waves_by_vgpr(128, "gfx950") == 4 and waves_by_vgpr(0, "gfx950") == 8
     # granularity: 130 rounds to 136 -> 512//136 = 3
-    assert waves_by_vgpr(130) == 3, waves_by_vgpr(130)
+    assert waves_by_vgpr(130, "gfx950") == 3, waves_by_vgpr(130, "gfx950")
     # RDNA is a different file, granule and cap -- the CDNA answer is wrong there by 2-3x
     if _OCC:
         assert waves_by_vgpr(130, "gfx1201") == 10, waves_by_vgpr(130, "gfx1201")
@@ -574,18 +514,18 @@ def _selftest():
         assert vgpr_budget_at(arch_model("gfx942"), 2) == 256       # CDNA: the two agree
         # wave32 halves the lanes, so the same tile costs 2x the VGPR/lane
         assert tensor_vgpr(128, 128, 4, 32, 32) == 2 * tensor_vgpr(128, 128, 4, 32, 64)
-    # an unknown arch falls back to CDNA but SAYS SO in the label it prints
-    assert "no model for" in arch_model("gfx1399")["label"]
+    # Unknown targets do not acquire the CDNA model.
+    assert arch_model("gfx1399") is None
     # the CDNA rule that matters: arch and accum are ONE budget, not two
     r = _from_asm.__doc__  # noqa: F841  (documented behaviour exercised below via a temp file)
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".s", delete=False) as f:
-        f.write("  .vgpr_count: 128\n  .agpr_count: 384\n  .private_segment_fixed_size: 456\n")
+        f.write("  .vgpr_count: 512\n  .agpr_count: 384\n  .private_segment_fixed_size: 456\n")
         p = f.name
     # no target in the dump and no --arch: the register term is WITHHELD, never a CDNA guess
     unnamed_k = _from_asm(p)
     assert unnamed_k["waves_per_simd"] is None and unnamed_k["waves_by_vgpr_term"] is None, unnamed_k
-    assert "--arch" in unnamed_k["waves_warning"], unnamed_k
+    assert "WITHHELD" in unnamed_k["waves_warning"], unnamed_k
     got = _from_asm(p, arch_hint="gfx942")
     os.unlink(p)
     assert got["arch"] == "gfx942", got
@@ -601,7 +541,7 @@ def _selftest():
         f.write("  .amdgcn_target: \"amdgcn-amd-amdhsa--gfx942\"\n"
                 "  .vgpr_count: 64\n  .agpr_count: 0\n  .max_flat_workgroup_size: 256\n")
         p2 = f.name
-    lds_bound = _from_asm(p2, 32 * 1024)
+    lds_bound = _from_asm(p2, 32 * 1024, workgroup_size=256)
     assert lds_bound["waves_by_vgpr_term"] == 8, lds_bound
     assert lds_bound["waves_by_lds_term"] == 2, lds_bound
     assert lds_bound["waves_per_simd"] == 2, lds_bound
@@ -645,17 +585,17 @@ def _selftest():
             f"{lds_per_cu('gfx942')} -- a numeric fallback here is a guess wearing a fact's hat")
         assert lds_per_cu("gfx950") is None
         _no_model = _waves_by_lds(32 * 1024, 256, "gfx942")
-        assert _no_model[0] is None and "--lds-per-cu" in _no_model[1], _no_model
+        assert _no_model[0] is None and "unavailable" in _no_model[1], _no_model
     finally:
         globals()["_OCC"] = _saved_occ
     assert _OCC is _saved_occ
 
     # refusals: no target named -> None, and the message names the flag that fixes it
     unnamed = _waves_by_lds(32 * 1024, 256, None)
-    assert unnamed[0] is None and "--lds-per-cu" in unnamed[1], unnamed
-    # and the remedy has to actually work, or it is a consolation rather than a fix
-    assert _waves_by_lds(32 * 1024, 256, None, 163840)[0] == 5
-    assert _waves_by_lds(32 * 1024, 256, None, 65536)[0] == 2
+    assert unnamed[0] is None and "unknown arch" in unnamed[1], unnamed
+    # A capacity override cannot supply missing architecture geometry.
+    assert _waves_by_lds(32 * 1024, 256, None, 163840)[0] is None
+    assert _waves_by_lds(32 * 1024, 256, None, 65536)[0] is None
     # ...including when the dump DOES name a target and the caller disagrees with the table.
     # That is the only case where the flag changes anything a user would care about, and while
     # it went untested the override could lose to the table without any check noticing: gfx942
@@ -673,7 +613,7 @@ def _selftest():
     # the override must not silently apply when it was not given: None, not a fallback number
     assert _waves_by_lds(32 * 1024, 256, None, None)[0] is None
     # LDS/WG larger than any plausible CU budget is 0 waves, not a negative or a crash
-    assert _waves_by_lds(1 << 20, 256, None, 163840)[0] == 0
+    assert _waves_by_lds(1 << 20, 256, "gfx950", 163840)[0] == 0
     # a non-unique name match must NOT borrow another kernel's LDS
     assert _match_lds("k.s", {"ak": 1, "kb": 2}) is None
     assert _match_lds("gemm_kernel.s", {"gemm_kernel": 4096}) == 4096
@@ -751,9 +691,15 @@ def main():
     if a.selftest:
         return _selftest()
     if a.cmd == "measure":
-        return cmd_measure(a)
+        try:
+            return cmd_measure(a)
+        except (ValueError, OSError) as e:
+            ap.error(str(e))
     if a.cmd == "plan":
-        return cmd_plan(a)
+        try:
+            return cmd_plan(a)
+        except ValueError as e:
+            ap.error(str(e))
     ap.print_help()
     return 2
 

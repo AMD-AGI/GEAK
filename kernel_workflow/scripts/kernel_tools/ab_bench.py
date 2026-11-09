@@ -1,106 +1,42 @@
 #!/usr/bin/env python3
-"""Same-window INTERLEAVED A/B of N variants inside ONE process -- a SEARCH / SCREENING instrument.
+"""Interleaved same-process A/B screening through GEAK's harness_lib.time_op.
 
-A GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/; the Gluon pack keeps a shim at
-scripts/ab_bench.py).
+The median is the ranking key. Optional identical-code controls measure a noise
+band; rotated arm order and --permute test sensitivity to order/window effects.
+A screen pass requires correctness evidence, valid device-timer receipts, complete
+rotation, and a speedup above both the noise floor and --min-improve-pct (default 2).
+That threshold is caller-configurable. GEAK verify runs the task's frozen COMMANDMENT
+commands for final acceptance, preserving its oracle, deployment, workload and improvement
+requirements. E2e-extracted tasks use harness_lib.measure_legs inside their immutable UT;
+other tasks retain their existing runner.
 
-What this is, and what it is not. GEAK owns acceptance: a candidate is accepted on GEAK verify /
-`e2e_workflow/scripts/harness_lib.py:measure_legs` numbers (fresh process per leg, interleaved
-baseline/candidate pairs, median) against the commit gate MIN_IMPROVE=2%. This tool ranks arms
-WHILE SEARCHING, so its per-sample timing is the SAME instrument as acceptance --
-`harness_lib.time_op(detail=True)`: CUDA-event device time, a sync per sample, a read-evict
-cache flush before every sample (never a `zero_()` write-evict), median -- and everything it adds
-on top (the control arm, the measured noise band, --permute, the fingerprint gate) can only make
-a verdict STRICTER, never looser. A "screen pass" here means "worth sending to GEAK verify", not
-"accepted". harness_lib resolves from $GEAK_HARNESS_LIB (file or dir), else
-<repo>/e2e_workflow/scripts/harness_lib.py; if neither exists the tool exits with a clear message
-rather than falling back to a hand-rolled timer.
+Adapter contract (--module adapter.py):
+  variants() -> {name: zero_argument_callable}. Construct/compile outside timing.
+    Names are non-empty strings; the __control__ prefix is reserved for internal controls.
+  oracle(name) -> non-empty dict of numeric, finite, non-negative error metrics.
+    Every metric must be <= --tol. Failed variants are excluded before timing.
+  outputs(name), reference(name) -> tensors or matching nested tensor containers.
+    Optional pair: uses harness_lib.correct, including matching-infinity semantics.
+    outputs() alone scans for non-finite values but cannot verify correctness.
+  fingerprint(name) -> compiled-artifact identity. Optional collision guard.
+  toolchain(name) -> compiler identity. Required when variants patch the compiler;
+    differing toolchains require separate processes and GEAK verify.
+  sync() -> device synchronization. Optional; defaults to torch.cuda.synchronize.
 
-ONE PROCESS PER TOOLCHAIN-PATCHED VARIANT. Arms that need a different compiler (a patched
-Triton, an injected pass, gluon_swp / patch_reinject / patch_async_reinject) cannot share a
-process -- the patch is process-global. Give the adapter a `toolchain(name) -> str` hook; when
-the passing arms report more than one toolchain identity this tool refuses, and you run one
-window per toolchain and compare them through GEAK verify instead.
+Provide oracle() or outputs()+reference() to verify correctness for screening.
+Missing evidence permits diagnostic timing only (screen invalid, exit 2). These hooks
+are not a replacement for GEAK's complete random/replay correctness verification.
+A fingerprint collision rejects the run; identical timings alone are only a diagnostic
+suspicion. Neither order stability nor a distinct fingerprint proves kernel correctness.
 
-Why interleaving (the Gluon pack's references/method/benchmark-hygiene.md): on a box whose memory clock is not
-pinnable, two numbers produced by two processes are NOT comparable -- a 3% "win" is
-indistinguishable from a clock excursion. The construction that makes a small delta mean anything
-while SEARCHING is to run every variant inside ONE process, interleaved cell by cell, with the
-variant ORDER ROTATED per cell so no variant always occupies the same position in the clock
-trajectory.
+JSON schema v2 contains validity/reasons, final results and both windows' controls,
+per-cell measurement receipts and effort. A rejected window revokes all screen passes.
+Exit 0 = valid screening run (possibly no speedup), 2 = invalid screening/CLI input,
+1 = execution/gate failure. --cache hot is diagnostic only and always invalid for screening.
+Legacy min remains descriptive; removed stable_min is not the ranking metric.
 
-Correctness is gated BEFORE timing, in the same process. A variant whose oracle fails is never
-timed at all: a faster-and-wrong candidate that gets pinned poisons the comparator and
-everything transcribed from it downstream.
-
-The tool also refuses to let you over-read the result: if a pairwise delta is smaller than the
-measured cell-to-cell spread, it is reported as NOT RESOLVED rather than as a speedup.
-
-`--control` makes that floor MEASURED instead of inferred, and it is the single cheapest thing
-here. It adds a byte-identical duplicate of one arm as a first-class variant, so the window reads
-the same code twice and the difference is exactly what the box did in between. Cost: one more arm.
-Why it matters: over one 1208-round campaign the MEDIAN kept round was +0.833%, 31.6% of rounds
-marked a win recorded a NON-POSITIVE delta, and p25 was exactly 0.000% -- when the median win sits
-inside the band, ranking arms by end-to-end time is arithmetic on numbers that do not order. The
-technique was invented in the field and criticised by its own author in the same campaign --
-*"all eight such controls ever run put ONE inert arm in ONE slot"* -- so here the control rides the
-same per-cell rotation as every real arm, and `rotation_coverage()` says whether that rotation
-actually completed.
-
-Two failure modes are checked here rather than left to the adapter, because both have been
-observed to pass every adapter-level gate while destroying the result:
-
-* **A tolerance comparison cannot fail on NaN.** `NaN > tol` is False, so an all-NaN output
-  scores ZERO out-of-tolerance elements and prints ALL PASS. Every non-finite metric is a
-  failure here regardless of what the adapter's arithmetic concluded, and the optional
-  `outputs()` hook lets this file scan the tensors itself, one level below the adapter.
-* **Two variants differing only by a `constexpr` share a Triton cache entry**, and the second
-  silently runs the first's binary. It is numerically perfect -- every variant computes the
-  right answer, just not with its own code -- and it produces the most seductive possible
-  artifact: a FLAT result set that reads as a clean scientific negative. The `fingerprint()`
-  hook detects it outright; without the hook, a flat set is flagged as a COLLISION SUSPECT and
-  `--permute` provides the discriminating experiment (do the numbers follow the code, or the
-  position?).
-
-------------------------------------------------------------------------------------------
-Adapter contract -- your module (--module bench_mod.py) defines:
-
-    def variants() -> dict[str, callable]:
-        '''name -> zero-arg callable that runs ONE full iteration of the thing being timed.
-        Build/compile everything OUTSIDE the callable; only the timed work goes inside.'''
-
-    def oracle(name: str) -> dict:        # OPTIONAL but strongly recommended
-        '''name -> {"dQ": 0.0014, "dK": 0.0016, ...} error metrics. ANY value above --tol
-        fails that variant, which is then excluded from timing and reported as FAILED.
-        A non-finite metric is ALWAYS a failure, whatever it is compared against.'''
-
-    def outputs(name: str) -> object:     # OPTIONAL, strongly recommended
-        '''name -> the variant's output tensor(s): one tensor, or a list/tuple/dict of them.
-        Scanned here for non-finite values independently of oracle()'s tolerance math.'''
-
-    def fingerprint(name: str) -> str:    # OPTIONAL, strongly recommended for layout sweeps
-        '''name -> a hash of the COMPILED artifact (e.g. the .amdgcn text, or the Triton
-        cache key). Two variants that are meant to differ and share a fingerprint are a
-        cache collision, and this file exits non-zero rather than reporting their timings.'''
-
-    def sync() -> None:                   # OPTIONAL; defaults to torch.cuda.synchronize()
-                                          # (used for --preload and the hot-mode burst sizing;
-                                          # harness_lib.time_op does its own per-sample sync)
-
-    def toolchain(name: str) -> str:      # OPTIONAL; REQUIRED when any arm patches the compiler
-        '''name -> identity of the compiler stack the arm needs ("stock", "patch_reinject@<sha>").
-        More than one identity among the passing arms -> refused: one process per toolchain.'''
-
-Reading the result. `median` (the median over cells of each cell's harness_lib median) is the
-headline and the ranking key; `min` is reported beside it as an extra field only. A pairwise
-delta is a SCREEN PASS only when it clears BOTH the GEAK commit gate (--min-improve-pct, default
-2.0) AND this window's noise floor (the measured control band when --control is given, else the
-per-arm cell spread). The noise floor can only raise the bar above 2%, never lower it.
-
-Usage:
-    python3 ab_bench.py --module bench_mod.py [--cells 6] [--iters 20] [--warmup 10]
-                        [--cache cold|hot] [--tol 0.002] [--baseline NAME] [--json ab.json]
-                        [--permute] [--control auto|NAME] [--preload 3] [--min-improve-pct 2]
+Usage: python3 ab_bench.py --module adapter.py --baseline base --control auto \
+           --cells 6 --permute --json ab.json
 """
 from __future__ import annotations
 
@@ -112,6 +48,7 @@ import os
 import statistics
 import sys
 import time
+from pathlib import Path
 
 
 def _load_module(path: str):
@@ -131,7 +68,7 @@ def _default_sync():
         import torch
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-    except Exception:  # noqa: BLE001  - a non-torch adapter syncs inside its own callable
+    except Exception:  # noqa: BLE001, S110 -- non-torch adapter owns synchronization
         pass
 
 
@@ -168,7 +105,7 @@ def scan_non_finite(obj):
                 if n:
                     bad[name or "out"] = n
                 continue
-        except Exception:  # noqa: BLE001  - no torch, or a tensor type it cannot cast
+        except Exception:  # noqa: BLE001, S110 -- no torch; try scalar/array fallback
             pass
         try:  # numpy / array-likes / plain scalars
             if isinstance(t, (int, float)):
@@ -180,56 +117,62 @@ def scan_non_finite(obj):
             n = int((~np.isfinite(arr)).sum())
             if n:
                 bad[name or "out"] = n
-        except Exception:  # noqa: BLE001  - not scannable; silence is honest, a 0 would not be
-            continue
+        except Exception:  # noqa: BLE001 -- unsupported outputs cannot establish finite values
+            bad[name or "out"] = "unscannable output"
     return bad
 
 
 def gate_correctness(mod, names, tol):
-    """Run the oracle for every variant BEFORE any timing. Returns (passed, report).
+    """Screening oracle. Absent evidence is unverified; failed evidence is never timed.
 
-    Three independent reasons to fail, in the order they are checked: the oracle raised, a
-    metric is non-finite, or a metric exceeds `tol`. The middle one is not the adapter's job --
-    a NaN metric slips through `v > tol` as a PASS, so it is caught here.
+    An optional reference(name) paired with outputs(name) uses GEAK's comparator,
+    including matching-infinity semantics. Legacy oracle(name) returns numeric error
+    metrics; every metric must be finite and non-negative.
     """
     oracle = getattr(mod, "oracle", None)
     outputs = getattr(mod, "outputs", None)
-    if oracle is None and outputs is None:
-        return list(names), {n: {"_oracle": "absent"} for n in names}
+    reference = getattr(mod, "reference", None)
     passed, report = [], {}
     for n in names:
-        rep = {}
-        failed = False
-        if outputs is not None:
-            try:
-                nf = scan_non_finite(outputs(n))
-            except Exception as e:  # noqa: BLE001  - an outputs() that raises IS a failure
-                rep["_error"] = f"outputs(): {type(e).__name__}: {e}"
-                report[n] = rep
-                continue
-            if nf:
-                rep["_non_finite_outputs"] = nf
-                failed = True
-        if oracle is not None:
-            try:
-                res = oracle(n) or {}
-            except Exception as e:  # noqa: BLE001  - an oracle that raises IS a failure
-                rep["_error"] = f"oracle(): {type(e).__name__}: {e}"
-                report[n] = rep
-                continue
-            rep.update(res)
-            nan_metrics = {k: v for k, v in res.items()
-                           if isinstance(v, (int, float)) and not math.isfinite(v)}
-            if nan_metrics:
-                # NOT folded into _fail: a NaN metric means the comparison never happened,
-                # which is a different fact from "the error is too large".
-                rep["_non_finite_metrics"] = nan_metrics
-                failed = True
-            bad = {k: v for k, v in res.items()
-                   if isinstance(v, (int, float)) and math.isfinite(v) and v > tol}
-            if bad:
-                rep["_fail"] = bad
-                failed = True
+        rep = {"_verification": "unverified"}
+        failed, verified = False, False
+        try:
+            if reference is not None and outputs is None:
+                raise ValueError("reference() requires outputs()")
+            if outputs is not None:
+                out = outputs(n)
+                if reference is not None:
+                    ok, err = load_harness_lib().correct(out, reference(n), tol)
+                    rep["_reference"] = {"correct": bool(ok), "max_rel_err": err}
+                    failed = not ok or not math.isfinite(err)
+                    verified = not failed
+                else:
+                    nf = scan_non_finite(out)
+                    if nf:
+                        rep["_non_finite_outputs"] = nf
+                        failed = True  # infinity needs a reference, NaN never matches
+            if oracle is not None:
+                res = oracle(n)
+                if not isinstance(res, dict) or not res:
+                    raise ValueError("oracle() must return a non-empty dict of numeric error metrics")
+                if any(not isinstance(k, str) or k.startswith("_") or type(v) not in (int, float)
+                       for k, v in res.items()):
+                    raise ValueError("oracle() keys must be metric names, values numeric errors")
+                rep.update(res)
+                nf = {k: v for k, v in res.items() if not math.isfinite(v)}
+                bad = {k: v for k, v in res.items() if math.isfinite(v) and (v < 0 or v > tol)}
+                if nf:
+                    rep["_non_finite_metrics"] = nf
+                if bad:
+                    rep["_fail"] = bad
+                failed = failed or bool(nf or bad)
+                verified = not failed
+            elif reference is None:
+                rep["_oracle"] = "absent"
+        except Exception as e:  # noqa: BLE001 -- a failed hook cannot certify correctness
+            rep["_error"] = f"{type(e).__name__}: {e}"
+            failed = True
+        rep["_verification"] = "fail" if failed else "pass" if verified else "unverified"
         report[n] = rep
         if not failed:
             passed.append(n)
@@ -281,20 +224,19 @@ def collision_suspect(res, baseline):
     if len(others) < 2:
         return None
     if all(res[n].get("resolved") is False for n in others):
-        return ("FLAT RESULT SET across %d variants -- treat as a Triton cache-collision "
+        return (f"FLAT RESULT SET across {len(others) + 1} variants -- treat as a Triton cache-collision "
                 "suspect until the arm ORDER has been permuted. Re-run with --permute (or "
                 "reverse the arm order) and check whether each number follows the CODE or the "
-                "POSITION. Do not record 'the levers do not move the clock' from this window."
-                % (len(others) + 1))
+                "POSITION. Do not record 'the levers do not move the clock' from this window.")
     return None
 
 
 # --------------------------------------------------------------------------- the instrument
-# GEAK's harness_lib is the single owner of timing in GEAK. This file never times a kernel itself:
-# every sample comes from `harness_lib.time_op(detail=True)`, the same CUDA-event / per-sample sync /
-# read-evict / median instrument GEAK verify uses, so a screen and an acceptance number cannot
-# disagree because of the METER. (They still differ by process: acceptance is a fresh process per
-# leg, this is one process per window -- which is exactly why this is screening only.)
+# Every reported sample comes from `harness_lib.time_op(detail=True)`: CUDA events,
+# per-sample sync, read-evict and median. Reusing this primitive does not align the task's
+# deployment graph/compile mode, workload weighting or process isolation automatically.
+# Final acceptance uses the frozen COMMANDMENT through GEAK verify; e2e-extracted UTs
+# use fresh-process measure_legs internally, while other tasks retain their existing runner.
 _REPO_HARNESS_LIB = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
     "e2e_workflow", "scripts", "harness_lib.py"))
@@ -358,12 +300,12 @@ HOT_SAMPLES = 5
 def _time_cell(fn, hl, iters, budget_ms, cold, sync, warmup=1):
     """One cell's reading through harness_lib: (ms_per_call, effort, receipt).
 
-    cold (default, the acceptance protocol): `time_op(inner=1, repeats=iters)` -- one launch per
+    cold (default screening protocol): `time_op(inner=1, repeats=iters)` -- one launch per
       sample, a read-evict flush before every sample, CUDA-event device time, median.
     hot (SEARCH-ONLY diagnostic): `time_op(inner=N, repeats=HOT_SAMPLES)` with N sized from the
       budget -- each sample is one read-evict and then N back-to-back launches, so all but the first
-      read warm data. It is still harness_lib's events/sync/median; it is NOT what acceptance
-      measures, and a hot ranking may disagree with a cold one (measured: on a per-token quant
+      read warm data. It is still harness_lib's events/sync/median; a hot ranking may disagree
+      with the task's frozen benchmark or with a cold screen (measured: on a per-token quant
       kernel hot preferred the tuned config, cold the shipped one).
     Raises RuntimeError when time_op returns None (the variant raised under timing)."""
     if cold:
@@ -376,6 +318,8 @@ def _time_cell(fn, hl, iters, budget_ms, cold, sync, warmup=1):
         raise RuntimeError("harness_lib.time_op returned None -- the variant raised while timed")
     if not isinstance(d, dict):            # a time_op without detail support: wrap, label it
         d = {"ms": float(d), "timer": "unknown"}
+    if not math.isfinite(float(d["ms"])) or float(d["ms"]) <= 0:
+        raise RuntimeError("harness_lib returned a non-positive or non-finite timing")
     return float(d["ms"]), {"inner": inner, "repeats": repeats}, d
 
 
@@ -398,11 +342,20 @@ def gate_toolchain(mod, names):
     if len(set(ids.values())) > 1:
         return ids, ("arms need different toolchains " + json.dumps(ids, sort_keys=True) + " -- run "
                      "ONE window per toolchain (one process per toolchain-patched variant) and compare "
-                     "across them through GEAK verify / harness_lib.measure_legs, never in-process")
+                     "across them through the task's frozen commands in GEAK verify, never in-process")
     return ids, None
 
 
 CONTROL_PREFIX = "__control__"
+
+
+def validate_variant_names(names):
+    """Keep user variants distinct from synthetic controls before any gates or timing."""
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ValueError("variant names must be non-empty strings")
+        if name.startswith(CONTROL_PREFIX):
+            raise ValueError(f"variant name {name!r} uses reserved prefix {CONTROL_PREFIX!r}")
 
 
 def control_name(of: str) -> str:
@@ -431,6 +384,8 @@ def with_control(fns: dict, names: list, of: str) -> tuple[dict, list]:
     about any other position effect. So the control is a FIRST-CLASS member of `names` and rides
     the same per-cell rotation as every real arm -- see `rotation_coverage()` for the check that
     the rotation actually completed."""
+    validate_variant_names(fns)
+    validate_variant_names(names)
     if of not in fns:
         raise KeyError(of)
     cn = control_name(of)
@@ -489,8 +444,8 @@ def measure(mod, names, cells, iters, warmup, sync, budget_ms=100.0, cold=True,
             ms, effort, receipt = _time_cell(fns[n], hl, iters, budget_ms, cold, sync)
             cell_ms[n].append(ms)
             used[n] = effort
-            receipts[n] = {k: receipt.get(k) for k in ("timer", "primed", "host_ms",
-                                                       "cache_condition", "wall_ms")}
+            receipts.setdefault(n, []).append({k: receipt.get(k) for k in
+                ("timer", "primed", "host_ms", "cache_condition", "wall_ms")})
     measure.iters_used = used            # reported, so a reading's effort is auditable
     measure.receipts = receipts          # harness_lib's own receipt (timer, primed, cache policy)
     return cell_ms
@@ -514,11 +469,11 @@ def control_band_pct(cell_ms, control_of=None):
     mc, mt = statistics.median(c), statistics.median(t)
     twin = abs(100.0 * (mc - mt) / mt) if mt else 0.0
     return {"of": control_of, "control": cn,
-            "spread_pct": round(spread, 3), "vs_twin_pct": round(twin, 3),
-            "band_pct": round(max(spread, twin), 3)}
+            "spread_pct": spread, "vs_twin_pct": twin,
+            "band_pct": max(spread, twin)}
 
 
-MIN_IMPROVE_PCT = 2.0   # GEAK's commit gate; a measured band may only RAISE this bar
+MIN_IMPROVE_PCT = 2.0   # configured screening threshold; a measured band may only RAISE this bar
 
 
 def summarize(cell_ms, baseline, band=None, min_improve_pct=MIN_IMPROVE_PCT):
@@ -526,18 +481,18 @@ def summarize(cell_ms, baseline, band=None, min_improve_pct=MIN_IMPROVE_PCT):
 
     Verdicts per non-baseline arm:
       resolved          delta exceeds this window's noise floor (control band, else arm spread)
-      clears_min_improve  median speedup >= 1 + min_improve_pct/100 (GEAK's commit gate)
+      clears_min_improve  median speedup >= 1 + min_improve_pct/100 (configured screening threshold)
       screen            'pass' only when BOTH hold -- the band can only make the bar stricter.
                         'pass' means "send to GEAK verify", never "accepted"."""
     out = {}
     for n, cells in cell_ms.items():
         lo, hi = min(cells), max(cells)
         out[n] = {
-            "cells_ms": [round(v, 4) for v in cells],
-            "median": round(statistics.median(cells), 4),
-            "min": round(lo, 4),                       # extra field; never the ranking key
+            "cells_ms": list(cells),
+            "median": statistics.median(cells),
+            "min": lo,                       # extra field; never the ranking key
             # spread is the resolution floor of this window: a delta below it is not a result
-            "spread_pct": round(100.0 * (hi - lo) / lo, 2) if lo else None,
+            "spread_pct": 100.0 * (hi - lo) / lo if lo else None,
         }
     b = out.get(baseline)
     for n, r in out.items():
@@ -568,8 +523,27 @@ def summarize(cell_ms, baseline, band=None, min_improve_pct=MIN_IMPROVE_PCT):
                          f"counter. Record it as `--verdict null`, not as a small win.")
         elif not r["clears_min_improve"] and sp_med and sp_med >= 1.0:
             r["note"] = (f"resolved, but {100 * (sp_med - 1):.2f}% < the {min_improve_pct:.1f}% "
-                         f"commit gate -- not a screen pass (the band never lowers that bar).")
+                         f"screening threshold -- not a screen pass (the band never lowers that bar).")
     return out
+
+
+def window_invalid_reasons(window, coverage):
+    reasons = []
+    if not coverage["complete"]:
+        reasons.append("incomplete arm rotation")
+    for name, receipts in window["receipts"].items():
+        if any(r.get("timer") not in ("cuda_event", "cuda_event_graph") or r.get("primed") is not True
+               or (r.get("cache_condition") or {}).get("mode") != "read-evict"
+               for r in receipts):
+            reasons.append(f"unverified device timing/priming: {name}")
+    return reasons
+
+
+def invalidate_screens(results, reasons):
+    for row in results.values():
+        if "screen" in row:
+            row["screen"] = "invalid"
+            row["invalid_reasons"] = list(reasons)
 
 
 class _MockHL:
@@ -590,18 +564,25 @@ class _MockHL:
 
 
 def _selftest():
-    nop = lambda: None                                                        # noqa: E731
+    nop = lambda: None
 
     # 0a. ADAPTIVE BUDGET (hot burst sizing): the count must come from the callable's own duration.
-    def _sleep(us):
-        return lambda: time.sleep(us / 1e6)
-    n_fast, _e = _reps_for(_sleep(20), nop, budget_ms=20.0)
-    n_slow, _e = _reps_for(_sleep(400), nop, budget_ms=20.0)
-    assert n_fast > n_slow * 3, ("a 20us callable must get many more iterations than a 400us one at "
-                                 "the same budget", n_fast, n_slow)
+    # Test the sizing policy with a clock advanced by the callable. Real sleep
+    # includes host scheduling pauses and made this CPU-only check flaky under load.
+    from unittest.mock import patch
+    ticks = [0.0]
+    def timed_call(us):
+        def call():
+            ticks[0] += us / 1e6
+        return call
+    with patch.object(time, "perf_counter", side_effect=lambda: ticks[0]):
+        n_fast, fast_ms = _reps_for(timed_call(20), nop, budget_ms=20.0)
+        n_slow, slow_ms = _reps_for(timed_call(400), nop, budget_ms=20.0)
+    assert math.isclose(fast_ms, 0.02) and math.isclose(slow_ms, 0.4)
+    assert n_fast > n_slow * 3, (n_fast, n_slow)
 
-    # 0b. EVERY reading goes through harness_lib.time_op(detail=True). Cold = the acceptance
-    # protocol: ONE launch per sample (inner=1), `iters` samples, read-evict inside time_op.
+    # 0b. EVERY reading goes through harness_lib.time_op(detail=True). Cold screening uses
+    # ONE launch per sample (inner=1), `iters` samples, read-evict inside time_op.
     hl = _MockHL()
     ms, effort, rec = _time_cell(lambda: 0.25, hl, iters=7, budget_ms=100.0, cold=True, sync=nop)
     assert ms == 0.25 and effort == {"inner": 1, "repeats": 7}, (ms, effort)
@@ -642,7 +623,7 @@ def _selftest():
         if saved is not None:
             os.environ["GEAK_HARNESS_LIB"] = saved
     # 0e. no hand-rolled write-evict survives in this file
-    src = open(os.path.abspath(__file__)).read()
+    src = Path(__file__).read_text()
     assert ("_FLUSH" + "_BUF") not in src and ("def " + "flush_cache") not in src \
         and (".zero" + "_()") not in src, "a hand-rolled write-evict timer is left behind"
 
@@ -655,10 +636,10 @@ def _selftest():
     r = summarize({"base": [10.0, 11.0], "cand": [9.9, 10.9]}, "base")
     assert r["cand"]["resolved"] is False and r["cand"]["screen"] == "no", r
     assert "NOT RESOLVED" in r["cand"]["note"], r
-    # 2b. resolved but under GEAK's 2% commit gate: still not a screen pass (stricter only)
+    # 2b. resolved but under GEAK's 2% screening threshold: still not a screen pass (stricter only)
     r = summarize({"base": [10.0, 10.0, 10.0], "cand": [9.9, 9.9, 9.9]}, "base")
     assert r["cand"]["resolved"] is True and r["cand"]["clears_min_improve"] is False, r
-    assert r["cand"]["screen"] == "no" and "commit gate" in r["cand"]["note"], r
+    assert r["cand"]["screen"] == "no" and "screening threshold" in r["cand"]["note"], r
     # 2c. a resolved slowdown says so
     r = summarize({"base": [10.0, 10.0], "cand": [12.0, 12.0]}, "base")
     assert r["cand"]["screen"] == "slower", r
@@ -712,7 +693,7 @@ def _selftest():
                   fns={"a": lambda: 1.0, "b": lambda: 2.0}, hl=hl2)
     assert got == {"a": [1.0, 1.0], "b": [2.0, 2.0]}, got
     assert len(hl2.calls) == 4 and all(c["detail"] and c["inner"] == 1 for c in hl2.calls)
-    assert measure.receipts["a"]["timer"] == "mock", measure.receipts
+    assert measure.receipts["a"][0]["timer"] == "mock", measure.receipts
     # 6. THE NaN TRAP: a non-finite metric slips through `v > tol` as a pass. It must not.
     class _N:
         @staticmethod
@@ -721,7 +702,7 @@ def _selftest():
     passed, rep = gate_correctness(_N, ["ok", "allnan"], 2e-3)
     assert passed == ["ok"], (passed, rep)
     assert "_non_finite_metrics" in rep["allnan"], rep
-    assert (float("nan") > 2e-3) is False  # the trap this guards, stated as an assertion
+    assert (float("nan") > 2e-3) is False  # noqa: PLW0177 -- the trap this guards, stated as an assertion
     # 7. the outputs() hook catches non-finite tensors one level BELOW the adapter's arithmetic
     class _O:
         @staticmethod
@@ -771,7 +752,7 @@ def _selftest():
         with open(os.path.join(td, "harness_lib.py"), "w") as f:
             f.write("def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):\n"
                     "    ms = call()\n"
-                    "    d = {'ms': ms, 'wall_ms': ms, 'timer': 'stub', 'primed': True, "
+                    "    d = {'ms': ms, 'wall_ms': ms, 'timer': 'cuda_event', 'primed': True, "
                     "'host_ms': 0.001, 'cache_condition': {'mode': 'read-evict'}}\n"
                     "    return d if detail else ms\n")
         adapter = os.path.join(td, "bench_mod.py")
@@ -783,17 +764,17 @@ def _selftest():
         env = dict(os.environ, GEAK_HARNESS_LIB=td)
         p = subprocess.run([sys.executable, os.path.abspath(__file__), "--module", adapter,
                             "--cells", "3", "--iters", "4", "--warmup", "1", "--control", "auto",
-                            "--json", out_json], capture_output=True, text=True, env=env,
+                            "--json", out_json], capture_output=True, text=True, check=False, env=env,
                            timeout=120)
         assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
-        payload = json.load(open(out_json))
+        payload = json.loads(Path(out_json).read_text())
         assert payload["cache"] == "cold" and payload["instrument"]["timer"].startswith(
             "harness_lib.time_op"), payload
         assert payload["results"]["cand"]["screen"] == "pass", payload["results"]["cand"]
-        assert "measure_legs" in payload["role"], payload["role"]
+        assert "frozen COMMANDMENT" in payload["role"], payload["role"]
         env["GEAK_HARNESS_LIB"] = os.path.join(td, "missing")
         p = subprocess.run([sys.executable, os.path.abspath(__file__), "--module", adapter],
-                           capture_output=True, text=True, env=env, timeout=120)
+                           capture_output=True, text=True, check=False, env=env, timeout=120)
         assert p.returncode != 0 and "harness_lib" in (p.stderr + p.stdout), (p.stdout, p.stderr)
     print("[ab_bench] SELFTEST PASS")
 
@@ -814,18 +795,19 @@ def main():
                     help="hot mode only: size each burst from the kernel's own measured duration "
                          "(default 100). 0 sizes it from --iters")
     ap.add_argument("--cache", choices=("cold", "hot"), default="cold",
-                    help="cold (default) = the acceptance protocol: harness_lib.time_op, one launch "
+                    help="cold (default) = harness_lib.time_op, one launch "
                          "per sample, a read-evict flush before every sample. hot = SEARCH-ONLY "
                          "diagnostic: one read-evict then a back-to-back burst per sample. Not a scale "
-                         "factor -- it can REVERSE a ranking, and acceptance is always read-evict")
+                         "factor -- it can REVERSE a ranking. Final acceptance uses the task's "
+                         "frozen benchmark commands")
     ap.add_argument("--flush-mb", type=int, default=None,
                     help="size of harness_lib's read-evict buffer (sets HARNESS_CACHE_FLUSH_MB; "
                          "default: harness_lib's own, 512)")
     ap.add_argument("--tol", type=float, default=2e-3, help="oracle tolerance (default 0.002)")
     ap.add_argument("--baseline", help="variant to compare against (default: the first)")
     ap.add_argument("--min-improve-pct", type=float, default=MIN_IMPROVE_PCT,
-                    help="GEAK commit gate a screen pass must clear (default 2.0). Lowering it does "
-                         "not lower GEAK's gate; the measured band can only raise the bar")
+                    help="screening threshold (default 2.0); pass the workflow value explicitly. "
+                         "Final acceptance remains GEAK verify's responsibility")
     ap.add_argument("--json", help="write the full result here")
     ap.add_argument("--control", metavar="NAME|auto",
                     help="add a BYTE-IDENTICAL duplicate of NAME (or of the baseline, with "
@@ -850,6 +832,21 @@ def main():
     if not a.module:
         ap.error("--module is required (or use --selftest)")
 
+    for name in ("cells", "iters", "flush_mb"):
+        value = getattr(a, name)
+        if value is not None and value <= 0:
+            ap.error(f"--{name.replace('_', '-')} must be positive")
+    for name in ("warmup", "budget_ms", "tol", "preload", "min_improve_pct"):
+        value = getattr(a, name)
+        if not math.isfinite(value) or value < 0:
+            ap.error(f"--{name.replace('_', '-')} must be finite and non-negative")
+
+    # A failing rerun must never leave a previous run's actionable JSON in place.
+    if a.json:
+        with open(a.json, "w") as f:
+            json.dump({"schema_version": 2, "validity": {"valid": False,
+                       "reasons": ["run incomplete; inspect process exit/log"]}, "results": {}}, f)
+
     try:
         hl = load_harness_lib()
     except HarnessLibUnavailable as e:
@@ -860,14 +857,19 @@ def main():
     mod = _load_module(a.module)
     if not hasattr(mod, "variants"):
         sys.exit(f"{a.module}: no variants() -- see the adapter contract in this file's docstring")
-    names = list(mod.variants().keys())
+    fns = mod.variants()
+    names = list(fns.keys())
     if not names:
         sys.exit("variants() returned nothing")
+    try:
+        validate_variant_names(names)
+    except ValueError as e:
+        ap.error(str(e))
     sync = getattr(mod, "sync", _default_sync)
 
     proto = ("cold: harness_lib.time_op, 1 launch/sample, read-evict" if a.cache == "cold" else
              "HOT (search-only): read-evict + burst/sample")
-    print(f"=== ab_bench (SCREENING; acceptance = GEAK verify / harness_lib.measure_legs): "
+    print(f"=== ab_bench (SCREENING; acceptance = GEAK verify with frozen task commands): "
           f"{len(names)} variants, {a.cells} interleaved cells, {proto} ===")
     print(f"    instrument: {harness_lib_path()}")
 
@@ -894,7 +896,8 @@ def main():
         r = report[n]
         if n in passed:
             shown = {k: v for k, v in r.items() if not k.startswith("_")}
-            print(f"  oracle PASS  {n:28s} {shown or '(no oracle -- results are UNGATED)'}")
+            state = "PASS" if r["_verification"] == "pass" else "UNVERIFIED"
+            print(f"  oracle {state}  {n:28s} {shown}")
         else:
             why = (r.get("_non_finite_outputs") and f"NON-FINITE outputs {r['_non_finite_outputs']}"
                    or r.get("_non_finite_metrics") and f"NON-FINITE metrics {r['_non_finite_metrics']}"
@@ -907,11 +910,11 @@ def main():
     if tc_err:
         sys.exit(f"TOOLCHAIN GATE: {tc_err}")
 
-    baseline = a.baseline or passed[0]
+    baseline = a.baseline or names[0]
     if baseline not in passed:
         sys.exit(f"baseline {baseline!r} is not among the correctness-passing variants {passed}")
 
-    fns, control_of = mod.variants(), None
+    control_of = None
     if a.control:
         control_of = baseline if a.control == "auto" else a.control
         if control_of not in passed:
@@ -939,23 +942,28 @@ def main():
     receipts = dict(getattr(measure, "receipts", {}))
     band = control_band_pct(cells_ms, control_of)
     res = summarize(cells_ms, baseline, band, a.min_improve_pct)
-    for n, rc in receipts.items():
-        if rc.get("timer") not in ("cuda_event", "cuda_event_graph"):
-            print(f"  WARNING {n}: timer={rc.get('timer')} -- not CUDA-event device time; these "
-                  f"numbers do not screen anything on a GPU box")
-        elif rc.get("primed") is False:
-            print(f"  WARNING {n}: primed=False (host {rc.get('host_ms')} ms/launch) -- dispatch is "
-                  f"slower than the kernel, so this reading is HOST-bound, not a kernel time")
+    used = dict(getattr(measure, "iters_used", {}))
+    windows = [{"order": list(passed), "control": band, "receipts": receipts,
+                "iters_used": used}]
+    invalid = window_invalid_reasons(windows[0], cov)
+    unverified = [n for n in names if n in passed and report[n]["_verification"] != "pass"]
+    if unverified:
+        invalid.append(f"correctness unverified: {unverified}")
+    if a.cache != "cold":
+        invalid.append("hot-cache diagnostic; no screen verdict")
+    if invalid:
+        invalidate_screens(res, invalid)
     if band:
         print(f"\n  MEASURED NOISE BAND {band['band_pct']:.3f}% "
               f"(control spread {band['spread_pct']:.3f}%, control-vs-twin "
               f"{band['vs_twin_pct']:.3f}%). Pass this to "
               f"`round_record.py append --noise-band {band['band_pct']:.3f}`. It can only make a "
-              f"verdict stricter than the {a.min_improve_pct:.1f}% commit gate, never looser.")
+              f"verdict stricter than the {a.min_improve_pct:.1f}% screening threshold, never looser.")
     used = getattr(measure, "iters_used", {})
     if used:
         print("    effort per cell: " + ", ".join(
             f"{n}=inner {k['inner']} x {k['repeats']} samples" for n, k in used.items()))
+    print("\nFirst-window diagnostics (final validity follows the permutation check):")
     print(f"\n{'variant':28s} {'median':>9s} {'min':>9s} {'spread%':>8s} {'vs base':>9s} "
           f"{'screen':>7s}")
     for n in passed:
@@ -969,7 +977,7 @@ def main():
         if res[n].get("note"):
             print(f"\n  {n}: {res[n]['note']}")
     if any(res[n].get("screen") == "pass" for n in passed):
-        print("\n  screen pass = worth a GEAK verify run (fresh process per leg, measure_legs). It "
+        print("\n  screen pass = worth a GEAK verify run using the frozen task commands. It "
               "is NOT an acceptance number and must not be recorded as one.")
 
     suspect = collision_suspect(res, baseline)
@@ -979,31 +987,41 @@ def main():
     permuted = None
     if a.permute:
         print("\n=== --permute: second window, arm order REVERSED ===")
-        permuted = summarize(
-            measure(mod, list(reversed(passed)), a.cells, a.iters, a.warmup, sync,
-                    budget_ms=a.budget_ms, cold=(a.cache == "cold"),
-                    fns=fns, preload_s=a.preload, hl=hl),
-            baseline, band, a.min_improve_pct)
-        print(f"{'variant':28s} {'fwd median':>11s} {'rev median':>11s} {'delta%':>8s}")
-        followed_position = []
+        order = list(reversed(passed))
+        try:
+            reverse_cells = measure(mod, order, a.cells, a.iters, a.warmup, sync,
+                                    budget_ms=a.budget_ms, cold=(a.cache == "cold"),
+                                    fns=fns, preload_s=a.preload, hl=hl)
+        except RuntimeError as e:
+            sys.exit(f"ab_bench: {e}")
+        reverse_band = control_band_pct(reverse_cells, control_of)
+        permuted = summarize(reverse_cells, baseline, reverse_band, a.min_improve_pct)
+        windows.append({"order": order, "control": reverse_band,
+                        "receipts": dict(measure.receipts), "iters_used": dict(measure.iters_used)})
+        invalid.extend(window_invalid_reasons(windows[-1], rotation_coverage(order, a.cells)))
         for n in passed:
             f_ms, r_ms = res[n]["median"], permuted[n]["median"]
-            d = 100.0 * (r_ms - f_ms) / f_ms if f_ms else 0.0
-            noise = max(res[n]["spread_pct"] or 0, permuted[n]["spread_pct"] or 0)
-            if abs(d) > max(noise, 1.0):
-                followed_position.append(n)
-            print(f"{n:28s} {f_ms:11.4f} {r_ms:11.4f} {d:8.2f}")
-        if followed_position:
-            print(f"\n  THE NUMBERS FOLLOWED THE POSITION, NOT THE CODE, for {followed_position}."
-                  f"\n  That is a cache collision (or an un-cancelled clock trajectory), and NO "
-                  f"ranking from either window is usable. Give each arm its own kernel object "
-                  f"and its own TRITON_CACHE_DIR before re-measuring.")
-        else:
-            print("\n  Every number followed the CODE across the order flip -- the ranking is "
-                  "order-independent and the result stands.")
+            delta = abs(100.0 * (r_ms - f_ms) / f_ms)
+            noise = max(res[n]["spread_pct"] or 0, permuted[n]["spread_pct"] or 0,
+                        (band or {}).get("band_pct", 0), (reverse_band or {}).get("band_pct", 0))
+            if delta > max(noise, 1.0):
+                invalid.append(f"order/window-sensitive timing: {n} ({delta:.2f}%)")
+            # A forward pass must also clear the reversed window's own measured band.
+            if res[n].get("screen") == "pass" and permuted[n].get("screen") != "pass":
+                invalid.append(f"screen result not reproduced in reversed window: {n}")
+            print(f"  {n}: forward={f_ms:.6g} ms, reverse={r_ms:.6g} ms")
+    if invalid:
+        invalidate_screens(res, invalid)
+        if permuted:
+            invalidate_screens(permuted, invalid)
+        print("\nSCREEN INVALID: " + "; ".join(invalid))
+    else:
+        print("\nSCREEN VALID: final results may be sent to GEAK verify; acceptance remains separate.")
 
-    payload = {"role": ("search/screening -- acceptance numbers come from GEAK verify / "
-                        "e2e_workflow/scripts/harness_lib.py:measure_legs"),
+    payload = {"schema_version": 2, "validity": {"valid": not invalid, "reasons": invalid},
+               "windows": windows, "role": ("search/screening -- acceptance comes from GEAK verify "
+                        "using the task's frozen COMMANDMENT commands; e2e-extracted UTs use "
+                        "harness_lib.measure_legs internally"),
                "instrument": {"timer": "harness_lib.time_op(detail=True)",
                               "path": harness_lib_path(), "receipts": receipts},
                "baseline": baseline, "cells": a.cells, "iters": a.iters, "tol": a.tol,
@@ -1011,7 +1029,7 @@ def main():
                "flush_mb": a.flush_mb, "preload_s": a.preload,
                "min_improve_pct": a.min_improve_pct,
                "control": band, "rotation": cov, "toolchain": toolchains,
-               "iters_used": getattr(measure, "iters_used", {}),
+               "iters_used": used,
                "oracle": report, "results": res,
                "fingerprint_gate": "pass" if getattr(mod, "fingerprint", None) else "absent",
                "collision_suspect": suspect,
@@ -1019,9 +1037,10 @@ def main():
                "excluded_failing_oracle": [n for n in names if n not in passed]}
     if a.json:
         with open(a.json, "w") as f:
-            json.dump(payload, f, indent=2)
+            payload = json.loads(json.dumps(payload), parse_constant=str)
+            json.dump(payload, f, indent=2, allow_nan=False)
         print(f"\nwrote {a.json}")
-    return 0
+    return 2 if invalid else 0
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # hw_sources.sh — acquire/generate AMD hardware primary-source FACTS on demand (three tiers;
-# see perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md). Machine-readable-first: generate layouts from the
+# see kernel_workflow/scripts/kernel_tools/isa_tools.md). Machine-readable-first: generate layouts from the
 # Matrix Instruction Calculator, decode encodings from the ISA XML; the PDF is a CDNA4-only
 # fallback. Nothing large is committed — everything lands in a cache. Fail-safe: on any fetch/build
 # failure, print a scoped tool-gap and exit 3 (caller falls back to distilled perf_knowledge/hardware
-# + gluon_authoring/references/hardware values); never fabricate.
+# values with explicit source/uncertainty); never fabricate.
 # Lives in kernel_workflow/scripts/kernel_tools/ (GEAK shared kernel tool); the in-repo databases
 # are read from perf_knowledge/hardware/data/ via _hwdata.py ($GEAK_HW_DATA_DIR overrides).
 #
@@ -17,7 +17,7 @@
 #                                                          #   Richer queries (locate/encoding/sparse/hazard/
 #                                                          #   errata) live on gfx950_isa.py directly.
 #   hw_sources.sh xml <arch>                               # Tier 1: fetch+extract amdgpu_isa_<arch>.xml
-#   hw_sources.sh decode <arch> <hex-bytes>               # Tier 1: build isa_spec_manager, decode an instruction
+#   hw_sources.sh decode <arch> <hex-bytes>               # Tier 1: use installed isa_spec_manager to decode an instruction
 #   hw_sources.sh pdf <doc> [firstpage lastpage]          # Tier 3: fetch PDF, pdftoppm-render pages (CDNA4 layout / concepts)
 #                                                          #   doc: cdna4-isa|cdna3-isa|cdna3-wp|cdna4-wp|rdna3-isa|rdna4-isa
 #   hw_sources.sh --selftest                               # offline: data dir resolves, gfx950 layout answers
@@ -26,7 +26,7 @@ set -uo pipefail
 HERE_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Directory of the in-repo hardware databases, via the single locator (_hwdata.py).
 hw_data_dir(){ python3 "$HERE_SELF/_hwdata.py" 2>/dev/null | grep -v '^None$' || true; }
-gap(){ echo "SCOPED TOOL-GAP: $*" >&2; echo "  -> fall back to distilled perf_knowledge/hardware/ + gluon_authoring/references/hardware/ values (probe-then-trust)" >&2; exit 3; }
+gap(){ echo "SCOPED TOOL-GAP: $*" >&2; echo "  -> fall back to distilled perf_knowledge/hardware/ with explicit source and uncertainty" >&2; exit 3; }
 
 # gfx950 layout is dispatched BEFORE the cache gate below, deliberately: the CDNA4 layout database
 # is committed inside the pack, so this path fetches nothing, builds nothing and writes nothing.
@@ -38,9 +38,14 @@ if [ "${1:-}" = "layout" ]; then
       instr="${3:?instr}"; shift 3
       g="$HERE_SELF/gfx950_isa.py"
       [ -f "$g" ] || gap "Matrix Calculator has NO CDNA4/gfx950 support and gfx950_isa.py is missing from this pack -> use: hw_sources.sh pdf cdna4-isa (render the layout table)"
+      have_operand=0
+      for arg in "$@"; do
+        case "$arg" in -A|-B|-C|-D|--operand|--operand=*) have_operand=1;; esac
+      done
+      if [ "$have_operand" -eq 0 ]; then set -- -A "$@"; fi
       python3 "$g" facts "$instr" || exit $?
-      python3 "$g" layout "$instr" -A "$@" || exit $?
-      echo "# provenance: gfx950-mfma-layout.json (CDNA4 ISA ch.7, verified) — more: gfx950_isa.py --help" >&2
+      python3 "$g" layout "$instr" "$@" || exit $?
+      echo "# provenance: gfx950-mfma-layout.json (CDNA4 ISA ch.7; per-record verification caveats apply) — more: gfx950_isa.py --help" >&2
       exit 0 ;;
   esac
 fi
@@ -51,10 +56,10 @@ usage(){
   echo "  preflight       which arch x question class is answerable here, and how to repair a gap"
   echo "  layout          Tier 2 operand layout. gfx950 -> in-repo DB; cdna1/2/3 + rdna3/4 -> Matrix Calculator"
   echo "  xml             Tier 1 machine-readable ISA XML for <arch>"
-  echo "  decode          Tier 1 decode raw instruction bytes (builds isa_spec_manager)"
+  echo "  decode          Tier 1 decode raw bytes using a preinstalled isa_spec_cli"
   echo "  pdf             Tier 3 fetch + render pages (prose and anything not in a database)"
   echo "  --selftest      offline check (no cache, no network)"
-  echo "see perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/primary-sources.md (tiers; gfx950 + cdna3/rdna3/rdna4 answer from"
+  echo "see kernel_workflow/scripts/kernel_tools/isa_tools.md (tiers; gfx950 + cdna3/rdna3/rdna4 answer from"
   echo "    perf_knowledge/hardware/data/, no fetch)"
 }
 # --help is answered BEFORE the cache gate: asking a tool what it does must not require a
@@ -109,8 +114,8 @@ if [ "${1:-}" = "preflight" ]; then
   done
   if [ -z "$calc" ]; then
     calcwhy="absent"
-  elif ! python3 -c 'import tabulate,numpy' 2>/dev/null; then
-    calcwhy="present but its Python deps (tabulate, numpy) are not importable"
+  elif ! python3 "$HERE_SELF/matrix_dependency.py" --path "$calc/matrix_calculator.py" >/dev/null; then
+    calcwhy="present but interpreter/target queries failed (see matrix_dependency.py)"
   fi
   # in-pack databases
   have(){ [ -f "$HW_P/$1" ] && echo yes || echo no; }
@@ -140,29 +145,18 @@ if [ "${1:-}" = "preflight" ]; then
     printf '  [!] Matrix Instruction Calculator %s\n' "$calcwhy"
     printf '      It is the ONLY layout source for cdna1/2/3 and rdna3/4 (it has no cdna4\n'
     printf '      support, which is why gfx950 ships a DB instead).\n'
-    # WHO repairs this is not the same as HOW, and printing only the how is how a captain ends
-    # up installing into a shared container it was told not to touch. The project rule is
-    # explicit: captains consume the fleet environment snapshot and must not bootstrap,
-    # install, repair, restart or chmod it.
-    printf '      IF YOU ARE A CAPTAIN OR A WORKER: this is not yours to fix. Return\n'
-    printf '      `blocked_environment` naming this line. Do not install into a shared container.\n'
-    printf '      Meanwhile gfx950 still answers every chapter, and cdna3/rdna3/rdna4 still\n'
-    printf '      answer chapters 12-13, from in-pack databases that need none of this.\n'
-    printf '      FOR WHOEVER OWNS THE ENVIRONMENT (fleet / operator), in the repo checkout:\n'
-    printf '        git submodule update --init third_party/amd_matrix_instruction_calculator\n'
-    printf '        bash bootstrap.sh                    # + tabulate/numpy + the pinned ISA XML\n'
-    printf '        python3 -m pip install tabulate numpy   # deps only, if the checkout is there\n'
-    printf '      then export TILE_HW_TOOLS=<repo>/third_party so runtime finds it.\n'
-    printf '      Note: a pack is distributed self-contained, so the repo is often NOT in the\n'
-    printf '      container -- "bootstrap.sh is absent from this checkout" is the expected\n'
-    printf '      answer there, not a second fault. Fix it where the repo actually is.\n'
+    printf '      Prepare the pinned calculator explicitly with prepare_matrix.py (dependencies.md),\n'
+    printf '      or use preinstalled assets. Set TILE_HW_SEED or TILE_HW_TOOLS to\n'
+    printf '      its asset root (containing amd_matrix_instruction_calculator/).\n'
+    printf '      GEAK runtime queries do not bootstrap, clone or install dependencies.\n'
+
   else
     printf '  [ok] Matrix Instruction Calculator: %s\n' "$calc"
   fi
   if [ -z "${TILE_HW_CACHE:-}" ]; then
     rc=1
     printf '  [!] TILE_HW_CACHE is unset -- every fetching tier (xml/decode/pdf) will gap.\n'
-    printf '      The fleet runtime contract normally sets it; standalone: export TILE_HW_CACHE=~/.cache/tile-hw\n'
+    printf '      The fleet runtime contract normally sets it; standalone: set TILE_HW_CACHE to a writable workspace cache directory\n'
   elif [ -d "$TILE_HW_CACHE" ] && ! [ -w "$TILE_HW_CACHE" ]; then
     rc=1
     printf '  [!] TILE_HW_CACHE is not writable: %s\n' "$TILE_HW_CACHE"
@@ -183,8 +177,10 @@ fi
 # to HOME would reintroduce the image's stale campaign path and can write
 # outside the approved campaign tree.
 CACHE="${TILE_HW_CACHE:-}"
-[ -n "$CACHE" ] || gap "TILE_HW_CACHE is unset; consume the fleet runtime environment contract"
-mkdir -p "$CACHE" 2>/dev/null || gap "TILE_HW_CACHE is not writable: $CACHE"
+if [ "${1:-}" != layout ]; then
+  [ -n "$CACHE" ] || gap "TILE_HW_CACHE is unset; set a writable cache for XML/PDF/decode tools"
+  mkdir -p "$CACHE" 2>/dev/null || gap "TILE_HW_CACHE is not writable: $CACHE"
+fi
 # TILE_HW_TOOLS points at the read-only, pinned tool assets. Runtime never
 # installs packages or clones tools: a missing seed is an image contract error.
 TOOLS="${TILE_HW_TOOLS:-}"
@@ -220,26 +216,26 @@ fetch_xml(){  # $1=arch -> echoes path to amdgpu_isa_<arch>.xml
   [ -f "$x" ] && echo "$x" || gap "amdgpu_isa_${a}.xml absent after extract"
 }
 clone_calc(){
-  local d="${SEED:+$SEED/amd_matrix_instruction_calculator}"             # immutable image seed
-  [ -n "$d" ] && [ -f "$d/matrix_calculator.py" ] || d="${TOOLS:+$TOOLS/amd_matrix_instruction_calculator}"
-  [ -n "$d" ] && [ -f "$d/matrix_calculator.py" ] || d="$CACHE/amd_matrix_instruction_calculator"
-  [ -f "$d/matrix_calculator.py" ] \
-    || gap "Matrix Calculator absent from the image seed and runtime cache"
-  python3 -c 'import tabulate,numpy' 2>/dev/null \
-    || gap "matrix calculator Python dependencies are absent from the prebuilt image"
-  echo "$d"
+  local calc
+  calc="$(python3 -c 'import sys; sys.path.insert(0,sys.argv[1]); from amd_targets import calculator_path; print(calculator_path() or "")' "$HERE_SELF")"
+  [ -n "$calc" ] || gap "Matrix Calculator absent; see kernel_tools/dependencies.md"
+  python3 "$HERE_SELF/matrix_dependency.py" --path "$calc" >/dev/null \
+    || gap "calculator interpreter or target queries failed; run matrix_dependency.py for details"
+  dirname "$calc"
 }
 
 case "${1:-}" in
   layout)
     arch="${2:?arch}"; instr="${3:?instr}"; shift 3
+    arch="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from amd_targets import canonical; print(canonical(sys.argv[2]))' "$HERE_SELF" "$arch")" || exit 3
     # cdna4/gfx950 never reaches here — it is dispatched to gfx950_isa.py above the cache gate.
     d="$(clone_calc)" || exit 3
     # calculator needs a MODE flag; default to --register-layout (the VGPR/lane table = the PDF layout)
     case " $* " in *" -R "*|*register-layout*|*" -M "*|*matrix-layout*|*" -r "*|*get-register*|*matrix-entry*|*detail-instruction*) ;; *) set -- "$@" --register-layout;; esac
-    python3 "$d/matrix_calculator.py" -a "$arch" -i "$instr" --markdown "$@" \
+    calc_python="$(python3 "$HERE_SELF/matrix_dependency.py" --path "$d/matrix_calculator.py" --python)" || exit 3
+    "$calc_python" "$d/matrix_calculator.py" -a "$arch" -i "$instr" --markdown "$@" \
       || gap "calculator failed for $arch/$instr (list: matrix_calculator.py -a $arch -L)"
-    echo "# provenance: MI-calc $arch $instr $* — distill into perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/isa-mechanisms.md, cite this line" >&2 ;;
+    echo "# provenance: MI-calc $arch $instr $* — distill into your analysis record, cite this line" >&2 ;;
   xml)
     x="$(fetch_xml "${2:?arch}")" || exit 3; echo "$x"
     echo "# ISA XML (encoding). For instruction DECODE build isa_spec_manager: hw_sources.sh decode $2 <bytes>" >&2 ;;

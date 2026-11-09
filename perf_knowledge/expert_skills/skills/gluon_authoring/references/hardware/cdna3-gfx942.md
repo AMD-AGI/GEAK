@@ -39,7 +39,7 @@ datasheet / microarchitecture side: `perf_knowledge/hardware/cdna3_mi300/{arch,m
 | LDS banks / stride | 32 banks, 4 B | `(addr/4) % 32` |
 | LDS min alloc | 512 B | |
 | LDS peak read | ~128 B/clk | vs gfx950 ~256 B/clk |
-| VGPR budget | 512 / SIMD (**arch + accum combined**) | wave steps (granule 8, cap 8): `<=64->8w <=72->7w <=80->6w <=96->5w <=128->4w <=168->3w <=256->2w <=512->1w >512 spill`. Feed it the **allocated** count `ceil8(ceil4(next_free_vgpr))`, not a printed `.vgpr_count` / `n_regs`; these are **waves/SIMD**, not wg/CU. Full rule + caveats: `thresholds.json confirm.vgpr_wave_cliff`, `planning-constants.md ### Read the field the hardware reads, and round it before you compare` |
+| VGPR budget | 512 / SIMD (**arch + accum combined**) | wave steps (granule 8, cap 8): `<=64->8w <=72->7w <=80->6w <=96->5w <=128->4w <=168->3w <=256->2w <=512->1w >512 spill`. Feed it the **allocated** count `ceil8(ceil4(next_free_vgpr))`, not an unrounded metadata count or an unverified front-end `n_regs`; these are **waves/SIMD**, not wg/CU. Full rule + caveats: `thresholds.json confirm.vgpr_wave_cliff`, `planning-constants.md ### Read the field the hardware reads, and round it before you compare` |
 | TCP in-flight cap | 32 KiB / CU | |
 | LDS offset | 16-bit M0 (vs gfx950 18-bit) | |
 

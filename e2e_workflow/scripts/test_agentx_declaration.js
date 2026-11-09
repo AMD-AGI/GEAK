@@ -189,6 +189,7 @@ ok(has('GEAK_WORKLOAD_KIND', 'agentx_trace_replay'), 'GEAK_WORKLOAD_KIND names t
 ok(!/REPEATS/.test(sc.AGENTX_ENV), 'REPEATS is not declared, so REPLICAS keeps its meaning');
 ok(has('CONC', '8'), 'CONC comes from the declaration');
 ok(has('AGENTX_CANONICAL_DATASET', 'semianalysis_cc_traces_weka_062126')
+  && has('AGENTX_CANONICAL_NUM_ENTRIES', '393')
   && has('AGENTX_CANONICAL_DURATION', '3600'), 'the canonical reference is declared');
 ok(has('AGENTX_NUM_ENTRIES', '393') && has('GEAK_AGENTX_DURATION_S', '3600')
   && has('GEAK_AGENTX_LOOP_DURATION_S', '900'), 'corpus size and both durations are declared');
@@ -242,16 +243,21 @@ ok(/\|\| CONC='16'$/m.test(both.AGENTX_ENV) && /concurrency 16\)/.test(both.work
 // exactly what has to come back stamped non-canonical.
 ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126'$/m.test(ov.AGENTX_ENV),
   'overriding the corpus leaves the canonical dataset on the standard corpus');
+ok(/\|\| AGENTX_NUM_ENTRIES='50'$/m.test(ov.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_NUM_ENTRIES='393'$/m.test(ov.AGENTX_ENV),
+  'overriding the entry count leaves the canonical count at 393');
 const shortWindow = build({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } });
 ok(/\|\| GEAK_AGENTX_DURATION_S='1800'$/m.test(shortWindow.AGENTX_ENV)
   && /\|\| AGENTX_CANONICAL_DURATION='3600'$/m.test(shortWindow.AGENTX_ENV),
   'overriding the window leaves the canonical duration at 3600s');
 const moved = build({ workload_spec: { kind: 'agentx_trace_replay',
   corpus: 'semianalysis_cc_traces_weka_062126_256k',
-  canonical_corpus: 'semianalysis_cc_traces_weka_062126_256k', canonical_duration_s: 1800 } });
+  canonical_corpus: 'semianalysis_cc_traces_weka_062126_256k', canonical_num_entries: 200,
+  canonical_duration_s: 1800 } });
 ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126_256k'$/m.test(moved.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_NUM_ENTRIES='200'$/m.test(moved.AGENTX_ENV)
   && /\|\| AGENTX_CANONICAL_DURATION='1800'$/m.test(moved.AGENTX_ENV),
-  'declaring canonical_corpus / canonical_duration_s still moves the reference itself');
+  'declaring canonical_corpus / canonical_num_entries / canonical_duration_s still moves the reference itself');
 
 // Values are shell-quoted, so a corpus name containing a quote cannot break the sourced file.
 const nasty = build({ workload_spec: { kind: 'agentx_trace_replay', corpus: "a'b" } });

@@ -19,32 +19,25 @@
 #     (huge compile speedup). Runtime perf and correctness are unaffected (the kernel runs on the
 #     local arch either way). Honors a caller-set PYTORCH_ROCM_ARCH if already exported.
 #
-# THIS IS THE ONLY GPU LOCK IN THE REPO. The Gluon skill pack's scripts/gpu_lock.sh is a shim that
-# execs this file, so a pack command and a GEAK role command on the same GPU id flock the same file
-# in the same namespace (/tmp/team_gpu_locks) and serialize against each other. Absorbed from the
-# pack's former copy: --help, --selftest, the read-only lock-file open (below) and the OPTIONAL fleet
-# broker seam (GEAK_GPU_BROKER=1; off by default). Not absorbed: the pack's per-user lock namespace
-# (~/.cache/tile-runtime/gpu-broker/locks, which does not interlock with GEAK), its silent fallback to
-# a private namespace, its first-agent arch pin, and --no-lease (no consumer ships here; it ran a
-# command unarbitrated).
+# Shared command entry point. DSL shims use this wrapper; multi-GPU requests delegate to
+# gpu_lease.py. Both acquire the same /tmp/team_gpu_locks/gpu_<id>.lock files.
 #
-# Exported to the wrapped command: HIP_VISIBLE_DEVICES=<id>, GEAK_GPU_LOCK_HELD=<id> (tools that must
-# run under this lock -- the kernel_tools profiler wrappers -- check it instead of re-locking; a
-# nested gpu_lock.sh on the SAME id from inside the command would deadlock on its own flock),
-# TORCH_EXTENSIONS_DIR, and PYTORCH_ROCM_ARCH/GPU_ARCHS when the arch pin applies.
+# A single-card command receives HIP_VISIBLE_DEVICES=<id> and GEAK_GPU_LOCK_HELD=<id>.
+# Multi-GPU commands receive GEAK_GPU_LEASE_ACTIVE/IDS from gpu_lease.py; the e2e set wrapper
+# publishes GEAK_GPU_LOCKED_SET after acquiring all its cards. Consumers reuse matching ownership
+# instead of requesting the same lock again. These inherited markers are a caller contract,
+# not a replacement for acquiring a lock. Build-cache and compile-arch variables remain shared.
 
 set -euo pipefail
 
 _GL_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _GL_SELF="$_GL_HERE/$(basename "${BASH_SOURCE[0]}")"
-_GL_REPO="$(cd "$_GL_HERE/../.." && pwd)"
-_GL_SCHED_DEFAULT="$_GL_REPO/perf_knowledge/expert_skills/skills/gluon_authoring/scheduler"
 
 # --help, because the alternative is reading 300 lines of shell. Without a case for it, `--help`
 # fell through as a GPU SPEC and left a `gpu_--help.lock` file behind.
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     cat <<'USAGE'
-gpu_lock.sh -- run ONE GPU command holding an exclusive lane on this box.
+gpu_lock.sh -- run a command holding its requested GPU or GPU group.
 
   cd <workspace> && bash gpu_lock.sh <gpu_id> <command...>      pin: wait for that GPU's lock
   cd <workspace> && bash gpu_lock.sh <id,id,...> <command...>   pool: first free AND idle GPU
@@ -62,8 +55,14 @@ What it does for the command (all generic, nothing kernel-specific):
   6. sources   workspace source-provenance check before AND after the command (exit 86 = discard
                every number this invocation printed)
 
+Ownership: single-card commands receive GEAK_GPU_LOCK_HELD=<id>; gpu_lease.py publishes
+GEAK_GPU_LEASE_ACTIVE=1 and GEAK_GPU_LEASE_IDS=<ids> for a group. The e2e set wrapper publishes
+GEAK_GPU_LOCKED_SET=<ids> once all cards are held. A consumer under matching ownership runs
+directly; requesting a held GPU again is refused. Nested single-card acquisition is allowed
+only in ascending ID order, as used by the e2e set wrapper.
+
 Exit codes: the command's own, 86 (source provenance invalid), 1 (lock/allocation/idleness/arch
-refusal). Ids are the HIP ordinals of THIS process: inside an inherited ROCR_VISIBLE_DEVICES mask
+refusal), 2 (unsafe nested acquisition). Ids are the HIP ordinals of THIS process: inside an inherited ROCR_VISIBLE_DEVICES mask
 they are logical, so every tenant of a box must use the same numbering for the locks to mean the
 same card.
 
@@ -73,19 +72,13 @@ ENVIRONMENT
   GEAK_GPU_MAX_BUSY_PCT / GEAK_GPU_MAX_VRAM_MB   idleness thresholds (default 5 / 1024)
   GEAK_GPU_POOL_WAIT=<s>     how long pool mode waits for a free lane (default 1200)
   GEAK_GPU_USE_LOG=<file>    append one JSON line per acquisition: {t,gpu,pool,pid,mode,wait_s}
-                             mode = pool | pin | broker
+                             mode = pool | pin (multi-GPU leases use their existing group log)
   KERNEL_ENV_KEEP_ARCH=1     skip the arch pin (intentional multi-arch boxes)
   KERNEL_ENV_SKIP_ENUM_REAP=1  skip the enumerator reap
   GEAK_GPU_LOCK_DIR=<dir>    HERMETIC TESTS ONLY. Default /tmp/team_gpu_locks; two callers
                              serialize only if they resolve the same directory.
-  GEAK_GPU_BROKER=1          OPT-IN fleet broker (gluon_authoring/scheduler, default off): when a
-                             broker socket exists, queue for the lane through it; the granted lane
-                             still takes this flock. GEAK_GPU_BROKER_SOCK / a .geak_gpu_sock marker
-                             name the socket; GEAK_GPU_GROUP / .geak_gpu_group the fair-share key.
 
-LONG COMMANDS: this wrapper prints nothing once the command starts and BLOCKS while queueing. A
-harness that kills a silent child after N seconds should wrap it, e.g. (standalone pack runs)
-  bash <gluon_authoring>/scripts/wait_for.sh --run --log run.log -- bash gpu_lock.sh <id> <cmd...>
+This wrapper may wait silently for a lock. Allow its acquisition timeout when supervising it.
 USAGE
     exit 0
 fi
@@ -95,11 +88,14 @@ fi
 # lock, the command must see HIP_VISIBLE_DEVICES/GEAK_GPU_LOCK_HELD, and the use-log must carry mode.
 if [ "${1:-}" = "--selftest" ]; then
     _st_fail=0
-    _st_dir="${TMPDIR:-/tmp}/geak_gpu_lock_selftest.$(id -u)"   # reused, never rm'd
+    _st_dir="$(mktemp -d "${TMPDIR:-/tmp}/geak_gpu_lock_selftest.XXXXXX")"
+    trap 'rm -rf -- "$_st_dir"' EXIT
     mkdir -p "$_st_dir/locks" "$_st_dir/ws"
     : > "$_st_dir/order.log"; : > "$_st_dir/use.log"
-    _st_env=(env GEAK_GPU_LOCK_DIR="$_st_dir/locks" GEAK_GPU_REQUIRE_IDLE=0 KERNEL_ENV_KEEP_ARCH=1
-             KERNEL_ENV_SKIP_ENUM_REAP=1 GEAK_GPU_USE_LOG="$_st_dir/use.log" GEAK_GPU_BROKER=0)
+    _st_env=(env -u GEAK_GPU_ALLOWED -u GEAK_GPU_LOCK_HELD -u GEAK_GPU_LOCKED_SET
+             -u GEAK_GPU_LEASE_ACTIVE -u GEAK_GPU_LEASE_IDS
+             GEAK_GPU_LOCK_DIR="$_st_dir/locks" GEAK_GPU_REQUIRE_IDLE=0 KERNEL_ENV_KEEP_ARCH=1
+             KERNEL_ENV_SKIP_ENUM_REAP=1 GEAK_GPU_USE_LOG="$_st_dir/use.log")
     _st_cmd='echo "start $1 $(date +%s.%N)" >> "$2"; sleep 1; echo "end $1 $(date +%s.%N)" >> "$2"'
     (cd "$_st_dir/ws" && "${_st_env[@]}" bash "$_GL_SELF" 7 bash -c "$_st_cmd" _ A "$_st_dir/order.log") &
     _st_p1=$!
@@ -125,13 +121,6 @@ if [ "${1:-}" = "--selftest" ]; then
             || { echo "FAIL: read-only lock file was not usable: $_st_out"; _st_fail=1; }
     fi
     chmod u+w "$_st_dir/locks/gpu_8.lock"
-    # The scheduler's group resolver (only when the pack's scheduler is present).
-    _st_resolver="${GEAK_GPU_BROKER_SCHED_DIR:-$_GL_SCHED_DEFAULT}/group_identity.py"
-    if [ -f "$_st_resolver" ]; then
-        mkdir -p "$_st_dir/kernel_a/dir_17"
-        _st_group="$(cd "$_st_dir/kernel_a/dir_17" && python3 "$_st_resolver" --path "$PWD" --ignore-env)"
-        [ "$_st_group" = "kernel_a" ] || { echo "FAIL: direction leaf resolved as '$_st_group'"; _st_fail=1; }
-    fi
     [ "$_st_fail" = 0 ] && echo "GPU_LOCK SELFTEST PASS" || echo "GPU_LOCK SELFTEST FAIL"
     exit "$_st_fail"
 fi
@@ -157,6 +146,21 @@ esac
 if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
     echo "ERROR: nested gpu_lock.sh call inside a GPU lease (GPUs ${GEAK_GPU_LEASE_IDS:-?}); run the command directly" >&2
     exit 2
+fi
+
+# gpu_lock_set.py acquires single cards in ascending order, then publishes LOCKED_SET.
+# Keep that existing path working, while rejecting a full-set re-entry or an acquisition that
+# could deadlock with an outer single-card lock. LOCK_HELD is the last (largest) acquired ID.
+if [ -n "${GEAK_GPU_LEASE_IDS:-}" ] || [ -n "${GEAK_GPU_LOCKED_SET:-}" ]; then
+    echo "ERROR: nested gpu_lock.sh call inside a GPU set (GPUs ${GEAK_GPU_LEASE_IDS:-${GEAK_GPU_LOCKED_SET:-?}}); run the command directly" >&2
+    exit 2
+fi
+if [ -n "${GEAK_GPU_LOCK_HELD:-}" ]; then
+    if ! [[ "$GPU_SPEC" =~ ^(0|[1-9][0-9]*)$ && "$GEAK_GPU_LOCK_HELD" =~ ^(0|[1-9][0-9]*)$ ]] \
+       || [ "$GPU_SPEC" -le "$GEAK_GPU_LOCK_HELD" ]; then
+        echo "ERROR: nested gpu_lock.sh call while GPU $GEAK_GPU_LOCK_HELD is held; only a higher single GPU id may be acquired; run commands on held GPUs directly" >&2
+        exit 2
+    fi
 fi
 
 # Source provenance is checked before executing any command and again on exit:
@@ -237,109 +241,6 @@ if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
         exit 1
     fi
 fi
-
-# ---- Optional fleet broker (OFF unless GEAK_GPU_BROKER=1) ------------------------------------------
-# The Gluon pack ships a GPU broker (gluon_authoring/scheduler: priority queue, per-kernel fair share,
-# resident leases). It is opt-in: with GEAK_GPU_BROKER unset or 0, or with no broker socket listening,
-# this block is skipped and the flock allocator below is all that runs -- the GEAK default.
-#
-# When enabled, the broker only CHOOSES THE LANE. We re-enter this script with the granted single id,
-# so the source check, the per-workspace build cache, the arch pin, the reap and the flock all still
-# run; the flock on the granted lane is what keeps a brokered command mutually exclusive with every
-# non-brokered GEAK process on the box (same lock file). GEAK_GPU_BROKER_ACTIVE bounds the recursion.
-# The inner call skips the sysfs idleness test because the broker already judged the lane and, unlike
-# that test, it can tell its own parked residents from a foreign tenant.
-#
-# Not exec'd: the client runs as a child so the source-provenance EXIT trap above still fires.
-_GL_SCHED="${GEAK_GPU_BROKER_SCHED_DIR:-$_GL_SCHED_DEFAULT}"
-_GL_CLIENT="$_GL_SCHED/gpu_client.py"
-if [[ "$GPU_SPEC" != group:* && "$GPU_SPEC" != pool:*:* ]] && [ "${GEAK_GPU_BROKER:-0}" = "1" ] && [ -z "${GEAK_GPU_BROKER_ACTIVE:-}" ] && [ -f "$_GL_CLIENT" ]; then
-    # The socket: explicit env, else a `.geak_gpu_sock` marker at a parent of $PWD (the campaign
-    # names its broker; the commands are composed by agents, so a marker file is the only channel
-    # that reaches them), else the canonical path. gpu_client applies the same order and refuses an
-    # unnamed canonical socket, degrading to an unbrokered run of this same script.
-    _GL_SOCK="${GEAK_GPU_BROKER_SOCK:-}"
-    if [ -z "$_GL_SOCK" ]; then
-        _GL_SD="$PWD"
-        while [ "$_GL_SD" != "/" ] && [ -n "$_GL_SD" ]; do
-            if [ -f "$_GL_SD/.geak_gpu_sock" ]; then
-                _GL_SOCK="$(head -1 "$_GL_SD/.geak_gpu_sock" 2>/dev/null | tr -d '[:space:]')"
-                [ -n "$_GL_SOCK" ] && export GEAK_GPU_BROKER_SOCK="$_GL_SOCK"
-                break
-            fi
-            _GL_SD="$(dirname "$_GL_SD")"
-        done
-    fi
-    _GL_SOCK="${_GL_SOCK:-${GEAK_GPU_RUNTIME_ROOT:-$HOME/.cache/tile-runtime/gpu-broker}/gpu.sock}"
-    if [ -S "$_GL_SOCK" ]; then
-        export GEAK_GPU_BROKER_ACTIVE=1
-        # Fair-share key and priority band ride marker files for the same reason as the socket.
-        # Nothing in GEAK writes them; a campaign that wants per-kernel fair share writes
-        # `.geak_gpu_group` (and optionally `.geak_gpu_priority`) at its root, or exports the vars.
-        if [ -z "${GEAK_GPU_GROUP:-}" ] || [ -z "${GEAK_GPU_PRIORITY:-}" ]; then
-            _GL_D="$PWD"
-            while [ "$_GL_D" != "/" ] && [ -n "$_GL_D" ]; do
-                if [ -z "${GEAK_GPU_GROUP:-}" ] && [ -f "$_GL_D/.geak_gpu_group" ]; then
-                    GEAK_GPU_GROUP="$(head -1 "$_GL_D/.geak_gpu_group" 2>/dev/null | tr -d '[:space:]')"
-                    [ -n "$GEAK_GPU_GROUP" ] && export GEAK_GPU_GROUP
-                fi
-                if [ -z "${GEAK_GPU_PRIORITY:-}" ] && [ -f "$_GL_D/.geak_gpu_priority" ]; then
-                    GEAK_GPU_PRIORITY="$(head -1 "$_GL_D/.geak_gpu_priority" 2>/dev/null | tr -d '[:space:]')"
-                    [ -n "$GEAK_GPU_PRIORITY" ] && export GEAK_GPU_PRIORITY
-                fi
-                [ -n "${GEAK_GPU_GROUP:-}" ] && [ -n "${GEAK_GPU_PRIORITY:-}" ] && break
-                _GL_D="$(dirname "$_GL_D")"
-            done
-        fi
-        if [ -z "${GEAK_GPU_GROUP:-}" ] && [ -f "$_GL_SCHED/group_identity.py" ]; then
-            # Same resolver as the Python client, so a `dir_<n>` leaf is never its own tenant.
-            _GL_GROUP="$(python3 "$_GL_SCHED/group_identity.py" --path "$PWD" 2>/dev/null || true)"
-            [ -n "$_GL_GROUP" ] && export GEAK_GPU_GROUP="$_GL_GROUP"
-        fi
-        # Band / kind / runtime estimate derived from the command (an explicit GEAK_GPU_PRIORITY
-        # wins): profiler replays are long, verifies gate a kernel's completion.
-        _gl_kind() {
-            case "$*" in
-                *rocprof-compute*|*rocprofv3*|*--att*|*capture.sh*|*profile_kernel.sh*) printf 'profile' ;;
-                *plain_autotune*|*sweep_driver*) printf 'sweep' ;;
-                *task_runner*correctness*|*ab_bench*) printf 'verify' ;;
-                *setup.py*|*build_ext*|*compile*) printf 'compile' ;;
-                *) printf 'run' ;;
-            esac
-        }
-        _GL_KIND="$(_gl_kind "$@")"
-        case "$_GL_KIND" in
-            profile) _GL_BAND=bulk; _GL_EST=600; _GL_YIELD=profile_pass_boundary ;;
-            sweep)   _GL_BAND=sweep; _GL_EST=90; _GL_YIELD=sweep_reading ;;
-            verify)  _GL_BAND=verify; _GL_EST=90; _GL_YIELD=none ;;
-            compile) _GL_BAND=measure; _GL_EST=240; _GL_YIELD=compile_unit_boundary ;;
-            *)       _GL_BAND=measure; _GL_EST=180; _GL_YIELD=none ;;
-        esac
-        _GL_REQUIRE_GROUP=()
-        [ "${GEAK_GPU_REQUIRE_GROUP:-0}" = "1" ] && _GL_REQUIRE_GROUP=(--require-group)
-        _gl_rc=0
-        python3 "$_GL_CLIENT" run \
-            --lanes "$(echo "$GPU_SPEC" | tr -d ' ')" \
-            --group "${GEAK_GPU_GROUP:-${GEAK_KERNEL_NAME:-}}" \
-            --priority "${GEAK_GPU_PRIORITY:-$_GL_BAND}" \
-            --command-kind "$_GL_KIND" \
-            --estimated-runtime-s "$_GL_EST" \
-            --safe-yield-kind "$_GL_YIELD" \
-            --timeout-s "${GEAK_GPU_POOL_WAIT:-1200}" \
-            --label "${GEAK_GPU_LABEL:-gpu_lock:$$}" \
-            "${_GL_REQUIRE_GROUP[@]}" \
-            -- bash -c '
-                if [ -n "${GEAK_GPU_LANE:-}" ]; then
-                    export GEAK_GPU_REQUIRE_IDLE=0     # the broker already judged this lane
-                    exec bash "$0" "$GEAK_GPU_LANE" "${@:2}"
-                fi
-                exec bash "$0" "$1" "${@:2}"           # unbrokered: the original spec, unchanged
-            ' "$_GL_SELF" "$GPU_SPEC" "$@" || _gl_rc=$?
-        exit "$_gl_rc"
-    fi
-fi
-_GL_MODE_PIN="pin"
-[ -n "${GEAK_GPU_BROKER_ACTIVE:-}" ] && [ -n "${GEAK_GPU_LANE:-}" ] && _GL_MODE_PIN="broker"
 
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
@@ -561,7 +462,7 @@ else
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
-            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"$_GL_MODE_PIN\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export GEAK_GPU_LOCK_HELD="$GPU_ID"
         export HIP_VISIBLE_DEVICES="$GPU_ID"

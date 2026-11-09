@@ -9,13 +9,21 @@ when the arch is not CDNA or the ATT decoder is absent.
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 PROFILE = SCRIPTS / "profile_kernel.sh"
 
 FAKE = r"""#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 'fixture sdk'; exit 0;;
+  --help) echo '--att --att-library-path --kernel-trace --pmc'; exit 0;;
+esac
 out=""; mode=""; pmc=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,11 +42,21 @@ case "$mode" in
        { echo "Dispatch_ID,Kernel_Name,Counter_Name,Counter_Value,Start_Timestamp,End_Timestamp"
          for c in "${pmc[@]}"; do echo "1,_gemm_fwd_kernel,$c,50,1000,6000"; done; } > "$out/r_counter_collection.csv";;
   att) mkdir -p "$out/ui_output_agent_1_dispatch_1"
+       printf 'Kernel_Name,Dispatch_Id,VGPR_Count,Accum_VGPR_Count,SGPR_Count,LDS_Block_Size,Workgroup_Size_X,Workgroup_Size_Y,Workgroup_Size_Z\n_gemm_fwd_kernel,1,128,0,32,65536,256,1,1\n' > "$out/r_kernel_trace.csv"
        python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import _att_fixture; _att_fixture.write(sys.argv[2])" \
          "$KT_DIR_FOR_FAKE" "$out/ui_output_agent_1_dispatch_1";;
 esac
 "$@"
 """
+
+
+def _decoder(directory):
+    compiler = shutil.which('cc')
+    if not compiler:
+        pytest.skip('C compiler needed to exercise the decoder loader with a synthetic V1 library')
+    subprocess.run([compiler, '-shared', '-fPIC', '-x', 'c', '-', '-o',
+                    str(directory / 'librocprof-trace-decoder.so')],
+                   input='void rocprof_trace_decoder_parse_data(void) {}', text=True, check=True)
 
 
 def _env(tmp_path, arch="gfx950", **extra):
@@ -79,7 +97,7 @@ def test_default_run_contract_unchanged(tmp_path):
 def test_pmc_and_att_layers_collect(tmp_path):
     dec = tmp_path / "dec"
     dec.mkdir()
-    (dec / "librocprof-trace-decoder.so").write_text("")
+    _decoder(dec)
     out = tmp_path / "o"
     r, layers = _profile(tmp_path, out, "--pmc", "--att", ROCPROF_ATT_LIBRARY_PATH=str(dec))
     assert layers["pmc"] == "collected:pmc" and layers["att"] == "collected", layers
@@ -89,10 +107,29 @@ def test_pmc_and_att_layers_collect(tmp_path):
     summary = (out / "pmc" / "pmc_summary.txt").read_text()
     assert "MfmaUtil" in summary and "_fetch_size_caveat" in summary   # gfx950 caveat stamped
     assert "TCC_EA0_RDREQ_sum" in (out / "pmc" / "pmc_memory_ea" / "r_counter_collection.csv").read_text()
-    assert "VMEM-wait" in (out / "att" / "hotspots.txt").read_text()
+    hotspots = (out / "att" / "hotspots.txt").read_text()
+    assert "VMEM-wait" in hotspots
+    assert "Architecture:   gfx950" in hotspots
+    assert "occupancy:      2 waves/SIMD" in hotspots
     report = (out / "profile_report.txt").read_text()
     assert "PMC layer" in report and "ATT layer" in report
     assert "Profiler used: rocprofv3" in r.stdout
+
+
+def test_att_analysis_failure_is_partial(tmp_path):
+    dec = tmp_path / 'dec'
+    dec.mkdir()
+    _decoder(dec)
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    python = bindir / 'python3'
+    python.write_text(f'''#!/usr/bin/env bash
+case "$1" in */hotspot_analyzer.py) exit 6;; esac
+exec "{sys.executable}" "$@"
+''')
+    python.chmod(0o755)
+    _r, layers = _profile(tmp_path, tmp_path / 'o', '--att', ROCPROF_ATT_LIBRARY_PATH=str(dec))
+    assert layers['att'] == 'partial:analysis_failed(rc=6)'
 
 
 def test_aborting_counter_is_bisected_out(tmp_path):
@@ -112,7 +149,8 @@ def test_layers_degrade_instead_of_failing(tmp_path):
     assert layers["att"] == "degraded:decoder_absent"
     assert layers["spi"] == "degraded:no_source"
     report = (out / "profile_report.txt").read_text()
-    assert "rocprofv3 -L" in report and "ROCPROF_ATT_LIBRARY_PATH" in report
+    assert "rocprofv3 -L" in report and "profiling-dependencies.md" in report
+    assert json.loads((out / 'att/att_dependencies.json').read_text())['att']['status'] == 'decoder_absent'
 
 
 def test_unknown_option_is_refused(tmp_path):

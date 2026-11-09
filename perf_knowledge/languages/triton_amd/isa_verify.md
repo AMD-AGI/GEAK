@@ -29,7 +29,7 @@ Pull the resource numbers:
 ```bash
 grep ".amdhsa_next_free_vgpr"    dump.txt   # VGPRs/lane the occupancy is computed from (ArchVGPR+AGPR on CDNA)
 grep "; Occupancy:"              dump.txt   # LLVM's own register-term waves/SIMD for this subtarget
-grep ".vgpr_count\|.agpr_count"  dump.txt   # ArchVGPR / AGPR split -- NOT the occupancy input on its own
+grep ".vgpr_count\|.agpr_count"  dump.txt   # combined allocation / AGPR subset; do not add these counts
 grep ".sgpr_count"               dump.txt
 grep ".group_segment_fixed_size" dump.txt   # LDS bytes
 grep ".private_segment_fixed_size" dump.txt  # scratch — MUST be 0
@@ -39,8 +39,7 @@ grep "triton_gpu.shared"         dump.txt    # LDS bytes per shared layout (from
 GEAK's shared kernel tools do the arithmetic for you (offline, no GPU; examples use `--arch gfx950`):
 `kernel_workflow/scripts/kernel_tools/dump_ir.sh` (per-variant IR + `.s` + LDS metadata),
 `amd_occupancy.py --asm <kernel.s>` (register AND LDS terms), `probe.py measure --dir <ir_dir>`
-(both limiters per kernel, in WGs/CU), `asm_loop_audit.py <kernel.s>` (hot-loop op mix, waitcnt
-quality, KD register budget). Triton kernels size LDS at launch, so the `.s` says 0 bytes -- take the
+(register/LDS terms per kernel, with missing inputs explicitly reported). Triton kernels size LDS at launch, so the `.s` says 0 bytes -- take the
 LDS bytes from the cache metadata `shared` field (dump_ir.sh copies it as `meta_*.json`).
 
 ## 2. What good ISA looks like (GEMM inner loop)
@@ -58,8 +57,8 @@ LDS bytes from the cache metadata `shared` field (dump_ir.sh copies it as `meta_
 CDNA (gfx950 main line; gfx942 identical here): ArchVGPR and AGPR share ONE 512-entry file per SIMD,
 allocated in granules of **8**, capped at **8** waves/SIMD.
 1. Read the register term. Prefer LLVM's own `; Occupancy: N` from the `.s`. Otherwise take
-   `.amdhsa_next_free_vgpr` (already ArchVGPR+AGPR combined) — **not** `.vgpr_count`, which counts
-   ArchVGPRs only and silently drops the accumulator AGPRs.
+   `.amdhsa_next_free_vgpr` (already ArchVGPR+AGPR combined) or `.vgpr_count`, which already includes AGPR allocation on these targets.
+   Do not add `.agpr_count` again; LLVM `NumVgprs` gives the architectural count.
 2. `waves = min(8, floor(512 / round_up_8(next_free_vgpr)))`. The ladder is
    64→8, 72→7, 80→6, 96→5, 128→4, 168→3, 256→2 (the LAST VGPR count that still fits that many
    waves). If you're one granule over a boundary (e.g. 176 → 2 waves), set `waves_per_eu = target+1`

@@ -165,12 +165,14 @@ disagree with this measured ladder; trust `amd_occupancy.py`.
 
 ### Read the field the hardware reads, and round it before you compare
 
-`next_free_vgpr` comes from the `.amdgcn` KD — not from profiler `VGPR` meta, and not from a
-front-end `n_regs` / `.vgpr_count` print. Those are **reports** of the highest register number
-used. A build carrying a `waves_per_eu` hint can pay in AGPRs, so the report stays flat while
-the descriptor moves: one measured sweep read `.vgpr_count` **80 / 80 / 80 / 80 / 64** while
-`.amdhsa_next_free_vgpr` read **257 / 169 / 129 / 97 / 64** over the same five builds. The knob
-was moving the allocator at every setting and the metadata note was blind to it.
+Use the kernel descriptor's `.amdhsa_next_free_vgpr` as the combined allocation
+count before granule rounding. In the tested LLVM 22 / Triton 3.5–3.8 artifacts,
+AMDHSA `.vgpr_count` is also **combined**, while LLVM `; NumVgprs:` is architectural
+and `; NumAgprs:` is accumulator-only. Do not add AGPR to `.vgpr_count` again or
+label that metadata field architectural-only. Front-end `n_regs` and profiler
+fields have their own contracts and must not be substituted based on the name.
+The shared `amd_resources.py` records provenance and prefers descriptor totals;
+missing architectural counts remain unknown.
 
 **And the allocation is one layer below even that.** What the hardware reads is
 `GRANULATED_WORKITEM_VGPR_COUNT` = `COMPUTE_PGM_RSRC1[5:0]` of the 64-byte kernel descriptor,
@@ -178,11 +180,10 @@ with `allocated = (granulated + 1) * 8` = `ceil8(ceil4(next_free_vgpr))`. Measur
 builds the round-up is **0 to +7**, never negative, and **zero exactly when `next_free_vgpr` is
 already a multiple of 8** — which *measures* granule 8 rather than citing it.
 
-This third layer bites precisely where the first two **agree**. On a default build
-`.vgpr_count == .amdhsa_next_free_vgpr` (36 of 36 hint-free builds in one lane) and the
-agreement reads as confirmation; neither field is the allocation. One measured cell: printed
-**97** says `512/97 = 5` waves/SIMD, allocated **104** says 4. *Two fields agreeing is not two
-measurements agreeing when neither one is the quantity.*
+Agreement between `.vgpr_count` and `.amdhsa_next_free_vgpr` does not remove the
+need to round to the architecture's allocation granule. For example, a count of
+97 rounds to 104 with an 8-register granule: the register bound is 4 waves/SIMD,
+not `512 // 97 = 5`. Both metadata fields describe the same compilation.
 
 **Round before comparing two configurations, not after.** The ladder above is already rounded;
 the number the artifact hands you is not, so the natural workflow compares unrounded counts

@@ -81,11 +81,33 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# The main profiler operates in its workload environment. External-container
+# task capture is supported by capture.sh; mixing host baseline and container
+# optional layers in one report would describe different executions.
+if [ -n "${TILE_KERNEL_CONTAINER:-}" ]; then
+    echo "profile_kernel.sh must run inside the workload environment with TILE_KERNEL_CONTAINER unset; use capture.sh for external-container task capture." >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
 KT_DIR="$SCRIPT_DIR/kernel_tools"
 RV3_SAFE="$KT_DIR/rocprofv3_safe.sh"
 source "$SCRIPT_DIR/profile_policy.sh"
+
+# Reuse a validated outer GEAK lease for every layer. Calling gpu_lock again
+# would deadlock or fail, while skipping ownership checks could profile another GPU.
+OWNERSHIP_RC=0
+python3 "$SCRIPT_DIR/gpu_ownership.py" --gpu-spec "$GPU_ID" || OWNERSHIP_RC=$?
+[ "$OWNERSHIP_RC" -le 1 ] || exit 2
+run_gpu() {
+    if [ "$OWNERSHIP_RC" = 0 ]; then
+        python3 "$SCRIPT_DIR/workspace_sources.py" check --workspace "$PWD" || return 2
+        "$@"
+    else
+        bash "$GPU_LOCK" "$GPU_ID" "$@"
+    fi
+}
 
 WARMUP_RUNS="${WARMUP_RUNS:-3}"
 # Arch detection masks rocminfo to the requested GPUs, so it needs plain ids, not a group spec.
@@ -94,6 +116,7 @@ case "$GPU_ID" in
     pool:*:*) _ARCH_IDS="${GPU_ID#pool:*:}" ;;
     *) _ARCH_IDS="$GPU_ID" ;;
 esac
+[ "$OWNERSHIP_RC" != 0 ] || _ARCH_IDS="$HIP_VISIBLE_DEVICES"
 DETECTED_ARCH="$(GPU_ID="$_ARCH_IDS" profile_detect_arch)"
 PROFILER_PRIORITY="${PROFILER_PRIORITY:-$(profiler_priority_for_arch "$DETECTED_ARCH")}"
 RPC_PROFILE_ARGS="${RPC_PROFILE_ARGS:---no-roof}"
@@ -129,7 +152,7 @@ echo ""
 echo "=== Warmup ($WARMUP_RUNS runs) ==="
 for i in $(seq 1 "$WARMUP_RUNS"); do
     echo "Warmup run $i/$WARMUP_RUNS..."
-    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" > /dev/null 2>&1 || true
+    run_gpu bash -c "$BENCHMARK_CMD" > /dev/null 2>&1 || true
 done
 
 # Step 2: Try each installed profiler until one produces real artifacts (csv/json/txt
@@ -169,13 +192,13 @@ run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump 
     mkdir -p "$workload"
     echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
     local rc=0
-    bash "$GPU_LOCK" "$GPU_ID" \
+    run_gpu \
         "$tool" profile $RPC_PROFILE_ARGS -n "$workload" -- bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; return 1; fi
     if [ -d "$workload" ]; then
         echo "=== $tool analyze (full, unparsed) ===" >> "$REPORT"
-        bash "$GPU_LOCK" "$GPU_ID" "$tool" analyze -p "$workload" >> "$REPORT" 2>&1 || true
+        run_gpu "$tool" analyze -p "$workload" >> "$REPORT" 2>&1 || true
     fi
     if profiler_artifacts_ok "$workload"; then
         PROFILE_SUCCESS=true
@@ -191,8 +214,8 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
     mkdir -p "$dir"
     echo "=== Profiling with rocprofv3 ($RPV3_TRACE_ARGS) ==="
     local rc=0
-    bash "$GPU_LOCK" "$GPU_ID" \
-        rocprofv3 $RPV3_TRACE_ARGS -d "$dir" -- bash -c "$BENCHMARK_CMD" \
+    run_gpu \
+        bash "$KT_DIR/rocprofv3_env.sh" $RPV3_TRACE_ARGS -d "$dir" -- bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/rocprofv3_run.log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprofv3 "$rc" RPV3_TRACE_ARGS "$OUTPUT_DIR/rocprofv3_run.log"; fi
     # Surface every artifact rocprofv3 produced into the report (generic: no fixed filename glob).
@@ -201,6 +224,13 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
         { echo ""; echo "=== rocprofv3 artifact: $f ==="; cat "$f"; } >> "$REPORT" 2>/dev/null || true
     done < <(find "$dir" -type f \( -name '*.csv' -o -name '*.json' -o -name '*.txt' \) 2>/dev/null | sort)
     if [ "$rc" -eq 0 ] && profiler_artifacts_ok "$dir"; then
+        # Default tracing shares the same dispatch validation as optional passes.
+        # Explicit non-trace RPV3_TRACE_ARGS overrides retain main's generic raw
+        # artifact contract; their custom profiler format is read by the engineer.
+        if [[ " $RPV3_TRACE_ARGS " == *" --kernel-trace "* ]]; then
+            python3 "$KT_DIR/profiler_artifacts.py" --out "$dir" --mode trace --kernel . \
+                > "$OUTPUT_DIR/baseline_trace_artifacts.json" || return 1
+        fi
         PROFILE_SUCCESS=true
         return 0
     fi
@@ -215,7 +245,7 @@ run_rocprof() {          # legacy: rocprof --stats (HIP dispatch stats).
     local log="$OUTPUT_DIR/rocprof_run.log"
     echo "=== Profiling with rocprof ($RPROF_ARGS) ==="
     local rc=0
-    bash "$GPU_LOCK" "$GPU_ID" \
+    run_gpu \
         rocprof $RPROF_ARGS -o "$output" bash -c "$BENCHMARK_CMD" \
         > "$log" 2>&1 || rc=$?
     { cat "$log"; echo ""; } >> "$REPORT" 2>/dev/null || true
@@ -235,7 +265,7 @@ run_metrix() {           # generic/extensible profiler: env-driven (METRIX_ARGS)
     echo "=== Profiling with metrix ($METRIX_ARGS) ==="
     local rc=0
     # No hardcoded flags: pass METRIX_ARGS through and hint the output dir via env (ignored if unused).
-    bash "$GPU_LOCK" "$GPU_ID" env METRIX_OUTPUT_DIR="$dir" \
+    run_gpu env METRIX_OUTPUT_DIR="$dir" \
         metrix $METRIX_ARGS bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/metrix_run.log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then emit_profiler_failure metrix "$rc" METRIX_ARGS "$OUTPUT_DIR/metrix_run.log"; fi
@@ -266,7 +296,7 @@ if [ "$PROFILE_SUCCESS" = false ]; then
     echo ""
     echo "=== Fallback: benchmark-only (no usable profiler output) ==="
     PROFILER="benchmark-only"
-    bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || true
+    run_gpu bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || true
 fi
 
 # Step 3 (optional layers): each one degrades -- records why -- instead of failing the profile.
@@ -347,18 +377,23 @@ for name, counters in groups:
         rc = subprocess.call(["bash", safe, "--gpu", gpu, "--kernel", kernel, "--out", d,
                               "--pmc", " ".join(sub), "--timeout", timeout, "--cmd", bench])
         print(f"pass {name}#{n['i']} {sub} rc={rc}", flush=True)
-        return rc
+        try:
+            outcome = json.load(open(os.path.join(d, "rocprofv3_safe.json")))
+        except (OSError, ValueError):
+            outcome = {"state": "error", "reason": "missing_collection_status"}
+        return {**outcome, "rc": rc}
     record["groups"][name] = parse_pmc.collect_pmc_group(counters, run_pass)
+record["state"] = parse_pmc.collection_state(record["groups"].values())
 json.dump(record, open(os.path.join(out, "pmc_collection.json"), "w"), indent=1)
 PY
-    python3 "$KT_DIR/parse_pmc.py" "$dir" "" --arch "${DETECTED_ARCH:-}" > "$dir/pmc_summary.txt" 2>&1 || true
-    local dropped
-    dropped="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(c for g in d["groups"].values() for c in g["dropped"]))' "$dir/pmc_collection.json" 2>/dev/null || echo "?")"
-    LAYER_PMC="collected:$mode"
-    [ -n "$dropped" ] && LAYER_PMC="partial:$mode"
-    layer_note "PMC layer ($mode, kernel~=$KERNEL_FILTER) -- parse_pmc summary" \
+    python3 "$KT_DIR/parse_pmc.py" "$dir" "$KERNEL_FILTER" --regex --arch "${DETECTED_ARCH:-}" > "$dir/pmc_summary.txt" 2>&1 || true
+    local state
+    state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$dir/pmc_collection.json" 2>/dev/null || echo failed)"
+    LAYER_PMC="$state:$mode"
+    layer_note "PMC layer ($LAYER_PMC, kernel~=$KERNEL_FILTER)" \
         "$(cat "$dir/pmc_summary.txt" 2>/dev/null)" \
-        "${dropped:+counters dropped (abort/timeout alone, unavailable on this box): $dropped}"
+        "Pass outcomes, missing counters and errors: $dir/pmc_collection.json"
+
 }
 
 run_att_layer() {
@@ -373,38 +408,52 @@ run_att_layer() {
     bash "$RV3_SAFE" --gpu "$GPU_ID" --kernel "$KERNEL_FILTER" --out "$dir" --att \
         --timeout "${PROFILE_ATT_TIMEOUT:-600}" --cmd "$BENCHMARK_CMD" > "$OUTPUT_DIR/att_run.log" 2>&1 || rc=$?
     if [ "$rc" -eq 3 ]; then
-        LAYER_ATT="degraded:decoder_absent"
-        layer_note "ATT layer DEGRADED" "rocprof-trace-decoder not found (GEAK does not vendor it); export" \
-            "ROCPROF_ATT_LIBRARY_PATH=<dir holding librocprof-trace-decoder.so> to enable --att."
+        local reason
+        reason="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$dir/rocprofv3_safe.json" 2>/dev/null || echo dependency_probe_failed)"
+        LAYER_ATT="degraded:$reason"
+        layer_note "ATT layer DEGRADED" "$reason; see $dir/att_dependencies.json and kernel_tools/profiling-dependencies.md."
         return 0
     fi
-    disp="$(find "$dir" -maxdepth 3 -type d -name 'ui_output_agent_*' 2>/dev/null | head -1 || true)"
-    if [ -n "$disp" ] && grep -q '"code": *null' "$disp/code.json" 2>/dev/null; then
-        # the traced CU caught no waves: retry once selecting every SIMD
-        move_aside "$dir"
-        bash "$RV3_SAFE" --gpu "$GPU_ID" --kernel "$KERNEL_FILTER" --out "$dir" --att-wide \
-            --timeout "${PROFILE_ATT_TIMEOUT:-600}" --cmd "$BENCHMARK_CMD" >> "$OUTPUT_DIR/att_run.log" 2>&1 || rc=$?
-        disp="$(find "$dir" -maxdepth 3 -type d -name 'ui_output_agent_*' 2>/dev/null | head -1 || true)"
-    fi
-    if [ -z "$disp" ] || [ ! -f "$disp/code.json" ]; then
-        LAYER_ATT="degraded:no_trace(rc=$rc)"
-        layer_note "ATT layer DEGRADED" "rocprofv3 --att produced no decoded dispatch (rc=$rc); see att_run.log."
-        return 0
-    fi
-    python3 "$KT_DIR/hotspot_analyzer.py" "$disp" --topk 15 --mode both > "$dir/hotspots.txt" 2>&1 || true
+    local state reason
+    state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$dir/rocprofv3_safe.json" 2>/dev/null || echo error)"
+    reason="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason", "unknown"))' "$dir/rocprofv3_safe.json" 2>/dev/null || echo missing_status)"
+    disp="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("att_dispatch", ""))' "$dir/rocprofv3_safe.json" 2>/dev/null || true)"
+    case "$state" in
+        ok|partial) ;;
+        *) LAYER_ATT="failed:$reason(rc=$rc)"
+           [ "$state" != unavailable ] || LAYER_ATT="unavailable:$reason"
+           layer_note "ATT layer $LAYER_ATT" "See $dir/rocprofv3_safe.json and att_run.log."
+           return 0 ;;
+    esac
+    local analysis_rc=0
+    python3 "$KT_DIR/hotspot_analyzer.py" "$disp" --topk 15 --mode both \
+        --arch "${DETECTED_ARCH:-}" --kernel "$KERNEL_FILTER" > "$dir/hotspots.txt" 2>&1 || analysis_rc=$?
     LAYER_ATT="collected"
+    [ "$state" != partial ] || LAYER_ATT="partial:$reason"
+    [ "$analysis_rc" -eq 0 ] || LAYER_ATT="partial:analysis_failed(rc=$analysis_rc)"
     layer_note "ATT layer (kernel~=$KERNEL_FILTER) -- hotspot_analyzer" "dispatch: $disp" "$(cat "$dir/hotspots.txt" 2>/dev/null)"
 }
 
 run_spi_layer() {
-    local dir="$OUTPUT_DIR/spi" workload="$OUTPUT_DIR/${PROFILER}_workload"
+    local dir="$OUTPUT_DIR/spi" workload="$OUTPUT_DIR/${PROFILER}_workload" rc=0
     move_aside "$dir"; mkdir -p "$dir"
     case "$PROFILER" in
         rocprof-compute|omniperf)
             if [ -d "$workload" ]; then
-                bash "$GPU_LOCK" "$GPU_ID" "$PROFILER" analyze -p "$workload" --block 6.2 2.1.15 \
-                    > "$dir/spi_limiter.txt" 2>&1 || true
-                LAYER_SPI="collected:rocprof-compute"
+                run_gpu "$PROFILER" analyze -p "$workload" --block 6.2 2.1.15 \
+                    > "$dir/spi_limiter.txt" 2>&1 || rc=$?
+                LAYER_SPI="failed:rocprof-compute(rc=$rc)"
+                if [ "$rc" = 0 ]; then
+                    LAYER_SPI="unavailable:spi_metrics"
+                    if python3 - "$KT_DIR" "$dir/spi_limiter.txt" <<'PY_SPI'
+import sys
+sys.path.insert(0, sys.argv[1])
+import parse_rc
+metrics = parse_rc.parse_rc_analyze(sys.argv[2])
+raise SystemExit(not any(v is not None for v in metrics["spi_insufficient"].values()))
+PY_SPI
+                    then LAYER_SPI="collected:rocprof-compute"; fi
+                fi
                 layer_note "SPI occupancy-limiter ($PROFILER analyze --block 6.2 2.1.15)" "$(cat "$dir/spi_limiter.txt")"
                 return 0
             fi ;;
@@ -412,8 +461,15 @@ run_spi_layer() {
     if [ -n "${PROFILE_SPI_COUNTERS:-}" ] && command -v rocprofv3 &> /dev/null && select_kernel; then
         bash "$RV3_SAFE" --gpu "$GPU_ID" --kernel "$KERNEL_FILTER" --out "$dir/pmc_spi" \
             --pmc "${PROFILE_SPI_COUNTERS//,/ }" --timeout "${PROFILE_PMC_TIMEOUT:-150}" \
-            --cmd "$BENCHMARK_CMD" > "$dir/spi_run.log" 2>&1 || true
-        LAYER_SPI="collected:rocprofv3"
+            --cmd "$BENCHMARK_CMD" > "$dir/spi_run.log" 2>&1 || rc=$?
+        local state
+        state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$dir/pmc_spi/rocprofv3_safe.json" 2>/dev/null || echo error)"
+        case "$state" in
+            ok) LAYER_SPI="collected:rocprofv3" ;;
+            unavailable) LAYER_SPI="unavailable:spi_metrics" ;;
+            partial) LAYER_SPI="partial:rocprofv3" ;;
+            *) LAYER_SPI="failed:rocprofv3(rc=$rc)" ;;
+        esac
         layer_note "SPI occupancy-limiter (rocprofv3 --pmc $PROFILE_SPI_COUNTERS)" "raw CSVs under $dir/pmc_spi"
         return 0
     fi

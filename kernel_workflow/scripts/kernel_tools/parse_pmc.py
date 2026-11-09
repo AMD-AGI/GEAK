@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import csv
 import glob
+import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -115,14 +117,22 @@ def collect_pmc_group(counters, run_pass, is_abort=None):
     alone (unavailable on this box). Deterministic; no GPU needed for the bisection logic itself."""
     if is_abort is None:
         is_abort = lambda rc: rc is not None and (rc < 0 or rc in (124, 134))
-    passes, dropped = [], []
+    passes, dropped, failed, partial = [], [], [], []
 
     def _try(group):
         if not group:
             return
-        rc = run_pass(list(group))
+        outcome = run_pass(list(group))
+        rc = outcome.get("rc") if isinstance(outcome, dict) else outcome
+        if rc == 0:
+            passes.append(list(group))
+            return
+        if isinstance(outcome, dict) and outcome.get("state") == "partial":
+            partial.append({"counters": list(group), **outcome})
+            return
         if not is_abort(rc):
-            passes.append(list(group))      # collected OK (rc may be 0 or a benign non-abort)
+            detail = outcome if isinstance(outcome, dict) else {"rc": rc, "state": "error"}
+            failed.append({"counters": list(group), **detail})
             return
         if len(group) == 1:
             dropped.append(group[0])         # this single counter overflows the box -> unavailable
@@ -132,7 +142,20 @@ def collect_pmc_group(counters, run_pass, is_abort=None):
         _try(group[mid:])
 
     _try(list(counters))
-    return {"passes": passes, "dropped": dropped}
+    return {"passes": passes, "dropped": dropped, "failed": failed, "partial": partial}
+
+
+def collection_state(groups):
+    """Summarize verified pass outcomes, independently of the profile's default layer."""
+    groups = list(groups)
+    usable = any(g["passes"] or g.get("partial") for g in groups)
+    incomplete = any(g["dropped"] or g.get("failed") or g.get("partial") for g in groups)
+    if usable:
+        return "partial" if incomplete else "collected"
+    failures = [item for g in groups for item in g.get("failed", [])]
+    if failures and all(item.get("state") == "unavailable" for item in failures):
+        return "unavailable"
+    return "failed" if failures or any(g["dropped"] for g in groups) else "unavailable"
 
 
 def _dispatch_duration(row, meta, seen_dispatch):
@@ -161,7 +184,7 @@ def _ingest_long(reader, kfilter, vals, meta, seen_dispatch):
     n = 0
     for row in reader:
         kn = row.get("Kernel_Name", "")
-        if kfilter and kfilter not in kn:
+        if kfilter and not (kfilter.search(kn) if hasattr(kfilter, "search") else kfilter in kn):
             continue
         try:
             vals[row["Counter_Name"]].append(float(row["Counter_Value"]))
@@ -193,7 +216,7 @@ def _ingest_wide(reader, kfilter, vals, meta, seen_dispatch):
     n = 0
     for row in reader:
         kn = row.get("Kernel_Name", "")
-        if kfilter and kfilter not in kn:
+        if kfilter and not (kfilter.search(kn) if hasattr(kfilter, "search") else kfilter in kn):
             continue
         n += 1
         _dispatch_duration(row, meta, seen_dispatch)
@@ -242,6 +265,11 @@ def parse_pmc(prof_dir: str, kfilter: str = "_attn_fwd") -> dict:
                 continue
             seen.add(path)
             try:
+                status_path = os.path.join(os.path.dirname(path), "rocprofv3_safe.json")
+                if os.path.isfile(status_path):
+                    with open(status_path) as state_file:
+                        if json.load(state_file).get("state") not in ("ok", "partial"):
+                            continue
                 with open(path) as f:
                     reader = csv.DictReader(f)
                     cols = set(reader.fieldnames or [])
@@ -250,7 +278,7 @@ def parse_pmc(prof_dir: str, kfilter: str = "_attn_fwd") -> dict:
                     elif "Kernel_Name" in cols:
                         _ingest_wide(reader, kfilter, vals, meta, seen_dispatch)
                     # else: unrecognized CSV; skip
-            except OSError:
+            except (OSError, ValueError):
                 continue
     meta["duration_ns"] = _median(meta["durations_ns"])
     meta["n_dispatches"] = len(meta["durations_ns"])
@@ -456,6 +484,9 @@ def main() -> None:
         for name, counters in PMC_GROUPS.items():
             print(f"{name}: {' '.join(counters)}")
         return
+    use_regex = "--regex" in argv
+    if use_regex:
+        argv.remove("--regex")
     arch = None
     if "--arch" in argv:
         i = argv.index("--arch")
@@ -465,7 +496,7 @@ def main() -> None:
         sys.exit("usage: parse_pmc.py <rocprofv3_out_dir> [kernel_substr] [--arch gfxNNN] | --print-groups")
     prof_dir = argv[0]
     kfilter = argv[1] if len(argv) > 1 else "_attn_fwd"
-    parsed = parse_pmc(prof_dir, kfilter)
+    parsed = parse_pmc(prof_dir, re.compile(kfilter) if use_regex else kfilter)
     vals, meta = parsed["vals"], parsed["meta"]
     print(f"=== {prof_dir}  (kernel filter: {kfilter!r}) ===")
     if not vals:

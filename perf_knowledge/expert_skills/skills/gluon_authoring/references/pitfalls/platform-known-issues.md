@@ -337,8 +337,8 @@ is a schedule that was taken away from you**, and no kernel-side lever will win 
 and counter naming/semantics on RDNA4 client parts are not the same as on Instinct
 (CDNA), and client-GPU PMC profiling is less complete. CDNA counter names
 (`SQ_WAVES` / `VALUInsts` / the `MfmaUtil` / `VALUBusy` family) may be absent or differ.
-The ISA caveat may apply to other gfx1201 products, but GEAK's calibrated
-product policy and evidence remain R9700-only.
+This PMC evidence remains R9700-only. GEAK serving policy also covers R9600D;
+that policy does not validate PMC availability on another product.
 
 Decision rule (per-box preflight):
 - Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3-avail list --pmc` and
@@ -370,48 +370,23 @@ Decision rule: on gfx1201 attention kernels served under a CUDA graph, keep
 
 ## Container-locus profiling defects (host ⇄ kernel-container split)
 
-These bite ONLY when the kernel runs in a **separate container** from the host that drives
-`capture.sh` (now `kernel_workflow/scripts/kernel_tools/capture.sh`, under GEAK's profiler entry
-`kernel_workflow/scripts/profile_kernel.sh`) (`TILE_KERNEL_CONTAINER` set, profilers wrapped via `locus.sh`). On a single-host
-setup they do not fire. Each was hit in a real run; the workaround is proven, the root fix is
-noted for whoever next has the actual two-container box to verify on — do **not** apply a
-host-side `readlink -f` blind, because the container may see the bind-mount at a *different*
-absolute path and a wrong "fix" writes profiler output to the wrong place silently instead of
-failing loudly.
+These historical failures explain the shared tools' host/container contract. They apply when
+`TILE_KERNEL_CONTAINER` selects a separate execution container. Current wrappers map paths and
+forward the selected environment through `locus.sh`; do not reintroduce the old application-side
+workarounds or set a device independently of GEAK's allocation.
 
-- **Relative `-d`/`-w` output dir resolves INSIDE the container → every profiler layer silently
-  degrades to PMC-blind.** `capture.sh` / `rocprof_compute_probe.sh` hand a relative `$OUT` to
-  `locus_run` (= `docker exec [-w $TILE_KERNEL_CONTAINER_WORKDIR]`); with no workdir the container
-  CWD is `/`, so rocprofv3 writes to `/exp/.../kt` *inside* the container and the host-side parse
-  finds nothing → `balanced` from a missing layer (a confident WRONG class, not "no data").
-  **Workaround:** `export TILE_KERNEL_CONTAINER_WORKDIR=<abs work_root>` so relative paths resolve
-  to the same bind-mounted path both sides. **Root fix (needs the container to verify):** resolve
-  `$OUT` to the *container-visible* absolute path before `locus_run`, or default the workdir to the
-  bind-mount root.
+| Historical failure | Current contract to check |
+| --- | --- |
+| A relative output directory was resolved inside the container while the host parser read another path | Resolve host output paths, map them to the configured container mount, and check that the outputs are shared before collection |
+| `docker exec` omitted the selected GPU and compiler environment | Shared `locus.sh` forwards the declared variables; `gpu_ownership.py` checks inherited ownership before reuse, and rocprofv3 collapses HIP-inside-ROCR to the selected devices |
+| IR compilation ran on the host with a cache unavailable to the container | `dump_ir.sh` executes through the configured locus with a mapped cache; source and output identities stay with the capture |
+| rocprof-compute collected inside the container but analyzed with a different host installation | Explicit diagnostic profile/analyze use the same locus and tool environment; an imported workload must be analyzed with its compatible ROCm environment |
 
-- **`locus_run` forwards NO env into `docker exec`.** `HIP_VISIBLE_DEVICES` / `TRITON_*` are not
-  passed, so a profiler pass can land on the container's default GPU — a correctness *and* courtesy
-  hazard on a shared box where the run owns only some GPUs. **Workaround:** acquire the GPU through
-  `kernel_workflow/scripts/gpu_lock.sh <gpu_id> <command...>` (the only GPU lock; it exports the
-  locked device and `GEAK_GPU_LOCK_HELD`), and have the app set that device in-process before
-  importing torch, so every pass lands right regardless of the wrapper. Never prefix a profiler
-  command with an inline `HIP_VISIBLE_DEVICES=`. **Root fix:** `locus_run` should
-  `-e HIP_VISIBLE_DEVICES` (and `TRITON_*`) when set.
-
-- **`dump_ir.sh` (`kernel_workflow/scripts/kernel_tools/dump_ir.sh`) runs the app host-side with a host `/tmp` `TRITON_CACHE_DIR`** a container locus
-  cannot see → the static-ISA layer is structurally undumpable on a container task. **Workaround:**
-  have the app re-enter the container with `TRITON_CACHE_DIR` redirected to a bind-mounted path,
-  then copy artifacts back to where `dump_ir.sh` expects them. **Root fix:** route the compile
-  through `locus.sh` with a bind-mounted cache.
-
-- **`rocprof-compute profile` runs in-container but `analyze` runs host-side** (ROCm minors differ,
-  e.g. 7.1 vs 7.2) → `PermissionError` / missing-package aborts, and a rocprof-compute workload dir
-  is not portable across ROCm minors anyway. This is why a `rc_profile.log` path can be cited that
-  does not exist host-side (now handled: the probe prints the tail inline or says the log is
-  container-side). **Workaround:** a PATH shim that re-execs host-side `rocprof-compute` into the
-  container. **Root fix:** run `analyze` through the SAME `locus.sh` as `profile`. Until then SOL is
-  optional (`../method/profile.md ### 3.2 Evidence layers: the floor, and the full read`) —
-  ATT + static are the required pair and both run through `rocprofv3` alone.
+CPU fixtures validate command routing, environment and failure reporting. They do not establish
+physical-device identity across arbitrary container mappings, profiler ABI compatibility or usable
+GPU counters. Keep missing/failed layers explicit and verify those properties in the actual workload
+container before quoting measured evidence. See [`../method/geak-integration.md`](../method/geak-integration.md)
+and [`../method/profile.md`](../method/profile.md).
 
 ## How to use this file
 

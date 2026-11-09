@@ -127,6 +127,10 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
+if str(GEAK_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(GEAK_ROOT / "scripts"))
+import hardware_context as _hardware_context  # noqa: E402 (repository-local module)
+
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
 RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
@@ -599,6 +603,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
         "target": target,
         "marketing_name": str(identity.get("marketing_name") or ""),
         "physical_cu_count": int(identity.get("physical_cu_count") or 0),
+        **{key: identity[key] for key in ("sku", "visible_gpu_agents", "compute_partition",
+            "memory_partition", "memory_bytes", "agents") if identity.get(key) is not None},
     }
 
 
@@ -784,6 +790,24 @@ def map_args(
             "expected_device_name": gpu_identity["marketing_name"],
             "expected_physical_cu_count": gpu_identity["physical_cu_count"],
         })
+        # Old explicit pins can omit CU/name; keep them as expectations, not facts.
+        context = None
+        if gpu_identity["physical_cu_count"] > 0:
+            context = _hardware_context.build(gpu_identity)
+        supplied = h.get("hardware_context") or (h.get("state") or {}).get("hardware_context")
+        if supplied is not None:
+            supplied = _hardware_context.load(supplied)
+            observed = supplied["observed"]
+            if (observed["gfx"] != gpu_identity["gfx"] or
+                    (gpu_identity["marketing_name"] and observed["marketing_name"] != gpu_identity["marketing_name"]) or
+                    (context and not _hardware_context.same_device_scope(context, supplied, allow_enrichment=True))):
+                raise ValueError("hardware_context disagrees with expected GPU identity")
+            context = supplied
+        if context is not None:
+            ps_args["hardware_context"] = context
+            ps_args["expected_sku"] = context["sku"]
+        if h.get("hardware_context_path"):
+            ps_args["hardware_context_path"] = h["hardware_context_path"]
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
     # Launch identity for the execution tracker. A nonce allocated HERE -- before
@@ -1218,7 +1242,9 @@ def apply_workload_spec(h: dict) -> dict:
         ("corpus", "AGENTX_DATASET"),
         ("canonical_corpus", "AGENTX_CANONICAL_DATASET"),
         ("num_entries", "AGENTX_NUM_ENTRIES"),
+        ("canonical_num_entries", "AGENTX_CANONICAL_NUM_ENTRIES"),
         ("duration_s", "GEAK_AGENTX_DURATION_S"),
+        ("canonical_duration_s", "AGENTX_CANONICAL_DURATION"),
         ("geak_loop_duration_s", "GEAK_AGENTX_LOOP_DURATION_S"),
         ("warmup_requests_per_lane", "AGENTX_WARMUP_REQUESTS_PER_LANE"),
         ("warmup_grace_period_s", "AGENTX_WARMUP_GRACE_PERIOD"),
@@ -1266,24 +1292,16 @@ def agentx_preflight(h: dict) -> list[str]:
     this model is a ~20 minute detour to reach a one-line error. This states the
     gap at dispatch instead.
 
-    Returns human-readable problem strings (empty when the run can proceed).
-    Deliberately NON-fatal: PATH inside the bench subprocess is not always the
-    PATH here, so a hard abort could refuse a run that would have worked.
+    Returns human-readable problem strings (empty when the run can proceed). It
+    only reports; agentx_refusal decides which problem stops the run.
     """
     spec = h.get("workload_spec")
     if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
         return []
     problems: list[str] = []
-    aiperf_bin = os.environ.get("AIPERF_BIN", "").strip() or "aiperf"
-    if not (
-        shutil.which(aiperf_bin)
-        or (os.path.isabs(aiperf_bin) and os.access(aiperf_bin, os.X_OK))
-    ):
-        problems.append(
-            f"aiperf not found on PATH (looked for {aiperf_bin!r}); the AgentX "
-            "client cannot replay traces. Install the AgentX-capable aiperf "
-            "into this environment, or set AIPERF_BIN to its path."
-        )
+    client_problem = _agentx_client_problem(spec)
+    if client_problem:
+        problems.append(client_problem[0])
     # The mapper is only a real gap when the vendored fallback is missing too.
     # GEAK ships a copy beside the client adapter precisely so a run without an
     # InferenceX checkout is not a failure; reporting its absence as a problem
@@ -1304,6 +1322,72 @@ def agentx_preflight(h: dict) -> list[str]:
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
     return problems
+
+
+def agentx_refusal(h: dict) -> str | None:
+    """Why an AgentX run must stop before its first server launch, or None.
+
+    A client named by an absolute path that cannot start is refused: no PATH can
+    change that. A bare name that does not resolve only warns, since PATH inside
+    the bench subprocess is not always the PATH here; GEAK_STRICT_AGENTX_PREFLIGHT=1
+    refuses it too.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    problem = _agentx_client_problem(spec)
+    if problem and (problem[1] or _env_flag("GEAK_STRICT_AGENTX_PREFLIGHT")):
+        return problem[0]
+    return None
+
+
+def _agentx_client_problem(spec: dict) -> tuple[str, bool] | None:
+    """Why the AgentX client cannot start here, and whether that holds on any PATH.
+
+    Resolved in the bench's order: AIPERF_BIN from the environment, else the
+    declaration's aiperf_bin (bench_env.sh assigns it only when the environment
+    left it unset), else aiperf on PATH.
+    """
+    client = (
+        os.environ.get("AIPERF_BIN", "").strip()
+        or str(spec.get("aiperf_bin") or "").strip()
+        or "aiperf"
+    )
+    if os.path.isabs(client):
+        why = _client_start_problem(client)
+        return (f"the AgentX client {client} {why}", True) if why else None
+    found = shutil.which(client)
+    if not found:
+        missing = (
+            f"aiperf not found on PATH (looked for {client!r}); the AgentX "
+            "client cannot replay traces. Install the AgentX-capable aiperf "
+            "into this environment, or set AIPERF_BIN to its path."
+        )
+        return missing, False
+    why = _client_start_problem(found)
+    return (f"the AgentX client {client!r} resolves to {found}, which {why}", False) if why else None
+
+
+def _client_start_problem(path: str) -> str | None:
+    """Why exec() of ``path`` fails here, or None when nothing says it would.
+
+    X_OK alone passes a venv's console script whose interpreter is gone. The venv's
+    python links to the interpreter that built it, outside the venv (uv installs its
+    own), so a container without that interpreter cannot start the script.
+    """
+    if not os.path.isfile(path):
+        return "does not exist"
+    if not os.access(path, os.X_OK):
+        return "is not executable"
+    bin_dir = os.path.dirname(os.path.realpath(path))
+    venv_python = os.path.join(bin_dir, "python")
+    if (
+        os.path.isfile(os.path.join(os.path.dirname(bin_dir), "pyvenv.cfg"))
+        and os.path.islink(venv_python)
+        and not os.path.exists(venv_python)
+    ):
+        return f"is in a venv whose interpreter is gone ({venv_python} -> {os.readlink(venv_python)})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -7872,6 +7956,7 @@ def main(argv: list[str]) -> int:
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
+    workload_refusal = agentx_refusal(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
@@ -7881,6 +7966,7 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,
                           "agentx_preflight_problems": workload_preflight,
+                          "agentx_refusal": workload_refusal,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
@@ -8108,6 +8194,14 @@ def main(argv: list[str]) -> int:
                           "result_json": str(result_path),
                           "speedup": cached_out.get("throughput_speedup")}))
         return 0 if cached_out.get("status") != "error" else 1
+
+    if workload_refusal:
+        sys.stderr.write(f"GEAK e2e: refusing before any server launch: {workload_refusal}\n")
+        refused = _emit(error=workload_refusal, error_class="agentx_client_unavailable")
+        print(json.dumps({"status": refused.get("status"),
+                          "result_json": str(result_path),
+                          "speedup": refused.get("throughput_speedup")}))
+        return 0 if refused.get("status") != "error" else 1
 
     out: dict = {}
     wf: dict | None = None

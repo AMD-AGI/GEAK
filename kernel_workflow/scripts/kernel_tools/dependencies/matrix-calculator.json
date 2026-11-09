@@ -1,0 +1,15 @@
+{
+  "schema": "geak.tool-dependency.v1",
+  "name": "amd_matrix_instruction_calculator",
+  "repository": "https://github.com/ROCm/amd_matrix_instruction_calculator.git",
+  "commit": "2ef91896bcdc4d26624f952e5c905c787cd9bc9e",
+  "version": "1.3.2",
+  "license": "MIT",
+  "files": {
+    "matrix_calculator.py": "53b027855ca44120401eeff69f41961821d1a393b163e112f7aa4d2a313e185d",
+    "LICENSE": "d9df59fe2eb53910bf6d1c97a316b7510f1356946ee110dbb54e9d40508b2f91"
+  },
+  "requirements": "matrix-requirements.txt",
+  "python": ">=3.10",
+  "scope": "Optional CPU matrix facts/layout/locate for CDNA1/2/3 and RDNA3/4; gfx950 uses committed data."
+}

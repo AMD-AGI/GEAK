@@ -38,7 +38,7 @@ sources:
 | CUs/XCD | **32 active** | a workgroup lives on one CU on one XCD |
 | SIMD/CU | **4** | occupancy per-SIMD |
 | Wave slots | 8/SIMD → 32/CU | hard cap |
-| VGPR | 512 ×4 B/SIMD, ArchVGPR + AGPR combined, **granule 8** | AGPRs (≤256) share the file and count toward occupancy (`vgpr_alloc_granule`, [`../data/hw_constants.json`](../data/hw_constants.json)) |
+| VGPR | 512 register slots/lane (128 KiB/SIMD across 64 lanes), ArchVGPR + AGPR combined, **granule 8** | AGPRs (≤256) share the file and count toward occupancy (`vgpr_alloc_granule`, [`../data/hw_constants.json`](../data/hw_constants.json)) |
 | LDS | **160 KiB/CU**, **64 banks**, **256 B/clk** | 2.5× CDNA3; re-tune bank padding |
 | GLOBAL_LOAD_LDS | **128-bit/lane** (1/2/4/12/16 DWORD) | direct g→LDS, bigger than CDNA3's 32-bit |
 | L2 | per-XCD | not global |

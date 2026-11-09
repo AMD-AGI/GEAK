@@ -24,7 +24,7 @@ merely because they exist.
 | who drives | GEAK `kernel_workflow` injects this skill (`use_gluon_skill=auto`, on supported Triton/Gluon lanes) into its existing roles; GEAK's phases (Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine. tech_lead dispatches **one** `deep_explore` direction; the deep_engineer carries entry → climb in its own loop |
 | the skill's role | advisory: what to measure, which layer, which gate a round owes, the record contract |
 | acceptance timing | `verify_engineer` / `measure_legs` via `e2e_workflow/scripts/harness_lib.py`; commit gate `MIN_IMPROVE` = 2% (a measured noise band only stricter); Director validates and arbitrates; `ab_bench.py` is screening only |
-| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; the pack's broker (`scheduler/`) only with `GEAK_GPU_BROKER=1` |
+| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; existing multi-GPU leases when the task requires them |
 | requests (`resweep_request`, `structure_suspect`) and the closure self-review | in the deep_engineer's `worker_result`; tech_lead turns a request into the next round's direction, Director quotes the self-review when arbitrating |
 
 The evidence owed is the same in every round: **budget / roofline before authoring**, and a **re-profile
@@ -173,8 +173,8 @@ refuses.
 | plain front end (other skill / GEAK) | [`front-end.md`](front-end.md) | plain strategies and lever recipes, bucket dispatch | triton pack `knob_probe.py`, `plain_autotune.py`; `scripts/create_harness.py` |
 | `transcribe` | [`transcribe.md`](transcribe.md) | the faithful anchor and its divergence ledger; the equivalence gate | `scripts/ttgir_bridge.py recover|verify|view`, `recover_gluon.py` (anchor assembly), `ttgir_to_gluon.py`; KT `dump_ir.sh`, `probe.py` |
 | `recover` | [`recover.md`](recover.md) | debt attribution, hand-written repayment, parity disposition; re-injection as diagnostic / last resort | `scripts/parity_gate.py`, `pipeline_survey.py`; last resort / diagnostic only: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` |
-| `evidence` | [`profile.md`](profile.md) | the four dials A/B/C/D, bound class, degrade ladder | `kernel_workflow/scripts/profile_kernel.sh <gpu_id> <cmd> <out>` under `gpu_lock.sh`; KT `capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_*.py`, `mfma_efficiency.py`, `asm_loop_audit.py`, `layout_facts.py`, `amd_occupancy.py` |
-| `climb` | [`climb.md`](climb.md) | which layer, which mechanism, keep / mature / revert | KT `probe.py`, `gfx950_isa.py`, `asm_schedule_viz.py`; `scripts/lever_index.py`, `served_envelope.py`, `ab_bench.py` (screening) |
+| `evidence` | [`profile.md`](profile.md) | the four dials A/B/C/D, bound class, degrade ladder | `kernel_workflow/scripts/profile_kernel.sh <gpu_id> <cmd> <out>` under `gpu_lock.sh`; KT `capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `mfma_efficiency.py`, `asm_loop_audit.py`, `layout_facts.py`, `amd_occupancy.py` |
+| `climb` | [`climb.md`](climb.md) | which layer, which mechanism, keep / mature / revert | KT `probe.py`, `gfx950_isa.py`, `asm_loop_audit.py`; `served_envelope.py`, `ab_bench.py` (screening) |
 | timing / harness (every stage that measures) | [`benchmark-hygiene.md`](benchmark-hygiene.md) | is the number a number | `e2e_workflow/scripts/harness_lib.py` (acceptance), `scripts/create_harness.py`, `parse_correctness.py`, `ab_bench.py` (screening) |
 | `close` | [`close.md`](close.md) | outcome, dispatch, closure self-review (`closure_review.md`), provenance, final report | `scripts/canonical_record.py`, `close_audit.py`, `report_lint.py` (optional bookkeeping) |
 | records (all stages) | [`records.md`](records.md) | the ledgers and the experiment contract | `scripts/canonical_record.py`, `recordctl.py`, `round_record.py` |
@@ -247,8 +247,8 @@ DSL-neutral hard rules. They bind every round, whether or not this page is resid
   Code physically blocks other source access. Correct the documentation when the request demonstrates a
   documentation defect. Tools are invoked by the paths in the table above.
 - Benchmark hygiene is mandatory: isolate source roots, imports, caches, artifacts, harness, shape stream,
-  and timing configuration; match the production boundary. Acceptance timing is GEAK's `harness_lib`
-  contract; GPU access goes through `kernel_workflow/scripts/gpu_lock.sh`, never an inline
+  and timing configuration; match the production boundary. Acceptance uses GEAK's frozen task
+  contract (`harness_lib` for extracted-task runners); GPU access goes through `kernel_workflow/scripts/gpu_lock.sh`, never an inline
   `HIP_VISIBLE_DEVICES` ([`benchmark-hygiene.md`](benchmark-hygiene.md)).
 - **An arm is not disposed of until its record has been re-read.** When a round fanned work out to parallel
   arms, re-read each arm's record *at the moment you rank them* — the file on disk, not the copy you

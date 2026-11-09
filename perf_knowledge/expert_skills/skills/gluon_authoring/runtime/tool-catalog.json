@@ -335,87 +335,12 @@
       "reason": "legacy or unverified command contract"
     },
     {
-      "name": "asm_schedule_viz",
-      "classification": "developer_only",
-      "path": "scripts/asm_schedule_viz.py",
-      "command": [
-        "python3",
-        "scripts/asm_schedule_viz.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
-      "name": "att_merge_perfetto",
-      "classification": "developer_only",
-      "path": "scripts/att_merge_perfetto.py",
-      "command": [
-        "python3",
-        "scripts/att_merge_perfetto.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
       "name": "att_opclass",
       "classification": "internal",
       "path": "scripts/att_opclass.py",
       "command": [
         "python3",
         "scripts/att_opclass.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "att_timeline",
-      "classification": "developer_only",
-      "path": "scripts/att_timeline.py",
-      "command": [
-        "python3",
-        "scripts/att_timeline.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
-      "name": "att_to_perfetto",
-      "classification": "developer_only",
-      "path": "scripts/att_to_perfetto.py",
-      "command": [
-        "python3",
-        "scripts/att_to_perfetto.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
-      "name": "audit_journal",
-      "classification": "internal",
-      "path": "scheduler/audit_journal.py",
-      "command": [
-        "python3",
-        "scheduler/audit_journal.py"
       ],
       "flags": [],
       "interface": {
@@ -656,21 +581,6 @@
       "description": "Select one named bounded slice or exact artifact reference from a stage-context package."
     },
     {
-      "name": "core",
-      "classification": "internal",
-      "path": "scheduler/core.py",
-      "command": [
-        "python3",
-        "scheduler/core.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "create_harness",
       "classification": "internal",
       "path": "scripts/create_harness.py",
@@ -792,7 +702,7 @@
         "bounded_bench",
         "skeptic"
       ],
-      "description": "Offline gfx950/CDNA4 ISA reference -- the WHOLE 608-page ISA document is transcribed into three committed databases, so on gfx950 never render or fetch the PDF and never assert a hardware fact from memory. No network, no GPU, no PDF. START WITH `search <term>`: it queries all three at once. `layout`/`locate`/`facts`/`modifiers`/`sparse` = MFMA operand layout, lane/VGPR/byte for A,B,C,D (ch.7). `opcodes`/`encoding`/`format` = all 1240 instructions and 33 encodings plus their pseudo-code (ch.12-13). `regs`/`waitcnt`/`waits`/`hazard`/`lds`/`mem`/`limits`/`concepts`/`tables` = registers, wait states and manual NOPs, LDS and memory model, programming limits (ch.1-6, 8-11). `errata` = known errors in the printed document -- read it before hand-assembling or trusting a printed opcode. Every answer prints a `# provenance:` line with the ISA page to cite."
+      "description": "Compatibility entry for the shared AMD ISA dispatcher, retaining the historic gfx950 default. New callers should use amd_isa --arch with an explicit target. Data/source caveats are printed per query; broad gfx950 coverage does not imply complete hardware validation."
     },
     {
       "name": "gluon_swp",
@@ -810,57 +720,12 @@
       "reason": "legacy or unverified command contract"
     },
     {
-      "name": "gpu_broker",
-      "classification": "internal",
-      "path": "scheduler/gpu_broker.py",
-      "command": [
-        "python3",
-        "scheduler/gpu_broker.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "gpu_client",
-      "classification": "internal",
-      "path": "scheduler/gpu_client.py",
-      "command": [
-        "python3",
-        "scheduler/gpu_client.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "gpu_lock",
       "classification": "internal",
       "path": "scripts/gpu_lock.sh",
       "command": [
         "bash",
         "scripts/gpu_lock.sh"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "group_identity",
-      "classification": "internal",
-      "path": "scheduler/group_identity.py",
-      "command": [
-        "python3",
-        "scheduler/group_identity.py"
       ],
       "flags": [],
       "interface": {
@@ -997,21 +862,6 @@
         "skeptic"
       ],
       "description": "One-key MFMA/WMMA operand-layout preflight, and the single entry point for ISA questions on ANY AMD arch -- it routes to whichever source can answer. Run it BEFORE authoring a matrix / low-precision / transpose lever: a scale or operand LAYOUT mismatch is the top cause of a kernel that compiles and returns wrong numbers, and this generates the authoritative table instead of guessing. `layout_facts.py <arch> <instr> [--layout]` gives dims, cycles, dtypes and the A/B lane-VGPR table. The instruction chapters are reachable through the same entry point on gfx950, cdna3, rdna3 and rdna4: `layout_facts.py <arch> encoding|format|opcodes|search|errata ...` answers from the in-pack databases with no network and no calculator. Layout for cdna1/2/3 and rdna3/4 needs the Matrix Calculator -- check `hw_sources.sh preflight` first. Every answer prints a `# provenance:` line to cite."
-    },
-    {
-      "name": "lever_index",
-      "classification": "internal",
-      "path": "scripts/lever_index.py",
-      "command": [
-        "python3",
-        "scripts/lever_index.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
     },
     {
       "name": "locus",
@@ -1349,21 +1199,6 @@
       }
     },
     {
-      "name": "residency",
-      "classification": "internal",
-      "path": "scheduler/residency.py",
-      "command": [
-        "python3",
-        "scheduler/residency.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
       "name": "rocprof_compute_probe",
       "classification": "internal",
       "path": "scripts/rocprof_compute_probe.sh",
@@ -1451,21 +1286,6 @@
         "fleet"
       ],
       "description": "Fleet-only generator and verifier for isolated container runtime environment contracts."
-    },
-    {
-      "name": "serve_traces",
-      "classification": "developer_only",
-      "path": "scripts/serve_traces.py",
-      "command": [
-        "python3",
-        "scripts/serve_traces.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
     },
     {
       "name": "served_envelope",
@@ -1588,66 +1408,6 @@
       "description": "Build one bounded, hash-addressed stage-context package from explicitly named metadata references."
     },
     {
-      "name": "test_broker_integration",
-      "classification": "internal",
-      "path": "scheduler/tests/test_broker_integration.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_broker_integration.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "test_foreign_accounting",
-      "classification": "internal",
-      "path": "scheduler/tests/test_foreign_accounting.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_foreign_accounting.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "test_scheduler_core",
-      "classification": "internal",
-      "path": "scheduler/tests/test_scheduler_core.py",
-      "command": [
-        "python3",
-        "scheduler/tests/test_scheduler_core.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "legacy or unverified command contract"
-    },
-    {
-      "name": "tile_trace",
-      "classification": "developer_only",
-      "path": "scripts/tile_trace.py",
-      "command": [
-        "python3",
-        "scripts/tile_trace.py"
-      ],
-      "flags": [],
-      "interface": {
-        "help": "unverified",
-        "describe": "unavailable"
-      },
-      "reason": "library, demo, graph/visualization, migration, or build helper"
-    },
-    {
       "name": "toolctl",
       "classification": "public",
       "path": "scripts/toolctl.py",
@@ -1724,6 +1484,62 @@
         "describe": "unavailable"
       },
       "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "amd_isa",
+      "classification": "public",
+      "path": "scripts/amd_isa.py",
+      "command": [
+        "python3",
+        "scripts/amd_isa.py"
+      ],
+      "flags": [
+        "--help",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "independent_direction",
+        "direct_owner",
+        "arm",
+        "deep",
+        "bounded_bench",
+        "skeptic"
+      ],
+      "description": "Shared GEAK AMD ISA entry. Require --arch gfx942|gfx950|gfx1201 (or a supported family); capabilities --json reports providers and gaps. Encoding is local; gfx942/gfx1201 matrix facts/layout/locate use the installed AMD Matrix Instruction Calculator. gfx942/gfx1201 structured prose facts are not extracted. Static evidence is not measured TraceLens roofline or a numerical kernel test."
+    },
+    {
+      "name": "emit_gluon",
+      "classification": "internal",
+      "path": "scripts/emit_gluon.py",
+      "command": [
+        "python3",
+        "scripts/emit_gluon.py"
+      ],
+      "flags": [
+        "--help"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "Gluon-specific adapter called only after successful shared IR capture; source transcription remains in the authoring pack."
     }
   ]
 }

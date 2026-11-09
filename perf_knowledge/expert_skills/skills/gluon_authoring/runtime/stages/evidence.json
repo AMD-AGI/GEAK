@@ -56,6 +56,7 @@
     "allowed": [
       "canonical_record",
       "context_query",
+      "amd_isa",
       "gfx950_isa",
       "hw_sources",
       "layout_facts",
@@ -68,6 +69,7 @@
       "deep": [
         "canonical_record",
         "context_query",
+        "amd_isa",
         "gfx950_isa",
         "hw_sources",
         "layout_facts",
@@ -80,6 +82,7 @@
     "public": [
       "canonical_record",
       "context_query",
+      "amd_isa",
       "gfx950_isa",
       "hw_sources",
       "layout_facts",

@@ -2,7 +2,7 @@
 
 The ISA guidance in this file applies to **RDNA 4 client gfx1201**. Product
 validation, serving images, and calibrated peaks apply specifically to the
-**Radeon AI PRO R9700**. A different gfx1201 product remains uncalibrated. This
+**Radeon AI PRO R9700 and R9600D**. Other gfx1201 products remain reference-only. This
 is not Instinct CDNA. Do **not** apply
 `amd_instinct.md` §2–3 (wave64, MFMA tiles, FNUZ/MX, 512-VGPR combined formula) to this box.
 
@@ -67,7 +67,7 @@ products remain `unknown-device-not-r9700`.
 
 Regenerated on 2026-09-21 with AMD clang 23.0.0git from the pinned ROCm 10
 R9700 image using
-`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
+`python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`. The breakpoints matched the prior LLVM 22
 sweep.
 

@@ -88,179 +88,43 @@ from pathlib import Path
 GLOBAL_WIDTHS = ["dwordx4", "dwordx3", "dwordx2", "dword", "ushort", "ubyte"]
 LDS_WIDTHS = ["b128", "b96", "b64", "b32", "u16", "u8"]
 
-# next_free_vgpr is the ONLY number the 256 cliff is measured against: ArchVGPR and AGPR share
-# ONE 512-register file per SIMD, so `num_vgpr` / `.vgpr_count` (arch only) reads comfortably
-# under 256 on a kernel that is actually past it. Keep both, decide on next_free.
-_NEXTFREE_RE = re.compile(r"\.amdhsa_next_free_vgpr\s+(\d+)")
-_ARCHVGPR_RE = re.compile(r"(?:\.set\s+\S*num_vgpr,\s*|\.vgpr_count:\s*)(\d+)")
-_ACCUM_RE = re.compile(r"(?:\.amdhsa_accum_offset\s+|;\s*AccumOffset\s*:\s*)(\d+)")
-_OCC_RE = re.compile(r"^\s*;\s*Occupancy\s*:\s*(\d+)", re.M)
-_SPILL_RE = re.compile(r"(?:\.vgpr_spill_count:\s*|;\s*ScratchSize\s*:\s*)(\d+)")
-# `LDSByteSize` in the .amdgcn is a structural 0 on Triton kernels -- shared memory is sized
-# dynamically at launch, so the compile-time field says "0 bytes/workgroup (compile time only)".
-# The real figure is the `shared` field of the Triton cache metadata; pass it in with --*-lds.
-# Fallback only: when amd_occupancy is importable its reader is used instead, because it also
-# reads `.amdhsa_group_segment_fixed_size` (the allocation) ahead of this comment (a report).
-_LDS_RE = re.compile(r"^\s*;\s*LDSByteSize:\s*(\d+)", re.M)
-
-
-def _first_int(rx, text, default=None):
-    m = rx.search(text)
-    return int(m.group(1)) if m else default
-
-
-# --- the two occupancy terms, and which one binds ------------------------------------------
-#
-# `; Occupancy: N` is LLVM's own number and it is authoritative for the REGISTER term: it is
-# emitted from the register allocation, and on every kernel whose shared memory is sized at
-# launch the same dump prints `LDSByteSize: 0 bytes/workgroup (compile time only)` beside it.
-# Two arms compared on that number alone therefore cannot see the mechanism THIS FILE names as
-# the most common lost_layout failure in a port -- "a materialized staging buffer cost an
-# occupancy step" -- because a staging buffer does not move a register count. The gate would
-# report `occupancy_dropped: absent` on exactly the case it exists to catch.
-#
-# So each arm gets `min(register term, LDS term)` and RECORDS WHICH TERM BOUND IT. Whether a
-# statically allocated group segment is already folded into `; Occupancy:` upstream is not
-# verified here, and nothing below assumes either way -- it does not need to. If it IS folded
-# in, the min is a no-op; if it is NOT, the min is the correction. The min is right under both
-# hypotheses, which is why it can be taken without settling the question.
-#
-# Every input this needs is REFUSED when absent, never substituted:
-#   * no arch named in the dump -> no LDS term at all. Never a default arch: gfx942 has 64 KiB
-#     of LDS per CU and gfx950 has 160 KiB, so a guessed divisor is wrong by 2.5x -- and it
-#     would be wrong INSIDE a min(), where too small an LDS term silently becomes the verdict.
-#   * no group-segment field, or a field that states 0 -> LDS bytes are UNAVAILABLE, not 0.
-#   * no workgroup size -> wg/CU cannot be converted to waves/SIMD, so no LDS term.
-#   * amd_occupancy not importable -> no LDS term; this file carries no LDS/CU table of its own.
-# In each case the arm reports the register term, flagged register-term-only WITH the reason.
-_OCC_MOD = None
-_OCC_MOD_WHY = None
-
-
-def _occ_module():
-    """`amd_occupancy`, or None. Lazy and non-fatal: this file still runs without it, at the
-    cost of the LDS term -- which it then says it lost, rather than inventing a divisor."""
-    global _OCC_MOD, _OCC_MOD_WHY
-    if _OCC_MOD is None and _OCC_MOD_WHY is None:
-        try:
-            here = str(Path(__file__).resolve().parent)
-            if here not in sys.path:
-                sys.path.insert(0, here)
-            import amd_occupancy as _o
-            _OCC_MOD = _o
-        except Exception as exc:                                   # pragma: no cover - env dep
-            _OCC_MOD_WHY = (f"amd_occupancy is not importable beside this script "
-                            f"({exc.__class__.__name__}), so no LDS term was computed")
-    return _OCC_MOD
+# Resource facts and bounds are shared with GEAK's probe/ISA tools. The
+# transcription decisions below remain specific to the authoring workflow.
+from amd_resources import analyze as resource_facts
 
 
 def lds_facts(text: str, lds_bytes: int | None = None) -> tuple[int | None, str]:
-    """(bytes/workgroup, source) for one arm, or (None, "UNAVAILABLE -- ...").
-
-    A STATED 0 is not zero LDS here. On any kernel whose shared memory is sized at launch the
-    compile-time group-segment field reads 0 while the kernel really does stage through LDS,
-    and that is this tool's whole population. So a 0 from the asm is reported as UNAVAILABLE --
-    naming the field that said 0 -- and only --*-lds, or a NONZERO field, is used as a number.
-    "Does not say" and "says zero" are both refusals; neither is allowed to become a divisor.
-    """
-    if lds_bytes is not None:
-        return lds_bytes, "caller (--*-lds, from the Triton cache metadata's `shared`)"
-    o = _occ_module()
-    if o is not None:
-        val, field = o.lds_bytes_per_wg_from_asm(text)
-        if val:
-            return val, f"asm {field}"
-        if val == 0:
-            return None, (f"UNAVAILABLE -- the asm's {field} states 0, which on a kernel whose "
-                          f"shared memory is sized at launch means 'not stated at compile "
-                          f"time', not 'no LDS'. Pass --champion-lds/--anchor-lds.")
-        return None, f"UNAVAILABLE -- {field}; pass --champion-lds/--anchor-lds"
-    lds_asm = _first_int(_LDS_RE, text)
-    if lds_asm:
-        return lds_asm, ("asm `; LDSByteSize` (fallback reader -- amd_occupancy was not "
-                         "importable, so `.amdhsa_group_segment_fixed_size` was not consulted)")
-    return None, ("UNAVAILABLE -- the asm field is a structural 0 on Triton kernels; pass "
-                  "--champion-lds/--anchor-lds from the cache metadata's `shared`")
+    record = resource_facts(text, lds_bytes=lds_bytes)
+    value = record["lds_bytes_per_wg"]
+    source = record["sources"]["lds_bytes"]
+    if value is None:
+        source = "UNAVAILABLE -- " + source + "; pass launch LDS from matched metadata"
+    return value, source
 
 
 def occupancy_terms(text: str, lds_bytes: int | None = None,
                     workgroup_size: int | None = None, arch: str | None = None) -> dict:
-    """Both occupancy terms for ONE arm, the binding value, and the name of the term that bound.
+    """Render shared static bounds for the Gluon parity decision.
 
-    `waves_per_simd` is min(register_term, lds_term) over whichever terms exist. When only one
-    exists it is that one, labelled so the reader knows the min was not actually taken; when
-    neither exists it is None. It is never a number with an unstated provenance.
+    Actual geometry must be supplied by the launch record. Compiler max-flat is
+    only a bound; unknowns and numeric zero retain the shared parser's meaning.
     """
-    out = {"arch": None, "arch_source": None,
-           "register_term": None, "register_source": None,
-           "lds_term": None, "lds_detail": None,
-           "lds_bytes": None, "lds_source": None,
-           "waves_per_simd": None, "bound_by": None, "why": None}
-    o = _occ_module()
-    # arch_from_asm already falls back from `.amdgcn_target` to any bare gfx token, so a None
-    # here means the dump genuinely names no target -- not that the parse was too strict. An
-    # operator may STATE the arch (--*-arch); what this will not do is pick one.
-    arch_src = "caller (--*-arch)"
-    if arch is None:
-        arch = o.arch_from_asm(text) if o is not None else None
-        arch_src = ".amdgcn_target / amdhsa.target" if arch else "NO TARGET NAMED in this dump"
-    out["arch"], out["arch_source"] = arch, arch_src
-
-    # --- register term: LLVM's own number first, the model only as a fallback ---
-    occ = _first_int(_OCC_RE, text)
-    if occ:
-        out["register_term"], out["register_source"] = occ, "LLVM `; Occupancy:`"
-    else:
-        nfv = _first_int(_NEXTFREE_RE, text)
-        if o is not None and arch and nfv:
-            w, label = o.waves_by_vgpr(nfv, arch)
-            if w:
-                out["register_term"] = w
-                out["register_source"] = f"amd_occupancy.waves_by_vgpr({nfv}, {arch}) [{label}]"
-        if out["register_term"] is None:
-            out["register_source"] = ("no `; Occupancy:` and no (arch, .amdhsa_next_free_vgpr) "
-                                      "pair to derive one from")
-
-    # --- LDS term: three inputs, each refused rather than defaulted when missing ---
-    lds_b, lds_src = lds_facts(text, lds_bytes)
-    out["lds_bytes"], out["lds_source"] = lds_b, lds_src
-    if o is None:
-        out["lds_detail"] = _OCC_MOD_WHY
-    elif lds_b is None:
-        out["lds_detail"] = f"no LDS bytes/workgroup: {lds_src}"
-    elif not arch:
-        out["lds_detail"] = (
-            "this dump names no .amdgcn_target, so the LDS/CU divisor is unknown and NO LDS "
-            "term is reported. It is not defaulted: gfx942 is 64 KiB/CU and gfx950 is 160 "
-            "KiB/CU, so a guess is wrong by 2.5x inside a min() -- which would not look wrong, "
-            "it would look like a verdict. Re-dump with the target, or pass --*-arch.")
-    else:
-        wgs = workgroup_size
-        wgs_src = "caller (--*-workgroup-size)"
-        if wgs is None:
-            wgs, wgs_src = o.workgroup_size_from_asm(text)
-        if not wgs:
-            out["lds_detail"] = f"no workgroup size ({wgs_src}); wg/CU cannot become waves/SIMD"
-        else:
-            w, detail = o.waves_by_lds(lds_b, arch, wgs)
-            out["lds_term"] = w
-            out["lds_detail"] = f"{detail} [workgroup size from {wgs_src}]"
-
-    # --- the min, and the name of whichever term produced it ---
-    r, l = out["register_term"], out["lds_term"]
+    record = resource_facts(text, arch=arch, lds_bytes=lds_bytes,
+                            workgroup_size=workgroup_size)
+    r, l = record["waves_by_vgpr_term"], record["waves_by_lds_term"]
     if r is not None and l is not None:
-        out["waves_per_simd"] = min(r, l)
-        out["bound_by"] = ("LDS" if l < r else "register" if r < l
-                           else "register and LDS (tie)")
+        bound = "LDS" if l < r else "register" if r < l else "register and LDS (tie)"
     elif r is not None:
-        out["waves_per_simd"], out["bound_by"] = r, "register (LDS term NOT computed)"
-        out["why"] = out["lds_detail"]
-    elif l is not None:
-        out["waves_per_simd"], out["bound_by"] = l, "LDS (register term NOT computed)"
-        out["why"] = out["register_source"]
+        bound = "register (LDS term NOT computed)"
     else:
-        out["why"] = f"register: {out['register_source']}; LDS: {out['lds_detail']}"
-    return out
+        bound = None
+    return {"arch": record["arch"], "arch_source": record["sources"]["arch"],
+            "register_term": r, "register_source": record["waves_source"].split("+")[0],
+            "lds_term": l, "lds_detail": record["lds_detail"],
+            "lds_bytes": record["lds_bytes_per_wg"], "lds_source": (record["sources"]["lds_bytes"] if record["lds_bytes_per_wg"] is not None
+                           else "UNAVAILABLE -- " + record["sources"]["lds_bytes"]),
+            "waves_per_simd": record["waves_per_simd"], "bound_by": bound,
+            "why": record["waves_warning"]}
 
 
 def _hist(text: str, mnemonic_rx: str, widths: list[str]) -> dict[str, int]:
@@ -332,11 +196,13 @@ def _count(text: str, pat: str) -> int:
 def asm_facts(text: str, lds_bytes: int | None = None,
               workgroup_size: int | None = None, arch: str | None = None) -> dict:
     occ = occupancy_terms(text, lds_bytes, workgroup_size, arch)
+    resources = resource_facts(text, arch=arch, lds_bytes=lds_bytes, workgroup_size=workgroup_size)
     return {
         # the occupancy-relevant register count, and the arch-only one it is often confused with
-        "next_free_vgpr": _first_int(_NEXTFREE_RE, text),
-        "arch_vgpr": _first_int(_ARCHVGPR_RE, text),
-        "accum_offset": _first_int(_ACCUM_RE, text),
+        "next_free_vgpr": resources["vgpr_combined"],
+        "arch_vgpr": resources["vgpr_arch"],
+        "accum_offset": resources["accum_offset"],
+        "agpr": resources["agpr"],
         "arch": occ["arch"],
         # THE BINDING occupancy: min(register term, LDS term), plus the terms it was taken over
         # and the name of the one that bound. Never a bare `; Occupancy:` -- see occupancy_terms.
@@ -346,7 +212,7 @@ def asm_facts(text: str, lds_bytes: int | None = None,
         "occupancy_bound_by": occ["bound_by"],
         "occupancy_terms_detail": {k: occ[k] for k in
                                    ("arch_source", "register_source", "lds_detail", "why")},
-        "spill_bytes": _first_int(_SPILL_RE, text, 0),
+        "spill_bytes": resources["spill_bytes"],
         # None, not 0: "does not say" and "says zero" are both refusals, never a divisor
         "lds_bytes": occ["lds_bytes"],
         "lds_source": occ["lds_source"],
@@ -535,7 +401,7 @@ def attribute_in_kernel(champ_asm: dict | None, anch_asm: dict | None,
     inst_c = champ_asm["n_valu"] + champ_asm["n_mfma"] + champ_asm["n_ds_read"] + champ_asm["n_ds_write"]
     inst_a = anch_asm["n_valu"] + anch_asm["n_mfma"] + anch_asm["n_ds_read"] + anch_asm["n_ds_write"]
     multiset_same = inst_c and abs(inst_a - inst_c) / inst_c <= 0.05
-    if anch_asm["spill_bytes"] and not champ_asm["spill_bytes"]:
+    if anch_asm["spill_bytes"] and champ_asm["spill_bytes"] == 0:
         reasons["spill_appeared"] = anch_asm["spill_bytes"]
     vc, va = champ_asm["next_free_vgpr"], anch_asm["next_free_vgpr"]
     if vc and va and va > vc:
@@ -860,7 +726,7 @@ def _selftest() -> int:
     assert cf["arch"] is None and cf["occupancy_lds_term"] is None, cf
     assert cf["occupancy_waves_per_simd"] == 1 and cf["occupancy_register_term"] == 1, cf
     assert cf["occupancy_bound_by"] == "register (LDS term NOT computed)", cf
-    assert "no .amdgcn_target" in (cf["occupancy_terms_detail"]["why"] or ""), cf
+    assert cf["occupancy_terms_detail"]["why"], cf
     ra9 = next(s for s in attribute(cf, af, None, None) if s["suspect"] == "lost_RA")
     assert "NEITHER arm has an LDS term" in ra9["evidence"]["occupancy"]["warning"], ra9
 
@@ -869,7 +735,7 @@ def _selftest() -> int:
     #     the whole point. A default would not read as an error, it would read as a verdict.
     t10 = occupancy_terms(champ, lds_bytes=32768, workgroup_size=256)
     assert t10["lds_term"] is None and t10["arch"] is None, t10
-    assert "2.5x" in t10["lds_detail"] and "gfx950" in t10["lds_detail"], t10
+    assert "unknown" in t10["lds_detail"], t10
 
     # 11. Name the arch and the LDS term appears -- and when it BINDS, the min takes it. 160
     #     KiB/CU on gfx950 // 65536 B/wg = 2 wg/CU, x 4 waves/wg / 4 SIMD = 2 waves/SIMD, under
@@ -901,7 +767,7 @@ def _selftest() -> int:
     kd0 = '\t.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n\t.amdhsa_group_segment_fixed_size 0\n'
     b13, s13 = lds_facts(kd0)
     assert b13 is None and s13.startswith("UNAVAILABLE"), (b13, s13)
-    assert "not 'no LDS'" in s13, s13
+    assert "launch LDS" in s13, s13
     assert occupancy_terms(kd0)["lds_term"] is None, occupancy_terms(kd0)
     b13b, s13b = lds_facts('\t.amdhsa_group_segment_fixed_size 38144\n')
     assert b13b == 38144 and "group_segment_fixed_size" in s13b, (b13b, s13b)

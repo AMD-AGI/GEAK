@@ -13,8 +13,8 @@ reports SIGNALS ONLY -- the structural-vs-schedulable VERDICT stays with the age
       ``s_wait_alu depctr_*`` / ``s_delay_alu`` are ALU-dependency waits, not memory
       drains -- they are counted on their own line and kept OUT of the drain ratio;
   (3) producer<->consumer sync barriers per iteration;
-  (4) ``s_nop`` count + requested stall cycles = the exposed FIXED-latency hazard
-      (e.g. MFMA/WMMA-write -> VALU-read), hidden by unroll/occupancy, never by reorder.
+  (4) ``s_nop`` instruction count, raw immediate sum and per-immediate counts.
+      These are static encoding observations, not measured stall time or a causal diagnosis.
 
 Matrix engines: CDNA MFMA (``v_mfma`` / ``v_smfmac``) and RDNA WMMA (``v_wmma``) are
 both classified as "mfma" — the audit treats any matrix-multiply instruction the same
@@ -31,14 +31,14 @@ Input forms (both accepted):
   (b) ``llvm-objdump -d`` of a prebuilt ``.hsaco`` / ``.co`` — labels are
       ``<hexaddr> <name>:``. Use this for a **prebuilt comparator** (e.g. a vendor asm
       kernel) where no ``.amdgcn`` source exists. Such a dump is the WHOLE function with
-      nested back-edges, so auto-detect may pick an *outer* loop; pass ``--loop-label``
-      with the inner MFMA loop's label to pin it.
+      nested back-edges; check the automatically selected scope and pass ``--loop-label``
+      to pin the intended loop when needed.
 
 Usage:
   python3 asm_loop_audit.py <file.s> [--loop-label .LBB0_5] [--max-stream 400]
 
-If --loop-label is omitted the hottest back-edge loop (most MFMA, tie-break longest)
-is auto-detected.
+If --loop-label is omitted, prefer innermost back-edge loops, then most matrix instructions,
+then the shortest body. With no back-edge, a bounded whole-kernel body is audited explicitly.
 """
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ import os
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 
 
 def _load_amd_occupancy():
@@ -158,93 +159,10 @@ def _mnemonic(line: str) -> str | None:
 #       / `.amdhsa_next_free_sgpr 96`  (LLVM AMDGPU, all gfx9/10/11/12 -- arch-agnostic).
 #   (b) .amdgpu_metadata YAML tail:     `.vgpr_count: 244` / `.sgpr_count: 96` / `.agpr_count: 0`.
 # next_free_vgpr = ArchVGPR + AGPR combined budget on CDNA (matches calc_perf.py KD occupancy).
-_KD_RE = {
-    "vgpr":       re.compile(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)"),
-    "sgpr":       re.compile(r"^\s*\.amdhsa_next_free_sgpr\s+(\d+)"),
-    "accum_off":  re.compile(r"^\s*\.amdhsa_accum_offset\s+(\d+)"),
-}
-_MD_RE = {
-    "vgpr":  re.compile(r"^\s*\.vgpr_count:\s*(\d+)"),
-    "sgpr":  re.compile(r"^\s*\.sgpr_count:\s*(\d+)"),
-    "agpr":  re.compile(r"^\s*\.agpr_count:\s*(\d+)"),
-}
-
 # A module may hold SEVERAL kernels. `.type <name>,@function` opens each one; an objdump-style
 # disasm has no `.type`, so `.amdhsa_kernel <name>` is the fallback anchor. The `.amdgpu_metadata`
 # YAML tail repeats every name and is NOT an anchor -- it would invent a second span per kernel.
-_KSTART_RE = re.compile(r"^\s*(?:\.type\s+([A-Za-z_$][\w$.]*)\s*,\s*@function"
-                        r"|\.amdhsa_kernel\s+([A-Za-z_$][\w$.]*))")
-_MD_TAIL_RE = re.compile(r"^\s*\.amdgpu_metadata\b")
-
-
-def kernels_in_asm(lines: list[str]) -> list[tuple[str, int, int]]:
-    """Every kernel in the dump as (name, start_idx, end_idx_exclusive), in file order.
-
-    Returns [] when the file names no kernel at all -- callers must treat that as "one
-    unnamed object", never as "zero kernels", because a hand-trimmed excerpt is still
-    auditable; it just cannot be labelled.
-    """
-    anchors: list[tuple[str, int]] = []
-    for i, ln in enumerate(lines):
-        if _MD_TAIL_RE.match(ln):
-            break
-        m = _KSTART_RE.match(ln)
-        if m:
-            name = m.group(1) or m.group(2)
-            if not anchors or anchors[-1][0] != name:
-                anchors.append((name, i))
-    if not anchors:
-        return []
-    # Dedupe: `.type f,@function` then `.amdhsa_kernel f` are two markers for ONE kernel.
-    uniq: list[tuple[str, int]] = []
-    for name, i in anchors:
-        if not any(n == name for n, _ in uniq):
-            uniq.append((name, i))
-    end_all = next((i for i, ln in enumerate(lines) if _MD_TAIL_RE.match(ln)), len(lines))
-    out = []
-    for k, (name, start) in enumerate(uniq):
-        end = uniq[k + 1][1] if k + 1 < len(uniq) else end_all
-        out.append((name, start, end))
-    return out
-
-
-def select_kernel(lines: list[str], want: str | None) -> tuple[list[str], str | None]:
-    """Narrow `lines` to ONE kernel, or exit listing the candidates.
-
-    The failure this exists to prevent is the quiet one. With several kernels in a module,
-    every whole-file reading silently mixes them -- the register budget maxes across them, the
-    loop picker scores loops from all of them together, and the heading names the FILE. The
-    result is a complete, internally consistent report about a kernel the reader did not ask
-    for, with nothing in it that looks wrong. So when the object is ambiguous the tool refuses
-    and lists what it found, on the same principle that the LDS divisor has no default: a
-    withheld answer is recoverable, a confident wrong one is not.
-    """
-    ks = kernels_in_asm(lines)
-    # `.amdgcn_target` is a MODULE fact that sits above the first kernel. Carry it into every
-    # slice, or narrowing the audit silently costs the arch -- and with it the occupancy verdict.
-    preamble = [ln for ln in lines[:ks[0][1]] if ".amdgcn_target" in ln] if ks else []
-    if not ks:
-        if want:
-            sys.exit(f"--kernel {want!r}: this dump names no kernel (no `.type ...,@function` "
-                     f"and no `.amdhsa_kernel`), so the name cannot be checked. Drop --kernel "
-                     f"to audit the file as one object.")
-        return lines, None
-    if want:
-        exact = [k for k in ks if k[0] == want]
-        part = exact or [k for k in ks if want in k[0]]
-        if len(part) != 1:
-            names = "\n".join(f"    {n}" for n, _, _ in ks)
-            sys.exit(f"--kernel {want!r} matches {len(part)} of {len(ks)} kernels in this dump."
-                     f" Candidates:\n{names}")
-        name, s, e = part[0]
-        return preamble + lines[s:e], name
-    if len(ks) == 1:
-        name, s, e = ks[0]
-        return preamble + lines[s:e], name
-    names = "\n".join(f"    {n}" for n, _, _ in ks)
-    sys.exit(f"this dump contains {len(ks)} kernels and no --kernel was given. Auditing all of "
-             f"them together would report one kernel's schedule under another's name, so pick "
-             f"one:\n{names}\n\n  re-run with `--kernel <name>` (a unique substring is enough).")
+from amd_artifacts import kernels_in_asm, select_kernel
 
 
 def _is_cdna_family(arch) -> bool:
@@ -272,29 +190,10 @@ def kd_regs(lines: list[str]) -> dict:
     Directive block wins over metadata YAML when both are present. Returns {} if neither seen
     (e.g. an llvm-objdump disasm with no KD) -- callers treat that as 'vgpr unavailable', never
     fabricate. On multiple kernels in one file, reports the MAX (worst-case occupancy driver)."""
-    kd: dict = {}
-    for ln in lines:
-        for key, rx in _KD_RE.items():
-            m = rx.match(ln)
-            if m:
-                kd[key] = max(kd.get(key, 0), int(m.group(1)))
-        for key, rx in _MD_RE.items():
-            m = rx.match(ln)
-            if m:
-                kd.setdefault("_md_" + key, 0)
-                kd["_md_" + key] = max(kd["_md_" + key], int(m.group(1)))
-    out: dict = {}
-    vgpr = kd.get("vgpr", kd.get("_md_vgpr"))
-    sgpr = kd.get("sgpr", kd.get("_md_sgpr"))
-    if vgpr is not None:
-        out["vgpr"] = vgpr           # next_free_vgpr = arch+accum combined (CDNA)
-    if sgpr is not None:
-        out["sgpr"] = sgpr
-    if "_md_agpr" in kd:
-        out["accum_vgpr"] = kd["_md_agpr"]
-    elif "accum_off" in kd and vgpr is not None:
-        out["accum_vgpr"] = max(0, vgpr - kd["accum_off"])
-    return out
+    from amd_resources import analyze
+    r = analyze('\n'.join(lines))
+    return {name: value for name, value in {'vgpr': r['vgpr_combined'],
+            'sgpr': r['sgpr'], 'accum_vgpr': r['agpr']}.items() if value is not None}
 
 
 def print_kd_regs(lines: list[str], arch: str | None = None) -> None:
@@ -327,20 +226,13 @@ def print_kd_regs(lines: list[str], arch: str | None = None) -> None:
             print("    waves/SIMD UNAVAILABLE -- amd_occupancy.py not importable; read LLVM's "
                   "`; Occupancy:` from the .s")
         else:
-            llvm_occ = _OCC.llvm_occupancy(text)
-            waves, model = _OCC.waves_by_vgpr(v, arch)
-            if llvm_occ is not None:
-                print(f"    -> waves/SIMD = {llvm_occ}   [LLVM `; Occupancy:` -- the REGISTER "
-                      f"TERM, computed by the backend for {arch or 'this subtarget'}]")
-                print( "       NOT the whole answer: the backend computes this against the LDS "
-                       "it can see at compile time. Take min() with the LDS budget below.")
-                if waves is not None and waves != llvm_occ:
-                    print(f"       (model for {arch} says {waves}; trust LLVM and report the "
-                          f"mismatch -- the model or the arch table is stale)")
-            elif waves is not None:
-                print(f"    -> waves/SIMD by VGPR <= {waves}   [model: {model}]")
+            from amd_resources import analyze
+            resources = analyze(text, arch=arch)
+            waves = resources['waves_by_vgpr_term']
+            if waves is None:
+                print(f"    -> waves/SIMD UNAVAILABLE: {resources['waves_warning']}")
             else:
-                print(f"    -> waves/SIMD UNAVAILABLE: {model}")
+                print(f"    -> waves/SIMD by VGPR = {waves} [{resources['waves_source']}; register bound]")
     if kd.get("accum_vgpr") is not None:
         print(f"  accum_vgpr     = {kd['accum_vgpr']}")
     if kd.get("sgpr") is not None:
@@ -374,11 +266,12 @@ def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for p in sorted(cands):
         try:
-            d = json.load(open(p))
+            d = json.loads(Path(p).read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(d, dict) and isinstance(d.get("shared"), int):
-            out.append((str(d.get("name") or os.path.basename(p))[:40], d["shared"]))
+        if (isinstance(d, dict) and type(d.get("shared")) is int and d["shared"] >= 0
+                and isinstance(d.get("name"), str) and d["name"]):
+            out.append((d["name"], d["shared"]))
     return out
 
 
@@ -401,7 +294,7 @@ def lds_per_cu(arch) -> int | None:
 
 
 def print_lds_budget(meta_path: str | None, cap: int | None,
-                     cap_src: str | None = None, kernel: str | None = None) -> None:
+                     cap_src: str | None = None, kernel: str | None = None, records=None) -> None:
     """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
     can be capped by both at once, and relieving only one buys nothing.
 
@@ -415,7 +308,7 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
     name. With a kernel named, only its entry is used; a mismatch is reported, never silently
     resolved."""
     print("LDS budget per workgroup (the SECOND occupancy limiter):")
-    kernels = lds_from_meta(meta_path) if meta_path else []
+    kernels = records if records is not None else lds_from_meta(meta_path) if meta_path else []
     if not kernels:
         print("  UNAVAILABLE -- pass --meta <ir-dir | kernel.json> (Triton cache metadata).")
         print("  Do NOT substitute the KD's group_segment_fixed_size or rocprof-compute 7.1.8: "
@@ -423,11 +316,11 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
         print("  structurally 0 for Triton kernels and will read as 'this kernel uses no LDS'.")
         print()
         return
+    if not kernel:
+        print("  UNAVAILABLE -- no observable kernel identity; launch metadata is withheld.\n")
+        return
     if kernel:
-        # Match the audited kernel. Metadata names are truncated for display, and a mangled
-        # symbol may carry a suffix the metadata name lacks, so accept containment either way.
-        hit = [kv for kv in kernels if kv[0] == kernel] or \
-              [kv for kv in kernels if kv[0] in kernel or kernel in kv[0]]
+        hit = [kv for kv in kernels if kv[0] == kernel]
         if len(hit) == 1:
             kernels = hit
         elif not hit:
@@ -443,8 +336,7 @@ def print_lds_budget(meta_path: str | None, cap: int | None,
                   f"which is this kernel's.")
             print()
             return
-    # several kernels and none named -> the MAX drives occupancy (same rule as kd_regs).
-    name, shared = max(kernels, key=lambda kv: kv[1])
+    name, shared = kernels[0]
     if not shared:
         print(f"  lds_bytes_per_wg = 0  ({name})  -> no LDS staging in this kernel")
     elif cap:
@@ -521,7 +413,7 @@ def kernel_body_span(lines: list[str]) -> tuple[str, int, int] | None:
             if not m:
                 continue
             lab = m.group("obj") or m.group("asm")
-            if lab.startswith(".LBB") or lab.startswith(".Lfunc"):
+            if lab.startswith((".LBB", ".Lfunc")):
                 continue          # a basic-block label, not the kernel entry
             start, name = i + 1, lab
             break
@@ -586,7 +478,7 @@ def parse_opcodes(path: str) -> dict[str, int]:
     out: dict[str, int] = {}
     inside = False
     try:
-        txt = open(path, errors="ignore").read()
+        txt = Path(path).read_text(errors="ignore")
     except OSError:
         return out
     for ln in txt.splitlines():
@@ -635,7 +527,8 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     opc: Counter = Counter()
     stream: list[str] = []
     relaxed = full_drain = unknown_wait = alu_waits = barriers = 0
-    nops = nop_cycles = 0
+    nops = nop_immediate_sum = 0
+    nop_immediates: Counter = Counter()
     waitcnt_detail: Counter = Counter()
     alu_detail: Counter = Counter()
     for ln in lines[start:end]:
@@ -652,7 +545,9 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
             nops += 1
             m = re.search(r"^s_nop\s+(?:0x([0-9a-fA-F]+)|(\d+))", ln.strip())
             if m:
-                nop_cycles += int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                immediate = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                nop_immediate_sum += immediate
+                nop_immediates[immediate] += 1
         if name == "aluwait":
             alu_waits += 1
             alu_detail[re.split(r";|//", ln, 1)[0].strip()] += 1
@@ -737,16 +632,21 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     print("   against per-unit busy (PMC) + overhead classes; a long VALU-only run is an")
     print("   exposed stretch no MFMA hides. Use kernel_breakdown.py to merge with PMC.)")
     print()
-    print("s_nop (exposed fixed-latency hazard, e.g. MFMA-write -> VALU-read):")
-    print(f"  count: {nops}   requested stall cycles: {nop_cycles}")
-    print("  (high s_nop => a fixed-latency hazard is NOT hidden; the fix is more")
-    print("   unroll/occupancy to fill it, NOT reorder -- reorder cannot create slack)")
+    print("s_nop (static encoding observations):")
+    print(f"  count: {nops}   raw immediate sum: {nop_immediate_sum}")
+    if nop_immediates:
+        counts = ", ".join(f"{value}={count}" for value, count in sorted(nop_immediates.items()))
+        print(f"  raw immediate counts: {counts}")
+    if nops != sum(nop_immediates.values()):
+        print(f"  unparsed immediates: {nops - sum(nop_immediates.values())}")
+    print("  (raw immediates are not measured stall time; no architecture-specific duration")
+    print("   formula is applied. Static presence alone does not establish a cause or fix.)")
     print()
-    print("VERDICT IS YOURS (signals only): scan the stream for an exposed single-class")
-    print("run with no interleaved M; ask whether any independent ready op could fill it")
-    print("(no => structural/no-slack; yes => scheduling miss). Many full drains =>")
-    print("conservative-waitcnt; barriers scaling with depth => excess-sync; high s_nop")
-    print("=> unhidden fixed-latency hazard (unroll/occupancy, not reorder). See")
+    print("VERDICT IS YOURS (signals only): inspect single-class runs and whether")
+    print("independent operations could be ready. For full drains, inspect outstanding")
+    print("dependencies; for barrier counts, inspect the synchronization protocol.")
+    print("Correlate these observations with runtime evidence before attributing a cause")
+    print("or choosing a change. Interpret s_nop with the target ISA and dependency context. See")
     print("compiler-contract.md ## Auditing the hot-loop schedule.")
 
 
@@ -852,10 +752,15 @@ def _selftest() -> int:
     # each span holds its OWN register budget -- the pre-fix whole-file scan maxed across both
     assert kd_regs(_two[_ks[0][1]:_ks[0][2]])["vgpr"] == 128
     assert kd_regs(_two[_ks[1][1]:_ks[1][2]])["vgpr"] == 16
-    assert kd_regs(_two)["vgpr"] == 128, "whole-file scan maxes -- this is what selection avoids"
+    try:
+        kd_regs(_two)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("multi-kernel resource analysis must refuse instead of mixing counts")
     # a unique substring selects; the label comes from the same call that narrows the lines
     _sel, _nm = select_kernel(_two, "tail")
-    assert _nm == "k_tail" and len(_sel) == len(_two[_ks[1][1]:_ks[1][2]]), (_nm, _sel)
+    assert _nm == "k_tail" and kd_regs(_sel)["vgpr"] == 16, (_nm, _sel)
     # ambiguity and absence both REFUSE rather than pick
     for _bad in (None, "k_"):
         try:
@@ -934,8 +839,8 @@ def main() -> None:
     # means what the help already promised: look next to <asm>.
     ap.add_argument("--meta", nargs="?", const="",
                     help="Triton cache metadata .json (or a dir to scan) for the LDS "
-                         "bytes/WG. Bare `--meta`, or omitted, defaults to the dir holding "
-                         "<asm>. The KD and rocprof-compute both report 0 LDS for Triton -- "
+                         "bytes/WG. Bare `--meta`, or omitted, uses the artifact manifest or "
+                         "same-stem metadata. The KD and rocprof-compute report 0 dynamic LDS -- "
                          "this is the only correct source.")
     # The old help said "CDNA gfx942/gfx950 64 KiB", which is wrong and contradicts this
     # pack's own arch cards: gfx950 has 160 KiB/CU.
@@ -957,7 +862,7 @@ def main() -> None:
     a = ap.parse_args()
 
     try:
-        lines = open(a.asm).read().splitlines()
+        lines = Path(a.asm).read_text().splitlines()
     except OSError as e:
         sys.exit(f"cannot read {a.asm!r}: {e}")
 
@@ -971,7 +876,7 @@ def main() -> None:
     # scored loops from every kernel at once.
     # `.amdgcn_target` precedes the first kernel, so read the arch from the whole module
     # BEFORE narrowing -- it is a property of the build, not of the kernel picked.
-    _arch = a.arch or (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None)
+    _arch = (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None) or a.arch
     lines, kname = select_kernel(lines, a.kernel)
     print(f"=== asm loop audit: {a.asm}"
           + (f"  [kernel: {kname}]" if kname else "  [single unnamed object]") + " ===\n")
@@ -985,7 +890,17 @@ def main() -> None:
         _lds, _src = a.lds_per_cu, "--lds-per-cu"
     else:
         _lds, _src = lds_per_cu(_arch), _arch
-    print_lds_budget(a.meta or os.path.dirname(os.path.abspath(a.asm)), _lds, _src, kname)
+    records = None
+    if not a.meta:
+        from amd_artifacts import inspect_artifact
+        try:
+            _name, metadata, _bound = inspect_artifact(a.asm, kernel=a.kernel)
+        except (ValueError, OSError) as exc:
+            ap.error(str(exc))
+        records = []
+        if (metadata and type(metadata.get('shared')) is int and metadata['shared'] >= 0):
+            records = [(metadata['name'], metadata['shared'])]
+    print_lds_budget(a.meta, _lds, _src, kname, records=records)
 
     loops = find_loops(lines)
     picked = pick_loop(lines, loops, a.loop_label)

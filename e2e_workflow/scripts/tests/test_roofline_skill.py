@@ -93,7 +93,7 @@ class TestPeaks(unittest.TestCase):
             "torch.half": 2.5e15,
             "bfloat16": 2.5e15,
             "float16": 2.5e15,
-            "float32": 1.57e14,
+            "float32": 1.573e14,
         }
         for dtype, peak in expected.items():
             with self.subTest(dtype=dtype):
@@ -115,8 +115,8 @@ class TestPeaks(unittest.TestCase):
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 256.0e9, delta=1e9)
         self.assertEqual(p["cu"], 40)
         self.assertEqual(p["source"], "table")
-        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 60.0e12, delta=1e11)
-        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 30.0e12, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 59.4e12, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 29.7e12, delta=1e11)
 
     def test_gfx1151_metrics_see_both_axes(self):
         """Both roofs must be live, not just the memory one. A high-AI kernel at 67% of the WMMA
@@ -127,7 +127,7 @@ class TestPeaks(unittest.TestCase):
         m = rt.roofline_metrics(2.56e6, 4e9, 100e-6, p["hbm_bw_bytes_s"],
                                 rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=20.0)
         self.assertEqual(m["bound_type"], "compute")
-        self.assertAlmostEqual(m["compute_util"], 2.0 / 3.0, places=3)
+        self.assertAlmostEqual(m["compute_util"], 40.0 / 59.4, places=3)
         self.assertAlmostEqual(m["hbm_util"], 0.1, places=3)
         self.assertIsNotNone(m["ridge_point"])
         self.assertLess(m["attainable_speedup"], 2.0)
@@ -157,7 +157,7 @@ class TestPeaks(unittest.TestCase):
         p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")
         self.assertIsNotNone(p)
         self.assertEqual(p["source"], "table")
-        self.assertEqual(p["confidence"], "high")
+        self.assertEqual(p["confidence"], "low")
         self.assertEqual(p.get("product"), "r9700")
         self.assertEqual(p["cu"], 64)
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 6.4e11, delta=1e8)
@@ -179,9 +179,8 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNone(rt.peak_flops_for(p, "fp4"))
         self.assertNotIn("fp4", p["flops"])
 
-    def test_unknown_product_identity_keeps_instinct_tables(self):
-        """gpu_identity reports target=unknown for every card except an exact R9700. Passing that
-        straight through as `product` must still find the ISA-keyed CDNA tables, not derive."""
+    def test_instinct_resolution_requires_observed_identity(self):
+        """Legacy target=unknown is not sufficient to select a full-device reference."""
         original = rt.derive_peaks_from_props
 
         def no_derive(device=0):
@@ -195,11 +194,31 @@ class TestPeaks(unittest.TestCase):
                     identity = _identity(gfx, name, cu)
                     self.assertEqual(identity["target"], "unknown")
                     p = rt.resolve_peaks(PEAKS_MD, identity["gfx"], product=identity["target"])
-                    self.assertEqual(p, rt.load_peaks(PEAKS_MD, gfx))
-                    self.assertEqual(p["source"], "table")
-                    self.assertEqual(p["confidence"], "high")
+                    self.assertIsNone(p)
+                    p = rt.resolve_peaks(PEAKS_MD, gfx, identity=identity)
+                    self.assertEqual(p["cu"], cu)
+                    self.assertEqual(p["source"], "sku_specification")
+                    self.assertFalse(p["may_gate"])
         finally:
             rt.derive_peaks_from_props = original
+
+    def test_shared_context_cannot_select_another_full_device(self):
+        import hardware_context as hc
+        for name, cu, expected in [('MI300X',304,1307.4), ('MI308X',80,344),
+                                   ('MI300X',80,None), ('MI300X',38,None), ('MI300X VF',304,None)]:
+            with self.subTest(name=name, cu=cu):
+                c = hc.build(_identity('gfx942', 'AMD Instinct ' + name, cu))
+                p = rt.resolve_peaks(PEAKS_MD, 'gfx942', hardware_context=c)
+                if expected is None:
+                    self.assertIsNone(p)
+                else:
+                    self.assertEqual(p['flops']['fp16'] / 1e12, expected)
+                    self.assertEqual(p['cu'], cu)
+                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx950', hardware_context=c))
+                c['catalog_sha256'] = '0' * 64
+                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx942', hardware_context=c))
+        c = hc.build(_identity('gfx942', 'AMD Instinct MI308X', 80))
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx942', product='mi300x', hardware_context=c))
 
     def test_identity_product_still_scopes_the_r9700_table(self):
         r9700 = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
@@ -224,7 +243,7 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
-    def test_gfx1250_missing_table_may_derive(self):
+    def test_arch_only_lookup_does_not_invent_device_scope(self):
         called = []
         original = rt.derive_peaks_from_props
 
@@ -235,7 +254,7 @@ class TestPeaks(unittest.TestCase):
         rt.derive_peaks_from_props = fake_derive
         try:
             self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1250"))
-            self.assertEqual(called, [0])
+            self.assertEqual(called, [])
             called.clear()
             self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
             self.assertEqual(called, [])

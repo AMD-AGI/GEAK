@@ -57,7 +57,7 @@ echo "== 1e. GEAK shared kernel tools, through the pack shims =="
 # the shim at once; every one is offline (no GPU, no network, no tool cache).
 KT_DIR="$(cd "$SCRIPT_DIR/../../../../.." && pwd)/kernel_workflow/scripts/kernel_tools"
 python3 "$KT_DIR/_hwdata.py" --selftest
-for t in asm_loop_audit asm_schedule_viz mfma_efficiency deep_mfma_analysis gfx950_isa layout_facts; do
+for t in asm_loop_audit mfma_efficiency deep_mfma_analysis gfx950_isa layout_facts; do
   python3 "$SCRIPT_DIR/$t.py" --selftest >/dev/null || { echo "SMOKE FAIL: $t.py --selftest"; exit 1; }
   echo "   $t ok"
 done
@@ -67,7 +67,6 @@ bash "$SCRIPT_DIR/dump_ir.sh" --selftest | tail -1
 echo "== 1f. gates, lever index and harness/bench self-tests =="
 python3 "$SCRIPT_DIR/parity_gate.py" --selftest
 python3 "$SCRIPT_DIR/champion_gate.py" --selftest
-python3 "$SCRIPT_DIR/lever_index.py" --selftest | cut -c1-100
 python3 "$SCRIPT_DIR/check_term_index.py" --selftest
 python3 "$SCRIPT_DIR/check_term_index.py" --pack "$SCRIPT_DIR/.."
 python3 "$SCRIPT_DIR/ab_bench.py" --selftest

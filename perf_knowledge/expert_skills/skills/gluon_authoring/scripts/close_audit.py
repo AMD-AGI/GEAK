@@ -1463,7 +1463,7 @@ def check_ceiling_provenance(root, facts, out):
     """9c. A percent-of-ceiling quoted against a ceiling nobody probed.
 
     `hw_budget.py` already does the hard half: when the only ceiling available is the SKU's
-    datasheet peak it REFUSES to compute a percentage or a gap, sets `ceiling_refused`, and names
+    specification peak it REFUSES to compute a percentage or a gap, sets `ceiling_refused`, and names
     the probe that would settle it. That refusal works -- measured across 19 kernel/phase runs, 11
     of the 13 that never probed also quoted no percentage, which is the honest outcome and the
     reason this check does not simply ask whether the probe ran.
@@ -1479,7 +1479,7 @@ def check_ceiling_provenance(root, facts, out):
         if not isinstance(doc, dict):
             continue
         w = doc.get("workload") if isinstance(doc.get("workload"), dict) else doc
-        if w.get("ceiling_refused") and str(w.get("hbm_ceiling_source") or "") == "datasheet":
+        if w.get("ceiling_refused") and w.get("hbm_ceiling_source") in ("datasheet", "orc-derived", "unknown"):
             refused.append(_rel(root, p))
     if not refused:
         return {"applicable": False, "reason": "no budget artifact refused a ceiling"}
@@ -1496,7 +1496,7 @@ def check_ceiling_provenance(root, facts, out):
     for ref in quoted:
         _finding(out, "ceiling_provenance", "quoted_an_unprobed_ceiling",
                  "this run quotes a percent-of-ceiling or a ceiling gap, and its budget artifact "
-                 "refused to compute one because the only ceiling available was the SKU datasheet "
+                 "refused to compute one because the only ceiling available was the SKU specification "
                  "peak -- a number no real access shape reaches. Probe the in-shape ceiling "
                  "(mem_bw_probe.py at this run's length / stride / read:write mix / program count) "
                  "and pass --measured-hbm-tb-s, or drop the fraction and quote the measured time",
@@ -2421,7 +2421,10 @@ def check_knob_probe_reproducible(root, facts, out):
 
 
 def check_measurement_arbitration(root, facts, out):
-    """16. A broker was up and none of the readings held a window on it.
+    """16. Audit imported resident-backend receipts, when supplied.
+
+    These optional records come from an external producer. GEAK authoring uses its
+    shared GPU locks/leases; this check does not require or start a broker.
 
     `exclusive_window` per reading and `exclusive_window_rate` in the aggregate answer the one
     question a lease cannot answer for itself: did the lease land on the pool that owns THIS run's
@@ -2450,7 +2453,7 @@ def check_measurement_arbitration(root, facts, out):
                      f"{win['lane_mismatch']} of {win['readings']} readings were refused with 'no "
                      f"such lane': the broker these leases went to owns none of this run's lanes, so "
                      f"it is not this run's pool and those readings were NOT arbitrated. Point "
-                     f".geak_gpu_sock / GEAK_GPU_BROKER_SOCK at the broker that owns them",
+                     f"the external producer at its allocated GPUs and remeasure through GEAK ownership",
                      [ref], severity="high")
         elif rate == 0:
             result["unarbitrated"].append(ref)
@@ -3771,6 +3774,12 @@ def _selftest():
         assert not [f for f in audit(cr, facts)["findings"] if f["check"] == "ceiling_provenance"]
         # Quoting one anyway is the finding.
         _wc("final_report.json", {"status": "closed", "notes": "reached 61% of the HBM ceiling"})
+        fc = [f for f in audit(cr, facts)["findings"] if f["check"] == "ceiling_provenance"]
+        assert [(f["kind"], f["severity"]) for f in fc] == [("quoted_an_unprobed_ceiling", "high")], fc
+        # Derived specifications are still unprobed; preserving their source label
+        # must not bypass the check that already applies to datasheet values.
+        _wc("hw_budget.json", {"workload": {"hbm_ceiling_source": "orc-derived",
+                                            "ceiling_refused": "specification peak only"}})
         fc = [f for f in audit(cr, facts)["findings"] if f["check"] == "ceiling_provenance"]
         assert [(f["kind"], f["severity"]) for f in fc] == [("quoted_an_unprobed_ceiling", "high")], fc
         # A probed ceiling means the budget never refused, so the check does not apply.

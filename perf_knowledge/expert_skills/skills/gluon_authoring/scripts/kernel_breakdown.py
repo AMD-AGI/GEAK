@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Shim: kernel_breakdown now lives in kernel_workflow/scripts/kernel_tools/kernel_breakdown.py (a GEAK shared kernel tool).
+"""Compatibility entry point for the GEAK shared kernel tools."""
+import importlib.util
+from pathlib import Path
+import runpy
+import sys
 
-Kept so the pack's tool paths (runtime/tool-catalog.json, docs, `import kernel_breakdown`) keep resolving."""
-import os as _os
-import sys as _sys
-
-_KT = _os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                                      "..", "..", "..", "..", "..", "kernel_workflow", "scripts", "kernel_tools"))
-if _KT not in _sys.path:
-    _sys.path.insert(0, _KT)
-if __name__ == "__main__":
-    import runpy
-    _sys.argv[0] = _os.path.join(_KT, "kernel_breakdown.py")
-    runpy.run_path(_sys.argv[0], run_name="__main__")
+_shared = Path(__file__).resolve().parents[5] / 'kernel_workflow/scripts/kernel_tools'
+sys.path.insert(0, str(_shared))
+_target = _shared / (Path(__file__).stem + '.py')
+if __name__ == '__main__':
+    runpy.run_path(str(_target), run_name='__main__')
 else:
-    import importlib.util as _ilu
-    _spec = _ilu.spec_from_file_location(__name__, _os.path.join(_KT, "kernel_breakdown.py"))
-    _mod = _ilu.module_from_spec(_spec)
-    _sys.modules[__name__] = _mod
-    _spec.loader.exec_module(_mod)
+    _spec = importlib.util.spec_from_file_location(__name__, _target)
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules[__name__] = _module
+    _spec.loader.exec_module(_module)

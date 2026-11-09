@@ -186,8 +186,10 @@ def test_markdown_links_use_real_relative_paths_and_exact_anchors(tmp_path):
 def test_locus_maps_and_forwards_frozen_calibration(tmp_path):
     host = tmp_path / 'host'; host.mkdir()
     env = dict(__import__('os').environ, TILE_KERNEL_HOST_WORKDIR=str(host),
-               TILE_KERNEL_CONTAINER_WORKDIR='/mounted', ROOFLINE_MIBENCH_CACHE=str(host / 'peak.csv'))
+               TILE_KERNEL_CONTAINER_WORKDIR='/mounted', ROOFLINE_MIBENCH_CACHE=str(host / 'peak.csv'),
+               GEAK_HARDWARE_CONTEXT=str(host / 'hardware_context.json'))
     env.pop('LOCUS_ENV', None)
     result = run(['bash', '-c', 'source "$1"; _locus_env_args', 'test', str(SCRIPTS / 'locus.sh')], env=env)
     assert result.returncode == 0, result.stderr
     assert 'ROOFLINE_MIBENCH_CACHE=/mounted/peak.csv\x00' in result.stdout
+    assert 'GEAK_HARDWARE_CONTEXT=/mounted/hardware_context.json\x00' in result.stdout
