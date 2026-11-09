@@ -110,19 +110,11 @@ def _pack_root():
     return str(p) if p else None
 
 
-def _denominator_basis(sku, bw_src, ceiling_source_ref=None):
-    """datasheet | empirical@<tool>-<version> | in-shape probe -- what the HBM ceiling rests on.
-
-    A typed-in ceiling with no probe artifact is empirical but of unknown origin, so it is labelled
-    empirical@hand-entered rather than promoted to an in-shape probe. A table row whose own peak is
-    MEASURED (sku.json peak_hbm_basis) is empirical at the tool its measured_ceilings entry names.
-    """
+def _denominator_basis(bw_src, ceiling_source_ref=None):
+    """Basis of the selected bandwidth; measurements require an explicit ceiling."""
     if bw_src == "calibrated":
         return "in-shape probe" if ceiling_source_ref else "empirical@hand-entered"
-    if (sku or {}).get("peak_hbm_basis") == "measured":
-        m = next((c for c in sku.get("measured_ceilings") or [] if c.get("metric") == "hbm_tb_s"), {})
-        return f"empirical@{m.get('tool', 'unrecorded')}-{m.get('tool_version', 'unrecorded')}"
-    return "datasheet"
+    return bw_src
 
 
 def _normalize_workload(name, refused, aliases, models_doc):
@@ -394,6 +386,10 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
     if sku_name not in skus:
         sys.exit(f"[hw_budget] unknown SKU {sku_name!r}; known: {', '.join(skus)}")
     sku = skus[sku_name]
+    memory = _hwdata.memory_peak(sku)
+    spec_bw = memory["value_tb_s"]
+    if spec_bw is None and not measured_hbm_tb_s:
+        sys.exit(f"[hw_budget] {sku_name}: no specification bandwidth; supply --measured-hbm-tb-s")
     arch = sku["arch"]
     if sku.get("geak_support") == "unsupported" and warn:
         print(f"[hw_budget] NOTE: {sku_name} ({arch}) is kept in sku.json for reference only -- GEAK "
@@ -414,9 +410,9 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
     # every read substituted that one dtype's crossover for the caller's -- the SAME silent
     # substitution refused two lines up, and it put every fp32 kernel whose intensity fell between
     # 27 and 218 on the wrong side. Derived here, never stored, and absent for a dtype with no rate.
-    # (Both terms are datasheet peaks, so the crossover is a property of the SKU and does not move
+    # (Both terms are specification peaks, so the crossover is a property of the SKU and does not move
     # with each probe. It orients the reader; the FLOORS below are what a round gets sized on.)
-    ridge = (peak_tflops / sku["peak_hbm_tb_s"]) if peak_tflops else 0
+    ridge = (peak_tflops / spec_bw) if peak_tflops and spec_bw else 0
     # A LOWER BOUND ON THE RIDGE, for the one reader that can use a bound instead of a value: the
     # engine gate below, which only ever asks "is AI far BELOW the crossover". A lower bound settles
     # that question and nothing else, so it is kept apart from `ridge` -- what gets reported stays
@@ -433,7 +429,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
     if not ridge:
         want_b = _dtype_bytes(dtype)
         wider = [tf for d, tf in sku["peak_tflops"].items() if _dtype_bytes(d) >= want_b and tf]
-        ridge_floor = (max(wider) / sku["peak_hbm_tb_s"]) if wider else 0
+        ridge_floor = (max(wider) / spec_bw) if wider and spec_bw else 0
 
     # The register and LDS notes are ARCH-SPECIFIC and cannot be written once: CDNA shares one
     # 512-entry ArchVGPR+AGPR file per SIMD, RDNA has a 1536-entry file with a 256/wave cap and
@@ -524,7 +520,8 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             "lds_bandwidth": {"bytes_per_clk": hwc.get("lds_bytes_per_clk"),
                               "banks": hwc.get("lds_banks"),
                               "ds_read_b128_cf_cyc": hwc.get("ds_read_b128_conflict_free_cyc")},
-            "hbm": {"peak_tb_s": sku.get("peak_hbm_tb_s"),
+            "hbm": {"peak_tb_s": spec_bw, "basis": memory["basis"],
+                    "source_field": memory["source_field"],
                     "ridge_ops_per_byte": round(ridge, 1) if ridge else None,
                     "ridge_dtype": dtype if ridge else None},
             # Two capacities, and they are not interchangeable: the L2 is per-XCD and is the gateway
@@ -683,13 +680,13 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             b_lo, b_hi = min(vals) * 1e6, max(vals) * 1e6
             bytes_src = "measured" if b_lo == b_hi else "measured (routes disagree)"
         hbm_bytes = b_lo
-        peak_bw = sku.get("peak_hbm_tb_s")
+        peak_bw = spec_bw
         if measured_hbm_tb_s:
             bw_lo, bw_hi = min(measured_hbm_tb_s), max(measured_hbm_tb_s)
             bw_src = "calibrated"
         else:
             bw_lo = bw_hi = peak_bw
-            bw_src = "datasheet"
+            bw_src = memory["basis"]
         # PHYSICS TIGHTENS THE BRACKET. A byte-count end that implies a rate above the fastest rate
         # this box can reach is not merely pessimistic, it is impossible: that traffic never got to
         # the fabric. Clamping turns a useless bracket end into information -- "at most this much of
@@ -864,7 +861,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
                 f"priced on neither the matrix peak nor the plain VALU peak.")
         else:
             tf_lo = tf_hi = peak_tflops
-            tf_src = "datasheet"
+            tf_src = sku.get("basis", "unknown")
         # fastest rate -> lowest floor, and the reverse; identical ends when uncalibrated
         if not flops:
             mfma_floor_lo = mfma_floor_hi = 0.0
@@ -973,7 +970,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             # denominator may RANK only; a measured numerator over a probed/calibrated denominator
             # is the only combination that may gate or close.
             "numerator_basis": "counters" if measured_bytes_mb is not None else "model",
-            "denominator_basis": _denominator_basis(sku, bw_src, ceiling_source_ref),
+            "denominator_basis": _denominator_basis(bw_src, ceiling_source_ref),
             "analysis_role": "planning",
             "engine": "GEAK local analytic model",
             "may_gate": False,
@@ -1022,7 +1019,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             # would mark every honest answer uncalibrated, which trains the reader to ignore it.
             "binding_floor_source": (tf_src if binding.startswith("compute") else
                                      bw_src if binding.startswith("memory") else
-                                     "calibrated" if tf_src == bw_src == "calibrated" else "datasheet"),
+                                     tf_src if tf_src == bw_src else "mixed"),
             # An unevaluated term is not a calibrated model: when memory is the bound only because
             # the compute term was never priced, the ceilings being measured does not make the
             # VERDICT measured, so this stays False until the missing term is supplied or intensity
@@ -1042,7 +1039,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             "ceiling_provenance": {
                 "entry": ("probe_artifact" if ceiling_source_ref else
                           "hand_entered" if (measured_hbm_tb_s or measured_tflops) else
-                          "datasheet"),
+                          "datasheet" if tf_src == bw_src == "datasheet" else "specification"),
                 "refs": list(ceiling_source_ref or []),
             },
             # ...and when it is NOT calibrated, WHICH term is still uncalibrated decides what to go
@@ -1054,7 +1051,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
                 ("ceiling (datasheet MFMA peak: assumes back-to-back MFMA issue with operands "
                  "already in register, which no real kernel sustains) -> time a dense back-to-back "
                  "MFMA loop at this dtype and pass --measured-tflops",
-                 tf_src == "datasheet" and not binding.startswith("memory")),
+                 tf_src in ("datasheet", "derived", "orc-derived") and not binding.startswith("memory")),
                 # this one fires even on a memory-BINDING kernel, because the binding is only
                 # provisional while a term is missing -- that is the whole point of the state
                 (f"compute floor NOT COMPUTED ({tf_src}) -> the memory verdict is provisional until "
@@ -1120,10 +1117,10 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             # saying: the error only ever flatters the opportunity, so a round sized on this number
             # is sized on the most optimistic reading available, and "2.4x on the table" can be
             # 1.8x once the ceiling is real. Reported (it is a genuine bound) but never as fact.
-            if w["binding_floor_source"] == "datasheet" and not binding.startswith(("REFUSED", "NONE")):
+            if w["binding_floor_source"] in ("datasheet", "derived", "orc-derived", "mixed") and not binding.startswith(("REFUSED", "NONE")):
                 w["prize_is_upper_bound"] = (
                     f"{w['multiple_over_floor'][0]}x is an UPPER BOUND on the prize, not the prize: "
-                    f"the {binding.split()[0]} floor rests on a datasheet peak, which sits below the "
+                    f"the {binding.split()[0]} floor rests on a specification peak, which sits below the "
                     f"real floor, so the multiple over it can only overstate what is reachable. "
                     f"Calibrate that ceiling before sizing a round on this number.")
             if hbm_floor_hi:
@@ -1141,13 +1138,13 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
                         "no %-of-ceiling and no gap: this kernel does not meet the preconditions for "
                         "a roofline in the first place (see above). A fraction-of-ceiling computed "
                         "anyway would be measuring the wrong resource.")
-                elif bw_src == "datasheet":
+                elif bw_src != "calibrated":
                     w["pct_of_hbm_ceiling"] = w["hbm_gap_ms"] = None
                     w["ceiling_refused"] = (
                         "no %-of-ceiling and no gap: the only ceiling available is this SKU's "
-                        "datasheet peak, which no real access shape reaches. Probe the in-shape "
+                        f"specification peak ({bw_src}), not an in-shape measurement. Probe the in-shape "
                         "ceiling (mem_bw_probe.py at this run length / stride / read:write mix / "
-                        "program count) and pass --measured-hbm-tb-s lo,hi. The datasheet floor "
+                        "program count) and pass --measured-hbm-tb-s lo,hi. The specification floor "
                         "above is a plausibility bound only -- a measurement under it is "
                         "impossible, a measurement over it means nothing.")
                 else:
@@ -1956,7 +1953,7 @@ def _selftest_body():
     sku0 = sorted(_load("sku.json")["skus"])[0]
     base = dict(workload="gemm", shapes={"M": 4096, "N": 4096, "K": 4096}, measured_ms=1.0)
     b_ds = budget(sku0, **base)["workload"]["ceiling_provenance"]
-    assert b_ds == {"entry": "datasheet", "refs": []}, b_ds
+    assert b_ds == {"entry": "specification", "refs": []}, b_ds
     _w = budget("MI355X", **base)["workload"]
     assert (_w["numerator_basis"], _w["denominator_basis"], _w["may_gate"]) == (
         "model", "datasheet", False), _w
@@ -1965,7 +1962,8 @@ def _selftest_body():
     assert (_w["numerator_basis"], _w["denominator_basis"], _w["may_gate"]) == (
         "counters", "in-shape probe", False), _w
     _w = budget("AI_MAX_395", **base)["workload"]
-    assert _w["denominator_basis"].startswith("empirical@rocm_bandwidth_test"), _w["denominator_basis"]
+    assert _w["denominator_basis"] == "datasheet", _w["denominator_basis"]
+    assert _w["hbm_ceiling_tb_s"] == [0.256, 0.256]
     b_hand = budget(sku0, measured_hbm_tb_s=[4.0, 4.2], **base)["workload"]["ceiling_provenance"]
     assert b_hand == {"entry": "hand_entered", "refs": []}, b_hand
     b_ref = budget(sku0, measured_hbm_tb_s=[4.0, 4.2],

@@ -36,6 +36,16 @@ Generated Markdown tables are views of the JSON. Ridge points are computed from
 the requested precision and product; a missing precision has no substituted rate.
 The recorded native MXFP rates are available only on gfx950 products.
 
+Default bandwidth selection is shared by the calculators, hardware context,
+bandwidth probe and generated tables through `kernel_tools/_hwdata.memory_peak`.
+It selects the datasheet pin rate when recorded; derived specifications retain
+their original basis. Historical measurements are not default specifications.
+For example, `AI_MAX_395` defaults to 0.256 TB/s; its older 0.212 TB/s report stays
+in the catalog as historical evidence. Pass a measured ceiling explicitly for
+measurement-based analysis (`hw_budget.py --measured-hbm-tb-s` with `--measured-from`
+for its source, or `calc_perf.py --peak-hbm-bw` as a labelled manual override).
+Local measured inputs remain planning-only and do not replace TraceLens calibration.
+
 The simple GEMM byte model assumes one read of each operand and one output write.
 FP4/FP6 default to MX storage with one scale byte per 32 elements; explicit MXFP8
 also counts scales. Low-precision floating-point inputs default to a 16-bit output,
