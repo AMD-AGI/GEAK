@@ -51,6 +51,18 @@ or pass `identity=GPU_IDENTITY_JSON`. Arch-only resolution returns `None`.
 Explicit legacy product-only lookups are low-confidence reference data. All local
 specification estimates remain planning-only and cannot establish acceptance.
 
+The legacy API also accepts `cu=` (or CLI `--cu`) for compatibility with physical-CU
+gated gfx115x callers. `roofline_tools.py --peaks gfx1151 --cu 40` reads the generated
+AI Max 395 reference: 59.4 BF16 TFLOPS / 256 GB/s. It retains `sku=unknown`, records
+`reference_sku=AI_MAX_395`, and sets `scope=explicit_arch_cu_reference_only`,
+`confidence=low`, `may_gate=false`. It does not identify an unnamed GPU as that
+product: the 495 also has 40 CUs and different reference values. The count must
+come from rocminfo; 32/16-CU devices, Torch's 20 WGPs and invalid counts are refused.
+This explicit query can use an unnamed, non-conflicting run context; the context
+itself stays unknown. Matched contexts retain their own SKU values, and a supplied
+CU count must agree with the observation. Conflicts never fall back to a reference.
+No serving, profiler-order or automatic-routing policy is changed by this API.
+
 `kernel_tools/calc_perf.py`, `hw_budget.py`, `mem_bw_probe.py` and `amd_occupancy.py` accept `--hardware-context FILE` or the same environment
 variable. Product-based tools select the matched SKU and reject a conflicting `--sku`;
 `calc_perf.py` also rejects conflicting `--arch`/`--cus`. `amd_occupancy.py` selects
