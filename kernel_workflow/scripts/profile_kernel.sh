@@ -97,7 +97,7 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
 
 profiler_artifacts_ok() {  # true when the tool left a non-empty csv/json (not just the report)
     local dir="${1:-$OUTPUT_DIR}"
-    find "$dir" -type f \( -name '*.csv' -o -name '*.json' \) -size +0 2>/dev/null | grep -q .
+    find "$dir" -type f \( -name '*.csv' -o -name '*.json' \) -size +0 -print -quit 2>/dev/null | grep -q .
 }
 
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.

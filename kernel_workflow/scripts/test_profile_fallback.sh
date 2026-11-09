@@ -73,6 +73,14 @@ done
 [ -n "$out" ] || exit 3
 mkdir -p "$(dirname "$out")"
 printf 'Name,Duration,Count\nfixture_kernel,12.0,1\n' > "$out"
+# More paths than a pipe buffer: finding real output must not fail on SIGPIPE.
+python3 - "$out" <<'PY'
+from pathlib import Path
+import sys
+output = Path(sys.argv[1])
+for i in range(4096):
+    (output.parent / f"fixture_{i}.csv").write_bytes(output.read_bytes())
+PY
 echo "Kernel Duration Count"
 EOF
 chmod +x "$tmp/bin/rocprof"
