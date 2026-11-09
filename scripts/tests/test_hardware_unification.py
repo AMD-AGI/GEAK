@@ -50,10 +50,66 @@ assert amd_occupancy.waves_by_vgpr(249, 'gfx1201')[0] == 5
     ('hw_budget.py', ['--workload', 'gemm', '--shapes', 'M=1024,N=1024,K=1024', '--json']),
     ('mem_bw_probe.py', []),
 ])
-def test_tools_refuse_wrong_sku_before_measurement(tmp_path, tool, args):
+@pytest.mark.parametrize('sku', ['MI300X', 'mi300x', 'Mi300X'])
+def test_tools_refuse_wrong_sku_before_measurement(tmp_path, tool, args, sku):
     p = context_file(tmp_path)
-    result = run(KT / tool, '--sku', 'MI300X', *args, env={'GEAK_HARDWARE_CONTEXT': str(p)})
+    result = run(KT / tool, '--sku', sku, *args, env={'GEAK_HARDWARE_CONTEXT': str(p)})
     assert result.returncode != 0 and 'conflicts with the run hardware context' in result.stderr
+
+
+@pytest.mark.parametrize('sku', ['mi355x', 'Mi350X', 'r9700', 'ai_max_395'])
+def test_standalone_budget_sku_case_preserves_result(sku):
+    args = ['--workload', 'gemm', '--shapes', 'M=4096,N=4096,K=4096', '--dtype', 'bf16', '--json']
+    reference = run(KT / 'hw_budget.py', '--sku', sku.upper(), *args)
+    result = run(KT / 'hw_budget.py', '--sku', sku, *args)
+    assert reference.returncode == 0, reference.stderr
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data == json.loads(reference.stdout)
+    assert data['sku'] == sku.upper()
+    assert data['workload']['may_gate'] is False
+
+
+def test_bandwidth_probe_accepts_mixed_case_sku_before_measurement(monkeypatch):
+    # Exercise CLI parsing and planning, stopping at the GPU measurement boundary.
+    monkeypatch.syspath_prepend(str(KT))
+    monkeypatch.delenv('GEAK_HARDWARE_CONTEXT', raising=False)
+    monkeypatch.delenv('GEAK_HW_DATA_DIR', raising=False)
+    import mem_bw_probe
+
+    class MeasurementReached(Exception):
+        pass
+
+    def stop_before_gpu(*args):
+        raise MeasurementReached
+
+    monkeypatch.setattr(mem_bw_probe, 'measure', stop_before_gpu)
+    monkeypatch.setattr(sys, 'argv', ['mem_bw_probe.py', '--sku', 'mI350x'])
+    with pytest.raises(MeasurementReached):
+        mem_bw_probe.main()
+
+
+@pytest.mark.parametrize('tool', ['hw_budget.py', 'mem_bw_probe.py'])
+def test_unknown_explicit_sku_is_still_refused(tool):
+    result = run(KT / tool, '--sku', 'mi_unknown')
+    assert result.returncode != 0 and 'unknown SKU' in result.stderr
+
+
+@pytest.mark.parametrize('sku', ['mi308x', 'Mi308X'])
+def test_budget_explicit_sku_case_preserves_context(tmp_path, sku):
+    p = context_file(tmp_path)
+    result = run(KT / 'hw_budget.py', '--hardware-context', p, '--sku', sku, '--json')
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data['sku'] == 'MI308X'
+    assert data['hardware_context_sha256'] == hc.catalog()[1]
+
+
+@pytest.mark.parametrize('tool', ['hw_budget.py', 'mem_bw_probe.py'])
+def test_unknown_scope_cannot_supply_product_peaks(tmp_path, tool):
+    p = context_file(tmp_path, 'MI300X', 80)
+    result = run(KT / tool, '--hardware-context', p, '--sku', 'unknown')
+    assert result.returncode != 0 and 'no supported product peaks' in result.stderr
 
 
 def test_budget_adopts_context_without_explicit_sku(tmp_path):
