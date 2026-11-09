@@ -119,7 +119,9 @@ def run_sku(sku=None, value=None):
     """Select the observed SKU; refuse reference fallback for unresolved run scope."""
     context = run_context(value)
     if context is None:
-        return sku, None
+        # Identity emits lowercase IDs; explicit references use the same catalog
+        # keys as context-backed calls, without inferring a product or a scope.
+        return sku.upper() if sku else sku, None
     if sku and str(sku).lower() != context["sku"]:
         raise ValueError("SKU override conflicts with the run hardware context")
     if context["status"] != "matched" or context["specification"]["geak_support"] != "supported":
