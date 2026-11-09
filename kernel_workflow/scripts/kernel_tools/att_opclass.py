@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Aggregate rocprofv3 ATT code.json per op-class (ATT-measured cycles).
 
-ATT gives measured per-instruction Hit / Latency / Stall / Idle cycles. We classify
-each instruction (MFMA/VALU/LDS/...) and sum, giving an ATT-accurate per-op-class
-active(latency-stall) vs stall(bubble) breakdown — the real overlap picture that the
-static ISA histogram and the whole-kernel PMC aggregate cannot give.
+Classify decoded per-instruction Hit / Latency / Stall / Idle fields by
+op-class (MFMA/VALU/LDS/...) and emit text or JSON for agent analysis.
+Totals retain the decoder sampling scope; they do not establish chip-wide utilization.
 
 Requires the ATT decoder (rocprof-trace-decoder) so rocprofv3 --att emits code.json.
 Reuses asm_loop_audit.py's classifier (same kernel_tools/ dir).
@@ -12,7 +11,7 @@ GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/); the Gluon pack'
 The ATT decoder (rocprof-trace-decoder) is NOT vendored: point ROCPROF_ATT_LIBRARY_PATH at it when
 collecting; without it there is no code.json and this tool has nothing to read (the layer is DEGRADED).
 
-Usage: python3 att_opclass.py <ui_output_agent_*_dispatch_N/code.json> [--png out.png] [--json out.json]
+Usage: python3 att_opclass.py <ui_output_agent_*_dispatch_N/code.json> [--json out.json]
        python3 att_opclass.py --selftest
 """
 import argparse
@@ -66,36 +65,6 @@ def report(agg, title=""):
     return tot_lat, tot_stall
 
 
-def render_png(agg, out, title):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.patches as mp
-    import matplotlib.pyplot as plt
-    items = [(c, v[1], v[2]) for c, v in agg.items() if v[1] > 0]
-    items.sort(key=lambda x: -x[1])
-    tot = sum(l for _, l, _ in items) or 1
-    labels = [c for c, _, _ in items]
-    fig, ax = plt.subplots(figsize=(11, 0.5 * len(labels) + 1.5))
-    for i, (c, l, st) in enumerate(items):
-        active = l - st
-        ax.barh(i, 100 * active / tot, color="#1f77b4", zorder=3)
-        ax.barh(i, 100 * st / tot, left=100 * active / tot, color="#d62728", zorder=3)
-        ax.text(100 * l / tot + 0.3, i, f"{100*l/tot:.1f}%  (stall {100*st/l if l else 0:.0f}%)",
-                va="center", fontsize=7)
-    ax.set_yticks(range(len(labels)))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.invert_yaxis()
-    ax.set_xlabel("% of total latency cycles  (blue=active/issuing, red=stall/bubble)")
-    ax.set_title(title)
-    ax.grid(axis="x", linestyle=":", alpha=0.5, zorder=0)
-    ax.legend(handles=[mp.Patch(color="#1f77b4", label="active"),
-                       mp.Patch(color="#d62728", label="stall/bubble")], fontsize=8, loc="lower right")
-    fig.tight_layout()
-    fig.savefig(out, dpi=140, bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
-
-
 def _selftest():
     import tempfile
     import _att_fixture
@@ -119,14 +88,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("code_json")
     ap.add_argument("--json", help="dump per-op-class dict to this path")
-    ap.add_argument("--png", help="render a per-op-class active/stall bar chart")
     ap.add_argument("--title", default="")
     a = ap.parse_args()
     agg = analyze(a.code_json)
     ttl = a.title or os.path.basename(os.path.dirname(a.code_json))
     report(agg, ttl)
-    if a.png:
-        render_png(agg, a.png, ttl)
     if a.json:
         out = {c: dict(hit=v[0], latency=v[1], stall=v[2], idle=v[3]) for c, v in agg.items()}
         json.dump(out, open(a.json, "w"), indent=1)
