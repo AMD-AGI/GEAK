@@ -137,7 +137,10 @@ async function createEvolution(start) {
       await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
       const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
       if (parentRef) {
-        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        // A verified empty diff selects the unchanged baseline without invoking git apply.
+        if (parentRef.sha256 !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+          await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        }
         if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
       }
       await run('git', ['-C', workspace, 'add', '-A']);

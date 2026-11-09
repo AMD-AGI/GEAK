@@ -182,7 +182,7 @@ async function runCase(sc) {
       fs.writeFileSync(path.join(destination, name), contents);
     }
     initRepo(destination);
-    git(destination, 'apply', '--', patch);
+    if (fs.readFileSync(patch).length) git(destination, 'apply', '--', patch);
     return readSources(destination);
   };
   const bashBlock = prompt => {
@@ -662,6 +662,32 @@ cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalL
     stagedBinary: 'payload.bin', finalSpeed: 2, finalDev: 1.3},
   {...externalLineage, name: 'final trusted reader rejects source drift between native capture and Git diff',
     patchSourceMismatch: source(99, 99, {'inherited.py': 'P = 1\n'})});
+
+cases.push({name: 'verified empty-delta parent initializes unchanged source and remains developable',
+    args: {budget: 2}, best: 1.4, bestId: 'r2_d0', expected: fast,
+    plans: {r1: plan(direction('unchanged')), r2: plan(direction('develop-empty', {parent_id: 'r1_d0'}))},
+    candidates: {r1_d0: {files: original, speed: 1},
+      r2_d0: {files: fast, inherited: original, speed: 1.4}},
+    check: ({archive, events, hostCalls, h}) => {
+      const parent = archive.entries.find(row => row.id === 'r1_d0');
+      const child = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(parent.verified, true);
+      assert.equal(fs.readFileSync(parent.patch_ref.path).length, 0, 'retained parent is an actual empty delta');
+      assert.equal(parent.patch_ref.sha256, hash(''));
+      assert.equal(child.parent_id, parent.id, 'unchanged source still retains its selected parent identity');
+      const context = h.field(events.find(event => event.label.startsWith('eng r2_d0')).prompt, 'EVOLUTION');
+      const ready = context.initialization;
+      assert.equal(ready.status, 'ready');
+      assert.equal(ready.parent_id, parent.id);
+      assert.deepEqual(ready.parent_patch_ref, parent.patch_ref);
+      assert.equal(ready.initial_tree, git(ready.workspace, 'rev-parse', `${ready.workspace_base_commit}^{tree}`).trim(),
+        'empty parent preserves the materialized baseline tree');
+      assert.notEqual(ready.initial_commit, ready.workspace_base_commit, 'selected-parent identity commit remains');
+      assert.equal(git(ready.workspace, 'rev-parse', `${ready.initial_commit}^`).trim(), ready.workspace_base_commit);
+      assert.ok(!hostCalls.some(([cmd, ...args]) => cmd === 'git' && args[2] === 'apply'
+        && args.at(-1) === parent.patch_ref.path), 'empty selected parent needs no git apply');
+      assert.ok(child.verified, 'engineering can develop the unchanged retained parent');
+    }});
 
 (async () => {
   console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
