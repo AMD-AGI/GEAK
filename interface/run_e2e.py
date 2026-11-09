@@ -1190,6 +1190,19 @@ _E2E_METRIC_FOR_BASIS = {
     "aggregate_output_tok_s": "output",
     "aggregate_total_token_tok_s": "total",
 }
+# E2E_METRIC token -> the metric_basis bench_summarize.py records under it: its _BASES flattened,
+# as e2e_workflow.js METRIC_BASIS_OF_AXIS is. test_run_e2e_measurement_basis.py pins this copy.
+_METRIC_BASIS_OF_E2E_METRIC = {
+    "output": "aggregate_output_tok_s",
+    "total": "aggregate_total_token_tok_s",
+    "total_token": "aggregate_total_token_tok_s",
+    "total_throughput": "aggregate_total_token_tok_s",
+    "intvty": "e2e_norm_intvty_p90",
+    "interactivity": "e2e_norm_intvty_p90",
+    "e2e_norm_intvty_p50": "e2e_norm_intvty_p50",
+    "e2e_norm_intvty_p90": "e2e_norm_intvty_p90",
+    "p90_intvty_inferencex": "p90_intvty_inferencex",
+}
 
 
 def apply_workload_spec(h: dict) -> dict:
@@ -3982,6 +3995,52 @@ def handoff_acceptance(h: dict) -> dict | None:
     return None
 
 
+#: The axis a standalone AgentX run is graded on when nothing else is declared (e2e_workflow.js
+#: AGENTX_DEFAULTS.metric_basis), and the guard GEAK's own rule holds beside every other axis.
+STANDALONE_AGENTX_OBJECTIVE = "p90_intvty_inferencex"
+STANDALONE_AGENTX_GUARD = "aggregate_total_token_tok_s"
+#: The bars Hyperloom's AgentX KEEP rule holds an orchestrated run to (its 3% gain and default
+#: 5% noise band), so a run that states no rule is judged alike. The guard band is also
+#: e2e_workflow.js STANDALONE_TOTAL_GUARD_PCT.
+STANDALONE_AGENTX_MIN_GAIN_PCT = 3.0
+STANDALONE_AGENTX_GUARD_DROP_PCT = 5.0
+
+
+def standalone_acceptance(h: dict) -> dict | None:
+    """GEAK's own KEEP rule for an AgentX run that states none; None leaves GEAK's verdict.
+
+    A trace replay graded on any axis but total token throughput, with no rule from the caller,
+    is kept only when that axis gains at least 3% and total token throughput falls no more than
+    5% below the reference. The corpus fixes the work each request asks for, so every other axis
+    can rise while the server completes less of it: the decode-only axis by shedding prefill, any
+    of them by finishing short requests in place of long ones. A declared ``acceptance`` block,
+    even one handoff_acceptance ignores, is the caller's own rule and keeps this one out.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    if spec.get("acceptance") is not None:
+        return None
+    # The axis e2e_workflow.js resolveAgentxMetric grades: the declared basis or its token, else
+    # an exported E2E_METRIC token, else the default. One it cannot resolve fails the run there.
+    declared = str(spec.get("metric_basis") or "").strip().lower()
+    inherited = str(os.environ.get("E2E_METRIC") or "").strip().lower()
+    if declared:
+        objective = (declared if declared in _METRIC_BASIS_OF_E2E_METRIC.values()
+                     else _METRIC_BASIS_OF_E2E_METRIC.get(declared))
+    elif inherited:
+        objective = _METRIC_BASIS_OF_E2E_METRIC.get(inherited)
+    else:
+        objective = STANDALONE_AGENTX_OBJECTIVE
+    if objective is None or objective == STANDALONE_AGENTX_GUARD:
+        return None
+    return {
+        "objective": objective,
+        "min_gain_pct": STANDALONE_AGENTX_MIN_GAIN_PCT,
+        "guard_max_drop_pct": {STANDALONE_AGENTX_GUARD: STANDALONE_AGENTX_GUARD_DROP_PCT},
+    }
+
+
 def acceptance_verdict(
     rule: dict,
     *,
@@ -3991,7 +4050,7 @@ def acceptance_verdict(
     reference: dict,
     candidate: dict,
 ) -> dict:
-    """Apply the caller's KEEP rule to the pair this run publishes.
+    """Apply a KEEP rule to the pair this run publishes.
 
     Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
     objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
@@ -4512,8 +4571,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
-    # The one exception is ``acceptance``, added below only when the handoff states
-    # the caller's KEEP rule.
+    # The one exception is ``acceptance``, added below only when a KEEP rule applies:
+    # the one the handoff states, or GEAK's own for an AgentX run that states none.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
     # The metric-neutral spread first: the output_*-named alias is only written on the output
     # basis, so on any other axis it would leave both legs' scatter unknown.
@@ -4585,12 +4644,14 @@ def normalize_result(h: dict, wf: dict) -> dict:
         or "aggregate_output_tok_s"
     )
 
-    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # ── the KEEP rule ────────────────────────────────────────────────────────
     # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
     # interactivity grading), "ok" means that rule keeps the published pair, not merely
-    # that the final beat the baseline. Guards come from the two legs the pair was read
-    # from; a pair with no such legs (a recovered win) cannot show its guards held.
-    acceptance = handoff_acceptance(h)
+    # that the final beat the baseline. An AgentX run that states none is held to GEAK's
+    # own rule on Hyperloom's bars: total tok/s guards any other axis. Guards come from the
+    # two legs the pair was read from; a pair with no such legs (a recovered win) cannot
+    # show its guards held.
+    acceptance = handoff_acceptance(h) or standalone_acceptance(h)
     if acceptance is not None:
         verdict = acceptance_verdict(
             acceptance,
@@ -7921,9 +7982,11 @@ def main(argv: list[str]) -> int:
     # Module B writes workflow_return.json before normalize_result runs. Send the same
     # comparability calculation into that return while the selected client is known.
     ps_args["comparability"] = _workload_comparability(h)
-    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # A KEEP rule's verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
     # until then; _kb_write_back handles successful runs too when Module B left no receipt.
-    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
+    ps_args["kb_defer_to_interface"] = (
+        handoff_acceptance(h) or standalone_acceptance(h)
+    ) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)

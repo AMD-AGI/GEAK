@@ -99,7 +99,7 @@ function build(args, env) {
   if (env && env.E2E_METRIC != null) process.env.E2E_METRIC = env.E2E_METRIC;
   try {
     return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
-      `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_METRIC_SOURCE, AGENTX_E2E_METRIC, CONC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, workloadIdentityBlock };`
+      `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_METRIC_SOURCE, AGENTX_E2E_METRIC, CONC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, STANDALONE_TOTAL_GUARD_PCT, workloadIdentityBlock };`
     )(args, islDeclared, oslDeclared);
   } finally {
     delete process.env.E2E_METRIC;
@@ -323,12 +323,29 @@ ok(/throughput_tok_s_median/.test(blk), 'the metric-neutral summary key is named
 ok(/InferenceX P90 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
   && /guard_aggregate_output_tok_s_median/.test(blk),
   'on the default axis the prompt names its unit and the output-throughput guard beside it');
+const STANDALONE_VERDICT = `more than ${sc.STANDALONE_TOTAL_GUARD_PCT}% below the base leg`;
+ok(sc.STANDALONE_TOTAL_GUARD_PCT === 5 && /guard_aggregate_total_token_tok_s_median/.test(blk)
+  && blk.includes(STANDALONE_VERDICT) && /validated_no_win/.test(blk),
+  'with no KEEP rule from the caller, total tok/s is a guard too, and Validate holds it to its band');
 const p50Blk = axisOf('e2e_norm_intvty_p50').workloadIdentityBlock();
 ok(/P50 interactivity/.test(p50Blk) && /guard_e2e_norm_intvty_p90_median/.test(p50Blk)
   && /guard_aggregate_output_tok_s_median/.test(p50Blk) && !/guard_total/.test(p50Blk),
   'the p50 objective names both KEEP guards and never requests the removed total guard');
+ok(/guard_aggregate_total_token_tok_s_median/.test(p50Blk) && p50Blk.includes(STANDALONE_VERDICT),
+  'and, declared with no KEEP rule, holds total tok/s beside them');
+const outBlk = axisOf('aggregate_output_tok_s').workloadIdentityBlock();
+ok(/OUTPUT tok\/s/.test(outBlk) && /guard_aggregate_total_token_tok_s_median/.test(outBlk)
+  && outBlk.includes(STANDALONE_VERDICT),
+  'the output axis holds it too: short requests finished in place of long ones raise output tok/s');
+const hlRule = { objective: 'e2e_norm_intvty_p50', min_gain_pct: 3.0,
+  guard_max_drop_pct: { e2e_norm_intvty_p90: 5.0, aggregate_output_tok_s: 5.0 } };
+const hlBlk = build({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: 'e2e_norm_intvty_p50',
+  acceptance: hlRule } }).workloadIdentityBlock();
+ok(hlBlk === p50Blk.slice(0, p50Blk.indexOf('\n  Report `guard_aggregate_total_token_tok_s_median`'))
+  + p50Blk.slice(p50Blk.indexOf('`arbitration_note`.') + '`arbitration_note`.'.length),
+  "a caller that states its KEEP rule gets exactly the note before this guard: its rule names its guards");
 const totalBlk = axisOf('aggregate_total_token_tok_s').workloadIdentityBlock();
-ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_total/.test(totalBlk),
+ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_/.test(totalBlk),
   'a declared throughput axis keeps the throughput wording, with no guard to report');
 ok(blk.includes(String(sc.AGENTX.geak_loop_duration_s)) && blk.includes(String(sc.AGENTX.duration_s)),
   'both measurement windows are stated so phases can budget');

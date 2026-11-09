@@ -218,6 +218,8 @@ try {
   ok(near(s.throughput_tok_s_median, p90For(1)),
     `the graded number is 1000 / P90 ITL of that replay (${s.throughput_tok_s_median})`);
   ok(near(s.guard_aggregate_output_tok_s_median, OUT_TPUT), 'output tok/s rides beside it as the guard');
+  ok(near(s.guard_aggregate_total_token_tok_s_median, IN_TPUT + OUT_TPUT),
+    'and so does total tok/s, the guard GEAK holds when the caller states no KEEP rule');
   ok(!('guard_total_tok_s_median' in s) && !('guard_basis' in s),
     'the removed total-throughput guard fields stay absent');
   ok(near(s.observed_isl, ISL_AVG) && near(s.observed_osl, OSL_AVG), 'the served request shape is reported');
@@ -285,8 +287,9 @@ try {
   ok(v.requested_replicas === 3 && v.successful_replicas === 3 && v.status === 'complete',
     'and the aggregate reports all three');
   ok(near(v.throughput_tok_s_median, p90For(2)), 'its number is the median replica, on the declared axis');
-  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_aggregate_output_tok_s_median, OUT_TPUT),
-    'with the guard carried through the aggregate');
+  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_aggregate_output_tok_s_median, OUT_TPUT)
+    && near(v.guard_aggregate_total_token_tok_s_median, IN_TPUT + OUT_TPUT),
+  'with both guards carried through the aggregate');
 
   // ── 7. Legacy gives a trace replay one timed round unless asked for more ──────────────────────
   // The lifecycle PROFILE=1 / REPEATS=0 fall back to; each round is a full measured window.
@@ -307,6 +310,8 @@ try {
   ok(syn.proc.status === 0 && aiperfCalls(syn).length === 0
     && syn.events.filter((e) => e.event === 'native_bench').length === 4 && (syn.summary || {}).runs === 3,
   'with no bench_env.sh the synthetic client keeps its warmup + three rounds');
+  ok(syn.summary && !Object.keys(syn.summary).some((k) => k.startsWith('guard_')),
+    'and its summary carries no guard: a synthetic sweep keeps its field set');
   const synWarm = bench(SYN_DIR, { isl: 1024, osl: 1024, conc: 64 },
     { OUT_DIR: path.join(SYN_DIR, 'warm_server_leg') });
   ok(synWarm.proc.status === 0 && synWarm.events.filter((e) => e.event === 'native_bench').length === 2
@@ -340,6 +345,8 @@ try {
   const inherited = bench(inheritedDir, wf.WORKLOAD, { E2E_METRIC: 'total' });
   ok((inherited.summary || {}).metric_basis === 'aggregate_total_token_tok_s',
     'an E2E_METRIC the bench inherited outranks bench_env.sh ...');
+  ok(!Object.keys(inherited.summary || {}).some((k) => k.startsWith('guard_')),
+    '(on total the objective is the guard, so none rides beside it)');
   ok(/not comparable/.test(setupError(ARGS, inheritedDir)), '... and Setup refuses that baseline');
   const forgotDir = stage('eval_forgot_env', '');
   bench(forgotDir, wf.WORKLOAD);

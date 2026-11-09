@@ -255,6 +255,8 @@ class DeclaredAxisMatchesTheSummaryTest(unittest.TestCase):
         self.assertEqual(default, self.summarize.P90_INTVTY_BASIS)
         self.assertEqual(set(self.summarize._GUARDS[default]),
                          {self.summarize.OUTPUT_BASIS})
+        self.assertEqual(set(self.summarize._guard_table(default, True)),
+                         {self.summarize.OUTPUT_BASIS, self.summarize.TOTAL_BASIS})
 
 
 if __name__ == "__main__":

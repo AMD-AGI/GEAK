@@ -165,8 +165,12 @@ the bench use it identically. An AgentX submission is not that. It replays a rec
 client owns the request mix, the arrival pattern, its own warmup and the measurement duration.
 Standalone it is graded on **InferenceX P90 interactivity** — `p90_intvty_inferencex`, i.e.
 `1000 / P90(ITL)` in tok/s/user, decode only, the x-axis of the InferenceX pareto — with total
-(input+output) tok/s carried beside it as `guard_total_tok_s_median`. The output-only axis a sweep
-uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large change in work.
+(input+output) tok/s carried beside it as `guard_aggregate_total_token_tok_s_median`. Unless the
+caller states its own KEEP rule, a win must gain 3% on the graded axis with total tok/s at most 5%
+below the base leg, whichever axis is graded but total itself: the corpus fixes the work each request
+asks for, so a candidate that completes less of it can still raise the graded number. The output-only
+axis a sweep uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large
+change in work.
 
 Under Hyperloom this arrives as environment variables that `interface/run_e2e.py` exports. Standalone,
 declare it in the args instead — one line is enough, and it fills the canonical setup:
