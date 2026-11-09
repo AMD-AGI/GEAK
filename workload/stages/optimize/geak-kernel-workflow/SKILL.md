@@ -1,6 +1,6 @@
 ---
 name: geak-kernel-workflow
-description: Optimize one frozen-harness unit-test task with GEAK's own kernel_workflow.js — one task per GPU, attempts chained so improvements accumulate, until the time budget is exhausted.
+description: Optimize a frozen-harness unit-test task with GEAK's own kernel_workflow.js, using isolated resources and chained attempts until the time budget is exhausted.
 ---
 
 # geak-kernel-workflow
@@ -8,7 +8,7 @@ description: Optimize one frozen-harness unit-test task with GEAK's own kernel_w
 The **default** implementation of the optimize stage. It hands each task directory
 extracted by the profile stage (`tasks/<kernel>/`, containing `unittest.py`, `meta.json`,
 `cases.py` and `kernel_src/`) to GEAK's `kernel_workflow/kernel_workflow.js`, which edits
-`kernel_src/<mod>.py`.
+the task's declared kernel sources.
 
 This skill supplies the **optimization method** only; parallelism, timing, fault
 tolerance and KEEP/revert belong to the stage-shared `engine/campaign/worker.sh` and
@@ -23,12 +23,12 @@ So changing the optimization method means a different directory containing a `pr
 
 ## What it asks the agent to do
 
-The prompt from `prompt.sh` instructs one unattended session to run
-`kernel_workflow.js` with:
+Use `prompt.sh` for the attempt's handoff and invoke `kernel_workflow.js` with:
 
 | Parameter | Value | Why |
 | --- | --- | --- |
-| `kernel_path` | `$TASK_DIR/kernel_src/<mod>.py` | the only editable file |
+| `kernel_path` | `$TASK_DIR` | carries the frozen harness and declared editable sources |
+| `target_language` | selected implementation language | scopes knowledge reads and writes; set explicitly |
 | `workflow_dir` | GEAK's `kernel_workflow/` | |
 | `eval_dir` | `$EVAL_DIR` (this attempt's own directory) | intermediate artifacts from different attempts must not overwrite each other |
 | `exp_root` | `$RUN_DIR` | |
@@ -42,7 +42,7 @@ The prompt from `prompt.sh` instructs one unattended session to run
 All four were written in because a previous 200 GPU-hour campaign saw each of them
 actually violated:
 
-1. **The harness is frozen.** Only `kernel_src/<mod>.py` may be edited. `unittest.py`,
+1. **The harness is frozen.** Only the declared editable kernel sources may change. `unittest.py`,
    `cases.py` and `meta.json` are off limits — a "speedup" obtained by editing the
    harness measured nothing.
 2. **The noise band.** An improvement below the keep threshold (default 1.045) is noise,
