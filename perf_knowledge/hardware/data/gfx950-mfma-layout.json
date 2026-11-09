@@ -11867,7 +11867,7 @@
   },
   "bi_form": "bullet",
   "method": "5-way parallel extraction (split by section, each agent spot-checking its own output against re-rendered pages) + a merge agent running four tests; then a coverage audit binning every record against the PDF bookmark tree and caption census, and a gap-fill pass (fragments L, M) for the chapter-7 pages that audit showed uncited.",
-  "standing_caveat": "Every genuinely CDNA4-new surface -- the four F8F6F4 opcodes, E8M0 scaling, 6-bit packing, the K=128 shapes and the new sparse shapes -- has exactly ONE channel of evidence behind it, because no tool reaches them. The 11776-element cross-check covers only what CDNA4 inherits from CDNA3. Validate a low-precision layout numerically on hardware before trusting it in a kernel.",
+  "standing_caveat": "The 11776-element calculator cross-check covers only what CDNA4 inherits from CDNA3. New F8F6F4, E8M0, 6-bit packing, K=128 and sparse rules retain their per-record source and verification limits. Triton can supply compiler layouts for supported formats; agreement with them is not complete ISA or GPU numerical validation. Validate the selected format and instruction on hardware before relying on it in a kernel.",
   "tests": {
    "T1_quote_check": "338/338 records: every _src.quote greps back to the page it names. Re-run after the chapter-7 gap-fill (fragments L and M) raised the sourced-record count from 241 to 338.",
    "T2a_figure_vs_formula": "94/104 grid cells. All 10 failures are the two FP8 grids, which are drawn in error (the FP4/FP6 grids for the SAME two opcodes agree with the formula).",

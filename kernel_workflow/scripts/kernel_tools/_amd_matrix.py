@@ -73,9 +73,7 @@ def facts(calc, arch, instr, want_layout):
     print(f"  dtype       A(Src0)={src0}")
     print(f"              B(Src1)={src1}")
     if epl_a is not None:
-        print(f"  elems/lane  A={epl_a}  B={epl_b}   "
-              f"<- ds_read_tr fit: a ds_read_trN gives N/lane; need {epl_a} for A "
-              f"(if trN < {epl_a}, transpose-read RAISES ds_read count -> disqualified)")
+        print(f"  elems/lane  A={epl_a}  B={epl_b}")
     if want_layout:
         rc, lay, err = _run(calc, "-a", arch, "-i", instr, "-R", "-A", "--markdown")
         if rc != 0:
