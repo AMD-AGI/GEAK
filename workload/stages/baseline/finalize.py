@@ -37,6 +37,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
 
 
+def write_section(out, baseline, run_root=None):
+    """This slot's section of the run report, written where the numbers were accepted.
+
+    The run-level renderer passes paths and reads `result.json`; it does not know that a
+    baseline has a provenance method or that a node-local leg outranks a remote receipt.
+    That is the slot's knowledge, so the slot writes the paragraph (PRINCIPLES R3/R6).
+    Only a baseline this function was reached with is reported -- it runs after the five
+    rules passed, never beside a `blocked`.
+    """
+    pristine = None
+    if run_root:
+        pristine = read_json(os.path.join(run_root, "profile", "out",
+                                          "pristine_baseline.json"))
+    L = ["## Baseline", "",
+         "| Reference | tok/s | Provenance |", "| --- | --- | --- |",
+         "| adopted receipt | %s | %s |"
+         % (baseline.get("throughput"),
+            (baseline.get("provenance") or {}).get("method") or "—")]
+    if isinstance(pristine, dict) and pristine.get("output_tok_per_s") is not None:
+        L.append("| node-local pristine leg | %s | measured on this node by the same "
+                 "harness as the candidate legs |" % pristine["output_tok_per_s"])
+        L += ["", "The A/B is against the **node-local** leg. A receipt from another "
+                  "machine is a cross-check, not a reference: only the local leg shares "
+                  "the harness, the client flags and the corpus with the candidate."]
+    try:
+        with open(os.path.join(out, "REPORT.md"), "w") as f:
+            f.write("\n".join(L) + "\n")
+    except OSError:
+        pass  # the verdict stands whether or not the prose could be written
+
+
 def truthy(value):
     """InferenceX records a valid submission as `true` or as the integer 1."""
     return value is True or value == 1
@@ -121,6 +152,8 @@ def main():
         metrics["drift_pct"] = round(drift, 5)
     if isinstance(reference.get("ratio"), (int, float)):
         metrics["reference_ratio"] = reference["ratio"]
+
+    write_section(out, baseline, run_root=os.environ.get("RUN_ROOT"))
 
     artifacts = {"baseline": "baseline.json"}
     for name in ("REPORT.md", "measured_baseline.json", "provenance.json",

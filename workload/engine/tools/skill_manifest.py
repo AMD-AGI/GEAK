@@ -21,7 +21,8 @@ import json
 import os
 import sys
 
-WORKLOAD_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKLOAD_ROOT = os.path.dirname(  # engine/tools/skill_manifest.py -> engine/tools -> engine -> workload
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STAGES = os.path.join(WORKLOAD_ROOT, "stages")
 SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache"}
 

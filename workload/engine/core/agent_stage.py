@@ -37,44 +37,12 @@ import subprocess
 import sys
 import time
 
-CONTRACT = """You are running one stage of an unattended pipeline. No one will answer a
-question, and nothing after this message is interactive: decide, act, and record what you
-did. Work until the stage is finished or genuinely blocked.
-
-THE CONTRACT (stages/CONTRACT.md), which is the whole of what this stage owes anybody:
-
-  1. Read $IN (the previous stage's output directory) and $PARAMS (this stage's
-     parameters). Neither is advisory. Where $PARAMS and the skill's SKILL.md disagree --
-     a selection cutoff, a count, a threshold -- $PARAMS wins: it is this run's executable
-     policy and the value in SKILL.md is the default it replaces. The slot checks
-     afterwards that what ran is what was configured, so a stage that quietly used the
-     skill's default fails even if everything it did was otherwise correct.
-  2. Do the work described in the skill's SKILL.md, below. It is the procedure; follow it
-     rather than improvising an equivalent.
-  3. Write every artifact into $OUT.
-  4. Finish by writing $OUT/result.json:
-       {"stage": "<stage>", "skill": "<skill>", "status": "ok|blocked|fail",
-        "artifacts": {"name": "relative/path"}, "metrics": {...}, "notes": "..."}
-     Use $WORKLOAD_ROOT/stages/_shared/emit_result.py to write it -- it validates the
-     shape and refuses a malformed one.
-
-status means exactly this:
-  ok      -- the work described in SKILL.md was done and its artifacts are in $OUT.
-  blocked -- a precondition was missing (no GPU, no server, no upstream artifact). Say in
-             `notes` what was missing and what would unblock it. This is a legitimate,
-             useful outcome; it is not a failure to admit one.
-  fail    -- it was attempted and did not succeed.
-
-Never report `ok` for work that was not done, and never report a number that was not
-measured. A stage that reports a plausible figure nobody computed is the one outcome this
-pipeline cannot recover from: everything downstream inherits it and nothing says so.
-
-Write result.json even so -- but know that the slot's `finalize.py` runs after this
-session, reads $OUT itself and has the last word. Every slot has one. It is not a second
-opinion to argue with: it is the stage's acceptance criterion, and it is in
-$WORKLOAD_ROOT/stages/<stage>/finalize.py and README.md where you can read exactly what it
-will require before you decide you are finished.
-"""
+# Everything the agent is told, other than the skill's own SKILL.md, is in prompt/. It is
+# text written to be read and re-read by whoever is tuning how these sessions behave, and
+# that person does not have to be someone who edits Python. Substitution is a literal
+# `{{NAME}}` replace and nothing more: a template engine here would be a framework, and
+# PRINCIPLES R2 says this pipeline does not have one.
+PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt")
 
 
 def read(path, default=""):
@@ -83,6 +51,25 @@ def read(path, default=""):
             return f.read()
     except OSError:
         return default
+
+
+def prompt_text(name, **fields):
+    """One of the prompt/*.md files, with every {{NAME}} replaced.
+
+    A missing file is a defect in this directory, not something to paper over with a
+    silent default: the session would run without the instruction that makes its output
+    usable, and nothing downstream would say so.
+    """
+    path = os.path.join(PROMPT_DIR, name)
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as exc:
+        raise SystemExit("the prompt text %s is missing or unreadable (%s); an agent "
+                         "session without it is not worth starting" % (path, exc))
+    for key, value in fields.items():
+        text = text.replace("{{%s}}" % key, str(value))
+    return text.rstrip("\n")
 
 
 def inventory(out_dir, limit=60):
@@ -103,7 +90,8 @@ def inventory(out_dir, limit=60):
 
 def build_prompt(env, lay, params, attempt, why=None, repair=None):
     out = env["OUT"]
-    lines = [CONTRACT, "", "ENVIRONMENT (already exported in your shell; use these paths "
+    lines = [prompt_text("contract.md"), "", "",
+             "ENVIRONMENT (already exported in your shell; use these paths "
                          "verbatim rather than retyping them):", ""]
     for k in ("GEAK_ROOT", "WORKLOAD_ROOT", "SKILL_ROOT", "STAGE", "STAGE_SKILL",
               "RUN_ROOT", "IN", "OUT", "CONFIG", "PARAMS"):
@@ -121,30 +109,18 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
     if attempt > 1:
         rows, truncated = inventory(out)
         if repair:
-            lines += ["THIS STAGE REPORTED `%s` (attempt %d) AND THERE IS BUDGET LEFT, so "
-                      "you get one more session. What it said was missing:"
-                      % (repair.get("status"), attempt - 1), "",
-                      "    " + (str(repair.get("notes") or "").strip()
-                                or "(nothing -- the note was empty, which is itself the "
-                                   "defect described below)"), "",
-                      "Do one of two things and nothing else:", "",
-                      "  * If that precondition is something you can satisfy here -- a "
-                      "file to build, a path to locate, a container to start, a step of "
-                      "SKILL.md that was skipped -- satisfy it and finish the stage.",
-                      "  * If it genuinely cannot be satisfied on this machine, report "
-                      "`blocked` again and make the note name exactly what is absent and "
-                      "the command that shows it absent. A vague or empty note is the one "
-                      "unacceptable outcome: nobody, human or agent, can act on "
-                      "\"  is missing\".", "",
-                      "Do not reinterpret the stage to get around the blocker, and do not "
-                      "start over -- what is already in $OUT was expensive:", ""]
+            lines += [prompt_text(
+                "repair.md",
+                STATUS=repair.get("status"),
+                PREV_ATTEMPT=attempt - 1,
+                NOTES=(str(repair.get("notes") or "").strip()
+                       or "(nothing -- the note was empty, which is itself the defect "
+                          "described below)")), ""]
         else:
-            lines += ["THIS IS A CONTINUATION (attempt %d). Earlier sessions left "
-                      "artifacts%s." % (attempt, (": " + why) if why else ""),
-                      "",
-                      "Do not start over. These artifacts are already on disk and were "
-                      "expensive to produce; read them, work out which step of SKILL.md "
-                      "they correspond to, and carry on from there:", ""]
+            lines += [prompt_text(
+                "continuation.md",
+                ATTEMPT=attempt,
+                WHY=(": " + why) if why else ""), ""]
         for rel, size in rows:
             lines.append("  %10d  %s" % (size, rel))
         if truncated:
@@ -189,8 +165,10 @@ def finalize(env, log_cb=print):
     one is a defect in the slot, reported here and caught before the run by
     `run.py --dry-run`.
     """
-    stages_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "stages")
+    # engine/core/agent_stage.py -> engine/core -> engine -> workload
+    workload_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    stages_root = os.path.join(workload_root, "stages")
     script = os.path.join(stages_root, env.get("STAGE", ""), "finalize.py")
     # The envelope writer belongs to the stage contract, not to the plumbing, so it lives
     # with the contract in stages/_shared (stages/CONTRACT.md 3). The dependency points

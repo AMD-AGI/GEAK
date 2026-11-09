@@ -114,7 +114,7 @@ measurement basis. Retain old credit in cost accounting; compare performance onl
 the matching harness version.
 
 ```
-python3 $WORKLOAD_ROOT/campaign/scheduler.py run \
+python3 $WORKLOAD_ROOT/engine/campaign/scheduler.py run \
     --work-root $OUT/work --tasks-dir "$TASKS_DIR" \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> [--gpus-per-task <n>] --target <sec> --backend docker --image <img> \
@@ -151,7 +151,7 @@ scenario config.
 For every task with a `state/<kernel>.status.json`, run it **twice** in a fresh process:
 
 ```
-python3 $WORKLOAD_ROOT/campaign/run_task_entry.py $TASKS_DIR/<kernel>
+python3 $WORKLOAD_ROOT/engine/campaign/run_task_entry.py $TASKS_DIR/<kernel>
 ```
 
 Use the retained source snapshot for that task, with the same frozen harness that scored
@@ -281,14 +281,14 @@ Before trusting any number, two things are worth checking and neither needs code
   task's harness files — a number measured by an edited harness measures the edit;
 * the only sources that changed under `kernel_src/` are the ones `meta.json` declares
   editable (`kernel_extraction.editable_leaves` / `candidate_bind.editable_leaves`).
-  `python3 $WORKLOAD_ROOT/campaign/source_tree.py check-frozen <task> <snapshot>` does the
+  `python3 $WORKLOAD_ROOT/engine/campaign/source_tree.py check-frozen <task> <snapshot>` does the
   first. For the second, `source_tree.py editable <task>` prints the declaration and
   `source_tree.py check <before> <task>/kernel_src --allowed "<those names>"` exits 2
   naming every file it will not accept.
 
 ## The `prompt.sh` interface
 
-An implementation supplies the optimization method and nothing else. `campaign/worker.sh`
+An implementation supplies the optimization method and nothing else. `engine/campaign/worker.sh`
 passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 
 | Variable | Meaning |

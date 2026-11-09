@@ -74,7 +74,7 @@ docker run -d --name "$NAME" --device /dev/kfd --device /dev/dri --group-add vid
 finish() { docker logs "$NAME" > "$OUT/server.log" 2>&1; docker rm -f "$NAME" >/dev/null 2>&1; }
 trap finish EXIT
 
-WATCH="$HERE/serving_watch.py"
+WATCH="$HERE/../_shared/serving_watch.py"
 ok=0
 for _ in $(seq 1 300); do       # 75 min: a cold page cache plus HiCache admission can take ~40
   # A rank can abort while the container and its HTTP front end stay up; look at the log too.

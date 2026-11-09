@@ -8,7 +8,7 @@ set -euo pipefail
 : "${KERNEL_SRC:?KERNEL_SRC}"
 
 GEAK_ROOT="${GEAK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-TASK_ENTRY="$GEAK_ROOT/workload/campaign/run_task_entry.py"
+TASK_ENTRY="$GEAK_ROOT/workload/engine/campaign/run_task_entry.py"
 
 KEEP_THRESHOLD="${KEEP_THRESHOLD:-1.045}"
 BEST_SPEEDUP="${BEST_SPEEDUP:-1.0}"

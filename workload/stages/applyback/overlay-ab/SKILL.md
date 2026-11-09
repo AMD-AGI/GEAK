@@ -178,7 +178,7 @@ image optimize built and cold-verified the kernels in -- never on the host's Pyt
    lowest, middle and highest concurrency first, then the rest -- `points.py` recomputes it when
    an older baseline has no `measure_order`, so nothing is narrowed silently. If the budget
    cannot hold every covered point, measure in that order and stop: finalize names the points
-   not reached and the verdict stays `incomplete` until a later session measures them. The leg watches its own server (`../serving_watch.py`): a rank can abort while the
+   not reached and the verdict stays `incomplete` until a later session measures them. The leg watches its own server (`../../_shared/serving_watch.py`): a rank can abort while the
    container and its HTTP front end stay up, so it scans the server log for the fatal lines a
    dead GPU server leaves, fails a start that dies in seconds instead of at the 75 min health
    timeout, and stops the client the moment the server dies mid-window (exit 3, the line in
@@ -204,11 +204,12 @@ image optimize built and cold-verified the kernels in -- never on the host's Pyt
 3. Copy `applied.json` and `shadow_check.json` into each `$OUT/points/<pid>/`. Points measured
    by an earlier session (`result.json` `ok`) are kept, not re-measured.
 
-The finalizer judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
+The finalizer (`../finalize.py`, which hands each point to `../../evaluate/finalize.py` with
+`reference: ci`) judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
 row's own metric key, refuses a point without an ALIGNED `alignment.json`, a PROVEN `pins.json` or with a
 shortened duration, a measured window that ended early (`measured_duration_s` below 98% of the
 configured length) or a server that died during the leg (`server_watch.json`, or for older legs
-the saved `server.log`, scanned by `../serving_watch.py`), marks every selected point that has no
+the saved `server.log`, scanned by `../../_shared/serving_watch.py`), marks every selected point that has no
 measurement as unmeasured, and folds them (`../aggregate_points.py`): any regression makes the verdict
 `regression`, a gain needs a gain somewhere and no regression, a point without an A/B makes it
 `incomplete`. Each point's `ab.json` also carries p90 interactivity and per-GPU total throughput

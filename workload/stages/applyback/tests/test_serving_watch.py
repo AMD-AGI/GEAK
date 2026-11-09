@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 SLOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("serving_watch", SLOT / "serving_watch.py")
+spec = importlib.util.spec_from_file_location("serving_watch", SLOT.parent / "_shared" / "serving_watch.py")
 W = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(W)
 
@@ -58,7 +58,7 @@ class WatchTest(unittest.TestCase):
     def run_watch(self, client_seconds, die_after=None):
         client = subprocess.Popen(["sleep", str(client_seconds)], start_new_session=True)
         out = self.tmp / "watch.json"
-        w = subprocess.Popen([sys.executable, str(SLOT / "serving_watch.py"), "watch",
+        w = subprocess.Popen([sys.executable, str(SLOT.parent / "_shared" / "serving_watch.py"), "watch",
                               "--container", "c", "--client-pid", str(client.pid),
                               "--out", str(out), "--interval", "0.5"], env=self.env)
         if die_after is not None:
@@ -84,17 +84,17 @@ class WatchTest(unittest.TestCase):
 
     def test_a_container_that_exited_is_dead(self):
         (self.tmp / "docker").write_text("#!/bin/sh\necho false\n")
-        r = subprocess.run([sys.executable, str(SLOT / "serving_watch.py"), "scan", "--container", "c"],
+        r = subprocess.run([sys.executable, str(SLOT.parent / "_shared" / "serving_watch.py"), "scan", "--container", "c"],
                            env=self.env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 3)
         self.assertEqual(json.loads(r.stdout)["reason"], "container not running")
 
 
 class FinalizeAdmissionTest(unittest.TestCase):
-    """finalize.server_death: the leg's watch record, else its saved server log."""
+    """Evaluate's server_death: the leg's watch record, else its saved server log."""
     def setUp(self):
-        sys.path.insert(0, str(SLOT))
-        spec = importlib.util.spec_from_file_location("applyback_finalize", SLOT / "finalize.py")
+        spec = importlib.util.spec_from_file_location("evaluate_finalize",
+                                                      SLOT.parent / "evaluate" / "finalize.py")
         self.F = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.F)
         self.out = Path(tempfile.mkdtemp())

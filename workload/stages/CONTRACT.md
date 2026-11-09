@@ -1,11 +1,42 @@
-# Stage-skill contract
+# Module and stage-skill contract
+
+A module defines a capability and an input/output/acceptance contract. One or more
+implementation skills or tools perform that work. Kernel Workflow and native tools
+(OOB), for example, are alternative kernel-optimization implementations with the same
+frozen-task and verification contract. A module is not a position in an execution order.
+
+## Direct module calls
+
+The root agent follows `SKILL.md`. Each invocation's `PLAN.md` names its question,
+module and implementation path, input identities, scope, output directory, constraints,
+resource/time budget and decisive evidence. The task and explicit plan govern the scope;
+implementation defaults do not silently broaden or narrow it.
+
+Invoke the skill or tool with those inputs and a separate candidate/output directory.
+A module may use a relevant part of a larger skill, combine tools, or return a running
+handle. Keep the evaluation contract fixed and use the validation appropriate to the
+claim: a trace observation, a qualified UT, a cold-verified kernel and a serving comparison
+are different deliveries. Do not submit a partial delivery as a completed standard stage.
+
+Return native receipts/logs and `REPORT.md` with execution status, findings, changed
+artifacts and uncertainty. A losing experiment remains evidence. `STATE.md` holds pointers
+and decisions, not a second copy of measured numbers or worker counters. Existing
+`result.json` envelopes may be reused where appropriate; a diagnostic report need not
+manufacture a kernel artifact. A new implementation does not redefine the module's gates.
+
+The current stage finalizers remain authoritative for deliveries that meet their full
+contract. Applyback verifies kernel integration and delegates the same serving comparison
+to Evaluate; direct system experiments use their own effect/quality evidence. Preserve
+native invalidity and the configured comparison basis in either route.
+
+## Standard recipe adapter
 
 Each configured stage in `workload/` (`baseline`, `profile`, optional `ut`, `roofline`,
 `optimize`, `applyback`) is a **directory slot**. Every subdirectory of a slot is one interchangeable
 **implementation**, and each implementation is itself a skill: it has its own `SKILL.md`
 and its own code, and can be read or executed on its own, outside this pipeline.
 
-Replacing a module means pointing `stages.<stage>.skill` at a different directory name
+Selecting a stage implementation means pointing `stages.<stage>.skill` at a directory name
 in the same slot. Nothing else in the pipeline changes.
 
 ```
@@ -94,6 +125,13 @@ external interface.
 - Values in `artifacts` are paths **relative to `$OUT`**, never absolute. The driver
   checks that each one exists.
 - `metrics` holds numbers used for reporting and gating; it may be empty.
+- `$OUT/REPORT.md`, if present, is **this stage's own section of the run report**. The
+  run-level renderer pastes it in verbatim and never summarises it, so a stage says what
+  a stage's numbers mean. Write it from the skill if the skill is the one holding the
+  numbers (`kernel-roofline` does); otherwise the slot's `finalize.py` writes it, since
+  it already has every figure in hand at the moment it decides whether to accept them. A
+  stage that writes none still appears in the contract table — nothing downstream breaks,
+  it simply has no prose of its own.
 - When output is incomplete, report `blocked`/`fail` honestly. Marking a half-finished
   stage `ok` lets downstream burn 48 hours on fabricated inputs — the most expensive
   mistake available in this pipeline.
@@ -127,7 +165,7 @@ python3 "$WORKLOAD_ROOT/stages/_shared/emit_result.py" --status ok \
 the envelope writer above and `task_plan.py`, which reads task ownership out of a
 `task_plan.json` whose key names differ between the standalone skill and older slot
 deliveries. It belongs to this contract, not to the pipeline that runs it: a slot that
-reached up into `core/` for a tool would tie a replaceable skill to the plumbing, and
+reached up into `engine/` for a tool would tie a replaceable skill to the plumbing, and
 the point of the slot is that the plumbing can be swapped out from under it. Criteria
 themselves stay in each slot's own `finalize.py` (section 3.1); nothing scenario-specific
 or stage-specific goes here.
@@ -148,7 +186,7 @@ an `active_stack` key is read only there). `run.py validate` compares whatever i
 against the `target` block of the config and **fails the stage on a contradiction**: if
 the config says one model and the stage observed another, one of them is wrong and every
 label downstream is wrong with it. A stage that observes nothing is reported as
-`unverified`, which is a statement rather than a pass. See `core/target.py` for the
+`unverified`, which is a statement rather than a pass. See `engine/core/target.py` for the
 whole gate, and `README.md` for the naming half of it.
 
 ### 3.1 The slot's verdict: `finalize.py`
@@ -190,8 +228,8 @@ What belongs in it, and what does not:
 Shared slot-level logic lives here too (how expected e2e gain is computed, for instance),
 so that replacing the roofline implementation does not silently replace the ranking
 criterion along with it. Where the folding or scoring algorithm ships with the skill, call
-it — `stages/roofline/finalize.py` runs the implementation's own `scripts/fold.py` as a
-subprocess rather than reimplementing the sum.
+it during the implementation's work — the roofline README gives the native folding
+command. Its finalizer reads the resulting evidence without duplicating the sum.
 
 **The criterion is written once.** Prose that describes it — a slot `README.md`, a
 `SKILL.md` — points at `finalize.py` instead of restating its numbers, because a second
@@ -222,7 +260,7 @@ you happened to read.
 **The ranking key is `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)`,
 not operator speedup.** This scenario has twice produced an operator win of 1.8× / 1.34×
 against a whole-machine change of +0.24% / −0.09%. Operator speedup and end-to-end delta
-must be stated separately, and only `applyback` may claim an end-to-end gain.
+must be stated separately, and only a qualified serving comparison may support an end-to-end gain.
 
 Split scenarios insert `ut` after `profile` and set root config `task_source_stage: "ut"`.
 The driver exports `TASKS_DIR=$RUN_ROOT/<task_source_stage>/out/tasks` so optimize and

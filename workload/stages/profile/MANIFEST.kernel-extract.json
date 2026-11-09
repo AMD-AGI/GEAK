@@ -1,7 +1,7 @@
 {
   "file_count": 113,
   "files": {
-    "PROVENANCE.json": "54066a83443c92968988031a3a527d03aeebdab57c7f0399523aca7e56c54ebb",
+    "PROVENANCE.json": "1276c51d9707999e1c16b449eab757ecfe6b7bdc61b00e8e613332c1b17284d5",
     "SKILL.md": "8013b00bf01265066bcf3b78e926294b083bffc612453dc82e38438e90cdc1a6",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -116,9 +116,9 @@
     "ut_contracts/ut_driver.py": "ad3604baa8e7e037858f93e3d10bfed4af529ac33b62bf94c90c31e59aec31c9"
   },
   "modified_from_origin": false,
-  "note": "process_state UT gate (leg_runner snapshot + ut_driver gate), on top of the merged profile/UT split; adaptation notes in PROVENANCE.json.",
+  "note": "Merge of geak-x de48d854 (engine/ layout, Evaluate stage, modular skill loop, native UT output retention) into geak-x-multiconfig f4322665; kernel-extract content unchanged by the merge apart from adaptation notes (PROVENANCE).",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "94d4285482c70f18093aab0989e0ddfb5adc3070b4fd7b25c2e66f0592e94a48"
+  "tree_sha256": "5093eb99b40f5d411ff3622a54592f33e3f6b9d9d13b422d6eb86efd4d90598c"
 }

@@ -8,7 +8,7 @@ RUN="$RUN_DIR"
 # The baseline leg is always the **originally installed module**, not your previous change,
 # so this speedup is always the cumulative figure against the real baseline.
 #
-# The entry is launched through campaign/run_task_entry.py rather than with `cd $TASK_DIR &&
+# The entry is launched through engine/campaign/run_task_entry.py rather than with `cd $TASK_DIR &&
 # python3 unittest.py`: a task directory contains its own `unittest.py`, which lands on
 # sys.path[0] and shadows the standard library package, and the failure surfaces far away
 # ("No module named 'unittest.mock'") as an empty measurement rather than as an error.
@@ -30,7 +30,7 @@ RUN="$RUN_DIR"
 # Reporting the second when the first happened teaches the optimizer nothing and spends
 # the budget anyway.
 default_measure() {
-  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../campaign" && pwd)"
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../engine/campaign" && pwd)" || return 78
   ( timeout "$MEASURE_TIMEOUT" python3 "$here/run_task_entry.py" "$TASK_DIR" unittest.py 201>&- ) \
       > "$RUN/.measure.log" 2>&1
   local measure_rc=$?
