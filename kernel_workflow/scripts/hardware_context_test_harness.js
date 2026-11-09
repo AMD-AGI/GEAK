@@ -32,6 +32,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     args: {
       kernel_path: '/tmp/kernel',
       hardware_context: extras.hardwareContext,
+      use_hardware_context: extras.useHardwareContext,
       expected_sku: extras.expectedSku,
       state: extras.state,
       mode: extras.mode || 'optimize',
@@ -57,7 +58,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     })),
     budget: { total: null, spent: () => 0, remaining: () => budget },
     agent: async (prompt, options) => {
-      prompts.push({ label: options.label, prompt });
+      prompts.push({ label: options.label, prompt, schema: options.schema });
       if (extras.agentResponses && Object.prototype.hasOwnProperty.call(extras.agentResponses, options.label)) {
         return extras.agentResponses[options.label];
       }

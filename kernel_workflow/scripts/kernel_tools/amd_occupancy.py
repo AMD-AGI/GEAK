@@ -101,8 +101,9 @@ MODELS = {
 # gfx -> family. Prefix-matched longest-first, so a new gfx94x/gfx120x lands correctly without
 # an edit; an UNKNOWN arch returns None rather than defaulting to CDNA (a wrong model that
 # prints a confident number is worse than no number).
+# gfx908 has separate VGPR/AGPR files; do not reuse the CDNA2-4 combined model.
 _FAMILY_PREFIXES = [
-    ("gfx90a", "cdna"), ("gfx908", "cdna"), ("gfx94", "cdna"), ("gfx95", "cdna"),
+    ("gfx90a", "cdna"), ("gfx94", "cdna"), ("gfx95", "cdna"),
     ("gfx125", "cdna5"),
     ("gfx10", "rdna"), ("gfx11", "rdna"), ("gfx12", "rdna"),
 ]

@@ -16,7 +16,7 @@ function context(name, cu) {
     JSON.stringify({gfx:'gfx942', marketing_name:`AMD Instinct ${name}`, physical_cu_count:cu})], {cwd:root}));
 }
 function inputs(c) {
-  return {expected_gfx:c.observed.gfx, expected_target:'unknown',
+  return {use_hardware_context:true, expected_gfx:c.observed.gfx, expected_target:'unknown',
     expected_device_name:c.observed.marketing_name, expected_physical_cu_count:c.observed.physical_cu_count,
     hardware_context:c, hardware_context_path:'/tmp/eval/hardware_context.json', expected_sku:c.sku};
 }
@@ -31,7 +31,7 @@ function assertContext(prompt, c) {
   const c = context('MI308X', 80), other = context('MI300X', 304), unknown = context('MI300X', 80);
   for (const hw of [c, unknown]) {
     for (const language of ['triton', 'gluon', 'hip']) {
-      const run = await lane.run('gfx942', '', {hardwareContext:hw, deviceName:hw.observed.marketing_name,
+      const run = await lane.run('gfx942', '', {useHardwareContext:true, hardwareContext:hw, deviceName:hw.observed.marketing_name,
         physicalCuCount:80, language, budget:1, planDirections:[{id:'scope', specialty:'deep_explore',
           mode:'deep_explore', hypothesis:'resource-aware grid', out_dir:'/tmp/eval/deep', gpu_id:'0'}]});
       for (const label of ['tech_lead:analyze', 'profile_engineer:baseline']) {
@@ -45,7 +45,7 @@ function assertContext(prompt, c) {
   }
   const freeze = {device_gfx:'gfx942', device_target:'unknown', device_name:c.observed.marketing_name,
     physical_cu_count:80, hardware_context:c, hardware_context_path:'/tmp/eval/hardware_context.json'};
-  const b = bakeoff.build({kernel_path:'/tmp/k', workflow_dir:path.join(root,'kernel_workflow'), mode:'bakeoff',
+  const b = bakeoff.build({kernel_path:'/tmp/k', workflow_dir:path.join(root,'kernel_workflow'), mode:'bakeoff', use_hardware_context:true,
     use_expert_skills:'false', backends:['hip','gluon']}, {
     agent:bakeoff.healthy('triton', [], freeze), lane:{hip:1.2,gluon:1.1}});
   await b.run();
@@ -69,16 +69,57 @@ function assertContext(prompt, c) {
   assert(profiling.length > 0, 'the baseline profile role must run');
   profiling.forEach(p => assertContext(p.prompt, c));
   assert(resumed.trace.agentPrompts.length > 0);
-  resumed.trace.agentPrompts.forEach(p => assertContext(p.prompt, c));
+  resumed.trace.agentPrompts.filter(p => p.prompt.includes('## Shared GEAK hardware context')).forEach(p => assertContext(p.prompt, c));
   await assert.rejects(e2e.build({...modelArgs, state:{hardware_context:other}}).run, /hardware_context/);
-  await assert.rejects(lane.run('gfx942','',{hardwareContext:c, deviceName:c.observed.marketing_name,
+  await assert.rejects(lane.run('gfx942','',{useHardwareContext:true, hardwareContext:c, deviceName:c.observed.marketing_name,
     physicalCuCount:80, setupContext:other}), /hardware_context/);
-  await assert.rejects(lane.run('gfx942','',{hardwareContext:c, deviceName:c.observed.marketing_name,
+  await assert.rejects(lane.run('gfx942','',{useHardwareContext:true, hardwareContext:c, deviceName:c.observed.marketing_name,
     physicalCuCount:80, expectedSku:'mi300x'}), /expected_sku/);
-  await assert.rejects(lane.run('gfx942','',{hardwareContext:c, deviceName:c.observed.marketing_name,
+  await assert.rejects(lane.run('gfx942','',{useHardwareContext:true, hardwareContext:c, deviceName:c.observed.marketing_name,
     physicalCuCount:80, setupSku:'mi300x'}), /device_sku/);
   // Old callers still execute, but no SKU is invented from their ISA.
   const old = await lane.run('gfx942');
-  assert.strictEqual(old.result.hardware_context, null);
+  assert.strictEqual(old.result.hardware_context, undefined);
+  assert(old.prompts.every(p => !p.prompt.includes('## Shared GEAK hardware context')));
+  // Disabled and resumed paths execute actual workflow bodies, including setup schemas.
+  for (const flag of [undefined, false, 'false', '0', 'no', '']) {
+    const state = {hardware_context:'invalid'};
+    if (flag !== undefined) state.use_hardware_context = true;
+    const r = await lane.run('gfx942', '', {useHardwareContext:flag, state, hardwareContext:'invalid'});
+    assert.strictEqual(r.result.use_hardware_context, false);
+    assert(r.prompts.every(p => !p.prompt.includes('## Shared GEAK hardware context')));
+    assert(!JSON.stringify(r.prompts.find(p => p.label === 'director:setup').schema).includes('hardware_context'));
+    const passOff = e2e.build({kernel_path:'/tmp/k', use_hardware_context:flag, state});
+    await passOff.run();
+    assert.strictEqual(passOff.trace.workflowCalls[0].args.use_hardware_context, false);
+  }
+  for (const flag of [true, 'true', 1, '1', ' YES ', undefined]) {
+    const r = await lane.run('gfx942', '', {useHardwareContext:flag,
+      state:{use_hardware_context:true, hardware_context:c},
+      deviceName:c.observed.marketing_name, physicalCuCount:80});
+    assert.strictEqual(r.result.use_hardware_context, true);
+    const setupPrompt = r.prompts.find(p => p.label === 'director:setup');
+    assert(setupPrompt.prompt.includes('Run scripts/hardware_context.py'));
+    assert(JSON.stringify(setupPrompt.schema).includes('hardware_context'));
+    for (const p of r.prompts.filter(p => p.label !== 'director:setup')) {
+      assert(!p.prompt.includes('Run scripts/hardware_context.py'), p.label);
+      if (/report|finalize|validate|clock|write/.test(p.label)) {
+        assert(!p.prompt.includes('## Shared GEAK hardware context'), p.label);
+      }
+    }
+  }
+  const resumeOn = e2e.build({...modelArgs, use_hardware_context:undefined, phases:'final', state:result.state});
+  const resumedOn = await resumeOn.run();
+  assert.strictEqual(resumedOn.state.use_hardware_context, true);
+  const resumeOff = e2e.build({...modelArgs, use_hardware_context:false, phases:'final',
+    state:{...result.state, hardware_context:'invalid'}});
+  const resumedOff = await resumeOff.run();
+  assert.strictEqual(resumedOff.state.use_hardware_context, false);
+  assert(resumeOff.trace.agentPrompts.every(p => !p.prompt.includes('## Shared GEAK hardware context')));
+  for (const p of [...setup.trace.agentPrompts, ...resumeOn.trace.agentPrompts]) {
+    if (/report|finalize|validate|clock|write/.test(p.label)) {
+      assert(!p.prompt.includes('## Shared GEAK hardware context'), p.label);
+    }
+  }
   console.log('PASS: shared hardware context reaches real kernel/bakeoff/E2E/resume routes and rejects mismatches.');
 })().catch(e => {console.error(e); process.exit(1);});

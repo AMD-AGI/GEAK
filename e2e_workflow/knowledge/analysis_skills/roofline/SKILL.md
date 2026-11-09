@@ -88,18 +88,18 @@ see the disagreement rather than a single blended number that hides it.
 1. Resolve the observed product and resource scope using
    `resolve_peaks(peaks_md_path, gfx, hardware_context=env_report.hardware_context)`
    or export `GEAK_HARDWARE_CONTEXT` to the run's `hardware_context.json` file.
-   `device_target=unknown` is not a product identity. Bare gfx942/gfx950 must not
-   select MI300X/MI355X whole-device peaks. Unknown/conflicting name, ISA or CU
-   scope returns no numerical reference; emit unknown headroom. Exact MI308X
-   uses its own derived reference with low confidence and cannot rank (§6 L1).
-   Old explicit product-only calls remain low-confidence reference lookups.
-   For an explicit gfx115x reference, `resolve_peaks(..., cu=physical_cu_count)`
-   requires rocminfo's physical CU count. The generated 40-CU gfx1151 reference
-   is available at low confidence; other/missing/invalid counts are unknown.
-   It returns `scope=explicit_arch_cu_reference_only`, `sku=unknown` and
-   `reference_sku=AI_MAX_395`: a planning assumption, not proof of product identity.
-   A supplied context constrains the request; conflicting or named unknown devices
-   cannot fall back to this reference. Torch's 20 WGPs must not be passed as 40 CUs.
+   `device_target=unknown` is not a product identity. Matched context takes
+   priority. Without one, bare gfx942/gfx950 retain labelled architecture
+   references (`sku=unknown`, `reference_sku`, `confidence=low`). Other non-client
+   targets can retain the legacy device-property fallback if no table exists.
+   These references cannot establish identity or rank candidates (§7).
+   Invalid/conflicting context, named unknown devices, or mismatching CU counts
+   return no reference. Exact MI308X uses its own low-confidence derived row.
+   Explicit product-only calls remain low-confidence reference lookups.
+   Client gfx120x requires a product; gfx115x requires rocminfo's physical CU count.
+   The 40-CU gfx1151 reference uses `scope=arch_cu_reference_only` and
+   `reference_sku=AI_MAX_395`; other/missing/invalid counts are unknown.
+   Torch's 20 WGPs must not be passed as 40 CUs.
    Local SKU estimates are planning-only; native TraceLens retains independent
    models, calibration and report semantics. Use `peak_flops_for()` for precision
    lookup; a missing precision stays unknown.
@@ -250,7 +250,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | level | trigger | behavior |
 |---|---|---|
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | no compatible product/resource reference | Emit unknown headroom; do not derive a device peak from ISA alone. Explicit reference lookups remain low-confidence, planning-only. |
+| **L1** | no compatible product/resource reference | Try the compatible architecture table, then the legacy device-property fallback where allowed (§3). If unavailable, emit unknown headroom. Fallbacks remain low-confidence, planning-only. |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
 | **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
@@ -273,11 +273,11 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
-Every product uses the same generic op-class prior: `roofline_tools.TARGET_EFF`.
-The compatibility accessor `target_eff_for(op_class, product)` returns that same
-prior, including MoE 0.90 and elementwise 0.875 on R9700 and R9600D. A copy result
-from one board does not become a permanent product override. Keep measured
-calibration and its provenance separate from these planning assumptions.
+`roofline_tools.TARGET_EFF` supplies generic op-class priors. For compatibility
+with existing GEAK behavior, `target_eff_for` retains R9700's **0.76** MoE and
+elementwise priors; R9600D and other products retain generic values. This is an
+existing heuristic, not new validation or a datasheet fact. Changing these priors
+needs separate workload evidence because it changes headroom classification.
 
 ### Routing table (the actual point of this skill)
 
@@ -329,7 +329,7 @@ make the kernel move **fewer bytes for the same work**:
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated
    (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
-   generic op-class priors, the same for every product.
+   op-class priors with the existing R9700 exception described in §7.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the
