@@ -52,16 +52,18 @@ TARGET_EFF = {
     "elementwise": 0.875,
     "attn": 0.50,
 }
+PRODUCT_TARGET_EFF = {
+    # Preserve main's R9700 copy-based prior; changing efficiency policy is
+    # separate from selecting specifications in the shared hardware catalog.
+    "r9700": {"moe": 0.76, "elementwise": 0.76},
+}
 
 
 def target_eff_for(op_class, product=None):
-    """Compatibility accessor for the generic op-class prior on every product.
-
-    A board-specific copy measurement is not a permanent efficiency prior.
-    Keep accepting `product` for older callers; measured calibration stays separate.
-    """
+    """Preserve the existing product override, otherwise use the op-class prior."""
     op = str(op_class or "").strip().lower()
-    return TARGET_EFF.get(op)
+    prod = str(product or "").strip().lower()
+    return PRODUCT_TARGET_EFF.get(prod, {}).get(op, TARGET_EFF.get(op))
 
 #: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
 #: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure
@@ -235,15 +237,12 @@ def _cu_matches(cu, table_cu):
 
 def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None, *,
                   hardware_context=None, identity=None):
-    """Resolve the exact observed product/scope, never a full-device arch default.
+    """Prefer an observed SKU; keep legacy architecture/derived fallbacks.
 
-    Old product-only calls remain readable reference lookups (low confidence).
-    Arch-only calls return unknown. An explicit gfx115x `cu` request can read a
-    matching generated architecture reference, marked low-confidence and without
-    product identity. Physical CUs come from rocminfo, not Torch's WGP count.
-    A supplied context always constrains that request; conflicts never fall back.
-    The local workload math is unchanged;
-    native TraceLens models and calibration do not call this specification reader.
+    Fallbacks are labelled planning references, not confirmed product identity.
+    Observed CU counts constrain table selection; invalid or conflicting context
+    never falls back. Client RDNA4 still needs a product; gfx115x needs matching
+    physical CUs (rocminfo, not Torch's WGP count). Native calibration is separate.
     """
     gfx = str(gfx or "").strip().lower()
     product = str(product or "").strip().lower()
@@ -266,15 +265,14 @@ def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None, *,
             peaks = hc.planning_peaks(c)
             if peaks is not None:
                 return peaks
-            # Only an explicit CU request on an unnamed, non-conflicting context
-            # may use an architecture reference. Never reinterpret a named product.
             if c["status"] != "unknown" or c["observed"]["marketing_name"]:
                 return None
+            cu = c["observed"]["physical_cu_count"]
         except (OSError, ValueError, KeyError, TypeError):
             return None
     explicit_product = product not in ("", "unknown")
     rdna35 = is_client_rdna35(gfx)
-    if not explicit_product and not (rdna35 and cu is not None):
+    if cu is not None and not _cu_matches(cu, cu):
         return None
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     if peaks:
@@ -284,8 +282,16 @@ def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None, *,
                  "may_gate": False, "scope": "explicit_product_reference_only"}
         if not explicit_product:
             peaks.update(reference_sku=peaks.get("sku"), sku="unknown", product="unknown",
-                         scope="explicit_arch_cu_reference_only")
+                         scope="arch_cu_reference_only" if cu is not None else "arch_reference_only")
         return peaks
+    if explicit_product or is_client_rdna4(gfx) or rdna35:
+        return None
+    peaks = derive_peaks_from_props(device)
+    if peaks:
+        if cu is not None and not _cu_matches(cu, peaks.get("cu")):
+            return None
+        return {**peaks, "sku": "unknown", "product": "unknown", "confidence": "low",
+                "analysis_role": "planning", "may_gate": False, "scope": "derived_reference_only"}
     return None
 
 

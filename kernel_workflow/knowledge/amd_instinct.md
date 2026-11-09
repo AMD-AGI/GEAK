@@ -81,9 +81,12 @@ FP6/FP4 (block-scaled MFMA) — do NOT carry MI300X compute peaks onto it.
 - **Global memory coalescing granularity**: 64 bytes (one cache line).
 - **Launch**: max 1024 threads/block; block sizes multiples of 64 (64/128/256 typical).
 
-### Occupancy vs VGPRs (CDNA, 4 SIMDs/CU, max 8 waves/SIMD)
-Read the ALLOCATED count — `.amdhsa_next_free_vgpr` (ArchVGPR + AGPR combined) rounded up to the
-granule of 8 — not the printed `.vgpr_count`. Same on gfx950 and gfx942:
+### Register occupancy bound (gfx942/gfx950, 4 SIMDs/CU, max 8 waves/SIMD)
+Read the combined count from `.amdhsa_next_free_vgpr` or AMDHSA `.vgpr_count`,
+then round up to a granule of 8. Both already include AGPR allocation; do not add
+`.agpr_count` again. If only separate LLVM `NumVgprs` / `NumAgprs` counts exist,
+combine them as `alignTo(ArchVGPR, 4) + AGPR` when AGPRs are used.
+The register-only bound is the same on gfx950 and gfx942:
 
 | next_free_vgpr (allocated) | Max waves/SIMD | Occupancy |
 |---------------------------|----------------|-----------|
@@ -96,8 +99,10 @@ granule of 8 — not the printed `.vgpr_count`. Same on gfx950 and gfx942:
 | ≤ 256                     | 2              | 25%       |
 | ≤ 512                     | 1              | 12.5%     |
 
-Arbiter: `kernel_workflow/scripts/kernel_tools/amd_occupancy.py --vgpr N --arch gfx950` (or LLVM's
-`; Occupancy:` comment in the `.s`). LDS is the second, independent limiter (pool per CU above).
+Optional cross-check: `kernel_workflow/scripts/kernel_tools/amd_occupancy.py --vgpr N --arch gfx950`
+or LLVM's `; Occupancy:` comment in the `.s`. This table is a static register bound,
+not measured occupancy. LDS and actual launch geometry can lower it further.
+Low occupancy alone is not a reason to shrink tiles; validate changes with profiling and timing.
 Prefer `__launch_bounds__(max_threads, min_waves)` to steer register allocation.
 
 ## 3. Arch-specific: dtype, fp8 format, MFMA (gfx950 first, gfx942 downgrade)

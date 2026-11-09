@@ -54,7 +54,7 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 - **VGPRs allocate in blocks of 8 on CDNA2/3/4, counted over ArchVGPR + AGPR combined**
   (`alignTo(arch, 4) + agpr` when AGPRs are used). `vgpr_alloc_granule` = 8 in
   [`../data/hw_constants.json`](../data/hw_constants.json) is compiler-derived, and LLVM's
-  `getVGPRAllocGranule` returns 8 for every gfx90a+ target. A kernel at 170 rounds to **176** → 2
+  `getVGPRAllocGranule` returns 8 for the gfx90a/942/950 model. A kernel at 170 rounds to **176** → 2
   waves/SIMD, where 168 gives 3 — this rounding alone can drop an occupancy tier. Boundaries (last
   count that fits): 64/72/80/96/128/168/256 → 8/7/6/5/4/3/2 waves (`vgpr_wave_steps`;
   `kernel_workflow/scripts/kernel_tools/amd_occupancy.py` computes it). A 16-granule model, stated
@@ -65,7 +65,11 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
   arch-VGPR cap without spilling. The compiler inserts `v_accvgpr_read_b32` in the epilogue before
   `global_store` (~5% cost).
 
-### Occupancy math (per-SIMD)
+AMDHSA `.vgpr_count` and `.amdhsa_next_free_vgpr` already contain the combined
+allocation; do not add AGPRs again. Separate LLVM `NumVgprs` / `NumAgprs` require
+the combination above. Keep CDNA1 and RDNA models separate.
+
+### Static occupancy bounds (balanced waves across four SIMDs)
 ```
 occ_vgpr (waves/SIMD)    = floor(VGPR_per_SIMD / roundup(N, granule))  # cap at wave-slot limit (8, or 10 on CDNA1)
                           # CDNA2-4: floor(512 / roundup8(N)), N = ArchVGPR + AGPR combined
@@ -75,7 +79,9 @@ wg_from_vgpr             = floor(occ_vgpr * 4 / nW)     # 4 SIMDs/CU
 wg_per_CU                = min(wg_from_vgpr, occ_lds, floor(wave_slots_per_CU / nW))
 waves_per_CU             = wg_per_CU * nW
 ```
-Worked examples per generation live in each gen's `occupancy.md`.
+Use actual launch geometry, not `.max_flat_workgroup_size`. Register/LDS limits
+are upper bounds, not achieved occupancy; other constraints and runtime scheduling
+can reduce residency. Worked examples live in each generation's `occupancy.md`.
 
 ## The levers
 1. **Cut VGPRs to gain occupancy** — but watch the 8-granule rounding (over ArchVGPR + AGPR) and the LDS limit, which often

@@ -43,7 +43,19 @@ calibration remain with GEAK's profiling workflow and TraceLens.
 - [probe.py](probe.py) renders the shared resource record or estimates resident
   tensors for a tile plan. Planning is not actual compiler register allocation.
 
-Old Gluon-pack command paths forward to these shared tools in this PR. Plain
+Old Gluon-pack command paths forward to these shared tools. `probe.py` and
+`dump_ir.sh` require a **full GEAK checkout**; copying only the skill directory is
+not a self-contained installation. Their relocated entries accept `GEAK_ROOT`
+pointing to that checkout (the path must exist inside the workload container).
+Missing shared files produce an actionable error; they never download code.
+
+The legacy Gluon CLI `probe.py plan` retains its historical **gfx950 reference**
+when `--arch` is omitted, with a stderr notice. If `GEAK_HARDWARE_CONTEXT` is set,
+it validates that context and uses its observed ISA instead; an invalid context
+fails. An explicit `--arch` is an offline analysis override. The shared CLI and
+Python planning API require an architecture; `measure` never assumes gfx950 for
+unnamed artifacts. Python imports expose the shared API, including these stricter
+resource semantics. No numeric implementation is duplicated. Plain
 querying and inspection do not require Gluon. Transcription stays in the pack's
 `emit_gluon.py` / `recover_gluon.py`; `dump_ir.sh --emit-gluon` is an explicit
 compatibility hook that invokes that optional adapter after successful capture.
@@ -53,7 +65,11 @@ compatibility hook that invokes that optional adapter after successful capture.
 Analyze/Plan can query the ISA and estimate register pressure before generating
 code. After a candidate compiles, inspect its IR and run the probe; include its
 target and unresolved terms in the result handed to Optimize/Profile. These
-helpers do not add agents or change automatic skill selection.
+helpers do not add agents or change automatic skill selection. Existing default
+knowledge in `amd_instinct.md` and `profiling_guide.md` also receives corrected
+occupancy facts; that guidance is read by existing kernel lanes even if they do
+not call a new tool. It applies to HIP, Triton and Gluon. Static bounds inform
+analysis; they do not prescribe a tuning tactic or replace profiling/A-B gates.
 
 ```bash
 python3 kernel_workflow/scripts/kernel_tools/amd_isa.py --arch gfx1201 encoding v_wmma_f32_16x16x16_f16

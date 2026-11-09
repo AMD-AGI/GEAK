@@ -319,3 +319,15 @@ def test_reference_sources_are_preserved_per_axis(name, extra, compute, memory):
     assert row["memory_denominator_basis"] == memory
     assert row["denominator_basis"] == (compute if compute == memory else "mixed")
     assert row["may_gate"] is False
+
+
+def test_cdna1_does_not_inherit_cdna2_combined_register_model():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / 'kernel_tools/amd_occupancy.py'
+    spec = importlib.util.spec_from_file_location('occupancy_cdna1_boundary', path)
+    model = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model)
+    assert model.model_for('gfx908') is None
+    assert model.waves_by_vgpr(128, 'gfx908')[0] is None
+    assert model.waves_by_vgpr(128, 'gfx942')[0] == 4

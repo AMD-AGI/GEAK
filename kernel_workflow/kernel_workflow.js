@@ -21,6 +21,9 @@ const A = args || {};
 // BEGIN GENERATED hardware_context_workflow.js
 // Shared pure workflow contract. Embedded because GEAK workflow JS has no FS/import API.
 // Edit here, then run scripts/sync_hardware_context_workflow.py.
+// Explicit false overrides a saved opt-in; an old context alone never enables it.
+const hardwareOption = A.use_hardware_context != null ? A.use_hardware_context : (A.state || {}).use_hardware_context;
+const USE_HARDWARE_CONTEXT = ['true', '1', 'yes'].includes(String(hardwareOption || '').trim().toLowerCase());
 function parseHardwareContext(value) {
   if (!value) return null;
   const c = typeof value === 'string' ? JSON.parse(value) : value;
@@ -43,9 +46,10 @@ function parseHardwareContext(value) {
   }
   return c;
 }
-let HARDWARE_CONTEXT = parseHardwareContext((A.state || {}).hardware_context);
-let HARDWARE_CONTEXT_PATH = String(A.hardware_context_path || (A.state || {}).hardware_context_path || '');
+let HARDWARE_CONTEXT = USE_HARDWARE_CONTEXT ? parseHardwareContext((A.state || {}).hardware_context) : null;
+let HARDWARE_CONTEXT_PATH = USE_HARDWARE_CONTEXT ? String(A.hardware_context_path || (A.state || {}).hardware_context_path || '') : '';
 function adoptHardwareContext(value, gfx, name, cu, path, declaredSku) {
+  if (!USE_HARDWARE_CONTEXT) return;
   const next = parseHardwareContext(value) || HARDWARE_CONTEXT;
   if (next) {
     const o = next.observed;
@@ -72,19 +76,30 @@ function adoptHardwareContext(value, gfx, name, cu, path, declaredSku) {
   HARDWARE_CONTEXT_PATH = String(path || HARDWARE_CONTEXT_PATH);
 }
 function hardwareInputs() {
-  return { DEVICE_SKU: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown',
+  return { USE_HARDWARE_CONTEXT: true, DEVICE_SKU: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown',
     HARDWARE_CONTEXT, HARDWARE_CONTEXT_PATH };
 }
-const initialHardwareContext = parseHardwareContext(A.hardware_context) || HARDWARE_CONTEXT;
+function hardwareArgs() {
+  return USE_HARDWARE_CONTEXT ? { use_hardware_context: true,
+    hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
+    expected_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown' } : { use_hardware_context: false };
+}
+const initialHardwareContext = USE_HARDWARE_CONTEXT ? parseHardwareContext(A.hardware_context) || HARDWARE_CONTEXT : null;
 if (initialHardwareContext) {
   const o = initialHardwareContext.observed;
   adoptHardwareContext(initialHardwareContext, A.expected_gfx || o.gfx,
     A.expected_device_name || o.marketing_name, Number(A.expected_physical_cu_count || o.physical_cu_count));
 }
-function hardwarePrelude() {
+function hardwarePrelude(prompt) {
+  if (!USE_HARDWARE_CONTEXT) return '';
+  const role = /(?:^|\n)You are the ([\w-]+)\. PHASE=([\w-]+)\./.exec(String(prompt || ''));
+  const worker = /^You are Engineer /.test(String(prompt || ''));
+  if (!worker && (!role || /^(report|finalize|validate)$/.test(role[2]) ||
+      !/^(director|oracle_freezer|tech_lead|profiler|profile_engineer|engineer|deep_engineer|author_engineer|tuning_specialist|system_architect|op_benchmarker)$/.test(role[1]))) return '';
+  const setup = role && /^(director|oracle_freezer)$/.test(role[1]) && /^(setup|freeze)$/.test(role[2]);
   return '\n## Shared GEAK hardware context\n' + JSON.stringify(hardwareInputs()) + '\n' +
-    'Read scripts/hardware_context.md under the GEAK repository root. This applies to every language and optimization role, independently of expert-skill switches. ' +
-    'Setup/Freeze must run scripts/hardware_context.py in the workload environment, write EVAL_DIR/hardware_context.json, and return hardware_context plus hardware_context_path. ' +
+    'Hardware context was explicitly enabled. Read scripts/hardware_context.md under the GEAK repository root. ' +
+    (setup ? 'Run scripts/hardware_context.py in the workload environment after creating EVAL_DIR, write EVAL_DIR/hardware_context.json, and return the complete hardware_context plus hardware_context_path and device_sku. Check any supplied context against this fresh observation. ' : '') +
     'Before numerical planning, validate that file with scripts/hardware_context.py --check FILE. ' +
     'Use observed visible CUs for grid sizing; use verified resource scope for memory/cache planning. Missing facts stay unknown; never promote an ISA default to a product. ' +
     'Export GEAK_HARDWARE_CONTEXT to that file for local and native roofline tools. TraceLens retains native models/calibration; local specification values are planning-only.\n\n';
@@ -286,8 +301,9 @@ const FREEZE_SCHEMA = obj({
   device_gfx: { type: 'string' },
   device_target: { type: 'string' },
   device_name: { type: 'string' },
-  device_sku: { type: 'string' }, hardware_context: { type: 'object', additionalProperties: true },
-  hardware_context_path: { type: 'string' },
+  ...(USE_HARDWARE_CONTEXT ? { device_sku: { type: 'string' },
+    hardware_context: { type: 'object', additionalProperties: true },
+    hardware_context_path: { type: 'string' } } : {}),
   physical_cu_count: { type: 'number' },
   // Always "" from oracle_freezer — a freezer-built task dir records NO golden tensors (correctness is
   // live parity vs baseline_src/). Kept in the schema because an e2e kernel_extractor task dir, which
@@ -363,7 +379,7 @@ function tlAgent(prompt, o, attempt) {
   return e;
 }
 async function agentT(p, o) {
-  p = hardwarePrelude() + p;
+  p = hardwarePrelude(p) + p;
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
@@ -651,8 +667,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       expected_gfx: LANE_GFX, expected_target: LANE_TARGET,
       expected_device_name: LANE_DEVICE_NAME,
       expected_physical_cu_count: LANE_PHYSICAL_CU_COUNT,
-      hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
-      expected_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : "unknown",
+      ...hardwareArgs(),
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',
@@ -835,7 +850,7 @@ if (EVAL_DIR && LLM_STATS) {
 }
 
 return {
-  hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
+  ...hardwareArgs(),
   mode: MODE,
   // `instance` = this run's eval dir: a stable identity so the parser dedupes a timeline reached
   // twice without collapsing two distinct same-shape lanes.
