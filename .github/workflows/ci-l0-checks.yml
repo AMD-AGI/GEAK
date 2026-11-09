@@ -321,6 +321,8 @@ jobs:
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
+      - name: gfx1151 knowledge doc contract
+        run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
       # job can run the JS half, so without it the two implementations are pinned on the Python side
       # alone and are free to drift — which lets a kernel pass one side and be refused by the other.

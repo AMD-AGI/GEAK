@@ -102,9 +102,13 @@ def planning_peaks(context):
     r = c["specification"]
     if c["status"] != "matched" or not r or r["geak_support"] != "supported":
         return None
+    memory = _hwdata.memory_peak(r)
+    if memory["value_tb_s"] is None:
+        return None
     # Native TraceLens/rocprof references are never sourced from this function.
     return {"gfx": r["arch"], "sku": c["sku"], "product": c["sku"], "cu": c["observed"]["physical_cu_count"],
-            "hbm_bw_bytes_s": (r.get("datasheet_hbm_tb_s") or r["peak_hbm_tb_s"]) * 1e12,
+            "hbm_bw_bytes_s": memory["value_tb_s"] * 1e12,
+            "memory_basis": memory["basis"], "memory_source_field": memory["source_field"],
             "flops": {k: v * 1e12 for k, v in r["peak_tflops"].items()},
             "source": "sku_specification", "confidence": "high" if r["basis"] == "datasheet" else "low",
             "basis": r["basis"], "catalog_sha256": c["catalog_sha256"],
