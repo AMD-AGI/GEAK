@@ -1142,8 +1142,8 @@ clue the model was recovered from. Quote a multiple only once the effect is know
 - **noise-floor gate:** first measure the repeat spread of a *fixed* config (same knob, repeated — the
   `--control` arm), then treat that spread as the noise band. A candidate-vs-baseline delta **smaller
   than the noise band is not a win or a finding** — report it as "within noise", do not act on it. (This
-  is what turned an apparent decode "trough" / "lift" into noise once measured properly.) The band only
-  ever raises the keep threshold above `MIN_IMPROVE` (2 %), never lowers it. **Measure that band *before*
+  is what turned an apparent decode "trough" / "lift" into noise once measured properly.) The band may raise the supplementary screening threshold above configured
+  `MIN_IMPROVE` (default 2 %), never lower it; GEAK does not automatically apply this noise band to its commit gate. **Measure that band *before*
   spending the comparison, and hold the effect you expect against it.** A fixed config run against
   itself on the same shape gives this run's smallest resolvable effect; if what you are going looking for
   is predicted to be smaller than that, the run cannot produce evidence in either direction and the cost
@@ -1954,10 +1954,10 @@ Rewritten / demoted under the benchmark rule (nothing silently dropped):
 - **one process / interleaved cells for all variants** → screening only; acceptance = fresh process per
   leg; patched variants always in their own process; the in-process per-variant cache-tag interleave is
   not used.
-- **Small-gain policy "<2% needs a repeat"** → rewritten to the GEAK commit gate (<2 % is never banked; a
-  measured band only raises the bar).
+- **Small-gain policy "<2% needs a repeat"** → use the configured GEAK `MIN_IMPROVE` commit gate
+  (default 2 %); noise may require stricter supplementary screening and another measurement.
 - **Sub-ms warmup/reps/noise table** → kept as screening guidance and launch-floor evidence; cannot lower
-  the 2 % gate.
+  the configured `MIN_IMPROVE` gate (default 2 %).
 - **LDS pre-screen** rewritten gfx950-first (160 KiB / 64 banks) with gfx942 (64 KiB / 32 banks) as the
   downgrade; data path → `perf_knowledge/hardware/data/hw_constants.json`.
 - **JSON schema** `latency: mean / min / max` → adds `median (acceptance)` and the `harness_lib` receipt
