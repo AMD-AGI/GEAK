@@ -283,13 +283,11 @@ blindly.
     32x32 shapes: on the 16x16 family it is 2x high, and on fp8 `16x16x128` it is
     8x high. Both of those shapes appear in this pack's own examples with the
     correct values, so the formula contradicted its own worked cases.
-  - The authoritative per-shape check is
-    `kernel_workflow/scripts/kernel_tools/layout_facts.py gfx950 <opcode>` (the pack's
-    `scripts/layout_facts.py` is a shim to it), no GPU needed — but read the right line per routing tier. On the Matrix
-    Instruction Calculator path (`cdna1/2/3`, `rdna3/4`) it prints `elems/lane A=`
-    directly, which **is** `k_width`. On the gfx950/CDNA4 path it prints
-    `vgprs A=` instead, so convert: `k_width = vgprs_A * 4 / dtype_bytes`
-    (`v_mfma_f32_16x16x32_f16` reports `A=4` -> `4*4/2 = 8`, matching the formula).
+  - Check the installed compiler's operand layout and packed tensor units using
+    [compiler-layouts.md](compiler-layouts.md). Hardware `facts/layout/locate`
+    provide an independent check; XML operand widths are not automatically
+    Gluon `k_width`, particularly for packed FP4. F8F6F4 facts require an explicit
+    `--as` format for register spans; inspect mixed-format operands separately.
 - `instr_shape` is the matrix instruction shape, not a convenient local tile.
   Use the 3D `[M, N, K]` form on Triton >= 3.6. Candidate values per target/dtype
   live in `../hardware/capability-matrix.md`.

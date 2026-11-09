@@ -2,9 +2,8 @@
 
 How to get an authoritative AMD hardware fact the DSL/compiler doesn't expose and that isn't
 already distilled in `references/hardware/`. **Prefer machine-readable + generated over reading a
-PDF.** Shared by every AMD DSL via overlay (no DSL fork). Nothing large is committed — sources are
-fetched/generated on demand into a cache by `scripts/hw_sources.sh`; only the *distilled fact* (a
-line/table with provenance) is written back into a hardware page.
+PDF.** Hardware queries are shared by AMD DSLs. Selected source-derived databases
+are committed; optional XML/PDF assets use an explicit cache and fetch permission.
 
 **Where things live in GEAK.** The tools (`hw_sources.sh`, `gfx950_isa.py`, `layout_facts.py`) are
 GEAK shared kernel tools in `kernel_workflow/scripts/kernel_tools/`; every `scripts/<name>` below is
@@ -17,7 +16,14 @@ via the calculator. GEAK's human-readable ISA cards are
 `perf_knowledge/hardware/cdna4_mi350/isa_notes.md` and `perf_knowledge/hardware/cdna3_mi300/isa_notes.md`
 (distilled, no provenance-per-record — confirm against the databases before a fact gates a layout).
 
-## Run the preflight first
+## Use compiler layouts before optional hardware queries
+
+For Gluon data/scale layout construction, use native Triton APIs and the
+[compiler layout interface guide](../gluon/compiler-layouts.md). The existing bridge
+reports actual API capabilities and checks layouts recovered from TTGIR. The
+calculator is optional and is not a prerequisite for ordinary Gluon authoring.
+
+## Inspect hardware sources when needed
 
 ```bash
 scripts/hw_sources.sh preflight     # arch x question class -> who answers, here, right now
@@ -26,28 +32,26 @@ scripts/hw_sources.sh preflight     # arch x question class -> who answers, here
 The tier that answers a question is **not the same for every architecture**, and two of the
 sources can be missing from an environment without anything saying so until the moment you need
 them. `preflight` prints the whole matrix and, for anything unavailable, the exact repair
-command. It needs no cache, no network and no GPU, and the environment gate calls it — so a
-launch that passed the gate has already told you what this box can answer. Reading a tool-gap
+command. It needs no cache, no network and no GPU, and describes optional hardware-source availability; a missing calculator
+does not prevent compiler layout queries. Reading a tool-gap
 mid-climb and recording it as a hardware ceiling is the failure this exists to prevent.
 
 ## The three tiers (pick by what you need)
 
 | need | tier | source (machine-readable?) | tool | `hw_sources.sh` |
 | --- | --- | --- | --- | --- |
-| operand **data layout** (which VGPR/lane/byte holds A[m][k], B, C/D; scale mapping) on **CDNA1-3 / RDNA3-4** | 2 | **AMD Matrix Instruction Calculator** — ✅ *generates* the exact table | the calculator (submodule / cache) | `layout <arch> <instr> [-A -B -C -D -k]` |
+| operand **data layout** (which VGPR/lane/byte holds A[m][k], B, C/D; sparse K indices) on **CDNA1-3 / RDNA3-4** | 2 | **AMD Matrix Instruction Calculator** — ✅ *generates* the exact table | the pinned optional calculator | `layout <arch> <instr> [-A -B -C -D -k]` |
 | operand **data layout** on **CDNA4 / gfx950** | 2 | **`gfx950-mfma-layout.json`** — ✅ committed, offline; CDNA4 ISA ch.7 extracted + verified | `scripts/gfx950_isa.py` | `layout gfx950 <instr>` |
 | instruction **encoding**, opcode, operand fields, **pseudo-code** on **gfx950 / cdna3 / rdna3 / rdna4** | 2 | **`<arch>-encoding.json.gz`** — ✅ committed, offline; ISA ch.12-13, ingested from the XML + geometric pseudo-code | `gfx950_isa.py --arch <a>` (or `layout_facts.py <a> encoding …`) | — |
-| instruction **encoding** on any **other** arch (cdna1, cdna2, rdna3.5) | 1 | GPUOpen ISA **XML** (`amdgpu_isa_<arch>.xml`) — ✅ machine-readable | `isa_spec_manager` (built on demand) | `xml <arch>` / `decode …` |
+| instruction **encoding** on any **other** arch (cdna1, cdna2, rdna3.5) | 1 | GPUOpen ISA **XML** (`amdgpu_isa_<arch>.xml`) — ✅ machine-readable | preinstalled `isa_spec_manager` | `xml <arch>` / `decode …` |
 | registers, waitcnt, wait states, addressing, LDS banking — **gfx950 only** | 2 | **`gfx950-isa-facts.json.gz`** — ✅ committed, offline; ISA ch.1-6, 8-11 | `scripts/gfx950_isa.py` | — |
 | the same, on **cdna3 / rdna3 / rdna4** | 3 | ISA **PDF** — not extracted for these arches yet | `pdftoppm` render | `pdf <arch>-isa <p0> <p1>` |
 | microarch prose **not in any database**; re-verifying a record against the source | 3 | ISA / whitepaper **PDF** — ❌ visual only | `pdftoppm` render (pdftotext MANGLES tables) | `pdf <doc> <p0> <p1>` |
 
-**The asymmetry is deliberate, and it is not the same gap in both directions.** gfx950 ships a
-layout DB because the calculator has *no* CDNA4 support, so without one the only path to a CDNA4
-layout was rendering a PDF. cdna3/rdna3/rdna4 ship *no* layout DB because the calculator already
-generates theirs exactly, on demand — transcribing it would add a weaker copy of a derived
-answer. What those arches were missing is the other half: an opcode, an operand field, a
-pseudo-code body. That half is now committed for them too.
+gfx950 ships hardware layout rules because the calculator has no CDNA4 support.
+CDNA3/RDNA3/RDNA4 reuse the calculator instead of storing another copy of its
+mapping rules. Their encoding indexes add a different query surface. Compiler
+layouts remain available separately through Triton on supported targets.
 
 **A "not extracted" cell is missing KNOWLEDGE, not an absent hardware feature.** The tools say so
 in those words when they cannot answer, because the two get recorded identically otherwise —
@@ -179,13 +183,13 @@ All **AMD** DSLs (gluon, flydsl, tilelang, HIP) — these are vendor-level facts
 **NVIDIA (cutedsl) does NOT use any of this**; it needs PTX/SASS ISA + CUTLASS docs + Nsight
 (a `vendor/nvidia` gap — see B4).
 
-## How — `scripts/hw_sources.sh` (fetch/build/generate into a cache, never committed)
+## How — `scripts/hw_sources.sh` (installed tools and optional cached sources)
 
 ```bash
 scripts/hw_sources.sh layout cdna3 v_mfma_f32_16x16x32_fp8_fp8 -A -B   # Tier 2: generate the table
 scripts/hw_sources.sh layout gfx950 V_MFMA_F32_16X16X128_F8F6F4        # Tier 2: -> gfx950_isa.py (no fetch)
 scripts/hw_sources.sh xml cdna4                                        # Tier 1: fetch+extract the ISA XML
-scripts/hw_sources.sh decode cdna4 <encoded-bytes>                     # Tier 1: build isa_spec_manager, decode
+scripts/hw_sources.sh decode cdna4 <encoded-bytes>                     # Tier 1: use installed isa_spec_cli to decode
 scripts/hw_sources.sh pdf cdna4-isa 52 55                              # Tier 3: fetch PDF, pdftoppm-render p52-55
 ```
 

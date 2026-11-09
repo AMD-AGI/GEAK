@@ -37,6 +37,7 @@ Three consequences worth stating, because they are the reason to switch:
 
 MODES
 -----
+  capabilities  report installed compiler APIs and normalization probes, no TTGIR needed.
   recover   .ttgir -> Gluon layout constants (+ JSON facts), with per-use-site
             provenance and a round-trip proof for every layout.
   verify    plain.ttgir vs anchor.ttgir, compared as LinearLayout normal forms.
@@ -127,7 +128,8 @@ _CAPS: dict | None = None
 # on the one build where it matters, which is how a 3.6 box ends up comparing its
 # DISTRIBUTED layouts as text too -- weaker than it needs to be, for no reason.
 _CAP_PROBE = """\
-import sys
+import inspect, json, sys
+import triton
 from triton._C.libtriton import ir, gluon_ir
 import triton.experimental.gluon.language as gl
 
@@ -137,6 +139,26 @@ def say(c):
     sys.stdout.flush()
 
 
+def api(obj):
+    if obj is None:
+        return {"available": False, "parameters": None}
+    try:
+        parameters = list(inspect.signature(getattr(obj, "fn", obj)).parameters)
+    except (TypeError, ValueError):
+        parameters = None
+    return {"available": True, "parameters": parameters}
+
+
+amd = getattr(gl, "amd", None)
+cdna4 = getattr(amd, "cdna4", None)
+apis = {
+    "mfma_layout": api(getattr(amd, "AMDMFMALayout", None)),
+    "wmma_layout": api(getattr(amd, "AMDWMMALayout", None)),
+    "scale_layout": api(getattr(cdna4, "get_mfma_scale_layout", None)),
+    "padded_shared_layout": api(getattr(cdna4, "compute_efficient_padded_shared_layout", None)),
+    "layout_view": api(getattr(gluon_ir, "get_layout_view", None)),
+}
+print("API:" + json.dumps({"triton_version": triton.__version__, "native_apis": apis}), flush=True)
 if hasattr(gluon_ir, "get_layout_view"):
     say("layout_view")
 ctx = ir.context()
@@ -148,7 +170,7 @@ try:
     say("distributed_norm")
 except Exception:
     pass
-# LAST: aborts the interpreter on Triton 3.6.
+# LAST: can abort on older builds; some vendor 3.6 builds backport this capability.
 try:
     lay = gl.SwizzledSharedLayout(4, 1, 16, order=[1, 0])
     b.to_linear_layout(lay._to_ir(b), [64, 64])
@@ -158,7 +180,7 @@ except Exception:
 """
 
 
-def capabilities() -> dict:
+def capabilities(force_probe: bool = False) -> dict:
     """What this Triton build can do, probed in a CHILD process.
 
     Probed rather than version-gated, and out-of-process rather than in a try/except,
@@ -174,10 +196,10 @@ def capabilities() -> dict:
     subprocess (or to force a set) if the ~0.4s is unwelcome in a loop.
     """
     global _CAPS
-    if _CAPS is not None:
+    if _CAPS is not None and not force_probe:
         return _CAPS
     env = os.environ.get("TTGIR_BRIDGE_CAPS")
-    if env is not None:
+    if env is not None and not force_probe:
         names = {n.strip() for n in env.split(",") if n.strip()}
         _CAPS = {"shared_norm": "shared_norm" in names,
                  "distributed_norm": "distributed_norm" in names,
@@ -186,6 +208,8 @@ def capabilities() -> dict:
     import subprocess
     names: set = set()
     how = "subprocess"
+    api_info: dict = {}
+    diagnostic = ""
     try:
         # A non-zero / signal exit is EXPECTED on the builds this probe exists for; what
         # matters is the lines that made it out before the child died, so returncode is
@@ -195,11 +219,17 @@ def capabilities() -> dict:
         for ln in (r.stdout or "").splitlines():
             if ln.startswith("CAP:"):
                 names.add(ln[4:].strip())
-    except Exception:  # noqa: BLE001
+            elif ln.startswith("API:"):
+                api_info = json.loads(ln[4:])
+        if r.returncode:
+            diagnostic = (r.stderr or f"probe exited {r.returncode}")[-2000:]
+    except Exception as exc:  # noqa: BLE001
         how = "probe-failed"
+        diagnostic = str(exc)
     _CAPS = {"shared_norm": "shared_norm" in names,
              "distributed_norm": "distributed_norm" in names,
-             "layout_view": "layout_view" in names, "probed": how}
+             "layout_view": "layout_view" in names, "probed": how,
+             **api_info, "probe_diagnostic": diagnostic}
     return _CAPS
 
 
@@ -2464,6 +2494,8 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="offline smoke; no GPU")
     sub = ap.add_subparsers(dest="mode")
+    c = sub.add_parser("capabilities", help="inspect installed Triton APIs; no GPU or hardware assets")
+    c.add_argument("--json", action="store_true", help="print the capability record as JSON")
 
     r = sub.add_parser("recover", help="ttgir -> Gluon layout constants + JSON facts")
     r.add_argument("--ttgir", required=True)
@@ -2496,6 +2528,19 @@ def main() -> None:
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(_selftest())
+    if a.mode == "capabilities":
+        # An inventory must inspect the real compiler, not TTGIR_BRIDGE_CAPS overrides.
+        caps = capabilities(force_probe=True)
+        caps["note"] = "API presence and normalization probes only; target lowering, numerical correctness and performance require separate checks."
+        if a.json:
+            print(json.dumps(caps, indent=2))
+        else:
+            print(f"Triton {caps.get('triton_version', 'unavailable')}")
+            for name, info in caps.get("native_apis", {}).items():
+                print(f"{name}: {info}")
+            for name in ("layout_view", "distributed_norm", "shared_norm", "probe_diagnostic", "note"):
+                print(f"{name}: {caps[name]}")
+        raise SystemExit(0 if caps.get("native_apis") else 3)
     if a.mode is None:
         ap.print_help()
         raise SystemExit(2)
