@@ -38,7 +38,9 @@ send a short **Plan / Finish** update to the user: **Plan** — next actions, ru
 and blockers; **Finish** — verified completions since the last update, linked to evidence.
 Say when nothing new has finished. Record the update and next reporting time in `STATE.md`
 and continue monitoring between reports. Background logs do not replace this user-facing
-update.
+update. Before promising unattended updates, verify both scheduled wake-up and delivery
+to this conversation. If either is unavailable, state that limit and keep the primary
+conversation active when ongoing reporting is required.
 
 Changing an implementation does not change its module's acceptance contract. Kernel
 Workflow and native tools (OOB) share the same frozen-task and cold-verification rules.
