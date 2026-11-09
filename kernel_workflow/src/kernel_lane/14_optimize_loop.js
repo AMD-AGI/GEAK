@@ -54,6 +54,18 @@ const contextRef = (id, outDir) => {
     ? {path: `${retained.source.path}.json`, field: 'reported_context'}
     : {unavailable: 'no complete retained context artifact', related_report: `${outDir}/report.md`};
 };
+const measurementRef = winner => {
+  const id = winner?.id;
+  if (id && evo?.entries.some(row => row.id === id && row.verifier)) {
+    return {path: evo.path, entry_id: id, field: 'verifier'};
+  }
+  const retained = id && retainedSources.find(row => row.id === id && row.d && !row.archived && row.ver
+    && row.source && !row.retention_error);
+  return retained ? {path: `${retained.source.path}.json`, field: 'ver'}
+    : {unavailable: 'no complete retained measurement record',
+      evidence_refs: winner?.evidence_context?.evidence_refs
+        || winner?.reported_context?.verifier?.evidence_context?.evidence_refs || null};
+};
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
 await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
@@ -97,10 +109,12 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planInputs = (forbidStop, facts = {}) => ({
+  let caseMeasurementObservation = null;
+  const planInputs = (forbidStop, facts = {}) => {
+    const inputs = {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
-    CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+    ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner)), HISTORY: history,
     ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
@@ -140,7 +154,41 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
       `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
-  });
+    };
+    if (CASE_MEASUREMENT_VIEW !== undefined) {
+      try {
+        const visibleEntries = inputs.EVOLUTION_ENTRIES;
+        const initialOriginal = !finalWinner && bestPerCase === BASELINE_PER_CASE;
+        const rawCases = value => value ? {native_primary: primSpeedup(value),
+          per_case: value.per_case ?? null, evidence_context: compactCaseMeasurementContext(value)} : null;
+        const decisionView = {
+          CURRENT_BEST_PER_CASE: inputs.CURRENT_BEST_PER_CASE,
+          CURRENT_BEST_CASE_MEASUREMENT: inputs.CURRENT_BEST_CASE_MEASUREMENT ?? null,
+          archive_present: Array.isArray(visibleEntries),
+          archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(row => ({id: row.id,
+            case_evidence_present: Object.hasOwn(row, 'case_evidence'), case_evidence: row.case_evidence ?? null})) : null,
+        };
+        // Copy now, before the planner runs or later archive/verifier updates.
+        // This is an observation only, never another prompt or acceptance input.
+        caseMeasurementObservation = JSON.parse(JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+          authority: 'constructed planner case inputs and retained reported measurements; not proof of model reads',
+          decision_view: decisionView, decision_view_bytes: contextBytes(decisionView),
+          raw_current_best: {initial_original: initialOriginal,
+            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(finalWinner),
+            native_primary: initialOriginal ? null : cumulative,
+            per_case: bestPerCase, evidence_context: compactCaseMeasurementContext(finalWinner)
+              || compactCaseMeasurementContext(finalWinner?.reported_context?.verifier)},
+          raw_archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(visible => {
+            const row = evo?.entries.find(entry => entry.id === visible.id);
+            return {id: visible.id, present: !!row, patch_ref: row?.patch_ref ?? null,
+              engineer: rawCases(row?.engineer), verifier: rawCases(row?.verifier)};
+          }) : null}));
+      } catch (_) {
+        caseMeasurementObservation = {mode: CASE_MEASUREMENT_VIEW, unavailable: 'case_snapshot_serialization_failed'};
+      }
+    }
+    return inputs;
+  };
 
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
@@ -148,7 +196,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     const path = `${EVAL_DIR}/planner_r${round}_${attempt}.json`;
     let saved = null;
     try { saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', path],
-      { input: JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n',
+      { input: JSON.stringify({round, attempt, plan: proposed ?? null,
+          ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {case_measurement_observation: caseMeasurementObservation})}, null, 2) + '\n',
         timeoutMs: 1000, graceMs: 0 }); }
     catch (_) { /* Observation failure must not change the search decision. */ }
     if (saved === null)
@@ -283,6 +332,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       // Source preservation can be tested independently of the deferred evolution context.
       const preserveFounder = !!evo && !evoEngineer && A.evolution_preserve_founder_attempts === true;
       const preserveAttempt = evoEngineer || preserveFounder;
+      // Returning an unmeasured final implementation when nothing else would be saved is a separate factor.
+      const returnDevelopment = !!evo && A.evolution_return_development === true;
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
@@ -316,7 +367,7 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${preserveAttempt ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${preserveAttempt ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit' + (evoEngineer ? '. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : '') : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.${preserveFounder ? '\nReturn the best correct implementation of the requested realization even when it is slower than the starting program or ORIGINAL, with its own measurements and limitations. This source-return rule replaces the stock role\'s instruction to omit a patch on regression; it does not qualify or promote the source. Keep the final workspace, returned patch and measurement tied to those same bytes. Preserve failed or unfinished attempts separately under OUTPUT_DIR and record their source/evidence paths and limitations in report.md and worker_result.json notes; do not describe them as correct or measured.' : ''}
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${preserveAttempt ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit' + (evoEngineer ? '. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : '') : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.${preserveFounder ? '\nReturn the best correct implementation of the requested realization even when it is slower than the starting program or ORIGINAL, with its own measurements and limitations. This source-return rule replaces the stock role\'s instruction to omit a patch on regression; it does not qualify or promote the source. Keep the final workspace, returned patch and measurement tied to those same bytes. Preserve failed or unfinished attempts separately under OUTPUT_DIR and record their source/evidence paths and limitations in report.md and worker_result.json notes; do not describe them as correct or measured.' : ''}${returnDevelopment ? '\nDevelopment fallback, only after your normal engineering and evaluation obligations (it never justifies skipping an available evaluation or stopping early): if your ordinary best_patch.diff return would be absent, empty or only the inherited selected-parent changes, you have no correct measured development beyond that starting program, and you hold one concrete unmeasured implementation attempt, save that one attempt as best_patch.diff with the same command, so it includes the inherited parent changes, and keep the workspace at exactly those bytes. Never replace a saved correct measured development source beyond the starting program with a later unmeasured iteration; a re-measured unchanged starting program is not such development, and a correct measured but slower source stays under the existing return rules. Never edit the canonical incumbent. Return status partial, measurement_valid=false, no per_case rows, no inherited scores or external_evaluation IDs, and the required numeric speedup fields as 0 placeholders; state in notes that performance is unavailable, not measured zero. If no such attempt exists, return no fallback. The ordinary verifier still decides correctness, fitness and any promotion. This fallback permits local development-source capture before qualification; native reproducible-gain requirements for qualified export and delivery remain unchanged.' : ''}
 
 ## Inputs
 ${cfg({
@@ -409,8 +460,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     source: `engineer ${r.d.id}`, id: r.d.id, title: r.d.title, specialty: r.d.specialty,
     geomean: primSpeedup(r.ver), geomean_unweighted: r.ver.verified_geomean,
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
-    arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
+    arithmetic: r.ver.verified_arithmetic ?? (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? null : r.ver.verified_geomean ?? null),
     per_case: r.ver.per_case || [], patch: r.patch,
+    // Preserve the settled report; native fields remain role-reported, not host evidence.
+    verifier_report: r.ver,
+    evidence_context: compactCaseMeasurementContext(r.ver),
     ...(EXTERNAL_OBJECTIVE ? {reported_per_case: r.ver.reported_per_case ?? null} : {}),
     reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
@@ -478,6 +532,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        verifier_report: integrate.best,
         reported_per_case: integrate.best.reported_per_case ?? null,
         ...externalFields(integrate.best),
       });
@@ -594,8 +649,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       // by its pinned bytes (EVO archive row or GEAK snapshot), never by the current promotion file.
       if (!EXTERNAL_OBJECTIVE) keepForDelivery({key: `round_${round}_winner`, id: winner.id, d: null, eng: null,
         reported_context: winner.reported_context,
-        ver: {status: 'verified', correctness: 'pass', verified_geomean: winner.geomean_unweighted,
-          verified_weighted: winner.weighted, per_case: winner.per_case},
+        ver: winner.verifier_report,
         evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
         base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
@@ -623,7 +677,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     if (improved) {
       await captureCanonicalSelection(history, 'after_commit', round, winner);
       cumulative = winner.geomean;
-      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      bestPerCase = Array.isArray(winner.per_case) ? winner.per_case : [];
       finalWinner = winner;
       roundsCommitted += 1;
       if (evo) {
@@ -838,6 +892,8 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
         }),
         { phase: 'Verify', label: `verify ${c.id} (delivery)`, schema: VERIFY_SCHEMA }); }
       finally { setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); }
+      // This native path also strips role-authored host provenance before retaining the report.
+      ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, frozen);
       // The result binds only to the bytes it measured.
       if (ver && (await digest(frozen) !== frozenSha || await digest(src.path) !== src.sha256)) {
         row.status = 'source_changed'; continue;
@@ -860,11 +916,13 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
       && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
     best.row.status = 'delivered';
     cumulative = best.primary;
-    bestPerCase = best.ver.per_case && best.ver.per_case.length ? best.ver.per_case : bestPerCase;
+    bestPerCase = Array.isArray(best.ver.per_case) ? best.ver.per_case : [];
     finalWinner = {source: `delivery ${best.c.key}`, id: best.c.id, title: best.c.d ? best.c.d.title : 'delivery',
       geomean: best.primary, geomean_unweighted: best.ver.verified_geomean,
       weighted: best.ver.verified_weighted != null ? best.ver.verified_weighted : null,
       per_case: best.ver.per_case || [], patch: best.promo.patch, source_tree: best.promo.tree,
+      verifier_report: best.ver,
+      evidence_context: compactCaseMeasurementContext(best.ver),
       reported_context: reportedEvidence({...best.c.d, id: best.c.id, reported_context: best.c.reported_context},
         best.c.eng, best.ver, best.promo.patch)};
     roundsCommitted += 1;

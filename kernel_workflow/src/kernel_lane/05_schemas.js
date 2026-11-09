@@ -27,9 +27,12 @@ const perCase = {
 const externalEvaluation = obj({ candidate_id: { type: 'string' }, evaluation_id: { type: 'string' } },
   ['candidate_id', 'evaluation_id']);
 const metricRequired = (fields) => EXTERNAL_OBJECTIVE ? fields.filter(k => !k.includes('geomean')) : fields;
+const secondaryMetric = {type: HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? ['number', 'null'] : 'number'};
 
 const SETUP_SCHEMA = obj({
-  eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
+  eval_dir: { type: 'string', ...(A.population_lineage ? { enum: [EVAL_DIR_OVERRIDE] } : {}) },
+  workspace: { type: 'string', ...(A.population_lineage ? { enum: [`${EVAL_DIR_OVERRIDE}/workspace`] } : {}) },
+  baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' },
   device_gfx: { type: 'string' },
   device_target: { type: 'string' },
@@ -176,6 +179,9 @@ const PLAN_SCHEMA = obj({
 
 // Optional author interpretation; never a score, eligibility gate or verification record.
 const evidenceContext = obj({
+  case_measurement: obj({basis: {type: 'string', enum: ['native', 'frozen_reference', 'unknown']},
+    cohort_ref: {type: 'string'}, reduction: {type: 'string'}, weight_source: {type: 'string'}}, []),
+  frozen_reference_per_case: perCase,
   tested_applicability: {type: 'string'},
   observations: {type: 'array', items: {type: 'string'}},
   unresolved: {type: 'array', items: {type: 'string'}},
@@ -187,7 +193,7 @@ const ENG_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
-  strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
+  strategy: { type: 'string' }, speedup_geomean: secondaryMetric, speedup_arithmetic: secondaryMetric,
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
   // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
   speedup_weighted: { type: 'number' },
@@ -200,7 +206,7 @@ const VERIFY_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
-  verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
+  verified_geomean: secondaryMetric, verified_arithmetic: secondaryMetric,
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
@@ -229,7 +235,7 @@ const COMMIT_SCHEMA = obj({
 }, ['committed']);
 
 const REPORT_SCHEMA = obj({
-  final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
+  final_speedup_geomean: secondaryMetric, final_speedup_arithmetic: secondaryMetric,
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,

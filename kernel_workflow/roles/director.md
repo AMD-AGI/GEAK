@@ -32,9 +32,15 @@ other gfx1201 products stay `unknown`. Physical CUs are not PyTorch's WGP count.
 against `EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, `EXPECTED_PHYSICAL_CU_COUNT`;
 the captured route requires all four to match before Setup can proceed.
 
-Create a unique run ID `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`. Use a supplied
-`EVAL_DIR_OVERRIDE`, otherwise `$EXP_ROOT/team_${KERNEL_NAME}_${TS}/${KERNEL_NAME}`. Never overwrite
-a nonempty directory; add a unique suffix. Record `original_kernel_path.txt`.
+A supplied `EVAL_DIR_OVERRIDE` is an exact assigned path: use it unchanged as `EVAL_DIR`,
+with the canonical workspace exactly `EVAL_DIR_OVERRIDE/workspace`. Never append a suffix,
+rename it or choose another path. If it contains conflicting pre-existing state, stop with an
+explicit Setup error identifying the path; do not overwrite it or return a successful Setup.
+
+Only when no override is supplied, create a unique run ID
+`TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}` and use
+`$EXP_ROOT/team_${KERNEL_NAME}_${TS}/${KERNEL_NAME}`. Add a unique suffix if that generated
+path is nonempty; never overwrite existing state. Record `original_kernel_path.txt`.
 
 ### Continued waves
 

@@ -45,6 +45,18 @@ function contextBytes(value) {
 }
 // Prompt-only reduction. The full archive/checkpoint artifact is retained separately.
 function boundedContext(value, fullRef, limit = 16384) {
+  if (CASE_MEASUREMENT_VIEW !== undefined) {
+    let omitted = false;
+    const prose = v => Array.isArray(v) ? v.map(prose)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([key]) => {
+        if (['per_case', 'frozen_reference_per_case', 'reported_per_case'].includes(key)) {
+          omitted = true; return false;
+        }
+        return true;
+      }).map(([key, child]) => [key, prose(child)])) : v;
+    const reduced = prose(value);
+    if (omitted) value = {...reduced, case_tables_omitted_from_prose: true, full_context_ref: fullRef};
+  }
   if (contextBytes(value) <= limit) return value;
   const compact = (v, depth = 0) => typeof v === 'string'
     ? [...v].slice(0, 192).join('') + ([...v].length > 192 ? ' [text omitted]' : '')
@@ -57,18 +69,77 @@ function boundedContext(value, fullRef, limit = 16384) {
   return result;
 }
 
+// Only reported measurement metadata/rows; never manufacture host reader authority.
+function compactCaseMeasurementContext(value) {
+  const context = value?.evidence_context;
+  if (!context) return null;
+  const m = context.case_measurement;
+  return {case_measurement: m ? Object.fromEntries(['basis', 'cohort_ref', 'reduction', 'weight_source']
+    .filter(key => m[key] !== undefined).map(key => [key, m[key]])) : null,
+    frozen_reference_per_case: context.frozen_reference_per_case ?? null,
+    evidence_refs: context.evidence_refs ?? null};
+}
+// Both experimental views require matching supplied tables, not expected task coverage. This
+// switches prompt values only; canonical rows, scalar scores and acceptance stay intact.
+function measurementCaseView(value, fullRef = null) {
+  const native = Array.isArray(value?.per_case) ? value.per_case : [];
+  if (CASE_MEASUREMENT_VIEW === undefined) return {per_case: value?.per_case ?? null};
+  const context = compactCaseMeasurementContext(value), m = context?.case_measurement;
+  const frozen = context?.frozen_reference_per_case;
+  const validRows = rows => Array.isArray(rows) && rows.length > 0
+    && rows.every(row => row && typeof row.name === 'string' && row.name.length > 0
+      && ['baseline_ms', 'optimized_ms', 'speedup'].every(key => Number.isFinite(row[key]) && row[key] > 0))
+    && new Set(rows.map(row => row.name)).size === rows.length;
+  const available = m?.basis === 'native' && ['cohort_ref', 'reduction', 'weight_source']
+    .every(key => typeof m[key] === 'string' && m[key].trim())
+    && validRows(native) && validRows(frozen) && native.length === frozen.length
+    && native.every(row => frozen.some(other => other.name === row.name && other.optimized_ms === row.optimized_ms));
+  const selected = !available ? {per_case: [], case_measurement_view_unavailable: 'native_and_matched_frozen_tables_unavailable'}
+    : CASE_MEASUREMENT_VIEW === 'current_mixed' ? {per_case: frozen}
+      : {per_case: native, case_measurement: {...m, authority: 'author_reported; no host validation'},
+        frozen_reference_diagnostics: {basis: 'frozen_reference', case_rows: frozen.length,
+          full_context_ref: fullRef, evidence_refs: context.evidence_refs}};
+  const view = {...selected, case_measurement_refs: {full_context_ref: fullRef,
+    evidence_refs: context?.evidence_refs ?? null}};
+  log(`[case_measurement_view] ${JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+    available: !!available, native_rows: native.length, frozen_rows: Array.isArray(frozen) ? frozen.length : null,
+    selected_unbounded_rows: view.per_case.length, per_view_unbounded_bytes: contextBytes(view),
+    full_context_ref: fullRef, evidence_refs: context?.evidence_refs ?? null})}`);
+  return view;
+}
+function currentBestCaseInputs(rows, winner, fullRef) {
+  if (CASE_MEASUREMENT_VIEW !== undefined && !winner && rows === BASELINE_PER_CASE) {
+    const inputs = {CURRENT_BEST_PER_CASE: rows, CURRENT_BEST_CASE_MEASUREMENT: {
+      source: 'ORIGINAL', basis: 'initial_benchmark', authority: 'benchmark_author_reported; no host validation',
+      full_context_ref: {path: `${EVAL_DIR}/baseline_timing.json`}}};
+    log(`[case_measurement_current_best_inline] ${JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+      initial_original: true, inline_rows: Array.isArray(rows) ? rows.length : null,
+      bytes: contextBytes(inputs), full_context_ref: inputs.CURRENT_BEST_CASE_MEASUREMENT.full_context_ref})}`);
+    return inputs;
+  }
+  const value = {per_case: rows, evidence_context: winner?.evidence_context
+    || winner?.reported_context?.verifier?.evidence_context};
+  const view = measurementCaseView(value, fullRef);
+  const inputs = {CURRENT_BEST_PER_CASE: view.per_case,
+    ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {CURRENT_BEST_CASE_MEASUREMENT:
+      Object.fromEntries(Object.entries(view).filter(([key]) => key !== 'per_case'))})};
+  if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_current_best_inline] ${JSON.stringify({
+    mode: CASE_MEASUREMENT_VIEW, inline_rows: view.per_case.length, bytes: contextBytes(inputs), full_context_ref: fullRef})}`);
+  return inputs;
+}
 // Prompt-only numerical view. Keep every supplied case and its extra fields;
 // row counts describe the report, not expected task coverage or qualification.
-function caseEvidenceReport(value) {
+function caseEvidenceReport(value, fullRef = null) {
   if (!value) return null;
+  const view = measurementCaseView(value, fullRef);
   const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
     'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
     'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
     'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
     'variance_note', 'graph_safe'];
   return {...Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
-    per_case: value.per_case ?? null,
-    case_rows: Array.isArray(value.per_case) ? value.per_case.length : null,
+    ...view,
+    case_rows: Array.isArray(view.per_case) ? view.per_case.length : null,
     ...(value.observed_evidence !== undefined ? {observed_evidence: value.observed_evidence,
       reported_per_case: value.reported_per_case ?? null} : {}),
     evidence_refs: value.evidence_context?.evidence_refs ?? null};
@@ -77,10 +148,16 @@ function caseEvidenceReport(value) {
 // Numeric handoffs are complete or explicitly reference-only. Prose reduction
 // must not turn the first four case rows into a seemingly complete comparison.
 function boundedCaseEvidence(rows, fullRef, limit = 16384) {
-  if (contextBytes(rows) <= limit) return {entries: rows, full_context_ref: fullRef};
-  return {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
+  const bytes = contextBytes(rows), overflow = bytes > limit;
+  const result = !overflow ? {entries: rows, full_context_ref: fullRef}
+    : {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
     full_context_ref: fullRef, row_counts: rows.map(row => ({entry_id: row.archive_ref.entry_id,
       engineer: row.engineer?.case_rows ?? null, verifier: row.verifier?.case_rows ?? null}))};
+  if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_view_bound] ${JSON.stringify({
+    mode: CASE_MEASUREMENT_VIEW, input_bytes: bytes, output_bytes: contextBytes(result), limit, overflow,
+    inline_rows: overflow ? 0 : rows.reduce((n, row) => n + (row.engineer?.case_rows || 0) + (row.verifier?.case_rows || 0), 0),
+    full_context_ref: fullRef})}`);
+  return result;
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
@@ -176,7 +253,8 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
-    engineer: caseEvidenceReport(row.engineer), verifier: caseEvidenceReport(row.verifier)});
+    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
+    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
   const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
     entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
@@ -265,9 +343,13 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
-        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
-          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
-          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+        // Native checkpoints retain the role report, without upgrading its legacy authority.
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : checked?.verifier_report || {
+          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? (HAS_WORKLOAD ? null : speedup),
+          verified_weighted: checked?.weighted ?? null,
+          per_case: Array.isArray(checked?.per_case) ? checked.per_case
+            : (round === 0 && !start.finalWinner ? BASELINE_PER_CASE : []),
+          evidence_context: compactCaseMeasurementContext(checked)}};
       await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
       const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
         checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};
@@ -360,7 +442,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       const summary = entries.slice(-12);
       const best = entries.find(row => row.id === bestId);
       if (best && !summary.includes(best)) summary.unshift(best);
-      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
         EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
@@ -370,9 +452,14 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
             row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
+      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
+        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
+          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
+          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
+      return inputs;
     },
     memoryInputs(directions) {
-      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
+      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
         const row = entries.find(entry => entry.id === direction.id);
         return {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
           approach: direction.approach || null, patch_ref: row?.patch_ref || null,
@@ -381,6 +468,11 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row || {id: direction.id})} : {}),
           report_path: `${direction.out_dir}/report.md`};
       })};
+      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_memory_inline] ${JSON.stringify({
+        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ROUND.map(row => ({
+          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
+          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
+      return inputs;
     },
     prepare(directions, round) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
@@ -418,7 +510,10 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
       const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
       if (parentRef) {
-        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        // A zero-byte cumulative diff is the already-materialized archive base.
+        if (parentRef.sha256 !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+          await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        }
         if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
       }
       await run('git', ['-C', workspace, 'add', '-A']);

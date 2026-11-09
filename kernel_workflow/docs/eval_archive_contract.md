@@ -55,6 +55,40 @@ extra top-level result fields need not survive the archive projection. Associate
 and candidate bindings. Preserve the producer's exact labels; unspecified conditions are
 `UNKNOWN`, not inferred from source equality, correctness or a kernel name.
 
+### Native aggregate and case measurements
+
+When COMMANDMENT declares a native primary, keep that scalar, its case rows and
+its repeat reduction associated with the same measurement cohort. Preserve the
+native ORIGINAL and candidate times, ratios, counts and weights. A median of
+aggregate scores need not equal an aggregate recomputed from casewise medians;
+record the declared reduction instead of silently forcing equality.
+
+Return compact provenance in `evidence_context.case_measurement`: `basis`
+(`native`, `frozen_reference` or `unknown`), `cohort_ref`, `reduction`, and
+`weight_source`. These are author-reported descriptions, not host verification.
+Put full source/result receipts in `evidence_context.evidence_refs`. Keep long
+explanations in the referenced report. Do not author `observed_evidence` or
+`reported_per_case`; those fields belong to the external host result reader.
+
+Preserve native geometric/arithmetic metrics when supplied; otherwise derive them
+only from the same native cohort under its declared reduction. In weighted mode,
+an unavailable secondary metric is `null` with an explanation, never a measured
+zero or a copy of the weighted primary. An unweighted primary still requires its
+actual numeric measurement. If native rows are unavailable, return `per_case:[]`;
+that omission alone neither invalidates nor qualifies the native primary. Required
+correctness, source, timing and acceptance rules still apply.
+
+Keep frozen-reference rows under
+`evidence_context.frozen_reference_per_case`, with their definition and receipts.
+Only calculate them when case identity, units, baseline times, candidate reduction
+and weight provenance are known. They describe a different denominator and must
+not replace native rows in stored candidate evidence. Unavailable inputs remain
+unknown. A diagnostic table disagreeing with the primary does not by itself prove
+the native measurement failed.
+Copy each native row's `optimized_ms` verbatim into its frozen-reference row; do
+not round it independently or substitute another repeat. Both tables must refer
+to the same candidate timing reduction, even though their ORIGINAL times differ.
+
 An archive entry holds the latest verifier verdict for a candidate; recording that candidate
 again replaces its verifier evidence. Before remeasurement, preserve the complete earlier
 result, case rows and conditions under a distinct report/JSON filename in the existing role

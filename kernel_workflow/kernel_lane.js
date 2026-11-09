@@ -189,6 +189,11 @@ const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
 const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+const CASE_MEASUREMENT_VIEW = A.case_measurement_view;
+if (CASE_MEASUREMENT_VIEW !== undefined &&
+    (!['current_mixed', 'native_consistent'].includes(CASE_MEASUREMENT_VIEW) || !HAS_WORKLOAD || EXTERNAL_OBJECTIVE)) {
+  throw new Error('case_measurement_view requires current_mixed/native_consistent and an ordinary workload-weighted task');
+}
 if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
     || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
   throw new Error('external_primary requires exactly kind and primary_regime');
@@ -690,9 +695,12 @@ const perCase = {
 const externalEvaluation = obj({ candidate_id: { type: 'string' }, evaluation_id: { type: 'string' } },
   ['candidate_id', 'evaluation_id']);
 const metricRequired = (fields) => EXTERNAL_OBJECTIVE ? fields.filter(k => !k.includes('geomean')) : fields;
+const secondaryMetric = {type: HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? ['number', 'null'] : 'number'};
 
 const SETUP_SCHEMA = obj({
-  eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
+  eval_dir: { type: 'string', ...(A.population_lineage ? { enum: [EVAL_DIR_OVERRIDE] } : {}) },
+  workspace: { type: 'string', ...(A.population_lineage ? { enum: [`${EVAL_DIR_OVERRIDE}/workspace`] } : {}) },
+  baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' },
   device_gfx: { type: 'string' },
   device_target: { type: 'string' },
@@ -839,6 +847,9 @@ const PLAN_SCHEMA = obj({
 
 // Optional author interpretation; never a score, eligibility gate or verification record.
 const evidenceContext = obj({
+  case_measurement: obj({basis: {type: 'string', enum: ['native', 'frozen_reference', 'unknown']},
+    cohort_ref: {type: 'string'}, reduction: {type: 'string'}, weight_source: {type: 'string'}}, []),
+  frozen_reference_per_case: perCase,
   tested_applicability: {type: 'string'},
   observations: {type: 'array', items: {type: 'string'}},
   unresolved: {type: 'array', items: {type: 'string'}},
@@ -850,7 +861,7 @@ const ENG_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
-  strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
+  strategy: { type: 'string' }, speedup_geomean: secondaryMetric, speedup_arithmetic: secondaryMetric,
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
   // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
   speedup_weighted: { type: 'number' },
@@ -863,7 +874,7 @@ const VERIFY_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
-  verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
+  verified_geomean: secondaryMetric, verified_arithmetic: secondaryMetric,
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
@@ -892,7 +903,7 @@ const COMMIT_SCHEMA = obj({
 }, ['committed']);
 
 const REPORT_SCHEMA = obj({
-  final_speedup_geomean: { type: 'number' }, final_speedup_arithmetic: { type: 'number' },
+  final_speedup_geomean: secondaryMetric, final_speedup_arithmetic: secondaryMetric,
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
@@ -906,10 +917,10 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
 const VALIDATE_SCHEMA = obj({
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   kernel_name: { type: 'string' },
-  director_verified_speedup_geomean: { type: 'number' },
-  director_verified_speedup_arithmetic: { type: 'number' },
+  director_verified_speedup_geomean: secondaryMetric,
+  director_verified_speedup_arithmetic: secondaryMetric,
   director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
-  tech_lead_reported_speedup_geomean: { type: 'number' },
+  tech_lead_reported_speedup_geomean: secondaryMetric,
   validation_status: { type: 'string' }, correctness: { type: 'string' },
   // clean | host_bound | unprimed | unknown | not_applicable. Declared so the relaying agent has no
   // reason to drop it -- the gate calls it REQUIRED so a speedup never travels downstream unlabelled.
@@ -1351,7 +1362,9 @@ const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
 if (A.population_lineage) {
   if (EVAL_DIR !== A.eval_dir || CANONICAL !== `${A.eval_dir}/workspace`) {
-    throw new Error('population Setup must use its assigned private eval_dir/workspace');
+    throw new Error('population Setup must use its assigned private eval_dir/workspace; ' +
+      JSON.stringify({ expected_eval_dir: A.eval_dir, expected_workspace: `${A.eval_dir}/workspace`,
+        actual_eval_dir: EVAL_DIR, actual_workspace: CANONICAL }));
   }
   const isolation = await runProcess({cmd: 'python3', args: ['-c',
     'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:])\n' +
@@ -1675,7 +1688,8 @@ if (setup.resumed && setup.prior_state) {
   if (Array.isArray(ps.insights)) history.insights = ps.insights;
   if (Array.isArray(ps.ledger)) history.ledger = ps.ledger;
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
-  if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) bestPerCase = ps.best_per_case;
+  if (Array.isArray(ps.best_per_case)) bestPerCase = ps.best_per_case;
+  else if (cumulative > 1) bestPerCase = [];
   log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 
@@ -1880,9 +1894,11 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             // The optimize loop now builds ON this patch: cumulative starts at the adopted Nx, so this
             // run's own rounds only earn the delta above it (split out as incremental_speedup below).
             cumulative = sp;
-            bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
+            bestPerCase = Array.isArray(ver.per_case) ? ver.per_case : [];
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
-              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              arithmetic: ver.verified_arithmetic ?? (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? null : sp), per_case: bestPerCase, patch: c.patch_path,
+              verifier_report: ver,
+              evidence_context: compactCaseMeasurementContext(ver),
               ...(EXTERNAL_OBJECTIVE ? {reported_per_case: ver.reported_per_case ?? null} : {}),
               ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
@@ -2003,6 +2019,18 @@ const contextRef = (id, outDir) => {
     ? {path: `${retained.source.path}.json`, field: 'reported_context'}
     : {unavailable: 'no complete retained context artifact', related_report: `${outDir}/report.md`};
 };
+const measurementRef = winner => {
+  const id = winner?.id;
+  if (id && evo?.entries.some(row => row.id === id && row.verifier)) {
+    return {path: evo.path, entry_id: id, field: 'verifier'};
+  }
+  const retained = id && retainedSources.find(row => row.id === id && row.d && !row.archived && row.ver
+    && row.source && !row.retention_error);
+  return retained ? {path: `${retained.source.path}.json`, field: 'ver'}
+    : {unavailable: 'no complete retained measurement record',
+      evidence_refs: winner?.evidence_context?.evidence_refs
+        || winner?.reported_context?.verifier?.evidence_context?.evidence_refs || null};
+};
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
 await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
@@ -2046,10 +2074,12 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planInputs = (forbidStop, facts = {}) => ({
+  let caseMeasurementObservation = null;
+  const planInputs = (forbidStop, facts = {}) => {
+    const inputs = {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
-    CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+    ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner)), HISTORY: history,
     ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
@@ -2089,7 +2119,41 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
       `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
-  });
+    };
+    if (CASE_MEASUREMENT_VIEW !== undefined) {
+      try {
+        const visibleEntries = inputs.EVOLUTION_ENTRIES;
+        const initialOriginal = !finalWinner && bestPerCase === BASELINE_PER_CASE;
+        const rawCases = value => value ? {native_primary: primSpeedup(value),
+          per_case: value.per_case ?? null, evidence_context: compactCaseMeasurementContext(value)} : null;
+        const decisionView = {
+          CURRENT_BEST_PER_CASE: inputs.CURRENT_BEST_PER_CASE,
+          CURRENT_BEST_CASE_MEASUREMENT: inputs.CURRENT_BEST_CASE_MEASUREMENT ?? null,
+          archive_present: Array.isArray(visibleEntries),
+          archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(row => ({id: row.id,
+            case_evidence_present: Object.hasOwn(row, 'case_evidence'), case_evidence: row.case_evidence ?? null})) : null,
+        };
+        // Copy now, before the planner runs or later archive/verifier updates.
+        // This is an observation only, never another prompt or acceptance input.
+        caseMeasurementObservation = JSON.parse(JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+          authority: 'constructed planner case inputs and retained reported measurements; not proof of model reads',
+          decision_view: decisionView, decision_view_bytes: contextBytes(decisionView),
+          raw_current_best: {initial_original: initialOriginal,
+            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(finalWinner),
+            native_primary: initialOriginal ? null : cumulative,
+            per_case: bestPerCase, evidence_context: compactCaseMeasurementContext(finalWinner)
+              || compactCaseMeasurementContext(finalWinner?.reported_context?.verifier)},
+          raw_archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(visible => {
+            const row = evo?.entries.find(entry => entry.id === visible.id);
+            return {id: visible.id, present: !!row, patch_ref: row?.patch_ref ?? null,
+              engineer: rawCases(row?.engineer), verifier: rawCases(row?.verifier)};
+          }) : null}));
+      } catch (_) {
+        caseMeasurementObservation = {mode: CASE_MEASUREMENT_VIEW, unavailable: 'case_snapshot_serialization_failed'};
+      }
+    }
+    return inputs;
+  };
 
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
@@ -2097,7 +2161,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     const path = `${EVAL_DIR}/planner_r${round}_${attempt}.json`;
     let saved = null;
     try { saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', path],
-      { input: JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n',
+      { input: JSON.stringify({round, attempt, plan: proposed ?? null,
+          ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {case_measurement_observation: caseMeasurementObservation})}, null, 2) + '\n',
         timeoutMs: 1000, graceMs: 0 }); }
     catch (_) { /* Observation failure must not change the search decision. */ }
     if (saved === null)
@@ -2232,6 +2297,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       // Source preservation can be tested independently of the deferred evolution context.
       const preserveFounder = !!evo && !evoEngineer && A.evolution_preserve_founder_attempts === true;
       const preserveAttempt = evoEngineer || preserveFounder;
+      // Returning an unmeasured final implementation when nothing else would be saved is a separate factor.
+      const returnDevelopment = !!evo && A.evolution_return_development === true;
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
@@ -2265,7 +2332,7 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${preserveAttempt ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
-Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${preserveAttempt ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit' + (evoEngineer ? '. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : '') : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.${preserveFounder ? '\nReturn the best correct implementation of the requested realization even when it is slower than the starting program or ORIGINAL, with its own measurements and limitations. This source-return rule replaces the stock role\'s instruction to omit a patch on regression; it does not qualify or promote the source. Keep the final workspace, returned patch and measurement tied to those same bytes. Preserve failed or unfinished attempts separately under OUTPUT_DIR and record their source/evidence paths and limitations in report.md and worker_result.json notes; do not describe them as correct or measured.' : ''}
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh <KERNEL_PATH> ${d.out_dir}/best_patch.diff ${evo ? d.evolution_context.workspace_base_commit : "HEAD"} <editable-source-paths>\` ${preserveAttempt ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit' + (evoEngineer ? '. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : '') : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. For an extracted task the tool captures only kernel_src, including new source files. Otherwise pass the task's declared editable files/directories, including any new backend/build source dependencies; exclude logs, measurements and tool artifacts. Do not replace this source capture with bare git diff.${preserveFounder ? '\nReturn the best correct implementation of the requested realization even when it is slower than the starting program or ORIGINAL, with its own measurements and limitations. This source-return rule replaces the stock role\'s instruction to omit a patch on regression; it does not qualify or promote the source. Keep the final workspace, returned patch and measurement tied to those same bytes. Preserve failed or unfinished attempts separately under OUTPUT_DIR and record their source/evidence paths and limitations in report.md and worker_result.json notes; do not describe them as correct or measured.' : ''}${returnDevelopment ? '\nDevelopment fallback, only after your normal engineering and evaluation obligations (it never justifies skipping an available evaluation or stopping early): if your ordinary best_patch.diff return would be absent, empty or only the inherited selected-parent changes, you have no correct measured development beyond that starting program, and you hold one concrete unmeasured implementation attempt, save that one attempt as best_patch.diff with the same command, so it includes the inherited parent changes, and keep the workspace at exactly those bytes. Never replace a saved correct measured development source beyond the starting program with a later unmeasured iteration; a re-measured unchanged starting program is not such development, and a correct measured but slower source stays under the existing return rules. Never edit the canonical incumbent. Return status partial, measurement_valid=false, no per_case rows, no inherited scores or external_evaluation IDs, and the required numeric speedup fields as 0 placeholders; state in notes that performance is unavailable, not measured zero. If no such attempt exists, return no fallback. The ordinary verifier still decides correctness, fitness and any promotion. This fallback permits local development-source capture before qualification; native reproducible-gain requirements for qualified export and delivery remain unchanged.' : ''}
 
 ## Inputs
 ${cfg({
@@ -2358,8 +2425,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     source: `engineer ${r.d.id}`, id: r.d.id, title: r.d.title, specialty: r.d.specialty,
     geomean: primSpeedup(r.ver), geomean_unweighted: r.ver.verified_geomean,
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
-    arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
+    arithmetic: r.ver.verified_arithmetic ?? (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? null : r.ver.verified_geomean ?? null),
     per_case: r.ver.per_case || [], patch: r.patch,
+    // Preserve the settled report; native fields remain role-reported, not host evidence.
+    verifier_report: r.ver,
+    evidence_context: compactCaseMeasurementContext(r.ver),
     ...(EXTERNAL_OBJECTIVE ? {reported_per_case: r.ver.reported_per_case ?? null} : {}),
     reported_context: reportedEvidence(r.d, r.eng, r.ver, r.patch),
     ...externalFields(r.ver),
@@ -2427,6 +2497,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        verifier_report: integrate.best,
         reported_per_case: integrate.best.reported_per_case ?? null,
         ...externalFields(integrate.best),
       });
@@ -2543,8 +2614,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       // by its pinned bytes (EVO archive row or GEAK snapshot), never by the current promotion file.
       if (!EXTERNAL_OBJECTIVE) keepForDelivery({key: `round_${round}_winner`, id: winner.id, d: null, eng: null,
         reported_context: winner.reported_context,
-        ver: {status: 'verified', correctness: 'pass', verified_geomean: winner.geomean_unweighted,
-          verified_weighted: winner.weighted, per_case: winner.per_case},
+        ver: winner.verifier_report,
         evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
         base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
@@ -2572,7 +2642,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     if (improved) {
       await captureCanonicalSelection(history, 'after_commit', round, winner);
       cumulative = winner.geomean;
-      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      bestPerCase = Array.isArray(winner.per_case) ? winner.per_case : [];
       finalWinner = winner;
       roundsCommitted += 1;
       if (evo) {
@@ -2787,6 +2857,8 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
         }),
         { phase: 'Verify', label: `verify ${c.id} (delivery)`, schema: VERIFY_SCHEMA }); }
       finally { setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S); }
+      // This native path also strips role-authored host provenance before retaining the report.
+      ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, frozen);
       // The result binds only to the bytes it measured.
       if (ver && (await digest(frozen) !== frozenSha || await digest(src.path) !== src.sha256)) {
         row.status = 'source_changed'; continue;
@@ -2809,11 +2881,13 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
       && await commitExactTree(best.promo, `delivery ${best.c.key}`)) {
     best.row.status = 'delivered';
     cumulative = best.primary;
-    bestPerCase = best.ver.per_case && best.ver.per_case.length ? best.ver.per_case : bestPerCase;
+    bestPerCase = Array.isArray(best.ver.per_case) ? best.ver.per_case : [];
     finalWinner = {source: `delivery ${best.c.key}`, id: best.c.id, title: best.c.d ? best.c.d.title : 'delivery',
       geomean: best.primary, geomean_unweighted: best.ver.verified_geomean,
       weighted: best.ver.verified_weighted != null ? best.ver.verified_weighted : null,
       per_case: best.ver.per_case || [], patch: best.promo.patch, source_tree: best.promo.tree,
+      verifier_report: best.ver,
+      evidence_context: compactCaseMeasurementContext(best.ver),
       reported_context: reportedEvidence({...best.c.d, id: best.c.id, reported_context: best.c.reported_context},
         best.c.eng, best.ver, best.promo.patch)};
     roundsCommitted += 1;
@@ -3100,6 +3174,18 @@ function contextBytes(value) {
 }
 // Prompt-only reduction. The full archive/checkpoint artifact is retained separately.
 function boundedContext(value, fullRef, limit = 16384) {
+  if (CASE_MEASUREMENT_VIEW !== undefined) {
+    let omitted = false;
+    const prose = v => Array.isArray(v) ? v.map(prose)
+      : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([key]) => {
+        if (['per_case', 'frozen_reference_per_case', 'reported_per_case'].includes(key)) {
+          omitted = true; return false;
+        }
+        return true;
+      }).map(([key, child]) => [key, prose(child)])) : v;
+    const reduced = prose(value);
+    if (omitted) value = {...reduced, case_tables_omitted_from_prose: true, full_context_ref: fullRef};
+  }
   if (contextBytes(value) <= limit) return value;
   const compact = (v, depth = 0) => typeof v === 'string'
     ? [...v].slice(0, 192).join('') + ([...v].length > 192 ? ' [text omitted]' : '')
@@ -3112,18 +3198,77 @@ function boundedContext(value, fullRef, limit = 16384) {
   return result;
 }
 
+// Only reported measurement metadata/rows; never manufacture host reader authority.
+function compactCaseMeasurementContext(value) {
+  const context = value?.evidence_context;
+  if (!context) return null;
+  const m = context.case_measurement;
+  return {case_measurement: m ? Object.fromEntries(['basis', 'cohort_ref', 'reduction', 'weight_source']
+    .filter(key => m[key] !== undefined).map(key => [key, m[key]])) : null,
+    frozen_reference_per_case: context.frozen_reference_per_case ?? null,
+    evidence_refs: context.evidence_refs ?? null};
+}
+// Both experimental views require matching supplied tables, not expected task coverage. This
+// switches prompt values only; canonical rows, scalar scores and acceptance stay intact.
+function measurementCaseView(value, fullRef = null) {
+  const native = Array.isArray(value?.per_case) ? value.per_case : [];
+  if (CASE_MEASUREMENT_VIEW === undefined) return {per_case: value?.per_case ?? null};
+  const context = compactCaseMeasurementContext(value), m = context?.case_measurement;
+  const frozen = context?.frozen_reference_per_case;
+  const validRows = rows => Array.isArray(rows) && rows.length > 0
+    && rows.every(row => row && typeof row.name === 'string' && row.name.length > 0
+      && ['baseline_ms', 'optimized_ms', 'speedup'].every(key => Number.isFinite(row[key]) && row[key] > 0))
+    && new Set(rows.map(row => row.name)).size === rows.length;
+  const available = m?.basis === 'native' && ['cohort_ref', 'reduction', 'weight_source']
+    .every(key => typeof m[key] === 'string' && m[key].trim())
+    && validRows(native) && validRows(frozen) && native.length === frozen.length
+    && native.every(row => frozen.some(other => other.name === row.name && other.optimized_ms === row.optimized_ms));
+  const selected = !available ? {per_case: [], case_measurement_view_unavailable: 'native_and_matched_frozen_tables_unavailable'}
+    : CASE_MEASUREMENT_VIEW === 'current_mixed' ? {per_case: frozen}
+      : {per_case: native, case_measurement: {...m, authority: 'author_reported; no host validation'},
+        frozen_reference_diagnostics: {basis: 'frozen_reference', case_rows: frozen.length,
+          full_context_ref: fullRef, evidence_refs: context.evidence_refs}};
+  const view = {...selected, case_measurement_refs: {full_context_ref: fullRef,
+    evidence_refs: context?.evidence_refs ?? null}};
+  log(`[case_measurement_view] ${JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+    available: !!available, native_rows: native.length, frozen_rows: Array.isArray(frozen) ? frozen.length : null,
+    selected_unbounded_rows: view.per_case.length, per_view_unbounded_bytes: contextBytes(view),
+    full_context_ref: fullRef, evidence_refs: context?.evidence_refs ?? null})}`);
+  return view;
+}
+function currentBestCaseInputs(rows, winner, fullRef) {
+  if (CASE_MEASUREMENT_VIEW !== undefined && !winner && rows === BASELINE_PER_CASE) {
+    const inputs = {CURRENT_BEST_PER_CASE: rows, CURRENT_BEST_CASE_MEASUREMENT: {
+      source: 'ORIGINAL', basis: 'initial_benchmark', authority: 'benchmark_author_reported; no host validation',
+      full_context_ref: {path: `${EVAL_DIR}/baseline_timing.json`}}};
+    log(`[case_measurement_current_best_inline] ${JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+      initial_original: true, inline_rows: Array.isArray(rows) ? rows.length : null,
+      bytes: contextBytes(inputs), full_context_ref: inputs.CURRENT_BEST_CASE_MEASUREMENT.full_context_ref})}`);
+    return inputs;
+  }
+  const value = {per_case: rows, evidence_context: winner?.evidence_context
+    || winner?.reported_context?.verifier?.evidence_context};
+  const view = measurementCaseView(value, fullRef);
+  const inputs = {CURRENT_BEST_PER_CASE: view.per_case,
+    ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {CURRENT_BEST_CASE_MEASUREMENT:
+      Object.fromEntries(Object.entries(view).filter(([key]) => key !== 'per_case'))})};
+  if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_current_best_inline] ${JSON.stringify({
+    mode: CASE_MEASUREMENT_VIEW, inline_rows: view.per_case.length, bytes: contextBytes(inputs), full_context_ref: fullRef})}`);
+  return inputs;
+}
 // Prompt-only numerical view. Keep every supplied case and its extra fields;
 // row counts describe the report, not expected task coverage or qualification.
-function caseEvidenceReport(value) {
+function caseEvidenceReport(value, fullRef = null) {
   if (!value) return null;
+  const view = measurementCaseView(value, fullRef);
   const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
     'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
     'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
     'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
     'variance_note', 'graph_safe'];
   return {...Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]])),
-    per_case: value.per_case ?? null,
-    case_rows: Array.isArray(value.per_case) ? value.per_case.length : null,
+    ...view,
+    case_rows: Array.isArray(view.per_case) ? view.per_case.length : null,
     ...(value.observed_evidence !== undefined ? {observed_evidence: value.observed_evidence,
       reported_per_case: value.reported_per_case ?? null} : {}),
     evidence_refs: value.evidence_context?.evidence_refs ?? null};
@@ -3132,10 +3277,16 @@ function caseEvidenceReport(value) {
 // Numeric handoffs are complete or explicitly reference-only. Prose reduction
 // must not turn the first four case rows into a seemingly complete comparison.
 function boundedCaseEvidence(rows, fullRef, limit = 16384) {
-  if (contextBytes(rows) <= limit) return {entries: rows, full_context_ref: fullRef};
-  return {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
+  const bytes = contextBytes(rows), overflow = bytes > limit;
+  const result = !overflow ? {entries: rows, full_context_ref: fullRef}
+    : {entries: null, case_evidence_omitted: 'over_utf8_budget; read complete cases at full_context_ref',
     full_context_ref: fullRef, row_counts: rows.map(row => ({entry_id: row.archive_ref.entry_id,
       engineer: row.engineer?.case_rows ?? null, verifier: row.verifier?.case_rows ?? null}))};
+  if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_view_bound] ${JSON.stringify({
+    mode: CASE_MEASUREMENT_VIEW, input_bytes: bytes, output_bytes: contextBytes(result), limit, overflow,
+    inline_rows: overflow ? 0 : rows.reduce((n, row) => n + (row.engineer?.case_rows || 0) + (row.verifier?.case_rows || 0), 0),
+    full_context_ref: fullRef})}`);
+  return result;
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
@@ -3231,7 +3382,8 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
-    engineer: caseEvidenceReport(row.engineer), verifier: caseEvidenceReport(row.verifier)});
+    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
+    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
   const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
     entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
@@ -3320,9 +3472,13 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
-        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
-          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
-          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+        // Native checkpoints retain the role report, without upgrading its legacy authority.
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : checked?.verifier_report || {
+          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? (HAS_WORKLOAD ? null : speedup),
+          verified_weighted: checked?.weighted ?? null,
+          per_case: Array.isArray(checked?.per_case) ? checked.per_case
+            : (round === 0 && !start.finalWinner ? BASELINE_PER_CASE : []),
+          evidence_context: compactCaseMeasurementContext(checked)}};
       await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
       const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
         checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};
@@ -3415,7 +3571,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       const summary = entries.slice(-12);
       const best = entries.find(row => row.id === bestId);
       if (best && !summary.includes(best)) summary.unshift(best);
-      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
         EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
@@ -3425,9 +3581,14 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
             row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
+      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
+        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
+          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
+          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
+      return inputs;
     },
     memoryInputs(directions) {
-      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
+      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
         const row = entries.find(entry => entry.id === direction.id);
         return {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
           approach: direction.approach || null, patch_ref: row?.patch_ref || null,
@@ -3436,6 +3597,11 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row || {id: direction.id})} : {}),
           report_path: `${direction.out_dir}/report.md`};
       })};
+      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_memory_inline] ${JSON.stringify({
+        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ROUND.map(row => ({
+          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
+          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
+      return inputs;
     },
     prepare(directions, round) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
@@ -3473,7 +3639,10 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
       const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
       if (parentRef) {
-        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        // A zero-byte cumulative diff is the already-materialized archive base.
+        if (parentRef.sha256 !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+          await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        }
         if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
       }
       await run('git', ['-C', workspace, 'add', '-A']);

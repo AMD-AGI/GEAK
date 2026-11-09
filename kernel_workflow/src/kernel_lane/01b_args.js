@@ -124,6 +124,11 @@ const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
 const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+const CASE_MEASUREMENT_VIEW = A.case_measurement_view;
+if (CASE_MEASUREMENT_VIEW !== undefined &&
+    (!['current_mixed', 'native_consistent'].includes(CASE_MEASUREMENT_VIEW) || !HAS_WORKLOAD || EXTERNAL_OBJECTIVE)) {
+  throw new Error('case_measurement_view requires current_mixed/native_consistent and an ordinary workload-weighted task');
+}
 if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
     || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
   throw new Error('external_primary requires exactly kind and primary_regime');

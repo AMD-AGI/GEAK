@@ -48,8 +48,10 @@ rankings or restrictions on algorithm/backend choice. Verify unfamiliar APIs bef
 
 ## Work
 
-1. Measure the starting candidate with COMMANDMENT; retain supplied original baseline timings as
-   the speedup denominator. Implement, check correctness, then run the full benchmark.
+1. Measure the starting candidate with COMMANDMENT; use its declared ORIGINAL baseline
+   and native paired cohort when supplied. Keep frozen-reference timings separately
+   labelled as described in `docs/eval_archive_contract.md`. Implement, check
+   correctness, then run the full benchmark.
 2. Report per-case baseline/candidate ms and ratios, geomean `exp(mean(log(speedups)))`, arithmetic
    mean, and COMMANDMENT's primary metric. For workload-aligned runs, use its declared weighted
    ratio-of-sums; extracted tasks use `h.serving_weighted_speedup` with measured latency and analytic

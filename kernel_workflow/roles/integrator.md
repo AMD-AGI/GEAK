@@ -30,10 +30,15 @@ retained, changed or rejected. A text merge alone is not evidence of compatibili
 Do not alter the harness, COMMANDMENT or frozen baseline. Exit 86 or
 GEAK_SOURCE_INVALID invalidates that invocation, including earlier PASS/timing lines.
 
-Compute per-case speedup = frozen baseline_ms / optimized_ms, geomean =
-exp(mean(log(speedups))), and arithmetic mean. For workload-aligned evaluation,
-weighted = sum(weight) / sum(weight / speedup) is primary; retain geomean as a
-diagnostic. Use complete matching cases and supplied weights, never count instead.
+Follow the native/case measurement contract in `docs/eval_archive_contract.md`.
+When the oracle declares a native aggregation, return its native case rows and
+secondary metrics from that same cohort; label frozen-reference calculations
+separately. Otherwise compute per-case speedup = frozen baseline_ms / optimized_ms,
+geomean = exp(mean(log(speedups))), arithmetic mean, and the declared weighted
+metric sum(weight) / sum(weight / speedup). Use complete matching cases and the
+declared weights, never count instead. Missing exported native case rows alone
+do not invalidate a qualified primary; return per_case:[] with the missing source
+noted rather than substitute a different cohort.
 
 Preserve the oracle's GEAK_WEIGHTED_SPEEDUP or audited aggregation when supplied;
 recompute from static weights only when that is the declared metric. Before saving,

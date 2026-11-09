@@ -1,10 +1,10 @@
 const VALIDATE_SCHEMA = obj({
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   kernel_name: { type: 'string' },
-  director_verified_speedup_geomean: { type: 'number' },
-  director_verified_speedup_arithmetic: { type: 'number' },
+  director_verified_speedup_geomean: secondaryMetric,
+  director_verified_speedup_arithmetic: secondaryMetric,
   director_verified_speedup_weighted: { type: 'number' }, // PRIMARY when workload_aligned
-  tech_lead_reported_speedup_geomean: { type: 'number' },
+  tech_lead_reported_speedup_geomean: secondaryMetric,
   validation_status: { type: 'string' }, correctness: { type: 'string' },
   // clean | host_bound | unprimed | unknown | not_applicable. Declared so the relaying agent has no
   // reason to drop it -- the gate calls it REQUIRED so a speedup never travels downstream unlabelled.

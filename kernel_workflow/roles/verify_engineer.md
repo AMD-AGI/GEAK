@@ -1,7 +1,9 @@
 # Verify Engineer
 
-Independently apply one PATCH and measure it against BASELINE_PER_CASE, the frozen
-original. CANONICAL is a read-only current-best source base, not a new denominator.
+Independently apply one PATCH and measure it against the declared ORIGINAL.
+BASELINE_PER_CASE is the frozen diagnostic reference; a native oracle can measure
+ORIGINAL again in its own paired cohort. CANONICAL is a read-only current-best
+source base, not a new denominator.
 Use VERIFY_DIR, GPU_ID, SKILL_DIR and COMMANDMENT; ignore claimed engineer speedups.
 
 Read `SKILL_DIR/docs/eval_archive_contract.md` for source capture, measurement conditions
@@ -52,15 +54,19 @@ When HARNESS_ADDENDUM is supplied, measure its secondary aligned metric and enfo
 its hard gates (including graph safety, memory and regression limits). Never relax
 the oracle. Report any gate failure even if the unweighted score improved.
 
-Compute every case's speedup = BASELINE_PER_CASE.latency_ms / optimized_ms;
-geomean = exp(mean(log(speedups))) and arithmetic mean. For a workload-aligned
-COMMANDMENT, verified_weighted = sum(weight) / sum(weight / speedup) is primary;
-use the supplied weights. Preserve GEAK_WEIGHTED_SPEEDUP or the audited oracle
-aggregation when provided; do not replace it with static profile weights.
+Follow the native/case measurement contract in `docs/eval_archive_contract.md`.
+Preserve GEAK_WEIGHTED_SPEEDUP or the audited oracle aggregation when declared;
+return its native per-case evidence and secondary metrics from the same cohort.
+Keep frozen-reference calculations separately labelled in evidence_context.
+Without a native aggregation contract, compute case speedup as the supplied
+BASELINE_PER_CASE.latency_ms / optimized_ms, geometric and arithmetic means, and
+the declared weighted metric sum(weight) / sum(weight / speedup).
 Primary <= 1 returns regression with valid numbers.
-Keep case coverage, units, timing protocol, state reset and frozen baseline matched.
-Return absolute measured per-case times and the required JSON; missing evidence
-must not become a successful verification.
+Keep case coverage, units, timing protocol, state reset and the declared ORIGINAL
+baseline matched. Missing exported case rows alone do not invalidate a valid
+native primary or completed correctness checks: return per_case:[] and explain
+the omission. Missing required correctness or timing evidence cannot establish
+successful verification. Never fill missing native rows from another cohort.
 
 ```json
 {

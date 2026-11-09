@@ -23,7 +23,8 @@ if (setup.resumed && setup.prior_state) {
   if (Array.isArray(ps.insights)) history.insights = ps.insights;
   if (Array.isArray(ps.ledger)) history.ledger = ps.ledger;
   if (ps.bottleneck_now) history.bottleneck_now = ps.bottleneck_now;
-  if (Array.isArray(ps.best_per_case) && ps.best_per_case.length) bestPerCase = ps.best_per_case;
+  if (Array.isArray(ps.best_per_case)) bestPerCase = ps.best_per_case;
+  else if (cumulative > 1) bestPerCase = [];
   log(`RESUMED from STATE_DIR: cumulative=${cumulative.toFixed(3)}x, ${history.insights.length} insights, ${history.ledger.length} ledger entries carried forward.`);
 }
 

@@ -39,7 +39,9 @@ const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
 if (A.population_lineage) {
   if (EVAL_DIR !== A.eval_dir || CANONICAL !== `${A.eval_dir}/workspace`) {
-    throw new Error('population Setup must use its assigned private eval_dir/workspace');
+    throw new Error('population Setup must use its assigned private eval_dir/workspace; ' +
+      JSON.stringify({ expected_eval_dir: A.eval_dir, expected_workspace: `${A.eval_dir}/workspace`,
+        actual_eval_dir: EVAL_DIR, actual_workspace: CANONICAL }));
   }
   const isolation = await runProcess({cmd: 'python3', args: ['-c',
     'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:])\n' +

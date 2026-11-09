@@ -199,9 +199,11 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             // The optimize loop now builds ON this patch: cumulative starts at the adopted Nx, so this
             // run's own rounds only earn the delta above it (split out as incremental_speedup below).
             cumulative = sp;
-            bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
+            bestPerCase = Array.isArray(ver.per_case) ? ver.per_case : [];
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
-              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              arithmetic: ver.verified_arithmetic ?? (HAS_WORKLOAD && !EXTERNAL_OBJECTIVE ? null : sp), per_case: bestPerCase, patch: c.patch_path,
+              verifier_report: ver,
+              evidence_context: compactCaseMeasurementContext(ver),
               ...(EXTERNAL_OBJECTIVE ? {reported_per_case: ver.reported_per_case ?? null} : {}),
               ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
