@@ -154,8 +154,13 @@ after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and 
 ### Mega mode (multi-rank operators)
 `mode="mega"` is for operators that run across several GPUs at once and are worth rewriting as one
 fused, persistent kernel — e.g. an EP MoE layer whose dispatch, GEMM1, GEMM2 and combine are
-separate launches today. The dispatcher hands the run to `kernel_mega.js`, which keeps a portfolio of
-independent whole-kernel **candidates** instead of one canonical tree:
+separate launches today.
+
+**Scope:** validated on EP MoE layers (MegaMoE) only. Other multi-rank operators (attention, a GEMM
+fused with its all-reduce, ...) are not validated yet; use it for EP MoE until they are.
+
+The dispatcher hands the run to `kernel_mega.js`, which keeps a portfolio of independent whole-kernel
+**candidates** instead of one canonical tree:
 
 - **Setup / Analyze / Benchmark / Profile** freeze the baseline, write an operator-neutral plan
   (MegaPlanIR: work domains, buffers, counters, queues, events, schedule) and build the paired A/B
