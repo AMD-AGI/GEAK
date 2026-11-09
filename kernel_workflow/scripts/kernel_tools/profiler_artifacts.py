@@ -102,8 +102,8 @@ def inspect(root, mode, kernel, counters=()):
         state = 'ok' if waves and identity else 'partial'
         reason = 'decoded_dispatch' if state == 'ok' else (
             'no_decoded_wave' if not waves else 'kernel_identity_unverified')
-        candidates.append(dict(state=state, reason=reason, matched_rows=len(identity),
-                               decoded_waves=waves, att_dispatch=str(code_path.parent)))
+        candidates.append({'state': state, 'reason': reason, 'matched_rows': len(identity),
+                           'decoded_waves': waves, 'att_dispatch': str(code_path.parent)})
     if candidates:
         return next((item for item in candidates if item['state'] == 'ok'), candidates[0])
     result['reason'] = 'code_null' if null_seen else 'no_decoded_code'

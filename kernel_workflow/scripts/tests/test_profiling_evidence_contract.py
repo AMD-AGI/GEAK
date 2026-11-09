@@ -1,13 +1,10 @@
 """CPU fixtures exercise collection failures, shared execution and evidence semantics."""
 import importlib.util
 import json
-import os
-from pathlib import Path
 import subprocess
 import sys
 
 import pytest
-
 from test_profile_kernel_layers import PROFILE, SCRIPTS, _decoder, _env
 
 KT = SCRIPTS / 'kernel_tools'
@@ -33,7 +30,7 @@ def profile(tmp_path, mode, flags, **extra):
     out = tmp_path / 'out'
     p = subprocess.run(['bash', str(PROFILE), '0', 'true', str(out),
                         '--kernel', '_gemm', *flags], env=env, cwd=tmp_path,
-                       capture_output=True, text=True, timeout=60)
+                       check=False, capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stdout + p.stderr
     return out, json.loads((out / 'profile_layers.json').read_text())
 
@@ -81,7 +78,7 @@ def test_group_profile_preserves_order_and_clears_nested_cuda_mask(tmp_path, own
 case "$mode" in'''))
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(PROFILE), 'group:1,0', 'true', str(out), '--pmc'],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads((out / 'profile_layers.json').read_text())['pmc'] == 'collected:pmc'
     assert (out / 'pmc/pmc_g/masks').read_text().strip() == 'unset|6,4|unset'
@@ -94,7 +91,7 @@ def test_conflicting_outer_lease_refuses_before_any_profile(tmp_path):
                HIP_VISIBLE_DEVICES='1')
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(PROFILE), '0', 'true', str(out), '--pmc'],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=30)
     assert result.returncode == 2 and 'does not match' in result.stderr
     assert not out.exists()
 
@@ -120,7 +117,7 @@ else:
     tool.chmod(0o755)
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(PROFILE), '0', 'true', str(out), '--spi'],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert json.loads((out / 'profile_layers.json').read_text())['spi'] == state
 
@@ -173,7 +170,7 @@ def test_capture_and_safe_share_att_retry_and_unknown_cadence(tmp_path, containe
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(KT / 'capture.sh'), 'case', str(out),
                              '--source', str(source), '--kernel', '_gemm', '--', 'true'],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     cap = json.loads((out / 'capture.json').read_text())
     status = json.loads((out / 'att/rocprofv3_safe.json').read_text())
@@ -211,8 +208,8 @@ def test_att_directory_or_incomplete_decode_is_not_collected(tmp_path, kind):
 def test_breakdown_preserves_evidence_without_attack_ranking(tmp_path):
     sys.path.insert(0, str(KT))
     try:
-        import kernel_breakdown
         import _att_fixture
+        import kernel_breakdown
         asm = tmp_path / 'kernel.s'; asm.write_text(kernel_breakdown._SELFTEST_ASM)
         _att_fixture.write(str(tmp_path))
         result = subprocess.run([sys.executable, str(KT / 'kernel_breakdown.py'), str(asm),
@@ -224,11 +221,29 @@ def test_breakdown_preserves_evidence_without_attack_ranking(tmp_path):
         assert forbidden not in result.stdout
 
 
+def test_breakdown_reports_nop_operands_and_requires_a_back_edge(tmp_path):
+    sys.path.insert(0, str(KT))
+    try:
+        import kernel_breakdown
+        asm = tmp_path / 'loop.s'
+        asm.write_text('.LBB0_1:\n\ts_nop 0\n\ts_nop 0x3\n\ts_cbranch_scc1 .LBB0_1\n')
+        result = kernel_breakdown.static_analyze(str(asm))
+        assert result['nop_count'] == 2 and result['nop_immediate_sum'] == 3
+        assert 'nop_cycles' not in result
+        asm.write_text('.LBB0_1:\n\ts_nop 3\n\ts_endpgm\n')
+        with pytest.raises(SystemExit, match='loop-only'):
+            kernel_breakdown.static_analyze(str(asm))
+        with pytest.raises(SystemExit, match='not found among back-edges'):
+            kernel_breakdown.static_analyze(str(asm), '.LBB0_1')
+    finally:
+        sys.path.pop(0)
+
+
 def test_main_profile_refuses_mixed_host_container_layers(tmp_path):
     env = _env(tmp_path, TILE_KERNEL_CONTAINER='external')
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(PROFILE), '0', 'true', str(out), '--pmc'],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=30)
     assert result.returncode == 2 and 'inside the workload environment' in result.stderr
     assert not out.exists()
 
@@ -240,7 +255,7 @@ def test_baseline_trace_metadata_does_not_count_as_dispatch_evidence(tmp_path):
         "trace) printf", "trace) echo '{}' > \"$out/metadata.json\"; exit 0; printf"))
     out = tmp_path / 'out'
     result = subprocess.run(['bash', str(PROFILE), '0', 'true', str(out)],
-                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                            env=env, cwd=tmp_path, check=False, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert json.loads((out / 'profile_layers.json').read_text())['profiler'] == 'benchmark-only'
     assert json.loads((out / 'baseline_trace_artifacts.json').read_text())['state'] == 'unavailable'
