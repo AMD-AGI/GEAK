@@ -240,6 +240,39 @@ const SCENARIOS = [
     onPlan: cutAt('r3'), eng: {r1_d0: {speed: 0.90}, r2_d0: {speed: 1.25}}, verify: {r1_d0: 0.90, r2_d0: 1.25}},
 ];
 (async () => {
+  // Focused opt-in fixture: keep the existing scripted host/runtime, not a second runner.
+  if (process.argv.includes('--first-plan-only')) {
+    const first = {stop: false, directions: [d('r1_d0', 'compute')]};
+    const second = {stop: false, directions: [d('r2_d0', 'compute')]};
+    const planPath = path.join(OUT, 'first_plan.json');
+    fs.writeFileSync(planPath, JSON.stringify({round: 1, plan: first}));
+    const ref = {path: planPath, sha256: sha(fs.readFileSync(planPath))};
+    const scenario = {name: 'first_plan_replay', args: {first_plan_ref: ref},
+      plans: {r1: first, r2: second}, eng: {r1_d0: {speed: 1.3}, r2_d0: {speed: 1.4}},
+      verify: {r1_d0: 1.3, r2_d0: 1.4}};
+    const template = {...TEMPLATE, budget: 2};
+    const ordinary = await runMode('greedy', {...scenario, name: 'first_plan_unset', args: {}}, template);
+    const replay = await runMode('greedy', scenario, template);
+    assert.equal(ordinary.error, null);
+    assert.equal(replay.error, null);
+    assert.ok(ordinary.calls.some(c => c.label === 'tech_lead:plan r1'));
+    assert.ok(!replay.calls.some(c => c.label === 'tech_lead:plan r1'));
+    assert.ok(replay.calls.some(c => c.label === 'tech_lead:plan r2'));
+    for (const id of ['r1_d0', 'r2_d0']) {
+      const prompt = replay.calls.find(c => c.label === `eng ${id}:compute`).prompt;
+      assert.deepEqual(field(prompt, 'DIRECTION'), field(ordinary.calls.find(c => c.label === `eng ${id}:compute`).prompt, 'DIRECTION'));
+    }
+    const provenance = JSON.parse(fs.readFileSync(path.join(OUT, 'runs', scenario.name, 'greedy', 'eval', 'planner_r1_initial.json')));
+    assert.deepEqual(provenance.plan, first);
+    assert.deepEqual(provenance.source, {kind: 'first_plan_ref', ...ref});
+    const bad = await runMode('greedy', {...scenario, name: 'first_plan_bad_sha',
+      args: {first_plan_ref: {...ref, sha256: '0'.repeat(64)}}}, template);
+    assert.match(bad.error || '', /first_plan_ref could not be read or validated/);
+    assert.ok(!bad.calls.some(c => c.label.startsWith('tech_lead:plan') || c.label.startsWith('eng ')));
+    fs.rmSync(OUT, {recursive: true, force: true});
+    console.log('PASS: first-plan replay preserves the direction, skips only the initial planner, records provenance, retains native round2, and refuses bad SHA without fallback. Scripted CPU fixture only.');
+    return;
+  }
   for (const sc of SCENARIOS) {
     const g = await runMode('greedy', sc, TEMPLATE), e = await runMode('evo', sc, TEMPLATE);
     assert.equal(g.error, null, `${sc.name} greedy: ${g.error}`);

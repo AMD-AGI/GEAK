@@ -144,23 +144,51 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
-  const recordProposedPlan = async (attempt, proposed) => {
+  const recordProposedPlan = async (attempt, proposed, source = null) => {
     const path = `${EVAL_DIR}/planner_r${round}_${attempt}.json`;
     let saved = null;
     try { saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', path],
-      { input: JSON.stringify({round, attempt, plan: proposed ?? null}, null, 2) + '\n',
+      { input: JSON.stringify({round, attempt, plan: proposed ?? null, ...(source ? {source} : {})}, null, 2) + '\n',
         timeoutMs: 1000, graceMs: 0 }); }
-    catch (_) { /* Observation failure must not change the search decision. */ }
+    catch (_) { /* Ordinary planner observations remain best-effort; replay provenance is required below. */ }
     if (saved === null)
       log(`Round ${round}: proposed-plan artifact unavailable or already recorded (${attempt}).`);
+    if (source && saved === null) throw new Error('first_plan_ref replay provenance could not be preserved');
   };
 
-  let plan = await agentT(
+  // Optional caller-supplied first plan only; preparation and all later role calls remain native.
+  // Hash and parse the same bytes, using the runtime's existing lightweight schema validator.
+  const replay = round === 1 && FIRST_PLAN_REF !== undefined;
+  if (replay && archiveHasSource()) throw new Error('first_plan_ref cannot replay with a source-bearing archive');
+  let plan;
+  if (replay) {
+    const raw = await hostRun('node', ['--input-type=module', '-e', `
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {pathToFileURL} from 'node:url';
+const [path, expected, validator, schema] = process.argv.slice(1);
+const bytes = readFileSync(path);
+if (createHash('sha256').update(bytes).digest('hex') !== expected) throw new Error('plan SHA256 mismatch');
+const record = JSON.parse(bytes.toString('utf8'), (key, value) => {
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('non-finite plan number');
+  return value;
+});
+const {validate} = await import(pathToFileURL(validator).href);
+if (record?.round !== 1 || !validate(record.plan, JSON.parse(schema)).ok
+    || record.plan.stop !== false || record.plan.directions.length === 0)
+  throw new Error('expected a valid nonempty, non-stopping round-one plan');
+process.stdout.write(JSON.stringify(record.plan));
+`, FIRST_PLAN_REF.path, FIRST_PLAN_REF.sha256,
+      `${WORKFLOW_DIR}/../interface/runtime/engine/schema.mjs`, JSON.stringify(PLAN_SCHEMA)],
+      {timeoutMs: 10000, graceMs: 0});
+    if (raw === null) throw new Error('first_plan_ref could not be read or validated');
+    plan = JSON.parse(raw);
+  } else plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
       evolutionInstructions(),
       planInputs(false, await deliveryFactsInput())),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
-  await recordProposedPlan('initial', plan);
+  await recordProposedPlan('initial', plan, replay ? {kind: 'first_plan_ref', ...FIRST_PLAN_REF} : null);
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,

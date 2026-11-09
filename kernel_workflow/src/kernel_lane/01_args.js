@@ -7,12 +7,21 @@ const A = args || {};
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
   throw new Error('prepare_only must be a boolean');
 if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
-    || A.state_dir || A.prepared_original_ref !== undefined || A.population_lineage
+    || A.state_dir || A.prepared_original_ref !== undefined || A.first_plan_ref !== undefined || A.population_lineage
     || A.objective?.kind === 'external_primary'
     || A.search_duration_s != null || A.preparation_allowance_s != null))
   throw new Error('prepare_only needs a fresh ORIGINAL lane, without author/resume/import/population or relative search controls');
 if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
   throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
+}
+const FIRST_PLAN_REF = A.first_plan_ref;
+if (FIRST_PLAN_REF !== undefined && (!FIRST_PLAN_REF || typeof FIRST_PLAN_REF !== 'object'
+    || Array.isArray(FIRST_PLAN_REF) || Object.keys(FIRST_PLAN_REF).sort().join(',') !== 'path,sha256'
+    || typeof FIRST_PLAN_REF.path !== 'string' || !FIRST_PLAN_REF.path.startsWith('/')
+    || /[\0\r\n]/.test(FIRST_PLAN_REF.path)
+    || !FIRST_PLAN_REF.path.slice(1).split('/').every(part => part && part !== '.' && part !== '..')
+    || typeof FIRST_PLAN_REF.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(FIRST_PLAN_REF.sha256))) {
+  throw new Error('first_plan_ref requires an absolute path and lowercase SHA256');
 }
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/model directory)');
 
