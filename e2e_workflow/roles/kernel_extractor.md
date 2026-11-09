@@ -218,11 +218,14 @@ Compile parity is included by `h.run_correctness`: numeric drift fails; an isola
 error is a surfaced note, not a regenerate signal. The end-to-end gate judges deployment compile behavior.
 
 Timing is `per_case = h.measure_legs(TASK, meta)`. It checks distinct source resolution and uses
-interleaved baseline/candidate subprocess pairs, the same graph/compile context, and median speedup
+interleaved baseline/candidate subprocess pairs, the requested graph/compile context, and median speedup
 `baseline_ms/optimized_ms`. Keep adaptive repetition defaults; report `speedup_spread` for noisy
 buckets. `h.time_op` uses device events (`inner=1`); do not replace it with host dispatch timing or
 award an isolated graph trick against an eager baseline. Print baseline/optimized ms and speedup
 per case. Surface `._geak_compile_error` in notes.
+Retain `timing_pairs` and report `timing_conditions`: graph capture can fall back independently in
+each leg; absent metadata is unknown. A `primed` difference describes measured host supply, not
+necessarily unequal benchmark policy. These diagnostics do not change the score or acceptance gate.
 
 ### Workload attribution and metric
 
