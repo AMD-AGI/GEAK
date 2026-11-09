@@ -102,6 +102,12 @@ work root so an old frozen snapshot or KEEP cannot silently be adopted into the 
 measurement basis. Retain old credit in cost accounting; compare performance only within
 the matching harness version.
 
+Before the first worker starts, compare the frozen snapshot with the task's declared
+immutable inputs. `check-frozen` checks bytes only for existing snapshot members;
+it does not prove coverage. If the default freeze omits inputs, complete the snapshot
+in a new work root, including the manifest that declares them, while preserving the
+declared edit boundary. Do not rewrite an existing work root's frozen snapshot.
+
 ```
 python3 $WORKLOAD_ROOT/engine/campaign/scheduler.py run \
     --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
