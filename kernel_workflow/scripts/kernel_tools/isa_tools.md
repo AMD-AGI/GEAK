@@ -4,6 +4,23 @@ These shared tools support Triton, Gluon and HIP inspection. They supply static
 facts and planning bounds; measured utilization, native roofline models and
 calibration remain with GEAK's profiling workflow and TraceLens.
 
+## Minimal interface ownership
+
+Compiler layout construction, scale layouts and available layout views belong to
+installed Triton. These shared tools provide hardware facts and artifact/resource
+checks. Ordinary native Gluon layout queries do not need the optional AMD
+calculator. Inspect installed API signatures because vendor builds can backport
+compiler features.
+
+`amd_isa.py` is the normalized hardware interface. `hw_sources.sh layout` is an
+explicit raw calculator passthrough for modifiers, sparse K and inverse queries;
+compatibility entrypoints do not implement a separate mapping algorithm.
+For gfx950 F8F6F4, `facts OPCODE --as fp4|fp6|fp8` reuses hardware layout rules to
+report equal-format A/B register spans. An unspecified format stays unknown;
+XML operand-width declarations remain separate from format-specific use and
+compiled allocation. `tables scale.16x16x128` / `scale.32x32x64` expose source
+excerpts and placement caveats without reimplementing Triton's scale generator.
+
 ## Entry points and ownership
 
 - [amd_isa.py](amd_isa.py) is the common AMD ISA CLI. New callers must pass
