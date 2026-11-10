@@ -51,7 +51,7 @@ body = block.group(0)
 # the kernel KB is a different scheme that legitimately spells some of them too (see the
 # `--language ... --gfx ...` sites), so "appears once" is the wrong assertion for them. They are
 # covered by the membership check below instead.
-E2E_ONLY = ("--tp", "--ep", "--isl", "--osl", "--conc", "--workload-kind")
+E2E_ONLY = ("--tp", "--ep", "--topology", "--isl", "--osl", "--conc", "--workload-kind")
 
 for flag in E2E_ONLY:
     hits = [s[:m.start()].count("\n") + 1 for m in re.finditer(re.escape(flag) + r"[ `]", s)]
@@ -90,6 +90,11 @@ check("--ep is fed by the startup constant SERVING_EP",
       "--ep ${SERVING_EP}" in body)
 check("SERVING_EP is a startup constant resolved from the launch configuration",
       "const SERVING_EP = resolveServingEp();" in s)
+# A multinode deployment is addressed apart from the one-host one at the same tp; one host emits
+# no --topology, so its address is unchanged.
+check("--topology is the pinned spread, emitted only when there is one",
+      "const spread = (MN_SPEC && MN_SPEC.kb_topology) || '';" in body
+      and "...(spread ? [`--topology ${spread}`] : [])" in body)
 
 # ── The graded axis is a LABEL, not an address ────────────────────────────────────────────────
 # bench_summarize.py grades on five bases and keeps adding them. In the address that would be five

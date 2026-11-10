@@ -171,9 +171,16 @@ class GpuLease:
         reap_root: Optional[Path] = None,
         reap_interval_s: float = 10.0,
         stale_idle_checker: Optional[Callable[[int], bool]] = None,
+        host_scope: str = "",
     ):
         self.request = request
         self.lock_dir = Path(lock_dir)
+        # A lock dir shared by several machines (a multinode run's lease dir on the shared mount)
+        # needs every file named per host: request/lease liveness is probed through this host's
+        # /proc, so another host's live files would read as dead and be deleted. The GPU lock name
+        # must match mn.py's lease_file (<host>.gpu<N>.lock), which serving legs hold.
+        self.host_scope = host_scope
+        self._file_prefix = f"{host_scope}." if host_scope else ""
         self.wait_timeout_s = max(0.0, float(wait_timeout_s))
         self.poll_interval_s = max(0.001, float(poll_interval_s))
         self.idle_checker = idle_checker
@@ -188,14 +195,19 @@ class GpuLease:
         self._gpu_fds = []
         self._selected_ids = None
         self.lease_id = f"{os.getpid()}-{time.time_ns()}"
-        self.metadata_path = self.lock_dir / f"lease_{self.lease_id}.json"
-        self.request_path = self.lock_dir / f"request_{self.lease_id}.json"
+        self.metadata_path = self.lock_dir / f"{self._file_prefix}lease_{self.lease_id}.json"
+        self.request_path = self.lock_dir / f"{self._file_prefix}request_{self.lease_id}.json"
         self._metadata = {
             "lease_id": self.lease_id,
             "manager_pid": os.getpid(),
             "pid_namespace": _pid_namespace(),
             "started_at_ns": time.time_ns(),
         }
+
+    def gpu_lock_path(self, gpu_id: int) -> Path:
+        if self.host_scope:
+            return self.lock_dir / f"{self.host_scope}.gpu{gpu_id}.lock"
+        return self.lock_dir / f"gpu_{gpu_id}.lock"
 
     @property
     def selected_ids(self) -> Tuple[int, ...]:
@@ -335,7 +347,7 @@ class GpuLease:
 
     def _has_live_stale_overlap(self) -> bool:
         requested = set(self.selected_ids)
-        for path in self.lock_dir.glob("lease_*.json"):
+        for path in self.lock_dir.glob(f"{self._file_prefix}lease_*.json"):
             if path == self.metadata_path:
                 continue
             try:
@@ -366,7 +378,7 @@ class GpuLease:
     def _try_acquire_group(self, *, excluded: Optional[set] = None) -> bool:
         excluded = excluded or set()
         allocator_fd = os.open(
-            self.lock_dir / "allocator.lock",
+            self.lock_dir / f"{self._file_prefix}allocator.lock",
             os.O_CREAT | os.O_RDWR,
             0o666,
         )
@@ -385,7 +397,7 @@ class GpuLease:
                 self._selected_ids = candidate
                 for gpu_id in sorted(candidate):
                     fd = os.open(
-                        self.lock_dir / f"gpu_{gpu_id}.lock",
+                        self.gpu_lock_path(gpu_id),
                         os.O_CREAT | os.O_RDWR,
                         0o666,
                     )
@@ -407,7 +419,7 @@ class GpuLease:
     def _is_request_turn(self) -> bool:
         requested_pool = set(self.request.pool_ids)
         contenders = []
-        for path in self.lock_dir.glob("request_*.json"):
+        for path in self.lock_dir.glob(f"{self._file_prefix}request_*.json"):
             try:
                 data = json.loads(path.read_text())
                 manager_pid = int(data["manager_pid"])
@@ -580,6 +592,7 @@ def run_command(
     reap_root: Optional[Path] = None,
     stale_idle_checker: Optional[Callable[[int], bool]] = None,
     use_log: Optional[Path] = None,
+    host_scope: str = "",
 ) -> int:
     if not command:
         raise ValueError("command must not be empty")
@@ -608,6 +621,7 @@ def run_command(
             idle_checker=idle_checker,
             reap_root=reap_root,
             stale_idle_checker=stale_idle_checker,
+            host_scope=host_scope,
         ) as lease:
             visible = ",".join(str(gpu_id) for gpu_id in lease.selected_ids)
             if use_log is not None:
@@ -822,6 +836,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GEAK_GPU_LOCK_DIR", "/tmp/team_gpu_locks"),
     )
     run.add_argument(
+        "--host-scope",
+        default="",
+        help=(
+            "name every lock/lease file after this host (<host>.gpu<N>.lock, "
+            "<host>.lease_*.json, ...); required when the lock dir is shared by machines"
+        ),
+    )
+    run.add_argument(
         "--reap-root",
         default=os.environ.get("GEAK_GPU_REAP_ROOT"),
         help=(
@@ -934,6 +956,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             reap_root=Path(args.reap_root) if args.reap_root else None,
             stale_idle_checker=stale_idle_checker,
             use_log=Path(args.use_log) if args.use_log else None,
+            host_scope=args.host_scope,
         )
     except CommandStartError as error:
         print(f"ERROR: {error}", file=sys.stderr)

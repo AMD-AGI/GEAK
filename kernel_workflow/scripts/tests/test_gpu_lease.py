@@ -242,6 +242,54 @@ def test_dead_pending_request_is_removed_without_blocking(tmp_path):
     assert not stale.exists()
 
 
+def test_host_scope_names_every_file_after_the_host_and_leaves_other_hosts_alone(tmp_path):
+    gpu_lease = load_gpu_lease()
+    request = gpu_lease.GpuRequest.from_fixed_ids("0", count=1)
+    # Another machine's files on the shared lease dir: its pids do not exist on this host.
+    other = {
+        "request": tmp_path / "hostB.request_x.json",
+        "lease": tmp_path / "hostB.lease_x.json",
+    }
+    other["request"].write_text(json.dumps({
+        "request_id": "x", "manager_pid": 999999999,
+        "pid_namespace": os.readlink("/proc/self/ns/pid"),
+        "pool_ids": [0], "count": 1, "started_at_ns": 1,
+    }))
+    other["lease"].write_text(json.dumps({"gpu_ids": [0], "child_pgid": 999999999}))
+
+    with gpu_lease.GpuLease(
+        request, lock_dir=tmp_path, wait_timeout_s=1.0, poll_interval_s=0.01,
+        host_scope="hostA",
+    ) as lease:
+        assert lease.metadata_path.name.startswith("hostA.lease_")
+        assert lease.gpu_lock_path(0) == tmp_path / "hostA.gpu0.lock"
+        assert (tmp_path / "hostA.allocator.lock").exists()
+        assert not (tmp_path / "gpu_0.lock").exists()
+        assert not (tmp_path / "allocator.lock").exists()
+
+    assert other["request"].exists() and other["lease"].exists()
+    unscoped = gpu_lease.GpuLease(request, lock_dir=tmp_path, wait_timeout_s=0.1)
+    assert unscoped.gpu_lock_path(0) == tmp_path / "gpu_0.lock"
+
+
+def test_host_scoped_lease_waits_for_the_card_lease_a_serving_leg_holds(tmp_path):
+    gpu_lease = load_gpu_lease()
+    request = gpu_lease.GpuRequest.from_fixed_ids("0,1", count=2)
+    # mn.py's lease_file: <host>.gpu<N>.lock on the shared mount.
+    with open(tmp_path / "hostA.gpu1.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(gpu_lease.LeaseTimeout), gpu_lease.GpuLease(
+            request, lock_dir=tmp_path, wait_timeout_s=0.1, poll_interval_s=0.01,
+            host_scope="hostA",
+        ):
+            pass
+        with gpu_lease.GpuLease(
+            request, lock_dir=tmp_path, wait_timeout_s=0.1, poll_interval_s=0.01,
+            host_scope="hostB",
+        ) as lease:
+            assert lease.selected_ids == (0, 1)
+
+
 def test_failed_group_acquire_releases_partial_locks(tmp_path):
     ctx = multiprocessing.get_context("spawn")
     ready_queue = ctx.Queue()

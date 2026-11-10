@@ -1248,6 +1248,24 @@ def test_ep_reaches_the_record_and_the_attest_evidence(tmp_path):
     assert attested["applied"]
 
 
+def test_a_multinode_record_is_its_own_deployment(tmp_path):
+    """A PD or cross-node record is read by that spread only; a one-host page never answers it,
+    not even through the pre-EP compatibility ladder, which holds one host's records."""
+    pd = IDENTITY + ["--ep", "1", "--topology", "pd_p8x1_d8x2"]
+    one_host = _write(tmp_path, "one_host", "config", identity=IDENTITY + ["--ep", "1"])
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0", identity=pd)
+    assert all(c["match_tier"] == "tp_any" for c in out["candidates"]
+               if c["session_id"] == one_host["session_id"]), out["candidates"]
+    written = _write(tmp_path, "pd", "config", identity=pd)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0", identity=pd)
+    assert (out["candidates"][0]["session_id"], out["candidates"][0]["match_tier"]) == \
+        (written["session_id"], "exact")
+    assert out["candidates"][0]["workload"]["topology"] == "pd_p8x1_d8x2"
+    shown = _run("identity", identity=pd)
+    assert shown["ladder"][0]["canonical_id"].endswith(":tp_8:ep_1:pd_p8x1_d8x2:isl_1024:osl_1024:conc_64")
+    assert not any("preep" in r["tier"] for r in shown["legacy_read_only"])
+
+
 def test_synthetic_preep_compatibility_is_preserved(tmp_path):
     _write(tmp_path, "old", "config", identity=IDENTITY)
     out = _run("resolve", "--store", str(tmp_path / "store"),

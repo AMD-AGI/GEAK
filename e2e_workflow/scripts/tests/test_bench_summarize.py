@@ -324,6 +324,60 @@ class FromRunsTest(unittest.TestCase):
         self.assertEqual(s["successful_rounds"], 2)
         self.assertIn("usable_for_acceptance=false", line)
 
+    def test_hollow_round_is_not_a_sample(self):
+        """Empty responses are credited the full output length; that number must not be accepted.
+
+        The two rows are the real r1pd rounds: a healthy one, and the one where the PD KV handoff
+        died and all requests returned empty bodies.
+        """
+        healthy = {"completed": 32, "total_output_tokens": 32768,
+                   "total_output_tokens_retokenized": 32763, "output_throughput": 182.56,
+                   "mean_ttft_ms": 35662.0, "mean_itl_ms": 25.5, "median_ttft_ms": 21996.4}
+        empty = {"completed": 32, "total_output_tokens": 32768,
+                 "total_output_tokens_retokenized": 0, "output_throughput": 10345.46,
+                 "mean_ttft_ms": 0.0, "mean_itl_ms": 0.0, "median_ttft_ms": 0.0}
+        with open(self.runs, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(healthy) + "\n" + json.dumps(empty) + "\n")
+        line = _run(["from-runs", self.runs, self.out], {"WARM_SERVER_ROUNDS": "2"})
+        with open(self.out, encoding="utf-8") as fh:
+            s = json.load(fh)
+        self.assertEqual(s["all_throughput"], [182.56])
+        self.assertEqual(s["hollow_rounds"], 1)
+        self.assertIn("0/32768", s["hollow_reasons"][0])
+        self.assertEqual(s["status"], "incomplete")
+        self.assertFalse(s["usable_for_acceptance"])
+        self.assertIn("hollow_rounds=1", line)
+
+    def test_a_half_delivered_round_is_hollow(self):
+        """The r1pd validation base round 3: the handoff died halfway, so the number doubled."""
+        half = {"completed": 32, "total_output_tokens": 32768,
+                "total_output_tokens_retokenized": 16384, "output_throughput": 400.898,
+                "mean_ttft_ms": 9000.0, "mean_itl_ms": 20.0, "median_ttft_ms": 5000.0}
+        clean = dict(half, total_output_tokens_retokenized=32757, output_throughput=180.99)
+        with open(self.runs, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(clean) + "\n" + json.dumps(half) + "\n")
+        _run(["from-runs", self.runs, self.out], {"WARM_SERVER_ROUNDS": "2"})
+        with open(self.out, encoding="utf-8") as fh:
+            s = json.load(fh)
+        self.assertEqual(s["all_throughput"], [180.99])
+        self.assertIn("16384/32768", s["hollow_reasons"][0])
+        self.assertFalse(s["usable_for_acceptance"])
+
+    def test_zero_latency_without_a_retokenized_count_is_hollow(self):
+        with open(self.runs, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"completed": 8, "output_throughput": 9000.0,
+                                 "mean_ttft_ms": 0.0, "mean_itl_ms": 0.0}) + "\n")
+        _run(["from-runs", self.runs, self.out], {"WARM_SERVER_ROUNDS": "1"})
+        with open(self.out, encoding="utf-8") as fh:
+            s = json.load(fh)
+        self.assertEqual(s["runs"], 0)
+        self.assertFalse(s["usable_for_acceptance"])
+
+    def test_rows_without_the_new_fields_are_still_samples(self):
+        s, _ = self.summarize([100.0, 110.0], env={"WARM_SERVER_ROUNDS": "2"})
+        self.assertEqual(s["hollow_rounds"], 0)
+        self.assertTrue(s["usable_for_acceptance"])
+
     def test_unparseable_round_count_fails_closed(self):
         s, _ = self.summarize([100.0], env={"WARM_SERVER_ROUNDS": "notanint"})
         self.assertEqual(s["status"], "incomplete")
