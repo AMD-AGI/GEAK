@@ -21,6 +21,23 @@ XML operand-width declarations remain separate from format-specific use and
 compiled allocation. `tables scale.16x16x128` / `scale.32x32x64` expose source
 excerpts and placement caveats without reimplementing Triton's scale generator.
 
+Default ISA queries read only the committed data, independent of installed
+Triton/HIP/CK/FlyDSL packages. Seed/cache XML does not override `facts` or
+`encoding`; use the explicit `hw_sources.sh xml` / decoder path when inspecting
+external primary sources. `GEAK_HW_DATA_DIR` selects an exclusive ISA data
+directory: missing files report a gap, rather than mixing it with the checkout.
+This ISA-specific rule does not change the locator policy of SKU/planning tools.
+
+Matrix data schema v2 keeps queried records in `gfx950-mfma-layout.json`.
+Source figures and conversion transcriptions live in the
+[reference evidence fixture](../tests/fixtures/gfx950-isa-evidence.json), linked
+by `reference_evidence`; normal queries do not load it. Figure cells use an
+explicit column list and one JSON row per source cell; citations and known-bad
+figures are retained. Raw schema-v1 consumers of `figure_layouts`/`conversions`
+must follow this reference; the query CLI and legacy entrypoints remain.
+`--selftest` checks runtime integrity without test assets. Detailed source/grid
+regressions run in [the existing test suite](../tests/test_kernel_tools_isa.py).
+
 ## Entry points and ownership
 
 - [amd_isa.py](amd_isa.py) is the common AMD ISA CLI. New callers must pass
@@ -116,7 +133,8 @@ When updating committed ISA data:
    license, retrieval date and verification scope with the data change.
 2. Update the appropriate database and the target/provider declarations in
    `amd_targets.py`. Keep encoding, matrix rules and prose facts separate.
-3. Run the offline ISA selftests and shared CLI suites below. For calculator-backed
+3. Run the offline runtime selftests and source/grid regressions in the CLI suites
+   below. For calculator-backed
    targets, run actual facts/layout/locate queries using the pinned dependency.
 4. Preserve known errors and unverified low-precision/sparse rules. A cross-check
    against CDNA3 does not validate new CDNA4 behavior; use numerical GPU tests
@@ -125,6 +143,9 @@ When updating committed ISA data:
 A complete automatic XML/PDF-to-database rebuild pipeline is not included.
 Database updates therefore require review of the source diff and per-record
 provenance, not an assumption that a generator reproduced the files.
+The evidence fixture retains the original layout-file hash and all relocated
+records. Changes to a source row should remain visible as data changes; do not
+minify or compress the fixture to hide its review surface.
 
 Run the CPU regression suites from the repository root:
 
