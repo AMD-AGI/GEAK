@@ -313,7 +313,7 @@ const R9700 = {
     }
   }
 
-  console.log('\n# G. RDNA 3.5 (gfx115x) gets the same isolation, and vLLM, from the ISA alone');
+  console.log('\n# G. RDNA 3.5 (gfx115x), from the ISA alone: isolation, vLLM, fp8 wording, ARCH_CONSTRAINTS');
   {
     // gfx1151 has no product key (it ships as the 8060S, 8050S and 8040S); rocminfo gives it an
     // empty marketing name. A bare gfx1150 must isolate too, without an invented product.
@@ -354,6 +354,27 @@ const R9700 = {
         `${identity.expected_gfx} fused-fp8 prompts say "${words}"`, r && r.FP8_MMA);
     }
     ok((BODY.match(/fp8 \$\{MATRIX_CORE_NAME\}/g) || []).length === 1, 'fp8 meets the core name only in FP8_MMA');
+    // Every E2E role prompt on gfx115x carries ARCH_CONSTRAINTS (so do the three hand-built DEEP
+    // prompts); R9700 and Instinct prompts get none.
+    const rolePrompts = async (identity) => {
+      const { run, trace } = build({ model_path: '/models/m', ...identity }, { setupIdentity: {
+        gfx: identity.expected_gfx, target: identity.expected_target,
+        name: identity.expected_device_name, cu: identity.expected_physical_cu_count,
+      } });
+      try { await run(); } catch (e) { /* the stubbed flow ends wherever it ends */ }
+      return trace.agentPrompts.filter((p) => /E2E_LEARNED_KB: (on|off)/.test(p.prompt || ''));
+    };
+    const halo = await rolePrompts(HALO);
+    const roles = new Set(halo.map((p) => p.label)).size;
+    ok(roles >= 5 && halo.every((p) => p.prompt.includes('ARCH_CONSTRAINTS: gfx1151: WMMA and wave32')),
+      `every gfx1151 role prompt carries ARCH_CONSTRAINTS (${halo.length} prompts, ${roles} roles)`);
+    ok((BODY.match(/\$\{DEEP_ARCH_NOTE\}/g) || []).length === 3, 'the three DEEP prompts splice in the note');
+    for (const identity of [R9700, { expected_gfx: 'gfx950', expected_target: 'unknown',
+      expected_device_name: 'AMD Instinct MI355X', expected_physical_cu_count: 256 }]) {
+      const ps = await rolePrompts(identity);
+      ok(ps.length > 0 && ps.every((p) => !p.prompt.includes('ARCH_CONSTRAINTS')),
+        `no ${identity.expected_gfx} role prompt carries ARCH_CONSTRAINTS (${ps.length} prompts)`);
+    }
   }
 
   console.log(failures === 0
