@@ -191,6 +191,7 @@ jobs:
           bash kernel_workflow/scripts/test_profile_fallback.sh
           bash kernel_workflow/scripts/test_detect_gpu_arch.sh
           bash kernel_workflow/scripts/test_gpu_lock_arch.sh
+          bash kernel_workflow/scripts/test_stop_engineer.sh
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
@@ -323,6 +324,8 @@ jobs:
         run: node kernel_workflow/scripts/test_candidate_floor.js
       - name: gfx1151 knowledge doc contract
         run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js
+      - name: timed-out engineer is stopped and merges what verify measured
+        run: node kernel_workflow/scripts/test_engineer_timeout_fence.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
       # job can run the JS half, so without it the two implementations are pinned on the Python side
       # alone and are free to drift — which lets a kernel pass one side and be refused by the other.
