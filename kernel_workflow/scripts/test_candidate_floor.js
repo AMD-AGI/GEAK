@@ -113,15 +113,19 @@ const verifiedFilter = src.match(/const verified = clean\.filter\(([\s\S]*?)\);/
 const qualifiedPredicate = src.match(/const isQualified = [\s\S]*?;\n/);
 ok(!!verifiedFilter && !!qualifiedPredicate, 'the complete verified filter is available for a behavioral check');
 if (verifiedFilter && qualifiedPredicate) {
-  const filter = new Function('clean', 'evo', 'CANDIDATE_FLOOR', 'primSpeedup', 'says',
+  const filter = new Function('clean', 'evo', 'CANDIDATE_FLOOR', 'primSpeedup', 'says', 'EXTERNAL_OBJECTIVE = null',
     `${qualifiedPredicate[0]}${verifiedFilter[0]} return verified;`);
-  const candidate = speed => ({ver: {status: 'verified', correctness: 'pass', verified_geomean: speed}});
-  const candidates = [candidate(0.8), candidate(1), candidate(1.2)];
+  const candidate = speed => ({ver: {status: speed <= 1 ? 'regression' : 'verified', correctness: 'pass', verified_geomean: speed}});
+  const candidates = [candidate(0.8), candidate(1), candidate(1.2),
+    {ver: {status: 'regression', correctness: 'pass', verified_geomean: 1.4}}];
   const admitted = (evo, floor) => filter(candidates, evo, floor,
     v => v.verified_geomean, (a, b) => a === b).map(r => r.ver.verified_geomean);
   ok(JSON.stringify(admitted(null, 1)) === '[1.2]', 'ordinary verified filter keeps the exact floor boundary');
   ok(JSON.stringify(admitted(null, 0.5)) === '[0.8,1,1.2]', 'ordinary filter honors a lowered floor');
   ok(JSON.stringify(admitted({}, 1)) === '[1.2]', 'EVO qualifies candidates with the same floor as greedy');
+  ok(JSON.stringify(admitted({}, 0.5)) === '[0.8,1,1.2]', 'EVO tracks valid regressions at a lower floor, never a mislabeled gain');
+  ok(filter(candidates, {}, 0.5, v => v.verified_geomean, (a, b) => a === b, external).length === 1,
+    'external regression qualification is unchanged');
 }
 ok(/if \(trustworthyBelowBaseline\) \{/.test(src) && !/trustworthyBelowBaseline && !evo/.test(src),
    'the trusted below-floor shortcut applies in both modes');

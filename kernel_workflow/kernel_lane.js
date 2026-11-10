@@ -2588,7 +2588,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     break;
   }
   const isQualified = r => r.ver && (!r.verification || r.verification_status === true) &&
-    says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR;
+    (says(r.ver.status, 'verified') || (!EXTERNAL_OBJECTIVE && says(r.ver.status, 'regression') && primSpeedup(r.ver) <= 1)) &&
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR;
   const verified = clean.filter(isQualified);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
@@ -3210,11 +3211,13 @@ function keepForDelivery(entry) {
 }
 async function retainResult(d, eng, ver, patch, evo, base, retained, verification = null) {
   if (EXTERNAL_OBJECTIVE) return; // External measurements retain their own authority and contract.
-  const qualified = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass');
+  const primary = primSpeedup(ver);
+  const qualified = ver && says(ver.correctness, 'pass') && (says(ver.status, 'verified') ||
+    (says(ver.status, 'regression') && Number.isFinite(primary) && primary > 0 && primary <= 1));
   const local = !ver && eng && eng.measurement_valid === true
     && !says(eng.status, 'failed') && !says(eng.status, 'invalid');
   const entry = {key: d.out_dir.slice(EVAL_DIR.length + 1).replace(/\//g, '_'), id: d.id, d, eng,
-    ver: qualified ? ver : null, evidence: qualified ? primSpeedup(ver) : local ? primSpeedup(eng) : null,
+    ver: qualified ? ver : null, evidence: qualified ? primary : local ? primSpeedup(eng) : null,
     archived: !!evo, source: evo ? retained?.patch_ref || null : pinned(patch),
     original_patch: patch, base: evo ? evo.baseCommit : base, verification,
     reported_context: retained?.reported_context || reportedEvidence(d, eng, ver, patch),

@@ -330,10 +330,10 @@ const FALLBACK = 'Development fallback';
     const plans = {r1: {stop: false, reasoning: 'r1', directions: [d('r1_d0', 'memory')]},
       r2: {stop: false, reasoning: 'r2', directions: [d('r2_d0', 'compute'), d('custom_alt', 'algorithm')]},
       r3: {stop: false, reasoning: 'r3', directions: [d('r3_d0', 'memory', {parent_id: 'r2_d0', approach: 'requalify'})]}};
-    // r2_d0 reports a valid local 1.40 but its verifier fails; custom_alt verifies 1.31, under the commit margin.
+    // r2_d0 reports a valid local 1.40 but its verifier fails; custom_alt's 1.31 claim verifies at 0.8.
     const sc = {name: 'stall_sources', plans, onPlan: cutAt('r4'),
       eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.40}, custom_alt: {speed: 1.31}, r3_d0: {speed: 1.45}},
-      verify: {r1_d0: 1.30, custom_alt: 1.31, r3_d0: 1.45}};
+      verify: {r1_d0: 1.30, custom_alt: 0.8, r3_d0: 1.45}};
     const lr = {...sc, name: 'stall_sources_on', args: {evolution_import_stall_sources: true}};
     const g = await runMode('greedy', sc, TEMPLATE), off = await runMode('evo', sc, TEMPLATE);
     const on = await runMode('evo', lr, TEMPLATE);
@@ -363,7 +363,9 @@ const FALLBACK = 'Development fallback';
     assert.match(rows.r2_d0.original_patch, /delivery\/sources\/round_2_engineer_0\.diff$/);
     assert.equal(rows.r2_d1.title, 'T custom_alt', 'a planner-chosen id is renamed by its engineer slot');
     assert.equal(rows.r2_d1.verified, true);
-    assert.equal(rows.r2_d1.speedup, 1.31, 'settled verification keeps its fitness');
+    assert.equal(rows.r2_d1.speedup, 0.8, 'settled regression verification keeps its fitness');
+    assert.equal(rows.r2_d1.status, 'slower');
+    assert.equal(rows.r2_d1.verifier.status, 'regression');
     assert.equal(on.continuation_archive.best_id, 'r3_d0', 'imports never take the best or default-parent rank');
     assert.equal(rows.r3_d0.parent_id, 'r2_d0');
     assert.equal(rows.r3_d0.evolution_context.initialization.parent_patch_ref.sha256, rows.r2_d0.patch_ref.sha256,
