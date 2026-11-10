@@ -3,7 +3,7 @@
 This is a **library**, not a Skill: it has no operator-specific analysis doctrine. Invalid contracts
 raise explicit exceptions; partial trace/rank data is returned with missing/error metadata so the
 caller can degrade deliberately. Operator-specific analysis Skills (see
-`perf_knowledge/expert_skills/workflows/mega_fusion/knowledge/analysis_skills/`) are built ON TOP of this library; this library must
+`perf_knowledge/expert_skills/expert_workflows/mega_fusion/knowledge/analysis_skills/`) are built ON TOP of this library; this library must
 never import or reference a specific kernel, model, or backend. If you are tempted to add a
 MegaMoE/AITER/MORI/FlyDSL name anywhere in this directory, stop — that belongs in a Skill's
 `category_map` or prompt, not here.
@@ -92,7 +92,7 @@ Mapping to this package:
   `kernel_workflow/scripts/gpu_lease.py` / `gpu_lock.sh`'s job; this package only ever reads env/output
   those already produced.
 - No opinion on what counts as a "good" bottleneck or which optimization direction to pick — that is
-  an advisory Skill's job (`perf_knowledge/expert_skills/workflows/mega_fusion/knowledge/analysis_skills/<skill>/SKILL.md`).
+  an advisory Skill's job (`perf_knowledge/expert_skills/expert_workflows/mega_fusion/knowledge/analysis_skills/<skill>/SKILL.md`).
 - No parsing of a single-rank profile's kernel Top-N — that is
   `e2e_workflow/scripts/parse_profile.py`'s job for the single-server e2e case; this package is the
   distributed/multi-rank complement.

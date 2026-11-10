@@ -22,7 +22,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
 const WF_DIR = path.join(ROOT, 'kernel_workflow');
-const MEGA_DIR = path.join(ROOT, 'perf_knowledge', 'expert_skills', 'workflows', 'mega_fusion');
+const MEGA_DIR = path.join(ROOT, 'perf_knowledge', 'expert_skills', 'expert_workflows', 'mega_fusion');
 const MEGA_WORKFLOW = path.join(MEGA_DIR, 'workflow.js');
 const DISPATCHER = path.join(WF_DIR, 'kernel_workflow.js');
 const BODY = fs.readFileSync(DISPATCHER, 'utf8').replace(/^export const meta/m, 'const meta');
@@ -160,7 +160,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     await run();
     const c = trace.workflowCalls[0];
     ok(trace.workflowCalls.length === 1, 'exactly one workflow() call', `n=${trace.workflowCalls.length}`);
-    ok(c.scriptPath === MEGA_WORKFLOW, 'scriptPath = workflows/mega_fusion/workflow.js', c.scriptPath);
+    ok(c.scriptPath === MEGA_WORKFLOW, 'scriptPath = expert_workflows/mega_fusion/workflow.js', c.scriptPath);
     for (const k of ['mode', 'gpu_ids', 'gpus_per_job', 'budget', 'task', 'kernel_path']) {
       ok(JSON.stringify(c.args[k]) === JSON.stringify(a[k]), `forwards ${k}`, JSON.stringify(c.args[k]));
     }
@@ -176,7 +176,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     const { run, trace } = build({ ...BASE, mode: 'mega', expert_workflow: 'mega_fusion' }, {});
     await run();
     ok(trace.workflowCalls.length === 1 && trace.workflowCalls[0].scriptPath === MEGA_WORKFLOW,
-      'expert_workflow=mega_fusion -> workflows/mega_fusion/workflow.js', trace.workflowCalls[0] && trace.workflowCalls[0].scriptPath);
+      'expert_workflow=mega_fusion -> expert_workflows/mega_fusion/workflow.js', trace.workflowCalls[0] && trace.workflowCalls[0].scriptPath);
     for (const bad of ['../x', 'Mega Fusion']) {
       const b = build({ ...BASE, mode: 'mega', expert_workflow: bad }, {});
       let err = null;

@@ -30,7 +30,7 @@
       "information": "tool version, command, scope, repetitions, perturbation and raw paths"
     }
   ],
-  "parser": "perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/trace_categories.py",
+  "parser": "perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/trace_categories.py",
   "helps_diagnose": [
     "logical-category rank-max duration",
     "launch/materialization gaps",

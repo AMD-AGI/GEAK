@@ -27,7 +27,7 @@ vice versa.
    candidate, and never overwrites `bottleneck` or `top_kernels`. Step-3 TechLead owns candidate
    generation/ranking; isolated A/B against the frozen oracle remains the judge.
 2. **Deterministic arithmetic first.** Each skill provides a checked-in runner for parsing and unit
-   math, built on `perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/`. `SKILL.md` defines doctrine,
+   math, built on `perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/`. `SKILL.md` defines doctrine,
    required evidence, and degradation. A runner failure degrades to the generic profile result; an
    agent must not improvise a confident numerical verdict by hand.
 3. **Degrade, never fail.** Every skill defines an explicit degradation ladder ending in "emit nothing

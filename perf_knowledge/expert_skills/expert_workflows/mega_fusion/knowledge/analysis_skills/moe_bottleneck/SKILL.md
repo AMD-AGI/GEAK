@@ -141,7 +141,7 @@ interconnect ceilings; without them a fusion ceiling for an in-kernel readiness 
 ## AMD Thread Trace instruction evidence
 
 When stage or fused-kernel time is high but the instruction-pipeline cause is unknown, use the
-`rocprofv3_att` collector in `perf_knowledge/expert_skills/workflows/mega_fusion/knowledge/collectors/`.
+`rocprofv3_att` collector in `perf_knowledge/expert_skills/expert_workflows/mega_fusion/knowledge/collectors/`.
 
 ATT can provide per-instruction:
 

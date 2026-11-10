@@ -84,7 +84,7 @@ class TestRouteReportMeasured(unittest.TestCase):
 
     def test_without_new_flags_output_matches_head_builder(self):
         head = subprocess.run(
-            ["git", "show", "HEAD:perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/build_mega_route_report.py"],
+            ["git", "show", "HEAD:perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/build_mega_route_report.py"],
             cwd=ROOT, capture_output=True, text=True)
         if head.returncode != 0:
             self.skipTest("HEAD builder unavailable")

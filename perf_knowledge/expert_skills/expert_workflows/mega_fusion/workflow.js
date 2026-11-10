@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-mega',
   description: 'mode=mega (expert workflow mega_fusion): optimizes a multi-rank operator (e.g. an EP MoE layer) as a portfolio of independent whole-kernel candidate lanes, each authored, verified on-card against the frozen baseline, and only a fully verified winner is delivered. Validated on EP MoE layers only.',
-  whenToUse: 'Prefer the kernel-workflow dispatcher with args.mode=mega (it runs this package as a sub-workflow); launch this script directly only to see per-phase progress. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir) and optionally args.expert_workflow_dir (this package dir; default <perf_knowledge>/expert_skills/workflows/mega_fusion), args.gpu_ids, args.gpus_per_job and the mega_* / guard / control args.',
+  whenToUse: 'Prefer the kernel-workflow dispatcher with args.mode=mega (it runs this package as a sub-workflow); launch this script directly only to see per-phase progress. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir) and optionally args.expert_workflow_dir (this package dir; default <perf_knowledge>/expert_skills/expert_workflows/mega_fusion), args.gpu_ids, args.gpus_per_job and the mega_* / guard / control args.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },

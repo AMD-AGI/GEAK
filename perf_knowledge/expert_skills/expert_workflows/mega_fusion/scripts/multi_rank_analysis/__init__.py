@@ -4,7 +4,7 @@ This package is deliberately operator-agnostic: it must never import or referenc
 kernel, model, or backend (no MegaMoE/AITER/MORI/FlyDSL names). It exists so that any distributed
 UT/benchmark's per-rank timing and profiling output can be merged into a stable, versioned report
 shape, and so that operator-specific analysis Skills (see
-``perf_knowledge/expert_skills/workflows/mega_fusion/knowledge/analysis_skills/``) have a shared, tested foundation to build on instead
+``perf_knowledge/expert_skills/expert_workflows/mega_fusion/knowledge/analysis_skills/``) have a shared, tested foundation to build on instead
 of re-deriving all_gather/mean/max plumbing per operator.
 
 See README.md in this directory for the full design rationale and the contract each module honors.

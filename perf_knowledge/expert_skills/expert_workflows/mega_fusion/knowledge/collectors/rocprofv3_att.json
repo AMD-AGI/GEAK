@@ -64,7 +64,7 @@
     "Idle": "gap caused by arbitration, register dependency, or instruction-cache miss",
     "accounted_cycles": "Latency + Idle; never add Stall twice"
   },
-  "parser": "perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/instruction_analysis.py",
+  "parser": "perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/instruction_analysis.py",
   "provenance": {
     "reference": "artifacts/archives/gemm_bottleneck_analysis.zip",
     "notes": "Flags and output names came from a working gfx950 GEMM ATT collection; probe current rocprofv3 because CLI options are version-dependent."

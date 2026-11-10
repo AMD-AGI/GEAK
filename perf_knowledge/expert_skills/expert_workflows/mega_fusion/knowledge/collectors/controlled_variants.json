@@ -51,7 +51,7 @@
     "a preferred implementation"
   ],
   "provenance": {
-    "reference": "perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/experiments.py",
+    "reference": "perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/experiments.py",
     "notes": "Variant hooks must be implemented and audited in the operator harness; the generic framework only validates the experiment contract."
   }
 }

@@ -155,7 +155,7 @@ after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and 
 `mode="mega"` fuses an operator that runs across several GPUs at once (e.g. an EP MoE layer whose
 dispatch, GEMM1, GEMM2 and combine are separate launches today) into one persistent kernel, searching
 independent whole-kernel candidates and verifying each on-card against the frozen baseline. It is an
-**expert workflow**: everything it needs lives in `perf_knowledge/expert_skills/workflows/mega_fusion/`,
+**expert workflow**: everything it needs lives in `perf_knowledge/expert_skills/expert_workflows/mega_fusion/`,
 and the dispatcher runs that package as a sub-workflow; the lane worker is not involved. Validated on EP
 MoE layers (MegaMoE) only. Usage, args and layout: that package's `README.md`.
 
@@ -308,7 +308,7 @@ Director/TechLead/Engineer orchestration is identical.
 ## Files
 ```
 kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=bakeoff -> multi-language bake-off;
-                       mode=mega -> the expert workflow perf_knowledge/expert_skills/workflows/mega_fusion)
+                       mode=mega -> the expert workflow perf_knowledge/expert_skills/expert_workflows/mega_fusion)
 kernel_lane.js         single-language WORKER (the deterministic optimize/author pipeline; called per lane)
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),

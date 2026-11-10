@@ -103,8 +103,8 @@ Idle, and Source fields; viewer output adds code, wave-state, selected wave, and
 The checked-in collector and parser are:
 
 ```text
-perf_knowledge/expert_skills/workflows/mega_fusion/knowledge/collectors/rocprofv3_att.json
-perf_knowledge/expert_skills/workflows/mega_fusion/scripts/multi_rank_analysis/instruction_analysis.py
+perf_knowledge/expert_skills/expert_workflows/mega_fusion/knowledge/collectors/rocprofv3_att.json
+perf_knowledge/expert_skills/expert_workflows/mega_fusion/scripts/multi_rank_analysis/instruction_analysis.py
 ```
 
 ATT diagnoses instruction-pipeline causes inside a kernel. It must be combined with E2E timeline,
