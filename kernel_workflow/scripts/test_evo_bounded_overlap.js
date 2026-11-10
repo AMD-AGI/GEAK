@@ -30,7 +30,65 @@ const rows = rec => Object.fromEntries(rec.archive.entries.map(row => [row.id, r
 const check = rec => { assert.equal(rec.error, null, rec.error); assert.equal(rec.runtime_state?.schemaFails || 0, 0); };
 const reports = [];
 
+async function optionalClosureFallbacks() {
+  for (const failedRole of ['integrate', 'reprofile', 'tech_lead:memory']) {
+    const outcomes = [];
+    for (const overlap of [false, true]) {
+      const successorEdit = latch();
+      const rec = await within(runMode('evo', {
+        name: `native_optional_${failedRole.replace(/:/g, '_')}_${overlap}`, nativeRuntime: true,
+        args: args({budget: 4, evolution_bounded_overlap: overlap}),
+        plans: {r1: plan(d('a', 'memory'), d('b', 'compute')),
+          r2: plan(d('c', 'algorithm')), r3: plan(d('d', 'memory'))},
+        eng: {r1_d0: {speed: 2}, r1_d1: {speed: 1.8}, r2_d0: {speed: 1.5}, r3_d0: {speed: 1.6}},
+        verify: {r1_d0: 2, r1_d1: 1.8, r2_d0: 1.5, r3_d0: 1.6},
+        async onCall(label) {
+          if (overlap && label === 'verify r1_d0') await successorEdit.promise;
+          if (label === `${failedRole} r1`) throw new Error(`fixture ${failedRole} backend failed`);
+        },
+        async beforeEngineerReturn(id, {rec}) {
+          if (overlap && id === 'r2_d0') {
+            assert.equal(index(rec, `${failedRole} r1`), -1, 'successor edits before optional closure call');
+            successorEdit.resolve();
+          }
+        }
+      }, template));
+      check(rec);
+      assert.ok(index(rec, `${failedRole} r1`) >= 0, 'failed optional role was invoked');
+      assert.ok(index(rec, 'verify r2_d0') > index(rec, `${failedRole} r1`),
+        'missing optional output must not deny successor qualification');
+      assert.ok(index(rec, 'tech_lead:plan r3') >= 0, 'ordinary search continues after optional failure');
+      assert.equal(rows(rec).r2_d0.verifier.verified_geomean, 1.5);
+      assert.equal(rows(rec).r3_d0.verifier.verified_geomean, 1.6);
+      assert.equal(rec.result.final_speedup, 2, 'verified individual remains the incumbent');
+      assert.equal(rec.result.budget_used, 4, 'existing direction credits are unchanged');
+      assert.match(fs.readFileSync(path.join(rec.fixture_root, 'eval/workspace/k.py'), 'utf8'), /r1_d0/);
+      if (overlap) assert.ok(events(rec).filter(e => e.kind === 'closed').every(e => e.status === 'closed'));
+      outcomes.push(rec);
+    }
+    const [serial, overlap] = outcomes;
+    for (const key of ['final_speedup', 'budget_used', 'stopped_by'])
+      assert.equal(overlap.result[key], serial.result[key], `${failedRole}: serial fallback outcome ${key}`);
+    const nextMemory = rec => field(rec.calls.find(c => c.label === 'tech_lead:memory r2').role_prompt, 'PRIOR_HISTORY');
+    if (failedRole === 'tech_lead:memory') {
+      assert.deepEqual(nextMemory(overlap).insights, nextMemory(serial).insights);
+      assert.deepEqual(nextMemory(overlap).ledger, nextMemory(serial).ledger);
+    }
+    if (failedRole === 'reprofile') {
+      for (const rec of outcomes)
+        assert.equal(field(rec.calls.find(c => c.label === 'tech_lead:plan r3').role_prompt, 'PROFILE_SUMMARY'), null);
+    }
+    reports.push(`native optional ${failedRole} failure: serial fallback, qualified incumbent, successor verification and further issuance preserved`);
+  }
+}
+
 (async () => {
+  if (process.argv.includes('--optional-closure-only')) {
+    await optionalClosureFallbacks();
+    console.log(reports.map(row => 'PASS: ' + row).join('\n'));
+    console.log('Witness artifacts: ' + OUT);
+    return;
+  }
   // Check the refactor against the actual base, not just two modes of new code.
   const baseline = execFileSync('git', ['show', '1a84579b:kernel_workflow/kernel_lane.js'],
     {cwd: path.resolve(__dirname, '../..'), encoding: 'utf8', maxBuffer: 1024 * 1024});
@@ -175,21 +233,7 @@ const reports = [];
     reports.push('native successor stop: a pending planner stop is terminal, never silently retried as a new round');
   }
 
-  {
-    const successorEdit = latch();
-    const rec = await within(runMode('evo', {name: 'native_memory_failure', nativeRuntime: true,
-      args: args({budget: 2}), plans: {r1: plan(d('a', 'memory')), r2: plan(d('b', 'compute'))},
-      eng: {r1_d0: {speed: 2}, r2_d0: {speed: 1.5}}, verify: {r1_d0: 2, r2_d0: 1.5},
-      async onCall(label) {
-        if (label === 'verify r1_d0') await successorEdit.promise;
-        if (label === 'tech_lead:memory r1') throw new Error('fixture memory backend failed');
-      },
-      async beforeEngineerReturn(id) {if (id === 'r2_d0') successorEdit.resolve();}
-    }, template));
-    check(rec); assert.equal(index(rec, 'verify r2_d0'), -1);
-    assert.ok(events(rec).some(e => e.round === 1 && e.status === 'memory_incomplete'));
-    reports.push('native memory failure: missing closure response is explicit failure, never successful predecessor closure');
-  }
+  await optionalClosureFallbacks();
 
   {
     const rec = await within(runMode('evo', {name: 'native_missing_profile', nativeRuntime: true,

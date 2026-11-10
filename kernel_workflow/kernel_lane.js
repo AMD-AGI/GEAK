@@ -2788,7 +2788,6 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   async function closeBatch(quiesce = async () => {}) {
   const results = await resultPromise;
   const clean = results.filter(Boolean);
-  let closureIncomplete = null;
   if (predecessor && predecessor.closed.result?.status !== 'closed') {
     history.rounds.push({round, metric: handoffMetric, status: 'predecessor_failed', improved: false,
       cumulative, directions: directionHistory});
@@ -2854,7 +2853,6 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
-    if (overlap && !integrate) closureIncomplete = 'integration_incomplete';
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
@@ -3062,7 +3060,6 @@ already verified source, and the host checks the resulting tree. Return JSON {co
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
         { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
-      if (overlap && !profileSummary) closureIncomplete = 'profile_incomplete';
     }
   }
 
@@ -3092,7 +3089,6 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
-  if (overlap && !mem) closureIncomplete = 'memory_incomplete';
   if (mem) {
     if (mem.insights) history.insights = mem.insights;
     if (mem.ledger) history.ledger = history.ledger.concat(mem.ledger);
@@ -3147,7 +3143,6 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   }
   history.rounds.push({
     round, metric: handoffMetric,
-    ...(closureIncomplete ? {closure_incomplete: closureIncomplete} : {}),
     ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directionHistory,
     results: clean.map(r => ({ id: r.d.id, ...roundScores(r.eng, r.ver),
@@ -3200,7 +3195,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     deadlineHit = true;
     return {status: 'deadline'};
   }
-  return {status: failedCommitRecovery ? 'commit_failed' : closureIncomplete || 'closed'};
+  return {status: failedCommitRecovery ? 'commit_failed' : 'closed'};
   }
 }
 // At most one successor is admitted. A charged successor is always drained and
