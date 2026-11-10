@@ -66,6 +66,9 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
 5. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
    `EVAL_DIR/profiling_summary.md` (or `round_N_shift_analysis.md`). For reprofile, include a
    BEFORE→AFTER shift section explaining why the bottleneck moved and what to target next.
+   Label derived quantities with their source values, units, denominators and assumptions.
+   Before handing off the profile, verify that numerical comparisons and uncertainty claims
+   agree with the cited values on the same basis.
 
 If no profiler is available, fall back to benchmark-only + the per-case table + dispatch count from
 `rocprof --stats` if present; still classify as best you can and SAY the profiler was unavailable.
