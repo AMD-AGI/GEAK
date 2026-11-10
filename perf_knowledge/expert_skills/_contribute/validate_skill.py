@@ -777,7 +777,7 @@ def static_check(skill_path, fm, body):
                         f"v2 constraint subject {evidence_key} must match current component"
                     )
             checker_path = os.path.join(
-                GEAK, "kernel_workflow", "tools", "expert_skill_contract.py"
+                os.path.dirname(os.path.abspath(__file__)), "expert_skill_contract.py"
             )
             if str(constraint_subject.get("checker_sha256") or "") != (
                 _canonical_component_sha256(checker_path)
@@ -850,7 +850,7 @@ def emit_plan(skill_path, skill_id, fm, args):
             extras.append(
                 "graph_contract_tool="
                 + os.path.join(
-                    GEAK, "kernel_workflow", "tools", "expert_skill_runtime.py"
+                    os.path.dirname(os.path.abspath(__file__)), "expert_skill_runtime.py"
                 )
             )
         if identity["planner_extension_sha256"]:

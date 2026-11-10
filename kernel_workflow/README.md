@@ -152,48 +152,12 @@ after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and 
 `bakeoff` rejects multi-GPU jobs.
 
 ### Mega mode (multi-rank operators)
-`mode="mega"` is for operators that run across several GPUs at once and are worth rewriting as one
-fused, persistent kernel — e.g. an EP MoE layer whose dispatch, GEMM1, GEMM2 and combine are
-separate launches today.
-
-**Scope:** validated on EP MoE layers (MegaMoE) only. Other multi-rank operators (attention, a GEMM
-fused with its all-reduce, ...) are not validated yet; use it for EP MoE until they are.
-
-The dispatcher hands the run to `kernel_mega.js`, which keeps a portfolio of independent whole-kernel
-**candidates** instead of one canonical tree:
-
-- **Setup / Analyze / Benchmark / Profile** freeze the baseline, write an operator-neutral plan
-  (MegaPlanIR: work domains, buffers, counters, queues, events, schedule) and build the paired A/B
-  harness (rank-max timing, CUDA-graph replay, positive/null controls).
-- **Optimize** runs candidate turns: a search lead picks the next candidate, an engineer authors it
-  in its own tree, and every candidate is verified on-card — direct accuracy on the run's required
-  cases, graph-replay liveness, launch count, and paired A/B against the frozen baseline. Failures are
-  recorded as structured blockers that the next turn consumes.
-- **Validate** re-measures the finalists and delivers the fastest fully verified candidate (or none).
-
-Every job needs the operator's full rank count, so pass `gpus_per_job` (or `job_gpu_ids`) with
-`gpu_ids`; see "Multi-GPU jobs". `use_expert_skills=true` adds a matched Expert Skill (e.g.
-`perf_knowledge/expert_skills/skills/megamoe_ep_mega_fusion`) as knowledge for the same roles; with
-`false` the generic lifecycle runs unchanged. Optional `analysis_skill=moe_bottleneck` adds a
-route-attribution pass after Profile.
-
-```
-Workflow({ scriptPath: "<WF_DIR>/kernel_workflow.js", args: {
-  mode: "mega", kernel_path: "<op task dir>", workflow_dir: "<WF_DIR>",
-  gpu_ids: "0,1,2,3,4,5,6,7", gpus_per_job: 8,
-  budget: 12, task: "...",
-  target_guards: ["8192_uniform"],          // cases that create speedup credit
-  regression_guards: ["512_uniform"],       // measured, veto-only
-  required_accuracy_cases: ["128", "8192"], // direct accuracy + liveness, independent of skills
-  launch_target: 2,                         // terminal launch-count ceiling
-  state_dir: "<dir>",                       // candidate registry; reuse it to continue a search
-}})
-```
-
-All other args (time budgets, final top-k, Expert Skill pinning, gates) are read at the top of
-`kernel_mega.js` with their defaults. Launching `kernel_mega.js` directly (with `mode: "mega"`) runs
-the same worker and shows its phases individually. `scripts/replay_runs.js` re-decides finished runs
-with the current gate arithmetic, on no GPU, before a gate change is committed.
+`mode="mega"` fuses an operator that runs across several GPUs at once (e.g. an EP MoE layer whose
+dispatch, GEMM1, GEMM2 and combine are separate launches today) into one persistent kernel, searching
+independent whole-kernel candidates and verifying each on-card against the frozen baseline. It is an
+**expert workflow**: everything it needs lives in `perf_knowledge/expert_skills/workflows/mega_fusion/`,
+and the dispatcher runs that package as a sub-workflow; the lane worker is not involved. Validated on EP
+MoE layers (MegaMoE) only. Usage, args and layout: that package's `README.md`.
 
 ### Deep Research Agent / Research phase (NEW, opt-in)
 `dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
@@ -343,14 +307,9 @@ Director/TechLead/Engineer orchestration is identical.
 
 ## Files
 ```
-kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=mega -> kernel_mega;
-                       mode=bakeoff -> multi-language bake-off)
+kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=bakeoff -> multi-language bake-off;
+                       mode=mega -> the expert workflow perf_knowledge/expert_skills/workflows/mega_fusion)
 kernel_lane.js         single-language WORKER (the deterministic optimize/author pipeline; called per lane)
-kernel_mega.js         mode=mega WORKER (multi-rank whole-kernel candidate search)
-roles/mega/            the role set kernel_mega.js reads (adds mega_search_lead, analysis_engineer)
-tools/                 mega_graph_ab, mega_regime, generic_graph_contract, expert_skill_contract/runtime,
-                       ab_retry, fast_test_key, rebase_commandment (mode=mega helpers)
-tests/                 mode=mega regression tests (`node tests/<t>.js`, `python -m pytest tests/`)
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
@@ -359,10 +318,7 @@ roles/               director, tech_lead, engineer, deep_engineer (deep_explore)
                      researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (CDNA gfx942/gfx950), amd_rdna4 (RDNA4 gfx1201),
-                     self_monitoring, geomean_levers; for mode=mega also distributed_fusion,
-                     fusion_preconditions, tile_task_graph, overlap_instrument, pipe_occupancy,
-                     resource_partition, gfx950_lowering, crash_bisection, jit_arm_isolation,
-                     mega_* (measurement, regimes, generic lessons), collectors/, analysis_skills/
+                     self_monitoring, geomean_levers
 knowledge/learned/   distilled experience cards (ADVISORY priors; each card self-describing via its
                      discovery header, INDEX.md GENERATED from them; written by the
                      TechLead update_experience step at the end of EVERY run). This sink is
@@ -375,9 +331,6 @@ scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), 
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
                      routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
-                     multi_rank_analysis/ (per-rank trace/counter aggregation for mode=mega),
-                     replay_runs.js (re-decide finished mega runs with today's gates, no GPU),
-                     reference_leak_sweep.sh, skill_address_scan.sh (capability-eval containment)
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).

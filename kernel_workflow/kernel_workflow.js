@@ -1,6 +1,6 @@
 export const meta = {
   name: 'kernel-workflow',
-  description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); mega -> delegate to the kernel_mega worker (multi-rank whole-kernel candidate search); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
+  description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); mega -> the expert workflow mega_fusion (perf_knowledge/expert_skills/workflows/mega_fusion: multi-rank whole-kernel candidate search, validated on EP MoE); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
   whenToUse: 'Optimize a kernel. Four modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). mode=mega optimizes a multi-rank operator (e.g. an EP MoE layer whose every run needs args.gpus_per_job GPUs) as independent whole-kernel candidates, each verified on-card against the frozen baseline. Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
@@ -36,12 +36,21 @@ if (OPTIMIZER === 'evo' && A.kernel_lane_script) {
   throw new Error('optimizer=evo cannot override kernel_lane_script');
 }
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
-// mode=mega worker: multi-rank whole-kernel candidate search. Same dir as this dispatcher.
-const MEGA_WORKER = String(A.kernel_mega_script || `${WORKFLOW_DIR}/kernel_mega.js`);
+// Expert workflows: self-contained packages under perf_knowledge/expert_skills/workflows/<id>/, run as one
+// sub-workflow (<id>/workflow.js). mode=mega is the expert workflow mega_fusion; args.expert_workflow
+// names one explicitly.
+const EXPERT_WORKFLOWS_DIR = `${String(A.expert_skills_dir || (A.perf_knowledge_dir
+  ? `${String(A.perf_knowledge_dir).replace(/\/+$/, '')}/expert_skills`
+  : `${WORKFLOW_DIR.replace(/\/[^/]*$/, '')}/perf_knowledge/expert_skills`)).replace(/\/+$/, '')}/workflows`;
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
 if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
   throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
 }
+const EXPERT_WORKFLOW = String(A.expert_workflow || (MODE === 'mega' ? 'mega_fusion' : '')).trim();
+if (EXPERT_WORKFLOW && !/^[a-z0-9][a-z0-9_-]*$/.test(EXPERT_WORKFLOW)) {
+  throw new Error(`expert_workflow must be a safe slug, got ${JSON.stringify(EXPERT_WORKFLOW)}`);
+}
+const EXPERT_WORKFLOW_DIR = EXPERT_WORKFLOW ? `${EXPERT_WORKFLOWS_DIR}/${EXPERT_WORKFLOW}` : '';
 
 // ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
 // Started HERE so a direct kernel run is tracked from its first agent, not only
@@ -93,13 +102,14 @@ if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
 // the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
 // worker ignores dispatcher-only args like `backends`). One nesting level.
-// mode=mega forwards the same way to kernel_mega.js.
+// An expert workflow (mode=mega) forwards the same way to its package's workflow.js.
 // ===========================================================================
-if (MODE === 'optimize' || MODE === 'author' || MODE === 'mega') {
+if (MODE === 'optimize' || MODE === 'author' || EXPERT_WORKFLOW) {
   phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
-  const script = MODE === 'mega' ? MEGA_WORKER : WORKER;
-  log(`mode=${MODE}: pass-through -> ${script}`);
-  const r = await workflow({ scriptPath: script }, { ...A, workflow_dir: WORKFLOW_DIR });
+  const script = EXPERT_WORKFLOW ? `${EXPERT_WORKFLOW_DIR}/workflow.js` : WORKER;
+  log(`mode=${MODE}: ${EXPERT_WORKFLOW ? `expert workflow ${EXPERT_WORKFLOW}` : 'single-language'} pass-through -> ${script}`);
+  const r = await workflow({ scriptPath: script }, { ...A, workflow_dir: WORKFLOW_DIR,
+    ...(EXPERT_WORKFLOW ? { expert_workflow_dir: EXPERT_WORKFLOW_DIR } : {}) });
   // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
   // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
   // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the

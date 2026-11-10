@@ -153,7 +153,11 @@ jobs:
             evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
-            kernel_workflow/tests \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_contract.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_planner_extension.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_runtime.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_validation.py \
+            perf_knowledge/expert_skills/workflows/mega_fusion/tests \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -364,10 +368,10 @@ jobs:
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       - name: kernel_workflow multi-GPU job resolution
         run: node kernel_workflow/scripts/test_gpu_request.js
-      - name: kernel_workflow mode=mega regression tests
+      - name: mode=mega (mega_fusion expert workflow) regression tests
         run: |
           set -e
-          for t in kernel_workflow/tests/test_*.js; do node "$t"; done
+          for t in perf_knowledge/expert_skills/workflows/mega_fusion/tests/test_*.js; do node "$t"; done
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

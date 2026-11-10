@@ -36,6 +36,7 @@ expert_skills/
 ├── tuning/                    # the VENDORED tuning skillset, hash-pinned WHOLE and unmodified
 │   ├── tuning-<backend>/SKILL.md   #   one skill per backend, upstream layout, byte-for-byte
 │   └── validate/claims.py     #   its own executable validator (drives validation_status)
+├── workflows/<id>/            # self-contained expert workflows (workflow.js + roles/knowledge/tools/tests)
 ├── _template/                 # skill, optional contract, and validation templates
 └── _contribute/               # the "add a skill to GEAK" skill: scaffold / validate / make_pr / SKILL.md
 ```
@@ -64,11 +65,16 @@ to the exact candidate HEAD/tree digest, and resumed evidence is invalidated
 on any mismatch even when the human revision string was not bumped.
 
 `contract.yaml` is data, not operator-specific verifier code. The shared
-`kernel_workflow/tools/expert_skill_contract.py` supports AST-normalized regex
+`perf_knowledge/expert_skills/_contribute/expert_skill_contract.py` supports AST-normalized regex
 rules, call-keyword identity, forbidden host mutations, runtime-value
 consumption, PlanIR assertions, provenance seals and optional reference-copy
 calibration. If a new invariant cannot be expressed safely, extend this shared
 vocabulary and test it before adding a custom checker.
+
+`workflows/<id>/` holds an expert workflow: a whole sub-workflow that a skill alone cannot express,
+packaged with everything it reads. The kernel-workflow dispatcher runs `<id>/workflow.js` when its
+mode maps to it or `expert_workflow: "<id>"` is passed; today `mode=mega` runs `workflows/mega_fusion/`
+(see its README). Nothing outside the package depends on it.
 
 `tuning/` is the one skill family that does not follow that layout, because it is not ours to lay
 out: it is vendored from upstream and pinned byte-for-byte by
