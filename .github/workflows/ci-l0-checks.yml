@@ -324,6 +324,7 @@ jobs:
           set -e   # without this only the LAST line's exit code is the step's verdict
           node e2e_workflow/scripts/test_kernel_extract_skill.js
           node e2e_workflow/scripts/test_agentx_baseline_selection.js
+          node e2e_workflow/scripts/test_milestone_primary_contract.js
           node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
           node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
