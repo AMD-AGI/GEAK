@@ -156,3 +156,19 @@ shape/regime/counts, or compute roofline utilization. Ordinary-lane reports keep
 their existing authority. Gate formulas and task thresholds are unchanged, but
 native qualification/export now requires the reader to supply the facts they
 consume.
+
+## Read published peer context
+
+The existing population query can return a checkpoint's complete published
+context alongside its source and measurement records:
+
+```sh
+python3 kernel_workflow/scripts/query_population.py \
+  --root /absolute/path/population --checkpoints-only --reported-context
+```
+
+Each `reported_context_query` binds the context to the checked checkpoint's
+lineage, round, source and patch. Missing or changed context is `unavailable`;
+it does not change source qualification or candidate selection. The content
+remains the author's interpretation. The query reads the published context
+file and does not fetch reports from the originating engineer's workspace.

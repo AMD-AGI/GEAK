@@ -65,6 +65,46 @@ def contained(path, directory):
     return path.resolve().is_relative_to(directory.resolve())
 
 
+def materialize_reported_context(record, root):
+    result = {"status": "unavailable", "authority": "author_reported_interpretation_only",
+              "checkpoint_path": record.get("checkpoint_path"), "context": None}
+    try:
+        need(record.get("status") in ("qualified", "no_improvement", "legacy_verified"),
+             "checkpoint source is not qualified")
+        checkpoint = record["checkpoint"]
+        lineage_id, round_number = checkpoint["lineage_id"], checkpoint["round"]
+        need(isinstance(lineage_id, str) and LINEAGE.fullmatch(lineage_id)
+             and type(round_number) is int and round_number >= 0, "invalid context checkpoint identity")
+        checkpoint_path = root / lineage_id / f"r{round_number}.json"
+        need(record["checkpoint_path"] == str(checkpoint_path) and contained(checkpoint_path, root)
+             and digest(checkpoint_path.read_bytes()) == record["checkpoint_sha256"],
+             "checkpoint identity changed before context query")
+        reference = checkpoint.get("reported_context_ref")
+        result["context_ref"] = reference
+        need(isinstance(reference, dict) and isinstance(reference.get("sha256"), str)
+             and SHA256.fullmatch(reference["sha256"]), "full reported context identity unavailable")
+        context_path = root / lineage_id / f"r{round_number}.context.json"
+        need(reference.get("path") == str(context_path) and contained(context_path, root),
+             "reported context is outside its checkpoint publication")
+        context, raw = read_json(context_path)
+        need(digest(raw) == reference["sha256"], "reported context hash differs")
+        binding = context.get("published_source_binding")
+        need(isinstance(binding, dict) and binding.get("lineage_id") == lineage_id
+             and binding.get("round") == round_number
+             and binding.get("source_id") == checkpoint.get("source_id")
+             and binding.get("source_tree") == checkpoint.get("source_tree")
+             and binding.get("patch_ref") == {"path": checkpoint["patch_ref"]["path"],
+                                              "sha256": checkpoint["patch_ref"]["sha256"]},
+             "reported context publication source differs from checkpoint")
+        need(context_path.read_bytes() == raw
+             and digest(checkpoint_path.read_bytes()) == record["checkpoint_sha256"],
+             "reported context or checkpoint changed during query")
+        result.update(status="available", context=context)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        result["reason"] = str(error)
+    return result
+
+
 def run(argv, *, timeout=30, cwd=None, env=None):
     result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout, check=False)
     need(result.returncode == 0,
@@ -341,7 +381,8 @@ def select(candidates):
     return min(available, key=lambda row: (-row["speedup"], row["lineage_id"], row["round"], row["kind"])) if available else None
 
 
-def query(root, *, lineages=(), base_tree=None, base_source_id=None, checkpoints_only=False, reader_timeout=30):
+def query(root, *, lineages=(), base_tree=None, base_source_id=None, checkpoints_only=False,
+          reader_timeout=30, reported_context=False):
     root = Path(root).resolve(strict=True)
     manifest, _ = read_json(root / "manifest.json")
     need(manifest.get("schema") == "geak.population/1", "unknown population manifest schema")
@@ -378,6 +419,8 @@ def query(root, *, lineages=(), base_tree=None, base_source_id=None, checkpoints
                                key=lambda path: int(CHECKPOINT.fullmatch(path.name)[1]))
                 for path in paths:
                     record, candidate = check_checkpoint(path, root, lane, manifest, trees, expected_base, base_source_id, reader_timeout)
+                    if reported_context:
+                        record["reported_context_query"] = materialize_reported_context(record, root)
                     records.append(record)
                     candidates.append(candidate)
                 pointer = directory / "latest.json"
@@ -438,12 +481,15 @@ def main(argv=None):
     parser.add_argument("--base-tree")
     parser.add_argument("--base-source-id")
     parser.add_argument("--checkpoints-only", action="store_true")
+    parser.add_argument("--reported-context", action="store_true",
+                        help="read exact published context without upgrading author claims or source qualification")
     parser.add_argument("--reader-timeout", type=float, default=30)
     args = parser.parse_args(argv)
     try:
         need(math.isfinite(args.reader_timeout) and args.reader_timeout > 0, "reader timeout must be positive")
         result = query(args.root, lineages=args.lineage, base_tree=args.base_tree,
-                       base_source_id=args.base_source_id, checkpoints_only=args.checkpoints_only, reader_timeout=args.reader_timeout)
+                       base_source_id=args.base_source_id, checkpoints_only=args.checkpoints_only,
+                       reader_timeout=args.reader_timeout, reported_context=args.reported_context)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({"schema": "geak.population.query/1", "selected": None, "error": str(error)}))
         return 2
