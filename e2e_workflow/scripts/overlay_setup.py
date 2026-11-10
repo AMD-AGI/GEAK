@@ -142,7 +142,9 @@ def _rebind(_entry):
         if not isinstance(_owner, type):
             raise TypeError("nested rebind owner must be a class: " + _entry["target"])
     _attr = _parts[-1]
-    _original = inspect.getattr_static(_owner, _attr)  # A missing leaf is not a new binding.
+    # Module exports may be lazy (__getattr__); class descriptors must remain unbound.
+    _original = (inspect.getattr_static(_owner, _attr) if isinstance(_owner, type)
+                 else getattr(_owner, _attr))  # A missing leaf is not a new binding.
     _impl = importlib.import_module(_entry["impl_module"])
     _replacement = getattr(_impl, _entry["impl_attr"])
     if isinstance(_owner, type):

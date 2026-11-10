@@ -376,6 +376,29 @@ print(json.dumps([obj.method(1), Alias.method(obj, 2), Alias.static(3), obj.stat
                 self.assertNotIn("[overlay] rebound", proc.stderr)
                 self.assertNotIn("property must not execute", proc.stderr)
 
+    def test_module_lazy_export_rebind_preserves_public_attribute_lookup(self):
+        with (self.root / "sample.py").open("a") as handle:
+            handle.write('''
+def __getattr__(name):
+    if name == "lazy_fn":
+        return lambda x: ["original-lazy", x]
+    raise AttributeError(name)
+''')
+        original = self.child(code="import sample; assert 'lazy_fn' not in vars(sample); "
+            "assert sample.lazy_fn(1) == ['original-lazy', 1]")
+        self.assertEqual(original.returncode, 0, original.stderr)
+        current = self.child(self.overlay([self.entry("lazy_fn", "module_fn")]),
+            "import sample, impl; from sample import lazy_fn; "
+            "assert vars(sample)['lazy_fn'] is impl.module_fn; "
+            "assert lazy_fn(2) == ['replacement-module', 2]")
+        self.assertEqual(current.returncode, 0, current.stderr)
+        self.assertIn("[overlay] rebound sample:lazy_fn", current.stderr)
+        missing = self.child(self.overlay([self.entry("missing_export", "module_fn")]),
+            "print('application started')")
+        self.assertEqual(missing.returncode, 70, missing.stderr)
+        self.assertNotIn("application started", missing.stdout)
+        self.assertIn("rebind FAILED", missing.stderr)
+
     def test_failed_add_keeps_prior_shim_and_manifest(self):
         overlay = self.overlay([self.entry("module_fn", "module_fn")], OV.PREVIOUS_SITECUSTOMIZE)
         manifest = (overlay / "_overlay_manifest.json").read_bytes()

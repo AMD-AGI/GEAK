@@ -299,8 +299,9 @@ hooks a live server callable through the overlay to capture real serving shapes 
 `add-rebind --target package.module:Class.method --impl-module candidate --impl-attr replacement`
 replaces the method on its class, including inherited methods and nested classes. The replacement
 must be a Python function; instance, `staticmethod`, and `classmethod` binding is preserved.
-Flat `module:attribute` targets continue to support arbitrary replacement values. Targets must
-already exist; properties, non-class intermediate owners, and other method descriptors are rejected.
+Flat `module:attribute` targets continue to support arbitrary replacement values, including exports
+resolved by module `__getattr__`. Targets must already exist; properties, non-class intermediate
+owners, and other method descriptors are rejected.
 A declared rebind failure now exits the child interpreter with status 70 instead of logging the
 error and continuing with the original implementation.
 
