@@ -1,0 +1,1298 @@
+{
+ "schema": "geak.isa-source-evidence/1",
+ "source": {
+  "chapter": "7. Matrix Arithmetic Instructions",
+  "md5": "0106fc07299e3451d72edc01a6de0f8d",
+  "pages": 608,
+  "pdf_pages_covered": [49, 77],
+  "printed_page_offset": -8,
+  "printed_pages_covered": [41, 69],
+  "size": 4596505,
+  "title": "AMD Instinct CDNA4 Instruction Set Architecture Reference Guide",
+  "url": "https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf"
+ },
+ "original_layout_sha256": "382dbc2d5d0025edef4951682cc908458faa27919748afc1cf53f1d821e4eef8",
+ "figure_layouts": [
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 59,
+    "printed_page": 51,
+    "quote": "16x16x128",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 31], "k=0-31", [0, 15], [0, 15], ["v0", "v3"]],
+    [[32, 63], "k=32-63", [16, 31], [0, 15], ["v0", "v3"]],
+    [[64, 95], "k = 64 - 95", [32, 47], [0, 15], ["v0", "v3"]],
+    [[96, 127], "K = 96 - 127", [48, 63], [0, 15], ["v0", "v3"]]
+   ],
+   "elem_bits": 4,
+   "id": "fig.fp4.16x16x128",
+   "notes": "Header inconsistency: every other column uses three header lines (rowN / thr X-Y / M/N = [...]); this figure's row2 column puts 'row2 thr 32-47' on ONE line, leaving its third header line empty. Word coordinates confirm: at top=354.4 the x=357.7 column holds 'row2 thr 32-47', at top=366.6 it holds 'M/N = [0-15]', and at top=378.8 that column is empty while the other three columns have text there. Casing/spacing inconsistency within one figure: 'k=0-31', 'k=32-63', 'k = 64 - 95', 'K = 96 - 127' (last cell uses capital K). Each k cell is drawn as a single box spanning all four VGPR rows v0..v3.",
+   "shape": {
+    "k": 128,
+    "m": 16,
+    "n": 16
+   },
+   "title": "16x16x128 A[16][128] B[128][16], FP4",
+   "verbatim_header": "16x16x128 / A[16][128] / B[128][16] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [0-15] | row2 thr 32-47 / M/N = [0-15] / <blank> | row3 / thr48-63 / M/N = [0-15]",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 59,
+    "printed_page": 51,
+    "quote": "A[32][64]",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 31], "k=0-31", [0, 15], [0, 15], ["v0", "v3"]],
+    [[0, 31], "k=0-31", [16, 31], [16, 31], ["v0", "v3"]],
+    [[32, 63], "k =32-63", [32, 47], [0, 15], ["v0", "v3"]],
+    [[32, 63], "K = 32-63", [48, 63], [16, 31], ["v0", "v3"]]
+   ],
+   "elem_bits": 4,
+   "id": "fig.fp4.32x32x64",
+   "notes": "Spacing/casing inconsistency within one figure: 'k=0-31', 'k=0-31', 'k =32-63' (space before '='), 'K = 32-63' (capital K). Each k cell is one box spanning v0..v3. Matches the formula printed just above this figure for 32x32x64 FP4: K_L = 64 / (64 / 32) = 32.",
+   "shape": {
+    "k": 64,
+    "m": 32,
+    "n": 32
+   },
+   "title": "32x32x64 A[32][64] B[64][32], FP4",
+   "verbatim_header": "32x32x64 / A[32][64] / B[64][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31]",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 59,
+    "printed_page": 51,
+    "quote": "FP6:",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 15], "k=0-15", [0, 15], [0, 15], ["v0", "v2"]],
+    [[32, 47], "k = 32-47", [16, 31], [0, 15], ["v0", "v2"]],
+    [[64, 79], "k=64-79", [32, 47], [0, 15], ["v0", "v2"]],
+    [[96, 111], "k = 96-111", [48, 63], [0, 15], ["v0", "v2"]],
+    [[16, 31], "k = 16-31", [0, 15], [0, 15], ["v3", "v5"]],
+    [[48, 63], "k = 48 - 63", [16, 31], [0, 15], ["v3", "v5"]],
+    [[80, 95], "k = 80-95", [32, 47], [0, 15], ["v3", "v5"]],
+    [[112, 127], "k = 112-127", [48, 63], [0, 15], ["v3", "v5"]]
+   ],
+   "elem_bits": 6,
+   "id": "fig.fp6.16x16x128",
+   "notes": "Six VGPRs per operand; the grid is split into two k boxes per column: the upper box spans v0..v2 and the lower box spans v3..v5. The printed k text sits vertically next to v1 / v4 respectively but the drawn box covers three VGPR rows each — recorded as the box extent, not the text baseline. Spacing inconsistency: 'k=0-15' vs 'k = 32-47' vs 'k = 48 - 63'.",
+   "shape": {
+    "k": 128,
+    "m": 16,
+    "n": 16
+   },
+   "title": "16x16x128 A[16][128] B[128][16], FP6",
+   "verbatim_header": "16x16x128 / A[16][128] / B[128][16] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [0-15] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [0-15]",
+   "vgprs": ["v0", "v1", "v2", "v3", "v4", "v5"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 60,
+    "printed_page": 52,
+    "quote": "B[64][32]",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 15], "k=0-15", [0, 15], [0, 15], ["v0", "v2"]],
+    [[0, 15], "k = 0-15", [16, 31], [16, 31], ["v0", "v2"]],
+    [[32, 47], "k = 32-47", [32, 47], [0, 15], ["v0", "v2"]],
+    [[32, 47], "k = 32-47", [48, 63], [16, 31], ["v0", "v2"]],
+    [[16, 31], "k = 16-31", [0, 15], [0, 15], ["v3", "v5"]],
+    [[16, 31], "k = 16-31", [16, 31], [16, 31], ["v3", "v5"]],
+    [[48, 63], "k = 48 - 63", [32, 47], [0, 15], ["v3", "v5"]],
+    [[48, 63], "k = 48 - 63", [48, 63], [16, 31], ["v3", "v5"]]
+   ],
+   "elem_bits": 6,
+   "id": "fig.fp6.32x32x64",
+   "notes": "This figure is the continuation of the FP6 group started on printed page 51; it is the first object on printed page 52 and carries no 'FP6:' caption of its own — the caption is on the previous page. Upper box spans v0..v2, lower box spans v3..v5.",
+   "shape": {
+    "k": 64,
+    "m": 32,
+    "n": 32
+   },
+   "title": "32x32x64 A[32][64] B[64][32], FP6",
+   "verbatim_header": "32x32x64 / A[32][64] / B[64][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31]",
+   "vgprs": ["v0", "v1", "v2", "v3", "v4", "v5"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 60,
+    "printed_page": 52,
+    "quote": "FP8:",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 15], "k=0-15", [0, 15], [0, 15], ["v0", "v3"]],
+    [[16, 31], "k=16-31", [16, 31], [0, 15], ["v0", "v3"]],
+    [[32, 47], "k = 32-47", [32, 47], [0, 15], ["v0", "v3"]],
+    [[48, 63], "k = 48 - 63", [48, 63], [0, 15], ["v0", "v3"]],
+    [[64, 79], "k=64-79", [0, 15], [0, 15], ["v4", "v7"]],
+    [[80, 95], "k = 80-95", [16, 31], [0, 15], ["v4", "v7"]],
+    [[96, 111], "k = 96-111", [32, 47], [0, 15], ["v4", "v7"]],
+    [[112, 127], "k = 112-127", [48, 63], [0, 15], ["v4", "v7"]]
+   ],
+   "conflict_with_layout_rule": {
+    "cells_matching_formula": 4,
+    "cells_total": 8,
+    "detail": "CONFLICT WITH THE LAYOUT FORMULA AND WITH THE OTHER GRIDS FOR THE SAME INSTRUCTION. The cells are transcribed exactly as drawn and are NOT corrected here. dense.in.a gives K_L = 32 for both F8F6F4 shapes, so lane group g = k / 32 and item = k % 32; the eight k-boxes should read (top row) 0-31 -> 32-63 -> 64-95 -> 96-127 split half-and-half between the two VGPR halves, i.e. column g upper = 32g..32g+15 and column g lower = 32g+16..32g+31. The FP8 grids instead number the eight boxes 0-15, 16-31, 32-47, 48-63 across the UPPER row and 64-79 ... 112-127 across the LOWER row -- row-major instead of column-major. Three independent witnesses say the grid is wrong, not the formula: (1) fig.fp4.* and fig.fp6.* describe THE SAME TWO OPCODES (V_MFMA_F32_16X16X128_F8F6F4 / V_MFMA_F32_32X32X64_F8F6F4, the format being chosen at runtime by CBSZ/BLGP) and are column-major, agreeing with the formula; at most one of FP6 and FP8 can be right about which k values a lane holds. (2) fig.bf16.* and the two merge-added fig.iu8.* grids also agree with the formula, 48/48 cells. (3) the formula box printed immediately above these very figures on PDF 59 states 'A[I, k] goes in “item” k % 32 of lane I + 32 * (k / 32)'. Consumers should use dense.in.a, not these two grids.",
+    "rule": "dense.in.a",
+    "verdict": "figure judged erroneous; formula kept"
+   },
+   "elem_bits": 8,
+   "id": "fig.fp8.16x16x128",
+   "notes": "Eight VGPRs; upper k box spans v0..v3, lower k box spans v4..v7.",
+   "shape": {
+    "k": 128,
+    "m": 16,
+    "n": 16
+   },
+   "title": "16x16x128 A[16][128] B[128][16], FP8",
+   "verbatim_header": "16x16x128 / A[16][128] / B[128][16] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [0-15] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [0-15]",
+   "vgprs": ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 60,
+    "printed_page": 52,
+    "quote": "A[32][64]",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 15], "k = 0 – 15", [0, 15], [0, 15], ["v0", "v3"]],
+    [[0, 15], "k = 0-15", [16, 31], [16, 31], ["v0", "v3"]],
+    [[16, 31], "k = 16-31", [32, 47], [0, 15], ["v0", "v3"]],
+    [[16, 31], "k = 16-31", [48, 63], [16, 31], ["v0", "v3"]],
+    [[32, 47], "k = 32-47", [0, 15], [0, 15], ["v4", "v7"]],
+    [[32, 47], "k = 32-47", [16, 31], [16, 31], ["v4", "v7"]],
+    [[48, 63], "k = 48-63", [32, 47], [0, 15], ["v4", "v7"]],
+    [[48, 63], "k = 48-63", [48, 63], [16, 31], ["v4", "v7"]]
+   ],
+   "conflict_with_layout_rule": {
+    "cells_matching_formula": 4,
+    "cells_total": 8,
+    "detail": "CONFLICT WITH THE LAYOUT FORMULA AND WITH THE OTHER GRIDS FOR THE SAME INSTRUCTION. The cells are transcribed exactly as drawn and are NOT corrected here. dense.in.a gives K_L = 32 for both F8F6F4 shapes, so lane group g = k / 32 and item = k % 32; the eight k-boxes should read (top row) 0-31 -> 32-63 -> 64-95 -> 96-127 split half-and-half between the two VGPR halves, i.e. column g upper = 32g..32g+15 and column g lower = 32g+16..32g+31. The FP8 grids instead number the eight boxes 0-15, 16-31, 32-47, 48-63 across the UPPER row and 64-79 ... 112-127 across the LOWER row -- row-major instead of column-major. Three independent witnesses say the grid is wrong, not the formula: (1) fig.fp4.* and fig.fp6.* describe THE SAME TWO OPCODES (V_MFMA_F32_16X16X128_F8F6F4 / V_MFMA_F32_32X32X64_F8F6F4, the format being chosen at runtime by CBSZ/BLGP) and are column-major, agreeing with the formula; at most one of FP6 and FP8 can be right about which k values a lane holds. (2) fig.bf16.* and the two merge-added fig.iu8.* grids also agree with the formula, 48/48 cells. (3) the formula box printed immediately above these very figures on PDF 59 states 'A[I, k] goes in “item” k % 32 of lane I + 32 * (k / 32)'. Consumers should use dense.in.a, not these two grids.",
+    "rule": "dense.in.a",
+    "verdict": "figure judged erroneous; formula kept"
+   },
+   "elem_bits": 8,
+   "id": "fig.fp8.32x32x64",
+   "notes": "Punctuation inconsistency: the row0/v0-v3 cell is printed with an EN DASH and spaces, 'k = 0 – 15', while every other cell in the same figure uses a hyphen ('k = 0-15'). Upper box spans v0..v3, lower box spans v4..v7.",
+   "shape": {
+    "k": 64,
+    "m": 32,
+    "n": 32
+   },
+   "title": "32x32x64 A[32][64] B[64][32], FP8",
+   "verbatim_header": "32x32x64 / A[32][64] / B[64][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31]",
+   "vgprs": ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 60,
+    "printed_page": 52,
+    "quote": "A[m][k]/B[k][n] Layout BF16",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 1], "k=0-1", [0, 15], [0, 15], ["v0", "v0"]],
+    [[8, 9], "k=8-9", [16, 31], [0, 15], ["v0", "v0"]],
+    [[16, 17], "k=16-17", [32, 47], [0, 15], ["v0", "v0"]],
+    [[24, 25], "k=24-25", [48, 63], [0, 15], ["v0", "v0"]],
+    [[2, 3], "k=2-3", [0, 15], [0, 15], ["v1", "v1"]],
+    [[10, 11], "k=10-11", [16, 31], [0, 15], ["v1", "v1"]],
+    [[18, 19], "k=18-19", [32, 47], [0, 15], ["v1", "v1"]],
+    [[26, 27], "k=26-27", [48, 63], [0, 15], ["v1", "v1"]],
+    [[4, 5], "k=4-5", [0, 15], [0, 15], ["v2", "v2"]],
+    [[12, 13], "k=12-13", [16, 31], [0, 15], ["v2", "v2"]],
+    [[20, 21], "k=20-21", [32, 47], [0, 15], ["v2", "v2"]],
+    [[28, 29], "k=28-29", [48, 63], [0, 15], ["v2", "v2"]],
+    [[6, 7], "k=6-7", [0, 15], [0, 15], ["v3", "v3"]],
+    [[14, 15], "k=14-15", [16, 31], [0, 15], ["v3", "v3"]],
+    [[22, 23], "k=22-23", [32, 47], [0, 15], ["v3", "v3"]],
+    [[30, 31], "k=30-31", [48, 63], [0, 15], ["v3", "v3"]]
+   ],
+   "elem_bits": 16,
+   "id": "fig.bf16.16x16x32",
+   "notes": "Section-scope inconsistency: this is a 16-bit (BF16) layout, yet it is printed inside §7.1.5.1 'Dense Matrix Layouts: 8-bit and Smaller'. The banner row 'A[m][k]/B[k][n] Layout BF16' spans the whole table and its remaining three columns are blank. Unlike the FP4/FP6/FP8 figures, every (VGPR, column) intersection here has its own cell (no boxes spanning several VGPR rows). Column x-positions differ from the FP8/FP6 figures above (188.8 / 278.2 / 357.7 / 457.0 instead of 159.0 / 258.3 / 357.7 / 457.0) but the four columns remain row0..row3 left to right.",
+   "shape": {
+    "k": 32,
+    "m": 16,
+    "n": 16
+   },
+   "title": "A[m][k]/B[k][n] Layout BF16 — 16x16x32 A[16][32] B[32][16]",
+   "verbatim_header": "A[m][k]/B[k][n] Layout BF16 || 16x16x32 / A[16][32] / B[32][16] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [0-15] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [0-15]",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 60,
+    "printed_page": 52,
+    "quote": "32x32x16",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 1], "k=0-1", [0, 15], [0, 15], ["v0", "v0"], null],
+    [[0, 1], "k=0-1", [16, 31], [16, 31], ["v0", "v0"], null],
+    [[8, 9], "k=8-9", [32, 47], [0, 15], ["v0", "v0"], null],
+    [[8, 9], "k=8-9", [48, 63], [16, 31], ["v0", "v0"], null],
+    [[2, 3], "k=2-3", [0, 15], [0, 15], ["v1", "v1"], null],
+    [[2, 3], "k=2-3", [16, 31], [16, 31], ["v1", "v1"], null],
+    [[10, 11], "k=10-11", [32, 47], [0, 15], ["v1", "v1"], null],
+    [[10, 11], "k=10-11", [48, 63], [16, 31], ["v1", "v1"], null],
+    [[4, 5], "k=4-5", [0, 15], [0, 15], ["v2", "v2"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[4, 5], "k=4-5", [16, 31], [16, 31], ["v2", "v2"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[12, 13], "k=12-13", [32, 47], [0, 15], ["v2", "v2"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[12, 13], "k=12-13", [48, 63], [16, 31], ["v2", "v2"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[6, 7], "k=6-7", [0, 15], [0, 15], ["v3", "v3"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[6, 7], "k=6-7", [16, 31], [16, 31], ["v3", "v3"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[14, 15], "k=14-15", [32, 47], [0, 15], ["v3", "v3"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}],
+    [[14, 15], "k=14-15", [48, 63], [16, 31], ["v3", "v3"], {"pdf_page": 61, "printed_page": 53, "quote": "k=4-5", "section": "7.1.5.1"}]
+   ],
+   "elem_bits": 16,
+   "id": "fig.bf16.32x32x16",
+   "notes": "JOINED BY THE MERGE AGENT. Rows v0/v1 are on PDF 60 (agent C); the table restarts at the top of PDF 61 with its header repeated and rows v2/v3. PDF 61 was in agent D's range and D did not take it, so the continuation would otherwise have been lost. INCOMPLETE / TRUNCATED: this table is split across the page break. Printed page 52 (PDF 60) shows only rows v0 and v1; the table restarts on printed page 53 (PDF 61) with the same header repeated and rows v2 and v3. Rows v2/v3 are on agent D's pages and are deliberately NOT transcribed here — the merge agent must join this record with the page-53 continuation before treating it as complete. vgprs list therefore holds only the VGPRs physically on my page.",
+   "shape": {
+    "k": 16,
+    "m": 32,
+    "n": 32
+   },
+   "title": "BF16 — 32x32x16 A[32][16] B[16][32] (joined across the PDF 60/61 page break)",
+   "verbatim_header": "32x32x16 / A[32][16] / B[16][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31]",
+   "verbatim_header_continuation": "32x32x16 / A[32][16] / B[16][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31] (header repeated verbatim at the top of PDF 61)",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs", "_src"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 61,
+    "printed_page": 53,
+    "quote": "A[m][k]/B[k][n] Layout IU8",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 3], "k=0-3", [0, 15], [0, 15], ["v0", "v0"]],
+    [[16, 19], "k=16-19", [16, 31], [0, 15], ["v0", "v0"]],
+    [[32, 35], "k=32-35", [32, 47], [0, 15], ["v0", "v0"]],
+    [[48, 51], "k=48-51", [48, 63], [0, 15], ["v0", "v0"]],
+    [[4, 7], "k=4-7", [0, 15], [0, 15], ["v1", "v1"]],
+    [[20, 23], "k=20-23", [16, 31], [0, 15], ["v1", "v1"]],
+    [[36, 39], "k=36-39", [32, 47], [0, 15], ["v1", "v1"]],
+    [[52, 55], "k=52-55", [48, 63], [0, 15], ["v1", "v1"]],
+    [[8, 11], "k=8-11", [0, 15], [0, 15], ["v2", "v2"]],
+    [[24, 27], "k=24-27", [16, 31], [0, 15], ["v2", "v2"]],
+    [[40, 43], "k=40-43", [32, 47], [0, 15], ["v2", "v2"]],
+    [[56, 59], "k=56-59", [48, 63], [0, 15], ["v2", "v2"]],
+    [[12, 15], "k=12-15", [0, 15], [0, 15], ["v3", "v3"]],
+    [[28, 31], "k=28-31", [16, 31], [0, 15], ["v3", "v3"]],
+    [[44, 47], "k=44-47", [32, 47], [0, 15], ["v3", "v3"]],
+    [[60, 63], "k=60-63", [48, 63], [0, 15], ["v3", "v3"]]
+   ],
+   "elem_bits": 8,
+   "id": "fig.iu8.16x16x64",
+   "notes": "ADDED BY THE MERGE AGENT. Physically on PDF 61 (printed 53): agent C's range stopped at PDF 60 and agent D's range started at sec.7.1.6 further down PDF 61, so this grid and its 32x32x32 sibling were claimed by no fragment. Read by eye from png/p0061.png at 300 dpi. Governs V_MFMA_I32_16X16X64_I8.",
+   "shape": {
+    "k": 64,
+    "m": 16,
+    "n": 16
+   },
+   "title": "A[m][k]/B[k][n] Layout IU8 — 16x16x64 A[16][64] B[64][16]",
+   "verbatim_header": "A[m][k]/B[k][n] Layout IU8 || 16x16x64 / A[16][64] / B[64][16] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [0-15] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [0-15]",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 61,
+    "printed_page": 53,
+    "quote": "32x32x32",
+    "section": "7.1.5.1"
+   },
+   "cells": [
+    [[0, 3], "k=0-3", [0, 15], [0, 15], ["v0", "v0"]],
+    [[0, 3], "k=0-3", [16, 31], [16, 31], ["v0", "v0"]],
+    [[16, 19], "k=16-19", [32, 47], [0, 15], ["v0", "v0"]],
+    [[16, 19], "k=16-19", [48, 63], [16, 31], ["v0", "v0"]],
+    [[4, 7], "k=4-7", [0, 15], [0, 15], ["v1", "v1"]],
+    [[4, 7], "k=4-7", [16, 31], [16, 31], ["v1", "v1"]],
+    [[20, 23], "k=20-23", [32, 47], [0, 15], ["v1", "v1"]],
+    [[20, 23], "k=20-23", [48, 63], [16, 31], ["v1", "v1"]],
+    [[8, 11], "k=8-11", [0, 15], [0, 15], ["v2", "v2"]],
+    [[8, 11], "k=8-11", [16, 31], [16, 31], ["v2", "v2"]],
+    [[24, 27], "k=24-27", [32, 47], [0, 15], ["v2", "v2"]],
+    [[24, 27], "k=24-27", [48, 63], [16, 31], ["v2", "v2"]],
+    [[12, 15], "k=12-15", [0, 15], [0, 15], ["v3", "v3"]],
+    [[12, 15], "k=12-15", [16, 31], [16, 31], ["v3", "v3"]],
+    [[28, 31], "k=28-31", [32, 47], [0, 15], ["v3", "v3"]],
+    [[28, 31], "k=28-31", [48, 63], [16, 31], ["v3", "v3"]]
+   ],
+   "elem_bits": 8,
+   "id": "fig.iu8.32x32x32",
+   "notes": "ADDED BY THE MERGE AGENT, same coverage gap as fig.iu8.16x16x64. Governs V_MFMA_I32_32X32X32_I8.",
+   "shape": {
+    "k": 32,
+    "m": 32,
+    "n": 32
+   },
+   "title": "IU8 — 32x32x32 A[32][32] B[32][32]",
+   "verbatim_header": "32x32x32 / A[32][32] / B[32][32] | row0 / thr 0-15 / M/N = [0-15] | row1 / thr 16-31 / M/N = [16-31] | row2 / thr 32-47 / M/N = [0-15] | row3 / thr48-63 / M/N = [16-31]",
+   "vgprs": ["v0", "v1", "v2", "v3"],
+   "cell_columns": ["k", "k_verbatim", "lanes", "mn", "vgprs"]
+  }
+ ],
+ "conversions": [
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_PK_FP8_F32 FP8 FP32 FP32 VOP3 Op_Sel[3]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_pk_fp8_f32",
+   "name": "CVT_PK_FP8_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=FP8, Src0=FP32, Src1=FP32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_PK_BF8_F32 BF8 FP32 FP32 VOP3 Op_Sel[3]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_pk_bf8_f32",
+   "name": "CVT_PK_BF8_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=BF8, Src0=FP32, Src1=FP32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_SR_FP8_F32 FP8 FP32 U32 VOP3 Op_Sel[3:2]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3:2]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_sr_fp8_f32",
+   "name": "CVT_SR_FP8_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=FP8, Src0=FP32, Src1=U32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_SR_BF8_F32 BF8 FP32 U32 VOP3 Op_Sel[3:2]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3:2]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_sr_bf8_f32",
+   "name": "CVT_SR_BF8_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=BF8, Src0=FP32, Src1=U32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_SR_FP16_F32 FP16 FP32 U32 VOP3 Op_Sel[3]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_sr_fp16_f32",
+   "name": "CVT_SR_FP16_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=FP16, Src0=FP32, Src1=U32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 65,
+    "printed_page": 57,
+    "quote": "CVT_SR_BF16_F32 BF16 FP32 U32 VOP3 Op_Sel[3]",
+    "section": "7.3"
+   },
+   "control": "Op_Sel[3]\nignores: clamp, omod\nsupports: neg, abs",
+   "encoding": "VOP3",
+   "id": "cvt.cvt_sr_bf16_f32",
+   "name": "CVT_SR_BF16_F32",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=BF16, Src0=FP32, Src1=U32. NOTE: this row lives on PDF page 65, which the first extraction pass cited only for Table 30; the Table 31 rows there were not captured. Included so the Table 31 roster is complete rather than starting mid-table.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_PK_F32_FP8 F32 FP8 - VOP1 SDWA, Op_Sel[0],",
+    "section": "7.3"
+   },
+   "control": "SDWA, Op_Sel[0], dst,dst+1\nignores: abs, neg, sext",
+   "encoding": "VOP1",
+   "id": "cvt.cvt_pk_f32_fp8",
+   "name": "CVT_PK_F32_FP8",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=F32, Src0=FP8, Src1=-.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_PK_F32_BF8 F32 BF8 - VOP1 SDWA, Op_Sel[0],",
+    "section": "7.3"
+   },
+   "control": "SDWA, Op_Sel[0], dst,dst+1\nignores: abs, neg, sext",
+   "encoding": "VOP1",
+   "id": "cvt.cvt_pk_f32_bf8",
+   "name": "CVT_PK_F32_BF8",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=F32, Src0=BF8, Src1=-.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_F32_FP8 F32 FP8 - VOP1 SDWA, Op_Sel",
+    "section": "7.3"
+   },
+   "control": "SDWA, Op_Sel\nignores: abs, neg, sext",
+   "encoding": "VOP1",
+   "id": "cvt.cvt_f32_fp8",
+   "name": "CVT_F32_FP8",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=F32, Src0=FP8, Src1=-.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_F32_BF8 F32 BF8 - VOP1 SDWA, Op_Sel",
+    "section": "7.3"
+   },
+   "control": "SDWA, Op_Sel\nignores: abs, neg, sext",
+   "encoding": "VOP1",
+   "id": "cvt.cvt_f32_bf8",
+   "name": "CVT_F32_BF8",
+   "notes": "Table 31 'Small Float Data Format Conversion ops', columns Instruction / Dst / Src0 / Src1 / Encoding / Control / Notes. The table starts on PDF page 65 (printed 57) and continues onto PDF page 66 (printed 58); the header row is repeated on p66. Column split confirmed from word x-coordinates (Control x=362.0, Notes x=470.0) because the PDF text layer interleaves the two columns: the 'ignores:'/'supports:' lines are CONTROL cells, not Notes. Additional per-row fields captured here: Dst=F32, Src0=BF8, Src1=-.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP4_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp4_f32",
+   "name": "CVT_SCALE_PK_FP4_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP4_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp4_f32",
+   "name": "CVT_SCALE_SR_PK_FP4_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F32_FP4",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f32_fp4",
+   "name": "CVT_SCALE_PK_F32_FP4",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP4_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp4_f16",
+   "name": "CVT_SCALE_PK_FP4_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP4_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp4_bf16",
+   "name": "CVT_SCALE_PK_FP4_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP4_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp4_f16",
+   "name": "CVT_SCALE_SR_PK_FP4_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP4_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp4_bf16",
+   "name": "CVT_SCALE_SR_PK_FP4_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F16_FP4",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f16_fp4",
+   "name": "CVT_SCALE_PK_F16_FP4",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF16_FP4",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf16_fp4",
+   "name": "CVT_SCALE_PK_BF16_FP4",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '4-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP6_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp6_f32",
+   "name": "CVT_SCALE_PK_FP6_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF6_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf6_f32",
+   "name": "CVT_SCALE_PK_BF6_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP6_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp6_f32",
+   "name": "CVT_SCALE_SR_PK_FP6_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_BF6_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_bf6_f32",
+   "name": "CVT_SCALE_SR_PK_BF6_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F32_FP6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f32_fp6",
+   "name": "CVT_SCALE_PK_F32_FP6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F32_BF6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f32_bf6",
+   "name": "CVT_SCALE_PK_F32_BF6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP6_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp6_f16",
+   "name": "CVT_SCALE_PK_FP6_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "uncertain",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP6_FB16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp6_fb16",
+   "name": "CVT_SCALE_PK_FP6_FB16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. SOURCE ERROR, transcribed as printed: the mnemonic reads 'CVT_SCALE_PK_FP6_FB16'. Every sibling in this cell spells the 16-bit source 'BF16' (e.g. CVT_SCALE_PK_BF6_BF16), so 'FB16' is almost certainly a typo for 'BF16', but the page is not corrected here.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF6_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf6_f16",
+   "name": "CVT_SCALE_PK_BF6_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF6_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf6_bf16",
+   "name": "CVT_SCALE_PK_BF6_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP6_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp6_f16",
+   "name": "CVT_SCALE_SR_PK_FP6_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_FP6_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_fp6_bf16",
+   "name": "CVT_SCALE_SR_PK_FP6_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_BF6_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_bf6_f16",
+   "name": "CVT_SCALE_SR_PK_BF6_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_PK_BF6_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_pk_bf6_bf16",
+   "name": "CVT_SCALE_SR_PK_BF6_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F16_FP6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f16_fp6",
+   "name": "CVT_SCALE_PK_F16_FP6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F16_BF6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f16_bf6",
+   "name": "CVT_SCALE_PK_F16_BF6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF16_FP6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf16_fp6",
+   "name": "CVT_SCALE_PK_BF16_FP6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF16_BF6",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf16_bf6",
+   "name": "CVT_SCALE_PK_BF16_BF6",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '6-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP8_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp8_f32",
+   "name": "CVT_SCALE_PK_FP8_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF8_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf8_f32",
+   "name": "CVT_SCALE_PK_BF8_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_FP8_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_fp8_f32",
+   "name": "CVT_SCALE_SR_FP8_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_BF8_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_bf8_f32",
+   "name": "CVT_SCALE_SR_BF8_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F32_FP8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f32_fp8",
+   "name": "CVT_SCALE_PK_F32_FP8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F32_BF8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f32_bf8",
+   "name": "CVT_SCALE_PK_F32_BF8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_F32_FP8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_f32_fp8",
+   "name": "CVT_SCALE_F32_FP8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_F32_BF8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_f32_bf8",
+   "name": "CVT_SCALE_F32_BF8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (first row band: F32 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP8_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp8_f16",
+   "name": "CVT_SCALE_PK_FP8_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF8_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf8_f16",
+   "name": "CVT_SCALE_PK_BF8_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_FP8_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_fp8_bf16",
+   "name": "CVT_SCALE_PK_FP8_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_BF8_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_bf8_bf16",
+   "name": "CVT_SCALE_PK_BF8_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_FP8_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_fp8_f16",
+   "name": "CVT_SCALE_SR_FP8_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_BF8_F16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_bf8_f16",
+   "name": "CVT_SCALE_SR_BF8_F16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_FP8_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_fp8_bf16",
+   "name": "CVT_SCALE_SR_FP8_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_SR_BF8_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_sr_bf8_bf16",
+   "name": "CVT_SCALE_SR_BF8_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F16_FP8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f16_fp8",
+   "name": "CVT_SCALE_PK_F16_FP8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_PK_F16_BF8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_pk_f16_bf8",
+   "name": "CVT_SCALE_PK_F16_BF8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_F16_FP8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_f16_fp8",
+   "name": "CVT_SCALE_F16_FP8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_SCALE_F16_BF8",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_scale_f16_bf8",
+   "name": "CVT_SCALE_F16_BF8",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '8-Bit' (second row band: F16/BF16 sources and destinations). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another.",
+   "scaled": true
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_PK_F16_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_pk_f16_f32",
+   "name": "CVT_PK_F16_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '16-Bit' (third row band). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. scaled=false for this record: the row sits inside Table 32 ('...ops with SCALE') but the mnemonic carries no SCALE and the op takes no E8M0 scale operand. The 'with SCALE' caption is therefore not literally true of the 16-Bit / Integer-8 band.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_PK_BF16_F32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_pk_bf16_f32",
+   "name": "CVT_PK_BF16_F32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '16-Bit' (third row band). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. scaled=false for this record: the row sits inside Table 32 ('...ops with SCALE') but the mnemonic carries no SCALE and the op takes no E8M0 scale operand. The 'with SCALE' caption is therefore not literally true of the 16-Bit / Integer-8 band.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "CVT_F32_BF16",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.cvt_f32_bf16",
+   "name": "CVT_F32_BF16",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column '16-Bit' (third row band). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. scaled=false for this record: the row sits inside Table 32 ('...ops with SCALE') but the mnemonic carries no SCALE and the op takes no E8M0 scale operand. The 'with SCALE' caption is therefore not literally true of the 16-Bit / Integer-8 band.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "ASHR_PK_I8_I32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.ashr_pk_i8_i32",
+   "name": "ASHR_PK_I8_I32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column 'Integer-8' (third row band). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. scaled=false for this record: the row sits inside Table 32 ('...ops with SCALE') but the mnemonic carries no SCALE and the op takes no E8M0 scale operand. The 'with SCALE' caption is therefore not literally true of the 16-Bit / Integer-8 band.",
+   "scaled": false
+  },
+  {
+   "_conf": "table",
+   "_src": {
+    "pdf_page": 66,
+    "printed_page": 58,
+    "quote": "ASHR_PK_U8_I32",
+    "section": "7.3"
+   },
+   "control": null,
+   "encoding": "VOP3",
+   "id": "cvt.ashr_pk_u8_i32",
+   "name": "ASHR_PK_U8_I32",
+   "notes": "Table 32 'Small Float Data Format Conversion ops with SCALE', column 'Integer-8' (third row band). Table 32 lists instruction names only -- it has no Dst/Src/Control/Notes columns; the encoding comes from the sentence under the table, 'All of the instructions in the table above use VOP3.', reinforced by 'Note: VOP3 instructions may not use SDWA.' Column membership confirmed from word x-coordinates (4-Bit x=59.6, 6-Bit x=225.2, 8-Bit x=390.8) because the PDF text layer serialises the three columns one after another. scaled=false for this record: the row sits inside Table 32 ('...ops with SCALE') but the mnemonic carries no SCALE and the op takes no E8M0 scale operand. The 'with SCALE' caption is therefore not literally true of the 16-Bit / Integer-8 band.",
+   "scaled": false
+  }
+ ]
+}
