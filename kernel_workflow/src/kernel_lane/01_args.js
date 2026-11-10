@@ -4,6 +4,9 @@
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.planner_profile_evidence !== undefined && typeof A.planner_profile_evidence !== 'boolean')
+  throw new Error('planner_profile_evidence must be a boolean');
+const PLANNER_PROFILE_EVIDENCE = A.planner_profile_evidence === true;
 if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
   throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')

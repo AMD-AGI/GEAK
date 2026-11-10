@@ -216,13 +216,13 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.exp_dir = c.exp_dir || '';
             if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = spReported; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
-            profileSummary = await agentT(
+            profileSummary = await profileAgent(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
                 WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
-              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }, 0) || profileSummary;
             if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
             if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
             break;

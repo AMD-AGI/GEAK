@@ -53,13 +53,13 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 // PHASE: Baseline profile (Profile Engineer)
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agentT(
+let profileSummary = await profileAgent(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT, ...PREPARED_INPUT,
   }),
-  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
+  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA }, 0);
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
 
 // The existing runtime persists this native return and separate metrics/backend events.

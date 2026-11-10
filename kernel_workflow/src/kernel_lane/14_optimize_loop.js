@@ -206,7 +206,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   };
 
   const callPlanner = async (attempt, intro, forbidStop, label) => {
-    const inputs = planInputs(forbidStop, await deliveryFactsInput());
+    const inputs = planInputs(forbidStop, {...await deliveryFactsInput(), ...await plannerProfileEvidenceInputs()});
     const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
     const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
     let plannerObservation;
@@ -724,12 +724,12 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
+      profileSummary = await profileAgent(
         roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
           WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
-        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA }, round);
     }
   }
 
