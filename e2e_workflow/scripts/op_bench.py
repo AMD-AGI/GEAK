@@ -842,15 +842,20 @@ def main():
     elif wb == "hipblaslt":
         kind = "none"  # default already; no change to deploy
 
-    # Amdahl ceiling: the MAX e2e delta this isolated speedup can produce given the kernel's GPU-time
-    # share (from the Architect/meta). The e2e Integrator uses this to refuse crediting an e2e delta
-    # that exceeds the ceiling (box drift, not the kernel). Annotated here so the number travels with
-    # the bake-off result. pct_gpu_time absent -> ceiling omitted (None).
+    # Conditional GPU-time projection, not an E2E bound or an acceptance gate.
+    # Canonical pct_gpu_time is in percent; the older pct_gpu fallback retains
+    # harness_lib's legacy fraction/percent convention. Missing share stays unknown.
     pct_gpu = meta.get("pct_gpu_time", meta.get("pct_gpu", None))
     amdahl_ceiling_pct = None
     if _hlib is not None and pct_gpu is not None and winner:
         try:
-            amdahl_ceiling_pct = round(_hlib.amdahl_ceiling(float(pct_gpu), float(speedup)), 3)
+            share = float(pct_gpu)
+            if "pct_gpu_time" in meta:
+                if not math.isfinite(share):
+                    raise ValueError("non-finite canonical GPU-time share")
+                # Convert explicitly so 0.5 percent cannot be interpreted as 50 percent.
+                share = min(max(share, 0.0), 100.0) / 100.0
+            amdahl_ceiling_pct = round(_hlib.amdahl_ceiling(share, float(speedup)), 3)
         except Exception:
             amdahl_ceiling_pct = None
 
