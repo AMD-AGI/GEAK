@@ -1,23 +1,10 @@
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
-//
-// The skillset lives at TUNING_SKILLSET_DIR as one intact, hash-pinned tree (it is validated standalone,
-// so GEAK must run the copy that was validated — see e2e_workflow/scripts/tuning_skillset_sync.py). It is
-// NOT decomposed into knowledge/ files and NOT injected as an advisory fragment into other roles: ONE role
-// (tuning_specialist) runs its complete six-step loop as ONE phase.
-//
-// Position is deliberate — after ConfigSweep, before HeadKernel:
-//   * BEFORE HeadKernel, because tuning is the cheap lever that reshapes which kernels dominate. Running
-//     it first means the head track spends its (expensive) budget on the ops that are still hot AFTER
-//     tuning, and every head A/B measures against a reference leg that already contains the tuning.
-//   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
-//     collapses into "one more candidate config") and its contribution becomes unattributable. With its
-//     own in-session pre/post isolated-server A/B, the final report can state tuning's share of the gain.
-//
-// An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
-// the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
+// TUNING_SKILLSET_DIR is one hash-pinned tree (scripts/tuning_skillset_sync.py). tuning_specialist
+// runs its full loop with its own pre/post A/B, so the head track then works on what is still hot,
+// against a tuned reference. An accept folds into curFlags/curEnv and the profile is re-taken.
 // ===========================================================================
-if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) {
+if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') && !tuningWindowShort()) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
@@ -33,33 +20,19 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
-      // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
-      // role learns the store exists at all. Gated by TUNING_KB_ENABLED for the same reason
-      // warmStartBlock() is: blind eval has to stay blind through BOTH channels or through neither.
+      // The always-fires channel (as for the Architect and config_tuner), gated like warmStartBlock()
+      // so a blind eval stays blind through both channels.
       ...(TUNING_KB_ENABLED ? KB_REF_INPUTS : {}),
       ...(TUNING_KB_ENABLED && KB_CACHE_DIR ? { KB_CACHE_DIR } : {}),
-      // The other half of the write below: the kernel store is where THIS phase files its tuned
-      // tables, keyed per (op, backend, gfx), so it is also where a later run finds them — even when
-      // the run that produced them ended below its own e2e baseline and wrote no deployment record
-      // at all. Handing over the root and the arch rather than a candidate list is deliberate: the
-      // role knows which ops it is about to work on and can ask per op, which no read done up here
-      // before the profile could do. Same TUNING_KB_ENABLED switch as everything else.
-      //
-      // PLANE, not root. The write below is `write-remote --plane both` whenever a service is
-      // configured, so the record lands behind a key on the shared store; a directory read against
-      // KB_ARTIFACTS_DIR would look at this run's own checkout, which HL creates empty per run, and
-      // would report `kernel_page_not_found` — indistinguishable from a page that has nothing. Read
-      // and write must name the same plane. A read takes exactly ONE (see kbResolveScript), so
-      // `both` resolves to `remote` and the local mirror is the named fallback.
+      // The read side of the tuned-table write below (kernel store, keyed per op/backend/gfx); the
+      // role queries per op itself. Read and write must name the same PLANE; a read takes exactly
+      // one (kbResolveScript), so `both` reads `remote` with the local mirror as fallback.
       ...(TUNING_KB_ENABLED && KB_DIMS && KB_DIMS.gfx ? {
         TUNED_KB_PLANE: E2E_KB_PLANE === 'both' ? 'remote' : E2E_KB_PLANE,
         TUNED_KB_STORE: E2E_KB_STORE_DIR,
         TUNED_KB_GFX: KB_DIMS.gfx,
-        // The page is keyed on arch and op, NOT on dtype — one `fused_moe` page holds the bf16 and
-        // the fp8_w8a8 tables side by side, ranked against each other on speedup. Passing this makes
-        // the read drop the other dtype's rows instead of ranking them; leaving it empty is the old
-        // behaviour (everything offered), which is why an unstated precision is never an error.
+        // Pages are keyed on arch and op, not dtype; this filters the read to one dtype's rows
+        // (empty offers every dtype).
         TUNED_KB_PRECISION: KB_DIMS.precision || '',
         TUNED_KB_SCRIPT: KERNEL_WF_DIR + '/scripts/experience_store.py',
         TUNED_KB_ENV_PRELUDE: KB_ENV_PRELUDE,
@@ -67,32 +40,22 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
     }),
     { phase: 'TuningSkillset', label: 'tuning_specialist:tune', schema: TUNING_SCHEMA });
 
-  // An accept must clear EVERY bar the skillset itself sets. Engagement is the load-bearing one: its
-  // stated thesis is that a speedup whose artifact was never proven live has proven nothing, and that
-  // failure mode is silent (the artifact lands where nothing reads it and the timing still moves). A
-  // completed BOTH-leg A/B is required for the same reason it is on the head track — a post-only number
-  // is not a measurement.
+  // An accept must clear every bar the skillset sets: proven engagement (an artifact never proven
+  // live proves nothing) and a completed both-leg A/B (a post-only number is not a measurement).
   const tuned = tuning && tuning.gate === 'accepted';
   const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
     tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
     tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
 
-  // Every op the skillset named, read twice below: by the accepted-kernel banking (gated on
-  // `tuneOk`) and by the attestation under it (deliberately not). `tuning &&`, not just
-  // `.ops_tuned ||`: `safeAgent` returns null by DESIGN, and this read sits outside the `tuneOk`
-  // short-circuit that used to screen the null off.
+  // Every op the skillset named: read by the banking (gated on `tuneOk`) and by the attestation
+  // (not gated). `tuning &&` because safeAgent can return null.
   const tunedOps = ((tuning && tuning.ops_tuned) || [])
     .filter((o) => String(o.op || o.short_name || '').trim());
 
-  // The other half of the recall loop: the write below only files wins, so without this the ledger
-  // grows in one direction. OUTSIDE `tuneOk` on purpose — a verdict on a stored record is a per-op
-  // fact, while the PHASE gate is an aggregate with different inputs; one op can reproduce
-  // perfectly inside a run that banks nothing. Before the write, since `write-remote` carries the
-  // ledger across its rewrite (experience_store.py `_carry_remote`).
-  //
-  // Searched ops are excluded — no prior record to be evidence about. So are recalled ops that
-  // never reached the GPU: `recalls` counts ATTEMPTS ON HARDWARE (kb/attest.py), proven by an
-  // installed `artifact`, engagement, or a measurement.
+  // Attest recalled tuned ops (the write below files only wins). Outside `tuneOk`: a per-op verdict
+  // stands even when the phase banks nothing. Before the write, which carries the ledger across its
+  // rewrite (experience_store.py `_carry_remote`). Only recalled ops that reached the GPU (artifact,
+  // engagement or a measurement) count: `recalls` counts attempts on hardware (kb/attest.py).
   const tuningAttestable = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
     String(o.session_id || '').trim() &&
     /recall|kb|knowledge/i.test(String(o.source || o.origin || ''))) : [];
@@ -105,9 +68,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
   }
   if (tuningRecalls.length) {
     const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
-    // One plane per verdict — `both` would count one attempt twice on two ledgers a curation pass
-    // then compares. The plane that ANSWERED is not the one ASKED FOR (the tuning role retries a
-    // remote miss locally), so the op names its own plane; the requested one is the fallback.
+    // One plane per verdict (`both` would count one attempt twice): the plane that answered, as the
+    // op reports it (the role retries a remote miss locally), else the requested one.
     const askedRemote = E2E_KB_PLANE !== 'local';
     const planeOf = (o) => {
       const said = String(o.read_plane || o.recall_plane || o.plane || '').trim().toLowerCase();
@@ -124,16 +86,14 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
         `--language ${shq(String(o.backend || 'tuned').trim())} --gfx ${shq(KB_DIMS.gfx)} ` +
         (KB_DIMS.framework_version ? `--framework-version ${shq(KB_DIMS.framework_version)} ` : '') +
         `--outcome ${outcome} --measured-speedup ${sp} ` +
-        // `claimed_gate`, not `gate`: the orchestrator's downgrade of an unproven accept happens
-        // below this, so what is readable here is the skillset's claim. `banked` sits beside the
-        // outcome rather than gating it — an auditor wants both facts, not one instead of the other.
+        // `claimed_gate`: the skillset's own claim (an unproven accept is downgraded below this);
+        // `banked` is recorded beside the outcome, not as a gate on it.
         `--note ${shq(`e2e tuning recall: engaged=${o.engaged === true}; banked=${!!tuneOk}` +
           `; claimed_gate=${tuning.gate}` +
           `${o.note ? '; ' + String(o.note) : ''}`.slice(0, 300))} ` +
         `--measured-by ${shq('e2e_workflow:tuning:' + BACKEND)} --apply || true`;
     });
-    // The prelude authenticates the service, needed when ANY op attests remotely — the set is
-    // mixed by construction.
+    // The prelude authenticates the service; needed if ANY op attests remotely.
     const anyRemote = tuningRecalls.some((o) => planeOf(o) === 'remote');
     try {
       await safeAgent(
@@ -159,20 +119,16 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
     const tuningBaselineConfig = { flags: curFlags, env: curEnv };
     if (tuning.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + tuning.apply_env;
     if (tuning.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + tuning.apply_flags;
-    // Carry the routing/enabling overlay forward exactly as an accepted head patch does. Without this
-    // the code half of a tuning win is silently dropped at the phase boundary and the data half is left
-    // bound to nothing — the failure the skillset spends its longest section on.
+    // Carry the routing/enabling overlay forward as an accepted head patch does; otherwise the code
+    // half of a tuning win is dropped and its tuned data binds to nothing.
     if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
     curTput = tuning.post_tune_throughput_tok_s;
     log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
       `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
       `${(tuning.ops_tuned || []).length} op(s), engagement proven` +
       `${tuning.apply_overlay ? `, carrying routing overlay ${tuning.apply_overlay}` : ''}). Re-profiling.`);
-    // A missing/unverified deploy bundle does NOT withhold the accept: the gain was measured and proven
-    // live, and the artifacts are already installed in this container, so every in-run number stays
-    // valid. What breaks is DELIVERY — final_launch.sh would reproduce less than the headline. Finalize
-    // re-checks and reports it, but warn here too, because this is the point at which it is still cheap
-    // to fix and the easiest failure in this phase to not notice.
+    // An unverified deploy bundle does not withhold the accept (the in-run numbers stay valid); it
+    // risks DELIVERY (final_launch.sh reproducing less). Finalize re-checks; warn early here too.
     if (tuning.deploy_verified !== true) {
       log(`WARNING: tuning accepted WITHOUT a verified deploy bundle (deploy_bundle=` +
         `${tuning.deploy_bundle || '<none>'}). The in-run measurements stand, but this win may not ` +
@@ -184,27 +140,17 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
       lesson: `tuning skillset (standalone, pre-head): ${tuning.summary || 'accepted'}`,
     });
 
-    // Bank each tuned op as an accepted kernel, so the KB record carries the LEVER and not just the
-    // launch script that happens to reference it. This is deliberately done HERE, deterministically,
-    // rather than left to Finalize's own accepted_kernels: the DeepSeek-V4-Pro 20260823 run banked a
-    // 3.29x tuned a8w8 blockscale table, returned accepted_kernels:[], and wrote a KB record whose
-    // files were [final.patch, launch.sh, report.md] — the lever itself was never recorded, and the
-    // next run at that canonical id recalls a configuration it cannot reproduce. Gated on tuneOk, so
-    // an unproven tuning claim banks nothing, exactly as it folds nothing into curEnv/curFlags.
-    // (`tunedOps` is computed above the branch: the attestation needs it on every path, banking only
-    // on this one.)
+    // Bank each tuned op as an accepted kernel, deterministically here rather than via Finalize's
+    // accepted_kernels, so the KB record carries the lever itself and not just the launch script.
     for (const o of tunedOps) {
       bankAccepted(acceptedKernels, {
         short_name: String(o.op || o.short_name).trim(),
         backend: o.backend || '',
-        // A tuned table is applied through env (the deploy's env var IS the engagement mechanism),
-        // which is already a first-class winner_kind in the store alongside patch/authored.
+        // A tuned table is applied through env, a first-class winner_kind in the store.
         kind: 'env',
         isolated: Number(o.isolated_speedup) || 0,
-        // The phase measured ONE pre/post A/B covering all of its ops, so its delta is attributable
-        // to a single op and only to a single op. With several, the per-op number is left at 0 and
-        // the phase-level figure stands alone in tuning_skillset.tuning_delta_pct — stamping the
-        // whole delta onto each op would double-count it in any consumer that sums the list.
+        // One A/B covers all ops: the delta is per-op only when there is one op; otherwise 0 (the
+        // phase figure is tuning_skillset.tuning_delta_pct) so consumers that sum do not double-count.
         e2e_delta_pct: tunedOps.length === 1 ? (tuning.tuning_delta_pct || 0) : 0,
         apply_env: tuning.apply_env || '',
         apply_flags: tuning.apply_flags || '',
@@ -212,10 +158,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
         engaged: o.engaged === true,
         from_tuning_skillset: true,
         tuning_artifact: o.artifact || '',
-        // Whether this op was SEARCHED here or RECALLED from a prior record. Now that the tuning
-        // track reads the store it also writes, the two are indistinguishable downstream without
-        // this field — and a recall re-banked as a discovery would make one original search look
-        // like N independent confirmations to anyone counting records.
+        // SEARCHED here or RECALLED: a recall re-banked as a discovery would look like an
+        // independent confirmation to anyone counting records.
         tuning_source: String(o.source || o.origin || '').trim() || 'search',
       }, {});
     }
@@ -226,33 +170,20 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
         `${recalled ? ` (${recalled} recalled from the KB rather than searched)` : ''}.`);
     }
 
-    // ---------------------------------------------------------------------------------------
-    // Write each tuned op into the KERNEL lane's experience store, one entry per op.
-    //
-    // Not a duplicate of the e2e KB write at the end of the run: that record is keyed on the whole
-    // deployment and gated on the run's FINAL throughput_speedup, so a tuning win a later phase
-    // erases — or a run that ends below its own baseline for unrelated reasons — takes the tuned
-    // table down with it, and the next run at the same identity searches it again from scratch. The
-    // kernel store has no such coupling: it ranks on ISOLATED per-op speedup and is addressed per
-    // (kernel, language, gfx), which is the granularity at which a tuned table is reusable.
-    //
-    // Gated on tuneOk, so nothing unproven is filed. Per-op: `isolated_speedup > 1.0` and `engaged`,
-    // because an op the phase could not prove live is not knowledge about that op whatever the
-    // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
+    // ---- Write each tuned op into the KERNEL lane's experience store, one entry per op ----
+    // Unlike the end-of-run e2e record (whole deployment, gated on final throughput), this ranks on
+    // isolated per-op speedup per (kernel, language, gfx), so the tuned table survives the run's
+    // verdict. Filed only if tuneOk, and per op only if `isolated_speedup > 1.0` and `engaged`.
+    // Best-effort: a failure loses a record, never a measurement.
     const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
       Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
     if (kernelKbOps.length) {
       const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
-      // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
-      // so it degrades to the plain directory write rather than erroring. Same selection the kernel
-      // lane makes at its own write site.
+      // `both` mirrors to the shared service; without a store dir it degrades to the plain write
+      // (as at the kernel lane's own write site).
       const remoteOn = E2E_KB_PLANE !== 'local' && !!E2E_KB_STORE_DIR;
-      // `--precision` and the two `--serving-*` flags are RECORDED, not keyed — they land in
-      // `value.upstream` and never move the entry's address. A tuned table's destination filename
-      // encodes its dtype (`...dtype=fp8_w8a8.json`), so a table measured under one precision offered
-      // to a run on another installs under a name that runtime never looks up: wasted, not wrong. What
-      // it does corrupt is RANKING, by putting an unusable table above a usable one on the same page.
-      // Stating precision here is what lets the reader's `--precision` filter drop it first.
+      // `--precision` and `--serving-*` are recorded in `value.upstream`, not keyed; precision lets
+      // the reader's `--precision` filter drop another dtype's table before it skews the ranking.
       const cmds = kernelKbOps.map((o) => {
         const op = String(o.op || o.short_name).trim();
         return `python3 ${shq(storeScript)} ${remoteOn
@@ -340,15 +271,12 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
       tuning_skillset: tuning,
     });
 
-    // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
-    // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
+    // Tuning changed which kernels dominate: re-profile + re-strategize, as after ConfigSweep.
     if (!searchClosed('post-tuning re-profile and re-strategize')) {
       profile = await safeAgent(
         roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-          // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
-          // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
-          // for the wrong landscape.
+          // curOverlay, not '': without a banked routing overlay the tuned artifact binds to nothing.
           OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
@@ -366,8 +294,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
       if (retune) await ensureFlydslGate();
     }
   } else if (tuned) {
-    // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
-    // every downstream A/B, which is the exact failure the skillset exists to prevent.
+    // Claimed accepted but failed a hard bar: not banked (an unproven artifact poisons later A/Bs).
     log(`Tuning skillset claimed ACCEPTED but did not clear the bar ` +
       `(engagement_verified=${tuning.engagement_verified}, ab_complete=${tuning.ab_complete}, ` +
       `correctness=${tuning.correctness_gate}, pre=${tuning.pre_tune_throughput_tok_s}, ` +
@@ -384,14 +311,10 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) 
 } else if (want('tune') && !TUNING_SKILLSET_ENABLED) {
   log('Tuning skillset DISABLED (tuning_skillset=false) — skipping the phase entirely.');
 }
-// Report inputs for the tuning phase. Empty object when the phase is off/absent, so the Report prompt is
-// byte-identical to a build without this feature.
+// Report inputs for the tuning phase; {} when off/absent, so the Report prompt is unchanged.
 const TUNING_REPORT_INPUTS = (TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESULT: tuning } : {};
-// Finalize inputs. A tuned DATA artifact cannot ride the PYTHONPATH overlay, so the ONLY way it reaches
-// production is for Finalize to fold this bundle into EVAL_DIR/final/ (concatenate its diff into
-// final_patch.diff, copy its files, and invoke its deploy.sh from final_launch.sh before the server
-// starts). Passed only when the tuning phase actually banked a win, so an unaccepted/absent tuning
-// leaves the Finalize prompt byte-identical.
+// Finalize inputs: a tuned DATA artifact cannot ride the PYTHONPATH overlay, so Finalize folds this
+// bundle into EVAL_DIR/final/ (diff, files, deploy.sh before server start). {} unless tuning banked.
 const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
   ? {
     TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
@@ -403,15 +326,10 @@ const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate
   }
   : {};
 
-// The live-tree carve-out, handed to EVERY integrate leg (see roles/e2e_integrator.md, "never mutate
-// site-packages"). That rule asserts `git status --porcelain` is EMPTY in the installed tree before and
-// after every gate leg — but an accepted tuning deploy legitimately writes into that tree, because a
-// config table only takes effect from inside the package that reads it. Without this list the head track
-// sees a dirty tree and either fails the assertion or "restores" it, silently deleting the banked tuning
-// out from under the reference leg of every later A/B. The rule's rationale does not apply to these
-// paths: they are recorded, reproducible from the deploy bundle, and INTENDED to be in both legs, exactly
-// like accepted env. A function, not a const, so it reflects a downgrade-to-no_win and so a resumed run
-// picks the carve-out up from carried state. Returns {} otherwise => prompt byte-identical without tuning.
+// The live-tree carve-out for EVERY integrate leg (roles/e2e_integrator.md, "never mutate
+// site-packages"): an accepted tuning deploy legitimately writes into the installed tree, so these
+// paths are exempt from the clean-tree check (otherwise a leg "restores" them and drops the tuning).
+// A function, so it reflects a downgrade to no_win and a resumed run's carried state; {} otherwise.
 function tuningIntegrateInputs() {
   if (!(TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')) return {};
   return {

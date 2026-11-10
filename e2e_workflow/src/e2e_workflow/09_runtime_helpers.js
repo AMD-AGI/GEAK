@@ -1,7 +1,7 @@
 // Agent calls, extraction, integration and workflow deadlines.
-function agentBounded(rawPrompt, opts, onHung) {
+function agentBounded(rawPrompt, opts, onHung, timeoutFor = agentTimeoutFor) {
   const prompt = withProcessSafety(rawPrompt);
-  const timeoutMs = agentTimeoutFor();
+  const timeoutMs = timeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const run = agent(prompt, opts);
@@ -18,18 +18,17 @@ function agentBounded(rawPrompt, opts, onHung) {
   ]);
 }
 
-// Attempts the hung-agent guard gave up on inside the reserve, by label. Each is still running, and
-// for an integrator its eventual return is the verdict of the A/B it was measuring
-// (adoptAbandonedVerdict).
+// Attempts the hung-agent guard abandoned inside the reserve, by label. Each is still running; an
+// integrator's eventual return is its A/B verdict (adoptAbandonedVerdict).
 const ABANDONED_RUNS = new Map();
 
-async function safeAgent(prompt, opts, tries = 3) {
+async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       let hung = null;
-      const r = await agentBounded(prompt, opts, (run) => { hung = run; });
+      const r = await agentBounded(prompt, opts, (run) => { hung = run; }, timeoutFor);
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
@@ -50,13 +49,10 @@ async function safeAgent(prompt, opts, tries = 3) {
   return null;
 }
 
-// --- FlyDSL provisioning gate -------------------------------------------------
-// Design intent (roles/system_architect.md §0a): the MOMENT strategize routes a flydsl backend onto
-// any head/kernel candidate, FlyDSL must be provisioned via the ensure_flydsl expert skill BEFORE any
-// consumer can select it. We enforce it in the ORCHESTRATOR — not by trusting the architect LLM to have
-// run it — so "decide to use flydsl" and "ensure_flydsl" are one inseparable step. The detect->reuse-or-build
-// decision lives ENTIRELY inside ensure_flydsl.sh (its own version gate: import flydsl + kernels.moe_gemm_2stage
-// AND __version__ >= FLYDSL_MIN_VERSION, default 0.2.2). is_flydsl_available() is NOT used to decide anything.
+// --- FlyDSL provisioning gate ----
+// Once strategize routes a flydsl backend onto any candidate, the orchestrator (not the architect
+// LLM) runs the ensure_flydsl skill before any consumer can select it (roles/system_architect.md
+// §0a). Reuse-or-build is decided only by ensure_flydsl.sh's own version gate.
 let flydslProvisioned = false;   // guard so the two call sites (strategize / re-strategize) provision at most once
 const _wantsFlydsl = (c) => ((c && c.candidate_backends) || []).some((b) => String(b).toLowerCase() === 'flydsl');
 const flydslRouted = (...queues) => queues.some((q) => (q || []).some(_wantsFlydsl));
@@ -97,9 +93,8 @@ const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
 // parse_profile.short_name truncates display names at 60 chars; a declared name that hit the limit
 // is our own doing, so a prefix match at it is accepted rather than read as a mismatch.
 const SHORT_NAME_LIMIT = 60;
-// Balanced groups are removed innermost-first until the symbol stops changing. One greedy pass
-// spans from the FIRST opener to the LAST closer, so `k<a>(t<b>)` loses the '(' that marks the end
-// of the name, and a nested `k<pair<a,b>>` leaves the leftover delimiter behind.
+// Removes balanced groups innermost-first until the symbol stops changing (a single greedy pass
+// would span `k<a>(t<b>)` from the first opener to the last closer).
 const stripBalanced = (symbol, opener, closer) => {
   const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const rx = new RegExp(`${esc(opener)}[^${esc(opener)}${esc(closer)}]*${esc(closer)}`, 'g');
@@ -110,42 +105,27 @@ const stripBalanced = (symbol, opener, closer) => {
   }
   return text;
 };
-// Must stay identical to canonical_kernel_name in kernel_selection.py -- the JS gate and the Python
-// verdict compare the same two symbols, so any drift lets a kernel pass one side and fail the other.
-// Parentheses are stripped as balanced groups rather than by cutting at the first '(': ROCm spells
-// the unnamed namespace `(anonymous namespace)`, which puts a parenthesis BEFORE the kernel, so
-// cutting there collapsed every such symbol to the return type `void`, and two unrelated kernels
-// that both collapsed to `void` then certified each other. Brackets go the same way, which subsumes
-// the `[clone .1]` rule: this pipeline appends its own annotations to a kernel name
-// (`_fwd_grouped_kernel_stage1 [sliding_attention]`, `main_kernel[prefill]`), and rocprof spells
-// memory ops `Memcpy DtoD (Device -> Device)`. The return type is then dropped by name and the FIRST
-// identifier taken, as parse_profile.short_name does; taking the last whitespace token also drops
-// `void`, but on any of those annotated spellings it answers with the annotation.
+// Must stay identical to canonical_kernel_name in kernel_selection.py (the JS gate and the Python
+// verdict compare the same symbols). Brackets, templates and parentheses are stripped as balanced
+// groups, not cut at the first '(' (ROCm's `(anonymous namespace)` precedes the kernel name, and
+// annotations like `[clone .1]`, `[prefill]` or `(Device -> Device)` follow it); then the return type
+// is dropped and the FIRST identifier taken, as parse_profile.short_name does.
 function canonicalDeviceKernel(s) {
   const stripped = stripBalanced(stripBalanced(
     stripBalanced(String(s || ''), '[', ']'), '<', '>'), '(', ')');
-  // Whatever opener is left never closes, so the symbol was cut off inside it -- profile artifacts
-  // store kernel names elided mid-template. The name is what precedes that opener; reading on
-  // instead lifts a fragment out of the template arguments and states it with the same confidence
-  // as a real name, which then matches the wrong kernel rather than refusing.
-  // Removing a group also leaves a gap where it stood, and an unnamed namespace sits mid-
-  // qualification: `at::native::(anonymous namespace)::CatArrayBatchedCopy` becomes
-  // `at::native:: ::CatArray...`, where the identifier probe stops at the space.
+  // A leftover opener never closes (the name was elided mid-template), so the name is what precedes
+  // it. Gaps left by removed groups are closed around `::` (`at::native:: ::CatArray...`).
   const cut = stripped.split(/[<([]/)[0].trim().replace(/\s*::\s*/g, '::');
   const match = /^[\w:]+/.exec(cut.replace(/^void\s+/, ''));
   return match ? match[0].split('::').pop().toLowerCase().replace(/[^a-z0-9_]+/g, '') : '';
 }
-// A name that hit the display limit ends mid-token, so no word boundary can follow it. Tested both
-// ways because either side may be the shortened one: heads carry a short_name while traces carry
-// the full symbol, and which is which is not fixed.
+// A name at the display limit ends mid-token (no word boundary follows). Called both ways: either
+// side may be the shortened one (heads carry short_name, traces the full symbol).
 const truncatedPrefix = (needle, haystack) =>
   needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
-// [arguments, closed] for the symbol's first `<...>`. Reading only what follows the `<` keeps this
-// independent of the return type and namespace, which one side routinely spells and the other does
-// not. `closed` is false when the symbol was cut off inside the template -- profile artifacts elide
-// long names, and only the visible part of an elided argument list can be held against anything.
-// Separators become `_` rather than vanishing, so `<128, 4, ...>` cannot read as a prefix of
-// `<128, 48, ...>`.
+// [arguments, closed] for the symbol's first `<...>`, independent of return type and namespace.
+// `closed` is false when the name was elided inside the template. Separators fold to `_`, so
+// `<128, 4, ...>` is not a prefix of `<128, 48, ...>`.
 function templateArguments(value) {
   const text = String(value || ''), start = text.indexOf('<');
   const fold = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_');
@@ -161,10 +141,8 @@ function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
   if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
-  // The base token deliberately drops template arguments so a bare declared name can match its
-  // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
-  // it certifies the wrong kernel: one capture here held 20 distinct kernels named
-  // at::native::vectorized_elementwise_kernel, separated only by their functor.
+  // The base token drops template arguments so a bare name matches its decorated spelling; when
+  // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
   if (!xa || !ya) return true;
   if (xc && yc) return xa === ya;
@@ -181,10 +159,8 @@ function requiredDeviceKernel(h) {
 }
 const candidateSpec = (c) =>
   String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
-// A declared depth is a STRUCTURAL claim about the call chain. It orders candidates before any
-// runtime evidence exists, so a value that is absent or not a finite number is unusable: `Number()`
-// turns it into NaN, every comparison against it is silently false, and a genuinely deeper candidate
-// stops being able to outrank anything. Refuse the candidate instead of ranking it as depth 0.
+// A declared depth orders candidates before any runtime evidence; a missing or non-finite one
+// returns null so the candidate is refused (NaN would silently break every comparison).
 const candidateDepth = (c) => {
   const depth = Number(c && c.depth);
   return Number.isFinite(depth) ? depth : null;
@@ -216,13 +192,22 @@ function selectionCandidatesForHead(h, ext) {
 }
 function prepareHeadSelection(h) {
   if (!h || typeof h !== 'object') return h;
+  // A completed UT already verified its callable; do not replace it with an
+  // untested nomination when the optimization queue is admitted.
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON && h.prepared_ut) return { ...h };
   const out = { ...h };
   const required = requiredDeviceKernel(out);
   if (required && !out.device_kernel) out.device_kernel = required;
   // live_call_seam and malformed target_callable values are prose, never machine targets.
   if (!validCallableSpec(out.target_callable)) out.target_callable = '';
   const fused = out.is_fused_kernel === true || out.op_kind === 'moe';
-  const deployable = selectionCandidatesForHead(out).filter((candidate) => {
+  const jointPhase = out.joint_ut && (out.joint_ut.phases || []).find(p =>
+    (p.required_device_kernels || []).some(k => kernelIdentitiesMatch(k, required)));
+  const deployable = selectionCandidatesForHead(jointPhase ? {
+    ...out, seam_candidates: jointPhase.seam_candidates || out.seam_candidates,
+  } : out).filter((candidate) => {
+    if (jointPhase && !(jointPhase.required_device_kernels || []).every(k =>
+        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v)))) return false;
     const role = String(candidate.role || '').toLowerCase();
     return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
   });
@@ -233,7 +218,78 @@ function prepareHeadSelection(h) {
     : 'extractor_must_discover_live_launcher';
   return out;
 }
-function kernelSelectionVerified(h, ext) {
+function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
+  if (ext && ext.selection_evidence_error) return { ok: false, why: ext.selection_evidence_error };
+  if (h && h.dispatch_ut) {
+    if (h.joint_ut) return { ok: false, why: 'choose joint_ut or dispatch_ut, not both' };
+    const phases = h.dispatch_ut.phases, rows = ext && ext.phase_selection_validations;
+    if (!Array.isArray(phases) || !phases.length || !Array.isArray(rows) || rows.length !== phases.length)
+      return { ok: false, why: 'dispatch UT requires one selection verdict per declared branch' };
+    const seen = new Set();
+    for (const spec of phases) {
+      if (!spec.regime || !spec.device_kernel || !Array.isArray(spec.seam_candidates) ||
+          !spec.seam_candidates.length || seen.has(spec.regime))
+        return { ok: false, why: 'dispatch branches must have distinct nonempty regime labels' };
+      seen.add(spec.regime);
+      const matches = rows.filter(r => r.regime === spec.regime);
+      if (matches.length !== 1 || matches[0].target_callable !== ext.target_callable)
+        return { ok: false, why: `${spec.regime}: dispatch branch must verify the same whole-op callable` };
+      const check = kernelSelectionVerified({ ...h, dispatch_ut: undefined,
+        is_fused_kernel: true, device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates }, matches[0]);
+      if (!check.ok) return { ok: false, why: `${spec.regime}: ${check.why}` };
+    }
+    if ([requiredDeviceKernel(h), ...(h.selected_device_kernels || [])].some(k =>
+        !phases.some(p => kernelIdentitiesMatch(k, p.device_kernel))))
+      return { ok: false, why: 'dispatch branches omit a selected device kernel' };
+    return { ok: true, why: 'verified whole-op dispatch branches independently' };
+  }
+  if (h && h.joint_ut) {
+    const phases = h.joint_ut.phases;
+    const results = ext && ext.phase_selection_validations;
+    if (!Array.isArray(phases) || !phases.length || !Array.isArray(results))
+      return { ok: false, why: 'joint UT requires declared phases and per-phase selection verdicts' };
+    if (!phases.some(p => (p.required_device_kernels || []).some(k =>
+        kernelIdentitiesMatch(k, requiredDeviceKernel(h)))))
+      return { ok: false, why: 'joint UT does not contain its profiled anchor kernel' };
+    const regimes = new Set();
+    for (const spec of phases) {
+      const regime = String(spec.regime || '').trim();
+      if (!regime || regimes.has(regime))
+        return { ok: false, why: 'joint UT phases must have distinct nonempty regime labels' };
+      regimes.add(regime);
+      const requiredMembers = spec.required_device_kernels;
+      if (!Array.isArray(requiredMembers) || requiredMembers.length < 2 ||
+          !requiredMembers.every(k => typeof k === 'string' && k.trim()) ||
+          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
+          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
+        return { ok: false, why: `${regime}: joint phase must declare its anchor and companion kernels` };
+      const matches = results.filter(r => r.regime === regime);
+      if (matches.length !== 1)
+        return { ok: false, why: `${regime}: expected one joint selection verdict` };
+      const result = matches[0], verdict = result.selection_validation;
+      if (!verdict || verdict.selection_scope !== 'joint_chain')
+        return { ok: false, why: `${regime}: a leaf verdict cannot certify a joint chain` };
+      const reported = verdict.required_device_kernels || [];
+      if (reported.length !== requiredMembers.length ||
+          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
+        return { ok: false, why: `${regime}: joint verdict has the wrong member kernel set` };
+      if (requiredMembers.some(k => !(verdict.chain_members || []).some(m =>
+          kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
+        return { ok: false, why: `${regime}: missing positive member-kernel execution evidence` };
+      if (!Array.isArray(verdict.joint_call_coverage) || !verdict.joint_call_coverage.length ||
+          verdict.joint_call_coverage.some(c => !Array.isArray(c.missing_members) || c.missing_members.length))
+        return { ok: false, why: `${regime}: incomplete joint invocation coverage` };
+      const check = kernelSelectionVerified({ ...h, joint_ut: undefined,
+        device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates || result.seam_candidates },
+        result, requiredMembers);
+      if (!check.ok) return { ok: false, why: `${regime}: ${check.why}` };
+    }
+    if (results.length !== phases.length)
+      return { ok: false, why: 'joint UT returned undeclared or duplicate phase results' };
+    if (!results.some(r => r.target_callable === ext.target_callable))
+      return { ok: false, why: 'joint UT primary callable is not one of its verified phase entries' };
+    return { ok: true, why: `verified complete joint chains for ${Array.from(regimes).join(', ')}` };
+  }
   const required = requiredDeviceKernel(h);
   if (!required) return { ok: true, why: 'not a profiled GPU-head extraction' };
   const target = String((ext && ext.target_callable) || '').trim();
@@ -242,6 +298,8 @@ function kernelSelectionVerified(h, ext) {
   const verdict = ext && ext.selection_validation;
   if (!verdict || verdict.contract !== 'kernel_selection')
     return { ok: false, why: 'kernel_selection.py verdict is missing' };
+  if (verdict.selection_scope === 'joint_chain' && !jointScopeMembers)
+    return { ok: false, why: 'joint-chain selection requires a declared joint UT boundary' };
   if (verdict.ok !== true)
     return { ok: false,
       why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
@@ -272,11 +330,8 @@ function kernelSelectionVerified(h, ext) {
       why: fused
         ? `fused head must select the whole-operation op_seam, got '${selectedRole || 'unknown'}'`
         : `selected target role '${selectedRole || 'unknown'}' is not a deployable inner/op seam` };
-  // "Deepest" is settled by the profiler's OBSERVED host-span nesting (kernel_selection.py computes
-  // deeper_live_candidates from it), not by the declared `depth`. The declared integer is a claim by
-  // the same agent whose choice is under review, and an appended candidate carrying a large depth
-  // would otherwise outrank a genuinely deeper one. The structural claim is still checked, but only
-  // as an ADDITIONAL way to fail: it can never buy a pass that the observed nesting did not grant.
+  // "Deepest" is settled by the profiler's OBSERVED nesting (kernel_selection.py's
+  // deeper_live_candidates), not the agent-declared `depth`, which can only add a failure.
   const observedDeeper = (verdict.deeper_live_candidates || [])
     .map((value) => String(value || '').trim()).filter(Boolean);
   if (observedDeeper.length)
@@ -295,15 +350,10 @@ function kernelSelectionVerified(h, ext) {
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
 }
 
-// The Architect restates each head and has emitted the row's classification (library_gemm,
-// triton_kernel) as entity_kind. The profiled row is the authority: a head whose device_kernel
-// matches a profiled gpu_kernel row takes that row's entity_kind.
-// Every row kind is evidence, not only gpu_kernel rows: canonicalization drops the namespace, so
-// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as parse_profile.py guards.
-// Exact names decide first; a canonical match that reaches rows of different kinds is ambiguous.
-// A row is identified by its most specific name only: a display short_name is shared across
-// distinct kernels (every vectorized_elementwise_kernel instantiation), so it must not stand in for
-// a concrete symbol the row already carries.
+// The profiled row, not the Architect's restated entity_kind, is the authority: a head adopts
+// gpu_kernel only if every row its device_kernel matches is a named gpu_kernel row (exact names
+// first; a canonical match folds `aten::mul` with `mul`). Rows are identified by their most
+// specific name, since one short_name is shared across instantiations.
 function adoptProfiledEntityKind(head, rows) {
   if (!head || head.entity_kind === 'gpu_kernel' || !head.device_kernel) return false;
   const want = String(head.device_kernel).trim();
@@ -315,6 +365,23 @@ function adoptProfiledEntityKind(head, rows) {
   if (!matched.length || matched.some((r) => r.entity_kind !== 'gpu_kernel' || !r.device_kernel)) return false;
   head.entity_kind = 'gpu_kernel';
   return true;
+}
+
+// A selection verdict may arrive as `selection_validation_ref` (path + SHA-256). This script cannot
+// read or hash files (see RUNTIME SANDBOX CONTRACT), so the extractor's preflight
+// (scripts/kernel_extraction_delivery.mjs::hydrateExtractionVerdicts) resolves it. Backstop: a ref
+// still unresolved here becomes an explicit evidence error, never an inline PASS.
+function guardUnhydratedVerdicts(ext) {
+  if (!ext || typeof ext !== 'object') return ext;
+  // A hydration that ran and failed already gave the more specific diagnosis, so it wins.
+  if (ext.selection_evidence_error) return ext;
+  const phases = Array.isArray(ext.phase_selection_validations) ? ext.phase_selection_validations : [];
+  const unresolved = (row) => !!(row && row.selection_validation_ref && !row.selection_validation);
+  if (!unresolved(ext) && !phases.some(unresolved)) return ext;
+  return { ...ext, selection_evidence_error:
+    'selection_validation_ref arrived unresolved: the workflow sandbox cannot read or hash files. ' +
+    'Run scripts/kernel_extraction_delivery.mjs as the extraction preflight so the verdict is ' +
+    'hydrated into selection_validation before it is returned.' };
 }
 
 const PRE_FLAGGED_HEADS = [];
@@ -339,9 +406,8 @@ function admitHeads(queue, stage) {
         reason: `entity_kind=${head.entity_kind || 'missing'}; gpu_kernel required` });
       continue;
     }
-    // A gpu_kernel head with NO device identity at all makes requiredDeviceKernel return '', and
-    // kernelSelectionVerified then passes it as "not a profiled GPU-head extraction". That vacuous
-    // pass is the whole contract switched off for this head, so refuse it at admission instead.
+    // A gpu_kernel head with no device identity would pass kernelSelectionVerified vacuously
+    // ("not a profiled GPU-head extraction"), so refuse it at admission.
     if (!requiredDeviceKernel(head)) {
       log(`  ⚠️ FLAG ${label}: entity_kind=gpu_kernel but no device_kernel/short_name/name; ` +
         `there is no profiled symbol to verify a seam against (${stage}).`);
@@ -368,17 +434,56 @@ const hasFrozenBaseline = (ext) =>
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
 
-// Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
-// transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
-// task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
-// to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
-// existing extract-failure path (smoke/unittest_smoke -> 'fail' + a reason) so the head is flagged
-// (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
-// are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
-// site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
+// Re-asserts in pure JS what the shipped envelope must still prove. agentx_kernel_preparation.mjs
+// gated the on-disk RETURN.json while packing, but its output reaches us through an agent (see
+// RUNTIME SANDBOX CONTRACT), so a truncated or hand-built reply must not pass. Checked at intake
+// (readAgentXPreparation) and at dispatch (reusePreparedUT); on-disk hashes stay preparation's job.
+function preparedUtDefect(kernel, result, phase) {
+  if (!result || typeof result !== 'object')
+    return 'prepared UT carries no validated result; re-pack the delivery with --emit-prepared';
+  if (typeof result.task_dir !== 'string' || !result.task_dir.trim())
+    return 'prepared UT result names no task_dir';
+  if (result.editable === false) return 'prepared UT task is not editable';
+  // extract reports unittest_smoke, extract_op reports smoke -- same split checkPreparedUT uses.
+  const status = phase === 'extract' ? result.unittest_smoke : result.smoke;
+  if (status !== 'pass') return `prepared UT did not pass (${phase}: ${status ?? 'no status'})`;
+  if (result.baseline_frozen !== true)
+    return 'prepared UT has no frozen baseline, so there is no speedup denominator';
+  if (!kernel || typeof kernel.pct_gpu_time !== 'number' ||
+      !Number.isFinite(kernel.pct_gpu_time) || kernel.pct_gpu_time < 0 || kernel.pct_gpu_time > 100)
+    return 'prepared candidate has no attributed GPU-time share in [0, 100]';
+  // `attention` and `attn` are one kind (agentx_kernel_preparation.mjs::opKind); a declaration that
+  // disagrees with its own result is a defect, not a routing choice.
+  const canonical = (v) => v === 'attention' ? 'attn' : v;
+  const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
+  if (requested && returned && requested !== returned)
+    return `op_kind differs between declaration and result: ${requested} / ${returned}`;
+  return '';
+}
+
+// Hand an optimization lane the UT preparation validated, after re-asserting the invariants above;
+// no prepared_ut.result fails closed. Known limit: a task dir mutated after packing is not detected.
+function reusePreparedUT(kernel) {
+  const fail = (why) => ({ smoke: 'fail', unittest_smoke: 'fail',
+    smoke_detail: `prepared UT is no longer valid: ${why}` });
+  const ref = kernel && kernel.prepared_ut;
+  if (!ref) return fail('missing prepared UT; complete the extraction stage before optimization');
+  const defect = preparedUtDefect(kernel, ref.result, ref.phase);
+  if (defect) return fail(defect);
+  const canonical = (v) => v === 'attention' ? 'attn' : v;
+  return { ...ref.result, op_kind: canonical(ref.result.op_kind) || canonical(kernel.op_kind),
+    smoke: 'pass', unittest_smoke: 'pass' };
+}
+
+// AgentX reuses its prepared UT. Otherwise run kernel_extractor and, while smoke passes but the
+// baseline is not frozen or the kernel selection is unverified, re-invoke it with a corrective (up to
+// BASELINE_EXTRACT_RETRIES); if still incomplete, return an extract failure so the head is flagged
+// or skipped, never timed against its own scaffold. Failures stay local to the caller; GPU work
+// uses the skill's per-device locks.
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   const head = (inputs && inputs.KERNEL) || {};
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON) return reusePreparedUT(head);
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
     `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
@@ -390,6 +495,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     CAPTURE_CASE_BYTE_LIMIT,
     CAPTURE_PERSIST_POLICY,
   }), opts);
+  ext = guardUnhydratedVerdicts(ext);
   let tries = 0;
   const attemptedTargets = [];
   const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
@@ -420,7 +526,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       `(${selection.ok ? 'kernel selected' : selection.why}; ` +
       `${needBaseline ? 'baseline missing (baseline_overlay/ + meta.candidate_bind)' : 'baseline frozen'}). ` +
       `RE-EXTRACTING (retry ${tries}/${BASELINE_EXTRACT_RETRIES}).`);
-    // Best-effort reclaim before the agent retries (issue #429 storage amplification).
+    // Best-effort capture reclaim before the agent retries.
     if (ext && ext.task_dir) {
       try {
         const { execFileSync } = require('child_process');
@@ -446,6 +552,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
       }),
       opts);
+    ext = guardUnhydratedVerdicts(ext);
   }
   const finalSelection = kernelSelectionVerified(head, ext);
   if (smokeOk(ext) && !finalSelection.ok) {
@@ -463,6 +570,14 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
+  // source_delivery_required is set only by the AgentX preparation reader, whose mode returned at
+  // reusePreparedUT (verifySourceDelivery ran at packing). Reaching here means source evidence is
+  // required on a path that cannot hash kernel_src (no filesystem), so fail closed.
+  if (smokeOk(ext) && head.source_delivery_required === true) {
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail', source_delivery_failed: true,
+      smoke_detail: 'source delivery incomplete: this head requires source evidence, but it was ' +
+        'extracted outside the AgentX preparation stage, which is what verifies it' };
+  }
   return ext;
 }
 
@@ -470,31 +585,21 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
 // verdict. gate:'incomplete' or ab_complete:false means a leg is still missing.
 const abDone = (integ) => !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
 
-// An e2e delta is a RATIO. These are the two numbers it is a ratio of, taken
-// off the same A/B that produced it: ref_med is where the workload stood
-// before this win, cand_med is where it stood after. Published together, a
-// consumer can restate the win in points of one fixed baseline. Published
-// alone, the only thing a consumer can do is add percentages that were each
-// measured against a different denominator, and those do not compose.
+// Publish an e2e delta with its two medians from the same A/B (ref_med before the win, cand_med
+// after), so consumers can restate wins against one fixed baseline; bare percentages don't compose.
 const e2eFrom = (integ) => ({
   e2e_delta_pct: integ.e2e_delta_pct,
   base_tput: integ.ref_med,
   new_tput: integ.cand_med,
 });
-// The KERNEL_RESULT that a given integrate A/B actually gated. Both patch spellings are read at the
-// call sites because the two tracks fill different ones (head=code_patch, milestone=final_patch) and
-// tryCorrectiveReauthor deliberately sets BOTH to the corrected patch.
+// The KERNEL_RESULT a given integrate A/B gated. Call sites read both patch spellings
+// (head=code_patch, milestone=final_patch; tryCorrectiveReauthor sets both).
 const krOf = (inputs) => (inputs && inputs.KERNEL_RESULT) || {};
 
-// Bank an accepted win, carrying the fields a KB reader needs to REPLAY it on another box.
-// e2e_store.py:_accepted_kernels starts from dict(item) so anything here survives verbatim into the
-// record — but it LOOKS UP `name`, `language`, `isolated_speedup` and `patch`, while this workflow
-// only ever pushed `short_name`, `backend` and `isolated`. Every accepted kernel was therefore
-// matched by nothing and silently dropped on the way into the store, which is why both e2e records
-// already in the remote KB were written with accepted_kernels:[] and no patch at all. The old
-// spellings stay (the report, the resume state and run_e2e.py all read them); the aliases are added
-// alongside. `e.patch` wins over the KERNEL_RESULT's because a corrective re-author supplies the
-// FIXED patch and the gated one is the broken kernel.
+// Bank an accepted win with the fields a KB reader needs to replay it elsewhere. e2e_store.py's
+// _accepted_kernels keeps every field but looks up `name`, `language`, `isolated_speedup` and
+// `patch`, so those aliases sit beside short_name/backend/isolated (read by the report, resume state
+// and run_e2e.py). `e.patch` wins: a corrective re-author supplies the fixed patch.
 const bankAccepted = (list, e, kr) => {
   const k = kr || {};
   list.push({
@@ -512,16 +617,16 @@ const bankAccepted = (list, e, kr) => {
   });
 };
 
-// An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
-// verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
-// can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
-// Finalize/Report/Validate keep the rest.
+// An integrator abandoned at the reserve boundary is still measuring; with no FINISH retry allowed
+// inside the reserve, its late return is this A/B's only verdict. Wait for it through at most the
+// first LATE_VERDICT_RESERVE_FRAC of the reserve, never into AGENTX_FINAL_PHASE_MS.
 const LATE_VERDICT_RESERVE_FRAC = 0.25;
 async function adoptAbandonedVerdict(integ, label) {
   const run = ABANDONED_RUNS.get(label);
   ABANDONED_RUNS.delete(label);
   if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
-  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  const waitMs = remainingMs() - Math.max(Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC)),
+    AGENTX_FINAL_PHASE_MS);
   if (!(waitMs > 0)) return integ;
   log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
     'for its own verdict instead of starting a FINISH retry.');
@@ -540,12 +645,77 @@ async function adoptAbandonedVerdict(integ, label) {
   return late;
 }
 
-// Retry an incomplete A/B within the remaining budget. Acceptance requires both
-// legs; a missing leg at the deadline remains incomplete.
+const SPEEDUP_REVIEW_RESULTS = new Map();
+async function reviewSpeedup(integ, inputs, label, phaseName) {
+  const kr = inputs.KERNEL_RESULT || {};
+  const pct = kr.pct_gpu_time || 0, isolated = kr.verified_isolated_speedup || 0;
+  if (!abDone(integ) || !['accepted', 'stack'].includes(integ.gate) || integ.output_parity === 'fail'
+      || !speedupNeedsReview(pct, isolated, integ) || confirmedSpeedup(integ)) return integ;
+  if (integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
+  const original = integ.measurement_evidence || {};
+  const estimate = speedupEstimate(pct, isolated, integ);
+  // Cache by measurement AND candidate/reference inputs. Returning the same cached A/B cannot
+  // restart a review, including when Finalize revisits a pending integration.
+  const key = JSON.stringify([original, kr, inputs.CURRENT_OVERLAY, inputs.CURRENT_FLAGS,
+    inputs.CURRENT_ENV, inputs.WORKLOAD, integ.ref_med, integ.cand_med]);
+  if (SPEEDUP_REVIEW_RESULTS.has(key)) return SPEEDUP_REVIEW_RESULTS.get(key);
+  const pending = { ...integ, speedup_review: { status: 'inconclusive', original_measurement: original, estimate },
+    reason: 'speedup_review_inconclusive: independent A/B confirmation unavailable' };
+  SPEEDUP_REVIEW_RESULTS.set(key, pending);
+  log(`  ${label}: speedup review (+${integ.e2e_delta_pct}% vs estimate +${estimate.estimate_pct.toFixed(2)}%, ` +
+    `${estimate.pct_gpu_time}% GPU, ${estimate.source}); one independent A/B, no kernel rewrite.`);
+  if (!['measurement_id', 'candidate_digest', 'reference_digest', 'workload_digest', 'ref_summary', 'cand_summary']
+      .every((field) => typeof original[field] === 'string' && original[field].length > 0)) {
+    pending.reason = 'speedup_review_inconclusive: original A/B provenance missing; cannot bind a confirmation';
+    return pending;
+  }
+  if (searchClosed(`${label}: speedup review`)) return pending;
+  const reviewInputs = { ...inputs, FORCE_FRESH_AB: true, RESUME_AB: false, REUSE_REF: false,
+    REPLICAS: Math.max(2, Number(inputs.REPLICAS) || 1),
+    CAND_OVERLAY_DIR: integ.accepted_overlay || '',
+    SPEEDUP_REVIEW: { original_measurement: original, estimate },
+  };
+  delete reviewInputs.SHARED_REF_MED;
+  // A confirmation abandoned at the boundary confirms nothing.
+  if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {
+    pending.reason = 'speedup_review_inconclusive: deferred, the confirmation A/B cannot finish before the final reserve';
+    return pending;
+  }
+  const fresh = await safeAgent(roleAgent('e2e_integrator', 'integrate',
+    'Confirm this surprising speedup with ONE independent A/B. Follow FORCE_FRESH_AB in your role: ' +
+    'use separate ref/cand artifact directories, preserve the exact candidate and current reference, ' +
+    'measure at least two replicas per leg and repeat the configured correctness and engagement gates. ' +
+    'Do not reuse old benchmark legs or rewrite the kernel. Amdahl is an estimate, never a correctness verdict. ' +
+    'Return the fresh measurements and their provenance; if the gain reproduces, accept even above the estimate.',
+    reviewInputs), { phase: phaseName, label: `${label} speedup review`, schema: INTEGRATE_SCHEMA }, 1);
+  let result = pending;
+  if (fresh && fresh.ab_complete === true && fresh.gate !== 'incomplete') {
+    const checked = { ...fresh, speedup_review: { status: 'confirmed', original_measurement: original, estimate } };
+    if (confirmationEvidenceMatches(checked)) {
+      if (fresh.gate === 'accepted' && fresh.output_parity === 'pass'
+          && ['accuracy', 'byte_exact'].includes(fresh.parity_kind)) result = checked;
+      else if (fresh.gate === 'rejected' || fresh.output_parity === 'fail') {
+        result = { ...checked, gate: 'rejected', speedup_review: { ...checked.speedup_review, status: 'rejected' } };
+      }
+    }
+  }
+  SPEEDUP_REVIEW_RESULTS.set(key, result);
+  return result;
+}
+// Run ONE integrate A/B: an incomplete result is re-invoked in resume mode for the missing leg (up
+// to AB_FINISH_RETRIES) within the remaining budget. Acceptance requires both legs; a leg still
+// missing at the deadline stays incomplete. Every integrate site uses this.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
-  // Caller inputs win for the candidate; correctness always uses the retained original seed.
+  // Incomplete, so callers keep it PENDING, not rejected.
+  if (abWindowShort(abLegs(inputs), label)) {
+    return { gate: 'incomplete', ab_complete: false,
+      reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
+  }
+  // Caller inputs win for the candidate (the accuracy gate and the tuning carve-out only ADD keys);
+  // correctness always uses the retained original seed.
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+    PROFILE_TOPN_JSON: (profile && profile.profile_topN_json) || '',
     ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
     BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
   };
@@ -555,6 +725,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
     if (searchClosed(`${label}: FINISH retry`)) break;
+    if (abWindowShort(1, `${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
@@ -569,12 +740,17 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
+  integ = await reviewSpeedup(integ, withTuning, label, phaseName);
   if (integ && integ.short_name) {
-    const candidateId = String(integ.short_name).replace(/[^A-Za-z0-9_.-]+/g, '_');
-    const accepted = integ.gate === 'accepted' || integ.gate === 'stack';
+    // Preserve every candidate's review when several backends share one head short_name.
+    const measurementId = (integ.measurement_evidence && integ.measurement_evidence.measurement_id) || withTuning.CAND_TAG || '';
+    const candidateId = [integ.short_name, measurementId].filter(Boolean).join('_').replace(/[^A-Za-z0-9_.-]+/g, '_');
+    const accepted = integEligible(integ);
+    // integration_result keeps any speedup review as evidence; only a rejected one blocks.
     await persistE2EValidationCheckpoint(`overlay/candidate_${candidateId}/e2e_validation.json`, {
       phase: 'Overlay', validation_level: 'integrator', gate: integ.gate || 'incomplete',
       committed: accepted, validation_status: accepted ? 'accepted_intermediate' : 'incomplete',
+      integration_result: integ,
       baseline_throughput_tok_s: integ.ref_med || 0,
       final_throughput_tok_s: integ.cand_med || integ.e2e_throughput_tok_s || 0,
       throughput_speedup: (integ.ref_med && integ.cand_med) ? integ.cand_med / integ.ref_med : 0,
@@ -597,18 +773,16 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   return integ;
 }
 
-// Lightweight SURGICAL FIX (Tier 1 of the corrective). One focused kernel_surgeon agent reads the reject
-// diagnosis + the failing kernel + the live call seam (from the task's meta.json), makes the SMALLEST
-// edit that fixes the defect WITHOUT giving up the isolated win, self-verifies on the IMMUTABLE unittest
-// (correctness PASS + geomean preserved), and emits a final_patch. Returns a fix object shaped like the
-// kernel_workflow result ({final_patch, final_geomean, eval_dir, authored}) so the corrective re-gate path
-// is identical, or null if it could not produce a verified patch (=> escalate to the heavy re-author).
+// The lane's accepted primary metric; geomean only for an explicitly unweighted legacy result.
 function isolatedPrimary(result, workloadPath) {
   if (!result) return null;
   return result.final_speedup === undefined && !workloadPath && result.workload_aligned === false
     ? result.final_geomean : result.final_speedup;
 }
 
+// Lightweight SURGICAL FIX (Tier 1 of the corrective): one kernel_surgeon agent makes the smallest
+// fix that keeps the isolated win, self-verifies on the immutable unittest, and returns a
+// kernel_workflow-shaped result, or null to escalate to the heavy re-author.
 const SURGEON_SCHEMA = obj({
   fixed: { type: 'boolean' }, final_patch: { type: 'string' }, final_geomean: { type: 'number' },
   eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
@@ -637,17 +811,11 @@ async function trySurgicalFix(spec, reason, fixClass, attempt) {
   return null;
 }
 
-// Reusable CORRECTIVE RE-AUTHOR (general; used by every head-integration site, any mode). A head
-// candidate that PASSED the isolated oracle and ENGAGED live but was REJECTED at the e2e gate for a
-// FIXABLE integration reason (JIT/DSL kernel lazily compiling in TP>1 warmup -> NO_BINARY_FOR_GPU /
-// cuda_graph_capture_unsafe / capture hang / host-sync) earns up to HEAD_CORRECTIVE_MAX cheap fix-and-
-// retries: re-OPTIMIZE the EXISTING kernel (keep the algorithm + isolated win; fix only the integration
-// posture), then re-run the both-legs e2e A/B. This is NOT a new head discovery, so it does NOT consume
-// HEAD_BUDGET; it is bounded per head and skipped once the kernel-phase wall-clock deadline has fired.
-// spec: { short_name, op_kind, shapes, dtype, regime, gpu_id, kernel_eval_dir, task_dir, language,
-//         isolated, base_inputs (the integrate inputs template, carries KERNEL_RESULT), reason,
-//         cur:{overlay,flags,env,tput} }.  Returns { banked, integ, isolated } (banked=false if
-// ineligible or still rejected). See knowledge/learned/method-cudagraph-safe-integration.
+// CORRECTIVE RE-AUTHOR, used by every head-integration site. A candidate that passed the isolated
+// oracle and engaged live but was rejected at the e2e gate for a fixable class (rejectClass) gets up
+// to HEAD_CORRECTIVE_MAX fix-and-retries of the EXISTING kernel, each re-gated by a both-legs A/B.
+// Not charged to HEAD_BUDGET; skipped once the deadline fired. spec.base_inputs is the integrate
+// inputs template; spec.cur = {overlay,flags,env,tput}. Returns { banked, integ, isolated, ... }.
 async function tryCorrectiveReauthor(spec) {
   let reason = spec.reason || '';
   // Which fix-and-retry class is this reject? '' = terminal (not auto-correctable).
@@ -656,11 +824,8 @@ async function tryCorrectiveReauthor(spec) {
     && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
   if (!eligible) return { banked: false };
   const curTput = (spec.cur && spec.cur.tput) || 0;
-  // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
-  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy failure),
-  // possibly because the kernel over-fit the single captured snapshot. Both KEEP the
-  // algorithm + isolated win and fix only the defect. GENERIC — the text describes the failure CLASS,
-  // never this specific kernel/model.
+  // Class-specific, generic instructions: `integration` = wrong posture (JIT/capture/host-sync);
+  // `correctness` = wrong live output (parity/accuracy failure). Both keep the algorithm and isolated win.
   const INTEGRATION_FIX_TASK =
     `Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
     `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
@@ -689,10 +854,10 @@ async function tryCorrectiveReauthor(spec) {
     `A gain above the conditional Amdahl projection alone does not establish wrong output; preserve actual correctness evidence.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
     log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
-    // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
+    // TIER 1: lightweight surgical patch (one agent, minutes).
     let fix = await trySurgicalFix(spec, reason, fixClass, cAttempt);
     const viaSurgical = !!(fix && fix.final_patch && (fix.final_geomean || 0) > 1.0);
-    // TIER 2 — escalate to the HEAVYWEIGHT kernel_workflow re-author ONLY if the surgical patch failed.
+    // TIER 2: the heavyweight kernel_workflow re-author, only if the surgical patch failed.
     if (!viaSurgical) {
       try {
         fix = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
@@ -701,8 +866,7 @@ async function tryCorrectiveReauthor(spec) {
           op_spec: { op_kind: spec.op_kind, shapes: spec.shapes || {}, dtype: spec.dtype || 'bf16', regime: spec.regime || '', cuda_graph_safe: true, ...(spec.workload_path ? { workload_path: spec.workload_path } : {}) },
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
           use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
-          // A corrective must KEEP the isolated win; adopting a stored patch over it would be exactly the
-          // re-discovery the task forbids. History is still readable, just never auto-applied.
+          // Keep the isolated win: KB history is readable but never auto-applied here.
           ...KB_ARGS, warm_start: WARM_START_OFF ? KB_ARGS.warm_start : 'reference',
           budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
@@ -721,16 +885,15 @@ async function tryCorrectiveReauthor(spec) {
       return { banked: false };
     }
     log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; isolated primary ${fixedIsolated.toFixed(2)}. Re-gating e2e.`);
-    // Re-gate the FIXED kernel. Preserve the caller's KERNEL_RESULT SHAPE (head=authored/code_patch,
-    // milestone=editable/final_patch) and only swap in the corrected patch + eval_dir + iso speedup, so the
-    // helper is track-agnostic. Set BOTH patch fields to the new patch — the integrator reads whichever
-    // matches its apply mode; leaving the other stale would re-apply the broken kernel.
+    // Re-gate the fixed kernel in the caller's KERNEL_RESULT shape, swapping in the corrected patch,
+    // eval_dir and speedup. Both patch fields get the new patch; a stale one would re-apply the bug.
     const base = spec.base_inputs || {};
     const fixInputs = { ...base,
       KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
         code_patch: fix.final_patch, final_patch: fix.final_patch,
         authored_kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || (base.KERNEL_RESULT && base.KERNEL_RESULT.authored_kernel_eval_dir) || '',
         verified_isolated_speedup: fixedIsolated, isolated_geomean: fix.final_geomean ?? null,
+        pct_gpu_time: spec.pct_gpu_time || (base.KERNEL_RESULT && base.KERNEL_RESULT.pct_gpu_time) || 0,
         corrective_fix_of: reason } };
     if (spec.cur) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
@@ -742,19 +905,16 @@ async function tryCorrectiveReauthor(spec) {
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForDiagnostic = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
     if (ab2 && integAccepted(integ2, pctForDiagnostic, fixedIsolated) && integ2.e2e_throughput_tok_s > curTput) {
-      // Carry the CORRECTED patch out to the caller's bankAccepted. The gated KERNEL_RESULT at the
-      // call site still holds the broken kernel, and recording that into the KB would publish a
-      // patch that was rejected on this very box as if it were the win.
+      // Carry the corrected patch out to bankAccepted: the call site's KERNEL_RESULT still holds the
+      // rejected one.
       return { banked: true, integ: integ2, isolated: fixedIsolated, isolated_geomean: fix.final_geomean ?? null, patch: fix.final_patch,
         kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || '' };
     }
-    reason = (integ2 && (integ2.reason || integ2.gate)) || reason;
-    // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
-    // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
-    // longer failing), stop this corrective on the measured do-no-harm result. It does not establish
-    // that every alternative has exhausted the region's performance opportunity.
+    reason = gateRejectReason(integ2, pctForDiagnostic, fixedIsolated) || reason;
+    // Structured stop, not a re-classification of the prose reason: once parity no longer fails, a
+    // throughput or review issue cannot justify another correctness rewrite.
     if (ab2 && integ2.output_parity !== 'fail') {
-      log(`  ${spec.short_name}: corrective produced no e2e win without a reported parity failure (do-no-harm: ${reason}) — stopping this corrective.`);
+      log(`  ${spec.short_name}: corrective has no bankable e2e win (${reason}) — stopping kernel rewrites.`);
       break;
     }
     log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
@@ -766,11 +926,9 @@ async function tryCorrectiveReauthor(spec) {
   return { banked: false };
 }
 
-// --- FAST-MODE wall-clock control (no-op unless FAST_MODE) -------------------------------------------
-// Date.now()/new Date() are unavailable in workflow scripts (they would break resume), so the budget is
-// enforced with setTimeout: (1) a one-shot deadline flag that stops the head loop from STARTING new ops,
-// and (2) fastBoundedWorkflow() which races each nested kernel workflow against a per-head cap so the
-// in-flight op can't overrun. Both are inert when FAST_MODE is off → default path is byte-identical.
+// --- FAST-MODE wall-clock control (no-op unless FAST_MODE) ----
+// Date.now() is unavailable here (it would break resume), so budgets use setTimeout: a one-shot flag
+// stops the head loop STARTING new ops, and fastBoundedWorkflow() caps each nested kernel workflow.
 let FAST_DEADLINE_HIT = false;
 if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) {
   setTimeout(() => {
@@ -778,29 +936,45 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
-// workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
-// existing null-guards treat it as "no kernel" and continue.
-function fastBoundedWorkflow(ref, wfArgs, label) {
+// A nested kernel workflow raced against the tighter of the fast-mode cap and the trace-replay
+// reserve bound. On expiry it resolves null, which callers treat as "no kernel".
+async function fastBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
-  const capMs = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
+  const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
+  const resCap = laneReserveCapMs();
+  const capMs = [fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => {
+    if (capMs === resCap) return logLaneAtReserve(label);
+    log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
+  });
+}
+// Milestone lanes: the trace-replay reserve bound alone.
+async function reserveBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
+  const capMs = laneReserveCapMs();
+  if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => logLaneAtReserve(label));
+}
+function raceLaneCap(p, capMs, onCap) {
   let to;
   const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-      resolve(null);
-    }, capMs);
+    to = setTimeout(() => { onCap(); resolve(null); }, capMs);
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+function logLaneAtReserve(label) {
+  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning (null).`);
+}
 
-// --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) -------------------------------------------
-// Same mechanism as fast mode: a one-shot deadline flag stops the deep head scheduler from starting NEW
-// co-opt waves once the 20h HeadKernel budget is spent (the in-flight wave + Finalize/Validate still run),
-// and deepBoundedWorkflow() caps each nested kernel_workflow BURST so a slow backend can't stall the
-// per-wave barrier. Both inert when DEEP_MODE is off → default/fast paths byte-identical.
+// --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) ----
+// Same mechanism: a one-shot flag stops NEW co-opt waves once the HeadKernel budget is spent, and
+// deepBoundedWorkflow() caps each nested kernel_workflow burst so one backend can't stall a wave.
 let DEEP_DEADLINE_HIT = false;
 if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
   setTimeout(() => {
@@ -808,13 +982,9 @@ if (DEEP_MODE && typeof setTimeout === 'function' && DEEP_HEAD_BUDGET_MS > 0) {
     log(`[deep-mode] HeadKernel budget (${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h) reached — no NEW co-opt waves will start; finishing the in-flight wave then proceeding to Finalize/Validate.`);
   }, DEEP_HEAD_BUDGET_MS);
 }
-// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) -----------------------------
-// fast/deep have their own deadline flags (capped above); the DEFAULT pipeline had NO time awareness at
-// all — its Milestone editable-kernel loop and head bake-off track could run past the orchestrator's kill.
-// Mirror the fast/deep mechanism with ONE general flag: stop STARTING new head/milestone work after 60% of
-// the effective budget (same 60/40 carve as fast — leaves the tail for the in-flight task + Finalize/
-// Report/Validate). Active in ALL modes when time_budget_s is set (harmless for fast/deep, which stop even
-// earlier on their own flags); fully inert (never registered) when time_budget_s is absent => byte-identical.
+// --- DEFAULT-MODE wall-clock control (no-op unless time_budget_s passed) ----
+// One flag for every mode: stop STARTING new head/milestone work at TIME_HEAD_DEADLINE_MS, leaving
+// the tail for in-flight work and Finalize/Report/Validate.
 let TIME_DEADLINE_HIT = false;
 if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HEAD_DEADLINE_MS > 0) {
   setTimeout(() => {
@@ -822,10 +992,8 @@ if (TIME_HEAD_DEADLINE_MS != null && typeof setTimeout === 'function' && TIME_HE
     log(`[time-budget] dispatch deadline (${Math.round(TIME_HEAD_DEADLINE_MS / 60000)}min of ${Math.round(TIME_BUDGET_MS / 60000)}min budget) reached — no NEW head/milestone work will start; finishing in-flight then proceeding to Finalize/Report/Validate before the hard kill.`);
   }, TIME_HEAD_DEADLINE_MS);
 }
-// --- RESERVE BOUNDARY ---------------------------------------------------------------------------
-// TIME_DEADLINE_HIT above only stops STARTING new head/milestone work; it does not bound the
-// Finalize-gate that sits between it and phase('Finalize'), whose unbounded drain loop ate the whole
-// reserve in the 20260823 sessions. This is the one flag saying "the reserve has begun": a single
+// --- RESERVE BOUNDARY ----
+// The one flag saying "the reserve has begun" (it also bounds the Finalize-gate drain): a single
 // absolute setTimeout, so unlike remainingMs() it cannot drift. Inert without time_budget_s.
 let TIME_FINAL_DEADLINE_HIT = false;
 if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME_BUDGET_EFFECTIVE_MS > 0) {
@@ -841,6 +1009,20 @@ function searchClosed(what) {
   log(`[time-budget] ${what} SKIPPED — the final reserve has begun.`);
   return true;
 }
+// The tuning loop is hours of GPU work under ONE agent, which the reserve can abandon but not stop,
+// so it starts only with this much left before the reserve. tuning_min_window_s=0 disables.
+const _tuningMinWindowS = parseInt(A.tuning_min_window_s, 10);
+const TUNING_MIN_WINDOW_MS = (Number.isFinite(_tuningMinWindowS) && _tuningMinWindowS >= 0
+  ? _tuningMinWindowS : 21600) * 1000;   // 6h
+function tuningWindowShort() {
+  if (TIME_BUDGET_MS == null || !(TUNING_MIN_WINDOW_MS > 0)) return false;
+  const windowMs = remainingMs() - FINAL_RESERVE_MS;
+  if (windowMs >= TUNING_MIN_WINDOW_MS) return false;
+  log(`[time-budget] TuningSkillset SKIPPED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before ` +
+    `the final reserve, under the ${Math.round(TUNING_MIN_WINDOW_MS / 60000)}min the tuning loop needs to ` +
+    'finish its A/B before Finalize and Validate need the GPUs.');
+  return true;
+}
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
@@ -853,9 +1035,74 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+// --- TRACE-REPLAY SEARCH vs THE RESERVE ----
+// Trace-replay lanes and A/Bs start only if they fit before the boundary (inert off AgentX/time_budget_s).
+const AGENTX_LANE_ROUND_S = 3600;    // a lane round in flight at its stop, plus the lane's report
+const AGENTX_EXTRACT_S = 4200;       // kernel extraction
+const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
+const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
+// A reused or resumed reference leg is not run again.
+const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
+// A leg timed over several passes costs that many legs (an upper bound under warm_server).
+const agentxAbMs = (legs, passes = 1) =>
+  1000 * (legs * passes * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
+const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
+// need() reads AGENTX, so it runs only once the guard holds.
+function windowShort(need, what, verdict, cost) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = need();
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} ${verdict} — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min ${cost}.`);
+  return true;
+}
+// An A/B that cannot finish is deferred (incomplete, pending), not abandoned mid-leg at the boundary.
+function abWindowShort(legs, what, passes = 1) {
+  return windowShort(() => agentxAbMs(legs, passes), what, 'DEFERRED',
+    `a ${legs}-leg trace-replay A/B${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes`);
+}
+// A lane needs one round before its stop plus the A/B for what it found.
+function laneWindowShort(what) {
+  return windowShort(agentxLaneStartMs, what, 'NOT STARTED', 'a kernel lane and its A/B need');
+}
+// Every search candidate needs kernel extraction and a lane; without both the run ends early.
+function searchWindowShort(what) {
+  return windowShort(() => AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs(), what, 'SKIPPED',
+    'kernel extraction plus one kernel lane and its A/B need. Going straight to Finalize and Validate');
+}
+// kernel_lane.js starts no round after deadline_epoch, so the stop is a lane tail ahead of the boundary;
+// no_stop_s past the window leaves the TechLead free to end it early. No clock (Date.now() breaks
+// resume): ONE `date +%s` read, anchored to ELAPSED_MS; unreadable, only the backstop bounds the lane.
+const CLOCK_SCHEMA = obj({ epoch: { type: 'number' } }, ['epoch']);
+let EPOCH_AT_T0 = null;
+async function epochNow(phaseName) {
+  if (EPOCH_AT_T0 == null) {
+    EPOCH_AT_T0 = safeAgent('Run EXACTLY this command and nothing else:\n```bash\ndate +%s\n```\n' +
+      'Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.',
+      { phase: phaseName, label: 'clock', effort: 'low', schema: CLOCK_SCHEMA }, 1, () => 5 * 60000)
+      .then((r) => (r && Number.isFinite(r.epoch) ? Math.floor(r.epoch) - Math.floor(ELAPSED_MS / 1000) : null));
+  }
+  const t0 = await EPOCH_AT_T0;
+  if (t0 == null) EPOCH_AT_T0 = null;
+  return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
+}
+async function laneDeadlineArgs(label, phaseName) {
+  if (!agentxGuardsOn()) return {};
+  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  if (!(stopInS > 0)) return {};
+  const now = await epochNow(phaseName);
+  if (now == null) {
+    log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
+    return {};
+  }
+  log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
+    `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
+  return { deadline_epoch: now + stopInS, no_stop_s: stopInS + 86400 };
+}
+// Backstop: never wait for a lane past the boundary.
+const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
 
-// GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
-// physical card ids from a pool so two concurrent isolated jobs never share a GPU -> their op-bench /
-// kernel-layer speed measurements never contend. Deadlock-free: a waiter holds 0 cards while queued and
-// acquires its full count atomically (no hold-and-wait). Uses only Promises/arrays (no Date.now/Math.random,
-// which the Workflow runtime forbids).
+// GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
+// leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
+// a waiter holds no cards and acquires its full count atomically.

@@ -42,8 +42,9 @@ rocm-smi --showmeminfo vram 2>/dev/null | head              # GDDR/HBM capacity
 | Radeon AI PRO R9700 | `gfx1201` | RDNA4 | **32** | **WMMA only** | OCP client | **no** |
 | RX 9070 XT / other gfx1201 | `gfx1201` | RDNA4 | **32** | **WMMA only** | OCP client | **no** |
 `gfx1200` is deliberately unsupported by this workflow until it has independent on-box validation.
-Use `gfx` for ISA facts. Use the structured `device_target`: only the exact
-`AMD Radeon AI PRO R9700` name selects R9700 images and peaks; other gfx1201
+Use `gfx` for ISA facts. Use the structured `device_target`: only an exact
+product name (`AMD Radeon AI PRO R9700` or `AMD Radeon AI PRO R9600D`) selects
+that product's peaks (and, for R9700, its image); other gfx1201
 products remain `unknown-device-not-r9700`.
 
 ## 2. RDNA4 fundamentals (validated on gfx1201)
@@ -113,13 +114,13 @@ occupancy 2–3×.
 - Under **CUDA/HIP graphs**, keep Triton `int64_strides=true` on gfx1201 attention unless an A/B on
   this kernel proves otherwise (`int64_strides=false` has been seen to fall off the vectorized path).
 
-## 4. Peak FLOPS / bandwidth — public R9700 datasheet
+## 4. Peak FLOPS / bandwidth — per product
 
-Radeon AI PRO R9700 / gfx1201 (Navi 48, 300 W): datasheet GDDR6 pin rate **~640 GB/s**;
+Radeon AI PRO R9700 / gfx1201 (Navi 48, 300 W, 64 CU): public datasheet GDDR6 pin rate **~640 GB/s**;
 dense matrix **191 TFLOP/s FP16/BF16**, **383 TOPS INT8**. Full table, including
 FP32/FP8/INT4 and sparse 2:4 rates, is in
 `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`. Do not invent peaks
-for a non-R9700 gfx120x SKU, and do not use CDNA MX/`fp4` numbers here.
+for a gfx120x SKU that has no `product:` block there, and do not use CDNA MX/`fp4` numbers here.
 
 - **Memory hierarchy:** 8 MiB L2 → 64 MiB Infinity Cache → external GDDR6. A hot working set served
   by cache can report effective bandwidth above the 640 GB/s external-memory pin rate; that is cache
@@ -132,6 +133,13 @@ for a non-R9700 gfx120x SKU, and do not use CDNA MX/`fp4` numbers here.
   the balance point in one universal direction.
 
 Report achieved % of **that** ceiling. Size the grid to the **detected** CU/WGP count, not 304.
+
+**Radeon AI PRO R9600D (gfx1201, 48 CU, 150 W):** same ISA and memory hierarchy as R9700,
+but 48 CUs at a 2020 MHz boost, so the matrix-core rate is about half. Public datasheet
+(see `peaks.md`): **99 TFLOP/s FP16/BF16**, **199 TOPS INT8**, **640 GB/s** GDDR6 pin
+rate. The BF16 ridge is about **155 FLOP/byte** (R9700: ~298), so a kernel between those
+intensities is compute-bound on R9600D and memory-bound on R9700. Never apply the R9700
+FLOP/s ceiling to this board; use the `DEVICE_TARGET` peaks.
 
 ## 5. Profiling caveats (RDNA4 client)
 

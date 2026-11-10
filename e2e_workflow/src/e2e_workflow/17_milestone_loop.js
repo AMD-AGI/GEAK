@@ -1,40 +1,45 @@
 // ===========================================================================
 // PHASE: Milestone loop — extract -> recursive kernel optimize -> overlay -> e2e gate
 // ===========================================================================
-// Floor: keep dispatching until >= MIN_KERNEL_TASKS editable-kernel tasks have run, THEN allow the
-// noImprove early-stop. While below the floor the loop never stops on no-improve / empty plan.
-// Budget: when time_budget_s was passed, TIME_DEADLINE_HIT stops STARTING new milestones (even below the
-// floor) so the in-flight work + Finalize/Validate finish before the orchestrator's hard kill. The guard
-// is inert when time_budget_s is absent (TIME_DEADLINE_HIT never set) => byte-identical default behavior.
+// Floor: below MIN_KERNEL_TASKS dispatched tasks the noImprove early-stop is off (an empty plan still
+// stops). TIME_DEADLINE_HIT (set only with time_budget_s) stops new milestones, even below the floor.
 while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
   milestone++;
   const remaining = BUDGET - dispatched;
   const belowFloor = dispatched < MIN_KERNEL_TASKS;
 
-  // --- (a) Plan this milestone (Architect): nominate next kernels. While BELOW the floor the Architect
-  // MUST nominate (it may not stop); it draws fresh editable candidates from the re-profile + the broad
-  // candidate pool, never re-using a confirmed e2e-null direction verbatim. ---
+  // --- (a) Plan this milestone (Architect): below the floor it MUST nominate, never re-using a
+  // confirmed e2e-null direction verbatim.
   phase('Milestone');
-  const plan = (milestone === 1 && kernelQueue.length)
-    ? { stop: false, kernel_candidates: kernelQueue }
-    : await safeAgent(
-      roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
-        EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
-        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
-        MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
-        PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
+  let plan;
+  if (KERNEL_EXTRACT_ON) {
+    plan = { stop: !kernelQueue.length, kernel_candidates: kernelQueue };
+    kernelQueue = [];
+  } else {
+    plan = (milestone === 1 && kernelQueue.length)
+      ? { stop: false, kernel_candidates: kernelQueue }
+      : await safeAgent(
+        roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
+          EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
+          BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
+          MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
+          PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
+
+  }
 
   const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
-  // pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (a candidate missing pct is kept,
-  // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
-  const planCands = planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
-  const skipped = planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
+  // AgentX keeps the skill-selected inventory; only execution budgets apply here.
+  // Fixed-load pct_gpu_time gate (overrides the floor): only kernels at or above MILESTONE_MIN_PCT;
+  // a missing pct is kept.
+  const planCands = KERNEL_EXTRACT_ON ? planCandsRaw : planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
+  const skipped = KERNEL_EXTRACT_ON ? [] : planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
   if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
   if (!planCands.length) {
-    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    if (KERNEL_EXTRACT_ON) log(`Milestone ${milestone}: prepared UT queue exhausted; stopping.`);
+    else if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
     else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
     else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
     break;
@@ -44,13 +49,14 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `k${milestone}_${i}`,
   }));
+  // AgentX selection inventories more work than this execution budget can run.
+  // Preserve undispatched eligible candidates in carried state for resume.
+  if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
-  // --- (b) PARALLEL optimize (extract + recursive kernel layer per candidate, on distinct GPUs), then
-  // SERIAL integrate. The optimize stage is independent per kernel -> run concurrently. The e2e integrate
-  // stage MEASURES throughput and COMPOUNDS the overlay, so it must be serial: no two servers benched at
-  // once (no timing conflict) and accepted overlays carry forward in order.
+  // --- (b) PARALLEL optimize (extract + kernel layer per candidate, on distinct GPUs), then SERIAL
+  // integrate: e2e A/Bs must not overlap, and accepted overlays compound in order.
   const optimized = await parallel(cands.map((c) => async () => {
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
@@ -65,7 +71,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
+      const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         ...(ext.workload_path ? { op_spec: { workload_path: ext.workload_path } } : {}),
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
@@ -74,11 +80,15 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      }));
-      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'));
+      if (r == null && IS_AGENTX) {
+        return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
+      }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
-        final_speedup: isolatedPrimary(r, ext.workload_path), final_validation: r.final_validation ?? null,
-        workload_aligned: r.workload_aligned,
+        // Prepared AgentX UTs carry their own case weights; otherwise the lane's accepted primary.
+        final_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? isolatedPrimary(r, ext.workload_path))
+          : isolatedPrimary(r, ext.workload_path),
+        final_validation: r.final_validation ?? null, workload_aligned: r.workload_aligned,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
     } catch (e) {
@@ -94,7 +104,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const c = o.c;
     if (o.skip) {
       log(`  ${c.short_name}: ${o.reason}; skipping.`);
-      history.ledger.push({ direction: c.short_name, verdict: 'dead_end', lesson: o.reason });
+      history.ledger.push({ direction: c.short_name, verdict: o.paused ? 'paused' : 'dead_end', lesson: o.reason });
       continue;
     }
     const { ext, kl } = o;
@@ -130,9 +140,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
       `integrate ${c.short_name}`, 'Milestone');
 
-    // Three-state gate (see head track): incomplete A/B => PENDING, not rejected.
-    // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
-    // flag => not done; a legacy return without ab_complete behaves as before.
+    // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
     if (abDone && integAccepted(integ, c.pct_gpu_time, isolatedSpeedup) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
@@ -143,10 +151,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
         isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
-      // Unified reject/incomplete handling (same as the head track): a FIXABLE reject OR fixable
-      // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
-      // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
-      // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
+      // As in the head track: a fixable reject or warmup crash earns a corrective re-author (not
+      // charged to HEAD_BUDGET); a non-fixable incomplete A/B stays PENDING.
       const reason = gateRejectReason(integ, c.pct_gpu_time, isolatedSpeedup);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
@@ -180,21 +186,23 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     }
   }
 
-  // --- (c) If improved: re-profile + grow the experience library ----------
+  // --- (c) If improved: re-profile
   if (milestoneImproved) {
     noImprove = 0;
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    if (!KERNEL_EXTRACT_ON) {
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    }
   } else {
     noImprove++;
   }
 
-  // --- (d) Update the persistent experience library + in-run memory -------
+  // --- (d) Update the persistent experience library + in-run memory
   const exp = E2E_LEARNED_KB_ENABLED ? await safeAgent(
     roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,

@@ -1,8 +1,7 @@
 // ===========================================================================
 // PHASE: Config sweep (Config Tuner) — FIRST, reshapes the profile
 // ===========================================================================
-// A carried phase-partial state still wins: it is a measurement this run already made. kbSeedTput is
-// 0 when Module A did not run or adopted nothing, so `0 || BASELINE_TPUT === BASELINE_TPUT`.
+// A carried phase-partial state wins (already measured); kbSeedTput is 0 unless Module A adopted.
 let curTput = ST.throughput || kbSeedTput || BASELINE_TPUT;
 if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length &&
     !searchClosed('ConfigSweep')) {

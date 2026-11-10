@@ -22,6 +22,8 @@ For hardware-dependent decisions, read
 Use detected hardware and supported counters; record evidence for bottleneck claims. Model percentages
 need stated work/traffic, capacity and timing boundaries. They are conditional guides, not proof that
 an optimization is possible or exhausted. Do not assume a fixed fraction of nameplate is attainable.
+On RDNA4, use a product's datasheet peaks (`peaks.md`) only when `ROOFLINE_STATUS` is
+`calibrated-<product>`; other gfx1201 products have no calibrated denominator.
 
 When `KERNEL_KNOWLEDGE_DIR` and `KK_OPERATOR` are set, consult supplied `KK_REFS`, the matching backend
 card and relevant tuning/numerics/fusion guidance. For migration, also read the target backend and

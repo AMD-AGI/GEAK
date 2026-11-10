@@ -3,12 +3,15 @@
 
 Run:  python3 -m pytest interface/test_run_e2e_margin.py -q
 
-The JS live path and this runner's recovery path use the same advisory threshold,
-retaining the legacy ``A.implausible_speedup_margin`` configuration name. It no
-longer changes acceptance. run_e2e.py validates the env-overridable value (finite,
-non-negative), and ``map_args`` forwards that value to the workflow unconditionally.
-These tests preserve the configuration contract without treating the model as a
-correctness gate.
+The JS live-path speedup-review trigger (``A.implausible_speedup_margin``, a legacy
+name, in e2e_workflow.js) and THIS runner's recovery path must apply the SAME
+advisory margin. Exceeding it asks for an independent A/B review of an
+accuracy-gated gain; it does not change acceptance by itself and is not a
+correctness verdict. run_e2e.py makes the Python constant the single source of
+truth: it validates the env-overridable value (finite, non-negative) and
+``map_args`` forwards THAT value to the workflow unconditionally. These tests pin
+both halves so a refactor cannot reintroduce Python/JS drift or let a bad env
+value through.
 """
 from __future__ import annotations
 

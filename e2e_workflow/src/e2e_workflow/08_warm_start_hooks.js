@@ -1,34 +1,19 @@
-// ---------------------------------------------------------------------------
-// e2e warm start: identity formatting + the prompt hook.
-//
-// These three `let`s are the ONLY state the feature adds above Module A, and all three stay at their
-// off-value (null / '') for the whole run unless Module A actually executes. Every consumer below
-// keys off them, which is what makes `warm_start=off` produce a byte-identical run rather than one
-// that merely behaves the same.
-// ---------------------------------------------------------------------------
+// e2e warm start: identity formatting + the prompt hook. These `let`s stay at their off-value
+// (null / '') unless Module A runs, and every consumer keys off them.
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
 let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
-let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
-// Everything this run RECALLED, in one report-ready object: which address was asked, what came back,
-// what re-measuring it HERE produced, and whether it was accepted. Threaded into the Report role's
-// Inputs because final_report.md was previously silent about recall altogether — a run that recalled
-// nothing and a run that recalled a 1.12x record and then rejected it wrote the same report, and the
-// second is the one a reader most needs to see.
-//
-// `asked` is filled in even when zero candidates come back. On an exact-lookup scheme a miss and a
-// never-recorded page are the SAME 404, so the ladder that was asked IS the finding: it is the only
-// artifact that distinguishes "no prior art" from "prior art exists one segment away".
+let KB_READ_PLANE = '';    // which plane answered the read (not implied by `both`)
+// Everything this run recalled, report-ready: the address asked, what came back, what re-measuring
+// it here produced, and whether it was accepted (fed to the Report role). `asked` is filled even
+// with zero candidates: a miss and a never-recorded page are the same 404, so the ladder asked is
+// the finding.
 let KB_RECALL = { e2e: null, kernel: [] };
 
-// One collection point for the KERNEL plane's recall. Every nested kernel_workflow returns its own
-// `warm_start` block (kernel_lane.js), and until now all of it died inside the lane: the e2e report
-// could say a kernel was authored from scratch while the lane had in fact adopted a stored patch.
-// Called from the two bounded wrappers and the two direct workflow() sites, i.e. every lane call.
+// One collection point for the KERNEL plane's recall: every lane return (its `warm_start` block,
+// kernel_lane.js) passes through here, so the report shows stored patches a lane adopted.
 function noteKernelKB(r, label) {
-  // Absorb a nested kernel run's own agent timeline (kernel_workflow/kernel_lane return it on
-  // llm_timeline). This is the one funnel every lane return passes through, so it captures every
-  // nested run's attempts for the ledger's "plus N nested kernel run(s)" accounting.
+  // Absorb the nested run's agent timeline (llm_timeline) for the ledger's nested-run accounting.
   if (r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
   const w = r && r.warm_start;
   if (w && typeof w === 'object') {
@@ -40,8 +25,7 @@ function noteKernelKB(r, label) {
       candidates: Array.isArray(w.candidates) ? w.candidates.length : 0,
       adopted: !!w.adopted,
       adopted_speedup: w.adopted ? (w.adopted_speedup != null ? w.adopted_speedup : null) : null,
-      // A lane that adopted a stored patch and then committed nothing of its own is where the kernel
-      // plane most often flatters itself, so carry the split rather than just the headline geomean.
+      // Carry the split, not just the geomean: an adopted patch with no own rounds flatters the lane.
       incremental_speedup: w.incremental_speedup != null ? w.incremental_speedup : null,
       rounds_committed: w.rounds_committed != null ? w.rounds_committed : null,
       no_rounds_after_adopt: !!w.no_rounds_after_adopt,
@@ -54,20 +38,16 @@ function noteKernelKB(r, label) {
 
 const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
 
-// The ONE place e2e KB identity argv is formatted — called by both the reader (Module A) and the
-// writer (Module B). kb/identity.py's own header names the failure this prevents: a reader and a
-// writer that disagree by a single segment do not raise, they address two different pages, and the
-// only symptom is that history quietly stops existing. Two call sites formatting the same flags
-// independently is exactly how that drift starts.
+// The ONE place e2e KB identity argv is formatted, for both reader (Module A) and writer (Module B):
+// a one-segment disagreement silently addresses a different page (see kb/identity.py).
 function kbIdentityFlags() {
   if (!KB_DIMS) return '';
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
     `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
-    // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
-    // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
-    // would mis-file precisely the degraded AgentX runs that most need a stable address.
+    // The declared kind, never the shape provenance (whose fallback values would mis-file
+    // degraded AgentX runs).
     `--workload-kind ${shq(WORKLOAD_KIND)}`,
     `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
 }
@@ -94,16 +74,11 @@ function kbPlaneFlags(plane) {
   return `--plane ${plane}` + (plane === 'remote' ? '' : ` --store ${shq(E2E_KB_STORE_DIR)}`);
 }
 
-// A READ takes exactly one plane. `cmd_resolve` now picks it via kb.plane:read_planes (service
-// first, local mirror only when the service has no answer) and reports which one spoke as
-// `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
-// is the copy a human gets from the CLI too.
-// The graded axis is NOT part of the address (bench_summarize's bases are five and growing, and a
-// reader wants them side by side with a label rather than scattered over five sparse pages), so the
-// reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
-// tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
-// An explicit recall policy requires an exact basis, including on synthetic runs. Without one,
-// preserve the historical measurement-derived filter and its compatibility with unlabelled records.
+// A READ takes one plane: `cmd_resolve` picks it (kb.plane:read_planes; service first, local mirror
+// as fallback) and reports it as `read_plane`. The graded axis is not part of the address (one page
+// holds several bases), so the reader states it, or mixed units would be ranked together. An
+// explicit recall policy requires an exact basis; otherwise the measured basis filters (unlabelled
+// records still match).
 function kbMetricBasisFlag() {
   return E2E_KB_METRIC.basis ? `--metric-basis ${shq(E2E_KB_METRIC.basis)} ` +
     (E2E_KB_METRIC.strict ? '--require-metric-basis ' : '') : '';
@@ -115,17 +90,12 @@ function kbResolveScript(args) {
     `  ${kbMetricBasisFlag()}${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
-// Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
-// is off or the role is not a consumer, so roleAgent's output is byte-identical to the pre-feature
-// build in those cases. KB_REF_DIR is assigned by Module A and nowhere else, so an off run — or one
-// whose read found nothing — never reaches the template at all.
+// Warm-start prompt injection, like expertSkillsBlock: '' when the feature is off, the role is not a
+// consumer, or Module A found nothing (KB_REF_DIR is set only by Module A).
 function warmStartBlock(role) {
   if (!KB_REF_DIR || !WARM_START_ROLES.has(role)) return '';
-  // `tuning_kb=false` is the blind-evaluation switch: it exists so a run can measure what the tuning
-  // track finds with NO prior knowledge in its context. Now that the tuning track's prior knowledge
-  // lives in the shared KB rather than in a private store, the switch has to reach here too — one
-  // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
-  // have quietly stopped being blind the moment the two stores merged.
+  // `tuning_kb=false` is the blind-eval switch; the tuning track's prior lives in the shared KB, so
+  // the switch also withholds this block.
   if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
   return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
@@ -133,9 +103,8 @@ function warmStartBlock(role) {
     `${KB_REF_DIR}/measured_on_this_box.md records what happened when THIS run benched them — that ` +
     `file OVERRIDES the stored claims in its siblings wherever the two disagree. A stored number is ` +
     `a hypothesis; only the measured column is evidence.` +
-    // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
-    // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
-    // whether the search it is about to spend hours on has already been run to completion once.
+    // The tuning track reads the same pages to check whether its search was already run once, so it
+    // gets an extra paragraph rather than a second block.
     (role === 'tuning_specialist' && KB_CACHE_DIR
       ? `\n\nFor YOUR track specifically: an accepted-kernel entry marked \`from tuning skillset\` is a ` +
         `tuned artifact a prior run produced and proved engaged. Its file was downloaded with the ` +
@@ -147,15 +116,11 @@ function warmStartBlock(role) {
       : '');
 }
 
-// Run-wide workload-identity invariant, injected into EVERY role prompt exactly
-// like the serving-config invariant above it — a trace replay changes what a
-// benchmark MEANS, so no role may be left assuming the synthetic sweep.
-// Returns '' unless the caller declared a trace replay, so a fixed-ISL/OSL run
-// gets byte-identical prompts.
+// Run-wide workload-identity invariant for EVERY role prompt (a trace replay changes what a
+// benchmark means); '' unless the caller declared a trace replay.
 function workloadIdentityBlock() {
   if (!IS_AGENTX) return '';
-  // Late-adopt here rather than only at Setup: this block is the one path every
-  // role prompt takes, so the shape can never be stale by more than one agent.
+  // Late-adopt here too: every role prompt passes through this block.
   ensureMeasuredShape();
   return `
 ## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
@@ -196,6 +161,38 @@ measurement duration. Consequences you must respect:
 `;
 }
 
+// The reserve holds ONE search leg for Finalize, and a search-leg claim is no yardstick for Validate's
+// legs (a claim equal to the baseline is canonical). Both are '' off a trace replay.
+function agentxFinalizeNote() {
+  if (!IS_AGENTX) return '';
+  return ` On this trace replay the final bench of step 2 is ONE leg on the ${AGENTX.geak_loop_duration_s}s ` +
+    `search window. Do NOT also bench the bundle on the ${AGENTX.duration_s}s canonical window: Validate ` +
+    'measures the stock and the final stack there right after this phase, and the final reserve holds time ' +
+    "for those legs only. Return the search leg's median as final_throughput_tok_s and say in note that it " +
+    'is a search-window number. Omit throughput_speedup: BASELINE_THROUGHPUT was measured on the canonical ' +
+    'window, so the ratio of the two is not a speedup.';
+}
+function agentxClaimNote(claimed, baseline) {
+  if (!IS_AGENTX || !(claimed > 0) || claimed === baseline) return '';
+  return ` On this trace replay CLAIMED_THROUGHPUT comes from ${AGENTX.geak_loop_duration_s}s search legs, ` +
+    `which replay a different, shorter slice of the corpus than your ${AGENTX.duration_s}s legs, so it is ` +
+    'not comparable with your numbers. When you set validation_status, drop both claim conditions ' +
+    '(validated_win\'s "within the noise band of the claim" and flagged\'s "lower than the claim by ' +
+    'more than the band") and arbitrate on your same-session A/B, the baseline and parity. Still ' +
+    'report claimed_throughput_tok_s, and say in arbitration_note that it is a search-window number.';
+}
+// Every signal must agree, so no single adoption path can pass a changed bundle off as Setup's.
+function agentxAdoptedNothing(s) {
+  return IS_AGENTX && !!s.setup && s.baseline > 0 && !s.accepted && s.tput === s.baseline
+    && s.flags === s.setup.flags && s.env === s.setup.env && s.overlay === s.setup.overlay;
+}
+// Why a trace replay skips Validate, or '': nothing to compare, or less time than its timed windows.
+function agentxValidateSkip(adoptedNothing, leftMs) {
+  if (!IS_AGENTX) return '';
+  if (adoptedNothing) return 'final_is_baseline';
+  return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
+}
+
 function correctnessEnvBlock(role) {
   if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
@@ -211,22 +208,44 @@ function correctnessEnvBlock(role) {
     `acceptance off.`;
 }
 
+// Optimization roles consume the skill's delivery; only the extractor loads its full procedure.
+function kernelExtractBlock(role) {
+  if (!KERNEL_EXTRACT_ON || !['system_architect', 'op_benchmarker'].includes(role)) return '';
+  return `\n\n## AgentX prepared UTs\n` +
+    `Read ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md. Use the supplied prepared tasks ` +
+    `and saved workload/ranking evidence. Selection, cases, weights and source bindings are already ` +
+    `validated; do not repeat discovery, sampling or UT authoring, or replace them with fixed ISL/OSL ` +
+    `assumptions. Run the existing immutable UT against optimization candidates, then E2E A/B.\n` +
+    `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
+  const standaloneExtraction = KERNEL_EXTRACT_ON && role === 'kernel_extractor';
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
-    // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
+    // Only surfaced on a trace replay.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
+    ...(standaloneExtraction ? {
+      SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
+      PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1',
+      CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
+    } : {}),
   };
+  const instruction = standaloneExtraction
+    ? `First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
+Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
+Do not load roles/kernel_extractor.md; it is the legacy procedure for other workloads.`
+    : `First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
+Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.`;
   const base = `You are the ${role}. PHASE=${phase}.
-First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
-Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
+${instruction}
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 When you invoke bench_e2e.sh, pass BACKEND=${BACKEND} in its env so the correct serving adapter is used.
 
@@ -247,40 +266,22 @@ ${workloadIdentityBlock()}
 ## Inputs
 ${cfg(inall)}
 
-Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role) + correctnessEnvBlock(role);
+Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff reference' : 'role file'} specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + correctnessEnvBlock(role);
 }
 
-// Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
-// must NOT kill a multi-hour run. Retry a few times, then DEGRADE to null so the caller's existing
-// null-guards skip/continue gracefully (critical phases like setup re-throw on null themselves).
-// Bound each attempt: an agent LLM call that HANGS (no response, no terminal error) would block this
-// await forever — the harness resolves terminal errors to null but not an indefinite hang. Race the
-// call against a VERY generous timeout that resolves null, which the loop below treats as a failed
-// attempt (retry, then degrade). A true hang never returns, so a generous bound still catches it while
-// NEVER killing a legitimately-long agent. The OUTER e2e agents orchestrate the serving stack (Director
-// launches sglang + runs the baseline bench ~30min; ConfigTuner does multiple server-launch+bench
-// cycles; the head e2e gate overlays + launches + A/B benches) — these run far longer than a kernel
-// agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
-// agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
-// falls back to raw agent() if setTimeout is unavailable.
-// Default 120min (generous — outer e2e agents launch servers + run ~30min benches). Fast mode tightens
-// it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
-// baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
+// Resilient agent wrapper: retry a failed agent a few times, then degrade to null for the callers'
+// null-guards (setup re-throws). Each attempt races a timeout that resolves null (the harness turns
+// errors into null, not hangs): 120min (45min fast), since agents launch servers and run ~30min
+// benches. args.agent_timeout_ms=0 disables it; without setTimeout it is a raw agent().
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
 // The guard abandons the PROMISE, not the agent: a timed-out attempt keeps running its servers and legs,
 // so a retry runs beside it on the same GPUs and files. agent_timeout_retry=false degrades to null instead.
 const AGENT_TIMEOUT_RETRY = String(A.agent_timeout_retry != null ? A.agent_timeout_retry : 'true') !== 'false';
-// Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
-// (the one place `agent()` is ever called) rather than in roleAgent(), because several
-// prompts are built inline and would otherwise never see it — and any future call site
-// inherits it automatically instead of having to remember it. Bash-capable agents own
-// server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
-// until it TERMs the caller's orchestrator and fails the whole task.
-// The detachment rule rides along for the same reason: EVERY bash-capable role runs a long
-// serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
-// one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
-// mid-measurement — an hour of budget and a booted server lost per role that learns it.
+// Process-safety rules prepended to EVERY agent prompt at the one `agent()` funnel: no
+// pattern-matched kills (they can TERM the caller's orchestrator), detach long legs from the tool's
+// shell manager (it group-reaps them), and never start a command with `sleep` (Claude Code 2.1.310+
+// refuses one of 25s+ with background tasks on; run_e2e.py turns those off too).
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -301,30 +302,32 @@ Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mod
 tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
 server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
 was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
-Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then wait on its log:
     cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
     # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
-Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
-you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
-the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
+Then wait in SEPARATE foreground calls, each a bounded loop that checks BEFORE it sleeps and ends inside
+the timeout you give that Bash call (the tool caps it at BASH_MAX_TIMEOUT_MS, 10 min by default):
+    timeout 540 bash -c 'until [ -s <leg_dir>/bench_summary.json ]; do sleep 30; done'; tail -5 run_bench.out
+Never START a command with a \`sleep\` (Claude Code refuses one of 25s or more), and never wait by ending
+your turn: your turn ending IS your return, so a Monitor, background-watcher or \`run_in_background\`
+notification lands after you are gone. Keep waiting until the summary lands or the leg is provably dead.
+Before you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and
+whether the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
+
+## ONCE THE FINAL PHASE STARTS, IT OWNS THE GPUS
+When \$EVAL_DIR/.final_phase_fence exists the search is over: the workflow stopped every leg, tuner and
+waiter still running from it, on purpose, so Finalize and Validate measure on quiet GPUs. Unless you are
+the e2e_integrator finalizing or the director validating, start nothing more on the GPUs (no server, leg,
+tuner or profiler), do not relaunch anything of yours that was stopped, and return what you already have.
 `;
 function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
 }
 
-// Option A (Hyperloom #1202): near the deadline, tighten each OPTIMIZATION agent's hung-guard so no
-// in-flight step finishes later than (budget − reserve). The loop-tops stop STARTING new work at
-// TIME_HEAD_DEADLINE_MS, but one iteration is a SEQUENCE of agents (extract → bakeoff → author → verify)
-// each armed with the full AGENT_TIMEOUT_MS, and that sequence could overrun the reserve and starve
-// Finalize/Report/Validate (the #1202 stall was a 62min extract_op running into the SIGKILL). Final-phase
-// agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
-// retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
-//
-// Exemption is by POSITION, not by a caller-supplied label. Keying it on opts.phase ∈ ['Finalize',
-// 'Report','Validate'] failed OPEN: the Finalize-GATE runs before phase('Finalize') yet tagged its
-// integrator agents 'Finalize', so optimization work claimed unlimited time. FINAL_PHASE_STARTED is set
-// once, at the phase('Finalize') call site. Agents in flight when it flips keep the cap they were armed
-// with — work started before the final phase stays bounded.
+// Near the deadline, cap each OPTIMIZATION agent's hung-guard at (remaining − reserve), so a chain
+// of agents in one loop iteration can't overrun the reserve. Final-phase agents are exempt by
+// position (FINAL_PHASE_STARTED, set at the phase('Finalize') call site), not label: the
+// Finalize-gate tags its agents 'Finalize'. 2min floor; inert without time_budget_s.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
 const AGENT_TIMEOUT_FLOOR_MS = 120000;
@@ -332,12 +335,17 @@ function agentTimeoutFor() {
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(AGENT_TIMEOUT_FLOOR_MS, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
-// An agent started now would only get the floor above: the reserve has begun, or is under one floor
-// away, and the final phase has not started. Nothing measured fits in two minutes, and the guard that
-// fires then abandons the promise, not the agent -- so whatever starts here runs on, unwatched, on the
-// GPUs Finalize and Validate are about to need.
+// True when a new agent would only get the floor (reserve begun or under one floor away, final phase
+// not started): nothing measured fits, and the abandoned agent would keep using the GPUs.
 function atReserveFloor() {
   return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
     remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
+}
+// A required checkpoint write (copy + hash, no GPU, 4-8min) is not bounded by the reserve cap: up to
+// 30min, passed only at requireE2EValidationCheckpoint. A hung writer is not retried beside itself
+// (two writers would leave digests disagreeing with assets).
+const CHECKPOINT_COMMIT_TIMEOUT_MS = 30 * 60000;
+function checkpointTimeoutFor() {
+  return Math.max(agentTimeoutFor(), Math.min(AGENT_TIMEOUT_MS, CHECKPOINT_COMMIT_TIMEOUT_MS));
 }
 

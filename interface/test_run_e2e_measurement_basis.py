@@ -382,6 +382,41 @@ def test_the_crashed_director_record_is_kept_as_evidence(tmp_path: Path) -> None
     assert out["validation_evidence"]["validate_final_missing"] is True
 
 
+def test_a_trace_replay_without_a_final_publishes_its_ab_not_the_carried_ratio(
+    tmp_path: Path,
+) -> None:
+    """A trace replay's A/B and Finalize legs run on the search window, Setup's baseline on the
+    longer canonical one, so the ratio the workflow carries is no speedup: here a +9% A/B reads
+    1.005x against Setup. Without a Validate number the workflow returns neither, and the A/B's
+    own pair is published instead. Under Hyperloom's rule that recovered pair cannot show its guards
+    held, so it is not kept, but the kernel is still handed back for Hyperloom to re-measure."""
+    eval_dir = _eval_dir(tmp_path, setup_base=113.325)
+    _accepted_candidate(eval_dir, ref=104.48, cand=113.9, delta=9.0)
+    wf = _wf(
+        eval_dir, base=113.325, final=0.0, speedup=0.0,
+        validation_status="flagged_no_number_used_carried_ab", metric_basis=P50,
+        accepted_kernels=[{"short_name": "fast_norm", "e2e_delta_pct": 9.0}],
+    )
+
+    out = rx.normalize_result({}, wf)
+    assert out["status"] == "ok"
+    assert out["result_source"] == "disk_intermediate_win"
+    assert (out["baseline_throughput_tok_s"], out["final_throughput_tok_s"]) == (104.48, 113.9)
+    _assert_self_consistent(out)
+
+    graded = rx.normalize_result(HL_AGENTX, wf)
+    assert (graded["baseline_throughput_tok_s"], graded["final_throughput_tok_s"]) == (104.48, 113.9)
+    verdict = graded["validation_evidence"]["acceptance"]
+    assert graded["status"] == "no_gain" and verdict["keep"] is False
+    assert verdict["reasons"] and all("was not measured on both legs" in r for r in verdict["reasons"])
+    assert graded["accepted_kernels"] == wf["accepted_kernels"]
+
+    # With that A/B gone from disk there is no pair to publish: no_gain, never the carried ratio.
+    lost = rx.normalize_result({}, {**wf, "eval_dir": str(_eval_dir(tmp_path / "lost", setup_base=113.325))})
+    assert lost["status"] == "no_gain"
+    assert lost["accepted_kernels"] == wf["accepted_kernels"]
+
+
 # --------------------------------------------------------------------------- #
 # only real artifacts get a path
 # --------------------------------------------------------------------------- #

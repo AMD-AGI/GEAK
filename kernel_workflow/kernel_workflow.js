@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
   description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -136,6 +136,11 @@ if (MODE === 'optimize' || MODE === 'author') {
 if (MODE !== 'bakeoff') {
   throw new Error(`unknown mode='${MODE}'. Use optimize | author | bakeoff.`);
 }
+// Bake-off lanes each take a slice of gpu_ids, so multi-GPU jobs are only supported by the
+// single-language modes for now.
+if ((A.gpus_per_job != null && String(A.gpus_per_job).trim() !== '1') || String(A.job_gpu_ids || '').trim()) {
+  throw new Error('mode=bakeoff does not support gpus_per_job > 1 or job_gpu_ids; use mode=optimize or mode=author.');
+}
 
 // Sibling e2e_workflow dir — we REFERENCE its op_benchmarker role + bench scripts in place (no copy).
 const E2E_WF_DIR = String(A.e2e_workflow_dir ||
@@ -149,11 +154,11 @@ if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
   throw new Error('expected_gfx and expected_target must be supplied together');
 }
 if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
-    (EXPECTED_TARGET && !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET))) {
-  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|mi350x|mi355x|unknown');
+    (EXPECTED_TARGET && !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET))) {
+  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|mi350x|mi355x|unknown');
 }
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);
@@ -307,7 +312,8 @@ function tlAgent(prompt, o, attempt) {
 
 // Role prompt: the agent reads its role file and knowledge itself; the script passes only inputs.
 // roleAgentFrom reads the role from any roles/ dir (kernel_workflow uses it for e2e's op_benchmarker,
-// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow).
+// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow);
+// multiGpuBlock only by kernel_lane, the one workflow that runs multi-GPU jobs.
 function roleAgentFrom(dir, role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phase}.
@@ -319,6 +325,7 @@ ${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role)
+    + (typeof multiGpuBlock === 'function' ? multiGpuBlock(role) : '')
     + (typeof externalMetricInstructions === 'function'
       ? externalMetricInstructions(role === 'director' && phase === 'validate')
       : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');

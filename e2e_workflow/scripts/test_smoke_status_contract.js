@@ -35,7 +35,8 @@ const grab = (name) => {
   return src.slice(start, end + 1);
 };
 const { EXTRACT_OP_SCHEMA, EXTRACT_SCHEMA } = new Function(
-  ['obj', 'arrObj', 'arrStr', 'SMOKE_STATUS', 'EXTRACT_OP_SCHEMA', 'EXTRACT_SCHEMA']
+  ['obj', 'arrObj', 'arrStr', 'SMOKE_STATUS', 'SELECTION_VERDICT_REF_SCHEMA',
+    'EXTRACTION_SELECTION_FIELDS', 'EXTRACT_OP_SCHEMA', 'EXTRACT_SCHEMA']
     .map(grab).join('\n') + '\nreturn { EXTRACT_OP_SCHEMA, EXTRACT_SCHEMA };')();
 
 // Just enough JSON-schema to judge the gate field: required + type + enum of the top-level props.

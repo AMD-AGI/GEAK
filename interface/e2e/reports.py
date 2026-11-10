@@ -69,6 +69,19 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
     identity = alignment.get("server_identity") or result.get("server_identity") or {}
     identity_status = str(identity.get("status") or "unavailable")
     identity_paths = identity.get("evidence_paths") or []
+    # Each server GEAK launched itself, so a failing leg is visible, not only the aggregate.
+    identity_legs = [
+        f"  - `{leg.get('leg')}`: `{leg.get('status')}`"
+        + (
+            " — " + ", ".join(
+                f"`{m.get('key')}` expected `{m.get('expected')}`, observed `{m.get('observed')}`"
+                for m in leg.get("mismatches") or []
+            )
+            if leg.get("mismatches")
+            else ""
+        )
+        for leg in identity.get("geak_launched") or []
+    ]
     stack = result.get("serving_stack") or {}
     launcher = str(stack.get("launcher") or "unknown")
     recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
@@ -134,6 +147,7 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
                     else "unavailable"
                 )
             ),
+            *(["- GEAK-launched servers:", *identity_legs] if identity_legs else []),
             f"- Server launch recipe: `{launcher}`",
             *reference_caveat,
             *recipe_caveat,

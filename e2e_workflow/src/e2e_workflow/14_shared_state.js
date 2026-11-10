@@ -1,18 +1,13 @@
-// ---------------------------------------------------------------------------
-// Shared state carried across the head + kernel tracks (and across phase invocations via args.state).
-// MUST be declared BEFORE the HeadKernel block that uses them (else temporal-dead-zone ReferenceError).
-// ---------------------------------------------------------------------------
+// Shared state for the head + kernel tracks (carried across phase invocations via args.state);
+// declared before the HeadKernel block that uses it (temporal dead zone).
 let dispatched = 0;                        // counts ONLY kernel-optimization tasks (the budget)
 let milestone = 0;
 let noImprove = 0;
-// kbSeedKernels is empty unless Module A REPLAYED a stored kernel and its fresh A/B accepted it —
-// these are this run's own measurements of a recovered patch, not the store's claims about it.
+// kbSeedKernels: stored kernels Module A replayed and this run's own A/B accepted.
 const acceptedKernels = (ST.accepted_kernels || []).slice().concat(kbSeedKernels);
 const acceptedHeads = (ST.accepted_heads || []).slice();
-// Verified-isolated wins whose e2e A/B did NOT complete (integrate agent timed
-// out / hung / degraded to null mid-gate). These are NOT rejections — keep them
-// so Finalize can finish the best one's A/B (Fix C) and so a real isolated win
-// is surfaced (return.pending_integrations) instead of being silently dropped.
+// Verified-isolated wins whose e2e A/B did not complete. Not rejections: Finalize finishes them
+// (Fix C) and the return surfaces them as pending_integrations.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).concat(PRE_FLAGGED_HEADS);   // heads that could NOT be optimized (loudly surfaced, never silently skipped)
 let headDispatched = 0;

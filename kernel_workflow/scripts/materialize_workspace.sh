@@ -107,12 +107,15 @@ find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 # protected ORIGINAL. Do NOT pass -h/--dereference: symlinks stay shared links.
 ( cd "$SRC" && tar --hard-dereference --mode=u+w "${TAR_EXCLUDES[@]}" -cf - . ) | ( cd "$DST" && tar -xf - )
 
-# Share the immutable golden when present on SRC (or as a dangling absolute link target).
-if [[ -z "$SHARED_INPUT_MANIFEST" && ( -e "$SRC/reference_io.pt" || -L "$SRC/reference_io.pt" ) ]]; then
-  rm -f "$DST/reference_io.pt"
-  ln -s "$(readlink -f "$SRC/reference_io.pt" 2>/dev/null || echo "$SRC/reference_io.pt")" \
-    "$DST/reference_io.pt" 2>/dev/null \
-    || ln -s "$SRC/reference_io.pt" "$DST/reference_io.pt"
+# Share root and phase-local goldens; the tar excludes both. Keep each relative
+# path intact so B tasks can load captures/<phase>/reference_io.pt after cloning.
+# A pinned shared-input manifest links its own exact files below instead.
+if [[ -z "$SHARED_INPUT_MANIFEST" ]]; then
+  while IFS= read -r -d '' golden; do
+    relative="${golden#"$SRC/"}"
+    [[ -d "$DST/$(dirname "$relative")" ]] || continue  # excluded build/archive tree
+    ln -sfn "$(readlink -f "$golden" 2>/dev/null || echo "$golden")" "$DST/$relative"
+  done < <(find "$SRC" \( -type f -o -type l \) -name reference_io.pt -print0)
 fi
 
 # Optional: one physical aiter/ tree per eval (shared-root), symlink into DST.

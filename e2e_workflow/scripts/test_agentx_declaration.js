@@ -37,17 +37,30 @@ const src = fs.readFileSync(WF, 'utf8');
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures++; } else console.log('  ok:', msg); };
 
+// EP is resolved UPSTREAM, by interface/run_e2e.py::_resolve_ep, and arrives as args.ep --
+// run_e2e.py sends it on every launch. The workflow used to re-derive it by shelling out to that
+// same parser, which could never run: neither workflow runtime defines `require`, so that branch
+// died with "require is not defined" at module scope the moment any launch detail was passed.
+// Guessing 1 instead would be worse than failing, because ep addresses the KB page beside tp. So
+// the contract is now: take args.ep, or 1 when there is nothing to resolve, or say what to pass.
+// The parser's own behaviour (--ep-size, EP_SIZE, --enable-expert-parallel x dp) is covered where
+// it lives, in interface/test_run_e2e_dispatch.py.
 const epSource = src.match(/function resolveServingEp\(\) \{[\s\S]*?\n\}/)[0];
-const standaloneEp = (args) => new Function('A', 'SERVING_TP', 'WORKFLOW_DIR', 'require',
-  epSource + '\nreturn resolveServingEp();')(args, 8, path.join(ROOT, 'e2e_workflow'), require);
-ok(standaloneEp({ initial_extra_server_args: '--ep-size=4' }) === 4,
-  'standalone initial flags resolve EP through the same parser as dispatch');
-ok(standaloneEp({ initial_extra_env: 'EP_SIZE=4' }) === 4,
-  'standalone EP_SIZE environment is part of baseline identity');
-ok(standaloneEp({ initial_extra_server_args: '--enable-expert-parallel --data-parallel-size 2' }) === 16,
-  'standalone vLLM EP includes data parallelism');
+const standaloneEp = (args) => new Function('A', 'SERVING_TP', 'WORKFLOW_DIR',
+  epSource + '\nreturn resolveServingEp();')(args, 8, path.join(ROOT, 'e2e_workflow'));
+ok(!/\brequire\s*\(/.test(epSource),
+  'EP resolution uses no Node API the workflow sandbox lacks');
 ok(standaloneEp({ ep: 2, initial_extra_server_args: '--ep-size=4' }) === 2,
   'an explicit standalone degree remains authoritative');
+ok(standaloneEp({}) === 1,
+  'nothing to resolve means no expert parallelism, which is also right for a dense model');
+for (const [key, value] of [['initial_extra_server_args', '--ep-size=4'],
+  ['initial_extra_env', 'EP_SIZE=4'], ['launch_recipe', 'envs:\n  EP_SIZE: 4\n']]) {
+  let thrown = '';
+  try { standaloneEp({ [key]: value }); } catch (e) { thrown = String(e.message || e); }
+  ok(thrown.includes('args.ep is required') && thrown.includes('run_e2e.py'),
+    `${key} without args.ep fails loudly and names the resolver (got: ${thrown.slice(0, 60) || 'no throw'})`);
+}
 
 // ── Rebuild the declaration block + the prompt injector with controlled inputs ──────────────────
 // Slice the contiguous region that defines WORKLOAD_SPEC..AGENTX_ENV, plus the standalone
@@ -176,6 +189,7 @@ ok(has('GEAK_WORKLOAD_KIND', 'agentx_trace_replay'), 'GEAK_WORKLOAD_KIND names t
 ok(!/REPEATS/.test(sc.AGENTX_ENV), 'REPEATS is not declared, so REPLICAS keeps its meaning');
 ok(has('CONC', '8'), 'CONC comes from the declaration');
 ok(has('AGENTX_CANONICAL_DATASET', 'semianalysis_cc_traces_weka_062126')
+  && has('AGENTX_CANONICAL_NUM_ENTRIES', '393')
   && has('AGENTX_CANONICAL_DURATION', '3600'), 'the canonical reference is declared');
 ok(has('AGENTX_NUM_ENTRIES', '393') && has('GEAK_AGENTX_DURATION_S', '3600')
   && has('GEAK_AGENTX_LOOP_DURATION_S', '900'), 'corpus size and both durations are declared');
@@ -229,16 +243,21 @@ ok(/\|\| CONC='16'$/m.test(both.AGENTX_ENV) && /concurrency 16\)/.test(both.work
 // exactly what has to come back stamped non-canonical.
 ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126'$/m.test(ov.AGENTX_ENV),
   'overriding the corpus leaves the canonical dataset on the standard corpus');
+ok(/\|\| AGENTX_NUM_ENTRIES='50'$/m.test(ov.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_NUM_ENTRIES='393'$/m.test(ov.AGENTX_ENV),
+  'overriding the entry count leaves the canonical count at 393');
 const shortWindow = build({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } });
 ok(/\|\| GEAK_AGENTX_DURATION_S='1800'$/m.test(shortWindow.AGENTX_ENV)
   && /\|\| AGENTX_CANONICAL_DURATION='3600'$/m.test(shortWindow.AGENTX_ENV),
   'overriding the window leaves the canonical duration at 3600s');
 const moved = build({ workload_spec: { kind: 'agentx_trace_replay',
   corpus: 'semianalysis_cc_traces_weka_062126_256k',
-  canonical_corpus: 'semianalysis_cc_traces_weka_062126_256k', canonical_duration_s: 1800 } });
+  canonical_corpus: 'semianalysis_cc_traces_weka_062126_256k', canonical_num_entries: 200,
+  canonical_duration_s: 1800 } });
 ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126_256k'$/m.test(moved.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_NUM_ENTRIES='200'$/m.test(moved.AGENTX_ENV)
   && /\|\| AGENTX_CANONICAL_DURATION='1800'$/m.test(moved.AGENTX_ENV),
-  'declaring canonical_corpus / canonical_duration_s still moves the reference itself');
+  'declaring canonical_corpus / canonical_num_entries / canonical_duration_s still moves the reference itself');
 
 // Values are shell-quoted, so a corpus name containing a quote cannot break the sourced file.
 const nasty = build({ workload_spec: { kind: 'agentx_trace_replay', corpus: "a'b" } });

@@ -1,20 +1,100 @@
-// ===========================================================================
 // PHASE: Setup + Baseline profile + Strategize  (gated; else load carried state)
-// ===========================================================================
-// Module A's outputs. They are folded into the ORDINARY state variables at those variables' real
-// declaration sites further down. Module A must run BEFORE Profile so the Top-N is taken on the
-// adopted config. Their off-values are 0 / '' / [], which makes each fold a no-op when the feature is off.
+// Module A's outputs, folded into the ordinary state variables at their declarations below (Module A
+// runs BEFORE Profile so the Top-N is taken on the adopted config). Off-values make each fold a no-op.
 let kbSeedTput = 0;
 let kbSeedOverlay = '';
 const kbSeedKernels = [];
-// Spread into the Strategize and ConfigSweep inputs. Stays `{}` unless Module A measured something:
-// `{...{}}` contributes no own-properties and preserves key order, so those two prompts are
-// byte-identical to the pre-feature build on an off run.
+// Spread into the Strategize and ConfigSweep inputs; stays {} unless Module A measured something.
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 // Keep the original measured seed separate from the evolving timing reference.
 let BASELINE_FLAGS = null, BASELINE_ENV = null, BASELINE_OVERLAY = null;
+let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
+
+// The envelope arrives in the reply: this script cannot read EVAL_DIR (RUNTIME SANDBOX CONTRACT).
+// Every malformed reply THROWS, which arms the caller's repair_delivery retry; an empty queue would
+// read as "nothing to optimize".
+function readAgentXPreparation(reply) {
+  const prepared = reply && reply.prepared;
+  if (!prepared || typeof prepared !== 'object')
+    throw new Error('reply carries no prepared envelope; run agentx_kernel_preparation.mjs with ' +
+      '--emit-prepared and return its stdout verbatim');
+  for (const key of ['head_candidates', 'kernel_candidates'])
+    if (!Array.isArray(prepared[key])) throw new Error(`prepared.${key} must be an array`);
+  // Re-assert each candidate's invariants (preparedUtDefect); a bad one THROWS rather than being
+  // silently dropped.
+  const defects = [];
+  for (const c of [...prepared.head_candidates, ...prepared.kernel_candidates]) {
+    const why = !c || !c.prepared_ut ? 'carries no prepared_ut'
+      : preparedUtDefect(c, c.prepared_ut.result, c.prepared_ut.phase);
+    if (why) defects.push(`${(c && c.short_name) || '(unnamed)'}: ${why}`);
+  }
+  if (defects.length)
+    throw new Error(`${defects.length} prepared candidate(s) failed re-validation — ${defects.join('; ')}`);
+  if (!prepared.kernel_extraction_delivery_json && reply.delivery_path)
+    prepared.kernel_extraction_delivery_json = reply.delivery_path;
+  for (const key of ['failed_tasks', 'deferred_tasks'])
+    if (!Array.isArray(prepared[key])) prepared[key] = [];
+  prepared.config_directions = Array.isArray(prepared.config_directions) ? prepared.config_directions : [];
+  return prepared;
+}
+
+async function prepareAgentXKernels(round, throughput) {
+  phase('KernelExtract');
+  const inputs = {
+    EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
+    BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
+    BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
+    BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
+    CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+    PREVIOUS_WORKLOAD_JSON: profile ? profile.profile_workload_json || '' : '',
+    PREVIOUS_RANKING_JSON: profile ? profile.kernel_ranking_json || '' : '',
+    PREVIOUS_UT_DELIVERY: profile ? profile.kernel_extraction_delivery_json || '' : '',
+    EXTRACTION_SELECTION_POLICY: { phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5,
+      overall_pct_gt: 3, combination: 'phase_top_k_and_overall_threshold', backfill: false },
+    SOURCE_DELIVERY_REQUIRED: true,
+    BUDGET, HEAD_BUDGET, REMAINING_MIN: remainingMin(),
+    SKILL_DIR: WORKFLOW_DIR, ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+  };
+  let reply = await safeAgent(roleAgent('kernel_extractor', 'prepare',
+    'Complete the kernel-extract skill from the saved baseline through executable, GPU-validated UTs. ' +
+    'Selection, task grouping and bootstrap replay are INTERNAL steps: save their artifacts and continue ' +
+    'to source extraction, UT authoring and validation in this invocation. Prefer fixed-seed input factories ' +
+    'from saved shape/layout metadata; UT execution must not start serving or capture shapes. ' +
+    'Capture only missing structural state needed for faithful cases. Do not return a candidate list ' +
+    'before UTs have been attempted. Reuse compatible evidence and passing UTs. Never rerun the full ' +
+    'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
+    'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
+    'restore the clean source and rerun the UT. Keep failures and budget-deferred tasks in the delivery. ' +
+    'Read references/workflow-handoff.md in the skill. Pack with ' +
+    '`agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared}: ' +
+    'delivery_path names that file under EVAL_DIR, and prepared is that command\'s stdout envelope ' +
+    'VERBATIM — the workflow cannot open the file, so an envelope you summarise or rebuild by hand ' +
+    'is a corrupted handoff. Return it after all scheduled UT work is finished. Do not optimize or ' +
+    'integrate.', inputs),
+    { phase: 'KernelExtract', label: `kernel_extractor:prepare ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
+      const prepared = await readAgentXPreparation(reply);
+      log(`Kernel extraction ready: ${prepared.head_candidates.length + prepared.kernel_candidates.length} validated UTs, ` +
+        `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
+      return prepared;
+    } catch (error) {
+      if (attempt >= 1) throw new Error(`AgentX UT delivery unreadable: ${error.message}`);
+      reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
+        'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
+        'passing GPU tests. Preserve every real failure and all task results. The reader failed with: ' +
+        error.message + '. Re-pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ' +
+        '{delivery_path, prepared} for the repaired file, prepared being that stdout verbatim.',
+        { ...inputs, PREVIOUS_DELIVERY_PATH: reply?.delivery_path || '' }),
+        { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
+    }
+  }
+}
+
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -24,10 +104,8 @@ if (want('setup')) {
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
       EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
-      // Non-empty ONLY on a declared trace replay. The Director writes it to
-      // $EVAL_DIR/bench_env.sh in step 3, BEFORE the baseline bench in step 5,
-      // so the baseline is measured on the real client and the real metric axis
-      // rather than a synthetic sweep. Empty => the Director writes nothing.
+      // Only on a declared trace replay: the Director writes it to $EVAL_DIR/bench_env.sh before
+      // the baseline bench, so the baseline uses the real client and metric axis.
       ...(AGENTX_ENV ? { BENCH_ENV_CONTENT: AGENTX_ENV } : {}),
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -71,6 +149,7 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
+  SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
   // The Director may resolve launch defaults beyond INIT_*; retain its complete measured config.
   BASELINE_FLAGS = typeof (setup.server_flags && setup.server_flags.extra) === 'string'
     ? setup.server_flags.extra : (INIT_FLAGS || null);
@@ -85,16 +164,9 @@ if (want('setup')) {
   }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
-  // BASELINE_TPUT is the denominator of every gain this run will report, so a
-  // baseline accidentally measured with the synthetic client on the output axis
-  // does not just mis-state one number -- it silently rebases the entire run,
-  // and the mismatch is invisible in the result afterwards. The declaration
-  // travels through an AGENT (the Director writes bench_env.sh), so confirm the
-  // effect rather than trusting the instruction: the file has to exist and the
-  // baseline summary has to carry the metric basis we asked for.
-  // Positive mismatch => abort now, while one bench has been spent instead of
-  // a full budget. Unreadable summary => say so loudly and continue, since the
-  // measurement itself may still be fine and a false abort is its own failure.
+  // BASELINE_TPUT is the denominator of every reported gain, and the declaration travels through an
+  // agent, so confirm bench_env.sh exists and the baseline summary carries the requested metric
+  // basis. A mismatch aborts now; an unreadable summary warns and continues.
   if (IS_AGENTX) {
     let verdict = null;
     try {
@@ -150,11 +222,8 @@ print(json.dumps(res))
         log(`Setup: trace-replay declaration verified (bench_env.sh present, ` +
           `baseline metric_basis=${verdict.basis}).`);
       }
-      // Now that something has actually been served, take the kernel-targeting
-      // shape from the measurement instead of from a declaration or a constant.
-      // A caller who declared a shape explicitly keeps it: they may be targeting
-      // a regime deliberately, and overriding that silently would be its own
-      // surprise.
+      // Take the kernel-targeting shape from what the baseline served, unless the caller declared
+      // one explicitly.
       if (SHAPE_IS_MEASURED) {
         log(`Setup: keeping the declared kernel-targeting shape isl=${ISL} osl=${OSL} ` +
           `(provenance ${WORKLOAD_SHAPE_PROVENANCE}); the baseline served ` +
@@ -174,20 +243,9 @@ print(json.dumps(res))
 
   // =========================================================================
   // MODULE A — read the deployment KB, then VALIDATE what it says on this box.
-  //
-  // Placed HERE, and not earlier, for three reasons that are each load-bearing:
-  //   * EVAL_DIR, bench_e2e.sh, BASELINE_TPUT and NOISE_BAND do not exist until Setup returns, and a
-  //     candidate cannot be judged without a baseline to judge it against.
-  //   * it is before Profile, so the Top-N is captured on the ADOPTED config. This is the same
-  //     discipline the flow already asserts by re-profiling after ConfigSweep: a config change moves
-  //     which kernels dominate, and routing off a stale profile optimizes the wrong ops.
-  //   * it is INSIDE want('setup'), so a phase-partial resume cold-starts automatically rather than
-  //     re-reading and re-benching a store on every phase invocation.
-  //
-  // Nothing below is trusted on the store's word. A stored speedup was measured on another box, on
-  // another day, against another baseline; the only thing that makes it actionable here is that this
-  // run re-measured it through the same gate a fresh idea would face.
-  // =========================================================================
+  // After Setup (needs EVAL_DIR, bench_e2e.sh, BASELINE_TPUT, NOISE_BAND), before Profile (Top-N on
+  // the adopted config), inside want('setup') (a phase-partial resume cold-starts). A stored speedup
+  // counts only once this run re-measures it through the same gate.
   if (E2E_WARM_START_ON) {
     phase('WarmStart');
     KB_DIMS = {
@@ -198,14 +256,11 @@ print(json.dumps(res))
       rocm_version: String(setup.rocm_version || '').trim(),
     };
     if (!KB_DIMS.gfx) {
-      // Refuse to read rather than read the wrong page. An arch-less identity resolves to the
-      // `gfx=unknown` rung, whose records were measured on hardware we cannot establish — and the
-      // cost of believing one is a 20-40min server launch, not a wasted lookup.
+      // Refuse to read rather than read the wrong page: an arch-less identity resolves to the
+      // `gfx=unknown` rung, measured on unknown hardware.
       log('[kb] warm start skipped: read_reason=missing_arch (the Director reported no gfx; a ' +
         'cross-arch config is not a candidate, it is a guess).');
-      // Still a recall FACT worth reporting: "we did not look, and here is why" is not the same
-      // report as "we looked and the store was empty", and the reader cannot tell them apart from
-      // an absent section.
+      // Still reported: "did not look, and why" differs from "looked and found nothing".
       KB_RECALL.e2e = { read_reason: 'missing_arch', tried: [], answered: '', match_tier: '',
         plane: E2E_KB_PLANE, mode: E2E_WARM_START, candidates: 0, configs: [], kernels: [] };
     } else {
@@ -225,24 +280,16 @@ print(json.dumps(res))
           `--top-n ${E2E_WARM_START_TOP_N} \\\n` +
           `  --min-speedup ${E2E_WARM_START_MIN_SPEEDUP} \\\n` +
           `  --refs-dir ${shq(refsDir)} --cache-dir ${shq(cacheDir)} \\\n` +
-          // The read leaves this run's KB ADDRESS on disk as a side effect, at the one moment the
-          // dimensions are known and the process is still healthy. Module B below is the happy
-          // path; when this process dies before reaching it (6 of the 9 measured runs on
-          // 20260821-22), run_e2e.py salvages the numbers from disk and needs this file to know
-          // which pages they belong on. Free: no extra agent, no second formatting of the dims.
-          // --store/--identity-plane are recorded, not used, by the read: a `both` run reads
-          // remote-first, so without them the file would tell the salvage writer "remote" and lose
-          // the local mirror this run was configured to keep.
+          // The read also leaves this run's KB address on disk, so run_e2e.py can salvage results
+          // onto the right pages if this process dies before Module B. --store/--identity-plane are
+          // only recorded (so a `both` run's salvage keeps its local mirror).
           `  --identity-out ${shq(KB_IDENTITY_FILE)} \\\n` +
           `  --store ${shq(E2E_KB_STORE_DIR)} --identity-plane ${E2E_KB_PLANE}`) + '\n' +
         '```',
         { phase: 'WarmStart', label: 'warm_start:resolve', schema: KB_RESOLVE_SCHEMA }) || {};
       const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
-      // Log the ladder VERBATIM. On a scheme with no search, "never recorded" and "recorded under an
-      // address one segment different" are the same 404, and this line is the only record of which
-      // question was actually asked — without it a silent identity drift looks like an empty store.
-      // `read_plane` is which plane ANSWERED, `plane` only which was asked for. Falls back for a
-      // resolve emitted by an older build, whose JSON has no `read_plane`.
+      // Log the ladder VERBATIM: it is the only record of which address was asked, so identity drift
+      // isn't mistaken for an empty store. `read_plane` is the plane that ANSWERED (`plane` if absent).
       KB_READ_PLANE = String(resolved.read_plane || resolved.plane || '');
       log(`[kb] e2e read: plane=${KB_READ_PLANE || '?'} tried=[${(resolved.tried || []).join(' | ')}] ` +
         `answered=${resolved.canonical_id || '?'} tier=${resolved.match_tier || '-'} ` +
@@ -264,9 +311,8 @@ print(json.dumps(res))
           `below_min_speedup=${curation.below_min_speedup || 0} (floor ${curation.min_speedup}). ` +
           'This is a FLOOR result, not a cold deployment.');
       }
-      // Record the ASK before anything is benched. If this process dies mid-warm-start the report
-      // still knows which ladder was queried, and on a zero-candidate read this is the entire
-      // finding — see KB_RECALL's declaration for why the address matters more than the count.
+      // Record the ask before anything is benched, so a mid-warm-start death still reports which
+      // ladder was queried.
       KB_RECALL.e2e = {
         read_reason: String(resolved.read_reason || ''),
         tried: Array.isArray(resolved.tried) ? resolved.tried : [],
@@ -277,39 +323,29 @@ print(json.dumps(res))
         recall_metric_strict: E2E_KB_METRIC.strict, recall_metric_source: E2E_KB_METRIC.source,
         measurement_metric_basis: kbMeasurementBasis(),
         candidates: cands.length, configs: [], kernels: [],
-        // Both floors, always: "what did this run decline to see, and at what threshold" is not
-        // answerable after the fact from a candidate list.
+        // Both floors, always: what this run declined to see, and at what threshold.
         read_min_speedup: E2E_WARM_START_MIN_SPEEDUP,
         bench_min_speedup: E2E_WARM_START_BENCH_MIN_SPEEDUP,
         curation,
       };
       if (cands.length) KB_REF_DIR = refsDir;   // arms warmStartBlock() for the consumer roles
-      // Armed on the same condition and never separately: the cache holds nothing until a candidate
-      // is materialized, and a path to an empty directory reads to an agent as "the file is missing"
-      // rather than "there was no record", which are very different things to act on.
+      // Armed on the same condition: a path to an empty cache reads to an agent as "the file is
+      // missing" rather than "there was no record".
       if (cands.length) KB_CACHE_DIR = cacheDir;
 
-      // How many of the offers are worth a server launch. A coarse rung gets its own (smaller)
-      // budget rather than zero — see E2E_WARM_START_VALIDATE_N_COARSE for why the stored number's
-      // incomparability bounds how much we spend guessing, not whether the guess can be measured.
+      // How many offers are worth a server launch; a coarse rung gets its own smaller budget
+      // (E2E_WARM_START_VALIDATE_N_COARSE), not zero.
       const exactTier = (resolved.match_tier || '') === 'exact';
       const benchN = E2E_WARM_START_REF_ONLY ? 0
         : exactTier ? E2E_WARM_START_VALIDATE_N
         : A.e2e_warm_start_validate_n != null ? E2E_WARM_START_VALIDATE_N
         : E2E_WARM_START_VALIDATE_N_COARSE;
-      // WHICH offers, once we know how many. The page came back ordered by absolute throughput (the
-      // resolve default), and on a coarse rung that throughput was measured at some other tp or
-      // workload point, so it ranks the offers by the one quantity that did not survive the move.
-      // Re-order by the rung's own metric — speedup — so the launch is spent on the record that
-      // claims the biggest RATIO, which is what the store promotes its coarse champions on. Note the
-      // page was still FETCHED by throughput, so this reorders a throughput-biased top-N; making the
-      // fetch itself follow the rung metric belongs in e2e_store.resolve, not here.
+      // WHICH offers: on a coarse rung the stored throughput was measured elsewhere, so re-order by
+      // speedup (the rung's own metric). The top-N itself was still fetched by throughput.
       const benchOrder = exactTier ? cands : [...cands].sort(
         (x, y) => (Number(y.speedup) || 0) - (Number(x.speedup) || 0));
-      // The floor that spends money, applied HERE and not in the read. A record under it keeps its
-      // place in the offer, its bundle in the cache and its paragraph in the roles' context, and
-      // loses only the launch. No speedup recorded stays benchable: an unanswerable test is not a
-      // failed one.
+      // The bench floor: a record under it stays an offered reference and loses only the launch.
+      // A record with no stored speedup stays benchable.
       const aboveBenchFloor = (c) =>
         c.speedup == null || Number(c.speedup) >= E2E_WARM_START_BENCH_MIN_SPEEDUP;
       const benchable = benchOrder.filter(aboveBenchFloor);
@@ -332,8 +368,7 @@ print(json.dumps(res))
           `comparable to this baseline; the A/B below is measured on this box and is what counts.`);
       }
 
-      // Seeded with the records the bench floor declined. `skipped` is outside the attestable set
-      // on purpose: the ledger counts what was TRIED on hardware, and this was not.
+      // Seeded with the records the bench floor declined; `skipped` is never attested (not tried).
       const verdicts = belowBenchFloor.map(c => ({
         ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a', outcome: 'skipped',
         why: `stored speedup ${c.speedup}x is below the bench floor of ` +
@@ -345,11 +380,8 @@ print(json.dumps(res))
             outcome: 'skipped', why: 'the final reserve began before its turn' });
           continue;
         }
-        // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
-        // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
-        // same parity check and the same swap-took-effect log grep the flow already trusts for a
-        // fresh idea. Reusing it rather than writing a warm-start harness is the whole reason a
-        // stored config and a proposed config are judged by identical evidence.
+        // VALIDATE THROUGH THE ORIGINAL GATE (config_tuner:sweep), so a stored config and a fresh
+        // one are judged by identical evidence.
         const stored = (c.accepted_config && typeof c.accepted_config === 'object') ? c.accepted_config : {};
         const storedFlags = String(stored.flags || '');
         const storedEnv = String(stored.env || '');
@@ -358,8 +390,7 @@ print(json.dumps(res))
             outcome: 'skipped', why: 'the record carries no config to apply' });
           continue;
         }
-        // Key-by-key, not string-concatenated — see mergeConfig. The recorded value wins every
-        // collision; `overrides` is the list of knobs where this box and the record disagreed.
+        // Key-by-key merge (mergeConfig): the recorded value wins every collision.
         const mf = mergeFlags(curFlags, storedFlags);
         const me = mergeEnv(curEnv, storedEnv);
         const overrides = mf.overrides.concat(me.overrides);
@@ -368,10 +399,8 @@ print(json.dumps(res))
             `knob(s) this run's baseline already pins — ${describeOverrides(overrides)}. ` +
             'The recorded value is the one under test, so it wins.');
         }
-        // Nothing left to test. Not a verdict on the record and not worth a server launch: this
-        // run's baseline already IS the recorded configuration, so a bench would compare the
-        // baseline with itself and file the ~0% result as a loss. Left un-attested on purpose —
-        // `recalls` counts attempts on hardware, and this one never reached any.
+        // Nothing to test: the baseline already IS the recorded configuration (a bench would file a
+        // ~0% self-comparison as a loss). Left un-attested.
         if (mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
             me.merged === renderEnvItems(parseEnvString(curEnv))) {
           verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
@@ -432,17 +461,9 @@ print(json.dumps(res))
           'the log first.',
           `warm_start:validate:${c.session_id || 'cand'}`);
 
-        // ONE repair attempt, and only when the server produced no number at all.
-        //
-        // The first launch is where a box the config has never met shows up: a flag deleted upstream
-        // makes argparse exit before the model loads, and a knob this run's baseline pins can be
-        // incompatible with the recorded value. Both used to end as measured 0, one shot spent,
-        // `not_reproduced` filed against the record — but only the first is the record's fault, and
-        // a record that keeps meeting incompatible baselines was being retired for it.
-        //
-        // So: hand the launch failure back, make the tuner say WHICH of the two it is, let it adapt
-        // the minimum needed, and bench once more. Exactly once — a repair loop against a config
-        // that cannot run here learns nothing new — and through the SAME accept gate.
+        // ONE repair attempt, only when the server produced no number: the tuner classifies the
+        // launch failure (a stale record vs a conflict with this baseline), adapts the minimum, and
+        // benches once more through the same accept gate.
         let repair = null;
         if (!measuredTrialOf(sweep, BASELINE_TPUT).measured &&
             !searchClosed(`[kb] repair of config ${c.session_id || '?'}`)) {
@@ -480,17 +501,15 @@ print(json.dumps(res))
             : 'the repair attempt itself produced nothing'));
         }
         const { trial, measured } = measuredTrialOf(sweep, BASELINE_TPUT);
-        // The role's own list when it filled one in; otherwise subtract what ran from what was
-        // asked for. Either way the verdict names the knobs that did not make it onto the box.
+        // The role's own drop list, else what was asked for minus what ran.
         const dropped = (repair && Array.isArray(repair.dropped_flags) && repair.dropped_flags.length)
           ? repair.dropped_flags
           : (repair ? droppedByDiff(mf.merged, me.merged,
             String(trial.change || [trial.flags, trial.env].filter(Boolean).join(' | '))) : []);
         const parity = String(trial.parity || trial.output_parity || '');
         const deltaPct = BASELINE_TPUT ? ((measured - BASELINE_TPUT) / BASELINE_TPUT) * 100 : 0;
-        // Both the tuner's own judgement AND our arithmetic. A warm-start candidate is precisely
-        // where an agent is most tempted to ratify a stored claim it did not establish, so the
-        // orchestrator re-derives the ratio from the raw number rather than accepting `kept: true`.
+        // Both the tuner's judgement AND our arithmetic: the ratio is re-derived from the raw number
+        // rather than trusting `kept: true`.
         const accept = trial.kept === true && measured > BASELINE_TPUT &&
           deltaPct > NOISE_BAND && parity !== 'fail';
         if (accept) {
@@ -520,16 +539,12 @@ print(json.dumps(res))
             `${measured} tok/s, +${deltaPct.toFixed(2)}% vs baseline ${BASELINE_TPUT} (noise band ${NOISE_BAND}%)` +
             `${dropped.length ? `, with ${dropped.join(' ')} dropped to make it run here` : ''}.`);
         }
-        // FOUR outcomes, three different things — see KB_ATTEST_OUTCOME. All counted apart
-        // (kb/attest.py); only a loss and a no-effect count against the record, and then only as
-        // evidence toward a threshold.
-        //
-        // `note` and `notes` are both read: the role file's return schema spells it `note`, and
-        // reading only `notes` meant the per-trial text never reached this regex at all.
+        // FOUR outcomes (see KB_ATTEST_OUTCOME), counted apart by kb/attest.py; only a loss and a
+        // no-effect count against the record, as evidence toward a threshold. The role file spells
+        // the per-trial text `note`.
         const notes = String(trial.notes || trial.note || (sweep && sweep.summary) || '');
         const inert = /\b(?:not (?:honou?red|recognized|recognised|applied|supported)|unrecognized|unrecognised|ignored|no such option|unknown (?:option|argument|flag)|renamed|removed upstream|did not take effect)\b/i.test(notes);
-        // The repair's structured verdict outranks the regex: it was reached by reading the launch
-        // error, while the regex is guessing at free text written for a human.
+        // The repair's structured classification outranks the free-text regex.
         const conflicted = String((repair && repair.classification) || '') === 'conflicts_with_baseline';
         const outcome = accept ? 'adopted'
           : !measured ? (conflicted ? 'inapplicable' : 'not_reproduced')
@@ -546,34 +561,21 @@ print(json.dumps(res))
         }
         verdicts.push({ ...c, measured_tok_s: measured || null, delta_pct: measured ? deltaPct : null,
           parity: parity || 'unknown', outcome, why: notes,
-          // What was actually put on the box, as opposed to what the record asked for. A reader
-          // comparing this run's number with the stored one needs both, and `applied_partial`
-          // is the difference between "the record lost" and "most of the record lost".
+          // What was actually put on the box vs what the record asked for.
           overrides, applied_partial: dropped.length > 0, dropped_flags: dropped,
           repair_classification: String((repair && repair.classification) || '') });
         if (accept) break;   // adopt the first that passes; the rest stay references
       }
-      // ---------------------------------------------------------------------
-      // Replay the stored KERNELS through the ordinary integrate gate.
-      //
-      // Same machinery as the Milestone track, verbatim: runIntegrateBothLegs, the same
-      // INTEGRATE_SCHEMA, the same isolated ref/candidate A/B with the parity probe, the same integAccepted
-      // predicate. The only thing that differs is where the patch came from, and that is exactly the
-      // thing the A/B is there to make irrelevant.
-      //
-      // Reverting is structural rather than an operation: a candidate lives in its own overlay
-      // directory and is activated only by being on PYTHONPATH, so rejecting one means not adopting
-      // it. Nothing is ever mutated in the install.
-      // ---------------------------------------------------------------------
+      // ---- Replay the stored KERNELS through the ordinary integrate gate ----
+      // Same machinery as the Milestone track (runIntegrateBothLegs, INTEGRATE_SCHEMA, the isolated
+      // A/B with parity probe, integAccepted). A candidate lives in its own overlay directory, active
+      // only on PYTHONPATH, so rejecting one is simply not adopting it.
       const kbKernels = [];
       const seenKernel = new Set();
       for (const c of cands) {
         const bundlePath = (c.bundle && c.bundle.path) || '';
-        // The record's PREBUILT overlay directory, packed by e2e_store._pack_overlay as
-        // `overlay.tar.gz` (manifest + sitecustomize + `_patched/` + every overlay-root module the
-        // rebinds transitively import). Named from the manifest rather than probed, because this
-        // script has no filesystem: a bundle whose upload never carried the tarball simply does not
-        // list it, and the entry stays a reference instead of costing two server launches to find out.
+        // The record's prebuilt overlay (`overlay.tar.gz` from e2e_store._pack_overlay), found via
+        // the bundle manifest (no filesystem here); without it the entry stays a reference.
         const bundleFiles = Array.isArray(c.bundle && c.bundle.files) ? c.bundle.files : [];
         const overlayTar = (bundlePath && bundleFiles.includes('overlay.tar.gz'))
           ? `${bundlePath}/files/overlay.tar.gz` : '';
@@ -586,35 +588,22 @@ print(json.dumps(res))
         }
       }
       let replayed = 0;
-      // One overlay tarball is the whole RECORD's final overlay, not one kernel's. If a record banked
-      // three authored kernels, restoring it restores all three at once, so it is benched ONCE and the
-      // remaining kernels of that record are marked as covered by it rather than each buying their own
-      // pair of server launches to measure the identical directory.
+      // One overlay tarball is the whole RECORD's final overlay, so it is benched ONCE and the
+      // record's other kernels are marked as covered by it.
       const overlayReplayed = new Set();
       const kernelVerdicts = [];
       for (const k of kbKernels) {
         const kind = String(k.winner_kind || k.kind || '').trim().toLowerCase();
-        // `patch` is stored inside the record's own bundle as `kernels/<name>.patch`, so the path only
-        // resolves if the artifacts actually came down. A record whose manifest was never committed
-        // downloads a knowledge document and no files, and handing the integrator a path that opens
-        // nothing would burn two server launches to discover it.
+        // `patch` lives in the record's bundle (`kernels/<name>.patch`); with no bundle there is no
+        // file to hand the integrator.
         const patchPath = (kind === 'patch' && k.patch && k.bundle)
           ? `${k.bundle}/files/${k.patch}` : '';
-        // An env/flag win is only replayable if the record actually says WHICH env or flag routed the
-        // op. Several records in the store name the kind but carry empty apply_env/apply_flags — they
-        // were written before those fields were banked. Sending one to the integrator produces an A/B
-        // between two identical configurations: two full server launches to measure nothing, and a
-        // 'rejected' verdict that then libels a win which may well have been real.
+        // An env/flag win is replayable only if the record names the env or flag that routed the op;
+        // otherwise the A/B would compare two identical configurations.
         const hasRouting = !!(String(k.apply_env || '').trim() || String(k.apply_flags || '').trim());
-        // A kind this lane cannot BUILD from a record can still be REPLAYED when the record ships the
-        // built artifact. `authored` is the case that matters: the integrator's authored path needs
-        // `authored_kernel_eval_dir/workspace/` to git-apply the diff and assemble the module, and that
-        // workspace is gone the moment the run ends — which is what the old blanket exclusion was
-        // about. But the OUTPUT of that build, the overlay directory, is in the record: manifest,
-        // sitecustomize, and the authored source (e.g. `geak_hip_extend/extend_attention_hip.hip`,
-        // rebuilt by the reader's own torch load()). The rebind seam is named in the manifest
-        // (`sglang...extend_attention:extend_attention_fwd` -> `geak_hip_extend:extend_attention_fwd`),
-        // so it is checkable rather than unprovable, and if it does not bind here the A/B says so.
+        // A kind this lane cannot rebuild from a record (e.g. `authored`, whose workspace is gone) can
+        // still be replayed from the record's built overlay; its manifest names the rebind seams, so
+        // the A/B shows whether they bind here.
         const viaOverlay = !E2E_REPLAYABLE_KINDS.has(kind) && !!k.overlay_tar;
         const unreplayable =
           E2E_WARM_START_REF_ONLY ? 'read-only mode'
@@ -639,8 +628,7 @@ print(json.dumps(res))
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
           KERNEL_RESULT: {
             short_name: k.name, winner_kind: kind,
-            // Both spellings, because the two tracks read different ones and this synthetic result
-            // has to satisfy whichever the integrator reaches for.
+            // Both patch spellings: the two tracks read different ones.
             code_patch: patchPath, final_patch: patchPath,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
             target_callable: String(k.target_callable || ''),
@@ -649,8 +637,7 @@ print(json.dumps(res))
             // task_dir is deliberately EMPTY and the provenance is declared foreign — see the intro.
             task_dir: '', provenance: 'knowledge_base_replay',
           },
-          // Set only on the prebuilt-overlay path, so the integrator can tell "assemble the candidate
-          // from this patch" from "the candidate already exists, unpack it and bench it".
+          // Only on the prebuilt-overlay path: unpack the candidate rather than assemble it.
           ...(viaOverlay ? { KB_OVERLAY_TARBALL: k.overlay_tar } : {}),
           CURRENT_OVERLAY: kbSeedOverlay || curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: kbSeedTput || BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
@@ -704,15 +691,13 @@ print(json.dumps(res))
           kbSeedTput = integ.e2e_throughput_tok_s;
           bankAccepted(kbSeedKernels, {
             short_name: k.name, backend: String(k.language || k.backend || ''), kind,
-            // On the prebuilt-overlay path there is no patch to point at; what reproduces this win is
-            // the accepted overlay the integrator just built from the tarball, and Module B packs that
-            // directory the same way the record we replayed was packed.
+            // On the prebuilt-overlay path there is no patch: the accepted overlay (packed by
+            // Module B) is what reproduces the win.
             e2e_delta_pct: integ.e2e_delta_pct, isolated, patch: patchPath,
             replayed_from_overlay: viaOverlay ? k.overlay_tar : '',
             pct_gpu_time: Number(k.pct_gpu_time) || 0,
             apply_env: String(k.apply_env || ''), apply_flags: String(k.apply_flags || ''),
-            // Provenance stays ON the banked entry: this kernel is a recovered win re-verified here,
-            // not something this run discovered, and Module B must not later claim otherwise.
+            // Provenance stays on the entry: a recovered win re-verified here, not a discovery.
             from_knowledge_base: true, kb_session_id: k.kb_session_id,
           }, krOf(kbIntegrateInputs));
           kernelVerdicts.push({ ...k, kind, outcome: 'adopted',
@@ -723,44 +708,20 @@ print(json.dumps(res))
           kernelVerdicts.push({ ...k, kind, outcome: abDone(integ) ? 'rejected' : 'incomplete',
             measured_delta_pct: integ ? integ.e2e_delta_pct : null,
             why: reason || 'A/B did not complete' });
-          // No corrective re-author here. That path re-optimizes a kernel this run authored and owns;
-          // a stored patch that fails its fresh gate is simply not this box's win, and the honest
-          // outcome is to hand it to the Architect as a lead rather than to repair someone else's diff.
+          // No corrective re-author: a stored patch that fails its fresh gate is handed to the
+          // Architect as a lead, not repaired.
           log(`[kb] kernel ${k.name} (${kind}) not adopted: ${reason || 'A/B did not complete'} — kept as a reference.`);
         }
       }
-      // ---------------------------------------------------------------------
-      // Demote what did not survive into a REFERENCE for the roles that come next.
-      //
-      // The resolver's own `e2e_reference_<sha7>.md` is deliberately left alone. It is the pristine
-      // record of what the STORE claimed, and the disagreement between that and what this box
-      // measured is the interesting datum — editing the claim to match the measurement destroys the
-      // only evidence that the two differ. So the measurements go in a sibling file that says, in as
-      // many words, that it overrides its neighbours.
-      //
-      // Three channels, because the first two can each be missed. The reference DIRECTORY is only
-      // read if an agent chooses to; the prompt BLOCK only reaches roles in WARM_START_ROLES; the
-      // INPUTS entry lands in `## Inputs` unconditionally and is the one that always fires.
-      // ---------------------------------------------------------------------
-      // ---------------------------------------------------------------------
-      // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
-      // box to resolve this identity saw the same optimistic record, benched it, and failed the
-      // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
-      // every rung, so a later reader can see how often it has been tried here and how it went.
-      // It moves no score and no champion: one box's failure is evidence, never a verdict. What it
-      // adds up to is decided elsewhere — KB_ATTEST_OUTCOME for the buckets, and
-      // kb/attest.py:should_retire for the threshold a separate `curate` pass acts on.
-      //
-      // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
-      // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
-      // counting it would put an attempt that never happened into the ledger.
-      //
-      // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
-      // record, not against the e2e run that once used it, and the two have separate ledgers —
-      // `experience_store.py attest` is where that verdict belongs.
-      //
-      // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
-      // benched only the config half, so every place printing both has to say which half ran.
+      // ---- Demote what did not survive into a REFERENCE for the roles that come next ----
+      // The store's `e2e_reference_<sha7>.md` stays as its claim; this box's measurements go in a
+      // sibling file that overrides it, surfaced three ways: the reference dir, the prompt block
+      // (WARM_START_ROLES) and the `## Inputs` entry, which always lands.
+      // ---- Tell the STORE what happened ----
+      // `e2e_store.py attest` counts each attempt onto the record (no score or champion moves;
+      // KB_ATTEST_OUTCOME sets the buckets, kb/attest.py:should_retire the curate threshold). Only
+      // config verdicts benched on this box count; a record whose bundle also claims kernels is
+      // reported as config-half-only.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
@@ -774,12 +735,9 @@ print(json.dumps(res))
           `--outcome ${KB_ATTEST_OUTCOME[v.outcome] || 'inapplicable'} ` +
           (v.measured_tok_s ? `--measured-tok-s ${v.measured_tok_s} ` : '') +
           `--baseline-tok-s ${BASELINE_TPUT} --parity ${shq(v.parity || 'n/a')} ` +
-          // The note carries what was actually run, not just why it ended: a bare "no win" against
-          // a partially-dropped config would read, three months later, as a verdict on the whole
-          // record. Overrides first — they are what a reader has to know to interpret the number.
+          // The note says what actually ran (overrides, drops), not just why it ended.
           `--note ${shq([
-            // The local verdict leads the note. It is filed as `inapplicable` so it cannot retire
-            // the record; a reader still has to be able to see what actually happened here.
+            // The local verdict leads the note: the filed bucket (KB_ATTEST_OUTCOME) may not show it.
             `local verdict: ${v.outcome}` +
               (v.measured_tok_s ? ` (${v.measured_tok_s} tok/s vs baseline ${BASELINE_TPUT})` : ' (no measurement)'),
             configHalfOnly(v)
@@ -807,18 +765,14 @@ print(json.dumps(res))
           log(`[kb] attested ${attestable.length} benched record(s): ` +
             attestable.map(v => `${v.session_id.slice(-12)}=${v.outcome}`).join(' '));
         } catch (e) {
-          // Non-fatal, like every other KB write. The measurements are already on disk and already
-          // in the reference file; losing the counter costs a future reader context, not this run.
+          // Non-fatal, like every other KB write.
           log(`[kb] attest failed (NON-FATAL): ${String(e).slice(0, 200)}`);
         }
       }
 
       const allVerdicts = verdicts.concat(kernelVerdicts);
-      // Same rows the measured_on_this_box.md tables carry, in machine form, so the Report role
-      // states the recall outcome from the orchestrator's own record rather than from whether an
-      // agent happened to open a reference file. Set OUTSIDE the `if (allVerdicts.length)` guard:
-      // an empty verdict list against a non-empty offer means "offered but not benched", which is
-      // itself a reportable outcome.
+      // The measured_on_this_box.md rows in machine form, for the Report role. Set outside the
+      // `if (allVerdicts.length)` guard: "offered but not benched" is itself reportable.
       if (KB_RECALL.e2e) {
         KB_RECALL.e2e.configs = verdicts.map(v => ({
           direction: String(v.direction || 'unlabeled'), session_id: String(v.session_id || ''),
@@ -831,10 +785,7 @@ print(json.dumps(res))
           measured_tok_s: v.measured_tok_s != null ? v.measured_tok_s : null,
           delta_pct: v.delta_pct != null ? v.delta_pct : null,
           parity: String(v.parity || ''), outcome: String(v.outcome || ''),
-          // What the merge and the repair did, in the same row as the number they produced. A
-          // reader who sees a neutral `delta_pct` needs to know whether the recorded value was the
-          // one that ran (`overrides`) and whether all of it ran (`applied_partial`); without them
-          // the row reads as a verdict on the record when it may be a verdict on the pairing.
+          // What the merge and repair did, beside the number they produced.
           overrides: Array.isArray(v.overrides) ? v.overrides : [],
           applied_partial: v.applied_partial === true,
           dropped_flags: Array.isArray(v.dropped_flags) ? v.dropped_flags : [],
@@ -852,9 +803,7 @@ print(json.dumps(res))
         const adoptedCfg = verdicts.filter(v => v.outcome === 'adopted');
         const adoptedKer = kernelVerdicts.filter(v => v.outcome === 'adopted');
         const rejected = allVerdicts.filter(v => v.outcome !== 'adopted');
-        // Split out of `rejected` for the reference section below, but deliberately still counted
-        // inside it: for the roles that come next, "lost the A/B" and "never ran" are both "do not
-        // re-propose this verbatim". The distinction matters to the STORE, not to the Architect.
+        // Also counted inside `rejected`: to the next roles both mean "do not re-propose verbatim".
         const notReproduced = verdicts.filter(
           v => v.outcome === 'not_reproduced' || v.outcome === 'inapplicable');
         const md = [
@@ -867,9 +816,8 @@ print(json.dumps(res))
           `- baseline: **${BASELINE_TPUT} tok/s** (noise band ${NOISE_BAND}%)`,
           `- serving: BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}, workload isl=${ISL} osl=${OSL} conc=${CONC}`,
           `- identity read: \`${resolved.canonical_id || '?'}\` (match tier \`${resolved.match_tier || '-'}\`)`,
-          // `exact` is exact on the IDENTITY, which encodes no server flags, env or kv-cache
-          // dtype — a record measured against a slower baseline reproduces smaller here for that
-          // reason alone.
+          // `exact` covers the identity only (no flags, env or kv-cache dtype), so a record measured
+          // against another baseline can reproduce smaller here for that reason alone.
           ...(verdicts.some(v => v.baseline_throughput_tok_s != null && BASELINE_TPUT &&
               Math.abs(v.baseline_throughput_tok_s - BASELINE_TPUT) / BASELINE_TPUT > NOISE_BAND / 100)
             ? ['- CAUTION: the match tier covers the identity only — not server flags, env or ' +
@@ -902,10 +850,8 @@ print(json.dumps(res))
             `**${v.outcome}** | ${String(v.why || '').slice(0, 160).replace(/[\\|]/g, '\\$&')} |`)
             : ['| _(none recorded)_ | | | | | |']),
           '',
-          // The plan's fourth requirement, made concrete: a top-N entry that could not be
-          // reproduced is not discarded, it is handed forward WITH its reproduction material. A
-          // lead the next role cannot open is a lead it will not use, so the launch script and the
-          // patch paths are spelled out here rather than left to be rediscovered in the bundle.
+          // A top-N entry that could not be reproduced is handed forward WITH its reproduction
+          // material (launch script, patch paths).
           ...(notReproduced.length ? [
             '## REFERENCE ONLY — recalled but NOT reproduced here',
             '',
@@ -985,8 +931,7 @@ print(json.dumps(res))
           2);
         KB_REF_DIR = refsDir;   // the measurements exist even if the offer list was thin
 
-        // The channel that always fires. Terse on purpose — it goes into `## Inputs` of two roles,
-        // and a verdict that has to be waded through is a verdict that gets skimmed.
+        // The channel that always fires (`## Inputs` of two roles); terse on purpose.
         KB_REF_INPUTS = {
           KB_REFERENCE_DIR: refsDir,
           KB_REFERENCE_VERDICT:
@@ -1023,28 +968,33 @@ print(json.dumps(res))
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  if (searchClosed('Profile and Strategize')) {
+  if (searchClosed('Profile and Strategize') || searchWindowShort('Profile, kernel extraction and the kernel search')) {
     kernelQueue = [];
     headQueue = [];
   } else {
-    phase('Profile');
-    profile = await safeAgent(
-      roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
-    log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+    if (KERNEL_EXTRACT_ON) {
+      strategy = await prepareAgentXKernels('baseline', kbSeedTput || BASELINE_TPUT);
+      profile = strategy;
+    } else {
+      phase('Profile');
+      profile = await safeAgent(
+        roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
+      log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
 
-    phase('Strategize');
-    strategy = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+      phase('Strategize');
+      strategy = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+    }
     kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
     headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
     headQueue = applyOpIdentityGuard(headQueue, 'strategize');
@@ -1066,10 +1016,30 @@ print(json.dumps(res))
   BASELINE_FLAGS = typeof ST.baseline_flags === 'string' ? ST.baseline_flags : null;
   BASELINE_ENV = typeof ST.baseline_env === 'string' ? ST.baseline_env : null;
   BASELINE_OVERLAY = typeof ST.baseline_overlay === 'string' ? ST.baseline_overlay : null;
-  profile = { profile_topN_json: ST.profile_topn_json || '' };
+  profile = { profile_topN_json: ST.profile_topn_json || '',
+    ...(KERNEL_EXTRACT_ON ? { profile_workload_json: ST.profile_workload_json || '',
+      kernel_ranking_json: ST.kernel_ranking_json || '',
+      kernel_extraction_delivery_json: ST.kernel_extraction_delivery_json || '',
+      failed_tasks: ST.kernel_extraction_summary?.failed_tasks || [],
+      deferred_tasks: ST.kernel_extraction_summary?.deferred_tasks || [],
+      coverage_summary: ST.kernel_extraction_summary?.coverage_summary || {} } : {}) };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = admitHeads(ST.headQueue || [], 'resume');
+  // Dispatch replays prepared_ut.result (it cannot read disk), so a candidate without it re-runs
+  // preparation, which re-packs the saved evidence rather than redoing GPU work.
+  const unusable = (k) => !k || !k.prepared_ut || !k.prepared_ut.result;
+  if (KERNEL_EXTRACT_ON &&
+      (PHASES.includes('extract') ||
+       (want('head') && (!Array.isArray(ST.headQueue) || headQueue.some(unusable))) ||
+       (want('kernel') && (!Array.isArray(ST.kernelQueue) || kernelQueue.some(unusable))))) {
+    // Finish the skill through GPU UT validation. Existing selection-only queues
+    // are evidence to reuse, not completed tasks ready for optimization.
+    strategy = await prepareAgentXKernels('resume', ST.throughput || BASELINE_TPUT);
+    profile = strategy;
+    headQueue = applyOpIdentityGuard(strategy.head_candidates.slice(), 'resume selection');
+    kernelQueue = strategy.kernel_candidates.slice();
+  }
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 

@@ -88,8 +88,10 @@ Write EVAL_DIR/COMMANDMENT.md with actual commands and these sections:
   Follow knowledge/profiling_guide.md for a reported !!! PROFILER FAILED and disclose
   degraded diagnostics. Do not invent successful profiling.
 - PARSE: exact tokens/regex, case IDs, units and mapping to weights.
-- METRIC: primary formula, each case's weight/weight_source if aligned, secondary
-  metrics and any non-representative baseline caveat.
+- METRIC: primary formula (time-weighted ratio-of-sums when a weighted oracle or
+  WORKLOAD_SPEC is present, otherwise unweighted geomean), each case's
+  weight/weight_source if aligned, secondary metrics and any non-representative
+  baseline caveat.
 - SOURCE_BINDING: the checks above.
 - MODIFIABLE FILES: exact editable source; prohibit harness/COMMANDMENT/reference
   changes and edits outside the workspace.

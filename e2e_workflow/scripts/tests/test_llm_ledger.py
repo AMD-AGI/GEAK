@@ -23,8 +23,10 @@ quotes. So the tests pin the four places it could quietly lie:
                                  with a stated reason, never an exception -- this runs at the end of
                                  a multi-hour GPU run.
 
-Plus a syntax guard on the three instrumented workflow JS files, using Node's parser in the
-workflow's async-function context. Bracket balance is a fallback when Node is unavailable.
+Plus a syntax guard on the three instrumented workflow JS files. When Node is available, it compiles
+them with the workflow engine's own async-function-body compiler (`compileWorkflowBody`); otherwise
+a structural bracket check still catches the class of mistake that wrapping a call in a helper
+introduces.
 
 Stdlib only, no GPU, no network -- everything is driven from synthetic transcripts in tempdirs.
 """
@@ -32,6 +34,7 @@ import glob as _glob
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -846,8 +849,10 @@ class TestOutputs(LedgerTestBase):
 
 
 # --------------------------------------------------------------------------- #
-# Syntax guard on the instrumented JS. Use the same async-function context as
-# the workflow engine; bracket balance is only the fallback without Node.
+# Syntax guard on the instrumented JS. These files are workflow function bodies,
+# not standalone scripts: top-level `await` and `return` are valid at runtime.
+# The engine's compiler is the syntax authority when Node is available; the
+# structural scanner is the explicit no-Node fallback.
 # --------------------------------------------------------------------------- #
 # A '/' starts a regex only where a value cannot already stand -- i.e. right after an
 # operator, an opener, a separator, or nothing at all. After a name, ')' , ']' or a
@@ -873,7 +878,7 @@ def _prev_word(src, i):
 
 
 def _find_node():
-    """A node runtime if one is discoverable -- the syntax AUTHORITY. None on a bare CI box."""
+    """A Node runtime if one is discoverable; otherwise None."""
     n = shutil.which("node")
     if n:
         return n
@@ -882,7 +887,8 @@ def _find_node():
     return cands[0] if cands else None
 
 
-# Compile through the engine without executing a workflow or selecting a backend.
+# Compile through the engine without executing a workflow or selecting a backend. The native
+# Workflow tool also requires exactly one `export const meta` declaration.
 _WORKFLOW_SYNTAX_CHECK = r"""
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -892,7 +898,10 @@ assert.equal(typeof compileWorkflowBody(
   '\uFEFFexport const meta = {}; await 0; throw new Error("must not execute"); return {};'
 ), 'function');
 assert.throws(() => compileWorkflowBody('const broken = ;'), SyntaxError);
-compileWorkflowBody(readFileSync(process.argv[1], 'utf8'));
+const source = readFileSync(process.argv[1], 'utf8');
+assert.equal((source.match(/^[ \t]*export[ \t]+const[ \t]+meta\b/gm) || []).length, 1,
+  'expected exactly one export const meta declaration');
+compileWorkflowBody(source);
 """
 
 
@@ -991,15 +1000,16 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
              "kernel_workflow/kernel_lane.js",
              "kernel_workflow/kernel_workflow.js")
 
-    def test_brackets_balance(self):
+    def test_workflow_syntax(self):
         node = _find_node()
         for rel in self.FILES:
             path = os.path.join(GEAK_ROOT, rel)
             if not os.path.isfile(path):
                 self.skipTest("%s not present" % rel)
             if node:
-                # Workflows allow top-level await/return after declaration exports
-                # are stripped; check the engine's function body, not a JS module.
+                # The workflow runtime evaluates these files as async function bodies, so a
+                # standalone `node --check` is wrong: it rejects their valid top-level return.
+                # The engine's compiler parses them without executing the workflow.
                 r = subprocess.run(
                     [node, "--input-type=module", "-e", _WORKFLOW_SYNTAX_CHECK, path,
                      os.path.join(GEAK_ROOT, "interface/runtime/engine/run_workflow.mjs")],
@@ -1009,6 +1019,79 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
                 with open(path, encoding="utf-8") as fh:
                     ok, why = js_balanced(fh.read())
                 self.assertTrue(ok, "%s: %s" % (rel, why))
+
+    # The `require('child_process')` sites that already exist. Every one is inside a try/catch,
+    # so on a runtime without `require` it degrades instead of crashing -- but it degrades
+    # SILENTLY, and `require` is undefined on BOTH workflow runtimes, so each of these is a
+    # feature that quietly does nothing: the live execution tracker, the measured-shape probe,
+    # capture reclaim before re-extraction and at Finalize, and the AgentX
+    # declaration-took-effect gate. Tracked debt, pinned here so the set cannot grow and so a
+    # NEW, unguarded require fails the build. Shrink this map when a site gets a real transport.
+    KNOWN_REQUIRE_SITES = {
+        "e2e_workflow/e2e_workflow.js": {
+            "const { spawn } = require('child_process');": 1,
+            "const { execFileSync } = require('child_process');": 4,
+        },
+        "kernel_workflow/kernel_workflow.js": {
+            "const { spawn } = require('child_process');": 1,
+        },
+        "kernel_workflow/kernel_lane.js": {},
+    }
+
+    @staticmethod
+    def _code_lines(path):
+        """Source lines with full-line `//` comments dropped -- these files document the
+        restriction by quoting the forbidden spelling, and that prose must not trip its guard."""
+        with open(path, encoding="utf-8") as fh:
+            return [(n, line) for n, line in enumerate(fh, 1)
+                    if not line.lstrip().startswith("//")]
+
+    def test_no_dynamic_import(self):
+        """A dynamic import in one of these files is a LAUNCH-TIME rejection of the WHOLE
+        script -- "SyntaxError: import() is not available in workflow scripts" -- so not one
+        line runs, on any phase, for any workload.
+
+        No parser catches it. Node accepts it, and so does the engine compile check above; that
+        is exactly how PR #520 shipped four dynamic imports and took the e2e workflow down
+        while CI stayed green. The restriction is the host's, not JavaScript's, so the guard
+        has to be a source-level one. Work that needs a file belongs in a vendored CLI under
+        e2e_workflow/scripts/ that an agent runs.
+        """
+        for rel in self.FILES:
+            path = os.path.join(GEAK_ROOT, rel)
+            if not os.path.isfile(path):
+                continue      # NOT skipTest: that aborts the loop and drops the guard for the rest
+            for number, line in self._code_lines(path):
+                self.assertNotIn(
+                    "import(", line,
+                    "%s:%d uses a dynamic import; the workflow runtime refuses the whole "
+                    "script at launch. Move the work into a vendored CLI under "
+                    "e2e_workflow/scripts/ that an agent runs." % (rel, number))
+
+    # A CommonJS module load: `require('<module>')`. Prompt strings embed Python helpers that
+    # are also named require (`require(condition, reason)`); those never reach Node's loader.
+    _JS_REQUIRE_RE = re.compile(r"\brequire\s*\(\s*['\"`]")
+
+    def test_no_new_require_sites(self):
+        """`require` is undefined on both workflow runtimes. The existing sites are pinned in
+        KNOWN_REQUIRE_SITES; anything else -- a new spelling, or one more of an existing one --
+        is a feature that will silently do nothing, so it fails here instead."""
+        for rel in self.FILES:
+            path = os.path.join(GEAK_ROOT, rel)
+            if not os.path.isfile(path):
+                continue      # NOT skipTest: that aborts the loop and drops the guard for the rest
+            seen = {}
+            for number, line in self._code_lines(path):
+                if not self._JS_REQUIRE_RE.search(line):
+                    continue
+                stripped = line.strip()
+                allowed = self.KNOWN_REQUIRE_SITES.get(rel, {}).get(stripped, 0)
+                seen[stripped] = seen.get(stripped, 0) + 1
+                self.assertLessEqual(
+                    seen[stripped], allowed,
+                    "%s:%d introduces a `require` the sandbox cannot satisfy: %s. It would "
+                    "fail silently. Move the work into a vendored CLI under "
+                    "e2e_workflow/scripts/ that an agent runs." % (rel, number, stripped))
 
     def test_each_workflow_records_a_timeline(self):
         """Every LLM chokepoint must feed the ledger, or a whole layer goes uncounted."""
@@ -1162,9 +1245,12 @@ class TestInstanceDedup(LedgerTestBase):
 
 
 class TestJsBalancedFallbackLimits(unittest.TestCase):
-    """js_balanced is a heuristic used ONLY when no node runtime is discoverable (Node's parser
-    is the authority in test_brackets_balance). These fixtures pin what the fallback does and does
-    NOT handle, so nobody mistakes it for a sound JavaScript parser and over-trusts a green run."""
+    """Pin the limits of the heuristic used only when no Node runtime is discoverable.
+
+    The engine's function-body compiler is authoritative when Node is present. These fixtures
+    document what the fallback does and does NOT handle so nobody mistakes it for a sound
+    JavaScript parser.
+    """
 
     def test_regex_after_a_value_keyword_is_not_read_as_division(self):
         # Without the keyword lookbehind the char before '/' is a letter, so the '/' would be
@@ -1181,7 +1267,7 @@ class TestJsBalancedFallbackLimits(unittest.TestCase):
         # The lookbehind covers keyword contexts, not the full grammar. A regex opened right
         # after a `)` that closes an `if (...)` head is valid JS but the heuristic reads the
         # '/' as division -- documented here so the limit is explicit, not a surprise.
-        # Node's parser (preferred whenever available) does not share this blind spot.
+        # The engine's function-body compiler does not share this blind spot.
         ok, _ = js_balanced("if (x) /[)]/.test(y);")
         self.assertFalse(ok)
 

@@ -24,7 +24,7 @@ const ctx = {
   INIT_FLAGS: '', INIT_ENV: '', INIT_BASE_OVERLAY: '/seed/overlay',
   setup: { server_flags: { extra: '--attention-backend seed' }, server_env: 'SEED=1' },
   tuning: { apply_env: 'TUNED=1', apply_flags: '--tuned', apply_overlay: '/accepted/overlay', post_tune_throughput_tok_s: 120 },
-  BACKEND: 'sglang', EVAL_DIR: '/eval', MODEL_NAME: 'model', BASELINE_TPUT: 100,
+  BACKEND: 'sglang', EVAL_DIR: '/eval', MODEL_NAME: 'model', BASELINE_TPUT: 100, KERNEL_EXTRACT_ON: false,
   NOISE_BAND: 1, profile: null, strategy: null, headQueue: [], kernelQueue: [],
   acceptedHeads: [], flaggedHeads: [], acceptedKernels: [], pendingIntegrations: [], history: {},
 };
@@ -42,7 +42,7 @@ const brief = (state) => {
     CURRENT_FLAGS: restored.curFlags, CURRENT_ENV: restored.curEnv,
     CURRENT_OVERLAY: restored.curOverlay, BASELINE_FLAGS: 'stale pending input',
   };
-  Object.assign(restored, { SEARCH_REPLICAS: 2, ACCURACY_INPUTS: {}, tuningIntegrateInputs: () => ({}) });
+  Object.assign(restored, { SEARCH_REPLICAS: 2, ACCURACY_INPUTS: {}, tuningIntegrateInputs: () => ({}), profile: null });
   run(integrate + '\nglobalThis.brief = withTuning;', restored);
   return plain(restored.brief);
 };

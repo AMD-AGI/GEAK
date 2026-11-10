@@ -1,36 +1,18 @@
 // ===========================================================================
 // MODULE B — record this run in the deployment knowledge base.
-//
-// STRICTLY AFTER the workflow_return.json persist above, and that ordering is not stylistic.
-// workflow_return.json is the pinned contract run_e2e.py depends on, documented as the workflow's
-// final act precisely because this process gets SIGKILLed. Module B is the one operation in the
-// whole workflow that waits on a NETWORK rather than a GPU, and putting it in front of the persist
-// would trade the run's canonical artifact for a knowledge-base entry. Feeding the KB that same file
-// as --result has a second benefit: the record cannot drift from the report, because they are the
-// same bytes.
-//
-// EVERY --apply IS PERMANENT. The service exposes no DELETE for /v1/kb/*, so a wrong record cannot
-// be cleaned up, only outranked. Hence the gates below are conservative by design.
+// Strictly after the workflow_return.json persist (Module B can be SIGKILLed while on the network);
+// that same file is the --result, so record and report match. EVERY --apply IS PERMANENT (no
+// DELETE for /v1/kb/*), hence the conservative gates.
 // ===========================================================================
-// The Director's verdict, not the raw ratio, decides whether a same-session A/B is a real win: a
-// declared no-win can still carry a ratio ABOVE 1.0 when a low outlier in the base leg depresses its
-// median, so the two mechanically-identical legs' ratio squeaks over 1.0 while the run bought
-// nothing (see the 20260822 gemma-4-26B-A4B run: 1.0215x raw same-session, but 0.9453x vs the
-// provided baseline, validation_status=validated_no_win, empty overlay + empty patch). Keying the
-// write on the ratio alone wrote that BELOW-baseline number in as the exact-id champion and buried
-// the real framework-layer win beneath it. A KB write is PERMANENT (no delete), so a verdict the
-// Director already computed to mean "no win" must never mint a champion record, whatever the ratio
-// rounded to. `startsWith` also catches the `..._no_number_used_carried_ab` fallback spelling.
+// The Director's verdict, not the raw ratio, decides a real win (a low base-leg outlier can lift a
+// no-win above 1.0); `startsWith` also catches the `..._no_number_used_carried_ab` spelling.
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     !A.kb_defer_to_interface &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
-  // Computed HERE, deterministically, from facts this script already holds — never asked of an
-  // agent. `direction` is inside _content_digest, so a label that varies between two runs of the
-  // same configuration mints a second session instead of replacing the first, and the page fills
-  // with near-identical entries that outrank each other by noise. '' (unlabeled) is the honest
-  // answer when nothing distinct happened; the store collapses unlabeled records with nothing.
+  // Computed deterministically here, never by an agent: `direction` is in _content_digest, so an
+  // unstable label would mint duplicate sessions. '' (unlabeled) when nothing distinct happened.
   const kbDirection = [
     (curFlags !== INIT_FLAGS || curEnv !== INIT_ENV) ? 'config' : '',
     (acceptedKernels.length || acceptedHeads.length) ? 'kernels' : '',
@@ -40,10 +22,8 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     KB_ENV_PRELUDE +
     `python3 ${shq(E2E_STORE_SCRIPT)} write ${kbIdentityFlags()} ` +
     `${kbPlaneFlags()} --result ${shq(EVAL_DIR + '/workflow_return.json')} ` +
-    // --require-win re-asks, inside the writer, the same question the `if` above already answered.
-    // Not redundancy for its own sake: run_e2e.py's salvage path is a SECOND writer, and the two
-    // must refuse the same results. One gate implementation (e2e_store.win_gate), two callers —
-    // the arrangement that stops the next gate fix from reaching only half the write paths.
+    // --require-win repeats the `if` above inside the writer: run_e2e.py's salvage path is a second
+    // writer, and both must refuse the same results via one gate (e2e_store.win_gate).
     `--require-win --direction ${shq(kbDirection)} ` +
     `--measured-by ${shq('e2e_workflow:' + BACKEND)} --apply`;
   try {
@@ -66,8 +46,7 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
       `promoted=${rungs.filter(r => r.promoted).length}` +
       `${rungs.filter(r => r.error).map(r => ` [${r.tier}: ${r.error}]`).join('')}`);
   } catch (e) {
-    // Non-fatal, exactly like the persist above. The run's result is already on disk and already
-    // returned; failing to record it is a lost opportunity, not a lost measurement.
+    // Non-fatal, like the persist above: the result is already on disk and returned.
     wfReturn.kb_written = { ok: false, error: String(e).slice(0, 200) };
     log(`[kb] write failed (NON-FATAL — the run's own artifacts are unaffected): ${String(e)}`);
   }
@@ -80,15 +59,12 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
   log(`[kb] not recording this run: ${why}.`);
 }
 
-// Persist the agent timeline so the ledger can attribute tokens/time to the right role, then render
-// the run report (ledger -> clickable role-execution-tree HTML + MD twin) as the very last step. The
-// script has no filesystem access, so a tiny agent writes the file and runs the report driver.
-// Entirely best-effort: accounting must never fail a run that produced a real speedup.
+// Last step, best-effort: an agent persists the agent timeline (per-role token/time attribution) and
+// renders the run report (role-execution-tree HTML + MD).
 if (EVAL_DIR && LLM_STATS) {
   try {
-    // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
-    // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
-    // that happen to share a shape. Unique per run, and available with no Date/random.
+    // `instance` (this run's eval dir) lets the parser dedupe a nested timeline reached twice
+    // without collapsing distinct lanes of the same shape; needs no Date/random.
     const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
     await safeAgent(persistLlmStatsPrompt(EVAL_DIR, tlJson),
       { phase: 'Validate', label: 'file_writer:persist_llm_stats',

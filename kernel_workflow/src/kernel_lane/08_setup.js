@@ -17,7 +17,7 @@ if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
   }
   if (typeof A.expected_gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)
       || typeof A.expected_target !== 'string'
-      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
+      || !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
       || typeof A.expected_device_name !== 'string' || !EXPECTED_DEVICE_NAME
       || !Number.isSafeInteger(A.expected_physical_cu_count) || A.expected_physical_cu_count <= 0) {
     throw new Error('captured GPU identity requires complete expected identity');
@@ -124,7 +124,7 @@ if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
       || !identity || typeof identity !== 'object' || Array.isArray(identity)
       || typeof identity.gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(identity.gfx)
       || typeof identity.target !== 'string'
-      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(identity.target)
+      || !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(identity.target)
       || typeof identity.marketing_name !== 'string' || !identity.marketing_name.trim()
       || !Number.isSafeInteger(identity.physical_cu_count) || identity.physical_cu_count <= 0
       || !Number.isSafeInteger(identity.visible_gpu_agents) || identity.visible_gpu_agents <= 0) {
@@ -218,9 +218,11 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 }
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
+// RDNA4 products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 let ROOFLINE_STATUS = 'non-rdna';
-if (DEVICE_TARGET === 'r9700' && GFX === 'gfx1201') {
-  ROOFLINE_STATUS = 'calibrated-r9700';
+if (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201') {
+  ROOFLINE_STATUS = `calibrated-${DEVICE_TARGET}`;
 } else if (/^gfx120/.test(GFX)) {
   ROOFLINE_STATUS = 'unknown-device-not-r9700';
 } else if (GFX === 'gfx950' && !['mi350x', 'mi355x'].includes(DEVICE_TARGET)) {
@@ -234,6 +236,14 @@ if (RDNA4_ISOLATE) {
   KERNEL_KNOWLEDGE_DIR = '';
   USE_LEARNED_READ = false;
   WARM_START_ON = false;
+}
+if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
+  applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement));
+  if (GPU_RESOURCE.warning) log(`GPU requirement WARNING: ${GPU_RESOURCE.warning}`);
+  if (GPU_JOB) {
+    log(`GPU requirement: ${GPU_RESOURCE.gpusPerJob} GPUs per job (${setup.gpu_requirement.kind}: ` +
+      `${setup.gpu_requirement.evidence || 'no evidence'}) -> ${GPU_JOB}`);
+  }
 }
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-

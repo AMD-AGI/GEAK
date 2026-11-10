@@ -17,8 +17,9 @@ python3 "$SKILL_DIR/../scripts/gpu_identity.py"
 ```
 Return gfx, target, marketing_name and physical_cu_count as device_gfx,
 device_target, device_name and physical_cu_count. Stop for a nonempty EXPECTED_GFX
-or EXPECTED_DEVICE_NAME mismatch, an EXPECTED_TARGET=r9700 mismatch, or disagreement
-with positive EXPECTED_PHYSICAL_CU_COUNT. Do not infer a product from gfx alone.
+or EXPECTED_DEVICE_NAME mismatch, an EXPECTED_TARGET product mismatch (any value
+other than unknown), or disagreement with positive EXPECTED_PHYSICAL_CU_COUNT.
+Do not infer a product from gfx alone; gfx1201 by itself is neither R9700 nor R9600D.
 
 Create the task and logs:
 ```bash
@@ -144,7 +145,7 @@ Return JSON:
   "baseline_frozen": true,
   "baseline_callable": "module:attr of the frozen input kernel",
   "device_gfx": "gfx950",
-  "device_target": "r9700|mi350x|mi355x|unknown",
+  "device_target": "r9700|r9600d|mi350x|mi355x|unknown",
   "device_name": "<exact Marketing Name>",
   "physical_cu_count": 256,
   "reference_io_sha256": "",

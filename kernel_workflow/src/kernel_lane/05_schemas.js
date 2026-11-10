@@ -44,6 +44,11 @@ const SETUP_SCHEMA = obj({
   // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
   // copies baseline_src/ + confirms meta.baseline_callable; the script aborts the run if neither holds.
   baseline_frozen: { type: 'boolean' }, baseline_callable: { type: 'string' },
+  // GPUs one run of the task's test/benchmark needs (roles/director.md "GPU requirement").
+  gpu_requirement: obj({
+    kind: { type: 'string', enum: ['single', 'fixed', 'scalable', 'unknown'] },
+    gpus_per_job: { type: 'number' }, evidence: { type: 'string' },
+  }, ['kind']),
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.

@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-lane',
   description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target.',
-  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.task.',
+  whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.gpus_per_job, args.job_gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
@@ -56,8 +56,8 @@ const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);
@@ -142,8 +142,84 @@ if (GPU_PROCESS_SETTLEMENT && (!agent.processTimeoutSupported
   throw new Error('GPU group requires native process settlement and its original absolute deadline');
 const GPU_MODE = REQUIRED_GPU_COUNT > 1 ? 'set'
   : String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
-const GPU_POOL = GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
-  : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+// Multi-GPU jobs (multi-rank ops). gpus_per_job > 1 leases any N GPUs of gpu_ids per command
+// (gpu_lock.sh pool:N:<ids>); job_gpu_ids pins one fixed group (group:<ids>). Either may also come
+// from op_spec.resource. Without any of them the count is what Setup found in the task's own
+// test/benchmark (`detected`, see scripts/detect_gpu_requirement.py). Every GPU consumer then gets
+// that one spec, so each command holds the whole group. One GPU per job leaves everything unchanged.
+// Setup's finding is a static hint: one that cannot run in gpu_ids (unknown, no usable count, more
+// GPUs than the pool) keeps the lane single-GPU with a warning. Only an explicit request throws.
+// required_gpu_count > 1 is the other request form: the lane's whole allocation as one set: lease
+// under native process settlement (above). It is explicit too, so it excludes these requests and
+// is never resized by Setup's finding.
+function resolveGpuRequest(A, gpuList, detected) {
+  const resource = (A.op_spec && A.op_spec.resource) || {};
+  const parseIds = (name, value) => {
+    const parts = String(value).split(',').map(s => s.trim()).filter(Boolean);
+    if (!parts.length) throw new Error(`${name} must contain at least one GPU id`);
+    if (parts.some(id => !/^\d+$/.test(id))) throw new Error(`${name} contains a non-numeric GPU id`);
+    const ids = parts.map(id => String(Number(id)));
+    if (new Set(ids).size !== ids.length) throw new Error(`${name} contains duplicate GPU ids`);
+    return ids;
+  };
+  const pool = parseIds('gpu_ids', gpuList.join(','));
+  const fixedValue = String(A.job_gpu_ids || '').trim() || resource.job_gpu_ids;
+  const fixedIds = String(fixedValue || '').trim() ? parseIds('job_gpu_ids', fixedValue) : [];
+  const explicit = A.gpus_per_job != null || resource.gpus_per_job != null || fixedIds.length > 0;
+  const found = (!explicit && detected) || {};
+  let foundCount = found.kind === 'scalable' ? pool.length : 1;
+  let problem = '';
+  if (found.kind === 'unknown') {
+    problem = 'Setup found multi-GPU code in this task but could not tell how many GPUs one run needs';
+  } else if (found.kind === 'fixed') {
+    const n = Number(found.gpus_per_job);
+    if (!Number.isSafeInteger(n) || n < 1) {
+      problem = `Setup reported no usable GPU count (${found.gpus_per_job})`;
+    } else if (n > pool.length) {
+      problem = `Setup found ${n} GPUs per run but gpu_ids holds ${pool.length}`;
+    } else {
+      foundCount = n;
+    }
+  }
+  const warning = problem ? `${problem} (${found.evidence || 'no evidence'}); running single-GPU. ` +
+    'Pass gpus_per_job=<N> (or job_gpu_ids) with enough gpu_ids to run it on N GPUs.' : '';
+  const countValue = A.gpus_per_job != null ? A.gpus_per_job
+    : (resource.gpus_per_job != null ? resource.gpus_per_job : (fixedIds.length || foundCount));
+  const countText = String(countValue).trim();
+  if (!/^[1-9]\d*$/.test(countText)) throw new Error('gpus_per_job must be a positive integer');
+  const gpusPerJob = Number(countText);
+  if (!Number.isSafeInteger(gpusPerJob)) throw new Error('gpus_per_job is too large');
+  if (fixedIds.length && fixedIds.length !== gpusPerJob) {
+    throw new Error(`gpus_per_job=${gpusPerJob} does not match job_gpu_ids size ${fixedIds.length}`);
+  }
+  if (!fixedIds.length && gpusPerJob > pool.length) {
+    throw new Error(`gpus_per_job=${gpusPerJob} exceeds gpu_ids pool size ${pool.length}; ` +
+      `pass gpu_ids with at least ${gpusPerJob} GPUs`);
+  }
+  if (fixedIds.some(id => !pool.includes(id))) throw new Error('job_gpu_ids must be a subset of gpu_ids');
+  const jobSpec = fixedIds.length ? `group:${fixedIds.join(',')}`
+    : (gpusPerJob > 1 ? `pool:${gpusPerJob}:${pool.join(',')}` : '');
+  return { gpusPerJob, fixedIds, jobSpec, explicit, warning };
+}
+// Validated now so a bad request fails before Setup; re-resolved from Setup's finding when implicit.
+let GPU_RESOURCE = null;
+let GPU_JOB = '';
+let GPU_POOL = '';
+let GPU_SINGLE = '';
+function applyGpuResource(r) {
+  GPU_RESOURCE = r;
+  GPU_JOB = r.jobSpec;
+  GPU_POOL = GPU_JOB || (GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
+    : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
+  GPU_SINGLE = GPU_JOB || (GPU_MODE === 'set' ? GPU_POOL : GPU_LIST[0]);
+}
+const GPU_REQUEST = resolveGpuRequest(A, GPU_LIST);
+if (REQUIRED_GPU_COUNT > 1 && GPU_REQUEST.explicit) {
+  throw new Error('required_gpu_count cannot be combined with gpus_per_job, job_gpu_ids or op_spec.resource');
+}
+applyGpuResource(REQUIRED_GPU_COUNT > 1
+  ? { gpusPerJob: REQUIRED_GPU_COUNT, fixedIds: GPU_LIST, jobSpec: '', explicit: true, warning: '' }
+  : GPU_REQUEST);
 const GPU_GROUP_INSTRUCTIONS = REQUIRED_GPU_COUNT > 1 ? `
 This task requires ${REQUIRED_GPU_COUNT} GPUs together. Its assigned raw IDs are ${GPU_IDS}.
 GPU_ID=${GPU_POOL} is a lock argument: pass it unchanged to gpu_lock.sh or profile_kernel.sh
@@ -723,6 +799,11 @@ const SETUP_SCHEMA = obj({
   // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
   // copies baseline_src/ + confirms meta.baseline_callable; the script aborts the run if neither holds.
   baseline_frozen: { type: 'boolean' }, baseline_callable: { type: 'string' },
+  // GPUs one run of the task's test/benchmark needs (roles/director.md "GPU requirement").
+  gpu_requirement: obj({
+    kind: { type: 'string', enum: ['single', 'fixed', 'scalable', 'unknown'] },
+    gpus_per_job: { type: 'number' }, evidence: { type: 'string' },
+  }, ['kind']),
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
@@ -1054,7 +1135,8 @@ function tlAgent(prompt, o, attempt) {
 
 // Role prompt: the agent reads its role file and knowledge itself; the script passes only inputs.
 // roleAgentFrom reads the role from any roles/ dir (kernel_workflow uses it for e2e's op_benchmarker,
-// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow).
+// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow);
+// multiGpuBlock only by kernel_lane, the one workflow that runs multi-GPU jobs.
 function roleAgentFrom(dir, role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phase}.
@@ -1066,6 +1148,7 @@ ${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role)
+    + (typeof multiGpuBlock === 'function' ? multiGpuBlock(role) : '')
     + (typeof externalMetricInstructions === 'function'
       ? externalMetricInstructions(role === 'director' && phase === 'validate')
       : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
@@ -1242,7 +1325,7 @@ async function deliveryFacts() {
 // Common assigned-pool facts at each dispatch; observed delivery facts remain opt-in.
 const evaluationServiceFacts = () => ({
   assigned_gpu_ids: GPU_LIST, lock_argument: GPU_POOL, mode: GPU_MODE,
-  required_gpus_per_evaluation: REQUIRED_GPU_COUNT,
+  required_gpus_per_evaluation: GPU_RESOURCE.gpusPerJob,
   meaning: 'Configured assigned evaluation pool, not an observation of live availability or throughput. ' +
     (GPU_LIST.length === 1 ? 'All GPU evaluations in this lane serialize through the one assigned device lock. ' :
       'Evaluations acquire the existing device/group locks. ') +
@@ -1336,6 +1419,20 @@ function expertSkillsBlock(role) {
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
+
+// Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
+function multiGpuBlock(role) {
+  if (!GPU_JOB) return '';
+  const n = GPU_RESOURCE.gpusPerJob;
+  return `\n\n## Multi-GPU job (GPUS_PER_JOB=${n})\n` +
+    `Every GPU command of this op needs ${n} GPUs. \`GPU_ID\` is the group spec \`${GPU_JOB}\`: one ` +
+    `\`gpu_lock.sh $GPU_ID <cmd>\` holds the whole group for the whole command and sets ` +
+    `HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call (e.g. ` +
+    `\`torchrun --nproc_per_node=${n} ...\`). Never call gpu_lock.sh from inside a leased command (it is ` +
+    `rejected) and never background a lease (\`&\`, nohup). A leased command is killed after ` +
+    `GEAK_GPU_RUN_TIMEOUT seconds (default 900); export a larger value for long runs such as a cold ` +
+    `JIT build. Leases on the same GPUs serialize, so put the arms you compare into one run.`;
+}
 // ===========================================================================
 // PHASE: Setup
 // ===========================================================================
@@ -1355,7 +1452,7 @@ if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
   }
   if (typeof A.expected_gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)
       || typeof A.expected_target !== 'string'
-      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
+      || !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
       || typeof A.expected_device_name !== 'string' || !EXPECTED_DEVICE_NAME
       || !Number.isSafeInteger(A.expected_physical_cu_count) || A.expected_physical_cu_count <= 0) {
     throw new Error('captured GPU identity requires complete expected identity');
@@ -1462,7 +1559,7 @@ if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
       || !identity || typeof identity !== 'object' || Array.isArray(identity)
       || typeof identity.gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(identity.gfx)
       || typeof identity.target !== 'string'
-      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(identity.target)
+      || !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(identity.target)
       || typeof identity.marketing_name !== 'string' || !identity.marketing_name.trim()
       || !Number.isSafeInteger(identity.physical_cu_count) || identity.physical_cu_count <= 0
       || !Number.isSafeInteger(identity.visible_gpu_agents) || identity.visible_gpu_agents <= 0) {
@@ -1556,9 +1653,11 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 }
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
+// RDNA4 products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 let ROOFLINE_STATUS = 'non-rdna';
-if (DEVICE_TARGET === 'r9700' && GFX === 'gfx1201') {
-  ROOFLINE_STATUS = 'calibrated-r9700';
+if (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201') {
+  ROOFLINE_STATUS = `calibrated-${DEVICE_TARGET}`;
 } else if (/^gfx120/.test(GFX)) {
   ROOFLINE_STATUS = 'unknown-device-not-r9700';
 } else if (GFX === 'gfx950' && !['mi350x', 'mi355x'].includes(DEVICE_TARGET)) {
@@ -1572,6 +1671,14 @@ if (RDNA4_ISOLATE) {
   KERNEL_KNOWLEDGE_DIR = '';
   USE_LEARNED_READ = false;
   WARM_START_ON = false;
+}
+if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
+  applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement));
+  if (GPU_RESOURCE.warning) log(`GPU requirement WARNING: ${GPU_RESOURCE.warning}`);
+  if (GPU_JOB) {
+    log(`GPU requirement: ${GPU_RESOURCE.gpusPerJob} GPUs per job (${setup.gpu_requirement.kind}: ` +
+      `${setup.gpu_requirement.evidence || 'no evidence'}) -> ${GPU_JOB}`);
+  }
 }
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
@@ -1996,7 +2103,7 @@ ${resolveScript}
             CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
-            GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            GPU_ID: GPU_SINGLE, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
             ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
@@ -2056,7 +2163,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], ROUND: 0,
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
               { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
@@ -2389,7 +2496,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_MODE === 'pin' ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this

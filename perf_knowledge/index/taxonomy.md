@@ -11,6 +11,7 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
 | `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK product calibration is R9700-only |
+| `gfx1151` | RDNA3.5 | integrated GPU of the Strix Halo APU; one ISA covers the Radeon 8060S (40 CU), 8050S (32 CU) and 8040S (16 CU) behind one generic nameplate, so there is no product key — peaks are calibrated for the 40-CU SKU and CU count is the only on-box discriminator |
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·
@@ -50,6 +51,10 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 **Library / auto backends (select-an-impl)**:
 `aiter` · `hipblaslt` · `rocblas` · `ck_lib` · `miopen` · `pytorch_inductor` · `mori` · `rccl` ·
 `fa_rocm` (FlashAttention-ROCm)
+**ONNX-Runtime EP backends (external `ROCm/hip-ep` repo; author/optimize a per-op kernel)**:
+`hip_ep` (HIP Execution Provider custom kernels — RDNA3.5 WMMA wave32 on gfx1151/gfx1150 client,
+CDNA MFMA wave64 on gfx942/gfx950 DC; op kernels in `lib/Runtime/Kernels/hip/<op>_kernel.hip`) ·
+`cpu_ep` (CPU Execution Provider reference / secondary target). See `languages/hip_ep/`.
 **Explicitly N/A on AMD** (record as `na` with reason): `flashinfer` (NVIDIA-only), `cutlass` (native),
 `cudnn`, `transformer_engine`.
 

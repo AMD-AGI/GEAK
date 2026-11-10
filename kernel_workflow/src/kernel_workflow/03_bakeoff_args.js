@@ -5,6 +5,11 @@
 if (MODE !== 'bakeoff') {
   throw new Error(`unknown mode='${MODE}'. Use optimize | author | bakeoff.`);
 }
+// Bake-off lanes each take a slice of gpu_ids, so multi-GPU jobs are only supported by the
+// single-language modes for now.
+if ((A.gpus_per_job != null && String(A.gpus_per_job).trim() !== '1') || String(A.job_gpu_ids || '').trim()) {
+  throw new Error('mode=bakeoff does not support gpus_per_job > 1 or job_gpu_ids; use mode=optimize or mode=author.');
+}
 
 // Sibling e2e_workflow dir — we REFERENCE its op_benchmarker role + bench scripts in place (no copy).
 const E2E_WF_DIR = String(A.e2e_workflow_dir ||
@@ -18,11 +23,11 @@ if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
   throw new Error('expected_gfx and expected_target must be supplied together');
 }
 if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
-    (EXPECTED_TARGET && !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET))) {
-  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|mi350x|mi355x|unknown');
+    (EXPECTED_TARGET && !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET))) {
+  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|mi350x|mi355x|unknown');
 }
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);

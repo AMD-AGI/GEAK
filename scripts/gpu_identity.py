@@ -4,7 +4,11 @@
 """Detect AMD GPU ISA and product identity from one structured rocminfo agent.
 
 Shared ISAs do not identify a product. This helper reports a known target only
-when the same GPU agent's ISA and exact marketing name match a supported product.
+when the same GPU agent's ISA and exact marketing name match a supported product:
+`r9700` or `r9600d` on gfx1201, `mi350x` or `mi355x` on gfx950. Every other
+product remains `unknown`, and an exact gfx1201 product name on another ISA
+fails closed. Product identity does not establish serving-policy or
+performance-calibration qualification.
 """
 
 from __future__ import annotations
@@ -20,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
+R9600D_MARKETING_NAME = "AMD Radeon AI PRO R9600D"
 PRODUCT_TARGETS = {
     ("gfx1201", R9700_MARKETING_NAME): "r9700",
+    ("gfx1201", R9600D_MARKETING_NAME): "r9600d",
     ("gfx950", "AMD Instinct MI350X"): "mi350x",
     ("gfx950", "AMD Instinct MI355X"): "mi355x",
 }
@@ -71,6 +77,14 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
         if not _GFX_RE.fullmatch(gfx) or gfx == "gfx000":
             continue
         marketing_name = fields.get("marketing name", "").strip()
+        # An exact gfx1201 product name on another ISA is an inconsistent agent
+        # and fails closed; any other unmatched (ISA, name) pair stays `unknown`.
+        gfx1201_target = PRODUCT_TARGETS.get(("gfx1201", marketing_name))
+        if gfx1201_target is not None and gfx != "gfx1201":
+            raise IdentityError(
+                f"GPU agent {gfx1201_target} requires gfx1201, observed {gfx}"
+            )
+        target = PRODUCT_TARGETS.get((gfx, marketing_name), "unknown")
         raw_cu = fields.get("compute unit", "")
         try:
             physical_cu_count = int(raw_cu)
@@ -84,7 +98,7 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
             {
                 "gfx": gfx,
                 "marketing_name": marketing_name,
-                "target": PRODUCT_TARGETS.get((gfx, marketing_name), "unknown"),
+                "target": target,
                 "physical_cu_count": physical_cu_count,
             }
         )
