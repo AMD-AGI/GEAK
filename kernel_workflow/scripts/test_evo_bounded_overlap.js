@@ -192,6 +192,9 @@ async function recoveryCallCaps() {
     assert.ok(callsInRecovery.some(c => c.label.startsWith('tech_lead:replan r2')));
     assert.equal(callsInRecovery.filter(c => c.label.startsWith('eng r2_d0:')).length, 2);
     assert.ok(callsInRecovery.every(c => c.global > cutoff && c.effective <= cutoff - 10));
+    fs.writeFileSync(path.join(rec.fixture_root, 'recovery_call_caps.json'), JSON.stringify({
+      authority: 'CPU fixture call options; not GPU efficacy', original_search_cutoff_epoch: cutoff,
+      engineer_cutoff_epoch: cutoff - 10, expireDuringRestore, calls: callsInRecovery}, null, 2));
     if (expireDuringRestore) {
       assert.equal(index(rec, 'verify r2_d0'), -1);
       assert.equal(index(rec, 'tech_lead:plan r3'), -1);
