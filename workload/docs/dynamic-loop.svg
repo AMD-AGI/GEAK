@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="1120" viewBox="0 0 1720 1120" font-family="DejaVu Sans, sans-serif" role="img" aria-labelledby="title desc">
+<title id="title">GEAK dynamic optimization loop</title>
+<desc id="desc">Reasoning, Plan, Module and Report form a feedback loop. Evidence determines which capabilities and implementations to call. Modules may repeat, skip, combine or run in parallel.</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L8 5 L1 9" fill="none" stroke="#8191a8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0" y="0" width="1720" height="1120" rx="28" fill="#f6f8fc" stroke="none"/>
+<rect x="1" y="1" width="1718" height="1118" rx="28" fill="none" stroke="#e5eaf2"/>
+<rect x="72" y="53" width="25" height="4" rx="2" fill="#366ae3" stroke="none"/>
+<text x="111" y="60" font-size="13" fill="#718095" font-weight="700" text-anchor="start" letter-spacing="1.6">GEAK / MODULAR WORKLOAD OPTIMIZATION</text>
+<text x="70" y="123" font-size="46" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="-1.6">Dynamic optimization loop</text>
+<text x="73" y="162" font-size="20" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Evidence chooses the next experiment. Skills do the work.</text>
+<rect x="1210" y="76" width="438" height="57" rx="28" fill="#eaf0fc" stroke="none"/>
+<text x="1429" y="111" font-size="17" fill="#42609b" font-weight="400" text-anchor="middle" letter-spacing="0">Objective · quality · budget</text>
+<rect x="72" y="207" width="980" height="678" rx="24" fill="#fff" stroke="#e0e6ef"/>
+<text x="104" y="241" font-size="13" fill="#718095" font-weight="700" text-anchor="start" letter-spacing="1.6">THE CONTROLLER</text>
+<path d="M476 346 H630" fill="none" stroke="#8191a8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none" marker-end="url(#arrow)"/>
+<path d="M825 427 V578" fill="none" stroke="#8191a8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none" marker-end="url(#arrow)"/>
+<path d="M632 673 H478" fill="none" stroke="#8191a8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none" marker-end="url(#arrow)"/>
+<path d="M285 578 V429" fill="none" stroke="#8191a8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none" marker-end="url(#arrow)"/>
+<rect x="110" y="275" width="350" height="138" rx="18" fill="#f5f1fd" stroke="#e5ddf5"/>
+<text x="135" y="309" font-size="13" fill="#8263b4" font-weight="700" text-anchor="start" letter-spacing="1.6">DECIDE</text>
+<text x="135" y="348" font-size="30" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Reasoning</text>
+<text x="135" y="382" font-size="17" fill="#586a80" font-weight="400" text-anchor="start" letter-spacing="0">Choose the next useful question.</text>
+<rect x="393" y="295" width="43" height="43" rx="12" fill="#e5ddf5" stroke="none"/>
+<g transform="translate(404,306)">
+<path d="M11 0 A11 11 0 1 1 10.99 0" fill="none" stroke="#8263b4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+<path d="M16 6 L13 13 L6 16 L9 9 Z" fill="none" stroke="#8263b4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+</g>
+<rect x="650" y="275" width="350" height="138" rx="18" fill="#edf3ff" stroke="#d9e5fb"/>
+<text x="675" y="309" font-size="13" fill="#366ae3" font-weight="700" text-anchor="start" letter-spacing="1.6">DESIGN</text>
+<text x="675" y="348" font-size="30" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Plan</text>
+<text x="675" y="382" font-size="17" fill="#586a80" font-weight="400" text-anchor="start" letter-spacing="0">Scope · method · budget · check</text>
+<rect x="933" y="295" width="43" height="43" rx="12" fill="#d9e5fb" stroke="none"/>
+<g transform="translate(944,306)">
+<path d="M8 1 H20 M8 10 H20 M8 19 H20" fill="none" stroke="#366ae3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+<path d="M0 1 H1 M0 10 H1 M0 19 H1" fill="none" stroke="#366ae3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+</g>
+<text x="553" y="489" font-size="22" fill="#18253b" font-weight="700" text-anchor="middle" letter-spacing="0">Evidence changes the plan</text>
+<text x="553" y="522" font-size="16" fill="#718095" font-weight="400" text-anchor="middle" letter-spacing="0">Repeat · skip · combine · parallelize</text>
+<rect x="650" y="603" width="350" height="138" rx="18" fill="#fff5e9" stroke="#f3e1c9"/>
+<text x="675" y="637" font-size="13" fill="#b57b31" font-weight="700" text-anchor="start" letter-spacing="1.6">EXECUTE</text>
+<text x="675" y="676" font-size="30" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Module</text>
+<text x="675" y="710" font-size="17" fill="#586a80" font-weight="400" text-anchor="start" letter-spacing="0">Run the selected skill or tool.</text>
+<rect x="933" y="623" width="43" height="43" rx="12" fill="#f3e1c9" stroke="none"/>
+<g transform="translate(944,634)">
+<path d="M0 0 H7 V7 H0 Z M14 0 H21 V7 H14 Z M0 14 H7 V21 H0 Z M14 14 H21 V21 H14 Z" fill="none" stroke="#b57b31" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+</g>
+<rect x="110" y="603" width="350" height="138" rx="18" fill="#edf8f5" stroke="#d6eae4"/>
+<text x="135" y="637" font-size="13" fill="#368775" font-weight="700" text-anchor="start" letter-spacing="1.6">LEARN</text>
+<text x="135" y="676" font-size="30" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Report</text>
+<text x="135" y="710" font-size="17" fill="#586a80" font-weight="400" text-anchor="start" letter-spacing="0">Results · evidence · uncertainty</text>
+<rect x="393" y="623" width="43" height="43" rx="12" fill="#d6eae4" stroke="none"/>
+<g transform="translate(404,634)">
+<path d="M1 0 V21 H22" fill="none" stroke="#368775" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+<path d="M6 16 L11 11 L16 13 L21 4" fill="none" stroke="#368775" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+</g>
+<path d="M110 785 H1000" fill="none" stroke="#e5eaf2" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+<rect x="118" y="825" width="10" height="10" rx="5" fill="#368775" stroke="none"/>
+<text x="142" y="836" font-size="16" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Finish on the objective or a declared stop condition. Retain verified results.</text>
+<rect x="1100" y="207" width="548" height="678" rx="24" fill="#fff" stroke="#e0e6ef"/>
+<text x="1126" y="250" font-size="26" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Choose a module</text>
+<text x="1126" y="278" font-size="16" fill="#718095" font-weight="400" text-anchor="start" letter-spacing="0">Capabilities, not a required sequence.</text>
+<path d="M1014 673 H1085" fill="none" stroke="#8191a8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 5" marker-end="url(#arrow)"/>
+<rect x="1124" y="308" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1140" y="343" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Setup</text>
+<text x="1140" y="373" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Prepare the environment</text>
+<rect x="1383" y="308" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1399" y="343" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Baseline</text>
+<text x="1399" y="373" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Establish the reference</text>
+<rect x="1124" y="410" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1140" y="445" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Profile</text>
+<text x="1140" y="475" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Find the bottleneck</text>
+<rect x="1383" y="410" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1399" y="445" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">UT</text>
+<text x="1399" y="475" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Qualify the computation</text>
+<rect x="1124" y="512" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1140" y="547" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Roofline</text>
+<text x="1140" y="577" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Estimate the headroom</text>
+<rect x="1383" y="512" width="239" height="88" rx="12" fill="#edf3ff" stroke="#d9e5fb"/>
+<text x="1399" y="547" font-size="21" fill="#366ae3" font-weight="700" text-anchor="start" letter-spacing="0">Optimize</text>
+<text x="1399" y="577" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Create a candidate</text>
+<rect x="1124" y="614" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1140" y="649" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Apply back</text>
+<text x="1140" y="679" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Integrate and prove effect</text>
+<rect x="1383" y="614" width="239" height="88" rx="12" fill="#f7f9fc" stroke="none"/>
+<text x="1399" y="649" font-size="21" fill="#18253b" font-weight="700" text-anchor="start" letter-spacing="0">Evaluate</text>
+<text x="1399" y="679" font-size="14" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">Measure system impact</text>
+<path d="M1124 729 H1622" fill="none" stroke="#e5eaf2" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="none"/>
+<text x="1126" y="761" font-size="13" fill="#718095" font-weight="700" text-anchor="start" letter-spacing="1.1">INTERCHANGEABLE IMPLEMENTATIONS</text>
+<text x="1126" y="790" font-size="15" fill="#65758a" font-weight="400" text-anchor="start" letter-spacing="0">For example, Optimize can use:</text>
+<rect x="1124" y="810" width="198" height="39" rx="9" fill="#eaf0fc" stroke="none"/>
+<text x="1223.0" y="835" font-size="15" fill="#366ae3" font-weight="400" text-anchor="middle" letter-spacing="0">Kernel Workflow</text>
+<rect x="1332" y="810" width="84" height="39" rx="9" fill="#eaf0fc" stroke="none"/>
+<text x="1374.0" y="835" font-size="15" fill="#366ae3" font-weight="400" text-anchor="middle" letter-spacing="0">OOB</text>
+<rect x="1426" y="810" width="196" height="39" rx="9" fill="#f1f4f8" stroke="none"/>
+<text x="1524.0" y="835" font-size="15" fill="#65758a" font-weight="400" text-anchor="middle" letter-spacing="0">Another skill / tool</text>
+<rect x="72" y="924" width="1576" height="122" rx="20" fill="#18253b" stroke="none"/>
+<text x="105" y="974" font-size="24" fill="#fff" font-weight="700" text-anchor="start" letter-spacing="0">A module defines the contract. A skill supplies the method.</text>
+<text x="105" y="1009" font-size="18" fill="#b4c0d3" font-weight="400" text-anchor="start" letter-spacing="0">Extend through Markdown, skills and tools. Preserve each module’s acceptance contract.</text>
+<text x="74" y="1084" font-size="13" fill="#8191a8" font-weight="400" text-anchor="start" letter-spacing="0">GEAK WORKLOAD</text>
+<text x="1646" y="1084" font-size="13" fill="#8191a8" font-weight="400" text-anchor="end" letter-spacing="0">REASONING → PLAN → MODULE → REPORT → REASONING</text>
+</svg>

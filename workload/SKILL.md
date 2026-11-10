@@ -13,12 +13,17 @@ running work; native receipts remain authoritative for measurements and credited
 
 Repeat:
 1. **Reason.** Read accepted and rejected evidence, uncertainties and running work.
-   Choose a useful observation or testable change; consult relevant skills on demand.
+   Choose a useful observation or testable change by expected benefit or uncertainty
+   resolved within the remaining budget. State why the evidence favors this next call;
+   consult relevant skills on demand.
 2. **Plan.** Write the question, module and implementation, input identities, scope,
    output directory, resource/time budget and decisive check in the invocation's
    `PLAN.md`. Use the [module catalogue](README.md#modules) and
    [invocation contract](stages/CONTRACT.md#direct-module-calls).
 3. **Act.** Call the selected skill or tool. Modules may repeat, skip or combine.
+   Use existing qualified inputs directly, keeping required checks inside the call.
+   A separate readiness investigation needs a concrete missing prerequisite or observed
+   incompatibility; it is not a routine stage.
    Parallel work gets separate candidate copies and outputs; measurements use isolated
    resources. Retain handles and evidence for work that reports later; the controller
    owns the next inspection and recovery, including after resource or storage migration.
@@ -31,8 +36,9 @@ Repeat:
    retaining its original request and output as context. An empty response or
    unfinished execution is not a formatting error; missing facts cannot be filled
    from another invocation, inferred units or placeholder values.
-   Record changes, findings and uncertainty; adopt, reject, investigate further or wait,
-   then return to reasoning.
+   Summarize **task → module / implementation → result → next decision**; keep retries
+   under their parent call. Index the invocation and report in `STATE.md`, then return
+   to reasoning: adopt, reject, investigate further or wait.
 
 Inspect ongoing work at the requested cadence: progress, native validity, resources and
 remaining scope. A heartbeat alone proves none of these. Investigate suspect results
