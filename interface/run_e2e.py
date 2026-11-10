@@ -880,7 +880,7 @@ def map_args(
     for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff",
                  "evolution_preserve_founder_attempts", "evolution_start",
                  "evolution_return_development", "evolution_import_stall_sources",
-                 "record_planner_inputs", "case_measurement_view"):
+                 "evolution_planner_case_evidence_view", "record_planner_inputs", "case_measurement_view"):
         if flag in h:
             ps_args[flag] = h[flag]
     if "kernel_budget" in h:

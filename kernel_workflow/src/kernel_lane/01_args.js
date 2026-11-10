@@ -4,6 +4,9 @@
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.evolution_planner_case_evidence_view !== undefined
+    && typeof A.evolution_planner_case_evidence_view !== 'boolean')
+  throw new Error('evolution_planner_case_evidence_view must be a boolean');
 if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
   throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')

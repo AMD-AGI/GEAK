@@ -41,7 +41,7 @@ const laneArgs = (wfArgs) => {
     // The worker validates the EVO schedule selector itself.
     ...(A.evolution_start !== undefined ? { evolution_start: A.evolution_start } : {}),
     ...Object.fromEntries(['evolution_return_development', 'evolution_import_stall_sources',
-      'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
+      'evolution_planner_case_evidence_view', 'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
       .map(key => [key, A[key]])),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,

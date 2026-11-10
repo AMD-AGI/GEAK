@@ -1000,6 +1000,98 @@ const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, spee
   reps: 3, speedup_spread: 0.01}));
 const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
 const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+// Hold archive/source access and scripted development fixed while changing only the
+// recipient views. The engineer treatment includes selected prose AND case rows.
+for (const [legacy, planner, engineer] of [
+  [false, false, false], [false, true, false], [false, false, true], [false, true, true],
+  [true, false, false],
+]) {
+  const rowsAt = speed => caseViewRows.map(row => ({...row, speedup: speed,
+    optimized_ms: +(row.baseline_ms / speed).toFixed(4)}));
+  const checkCaseView = (view, saved) => {
+    assert.equal(view.archive_ref.entry_id, saved.id);
+    assert.deepEqual(view.patch_ref, saved.patch_ref);
+    assert.equal(view.entry_verified, saved.verified);
+    assert.deepEqual(view.metric, {kind: 'geomean'});
+    for (const role of ['engineer', 'verifier']) {
+      if (!saved[role]) {
+        assert.equal(view[role], null);
+        continue;
+      }
+      assert.deepEqual(view[role].per_case, saved[role].per_case ?? null);
+      assert.equal(view[role].case_rows, saved[role].per_case?.length ?? null);
+      assert.deepEqual(view[role].evidence_refs, saved[role].evidence_context?.evidence_refs ?? null);
+    }
+  };
+  cases.push({...integrationFixture,
+    name: `recipient case views legacy=${legacy} planner=${planner} engineer=${engineer}`,
+    args: {...integrationFixture.args, evolution_case_evidence_view: legacy,
+      evolution_planner_case_evidence_view: planner, evolution_evidence_handoff: engineer,
+      evolution_return_development: true, evolution_preserve_founder_attempts: false,
+      evolution_import_stall_sources: false, record_planner_inputs: true},
+    plans: {...integrationFixture.plans,
+      r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+    candidates: {...integrationFixture.candidates,
+      ...Object.fromEntries(['r1_d0', 'r1_d1'].map(id => {
+        const spec = integrationFixture.candidates[id];
+        return [id, {...spec,
+          engineer: {status: 'ok', measurement_valid: true, speedup_geomean: spec.speed,
+            strategy: `strategy for ${id}`, per_case: rowsAt(spec.speed),
+            evidence_context: {evidence_refs: caseViewRefs}},
+          verifier: {...verifiedAt(spec.speed), per_case: rowsAt(spec.speed),
+            notes: `verified ${id}`, evidence_context: {evidence_refs: caseViewRefs}}}];
+      })),
+      r2_d0: {...integrationFixture.candidates.r2_d0, inherited: source(1, 0),
+        inspect: ({prompt, h}) => {
+          const context = h.field(prompt, 'EVOLUTION');
+          const saved = JSON.parse(fs.readFileSync(h.field(prompt, 'EVOLUTION_ARCHIVE'), 'utf8'));
+          assert.equal(Object.hasOwn(context, 'selected_evidence'), engineer);
+          assert.equal(Object.hasOwn(context, 'selected_case_evidence'), engineer);
+          if (!engineer) return;
+          const prose = [context.selected_evidence.parent, ...context.selected_evidence.donors];
+          assert.deepEqual(prose.map(row => row.id), ['r1_d0', 'r1_d1']);
+          assert.deepEqual(context.selected_case_evidence.entries.map(row => row.archive_ref.entry_id),
+            ['r1_d0', 'r1_d1']);
+          for (const row of prose) {
+            const entry = saved.entries.find(entry => entry.id === row.id);
+            assert.deepEqual(row.patch_ref, entry.patch_ref);
+            assert.equal(row.engineer.strategy, `strategy for ${row.id}`);
+            assert.equal(row.verifier.notes, `verified ${row.id}`);
+            assert.equal(Object.hasOwn(row.engineer, 'per_case'), false);
+          }
+          for (const view of context.selected_case_evidence.entries)
+            checkCaseView(view, saved.entries.find(entry => entry.id === view.archive_ref.entry_id));
+        }}},
+    inspectPlan: ({label, prompt, h}) => {
+      assert.deepEqual(h.field(prompt, 'CURRENT_BEST_PER_CASE'), h.perCase(label.endsWith('r1') ? 1 : 1.8),
+        'the planner override leaves current-best cases unchanged');
+      if (label.endsWith('r1')) assert.equal(h.field(prompt, 'EVOLUTION_ENTRIES'), undefined);
+    },
+    check: ({archive, events, h}) => {
+      assert.equal(archive.entries.length, 4);
+      assert.ok(archive.entries.every(row => row.verified === true));
+      assert.deepEqual(archive.entries.find(row => row.id === 'r2_d0').donor_ids, ['r1_d1']);
+      assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+      const plans = events.filter(event => /^tech_lead:plan r[2-9]/.test(event.label));
+      const memories = events.filter(event => event.label.startsWith('tech_lead:memory '));
+      const integrations = events.filter(event => event.label.startsWith('integrate '));
+      assert.equal(plans.length, 1);
+      assert.equal(memories.length, 2);
+      assert.equal(integrations.length, 1);
+      for (const [group, key, enabled] of [[plans, 'EVOLUTION_ENTRIES', planner],
+        [memories, 'EVOLUTION_ROUND', legacy]]) {
+        for (const event of group) for (const row of h.field(event.prompt, key)) {
+          assert.equal(Object.hasOwn(row, 'case_evidence'), enabled);
+          if (enabled) checkCaseView(row.case_evidence, archive.entries.find(entry => entry.id === row.id));
+        }
+      }
+      const integratedView = h.field(integrations[0].prompt, 'CANDIDATE_CASE_EVIDENCE');
+      assert.equal(integratedView !== undefined, legacy);
+      if (legacy) for (const view of integratedView.entries)
+        checkCaseView(view, archive.entries.find(entry => entry.id === view.archive_ref.entry_id));
+    },
+  });
+}
 cases.push({...integrationFixture,
   name: 'explicit invalid native integrator primary stays unavailable through adapters',
   args: {budget: 2}, best: 1.4, bestId: 'r1_d1', expected: fast,
@@ -1130,6 +1222,8 @@ cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view 
     [{optimizer: 'evo', optimizer_task_ref: {path: '/old/task.json', sha256: '0'.repeat(64)}},
       /optimizer_task_ref is retired/],
     [{optimizer_reserve_s: 0}, /optimizer_reserve_s is retired/],
+    ...[null, 'true', 1, [], {}].map(value => [
+      {evolution_planner_case_evidence_view: value}, /evolution_planner_case_evidence_view must be a boolean/]),
   ];
   for (const [args, message] of invalidArgs) {
     const unsupported = h.build(h.instrument(laneSource), {...h.BASE_ARGS, ...args},

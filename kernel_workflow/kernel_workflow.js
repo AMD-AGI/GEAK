@@ -614,7 +614,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
       // Preserve explicit search policy and evidence controls in every language lane.
       ...Object.fromEntries(['optimizer', 'evolution_start', 'evolution_return_development',
-        'evolution_import_stall_sources', 'evolution_case_evidence_view',
+        'evolution_import_stall_sources', 'evolution_case_evidence_view', 'evolution_planner_case_evidence_view',
         'evolution_evidence_handoff', 'evolution_preserve_founder_attempts',
         'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
         .map(key => [key, A[key]])),

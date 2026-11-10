@@ -39,6 +39,28 @@ flags control distinct evidence and initialization paths; see the
 These search settings leave the task's model, knowledge and skill configuration
 to the shared GEAK controls; a longer search need not disable those capabilities.
 
+## Planner and engineer evidence views
+
+To vary planner case presentation independently of selected engineer evidence,
+hold `evolution_case_evidence_view: false` and set the two controls explicitly:
+
+| Planner case view | Engineer selected prose and case bundle | `evolution_planner_case_evidence_view` | `evolution_evidence_handoff` |
+| --- | --- | --- | --- |
+| Off | Off | `false` | `false` |
+| On | Off | `true` | `false` |
+| Off | On | `false` | `true` |
+| On | On | `true` | `true` |
+
+These are argument overlays, not complete task configurations. Keep source/tool
+access, objective, current-best cases, development policy and resource budgets
+common across comparisons. The legacy flag keeps additional round-memory and
+integrator case rendering off in all four conditions. Their policies stay the
+same, though later history and plans can differ as a result of the treatment.
+Engineer handoff changes both selected prose and cases; it is not a case-only
+intervention. Omitting the planner override preserves the legacy planner behavior.
+See [archive views](archive.md#how-agents-use-the-archive) for the exact scope.
+These controls enable a presentation comparison; they do not establish benefit.
+
 ## Sustained development and time allocation
 
 EVO preserves the shared specialist and deep-engineer loops and their role

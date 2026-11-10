@@ -25,6 +25,9 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.evolution_planner_case_evidence_view !== undefined
+    && typeof A.evolution_planner_case_evidence_view !== 'boolean')
+  throw new Error('evolution_planner_case_evidence_view must be a boolean');
 if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
   throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
@@ -3897,6 +3900,9 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
     },
     planInputs() {
+      // Override only this recipient; memory, integration and engineer handoff keep their own controls.
+      const plannerCaseEvidence = A.evolution_planner_case_evidence_view === undefined
+        ? A.evolution_case_evidence_view === true : A.evolution_planner_case_evidence_view;
       const summary = entries.slice(-12);
       const best = entries.find(row => row.id === bestId);
       if (best && !summary.includes(best)) summary.unshift(best);
@@ -3906,7 +3912,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row)} : {}),
+          ...(plannerCaseEvidence ? {case_evidence: caseEvidence(row)} : {}),
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
             row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};

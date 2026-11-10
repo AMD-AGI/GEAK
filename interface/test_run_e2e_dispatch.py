@@ -300,7 +300,7 @@ class TestMapArgs(_RunE2ECase):
         flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
                  "evolution_preserve_founder_attempts", "evolution_start",
                  "evolution_return_development", "evolution_import_stall_sources",
-                 "record_planner_inputs", "case_measurement_view")
+                 "evolution_planner_case_evidence_view", "record_planner_inputs", "case_measurement_view")
         omitted = rx.map_args(self._handoff(optimizer="evo"))
         for flag in flags:
             self.assertNotIn(flag, omitted)

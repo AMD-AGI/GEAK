@@ -61,6 +61,8 @@ Prose is summarized if its JSON exceeds 16,384 UTF-8 bytes. A separate
 budget. Otherwise it supplies no partial case table: it reports the omission,
 row counts and exact archive entries to read. This option defaults to false and
 does not change stored archive rows or promotion rules.
+It controls the selected prose and case bundle together, independently of the
+planner, memory and integrator case-view settings below.
 
 The archive is a per-run record. Configured population lineages can publish
 committed checkpoints and import peer source/evidence into it; see
@@ -84,12 +86,23 @@ This option defaults to false and leaves the current planning/memory input shape
 unchanged when omitted or false. It is independent of engineer evidence handoff.
 It also supplies `CANDIDATE_CASE_EVIDENCE` to same-round EVO integration, with the
 same complete-or-reference-only size policy as selected engineer case evidence.
-Both settings retain the same full archive, including supplied engineer weighted/
+
+The optional boolean `evolution_planner_case_evidence_view` overrides only the
+planner's `EVOLUTION_ENTRIES[].case_evidence` rendering. When omitted, the planner
+continues to use `evolution_case_evidence_view === true`. An explicit `false`
+disables that planner view even when the legacy flag is true; an explicit `true`
+enables it without adding the memory or integrator views. Non-boolean values,
+including `null`, are rejected. The override leaves current-best and baseline
+cases unchanged. It does not change which entries are exposed or which source
+and evidence files agents can inspect.
+
+All settings retain the same full archive, including supplied engineer weighted/
 arithmetic metrics and verifier variance/graph-safety notes. The recent-twelve-plus-
 best entry selection, full-archive access, eligibility and delivery rules are unchanged.
-Both options are supported by the direct lane, optimize/author pass-through, and
+These options are supported by the direct lane, optimize/author pass-through, and
 the E2E handoff's existing nested-lane argument mapping. Values are forwarded
-without coercion; only boolean `true` enables a view. Bakeoff also forwards these
+without coercion; the legacy flags enable views only for boolean `true`, while
+the planner override requires a boolean when supplied. Bakeoff also forwards these
 evidence options and the EVO selector into its language lanes.
 Forwarding establishes configuration support, not actual evidence reads or gains.
 
