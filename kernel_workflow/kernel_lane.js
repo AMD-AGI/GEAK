@@ -25,6 +25,8 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
+  throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
   throw new Error('prepare_only must be a boolean');
 if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
@@ -2298,11 +2300,41 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       log(`Round ${round}: proposed-plan artifact unavailable or already recorded (${attempt}).`);
   };
 
-  let plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
-      evolutionInstructions(),
-      planInputs(false, await deliveryFactsInput())),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+  const callPlanner = async (attempt, intro, forbidStop, label) => {
+    const inputs = planInputs(forbidStop, await deliveryFactsInput());
+    const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
+    const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
+    let plannerObservation;
+    if (A.record_planner_inputs === true) {
+      const components = {};
+      const component = (name, value) => {
+        try {
+          const serialized = JSON.stringify(value);
+          const representedValue = serialized === undefined ? undefined : JSON.parse(serialized);
+          const state = representedValue === undefined ? 'absent' : representedValue === null ? 'null'
+            : representedValue === '' || (Array.isArray(representedValue) ? representedValue.length === 0
+              : typeof representedValue === 'object' && Object.keys(representedValue).length === 0) ? 'empty' : 'present';
+          components[name] = {state, ...(serialized === undefined ? {} : {serialized})};
+        } catch (_) { components[name] = {state: 'error'}; }
+      };
+      component('inputs', inputs);
+      component('role_prompt', prompt);
+      component('response_schema', schema);
+      component('prepared_original_ref', A.prepared_original_ref);
+      component('TASK', Object.hasOwn(inputs, 'TASK') ? inputs.TASK
+        : typeof TASK === 'string' && TASK ? TASK : undefined);
+      for (const key of new Set(['PROFILE_SUMMARY', 'HISTORY', 'EVOLUTION_ENTRIES', 'DEEP_COST',
+        'DEEP_SEARCH_BRIEF', 'LEARNED_KB_BUDGET', 'MINUTES_REMAINING', 'ENGINEER_CUTOFF_EPOCH',
+        'STOP_NOT_PERMITTED', ...Object.keys(inputs)])) component(`inputs.${key}`, inputs[key]);
+      plannerObservation = {eval_dir: EVAL_DIR, round, logical_attempt: attempt, components};
+    }
+    return agentT(prompt, { phase: 'Optimize', label, schema, ...ENGINEER_CALL,
+      ...(plannerObservation ? {plannerObservation} : {}) });
+  };
+
+  let plan = await callPlanner('initial',
+    'Decide this round\'s orthogonal directions (or stop).' + evolutionInstructions(), false,
+    `tech_lead:plan r${round}`);
   await recordProposedPlan('initial', plan);
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
@@ -2319,10 +2351,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
          (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
-    plan = await agentT(
-      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions(),
-        planInputs(true, await deliveryFactsInput())),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA, ...ENGINEER_CALL });
+    plan = await callPlanner(`replan${forcedReplans}`,
+      'Your stop was refused: plan at least one direction.' + evolutionInstructions(), true,
+      `tech_lead:replan r${round}#${forcedReplans}`);
     await recordProposedPlan(`replan${forcedReplans}`, plan);
     left = await secondsLeft(`replan-r${round}`);
   }

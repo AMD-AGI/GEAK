@@ -9,6 +9,7 @@
 import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRuntime } from './run_workflow.mjs';
 import { runProcess, runtimeFault } from './backends/base.mjs';
 import { extractJson, validate } from './schema.mjs';
@@ -123,11 +124,25 @@ async function testBackendEvents() {
   try {
     const path = join(dir, 'calls.jsonl');
     const b = makeFakeBackend();
+    const prompts = [];
+    const runAgent = b.runAgent;
+    b.runAgent = options => {
+      eq(Object.keys(options).sort(), ['cwd', 'env', 'label', 'model', 'prompt', 'timeoutMs'],
+        'backend receives only its explicit options, never planner observer metadata');
+      prompts.push(options.prompt); return runAgent(options);
+    };
+    const observation = eval_dir => ({eval_dir, round: 1, logical_attempt: 'initial', components: {
+      unicode: {state: 'present', serialized: JSON.stringify('observer-only λ🧪')},
+      missing: {state: 'absent'}, null_value: {state: 'null', serialized: 'null'},
+      empty: {state: 'empty', serialized: '[]'}, failed: {state: 'error'},
+      malformed: {state: 'present', serialized: null},
+    }});
     const rt = createRuntime({ backend: b, concurrency: 2, schemaRetries: 2,
       backendEventsFile: path, log: silent });
-    eq(await rt.parallel(['FAKE_TEXT:private-output', 'FAKE_THROW', 'FAKE_TEXT:last'].map((prompt, i) =>
-      () => rt.agent(prompt, { phase: 'Optimize', label: `eng r1_d${i}:memory` }))),
-    ['private-output', null, 'last'], 'recording preserves overlapping backend results and failure');
+    eq(await rt.parallel(['FAKE_TEXT:private-output λ🧪', 'FAKE_THROW', 'FAKE_TEXT:last'].map((prompt, i) =>
+      () => rt.agent(prompt, { phase: 'Optimize', label: 'tech_lead:plan r1',
+        plannerObservation: observation(`/eval/invocation-${i}`) }))),
+    ['private-output λ🧪', null, 'last'], 'recording preserves overlapping backend results and failure');
     const rows = async () => (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse);
     const events = await rows();
     const active = new Set(); let peak = 0;
@@ -135,8 +150,10 @@ async function testBackendEvents() {
       if (e.event === 'start') { active.add(e.backend_call_id); peak = Math.max(peak, active.size); }
       else { ok(active.delete(e.backend_call_id), 'backend end matches an active start'); }
       ok(e.schema === 'geak.backend-call/1' && e.phase === 'Optimize'
-        && e.label.startsWith('eng r1_') && Number.isFinite(Date.parse(e.timestamp_utc))
+        && e.label === 'tech_lead:plan r1' && Number.isFinite(Date.parse(e.timestamp_utc))
         && Number.isFinite(e.elapsed_ms), 'backend event has timing and existing role attribution');
+      eq([e.planner_observation.eval_dir, e.planner_observation.round, e.planner_observation.logical_attempt],
+        [`/eval/invocation-${e.backend_call_id - 1}`, 1, 'initial'], 'identical labels retain distinct eval invocation scopes');
     }
     eq(events.length, 6, 'three admitted backend calls have three start/end pairs');
     eq([peak, active.size], [b.maxInFlight, 0], 'interval overlap matches actual backend concurrency');
@@ -144,19 +161,56 @@ async function testBackendEvents() {
       [['Error', null]], 'backend failure records type without message');
     ok(!(await readFile(path, 'utf8')).includes('private-output'), 'trace excludes backend content');
     const schema = {type: 'object', required: ['ok']};
-    try { await rt.agent('FAKE_BADJSON', {schema}); } catch { /* expected after retries */ }
+    try { await rt.agent('FAKE_BADJSON', {schema, label: 'tech_lead:replan r1#1',
+      plannerObservation: {...observation('/eval/invocation-0'), logical_attempt: 'replan1'}}); } catch { /* expected after retries */ }
     const retries = (await rows()).slice(6);
     eq(retries.length, 6, 'each of three schema attempts has its own interval');
     eq(new Set(retries.map(e => e.backend_call_id)).size, 3, 'schema attempts have distinct backend identities');
     eq(new Set(retries.map(e => e.agent_call_id)).size, 1, 'schema attempts retain one agent identity');
+    ok(retries.every(e => e.planner_observation.eval_dir === '/eval/invocation-0'
+      && e.planner_observation.logical_attempt === 'replan1'), 'schema retries retain logical planner scope');
     eq(retries.filter(e => e.event === 'end').map(e => [e.schema_attempt, e.outcome]),
       [[1, 'returned'], [2, 'returned'], [3, 'returned']], 'invalid JSON is a returned backend call');
+    for (const e of await rows()) {
+      const prompt = prompts[e.backend_call_id - 1];
+      eq(e.host_prompt_state, 'present', 'successful host digest has explicit state');
+      eq(e.host_prompt_sha256, createHash('sha256').update(prompt, 'utf8').digest('hex'),
+        'start/end bind the exact dispatched prompt, including runtime additions and schema retries');
+      eq(e.host_prompt_bytes, Buffer.byteLength(prompt, 'utf8'), 'host prompt size counts UTF-8 bytes');
+      const c = e.planner_observation.components;
+      const serialized = JSON.stringify('observer-only λ🧪');
+      eq(c.unicode, {state: 'present', bytes: Buffer.byteLength(serialized, 'utf8'),
+        sha256: createHash('sha256').update(serialized, 'utf8').digest('hex')}, 'component digest binds exact serialized UTF-8');
+      eq([c.missing.state, c.null_value.state, c.empty.state, c.failed.state, c.malformed.state],
+        ['absent', 'null', 'empty', 'error', 'error'], 'component states distinguish absence, null, empty and observation errors');
+      eq([c.failed.bytes, c.failed.sha256, c.malformed.bytes, c.malformed.sha256], [null, null, null, null],
+        'observation failures carry no fabricated digest');
+    }
+    ok(!(await readFile(path, 'utf8')).includes('observer-only'), 'trace contains no serialized component contents');
     eq([rt.state.backendTrace.open_calls, rt.state.backendTrace.write_error], [0, null], 'settled trace is complete');
 
     const existing = createRuntime({backend: makeFakeBackend(), backendEventsFile: path, log: silent});
     eq(await existing.agent('FAKE_TEXT:unchanged'), 'unchanged', 'trace open failure does not change backend outcome');
     eq(existing.state.backendTrace.write_error, 'EEXIST', 'existing trace is explicitly rejected');
     eq((await rows()).length, 12, 'existing trace was neither replaced nor appended to');
+    const byteLength = Buffer.byteLength;
+    try {
+      Buffer.byteLength = (value, ...args) => {
+        if (typeof value === 'string' && value.startsWith('FAKE_TEXT:digest-survived')) throw new Error('fixture digest failure');
+        return byteLength(value, ...args);
+      };
+      eq(await rt.agent('FAKE_TEXT:digest-survived'), 'digest-survived', 'host digest failure preserves backend result');
+    } finally { Buffer.byteLength = byteLength; }
+    eq((await rows()).slice(-2).map(e => [e.host_prompt_state, e.host_prompt_bytes, e.host_prompt_sha256]),
+      [['error', null, null], ['error', null, null]], 'failed host digest remains explicit in matching start/end events');
+    for (const field of ['eval_dir', 'round', 'logical_attempt']) {
+      eq(await rt.agent('FAKE_TEXT:scope-survived', {plannerObservation: {
+        ...observation('/eval/valid'), [field]: {private: 'scope-object-content'},
+      }}), 'scope-survived', 'invalid observer scope preserves backend result');
+      eq((await rows()).slice(-2).map(e => e.planner_observation), [{state: 'error'}, {state: 'error'}],
+        'non-primitive scope produces only observer error state');
+    }
+    ok(!(await readFile(path, 'utf8')).includes('scope-object-content'), 'invalid scope contents never enter trace');
     const disabled = createRuntime({backend: makeFakeBackend(), log: silent});
     ok(!Object.hasOwn(disabled.state, 'backendTrace'), 'recording is absent by default');
     const expiredPath = join(dir, 'expired.jsonl');

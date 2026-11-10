@@ -86,7 +86,7 @@ async function runMode(mode, scenario, template) {
     deadline_epoch: OUTER, settlement_deadline_epoch: OUTER, editable_source_paths: ['k.py'],
     population_lineage: {...args0.population_lineage, id: 'lane', root: path.join(root, 'population')},
     ...(scenario.args || {})};
-  const rec = {mode, scenario: scenario.name, calls: [], logs: [], phases: [], host: []};
+  const rec = {mode, scenario: scenario.name, calls: [], logs: [], phases: [], host: [], planner_observations: []};
   const norm = s => String(s).split(root).join('<RUN>').split(WORKFLOW).join('<WORKFLOW>');
   const step = (label) => scenario.stepFor ? scenario.stepFor(label) : 60;
   const answer = async (label, prompt, opts) => {
@@ -99,9 +99,11 @@ async function runMode(mode, scenario, template) {
     if (label === 'benchmark_engineer') return {commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
       baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, correctness_cmd: 'c', benchmark_cmd: 'b',
       reliable: true, ...(scenario.bench || {})};
-    if (label === 'profile_engineer:baseline') return {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
+    if (label === 'profile_engineer:baseline') return Object.hasOwn(scenario, 'profile') ? scenario.profile
+      : {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
     if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
       const key = label.split(' ')[1];
+      if (scenario.failPlan === key) throw new Error('fixture planner failure');
       const p = scenario.plans[key];
       if (scenario.onPlan) { const t = scenario.onPlan(key, {now, processDeadline}); if (t != null) now = t; }
       return p || {stop: true, reasoning: 'fixture stop', directions: []};
@@ -163,10 +165,12 @@ async function runMode(mode, scenario, template) {
   };
   const agent = async (p, o = {}) => {
     const label = o.label || '';
+    if (o.plannerObservation) rec.planner_observations.push(JSON.parse(norm(JSON.stringify({
+      ...o.plannerObservation, label}))));
     const dispatched = neutralizeForBackend(o.schema ? p + schemaInstruction(o.schema) : p, 'codex');
     rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0,
       process_deadline_minus_now: processDeadline - now,
-      prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched))});
+      prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched)), role_prompt: norm(p)});
     const r = await answer(label, p, o);
     now += step(label);
     return r === undefined ? null : JSON.parse(JSON.stringify(r));
@@ -206,6 +210,7 @@ async function runMode(mode, scenario, template) {
     ? JSON.parse(norm(fs.readFileSync(path.join(evalDir, name, 'archive.json'), 'utf8'))) : null;
   rec.archive = readArchive('evolution');
   rec.continuation_archive = readArchive('evolution_continuation');
+  assert.ok(!fs.readdirSync(evalDir).some(n => /_inputs\.json$/.test(n)), 'observer writes no EVAL input artifact');
   return rec;
 }
 
@@ -442,6 +447,37 @@ const FALLBACK = 'Development fallback';
   assert.equal(rows.r4_d0.parent_id, 'r3_d0', 'a slower retained alternative is developed as a parent');
   assert.equal(rows.r3_d0.status, 'correct');
   assert.equal(evo.result.final_speedup, 1.45, 'delivery keeps the developed improvement');
+  {
+    const sc = {...SCENARIOS[0], name: 'planner_inputs', failPlan: 'r1', profile: null,
+      args: {task: 'Optimize the fixture kernel λ🧪.'}, plans: {
+        ...SCENARIOS[0].plans, 'r1#1': SCENARIOS[0].plans.r1}};
+    const off = await runMode('greedy', sc, TEMPLATE);
+    const on = await runMode('greedy', {...sc, args: {...sc.args, record_planner_inputs: true}}, TEMPLATE);
+    for (const actual of [off, on]) assert.equal(actual.error, null, actual.error);
+    assert.deepEqual(on.calls, off.calls, 'observer ON/OFF preserves every dispatched prompt and call');
+    assert.deepEqual(on.host, off.host, 'observer adds no host subprocess');
+    assert.deepEqual(on.result, off.result, 'observer ON/OFF preserves native outcomes');
+    assert.deepEqual(off.planner_observations, [], 'default OFF attaches no metadata');
+    const first = on.planner_observations.find(r => r.round === 1 && r.logical_attempt === 'initial');
+    const replan = on.planner_observations.find(r => r.round === 1 && r.logical_attempt === 'replan1');
+    const later = on.planner_observations.find(r => r.round === 2 && r.logical_attempt === 'initial');
+    assert.ok(first && replan && later, 'failed initial call, forced replan and later call retain logical identity');
+    for (const row of on.planner_observations) {
+      assert.equal(row.eval_dir, '<RUN>/eval');
+      assert.equal(JSON.parse(row.components.role_prompt.serialized), on.calls.find(c => c.label === row.label).role_prompt);
+    }
+    const c = first.components;
+    assert.equal(c.prepared_original_ref.state, 'absent');
+    assert.equal(c['inputs.STOP_NOT_PERMITTED'].state, 'absent');
+    assert.equal(c['inputs.PROFILE_SUMMARY'].state, 'null');
+    assert.equal(c['inputs.KK_OPERATOR'].state, 'empty');
+    assert.equal(c['inputs.KK_REFS'].state, 'empty');
+    assert.equal(c.TASK.state, 'present');
+    assert.equal(JSON.parse(c['inputs.HISTORY'].serialized).rounds.length, 0, 'snapshot survives later history mutation');
+    assert.ok(JSON.parse(later.components['inputs.HISTORY'].serialized).rounds.length > 0);
+    assert.equal(replan.components['inputs.STOP_NOT_PERMITTED'].state, 'present');
+    console.log('  ok: planner observer ON/OFF prompt/call parity, frozen states and eval/logical scope');
+  }
   fs.rmSync(OUT, {recursive: true, force: true});
   console.log('PASS: EVO stays byte-identical to greedy until its first non-improving round, then evolves from that incumbent. CPU fixture only.');
 })().catch(error => { console.error(error); process.exit(1); });

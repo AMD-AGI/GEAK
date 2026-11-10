@@ -30,6 +30,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { cpus } from 'node:os';
+import { createHash } from 'node:crypto';
 import { extractJson, validate, schemaInstruction } from './schema.mjs';
 import { defaultConcurrency, runProcess, runtimeFault } from './backends/base.mjs';
 import { parseArgv, loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
@@ -156,11 +157,17 @@ export function createRuntime({
       trace.events_written++;
     } catch (error) { trace.write_error = error.code || 'TRACE_WRITE_FAILED'; }
   }
-  async function callBackend(options, agentCallId, schemaAttempt, ph) {
+  async function callBackend(options, agentCallId, schemaAttempt, ph, plannerObservation) {
     if (!state.backendTrace) return backend.runAgent(options);
     const call = { backend_call_id: ++backendCallSeq, agent_call_id: agentCallId,
       schema_attempt: schemaAttempt, backend: backend.name, phase: ph, label: options.label,
-      timeout_ms: Number.isFinite(options.timeoutMs) ? options.timeoutMs : null };
+      timeout_ms: Number.isFinite(options.timeoutMs) ? options.timeoutMs : null,
+      host_prompt_state: 'present', host_prompt_sha256: null, host_prompt_bytes: null,
+      ...(plannerObservation ? {planner_observation: plannerObservation} : {}) };
+    try {
+      call.host_prompt_sha256 = createHash('sha256').update(options.prompt, 'utf8').digest('hex');
+      call.host_prompt_bytes = Buffer.byteLength(options.prompt, 'utf8');
+    } catch (_) { call.host_prompt_state = 'error'; call.host_prompt_sha256 = null; call.host_prompt_bytes = null; }
     state.backendTrace.open_calls++;
     backendEvent('start', call);
     let outcome = 'returned', error_name = null, error_code = null;
@@ -194,6 +201,30 @@ export function createRuntime({
     // A role's existing hang limit covers queueing and all schema attempts.
     const roleStopMs = agentOpts.processDeadlineEpoch != null && agentOpts.processTimeoutMs > 0
       ? elapsedMs() + Number(agentOpts.processTimeoutMs) : Infinity;
+
+    let plannerObservation;
+    if (state.backendTrace && agentOpts.plannerObservation) {
+      try {
+        const {eval_dir, round, logical_attempt, components: suppliedComponents} = agentOpts.plannerObservation;
+        if (typeof eval_dir !== 'string' || !eval_dir || !Number.isSafeInteger(round) || round < 1
+          || typeof logical_attempt !== 'string' || !/^(initial|replan[1-9]\d*)$/.test(logical_attempt)) throw new Error();
+        const components = Object.fromEntries(Object.entries(suppliedComponents).map(([name, part]) => {
+          const summary = {state: part?.state, bytes: null, sha256: null};
+          try {
+            if (!['absent', 'null', 'empty', 'present', 'error'].includes(summary.state)) throw new Error();
+            if (summary.state !== 'absent' && summary.state !== 'error') {
+              if (typeof part.serialized !== 'string') throw new Error();
+              summary.bytes = Buffer.byteLength(part.serialized, 'utf8');
+              summary.sha256 = createHash('sha256').update(part.serialized, 'utf8').digest('hex');
+            }
+          } catch (_) { summary.state = 'error'; summary.bytes = null; summary.sha256 = null; }
+          return [name, summary];
+        }));
+        plannerObservation = {eval_dir, round, logical_attempt, boundary: 'before_agentT',
+          serialization: 'JSON.stringify(value), UTF-8',
+          authority: 'supplied representation; not referenced file bytes or actual model reads', components};
+      } catch (_) { plannerObservation = {state: 'error'}; }
+    }
 
     const agentCallId = ++state.spawned;
     if (agentCallId > MAX_TOTAL_AGENTS) {
@@ -241,7 +272,7 @@ export function createRuntime({
           ({ text } = await callBackend({
             prompt: fullPrompt + timeGuidance + workflowGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
             model: agentOpts.model, timeoutMs,
-          }, agentCallId, i + 1, ph));
+          }, agentCallId, i + 1, ph, plannerObservation));
         } catch (error) {
           if (agentOpts.processDeadlineEpoch != null && msUntil(agentOpts.processDeadlineEpoch) <= 7000) {
             throw deadlineError();
