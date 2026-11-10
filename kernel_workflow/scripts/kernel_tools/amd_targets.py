@@ -37,8 +37,17 @@ def calculator_path():
     return None
 
 
-def capabilities(arch):
+def database_path(name):
+    """Resolve one ISA data source; an explicit directory never mixes versions."""
+    root = os.environ.get('GEAK_HW_DATA_DIR')
+    if root:
+        path = Path(root) / name
+        return path if path.is_file() else None
     import _hwdata
+    return _hwdata.find(name)
+
+
+def capabilities(arch):
     key = canonical(arch)
     target = TARGETS[key]
     result = {}
@@ -47,7 +56,7 @@ def capabilities(arch):
                 else 'encoding' if query in ENCODING_COMMANDS | {'search', 'errata'} else 'facts')
         database = target[kind]
         if database:
-            available = _hwdata.find(database) is not None
+            available = database_path(database) is not None
             result[query] = {'status': 'available' if available else 'missing_asset',
                              'source': database, 'provider': 'committed_database'}
         elif query in MATRIX_COMMANDS and target['calculator']:
