@@ -36,6 +36,9 @@ the test FAILS as NON-DISCRIMINATING rather than passing and implying coverage i
 Everything runs in a temp dir with a stdlib-only child; no GPU, no torch, no network.
 """
 import importlib.util
+import contextlib
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -44,6 +47,8 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -56,7 +61,8 @@ def _load(mod_name, filename):
     return mod
 
 
-NEW_SHIM = _load("overlay_setup", "overlay_setup.py").SITECUSTOMIZE
+OV = _load("overlay_setup", "overlay_setup.py")
+NEW_SHIM = OV.SITECUSTOMIZE
 
 # Frozen copy of the pre-fix injection strategy (overlay_setup.py at 52aa7aa5), kept verbatim so
 # the discrimination checks keep working after the fix is committed and `git show HEAD` no longer
@@ -280,6 +286,124 @@ class TestForkBombGuard(_Scenario):
                              "a script under /opt/rocm must be treated as a probe")
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+class TestClassMethodRebind(unittest.TestCase):
+    """Real child calls, failure exits and prior-shim composition; no serving/GPU imports."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "sample.py").write_text('''
+def module_fn(x): return ["original-module", x]
+VALUE = 3
+class Base:
+    def method(self, x): return ["original-method", self.tag, x]
+    @staticmethod
+    def static(x): return ["original-static", x]
+    @classmethod
+    def klass(cls, x): return ["original-class", cls.__name__, x]
+    @property
+    def prop(self): raise AssertionError("property must not execute")
+class Model(Base): tag = "model"
+class Sub(Model): pass
+singleton = Model()
+''')
+        self.impl = '''
+from sample import Model as EarlyClassAlias
+def method(self, x): return ["replacement-method", self.tag, x]
+def static(x): return ["replacement-static", x]
+def klass(cls, x): return ["replacement-class", cls.__name__, x]
+def module_fn(x): return ["replacement-module", x]
+VALUE = 99
+'''
+        self.calls = '''
+import json, inspect, sample
+from sample import Model as Alias, module_fn as function_alias
+obj = Alias()
+print(json.dumps([obj.method(1), Alias.method(obj, 2), Alias.static(3), obj.static(4),
+    Alias.klass(5), obj.klass(6), sample.Sub.klass(7), function_alias(8), sample.VALUE,
+    sample.Base.static(9), type(inspect.getattr_static(Alias, "static")).__name__,
+    type(inspect.getattr_static(Alias, "klass")).__name__]))
+'''
+
+    def entry(self, target, impl_attr):
+        return dict(target="sample:" + target, impl_module="impl", impl_attr=impl_attr)
+
+    def overlay(self, entries, shim=NEW_SHIM):
+        overlay = Path(tempfile.mkdtemp(dir=self.root))
+        (overlay / "sitecustomize.py").write_text(shim)
+        (overlay / "_overlay_manifest.json").write_text(json.dumps({"rebinds": entries}))
+        (overlay / "impl.py").write_text(self.impl)
+        return overlay
+
+    def child(self, overlay=None, code=None):
+        paths = ([str(overlay)] if overlay else []) + [str(self.root)]
+        return subprocess.run([sys.executable, "-c", code or self.calls], cwd=self.root,
+            env=dict(os.environ, PYTHONPATH=os.pathsep.join(paths), PYTHONDONTWRITEBYTECODE="1"),
+            capture_output=True, text=True, timeout=20)
+
+    def test_real_calls_preserve_descriptors_aliases_inheritance_and_reversal(self):
+        entries = [self.entry("Model." + name, name) for name in ("method", "static", "klass")]
+        entries += [self.entry("module_fn", "module_fn"), self.entry("VALUE", "VALUE")]
+        original = self.child()
+        old = self.child(self.overlay(entries, OV.PREVIOUS_SITECUSTOMIZE))
+        overlay = self.overlay(entries)
+        current = self.child(overlay)
+        for proc in (original, old, current):
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        before, broken, after = [json.loads(proc.stdout) for proc in (original, old, current)]
+        self.assertEqual(broken[:7], before[:7], "old dotted rebind must reproduce the no-op")
+        self.assertEqual(after, [["replacement-method", "model", 1], ["replacement-method", "model", 2],
+            ["replacement-static", 3], ["replacement-static", 4], ["replacement-class", "Model", 5],
+            ["replacement-class", "Model", 6], ["replacement-class", "Sub", 7],
+            ["replacement-module", 8], 99, ["original-static", 9], "staticmethod", "classmethod"])
+        alias = self.child(overlay, "import impl; print(impl.EarlyClassAlias().method(10))")
+        self.assertEqual(alias.returncode, 0, alias.stderr)
+        self.assertIn("replacement-method", alias.stdout)
+        self.assertEqual(self.child().stdout, original.stdout, "separate process without overlay restores original")
+
+    def test_invalid_targets_fail_before_application_and_do_not_invoke_descriptors(self):
+        for target, replacement in [("Model.absent", "method"), ("Missing.method", "method"),
+                ("singleton.method", "method"), ("Model.prop", "method"), ("Model.method", "VALUE"),
+                ("absent", "VALUE")]:
+            with self.subTest(target=target, replacement=replacement):
+                proc = self.child(self.overlay([self.entry(target, replacement)]), "print('application started')")
+                self.assertEqual(proc.returncode, 70, proc.stderr)
+                self.assertNotIn("application started", proc.stdout)
+                self.assertIn("rebind FAILED", proc.stderr)
+                self.assertNotIn("[overlay] rebound", proc.stderr)
+                self.assertNotIn("property must not execute", proc.stderr)
+
+    def test_prior_generic_shims_upgrade_through_stack_installer_and_merge(self):
+        priors = [(OV.PREVIOUS_SITECUSTOMIZE, "efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4"),
+                  (OV.LEGACY_SITECUSTOMIZE, "1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9")]
+        for prior, digest in priors:
+            with self.subTest(prior=digest):
+                self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), digest)
+                base = self.overlay([self.entry("module_fn", "module_fn")], prior)
+                stacked = self.root / ("stacked-" + digest[:8])
+                installer = self.overlay([], prior)
+                (installer / "fixture_installer.py").write_text("def install():\n    import sys\n    sys.fixture_installed = True\n")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    OV.cmd_add_rebind(SimpleNamespace(overlay=str(stacked), base=str(base),
+                        target="sample:Model.method", impl_module="impl", impl_attr="method", impl_file=""))
+                    OV.cmd_add_installer(SimpleNamespace(overlay=str(installer), base="", id="fixture",
+                        module="fixture_installer", callable="install", target=[], kernel=[]))
+                self.assertEqual((base / "sitecustomize.py").read_text(), prior)
+                merged = OV.merge_overlays(str(self.root / ("merged-" + digest[:8])), [str(base), str(stacked), str(installer)])
+                proc = self.child(merged, "import sample, sys; assert sys.fixture_installed; "
+                    "assert sample.Model().method(1)[0] == 'replacement-method'; "
+                    "assert sample.module_fn(2)[0] == 'replacement-module'; print('composed')")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.strip(), "composed")
+        custom = self.overlay([], "# custom startup\n")
+        with self.assertRaisesRegex(SystemExit, "custom sitecustomize"):
+            OV.cmd_add_rebind(SimpleNamespace(overlay=str(custom), base="", target="sample:Model.method",
+                impl_module="impl", impl_attr="method", impl_file=""))
+        self.assertEqual((custom / "sitecustomize.py").read_text(), "# custom startup\n")
+        self.assertEqual(json.loads((custom / "_overlay_manifest.json").read_text())["rebinds"], [])
 
 
 if __name__ == "__main__":

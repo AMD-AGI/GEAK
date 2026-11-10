@@ -128,15 +128,46 @@ for _e in _m.get("installers", []):
             os._exit(70)
 
 # (b) rebind single attributes (monkeypatch).
+import inspect
+
+
+def _rebind(_entry):
+    _modname, _path = _entry["target"].split(":")
+    _parts = _path.split(".")
+    if not all(_part.isidentifier() for _part in _parts):
+        raise ValueError("invalid rebind attribute path: " + _path)
+    _owner = importlib.import_module(_modname)
+    for _part in _parts[:-1]:
+        _owner = inspect.getattr_static(_owner, _part)
+        if not isinstance(_owner, type):
+            raise TypeError("nested rebind owner must be a class: " + _entry["target"])
+    _attr = _parts[-1]
+    _original = inspect.getattr_static(_owner, _attr)  # A missing leaf is not a new binding.
+    _impl = importlib.import_module(_entry["impl_module"])
+    _replacement = getattr(_impl, _entry["impl_attr"])
+    if isinstance(_owner, type):
+        if not inspect.isfunction(_replacement):
+            raise TypeError("class method replacement must be a Python function")
+        if type(_original) is staticmethod:
+            _replacement = staticmethod(_replacement)
+        elif type(_original) is classmethod:
+            _replacement = classmethod(_replacement)
+        elif not inspect.isfunction(_original):
+            raise TypeError("rebind supports instance, static and class methods, not this descriptor")
+    setattr(_owner, _attr, _replacement)
+    if inspect.getattr_static(_owner, _attr) is not _replacement:
+        raise RuntimeError("rebind owner did not retain the replacement")
+
+
 for _e in _m.get("rebinds", []):
     try:
-        _modname, _attr = _e["target"].split(":")
-        _t = importlib.import_module(_modname)
-        _impl = importlib.import_module(_e["impl_module"])
-        setattr(_t, _attr, getattr(_impl, _e["impl_attr"]))
+        _rebind(_e)
         sys.stderr.write("[overlay] rebound %s -> %s.%s\n" % (_e["target"], _e["impl_module"], _e["impl_attr"]))
     except Exception as _ex:
         sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
+        # CPython otherwise swallows startup errors and runs an unpatched candidate.
+        sys.stderr.flush()
+        os._exit(70)
 
 # (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost
 # stand-in and is already bound before any marker install imports a module that does
@@ -158,11 +189,27 @@ for _e in _m.get("markers", []):
 '''
 
 
-# Previous generic runtime, accepted when upgrading an existing manifest-based overlay.
+# Preserve both exact prior generic runtimes when upgrading a manifest-based overlay.
+_PRIOR_REBINDS = r'''# (b) rebind single attributes (monkeypatch).
+for _e in _m.get("rebinds", []):
+    try:
+        _modname, _attr = _e["target"].split(":")
+        _t = importlib.import_module(_modname)
+        _impl = importlib.import_module(_e["impl_module"])
+        setattr(_t, _attr, getattr(_impl, _e["impl_attr"]))
+        sys.stderr.write("[overlay] rebound %s -> %s.%s\n" % (_e["target"], _e["impl_module"], _e["impl_attr"]))
+    except Exception as _ex:
+        sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
+
+'''
 _INSTALLER_START = "# Manifest installers register deferred hooks"
 _INSTALLER_END = "# (b) rebind single attributes (monkeypatch)."
-LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
-                       + _INSTALLER_END + SITECUSTOMIZE.split(_INSTALLER_END)[1])
+_REBIND_END = "# (c) capture hooks"
+PREVIOUS_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_END)[0] + _PRIOR_REBINDS
+                        + _REBIND_END + SITECUSTOMIZE.split(_REBIND_END)[1])
+LEGACY_SITECUSTOMIZE = (PREVIOUS_SITECUSTOMIZE.split(_INSTALLER_START)[0]
+                       + _INSTALLER_END + PREVIOUS_SITECUSTOMIZE.split(_INSTALLER_END)[1])
+_GENERIC_SITECUSTOMIZES = (SITECUSTOMIZE, PREVIOUS_SITECUSTOMIZE, LEGACY_SITECUSTOMIZE)
 
 
 def installer_module_manifest(overlay, manifest):
@@ -223,7 +270,7 @@ def cmd_add_installer(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     runtime = os.path.join(a.overlay, "sitecustomize.py")
     with open(runtime) as handle:
-        if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+        if handle.read() not in _GENERIC_SITECUSTOMIZES:
             raise SystemExit("cannot add an installer to a custom sitecustomize; preserve its hooks first")
     m = _load_man(man)
     entry = {"id": a.id, "module": a.module, "callable": a.callable,
@@ -268,7 +315,7 @@ def merge_overlays(output, sources):
         if not isinstance(manifest, dict):
             raise ValueError("overlay manifest must be an object: " + source)
         with open(os.path.join(source, "sitecustomize.py")) as handle:
-            if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+            if handle.read() not in _GENERIC_SITECUSTOMIZES:
                 raise ValueError("custom sitecustomize cannot be merged automatically: " + source)
         manifest = installer_module_manifest(source, manifest)
         for kind, entries in manifest.items():
@@ -424,6 +471,12 @@ def cmd_add_module(a):
 
 def cmd_add_rebind(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
+    runtime = Path(a.overlay) / "sitecustomize.py"
+    shim = runtime.read_text()
+    if shim in _GENERIC_SITECUSTOMIZES:
+        runtime.write_text(SITECUSTOMIZE)
+    elif "." in a.target.partition(":")[2]:
+        raise SystemExit("cannot add a class-method rebind to a custom sitecustomize; preserve its hooks first")
     if a.impl_file:
         shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
     m = _load_man(man)

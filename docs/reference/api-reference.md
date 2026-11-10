@@ -296,6 +296,22 @@ Reversible-overlay tooling (never edits site-packages). `overlay_setup.py` build
 hooks a live server callable through the overlay to capture real serving shapes + a reference I/O oracle
 (`reference_io.pt` + `meta.json`); imported through the overlay, not a standalone CLI.
 
+`add-rebind --target package.module:Class.method --impl-module candidate --impl-attr replacement`
+replaces the method on its class, including inherited methods and nested classes. The replacement
+must be a Python function; instance, `staticmethod`, and `classmethod` binding is preserved.
+Flat `module:attribute` targets continue to support arbitrary replacement values. Targets must
+already exist; properties, non-class intermediate owners, and other method descriptors are rejected.
+A declared rebind failure now exits the child interpreter with status 70 instead of logging the
+error and continuing with the original implementation.
+
+Adding a rebind or installer, or merging overlays, upgrades recognized prior generic startup shims
+while retaining their manifest entries. Custom `sitecustomize.py` files are preserved; adding a
+class-method rebind to one is rejected because its rebinding behavior cannot be inferred.
+Remove the overlay from `PYTHONPATH` and start a new process to restore the installed implementation.
+Rebinding changes future attribute lookups and subsequent imports; previously copied function or
+bound-method aliases are not rewritten. Static/classmethod capture and marker wrapping are separate
+from this deployment support.
+
 ### `kernel_workflow/scripts/gpu_lock.sh`
 
 GPU lock + per-workspace build isolation. `flock` per GPU id (safe GPU sharing), per-workspace
