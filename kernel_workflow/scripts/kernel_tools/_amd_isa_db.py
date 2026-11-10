@@ -1,76 +1,18 @@
 #!/usr/bin/env python3
-"""gfx950_isa.py — the gfx950/CDNA4 ISA reference, offline. All 13 ISA chapters, three databases.
+"""Offline AMD ISA database provider; use amd_isa.py --arch for public queries.
 
-WHY THIS EXISTS. The AMD Matrix Instruction Calculator (Tier 2 of
-kernel_workflow/scripts/kernel_tools/isa_tools.md) *generates* the operand layout table for cdna1/2/3 and
-rdna3/4 — but it has NO cdna4/gfx950 support, so for the one chip this pack targets by default
-hardware queries need a different provider. This script exposes committed PDF/XML
-facts; Triton separately supplies compiler layouts for its supported operations.
-
-Three committed databases, split by what each source can faithfully express:
-
-  perf_knowledge/hardware/data/gfx950-mfma-layout.json     ISA ch.7      matrix operand layout
-  perf_knowledge/hardware/data/gfx950-encoding.json.gz     ISA ch.12-13  1240 instructions, 33 encodings,
-                                                                ingested from the ISA XML
-  perf_knowledge/hardware/data/gfx950-isa-facts.json.gz    ISA ch.1-6,   registers, limits, waitcnt,
-                                                  8-11          wait states, addressing, LDS
-
-It is a LOOKUP, not a probe: deterministic, no GPU, no compile round, works offline.
-
-  search         all three DBs at once -- start here when you do not know where the answer lives
-  layout/locate  which lane + VGPR + bits hold A[m][k], B[k][n], C/D[m][n]   (ch.7)
-  facts          dims, blocks, cycles, dtypes, governing rules + their trust verdict
-  opcodes        search all 1240 instructions by name / functional group / encoding   (ch.12)
-  encoding       opcode, encoding name, operand fields, for ANY instruction
-  format         the bit-field layout of one encoding                        (ch.13)
-  regs           MODE / STATUS / TRAPSTS / HW_ID / M0 bit fields              (ch.3)
-  limits         VGPR / SGPR / LDS capacities, allocation granularity, alignment
-  waitcnt        what VM_CNT / LGKM_CNT / EXP_CNT count, and their return ordering
-  waits          required software-inserted wait states / NOPs                (ch.4)
-  mem            addressing formulas, alignment, bounds checking              (ch.8-10)
-  lds            LDS banks, conflict rules, MFMA transpose loads              (ch.11)
-  tables         verbatim transcriptions of source tables
-  concepts       actionable prose facts, each with its verbatim quote
-  modifiers      CBSZ / ABID / BLGP / scale semantics and their value tables
-  hazard         required independent instructions / NOPs around MFMA
-  errata         the 19 places the source document is wrong
-
-HOW MUCH TO TRUST IT. The DB carries its own verification record and this tool surfaces it
-rather than hiding it. The layout rules matched the Matrix Instruction Calculator on
-11776/11776 elements across 10 CDNA3 instructions — the one check with no PDF in its chain —
-and 91/91 of the document's own worked examples. But that cross-check only covers what CDNA4
-INHERITS from CDNA3. New F8F6F4, E8M0, 6-bit and sparse rules retain their recorded
-verification limits; `sparse`/`hazards` are marked "needs review". Commands print the applicable caveat; do not
-strip it when you quote the answer. Validate a low-precision layout numerically before you
-ship a kernel on it.
-
-Usage:
-  gfx950_isa.py list [substr]                          # matrix instructions, optionally filtered
-  gfx950_isa.py facts <instr>                          # dims/cycles/dtypes/rules + trust verdict
-  gfx950_isa.py layout <instr> [-A|-B|-C|-D] [--as fp8|fp6|fp4|bf16|...]
-                               [--lanes lo-hi] [--block N] [--markdown]
-  gfx950_isa.py locate <instr> <A|B|C|D> <i> <k|j> [--block N] [--as FMT]
-  gfx950_isa.py encoding <instr>                       # Tier 1: join against amdgpu_isa_cdna4.xml
-  gfx950_isa.py search <substr>                        # all three DBs; e.g. `search bank conflict`
-  gfx950_isa.py opcodes|format [substr]
-  gfx950_isa.py regs|limits|waitcnt|waits|mem|lds|tables|concepts [substr]
-  gfx950_isa.py modifiers [substr]
-  gfx950_isa.py hazard [substr]
-  gfx950_isa.py errata [substr]
-  gfx950_isa.py --selftest                             # offline: re-derive the figures from the rules
-
-Provenance: every record cites `CDNA4 ISA p<NN>`. Copy a distilled fact into
-your analysis record WITH that citation so the next agent never re-derives it
-(isa_tools.md provenance guidance).
+Reads committed encoding, matrix, and prose facts without SDK/DSL imports or
+seed/cache XML overrides. Layouts are instruction-relative hardware facts,
+not compiler layout objects or allocated registers. Source citations and
+verification limits travel with answers; sparse A/B use source tables only.
+Full source/grid regression and evidence live in scripts/tests; --selftest
+checks runtime data integrity. See isa_tools.md for coverage and maintenance.
 """
 import argparse
 import json
-import os
 import re
 import sys
-from contextlib import redirect_stderr
 from math import ceil
-from pathlib import Path
 
 # Database FILE NAMES. They live once, in perf_knowledge/hardware/data/, and resolve through the
 # sibling `_hwdata` locator ($GEAK_HW_DATA_DIR first) -- see `_db_path`.
@@ -79,22 +21,6 @@ ENC_DB_REL = "gfx950-encoding.json.gz"
 FACTS_DB_REL = "gfx950-isa-facts.json.gz"
 DATA_HOME = "perf_knowledge/hardware/data"
 
-
-def _db_path(name):
-    """Path of a hardware database file, or None. `_hwdata.find` is the single locator; with it
-    unreachable (this file copied out alone) only the spots beside the tool are tried."""
-    here = Path(__file__).resolve().parent
-    if str(here) not in sys.path:
-        sys.path.insert(0, str(here))
-    try:
-        import _hwdata
-        return _hwdata.find(name)
-    except ImportError:
-        pass
-    for p in (here / "data" / name, here.parent / "references" / "hardware" / name):
-        if p.is_file():
-            return p
-    return None
 
 # Which databases exist per architecture, and therefore which subcommands can answer.
 #
@@ -107,7 +33,7 @@ def _db_path(name):
 #
 # A `None` here is a deliberate, documented absence with a named alternative -- never a hint
 # that the hardware lacks the feature. `_require` below prints the alternative.
-from amd_targets import ALIASES, TARGETS
+from amd_targets import ALIASES, TARGETS, database_path as _db_path
 
 _ARCH_DBS = {key: {kind: row[kind] for kind in ('layout', 'encoding', 'facts')}
              for key, row in TARGETS.items() if row['encoding']}
@@ -151,7 +77,7 @@ def _select_arch(argv):
     Done before argparse because `main` loads a database to build the parser. Default stays
     gfx950 so every existing invocation, doc reference and catalog entry keeps working.
     """
-    global ARCH, DB_REL, ENC_DB_REL, FACTS_DB_REL, XML_NAME
+    global ARCH, DB_REL, ENC_DB_REL, FACTS_DB_REL
     out, i, want = [], 0, None
     while i < len(argv):
         a = argv[i]
@@ -170,7 +96,6 @@ def _select_arch(argv):
         ARCH = key
         d = _ARCH_DBS[key]
         DB_REL, ENC_DB_REL, FACTS_DB_REL = d["layout"], d["encoding"], d["facts"]
-        XML_NAME = _XML_NAME[key]
     return out
 
 
@@ -181,11 +106,6 @@ def _require(cmd):
         return
     if _ARCH_DBS[ARCH][kind] is None:
         gap(f"`{cmd}` reads the {kind} database, which is not shipped for {ARCH}.  -> {_ALTERNATIVE[kind].format(arch=ARCH)}")
-# The live XML is preferred over the committed encoding DB when it is on disk, so its filename
-# has to follow --arch. The release ships one file per arch under these names.
-_XML_NAME = {"gfx950": "amdgpu_isa_cdna4.xml", "cdna3": "amdgpu_isa_cdna3.xml",
-             "rdna3": "amdgpu_isa_rdna3.xml", "rdna4": "amdgpu_isa_rdna4.xml"}
-XML_NAME = _XML_NAME["gfx950"]
 ARCHES = {"cdna4", "gfx950"}
 
 
@@ -242,12 +162,7 @@ def _load_gz_db(rel, required=True):
 
 
 def load_enc_db(required=True):
-    """The committed encoding half: ISA chapters 12 + 13, ingested from the machine-readable XML.
-
-    Kept gzipped (63 KB vs 2.8 MB) because it ships in every composed AMD pack. This is what
-    makes `encoding` and `format` work with no XML seeded and no network -- the live XML is still
-    preferred when present, since it is the authoritative and more current artifact.
-    """
+    """Fixed XML-derived encodings plus PDF semantics; no seed/cache XML override."""
     return _load_gz_db(ENC_DB_REL, required)
 
 
@@ -263,7 +178,7 @@ def load_facts_db(required=True):
 
 
 def _enc_instr(name):
-    """The committed-DB counterpart of _xml_instr: look one instruction up by name."""
+    """Look up an instruction in the selected committed encoding database."""
     edb = load_enc_db(required=False)
     if not edb:
         return None
@@ -446,8 +361,8 @@ def guard_dense(db, rec, operand):
         return
     rule = rec.get("layout_rule_a") if operand == "A" else rec.get("layout_rule_b")
     gap(f"{rec['name']} is a 4:2 SPARSE instruction: operand {operand} does NOT follow the "
-        f"dense closed form. Its layout is given as a table -> "
-        f"gfx950_isa.py sparse {rule}   (verdict: "
+        f"dense closed form. No generated sparse operand mapping is available. Source evidence: "
+        f"gfx950_isa.py sparse {rule} (A index tables describe metadata, not a complete A layout; verdict: "
         f"{db['verification']['array_verdicts']['sparse']})")
 
 
@@ -513,12 +428,7 @@ def cmd_facts(db, args):
     print(f"  dtype       A={r.get('in_type_a')}  B={r.get('in_type_b')}  "
           f"D={r.get('out_type')}  integer={r.get('integer')}")
     vg = {"A": r.get("src_a_vgprs"), "B": r.get("src_b_vgprs"), "C/D": r.get("src_c_d_vgprs")}
-    xml_vg, xp = {}, _xml_path(required=False)
-    if any(v is None for v in vg.values()):
-        # live XML first, then the committed ingest of it -- so the join survives offline.
-        xml_vg = _xml_vgprs(_xml_instr(xp, r["name"])) if xp else {}
-        if not any(xml_vg.values()):
-            xml_vg = _enc_vgprs(_enc_instr(r["name"]))
+    xml_vg = _enc_vgprs(_enc_instr(r["name"])) if any(v is None for v in vg.values()) else {}
     parts = []
     for k in ("A", "B", "C/D"):
         if k in format_vg:
@@ -678,53 +588,8 @@ def cmd_locate(db, args):
     return 0
 
 
-def _xml_path(required=True):
-    for env in ("TILE_HW_SEED", "TILE_HW_TOOLS", "TILE_HW_CACHE"):
-        d = os.environ.get(env)
-        if d and os.path.isfile(os.path.join(d, XML_NAME)):
-            return os.path.join(d, XML_NAME)
-    if not required:
-        return None
-    gap(f"{XML_NAME} absent from the image seed and runtime cache "
-        f"(TILE_HW_SEED/TILE_HW_TOOLS/TILE_HW_CACHE); fetch it with: "
-        f"kernel_workflow/scripts/kernel_tools/hw_sources.sh xml cdna4")
-
-
-def _xml_instr(path, name):
-    """Stream the 8.7 MB XML and return the <Instruction> element for `name`, or None."""
-    import xml.etree.ElementTree as ET
-    want, flat = name.upper(), name.upper().replace("_", "")
-    for _event, el in ET.iterparse(path, events=("end",)):
-        if not el.tag.endswith("Instruction"):
-            continue
-        nm = (el.findtext("InstructionName") or "").upper()
-        if nm == want or nm.replace("_", "") == flat:
-            return el
-        el.clear()
-    return None
-
-
-def _xml_vgprs(el):
-    """SrcA/SrcB/SrcC-D register counts from the encoding's OperandSize (bits / 32).
-
-    The PDF's Table 28 has no register-count column, so these fields are null in the layout DB
-    for most opcodes. The XML states operand sizes for every one of them -- this is exactly the
-    join that makes the two halves worth keeping in one tool.
-    """
-    if el is None:
-        return {}
-    by_field = {}
-    for enc in el.iter("InstructionEncoding"):
-        for o in enc.iter("Operand"):
-            sz = o.findtext("OperandSize")
-            if sz and sz.isdigit():
-                by_field[(o.findtext("FieldName") or "").upper()] = int(sz) // 32
-    return {"A": by_field.get("SRC0"), "B": by_field.get("SRC1"),
-            "C/D": by_field.get("SRC2") or by_field.get("VDST")}
-
-
 def _enc_vgprs(rec):
-    """_xml_vgprs against the committed encoding DB — same join, no XML on disk."""
+    """Declared widths; SMFMAC SRC2 is metadata, not the C/D accumulator."""
     if not rec:
         return {}
     by_field = {}
@@ -733,52 +598,26 @@ def _enc_vgprs(rec):
             if o.get("size_bits"):
                 by_field[(o.get("field") or "").upper()] = o["size_bits"] // 32
     return {"A": by_field.get("SRC0"), "B": by_field.get("SRC1"),
-            "C/D": by_field.get("SRC2") or by_field.get("VDST")}
+            "C/D": by_field.get("VDST") or (None if "SMFMAC" in rec["name"].upper() else by_field.get("SRC2"))}
 
 
 def cmd_encoding(db, args):
-    """Tier 1: the encoding half of the gfx950 database, joined to the layout half by name.
-
-    Works on ANY of the 1240 gfx950 instructions, not just the 68 matrix opcodes: the layout DB
-    is consulted only to normalize the name when it happens to know it. Prefers the live ISA XML
-    and falls back to the committed encoding DB, so this answers offline.
-    """
+    """Query the selected committed encoding/semantics record, independently of installed SDKs."""
+    edb = load_enc_db()
     name = args.instr
     for rec in (find_instr(db, name, required=False),):
         if rec:
             name = rec["name"]
 
-    path = _xml_path(required=False)
-    found = _xml_instr(path, name) if path else None
-    if found is not None:
-        desc = (found.findtext("Description") or "").strip()
-        encs = []
-        for enc in found.iter("InstructionEncoding"):
-            op = enc.find("Opcode")
-            ops = [(o.findtext("FieldName"), o.findtext("DataFormatName"),
-                    o.findtext("OperandType"), o.findtext("OperandSize"),
-                    o.get("Input") == "true", o.get("Output") == "true")
-                   for o in enc.iter("Operand")]
-            encs.append((enc.findtext("EncodingName"), op.text if op is not None else "?",
-                         enc.findtext("EncodingCondition"), ops))
-        origin = f"cdna4 ISA XML ({os.path.basename(path)})"
-        group = None
-    else:
-        erec = _enc_instr(name)
-        if erec is None:
-            edb = load_enc_db(required=False)
-            where = "the ISA XML nor the committed encoding DB" if path else \
-                    "the committed encoding DB (and no ISA XML is seeded)"
-            gap(f"no gfx950 instruction named {args.instr!r} in {where}"
-                + (f" — {len(edb['instructions'])} instructions are indexed; "
-                   f"list them with: gfx950_isa.py opcodes <substr>" if edb else ""))
-        name, desc, group = erec["name"], erec.get("description") or "", erec.get("functional_group")
-        encs = [(e.get("encoding"), e.get("opcode"), e.get("condition"),
-                 [(o.get("field"), o.get("format"), o.get("type"), o.get("size_bits"),
-                   o.get("input"), o.get("output")) for o in e.get("operands", [])])
-                for e in erec.get("encodings", [])]
-        edb = load_enc_db()
-        origin = f"committed encoding DB ({edb['source']['release']})"
+    erec = _enc_instr(name)
+    if erec is None:
+        gap(f"no {arch_label()} instruction named {args.instr!r} in the committed encoding DB")
+    name, desc, group = erec["name"], erec.get("description") or "", erec.get("functional_group")
+    encs = [(e.get("encoding"), e.get("opcode"), e.get("condition"),
+             [(o.get("field"), o.get("format"), o.get("type"), o.get("size_bits"),
+               o.get("input"), o.get("output")) for o in e.get("operands", [])])
+            for e in erec.get("encodings", [])]
+    origin = f"committed encoding DB ({edb['source']['release']})"
 
     print(f"## {name}  ({arch_label()}) — encoding")
     if desc:
@@ -792,9 +631,8 @@ def cmd_encoding(db, args):
                   f"{'in' if is_in else ''}{'/out' if is_out else ''}")
         print(f"                -> bit fields of this encoding: gfx950_isa.py format {ename}")
 
-    # Semantics come from ISA chapter 12 and live only in the committed DB, so look them up
-    # regardless of which source supplied the encodings above.
-    sem = _enc_instr(name) or {}
+    # Encoding and PDF semantics share the same versioned record.
+    sem = erec
     src = sem.get("_src") or {}
     if sem.get("operation"):
         pp = src.get("operation_pages") or []
@@ -1267,201 +1105,31 @@ def cmd_search(db, args):
 
 
 # ---------------------------------------------------------------------------------------
-# selftest — re-derive the transcribed grids from the rules. Offline, no GPU, no network.
+# Runtime integrity. Source/grid regressions and their evidence live in tests.
 # ---------------------------------------------------------------------------------------
-
-def _check_figure(db, fig):
-    """The figure was read by eye off a rendered image; the rules came from the text layer.
-    Agreement is real evidence because the two arrived by independent paths."""
-    sh = fig["shape"]
-    M, _N, K = sh["m"], sh["n"], sh["k"]
-    eb = fig["elem_bits"]
-    ok = bad = 0
-    for cell in fig["cells"]:
-        if cell.get("k") is None or cell.get("lanes") is None:
-            continue
-        l0, l1 = cell["lanes"]
-        m0, m1 = cell["mn"]
-        v0 = int(str(cell["vgprs"][0]).lstrip("v"))
-        v1 = int(str(cell["vgprs"][-1]).lstrip("v"))
-        for i in range(m0, m1 + 1):
-            for k in range(cell["k"][0], cell["k"][1] + 1):
-                item, lane = a_item_lane(M, 1, K, i, k, 0)
-                vg = {f[0] for f in item_to_bits(item, eb)}
-                if l0 <= lane <= l1 and all(v0 <= v <= v1 for v in vg):
-                    ok += 1
-                else:
-                    bad += 1
-    return ok, bad
 
 
 def cmd_selftest(db, args):
-    v = db["verification"]
-    unusable = set(v["unusable_ids"])
-    fail = 0
-
-    # 1. referential integrity. A sparse instruction's operand rule lives in sparse[], not in
-    # layout_rules[] -- the 4:2 layouts are tables, not closed forms -- so both namespaces count.
-    rule_ids = ({r["id"] for r in db["layout_rules"]} | {r["id"] for r in db["sparse"]})
-    pack_ids = {r["id"] for r in db["packing_rules"]}
-    dangling = []
-    for r in db["instructions"]:
-        for f in ("layout_rule_a", "layout_rule_b", "layout_rule_d"):
-            if r.get(f) and r[f] not in rule_ids:
-                dangling.append(f"{r['name']}.{f}={r[f]}")
-        for f in ("packing_rule_a", "packing_rule_b", "packing_rule_d"):
-            if r.get(f) and r[f] not in pack_ids:
-                dangling.append(f"{r['name']}.{f}={r[f]}")
-    print(f"[{'ok ' if not dangling else 'FAIL'}] referential integrity: "
-          f"{len(dangling)} dangling rule reference(s)")
-    fail += bool(dangling)
-    for d in dangling[:5]:
-        print(f"       {d}")
-
-    # 2. provenance present on every record
-    missing = [r.get("id") or r.get("name")
-               for key in ("instructions", "layout_rules", "packing_rules", "figure_layouts",
-                           "modifiers", "formats", "sparse", "hazards")
-               for r in db[key] if not r.get("_src") or not r.get("_conf")]
-    print(f"[{'ok ' if not missing else 'FAIL'}] provenance: "
-          f"{len(missing)} record(s) missing _src/_conf")
-    fail += bool(missing)
-
-    # 3. the real test: rules vs transcribed grids
-    tot_ok = tot_bad = 0
-    for fig in db["figure_layouts"]:
-        ok, bad = _check_figure(db, fig)
-        flag = "known-bad" if fig["id"] in unusable else ("ok " if bad == 0 else "FAIL")
-        print(f"[{flag:>9}] {fig['id']:<24} {ok}/{ok + bad} cells reproduce from the rules")
-        if fig["id"] in unusable:
-            # The DB claims these two grids are drawn in error. If they suddenly agreed, the
-            # claim would need re-examining -- so a clean pass here is itself a failure.
-            if bad == 0:
-                print(f"       FAIL: {fig['id']} is flagged unusable but now agrees with the "
-                      f"rules; re-open the finding")
-                fail += 1
-            continue
-        tot_ok += ok
-        tot_bad += bad
-        fail += bool(bad)
-    print(f"[{'ok ' if tot_bad == 0 else 'FAIL'}] usable grids: {tot_ok}/{tot_ok + tot_bad} "
-          f"cells reproduce from layout_rules + packing_rules")
-
-    # 4. spot-check the packing rules the calculator confirmed at bit granularity
-    checks = [(16, 0, [(0, 15, 0)]), (16, 3, [(1, 31, 16)]),
-              (32, 5, [(5, 31, 0)]), (8, 6, [(1, 23, 16)]), (4, 9, [(1, 7, 4)]),
-              (6, 5, [(0, 31, 30), (1, 3, 0)])]
-    bad_pack = [(eb, it) for eb, it, want in checks if item_to_bits(it, eb) != want]
-    print(f"[{'ok ' if not bad_pack else 'FAIL'}] packing rules: "
-          f"{len(checks) - len(bad_pack)}/{len(checks)} known placements")
-    fail += bool(bad_pack)
-
-    # 5. the dense formulas must refuse sparse A/B rather than answering confidently
-    leaked = []
-    with open(os.devnull, "w") as sink, redirect_stderr(sink):
-        for r in db["instructions"]:
-            if not r.get("sparse"):
-                continue
-            for op in ("A", "B"):
-                try:
-                    guard_dense(db, r, op)
-                    leaked.append(f"{r['name']}.{op}")
-                except SystemExit:
-                    pass
-    n_sparse = sum(1 for r in db["instructions"] if r.get("sparse"))
-    print(f"[{'ok ' if not leaked else 'FAIL'}] sparse guard: {n_sparse} sparse instruction(s), "
-          f"{len(leaked)} would have been answered with the dense formula")
-    fail += bool(leaked)
-
-    # --- the other two databases. Absent is a FAIL, not a skip: they ship committed in the pack,
-    # so "not found" means a broken pack layout, which is exactly what a selftest should catch.
-    edb = load_enc_db(required=False)
-    if edb is None:
-        print("[FAIL] encoding DB (ISA ch.12-13): not found next to the script")
-        fail += 1
-    else:
-        n_op = sum(len(i.get("encodings") or []) for i in edb["instructions"])
-        bad = [e["name"] for e in edb["encodings"]
-               for f in e["fields"]
-               for r in f["ranges"]
-               if not (0 <= r["bits"][1] <= r["bits"][0] < (e["bit_count"] or 64))]
-        print(f"[{'ok ' if not bad else 'FAIL'}] encoding DB: {len(edb['instructions'])} instructions, "
-              f"{n_op} opcode entries, {len(edb['encodings'])} encodings; "
-              f"{len(bad)} field range(s) outside their encoding's own bit width")
-        fail += bool(bad)
-
-        # The chapter-12 semantics layer. `operation: null` is a real answer (the ISA prints no
-        # code box for 48 control/cache/LDS-DMA instructions), so count the three states apart:
-        # a missing `operation` KEY means the instruction has no chapter-12 block at all.
-        withkey = [i for i in edb["instructions"] if "operation" in i]
-        withop = [i for i in withkey if i["operation"]]
-        noblock = len(edb["instructions"]) - len(withkey)
-        nopage = [i["name"] for i in withkey if not (i.get("_src") or {}).get("pdf_page")]
-        print(f"[{'ok ' if not nopage else 'FAIL'}] ch.12 semantics: {len(withop)} instructions with "
-              f"pseudo-code, {len(withkey) - len(withop)} documented but box-free, {noblock} with no "
-              f"ch.12 block; {len(nopage)} without a page citation")
-        fail += bool(nopage)
-        missing_r = [k for k in ("chapter12_rules", "tables", "instruction_limitations")
-                     if not edb.get(k)]
-        print(f"[{'ok ' if not missing_r else 'FAIL'}] ch.12 non-instruction material: "
-              f"{len(edb.get('chapter12_rules') or [])} promotion rules, "
-              f"{len(edb.get('tables') or [])} compare tables, "
-              f"{len(edb.get('instruction_limitations') or [])} DPP/SDWA exclusion lists"
-              + (f"; MISSING {missing_r}" if missing_r else ""))
-        fail += bool(missing_r)
-
-    # Reachability: agents arrive from the skill docs knowing layout_facts.py, which forwards
-    # gfx950 invocations here. If a subcommand exists here but not in that forwarding set it is
-    # unreachable by the documented route, so hold the two lists equal.
+    """Check runtime data integrity; full source/grid regression lives in tests."""
+    if db is None:
+        gap("matrix database missing")
+    rules = {r["id"] for k in ("layout_rules", "sparse", "packing_rules") for r in db[k]}
+    bad = [r["name"] for r in db["instructions"]
+           for key in ("layout_rule_a", "layout_rule_b", "layout_rule_d",
+                       "packing_rule_a", "packing_rule_b", "packing_rule_d")
+           if r.get(key) and r[key] not in rules]
+    for key in ("instructions", "layout_rules", "packing_rules", "modifiers", "formats", "sparse", "hazards"):
+        bad.extend(r.get("id") or r.get("name") for r in db[key] if not r.get("_src") or not r.get("_conf"))
+    load_enc_db()
+    load_facts_db()
     from amd_targets import COMMANDS
-    drift = set(SUBCOMMANDS) ^ COMMANDS
-    print(f"[{'FAIL' if drift else 'ok '}] shared query registry: {sorted(drift)}")
-    fail += bool(drift)
-
-    fdb = load_facts_db(required=False)
-    if fdb is None:
-        print("[FAIL] facts DB (ISA ch.1-6, 8-11): not found next to the script")
-        fail += 1
-    else:
-        keys = ("registers", "resources", "counters", "wait_states", "memory_ops",
-                "lds_facts", "tables", "concepts")
-        recs = [(k, r) for k in keys for r in fdb.get(k) or []]
-        # Every record must be traceable back to a page. This is the property the whole extraction
-        # was built around -- if it does not hold, no answer from this DB can be cited.
-        unsourced = [r.get("id") for k, r in recs
-                     if not (r.get("_src") or {}).get("quote")
-                     or not (r.get("_src") or {}).get("pdf_page") or not r.get("_conf")]
-        # printed_page = pdf_page - 8 holds throughout this document; a violation means a page
-        # number was typed rather than read.
-        offset = [r.get("id") for k, r in recs
-                  if (r.get("_src") or {}).get("printed_page") is not None
-                  and r["_src"]["printed_page"] != r["_src"]["pdf_page"] - 8]
-        ids = [r.get("id") for k, r in recs if r.get("id")]
-        dupes = sorted({i for i in ids if ids.count(i) > 1})
-        print(f"[{'ok ' if not unsourced else 'FAIL'}] facts DB: {len(recs)} records across "
-              f"{len(keys)} arrays; {len(unsourced)} without a page+quote+conf")
-        print(f"[{'ok ' if not offset else 'FAIL'}] facts DB page offset: "
-              f"{len(offset)} record(s) where printed_page != pdf_page - 8")
-        print(f"[{'ok ' if not dupes else 'FAIL'}] facts DB ids: {len(dupes)} duplicate id(s)")
-        fail += bool(unsourced) + bool(offset) + bool(dupes)
-        for d in (unsourced + offset + dupes)[:5]:
-            print(f"       {d}")
-        n_unc = sum(1 for k, r in recs if r.get("_conf") == "uncertain")
-        if n_unc:
-            print(f"       note: {n_unc} record(s) are _conf=uncertain by design -- the PDF did "
-                  f"not settle them. Not a failure; re-read the page before acting on one.")
-
-    print()
-    print("verification record carried by the DB:")
-    for k, t in v["tests"].items():
-        print(f"  {k:<24} {t}")
-    print()
-    print("array verdicts:")
-    for k, t in v["array_verdicts"].items():
-        print(f"  {k:<16} {t}")
-    print()
-    print(f"!! {v['standing_caveat']}")
-    return 1 if fail else 0
+    bad.extend(sorted(SUBCOMMANDS ^ COMMANDS))
+    print(f"[{'FAIL' if bad else 'ok '}] runtime data integrity: {len(bad)} error(s)")
+    for error in bad[:5]:
+        print(f"  {error}")
+    print("Source/grid regression: kernel_workflow/scripts/tests/test_kernel_tools_isa.py")
+    print(db["verification"]["standing_caveat"])
+    return int(bool(bad))
 
 
 # Populated in main() from the parser itself, so the reachability check in --selftest compares
@@ -1487,7 +1155,7 @@ def main(argv):
                    help="gfx950 (default) | cdna3 | rdna3 | rdna4; aliases cdna4/gfx942/mi300/"
                         "mi325/gfx1100/gfx1200")
     p.add_argument("--selftest", action="store_true",
-                   help="offline: re-derive the transcribed grids from the rules and exit")
+                   help="offline runtime data integrity; full source/grid checks are in the test suite")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("list", help="list matrix instructions")
@@ -1562,9 +1230,7 @@ def main(argv):
     args = p.parse_args(argv[1:])
     if args.selftest:
         if DB_REL is None:
-            gap(f"--selftest re-derives the matrix grids from the layout rules, and {ARCH} ships no "
-                "layout database. Run it without --arch (gfx950) to exercise that; the encoding "
-                "database's own checks are recorded in its `verification` block.")
+            gap(f"--selftest checks gfx950 runtime data; {ARCH} ships no matrix database")
         return cmd_selftest(db, args)
     if not getattr(args, "fn", None):
         p.print_help()
