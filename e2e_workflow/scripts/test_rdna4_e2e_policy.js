@@ -81,7 +81,7 @@ function build(argsObj, opts) {
     pipeline: async (items) => items,
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
   };
-  const fn = new Function(...Object.keys(g), `return (async () => { ${BODY} })();`);
+  const fn = new Function(...Object.keys(g), `return (async () => { ${o.body || BODY} })();`);
   return { run: () => fn(...Object.values(g)), trace };
 }
 
@@ -344,6 +344,16 @@ const R9700 = {
     let refusal = '';
     try { await refused.run(); } catch (e) { refusal = e.message; }
     ok(/gfx1151 E2E is vLLM-only \(got backend=sglang\)/.test(refusal), 'gfx1151 refuses sglang', refusal || 'no throw');
+    // The fused-fp8 prompts, rendered: gfx115x has no fp8 matrix instruction; every other family
+    // keeps its words. fp8 meets the core name only in FP8_MMA, so a new site cannot skip it.
+    const probe = BODY.replace(/(\nconst GRAPH_REQ = [\s\S]*?\n\) : '';\n)/, '$1return { GRAPH_REQ, FP8_MMA };\n');
+    for (const [identity, words] of [[HALO, 'fp8-weight (upcast in registers)'], [R9700, 'fp8 WMMA'],
+      [{ expected_gfx: 'gfx950', expected_target: 'unknown' }, 'fp8 MFMA']]) {
+      const r = await build({ model_path: '/models/m', backend: 'vllm', ...identity }, { body: probe }).run();
+      ok(r && r.FP8_MMA === words && r.GRAPH_REQ.includes(`fused quant (one ${words}, kill the dequant)`),
+        `${identity.expected_gfx} fused-fp8 prompts say "${words}"`, r && r.FP8_MMA);
+    }
+    ok((BODY.match(/fp8 \$\{MATRIX_CORE_NAME\}/g) || []).length === 1, 'fp8 meets the core name only in FP8_MMA');
   }
 
   console.log(failures === 0
