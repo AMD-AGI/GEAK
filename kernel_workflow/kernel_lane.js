@@ -4305,6 +4305,7 @@ return {
     delivery: history.delivery || {candidates: [], delivered: null, incomplete: []},
     delivery_incomplete: history.delivery?.incomplete || [],
   ...(history.search_timing ? {search_timing: history.search_timing} : {}),
+  ...(history.evolution_start ? {evolution_start: history.evolution_start} : {}),
   kernel_name: KERNEL_NAME,
   workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
   final_speedup: processValidated ? finalPrimary : null, // PRIMARY metric when final validation accepted

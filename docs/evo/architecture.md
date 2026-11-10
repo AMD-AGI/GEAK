@@ -66,6 +66,14 @@ cell allocation, or cross-run archive resume protocol. Deep engineers may run
 alongside other EVO directions; slower candidates may be verified and retained.
 These choices can change the cost of a search.
 
+When first-stall initialization succeeds, the lane result includes the existing
+`evolution_start` record: `after_round`, the current `cumulative` score, the archive
+path, and `first_round` if a later loop iteration begins. `first_round` is recorded
+before the planner call; it does not prove that planning returned, an engineer ran,
+or retained-source guidance was supplied. Join it with the timeline and archive
+evidence for those questions. An absent record does not distinguish no attempt
+from failed initialization or an older result format.
+
 Useful diversity, semantic crossover, recovery of initially slower ideas, and
 sustained discovery remain research outcomes to establish. Software checks can
 verify source handling and control flow; they cannot establish those outcomes
