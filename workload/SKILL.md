@@ -22,6 +22,8 @@ Repeat:
    Parallel work gets separate candidate copies and outputs; measurements use isolated
    resources. Retain handles and evidence for work that reports later; the controller
    owns the next inspection and recovery, including after resource or storage migration.
+   For a planned worker replacement, stop new dispatch, let active measurements finish
+   and retain their results before ending the old worker.
 4. **Report.** Read the module's native results and `REPORT.md`, including failures.
    Match receipts to their invocations and retain them before reusing an output path;
    failed calls and later exports can expose another invocation's files.
