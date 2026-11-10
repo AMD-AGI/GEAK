@@ -60,6 +60,9 @@ if (NATIVE_PLANNER_SEED) {
 if (A.evolution_planner_case_evidence_view !== undefined
     && typeof A.evolution_planner_case_evidence_view !== 'boolean')
   throw new Error('evolution_planner_case_evidence_view must be a boolean');
+if (A.planner_profile_evidence !== undefined && typeof A.planner_profile_evidence !== 'boolean')
+  throw new Error('planner_profile_evidence must be a boolean');
+const PLANNER_PROFILE_EVIDENCE = A.planner_profile_evidence === true;
 if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
   throw new Error('record_planner_inputs must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
@@ -1200,7 +1203,7 @@ function roleAgent(role, phase, intro, inputs) {
   return roleAgentFrom(WORKFLOW_DIR, role, phase, intro, inputs);
 }
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
-async function agentT(p, o) {
+async function agentT(p, o, observeAttempt) {
   const label = (o && o.label) ? o.label : 'agent';
   const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
   const boundedCall = agent.processDeadlineActive
@@ -1208,6 +1211,10 @@ async function agentT(p, o) {
   if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
+    // Optional host observation only; never serialized into role inputs/options.
+    const observed = (outcome, error_code = null) => {
+      if (observeAttempt) observeAttempt({attempt, outcome, error_code});
+    };
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
@@ -1215,11 +1222,13 @@ async function agentT(p, o) {
         const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
           processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
           : boundedCall ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
-        const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
+        const r0 = await agent(p, opts); observed('returned'); if (ev && r0) ev.ok = true; return r0;
       }
-      let to;
+      let to, guardFired = false;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
+          guardFired = true;
+          observed('no_end', 'GEAK_AGENT_TIMEOUT');
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
@@ -1229,9 +1238,13 @@ async function agentT(p, o) {
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      // A guard timeout already recorded no_end. A settled null is still a role return.
+      if (!guardFired) observed('returned');
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
+      observed(e?.code === 'GEAK_AGENT_TIMEOUT' || e?.code === 'GEAK_PROCESS_DEADLINE'
+        ? 'no_end' : 'threw', typeof e?.code === 'string' ? e.code : null);
       if ((groupTask || boundedCall) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
@@ -1648,7 +1661,9 @@ async function nativeSeededPlannerDecision() {
         || result.stdout.length > 4194304)
       throw new Error('native planner seed source closure rejected');
     const value = JSON.parse(result.stdout);
-    if (value?.seed?.schema !== 'geak.native_planner_seed/1' || !value.archive
+    if (value?.seed?.schema !== 'geak.native_planner_seed/1'
+        || !(value.archive === null || (value.archive && typeof value.archive === 'object'
+          && !Array.isArray(value.archive)))
         || !Array.isArray(value.verified_refs)) throw new Error('invalid native planner seed reader output');
     return value;
   };
@@ -1656,16 +1671,20 @@ async function nativeSeededPlannerDecision() {
   if (KERNEL_PATH_ORIG !== seed.task_root)
     throw new Error('native planner seed task_root must match kernel_path');
   const handoffMetric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
-  const evo = evolutionDecisionView({base: archive.base, baseCommit: archive.base_commit,
+  const evo = archive === null ? null : evolutionDecisionView({base: archive.base, baseCommit: archive.base_commit,
     archive: seed.archive.path, entries: archive.entries, getBestId: () => archive.best_id,
     metric: archive.metric ?? null});
-  const archiveHasSource = () => evo.entries.some(row => row.patch_ref && !row.retention_error);
-  if (!archiveHasSource()) throw new Error('native planner seed has no retained source');
+  const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
+  if (archive !== null && !archiveHasSource()) throw new Error('native planner seed has no retained source');
+  // JSON cannot preserve the identity used by the ordinary initial-baseline branch.
+  // The reader validates this explicit marker against equal rows and a null winner.
+  const initialOriginal = c.initial_original === true;
   const planner = nativePlannerCall({EVAL_DIR: c.eval_dir, round: c.round,
     remaining: c.budget_remaining, cumulative: c.cumulative_speedup,
     handoffMetric,
     BASELINE_GEOMEAN_MS: c.baseline_geomean_ms, profileSummary: c.profile_summary,
-    bestPerCase: c.current_best_per_case, finalWinner: c.final_winner,
+    bestPerCase: initialOriginal ? c.baseline_per_case : c.current_best_per_case,
+    finalWinner: c.final_winner,
     measurementRef: () => c.current_best_ref || {unavailable: 'no bound current measurement'},
     history: c.history, archiveHasSource, evo, GFX: c.gfx, DEVICE_TARGET: c.device_target,
     PHYSICAL_CU_COUNT: c.physical_cu_count, ROOFLINE_STATUS: c.roofline_status,
@@ -1673,13 +1692,16 @@ async function nativeSeededPlannerDecision() {
     getLeft: () => Infinity, KK_OPERATOR: c.kk_operator, KK_LANGUAGE: c.kk_language, KK_REFS: c.kk_refs,
     ENGINEER_CALL: {processDeadlineEpoch: A.native_planner_deadline_epoch, processTimeoutMs: AGENT_TIMEOUT_MS},
     DEADLINE_EPOCH: 0, ENGINEER_RESERVE_S: 0, ENGINEER_CUTOFF_EPOCH: null,
-    evoPlanSchema: nativeEvolutionPlannerSchema(true), allowInitialBenchmark: false,
+    evoPlanSchema: nativeEvolutionPlannerSchema(archiveHasSource()), allowInitialBenchmark: initialOriginal,
     // Operational facts use the ordinary input boundary. Seed provenance and
     // study bookkeeping stay in the returned receipt, outside model conditioning.
-    recordPlannerInputs: true, factsInput: async () => ({EVALUATION_SERVICE: evaluationServiceFacts(), ...c.facts})});
+    // This entry precedes Setup; consume a bound snapshot, never the later profile helper.
+    recordPlannerInputs: true, factsInput: async () => ({
+      EVALUATION_SERVICE: evaluationServiceFacts(), ...c.facts,
+      ...(PLANNER_PROFILE_EVIDENCE ? (c.profile_evidence_inputs || {}) : {})})});
   const plan = await planner.callPlanner('initial',
     'Decide this round\'s orthogonal directions (or stop).' +
-      ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.`,
+      (archiveHasSource() ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : ''),
     false, `tech_lead:plan r${c.round}`);
   const requested = Array.isArray(plan?.directions) ? plan.directions.map((direction, index) => ({
     index, requested_id: direction?.id ?? null,
@@ -1692,7 +1714,9 @@ async function nativeSeededPlannerDecision() {
     requested_plan: plan ?? null, requested_selections: requested, resolved_selections: [],
     case_measurement_observation: planner.caseMeasurementObservation(),
     continuation_materialization_qualified: false,
-    authority: 'selection resolution only; historical archive verification is not current source qualification',
+    authority: archiveHasSource()
+      ? 'selection resolution only; historical archive verification is not current source qualification'
+      : 'ordinary proposal only; no source resolution or qualification',
     direction_allocation: c.budget_remaining === null ? {unavailable: 'budget_remaining is unbound'}
       : {budget_remaining: c.budget_remaining},
     source_closure_rechecked: false};
@@ -1706,6 +1730,7 @@ async function nativeSeededPlannerDecision() {
   if (plan.stop === true) return {...result, status: 'stopped'};
   if (!Array.isArray(plan.directions) || !plan.directions.length)
     return {...result, status: 'selection_rejected', reference_errors: ['no requested directions']};
+  if (!archiveHasSource()) return {...result, status: 'proposed'};
   const retained = id => id === 'ORIGINAL' || evo.entries.some(row => row.id === id
     && row.patch_ref && !row.retention_error);
   const errors = [];
@@ -2045,6 +2070,93 @@ if (MODE === 'author') {
   log(`Author mode: ${TARGET_LANGUAGE} seed written (correct, seed ${authored.baseline_ms || '?'} ms; denominator = frozen online kernel). Optimizing it now.`);
 }
 
+// Optional planner delivery of existing profile context. Role/tool prompts and engineer
+// profileSummary remain unchanged. A source-at-read hash never qualifies a profile's producer.
+const profileEvidenceState = {summary: null, summary_origin: null, latest_attempt: null, paths: []};
+
+async function profileAgent(prompt, options, profileRound) {
+  if (!PLANNER_PROFILE_EVIDENCE) return agentT(prompt, options);
+  const origin = {role: 'profile_engineer', round: profileRound, phase: options.phase};
+  profileEvidenceState.latest_attempt = {...origin, attempt: null, outcome: 'no_end', error_code: null};
+  const report = await agentT(prompt, options, outcome => {
+    profileEvidenceState.latest_attempt = {...origin, ...outcome};
+  });
+  if (report) {
+    // Retain the returned value, not a promise that its mutable artifact paths preserve old bytes.
+    profileEvidenceState.summary = JSON.parse(JSON.stringify(report));
+    profileEvidenceState.summary_origin = {...origin,
+      attempt: profileEvidenceState.latest_attempt.attempt, currency: 'CURRENT'};
+  } else if (profileEvidenceState.summary_origin) {
+    profileEvidenceState.summary_origin = {...profileEvidenceState.summary_origin, currency: 'HISTORICAL'};
+  }
+  const paths = profileRound === 0
+    ? [`${EVAL_DIR}/profile_output`, `${EVAL_DIR}/baseline_metrics.json`, `${EVAL_DIR}/profiling_summary.md`]
+    : [`${EVAL_DIR}/profile_output_r${profileRound}`, `${EVAL_DIR}/round_${profileRound}_metrics.json`,
+      `${EVAL_DIR}/round_${profileRound}_shift_analysis.md`];
+  if (typeof profileEvidenceState.summary?.summary_path === 'string')
+    paths.push(profileEvidenceState.summary.summary_path);
+  // Keep only explicit known paths. Availability is checked afresh before each planner call.
+  profileEvidenceState.paths = [...profileEvidenceState.paths.filter(path => !paths.includes(path)),
+    ...new Set(paths)].slice(-24);
+  return report;
+}
+
+async function plannerProfileEvidenceInputs() {
+  if (!PLANNER_PROFILE_EVIDENCE) return {};
+  const imports = Array.isArray(A.population_lineage?.imports) ? A.population_lineage.imports : [];
+  const populationRoot = imports.length && typeof A.population_lineage?.root === 'string'
+    ? A.population_lineage.root : null;
+  const index = USE_LEARNED_READ ? `${LEARNED_DIR}/INDEX.md` : null;
+  const known = [...new Set([...profileEvidenceState.paths, COMMANDMENT,
+    ...(populationRoot ? [populationRoot] : []), ...(index ? [index] : [])])];
+  let metadata = null;
+  try {
+    const result = await runProcess({cmd: 'python3', args: ['-I', '-B',
+      `${WORKFLOW_DIR}/scripts/read_profile_evidence.py`, CANONICAL,
+      JSON.stringify(A.editable_source_paths === undefined ? ['kernel_src'] : A.editable_source_paths),
+      JSON.stringify(known)], timeoutMs: 30000, graceMs: 2000, settleMs: 2000});
+    if (result.status === 'completed' && result.code === 0 && result.group_cleared
+        && !result.strays_killed && !result.stdio_held) metadata = JSON.parse(result.stdout);
+  } catch (_) { /* Missing host metadata leaves provenance explicitly unknown. */ }
+  const available = path => metadata?.paths?.find(row => row.path === path && row.available);
+  const items = (metadata?.paths || []).filter(row => profileEvidenceState.paths.includes(row.path))
+    .map(row => ({path: row.path, kind: row.kind, available: row.available,
+      artifact_sha256: row.sha256, bytes: row.bytes, produced_by: null,
+      evidence_source_sha256: null, applicability: 'UNKNOWN', currency: 'UNKNOWN'}));
+  const commands = [];
+  if (populationRoot && available(populationRoot)) commands.push({
+    argv: ['python3', `${WORKFLOW_DIR}/scripts/query_population.py`, '--root', populationRoot,
+      '--checkpoints-only', ...imports.flatMap(id => ['--lineage', id])],
+    purpose: 'Read checkpoints from declared imports only. Check source compatibility before use; no new evaluation.'});
+  if (index && available(index)) commands.push({
+    argv: ['python3', `${WORKFLOW_DIR}/scripts/kb.py`, '--kb-dir', LEARNED_DIR, 'match',
+      '--operator', KK_OPERATOR, '--device', GFX, '--kernel-name', KERNEL_NAME, '--max', '3'],
+    purpose: 'Read existing learned-card matches under the unchanged learned-KB policy.'});
+  return {
+    PROFILE_SUMMARY: profileEvidenceState.summary,
+    EVIDENCE_STATUS: {
+      current_source_sha256: metadata?.current_source_sha256 || null,
+      current_source_paths: metadata?.source_paths || [],
+      current_source_status: metadata?.source_status || 'unknown',
+      current_source_reason: metadata?.source_reason || (metadata ? null : 'metadata_unavailable'),
+      latest_attempt: profileEvidenceState.latest_attempt,
+      retained_profile_return: profileEvidenceState.summary_origin,
+      items,
+      authority: 'Current source hash covers only the declared editable closure at this read. ' +
+        'No host-verified profile-producing-source receipt exists on this route, so applicability is UNKNOWN. ' +
+        'CURRENT/HISTORICAL on the retained return describe its attempt origin only. Existing paths are mutable; ' +
+        'their current bytes are not retained historical artifacts or proof of executed source.'
+    },
+    EVIDENCE_HANDOFF: {
+      paths: (metadata?.paths || []).filter(row => row.available).map(row => ({path: row.path, kind: row.kind})),
+      commandment: available(COMMANDMENT) ? {path: COMMANDMENT,
+        instruction: 'Read the existing PROFILE command here. Run it only in roles holding GPU_ID.',
+        last_recorded_duration_s: null} : null,
+      commands,
+      scope: 'Existing paths and commands only. No GPU grant, new profile, replacement bundle or query subsystem.'
+    }
+  };
+}
 // ===========================================================================
 // PHASE: Analyze + Roadmap (TechLead)
 // ===========================================================================
@@ -2100,13 +2212,13 @@ log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, 
 // PHASE: Baseline profile (Profile Engineer)
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agentT(
+let profileSummary = await profileAgent(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT, ...PREPARED_INPUT,
   }),
-  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
+  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA }, 0);
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
 
 // The existing runtime persists this native return and separate metrics/backend events.
@@ -2464,13 +2576,13 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.exp_dir = c.exp_dir || '';
             if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = spReported; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
-            profileSummary = await agentT(
+            profileSummary = await profileAgent(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
                 WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
-              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }, 0) || profileSummary;
             if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
             if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
             break;
@@ -2618,7 +2730,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planner = nativePlannerCall({EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft: () => left, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema});
+  const planner = nativePlannerCall({EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft: () => left, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema, factsInput: async () => ({...await deliveryFactsInput(), ...await plannerProfileEvidenceInputs()})});
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
   const recordProposedPlan = async (attempt, proposed) => {
@@ -3111,12 +3223,12 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
+      profileSummary = await profileAgent(
         roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
           WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
-        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA }, round);
     }
   }
 

@@ -13,7 +13,9 @@ async function nativeSeededPlannerDecision() {
         || result.stdout.length > 4194304)
       throw new Error('native planner seed source closure rejected');
     const value = JSON.parse(result.stdout);
-    if (value?.seed?.schema !== 'geak.native_planner_seed/1' || !value.archive
+    if (value?.seed?.schema !== 'geak.native_planner_seed/1'
+        || !(value.archive === null || (value.archive && typeof value.archive === 'object'
+          && !Array.isArray(value.archive)))
         || !Array.isArray(value.verified_refs)) throw new Error('invalid native planner seed reader output');
     return value;
   };
@@ -21,16 +23,20 @@ async function nativeSeededPlannerDecision() {
   if (KERNEL_PATH_ORIG !== seed.task_root)
     throw new Error('native planner seed task_root must match kernel_path');
   const handoffMetric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
-  const evo = evolutionDecisionView({base: archive.base, baseCommit: archive.base_commit,
+  const evo = archive === null ? null : evolutionDecisionView({base: archive.base, baseCommit: archive.base_commit,
     archive: seed.archive.path, entries: archive.entries, getBestId: () => archive.best_id,
     metric: archive.metric ?? null});
-  const archiveHasSource = () => evo.entries.some(row => row.patch_ref && !row.retention_error);
-  if (!archiveHasSource()) throw new Error('native planner seed has no retained source');
+  const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
+  if (archive !== null && !archiveHasSource()) throw new Error('native planner seed has no retained source');
+  // JSON cannot preserve the identity used by the ordinary initial-baseline branch.
+  // The reader validates this explicit marker against equal rows and a null winner.
+  const initialOriginal = c.initial_original === true;
   const planner = nativePlannerCall({EVAL_DIR: c.eval_dir, round: c.round,
     remaining: c.budget_remaining, cumulative: c.cumulative_speedup,
     handoffMetric,
     BASELINE_GEOMEAN_MS: c.baseline_geomean_ms, profileSummary: c.profile_summary,
-    bestPerCase: c.current_best_per_case, finalWinner: c.final_winner,
+    bestPerCase: initialOriginal ? c.baseline_per_case : c.current_best_per_case,
+    finalWinner: c.final_winner,
     measurementRef: () => c.current_best_ref || {unavailable: 'no bound current measurement'},
     history: c.history, archiveHasSource, evo, GFX: c.gfx, DEVICE_TARGET: c.device_target,
     PHYSICAL_CU_COUNT: c.physical_cu_count, ROOFLINE_STATUS: c.roofline_status,
@@ -38,13 +44,16 @@ async function nativeSeededPlannerDecision() {
     getLeft: () => Infinity, KK_OPERATOR: c.kk_operator, KK_LANGUAGE: c.kk_language, KK_REFS: c.kk_refs,
     ENGINEER_CALL: {processDeadlineEpoch: A.native_planner_deadline_epoch, processTimeoutMs: AGENT_TIMEOUT_MS},
     DEADLINE_EPOCH: 0, ENGINEER_RESERVE_S: 0, ENGINEER_CUTOFF_EPOCH: null,
-    evoPlanSchema: nativeEvolutionPlannerSchema(true), allowInitialBenchmark: false,
+    evoPlanSchema: nativeEvolutionPlannerSchema(archiveHasSource()), allowInitialBenchmark: initialOriginal,
     // Operational facts use the ordinary input boundary. Seed provenance and
     // study bookkeeping stay in the returned receipt, outside model conditioning.
-    recordPlannerInputs: true, factsInput: async () => ({EVALUATION_SERVICE: evaluationServiceFacts(), ...c.facts})});
+    // This entry precedes Setup; consume a bound snapshot, never the later profile helper.
+    recordPlannerInputs: true, factsInput: async () => ({
+      EVALUATION_SERVICE: evaluationServiceFacts(), ...c.facts,
+      ...(PLANNER_PROFILE_EVIDENCE ? (c.profile_evidence_inputs || {}) : {})})});
   const plan = await planner.callPlanner('initial',
     'Decide this round\'s orthogonal directions (or stop).' +
-      ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.`,
+      (archiveHasSource() ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : ''),
     false, `tech_lead:plan r${c.round}`);
   const requested = Array.isArray(plan?.directions) ? plan.directions.map((direction, index) => ({
     index, requested_id: direction?.id ?? null,
@@ -57,7 +66,9 @@ async function nativeSeededPlannerDecision() {
     requested_plan: plan ?? null, requested_selections: requested, resolved_selections: [],
     case_measurement_observation: planner.caseMeasurementObservation(),
     continuation_materialization_qualified: false,
-    authority: 'selection resolution only; historical archive verification is not current source qualification',
+    authority: archiveHasSource()
+      ? 'selection resolution only; historical archive verification is not current source qualification'
+      : 'ordinary proposal only; no source resolution or qualification',
     direction_allocation: c.budget_remaining === null ? {unavailable: 'budget_remaining is unbound'}
       : {budget_remaining: c.budget_remaining},
     source_closure_rechecked: false};
@@ -71,6 +82,7 @@ async function nativeSeededPlannerDecision() {
   if (plan.stop === true) return {...result, status: 'stopped'};
   if (!Array.isArray(plan.directions) || !plan.directions.length)
     return {...result, status: 'selection_rejected', reference_errors: ['no requested directions']};
+  if (!archiveHasSource()) return {...result, status: 'proposed'};
   const retained = id => id === 'ORIGINAL' || evo.entries.some(row => row.id === id
     && row.patch_ref && !row.retention_error);
   const errors = [];

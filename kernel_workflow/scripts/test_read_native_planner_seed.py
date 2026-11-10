@@ -144,6 +144,77 @@ class NativePlannerSeedTests(unittest.TestCase):
         self.assertEqual(value["entries"][0]["engineer"]["evidence_context"]["base_commit"], "keep_nested_fact")
         self.assertEqual(value["baseline"]["origin"], "historical_initialization")
 
+    def test_plain_context_preserves_real_observations_and_exact_reference_cap(self):
+        seed = self.fixture.seed
+        seed.update(original_archive=None, archive=None, source_refs=[])
+        profile_ref = write_json(self.fixture.root / "profile.json", {"counters": {"bytes": 128}})
+        seed["context_refs"] = [profile_ref]
+        rows = [{"name": "case0", "baseline_ms": 2, "optimized_ms": 2, "speedup": 1}]
+        seed["context"].update(initial_original=True, cumulative_speedup=1,
+                               baseline_per_case=rows, current_best_per_case=copy.deepcopy(rows),
+                               profile_summary={"bottleneck": "memory", "counters": {"bytes": 128}},
+                               history={"bottleneck_now": "memory", "rounds": []},
+                               profile_evidence_inputs={"PROFILE_SUMMARY": None,
+                                                        "EVIDENCE_STATUS": {"items": []}})
+        for profile in [seed["context"]["profile_summary"], None]:
+            seed["context"]["profile_summary"] = profile
+            seed_ref = self.fixture.save()
+            expected_refs = [seed_ref, *seed["task_files"], profile_ref]
+            with mock.patch.object(reader, "MAX_REFS", len(expected_refs)):
+                result = reader.read_seed(seed_ref)
+            self.assertEqual(result["seed"], seed)
+            self.assertIsNone(result["archive"])
+            self.assertEqual(result["verified_refs"], expected_refs)
+            with mock.patch.object(reader, "MAX_REFS", len(expected_refs) - 1):
+                self.rejected("reference_count_limit")
+
+    def test_rejects_inconsistent_plain_context_and_optional_fields(self):
+        seed = self.fixture.seed
+        seed.update(original_archive=None, archive=None, source_refs=[])
+        rows = [{"name": "case0", "time_ms": 2}]
+        seed["context"].update(initial_original=True, cumulative_speedup=1,
+                               baseline_per_case=rows, current_best_per_case=copy.deepcopy(rows))
+        pristine = copy.deepcopy(seed)
+        changes = [
+            (lambda s: s.update(archive={}), "inconsistent_absent_archive"),
+            (lambda s: s.update(original_archive={}), "inconsistent_absent_archive"),
+            (lambda s: s.update(source_refs=[ref(self.fixture.patch, entry_id="r3_d0")]),
+             "inconsistent_absent_archive"),
+            (lambda s: s.update(context_refs={}), "invalid_context_refs"),
+            (lambda s: s["context"].update(initial_original=1), "invalid_initial_original"),
+            (lambda s: s["context"].update(current_best_per_case=[{"name": "case0", "time_ms": 3}]),
+             "initial_original_context_mismatch"),
+            (lambda s: s["context"].update(final_winner={"id": "ORIGINAL"}),
+             "initial_original_context_mismatch"),
+            (lambda s: s["context"].update(cumulative_speedup=2), "initial_original_context_mismatch"),
+            (lambda s: s["context"].update(baseline_per_case=None), "initial_original_context_mismatch"),
+            (lambda s: s["context"].update(profile_evidence_inputs={"EVOLUTION_ENTRIES": []}),
+             "invalid_profile_evidence_inputs"),
+            (lambda s: s["context"].update(profile_evidence_inputs={"EVIDENCE_STATUS": None}),
+             "invalid_profile_evidence_value"),
+            (lambda s: s["context"].update(profile_evidence_inputs={"PROFILE_SUMMARY": []}),
+             "invalid_profile_evidence_value"),
+            (lambda s: s["context"].update(profile_summary=[]), "invalid_observation_context"),
+            (lambda s: s["context"].update(history=None), "invalid_observation_context"),
+        ]
+        for mutate, code in changes:
+            with self.subTest(code=code):
+                self.fixture.seed = copy.deepcopy(pristine)
+                mutate(self.fixture.seed)
+                self.rejected(code)
+
+    def test_context_ref_hash_and_path_binding_are_enforced(self):
+        self.fixture.seed.update(original_archive=None, archive=None, source_refs=[])
+        artifact = self.fixture.root / "profile.txt"
+        artifact.write_text("original profile\n")
+        bound_ref = ref(artifact)
+        self.fixture.seed["context_refs"] = [bound_ref]
+        artifact.write_text("modified profile\n")
+        self.rejected("file_hash_mismatch")
+        artifact.write_text("original profile\n")
+        self.fixture.seed["context_refs"].append(dict(bound_ref, sha256="0" * 64))
+        self.rejected("conflicting_path_references")
+
     def test_rejects_view_changes_even_with_updated_view_hash(self):
         mutations = [
             lambda view: view["entries"][0]["engineer"]["per_case"][0].update(speedup=2),

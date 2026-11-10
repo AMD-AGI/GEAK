@@ -90,6 +90,20 @@ const direction = (id = 'caller-ID', more = {}) => ({id, title: 'fixture directi
   specialty: 'memory', prompt: 'fixture only', parent_id: 'r1_d0', donor_ids: ['r1_d1'], ...more});
 const plan = directions => ({stop: false, directions});
 
+function plainFixture(root) {
+  const f = fixture(root);
+  Object.assign(f.seed, {archive: null, original_archive: null, source_refs: []});
+  const rows = [{name: 'case0', baseline_ms: 2, optimized_ms: 2, speedup: 1}];
+  Object.assign(f.seed.context, {round: 1, budget_remaining: 2, cumulative_speedup: 1,
+    baseline_geomean_ms: 2, baseline_per_case: rows, current_best_per_case: clone(rows),
+    initial_original: true, profile_summary: {bottleneck: 'memory', counters: {bytes: 128}},
+    history: {bottleneck_now: 'memory', rounds: []}});
+  const artifact = path.join(f.dir, 'profile.txt');
+  fs.writeFileSync(artifact, 'bound fixture profile\n');
+  f.seed.context_refs = [ref(artifact)];
+  return f;
+}
+
 async function main() {
   const runtimeURL = p => pathToFileURL(path.join(ROOT, 'interface/runtime/engine', p)).href;
   const [{compileWorkflowBody, createRuntime}, {runProcess}, {schemaInstruction}, {neutralizeForBackend}] =
@@ -361,6 +375,90 @@ async function main() {
         assert.deepEqual(result.resolved_selections, []);
         assert.equal(result.continuation_materialization_qualified, false);
         assert.equal(result.source_closure_rechecked, true);
+      }
+    });
+
+    await test('plain native proposal keeps ordinary schema and explicit initial ORIGINAL identity', async () => {
+      const requested = plan([{id: 'ordinary-ID', title: 'fixture', specialty: 'memory', prompt: 'fixture'}]);
+      for (const marker of [true, false, undefined]) {
+        const f = plainFixture(root);
+        if (marker === undefined) delete f.seed.context.initial_original;
+        else f.seed.context.initial_original = marker;
+        const h = harness(f, {respond: () => requested});
+        const result = await h.run(), call = result.constructed_planner_call;
+        assert.equal(result.status, 'proposed');
+        assert.deepEqual(result.requested_plan, requested);
+        assert.equal(Object.hasOwn(result.requested_plan.directions[0], 'parent_id'), false);
+        assert.deepEqual(result.resolved_selections, []);
+        assert.equal(result.continuation_materialization_qualified, false);
+        assert.equal(result.source_closure_rechecked, true);
+        assert.equal(result.archive_ref, null);
+        assert.equal(result.original_archive_ref, null);
+        assert.equal(h.agentCalls.length, 1);
+        assert.equal(h.backendCalls.length, 1);
+        assert.equal(h.hostCalls.length, 2, 'no later profile helper or lifecycle calls');
+        assert.deepEqual(h.phases, []);
+        assert.equal(fs.existsSync(f.seed.context.eval_dir), false);
+        assert(!call.prompt.includes('/roles/evolution.md'));
+        for (const key of ['parent_id', 'donor_ids', 'approach'])
+          assert.equal(Object.hasOwn(call.options.schema.properties.directions.items.properties, key), false);
+        assert.equal(Object.keys(call.inputs).some(key => key.startsWith('EVOLUTION_') || key === 'DEEP_COST'), false);
+        assert.deepEqual(call.inputs.HISTORY, f.seed.context.history);
+        assert.deepEqual(call.inputs.PROFILE_SUMMARY, f.seed.context.profile_summary);
+        assert.equal(result.case_measurement_observation.raw_current_best.initial_original, marker === true);
+        if (marker === true) {
+          assert.deepEqual(call.inputs.CURRENT_BEST_PER_CASE, f.seed.context.baseline_per_case);
+          assert.equal(call.inputs.CURRENT_BEST_CASE_MEASUREMENT.source, 'ORIGINAL');
+          assert.equal(call.inputs.CURRENT_BEST_CASE_MEASUREMENT.basis, 'initial_benchmark');
+        } else assert.notEqual(call.inputs.CURRENT_BEST_CASE_MEASUREMENT.basis, 'initial_benchmark');
+        assert.deepEqual(result.verified_refs.slice(1), [...f.seed.task_files, ...f.seed.context_refs]);
+      }
+    });
+
+    await test('plain profile snapshot is flag-gated and preserves missing versus null fields', async () => {
+      for (const snapshot of [
+        {PROFILE_SUMMARY: {bottleneck: 'latency'}, EVIDENCE_STATUS: {items: [{applicability: 'UNKNOWN'}]},
+          EVIDENCE_HANDOFF: {paths: [], commands: []}},
+        {PROFILE_SUMMARY: null}, {EVIDENCE_STATUS: {items: []}},
+      ]) {
+        const f = plainFixture(root);
+        f.seed.context.profile_evidence_inputs = snapshot;
+        const inputs = {}, prompts = {};
+        for (const mode of ['default', 'off', 'on']) {
+          const h = harness(f, {args: mode === 'default' ? {} : {planner_profile_evidence: mode === 'on'},
+            respond: () => plan([{id: 'plain', title: 'fixture', specialty: 'memory', prompt: 'fixture'}])});
+          const result = await h.run();
+          assert.equal(result.status, 'proposed');
+          assert.equal(h.hostCalls.length, 2);
+          inputs[mode] = result.constructed_planner_call.inputs;
+          prompts[mode] = result.constructed_planner_call.prompt;
+        }
+        assert.deepEqual(inputs.default, inputs.off);
+        assert.equal(prompts.default, prompts.off);
+        assert.equal(Object.hasOwn(inputs.off, 'EVIDENCE_STATUS'), false);
+        assert.equal(Object.hasOwn(inputs.off, 'EVIDENCE_HANDOFF'), false);
+        assert.deepEqual(inputs.on, {...inputs.off, ...snapshot});
+      }
+    });
+
+    await test('plain context closure and stop or invalid outcomes remain enforced', async () => {
+      for (const [response, status, mutate] of [
+        [plan([{id: 'plain', title: 'fixture', specialty: 'memory', prompt: 'fixture'}]), 'source_closure_changed', true],
+        [{stop: true, directions: []}, 'stopped', false],
+        [{stop: false, directions: []}, 'selection_rejected', false],
+        [{directions: []}, 'planner_unavailable', false],
+      ]) {
+        const f = plainFixture(root);
+        const h = harness(f, {respond: () => {
+          if (mutate) fs.writeFileSync(f.seed.context_refs[0].path, 'changed fixture bytes\n');
+          return response;
+        }});
+        const result = await h.run();
+        assert.equal(result.status, status);
+        assert.deepEqual(result.resolved_selections, []);
+        assert.equal(result.source_closure_rechecked, !mutate);
+        assert.equal(result.continuation_materialization_qualified, false);
+        assert.equal(h.hostCalls.length, 2);
       }
     });
     process.stdout.write(JSON.stringify({ok: true, tests: passed.length, passed}, null, 2) + '\n');

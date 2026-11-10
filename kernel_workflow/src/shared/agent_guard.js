@@ -1,5 +1,5 @@
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
-async function agentT(p, o) {
+async function agentT(p, o, observeAttempt) {
   const label = (o && o.label) ? o.label : 'agent';
   const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
   const boundedCall = agent.processDeadlineActive
@@ -7,6 +7,10 @@ async function agentT(p, o) {
   if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
+    // Optional host observation only; never serialized into role inputs/options.
+    const observed = (outcome, error_code = null) => {
+      if (observeAttempt) observeAttempt({attempt, outcome, error_code});
+    };
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
@@ -14,11 +18,13 @@ async function agentT(p, o) {
         const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
           processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
           : boundedCall ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
-        const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
+        const r0 = await agent(p, opts); observed('returned'); if (ev && r0) ev.ok = true; return r0;
       }
-      let to;
+      let to, guardFired = false;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
+          guardFired = true;
+          observed('no_end', 'GEAK_AGENT_TIMEOUT');
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
@@ -28,9 +34,13 @@ async function agentT(p, o) {
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      // A guard timeout already recorded no_end. A settled null is still a role return.
+      if (!guardFired) observed('returned');
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
+      observed(e?.code === 'GEAK_AGENT_TIMEOUT' || e?.code === 'GEAK_PROCESS_DEADLINE'
+        ? 'no_end' : 'threw', typeof e?.code === 'string' ? e.code : null);
       if ((groupTask || boundedCall) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);

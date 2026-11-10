@@ -22,6 +22,7 @@ SEED_KEYS = {
     "schema", "id", "original_archive", "archive", "source_refs", "task_root",
     "task_files", "context",
 }
+OPTIONAL_SEED_KEYS = {"context_refs"}
 CONTEXT_KEYS = {
     "eval_dir", "round", "budget_remaining", "cumulative_speedup",
     "baseline_geomean_ms", "baseline_per_case", "current_best_per_case",
@@ -29,6 +30,7 @@ CONTEXT_KEYS = {
     "device_target", "physical_cu_count", "roofline_status", "kk_operator",
     "kk_language", "kk_refs", "research_brief_path", "facts",
 }
+OPTIONAL_CONTEXT_KEYS = {"profile_evidence_inputs", "initial_original"}
 
 
 class SeedError(Exception):
@@ -219,7 +221,8 @@ def positive_number(value, *, integer=False, nullable=False):
 
 
 def validate_context(context, entries):
-    require(type(context) is dict and set(context) == CONTEXT_KEYS, "invalid_context_fields")
+    require(type(context) is dict and CONTEXT_KEYS <= set(context)
+            and set(context) <= CONTEXT_KEYS | OPTIONAL_CONTEXT_KEYS, "invalid_context_fields")
     canonical_path(context["eval_dir"])
     require(positive_number(context["round"], integer=True), "invalid_context_positive_integer")
     require(positive_number(context["budget_remaining"], integer=True, nullable=True),
@@ -235,10 +238,13 @@ def validate_context(context, entries):
                 "invalid_context_case_rows")
     for key in ("profile_summary", "history"):
         value = context[key]
-        require(type(value) is dict and set(value) in ({"unavailable"}, {"unavailable", "scope"})
-                and type(value["unavailable"]) is str and bool(value["unavailable"].strip())
-                and ("scope" not in value or (type(value["scope"]) is str and bool(value["scope"].strip()))),
-                "invalid_unavailable_context")
+        require(type(value) is dict or (key == "profile_summary" and value is None),
+                "invalid_observation_context")
+        if type(value) is dict and "unavailable" in value:
+            require(set(value) in ({"unavailable"}, {"unavailable", "scope"})
+                    and type(value["unavailable"]) is str and bool(value["unavailable"].strip())
+                    and ("scope" not in value or (type(value["scope"]) is str and bool(value["scope"].strip()))),
+                    "invalid_unavailable_context")
     for key in ("current_best_ref", "final_winner"):
         value = context[key]
         require(value is None or type(value) is dict, "invalid_current_best_context")
@@ -256,12 +262,28 @@ def validate_context(context, entries):
     require(type(context["kk_refs"]) is list
             and all(type(item) is str for item in context["kk_refs"]), "invalid_context_knowledge_refs")
     require(type(context["facts"]) is dict, "invalid_context_facts")
+    if "initial_original" in context:
+        require(type(context["initial_original"]) is bool, "invalid_initial_original")
+        if context["initial_original"]:
+            require(context["final_winner"] is None and context["cumulative_speedup"] == 1
+                    and context["baseline_per_case"] is not None
+                    and same_json(context["baseline_per_case"], context["current_best_per_case"]),
+                    "initial_original_context_mismatch")
+    if "profile_evidence_inputs" in context:
+        value = context["profile_evidence_inputs"]
+        require(type(value) is dict
+                and set(value) <= {"PROFILE_SUMMARY", "EVIDENCE_STATUS", "EVIDENCE_HANDOFF"},
+                "invalid_profile_evidence_inputs")
+        for key, item in value.items():
+            require(type(item) is dict or (key == "PROFILE_SUMMARY" and item is None),
+                    "invalid_profile_evidence_value")
 
 
 def read_seed(seed_ref):
     reader = Reader()
     seed = reader.read(seed_ref, json_file=True)
-    require(type(seed) is dict and set(seed) == SEED_KEYS
+    require(type(seed) is dict and SEED_KEYS <= set(seed)
+            and set(seed) <= SEED_KEYS | OPTIONAL_SEED_KEYS
             and seed["schema"] == "geak.native_planner_seed/1", "invalid_seed_schema")
     require(type(seed["id"]) is str and bool(seed["id"].strip()), "invalid_seed_id")
     canonical_path(seed["task_root"])
@@ -269,39 +291,48 @@ def read_seed(seed_ref):
     os.close(task_fd)
     require(type(seed["source_refs"]) is list and type(seed["task_files"]) is list
             and bool(seed["task_files"]), "invalid_seed_ref_lists")
-    require(3 + len(seed["source_refs"]) + len(seed["task_files"]) <= MAX_REFS,
+    context_refs = seed.get("context_refs", [])
+    require(type(context_refs) is list, "invalid_context_refs")
+    archive_ref_count = 0 if seed["archive"] is None and seed["original_archive"] is None else 2
+    require(1 + archive_ref_count + len(seed["source_refs"]) + len(seed["task_files"])
+            + len(context_refs) <= MAX_REFS,
             "reference_count_limit")
-    original = reader.read(seed["original_archive"], json_file=True)
-    archive = reader.read(seed["archive"], json_file=True)
-    entries = archive_entries(original)
-    archive_entries(archive)
-    expected = copy.deepcopy(original)
-    expected["base"] = seed["task_root"]
-    expected["base_commit"] = None
-    if type(expected.get("baseline")) is dict and "source" in expected["baseline"]:
-        expected["baseline"]["source"] = seed["task_root"]
-    source_refs = {}
-    for ref in seed["source_refs"]:
-        reference(ref, source=True)
-        entry_id = ref["entry_id"]
-        require(entry_id not in source_refs, "duplicate_source_entry_id")
-        source_refs[entry_id] = ref
-    patch_ids = {row["id"] for row in original["entries"] if row.get("patch_ref") is not None}
-    require(bool(patch_ids) and set(source_refs) == patch_ids, "source_reference_closure_mismatch")
-    for row in expected["entries"]:
-        if "base_commit" in row:
-            row["base_commit"] = None
-        patch = row.get("patch_ref")
-        if patch is not None:
-            ref = source_refs[row["id"]]
-            require(ref["sha256"] == patch["sha256"], "original_patch_hash_mismatch")
-            if "bytes" in patch:
-                require(type(patch["bytes"]) is int and patch["bytes"] == ref["bytes"],
-                        "original_patch_size_mismatch")
-            patch["path"] = ref["path"]
-            if "base_commit" in patch:
-                patch["base_commit"] = None
-    require(same_json(expected, archive), "archive_view_mismatch")
+    if seed["archive"] is None or seed["original_archive"] is None:
+        require(seed["archive"] is None and seed["original_archive"] is None
+                and not seed["source_refs"], "inconsistent_absent_archive")
+        archive, entries = None, {}
+    else:
+        original = reader.read(seed["original_archive"], json_file=True)
+        archive = reader.read(seed["archive"], json_file=True)
+        entries = archive_entries(original)
+        archive_entries(archive)
+        expected = copy.deepcopy(original)
+        expected["base"] = seed["task_root"]
+        expected["base_commit"] = None
+        if type(expected.get("baseline")) is dict and "source" in expected["baseline"]:
+            expected["baseline"]["source"] = seed["task_root"]
+        source_refs = {}
+        for ref in seed["source_refs"]:
+            reference(ref, source=True)
+            entry_id = ref["entry_id"]
+            require(entry_id not in source_refs, "duplicate_source_entry_id")
+            source_refs[entry_id] = ref
+        patch_ids = {row["id"] for row in original["entries"] if row.get("patch_ref") is not None}
+        require(bool(patch_ids) and set(source_refs) == patch_ids, "source_reference_closure_mismatch")
+        for row in expected["entries"]:
+            if "base_commit" in row:
+                row["base_commit"] = None
+            patch = row.get("patch_ref")
+            if patch is not None:
+                ref = source_refs[row["id"]]
+                require(ref["sha256"] == patch["sha256"], "original_patch_hash_mismatch")
+                if "bytes" in patch:
+                    require(type(patch["bytes"]) is int and patch["bytes"] == ref["bytes"],
+                            "original_patch_size_mismatch")
+                patch["path"] = ref["path"]
+                if "base_commit" in patch:
+                    patch["base_commit"] = None
+        require(same_json(expected, archive), "archive_view_mismatch")
     validate_context(seed["context"], entries)
     task_paths = set()
     prefix = seed["task_root"] + "/"
@@ -316,6 +347,8 @@ def read_seed(seed_ref):
     for ref in seed["source_refs"]:
         reader.read(ref, source=True)
     for ref in seed["task_files"]:
+        reader.read(ref)
+    for ref in context_refs:
         reader.read(ref)
     return {"seed": seed, "archive": archive, "verified_refs": reader.verified_refs}
 

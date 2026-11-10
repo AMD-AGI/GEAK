@@ -20,6 +20,7 @@
     "kernel_workflow/src/kernel_lane/07b_native_planner_seed.js",
     "kernel_workflow/src/kernel_lane/08_setup.js",
     "kernel_workflow/src/kernel_lane/09_author.js",
+    "kernel_workflow/src/kernel_lane/09b_profile_evidence.js",
     "kernel_workflow/src/kernel_lane/10_analyze_benchmark_profile.js",
     "kernel_workflow/src/kernel_lane/11_research.js",
     "kernel_workflow/src/kernel_lane/12_optimize_state.js",

@@ -100,7 +100,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  const planner = nativePlannerCall({EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft: () => left, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema});
+  const planner = nativePlannerCall({EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft: () => left, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema, factsInput: async () => ({...await deliveryFactsInput(), ...await plannerProfileEvidenceInputs()})});
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
   const recordProposedPlan = async (attempt, proposed) => {
@@ -593,12 +593,12 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
+      profileSummary = await profileAgent(
         roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
           WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
-        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA }, round);
     }
   }
 
