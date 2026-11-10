@@ -240,8 +240,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
-          // correctness corrective (the deep site already calls the corrective helper for every reject).
+          // Route the integrator's actual rejection evidence to the corresponding corrective.
+          // A conditional profile projection does not manufacture a corruption verdict.
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,

@@ -1448,9 +1448,9 @@ const INTEGRATE_SCHEMA = obj({
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
-  // How the correctness of an ACCEPT was established: 'byte_exact' (hard greedy byte-parity vs the true
-  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
-  // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
+  // Which correctness check actually ran: 'byte_exact' (sampled greedy byte parity against the
+  // original baseline), 'accuracy' (sampled task-quality probe), or 'none'. Neither sampled check
+  // proves correctness for every input; a model discrepancy is advisory for every parity kind.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
@@ -1489,7 +1489,6 @@ const VALIDATE_SCHEMA = obj({
 const CHECKPOINT_WRITE_SCHEMA = obj({
   written: { type: 'boolean' }, path: { type: 'string' }, checkpoint_sha256: { type: 'string' },
 }, ['written', 'path', 'checkpoint_sha256']);
-
 // ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
 // ---------------------------------------------------------------------------
@@ -4820,8 +4819,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
-          // correctness corrective (the deep site already calls the corrective helper for every reject).
+          // Route the integrator's actual rejection evidence to the corresponding corrective.
+          // A conditional profile projection does not manufacture a corruption verdict.
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
