@@ -179,7 +179,8 @@ async function runMode(mode, scenario, template) {
     rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0,
       process_deadline_minus_now: processDeadline - now,
       prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched)), role_prompt: norm(p)});
-    if (scenario.onCall) await scenario.onCall(label, p, {rec, root, evalDir, canonical, args, command, git, field});
+    if (scenario.onCall) await scenario.onCall(label, p, {rec, root, evalDir, canonical, args, command, git, field,
+      options: o, processDeadline, now});
     const r = await answer(label, p, o);
     if (scenario.onResult) await scenario.onResult(label, r, {rec, root, evalDir, canonical, args, setNow: value => {now = value;}, processDeadline});
     if (!scenario.nativeRuntime) now += step(label);
@@ -188,6 +189,8 @@ async function runMode(mode, scenario, template) {
   Object.defineProperty(agent, 'processTimeoutSupported', {value: true});
   Object.defineProperty(agent, 'processDeadlineActive', {get: () => true});
   const runProcess = async (req) => {
+    if (scenario.onProcess) await scenario.onProcess(req, {rec, canonical, processDeadline, now,
+      setNow: value => {now = value;}});
     rec.host.push(norm([req.cmd, ...(req.args || [])].join(' ')).slice(0, 300));
     const r = spawnSync(req.cmd, req.args, {encoding: 'utf8', timeout: 20000, input: req.input,
       cwd: req.cwd, env: {...ENV, ...(req.env || {})}});

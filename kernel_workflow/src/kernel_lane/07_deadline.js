@@ -82,11 +82,11 @@ async function observeRole(kind, label, call) {
       : left <= 7 ? 'no result at the search cutoff' : 'no result (timed out or failed)' });
   }
 }
-async function deliveryFacts() {
+async function deliveryFacts(secondsRemaining = () => setProcessDeadline.secondsLeft()) {
   let rows = '';
   try { rows = await hostRun('sh', ['-c', 'if [ -r "${GEAK_GPU_USE_LOG:-}" ]; then cat -- "$GEAK_GPU_USE_LOG"; fi']) || ''; }
   catch (error) { rows = ''; }
-  const now = SEARCH_CUTOFF_EPOCH - setProcessDeadline.secondsLeft();   // after the host read
+  const now = SEARCH_CUTOFF_EPOCH - secondsRemaining();   // after the host read
   const waits = rows.split('\n').map(line => { try { return JSON.parse(line); } catch (error) { return null; } })
     .filter(row => row && row.t >= LANE_START_EPOCH && Number.isFinite(row.wait_s)).map(row => row.wait_s);
   return { as_of_epoch: Math.floor(now), search_cutoff_epoch: SEARCH_CUTOFF_EPOCH,
@@ -127,8 +127,8 @@ const evaluationServiceFacts = () => ({
   clocks: 'Role timeouts are computed before runtime semaphore acquisition; queue, model and GPU lease waits consume wall time. ' +
     'Delivery facts report qualified observations only; missing waits and complete evaluation service time remain unknown.'
 });
-const deliveryFactsInput = async () => ({EVALUATION_SERVICE: evaluationServiceFacts(),
-  ...(DELIVERY_FACTS ? {DELIVERY_FACTS: await deliveryFacts()} : {})});
+const deliveryFactsInput = async (secondsRemaining) => ({EVALUATION_SERVICE: evaluationServiceFacts(),
+  ...(DELIVERY_FACTS ? {DELIVERY_FACTS: await deliveryFacts(secondsRemaining)} : {})});
 // ENGINEER RESERVE (opt-in; absent => unchanged). A declared budget allocation, not a cost estimate.
 // Planner and engineer calls carry the earlier per-call deadline search cutoff - engineer_reserve_s;
 // verify, integrate and commit keep the shared search cutoff, and Report/Validate keep their reserves.

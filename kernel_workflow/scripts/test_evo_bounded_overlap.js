@@ -82,7 +82,135 @@ async function optionalClosureFallbacks() {
   }
 }
 
+async function noPredecessorInputs() {
+  for (const deep of [false, true]) {
+    const outcomes = [];
+    for (const overlap of [false, true]) {
+      const rec = await runMode('evo', {name: `no_predecessor_${deep}_${overlap}`, stepFor: () => 0,
+        args: args({budget: deep ? 3 : 1, evolution_bounded_overlap: overlap}),
+        plans: {r1: plan(d('a', deep ? 'deep_explore' : 'memory')), r2: plan(d('b', 'compute'))},
+        eng: {r1_d0: {speed: 1.2}, r2_d0: {speed: 1.3}}, verify: {r1_d0: 1.2, r2_d0: 1.3}}, template);
+      check(rec);
+      outcomes.push(rec.calls.filter(c => /^(tech_lead:plan |eng |deep )/.test(c.label))
+        .map(({label, prompt, role_prompt}) => ({label, prompt, role_prompt})));
+    }
+    assert.deepEqual(outcomes[1], outcomes[0], 'no predecessor: planner and engineer inputs must match OFF');
+  }
+  reports.push('no predecessor: exact deterministic ON/OFF planner and engineer inputs, round1 and after deep');
+}
+
+async function recoveredCommitClosure() {
+  const outcomes = [];
+  for (const overlap of [false, true]) {
+    const successorEdit = latch(), commitFailed = latch();
+    const rec = await within(runMode('evo', {name: `native_recovered_commit_${overlap}`, nativeRuntime: true,
+      args: args({budget: 3, evolution_bounded_overlap: overlap}), commitFail: 'r1',
+      plans: {r1: plan(d('a', 'memory')), r2: plan(d('b', 'compute')), r3: plan(d('c', 'algorithm'))},
+      eng: {r1_d0: {speed: 1.3}, r2_d0: {speed: 1.5}, r3_d0: {speed: 1.6}},
+      verify: {r1_d0: 1.3, r2_d0: 1.5, r3_d0: 1.6},
+      async onCall(label, prompt, {canonical}) {
+        if (overlap && label === 'verify r1_d0') await successorEdit.promise;
+        if (label === 'verify r2_d0') assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'A = 0\nB = 0\n');
+        if (overlap && /r[23](?:_|\b)/.test(label)) {
+          const timing = JSON.parse(prompt.match(/WORKFLOW_TIMING[^\n]*\n([^\n]+)/)[1]);
+          assert.ok(timing.current_process_cutoff_epoch <= timing.search_cutoff_epoch);
+        }
+      },
+      async onResult(label) { if (label === 'commit r1') commitFailed.resolve(); },
+      async beforeEngineerReturn(id) {
+        if (overlap && id === 'r2_d0') {successorEdit.resolve(); await commitFailed.promise; await delay(25);}
+      }}, template));
+    check(rec);
+    assert.ok(index(rec, 'verify r2_d0') >= 0);
+    assert.equal(rows(rec).r2_d0.verifier.verified_geomean, 1.5);
+    assert.ok(index(rec, 'tech_lead:plan r3') >= 0);
+    const history = field(rec.calls.find(c => c.label === 'tech_lead:report').role_prompt, 'HISTORY');
+    assert.equal(history.rounds[0].status, 'commit_failed');
+    assert.ok(history.rounds[0].recovery.previous_commit);
+    assert.equal(rec.result.final_speedup, 1.6);
+    assert.equal(rec.result.budget_used, 3);
+    if (overlap) {
+      assert.ok(events(rec).some(e => e.round === 1 && e.kind === 'closed' && e.status === 'closed'));
+      assert.ok(events(rec).every(e => Number.isFinite(e.epoch) && e.epoch > 0));
+    }
+    outcomes.push(rec.result);
+  }
+  for (const key of ['final_speedup', 'budget_used', 'stopped_by']) assert.equal(outcomes[0][key], outcomes[1][key]);
+  reports.push('native recovered commit: restored incumbent, successor qualification and r3 preserved with serial outcomes');
+}
+
+async function recoveryCallCaps() {
+  for (const expireDuringRestore of [false, true]) {
+    const planStarted = latch(), recoveryStarted = latch(), engineerRetried = latch();
+    let cutoff = null, recovering = false, held = false, planAttempts = 0, engineerAttempts = 0;
+    const callsInRecovery = [];
+    const rec = await within(runMode('evo', {name: `recovery_caps_${expireDuringRestore}`, stepFor: () => 0,
+      args: args({budget: 3, agent_retries: 2, engineer_reserve_s: 10, no_stop_s: 0}), commitFail: 'r1',
+      plans: {r1: plan(d('a', 'memory')), r2: {stop: true, reasoning: 'fixture replan', directions: []},
+        'r2#1': plan(d('b', 'compute')), r3: plan(d('c', 'algorithm'))},
+      eng: {r1_d0: {speed: 1.3}, r2_d0: {speed: 1.5}, r3_d0: {speed: 1.6}},
+      verify: {r1_d0: 1.3, r2_d0: 1.5, r3_d0: 1.6},
+      onDeadline(epoch) {
+        if (cutoff !== null) {recovering = epoch > cutoff; if (recovering) recoveryStarted.resolve();}
+      },
+      onResult(label, result, state) {if (label === 'tech_lead:plan r1') cutoff = state.processDeadline;},
+      async onCall(label, prompt, state) {
+        if (label === 'verify r1_d0') await planStarted.promise;
+        if (label === 'tech_lead:plan r2' && ++planAttempts === 1) {
+          planStarted.resolve(); await recoveryStarted.promise; throw new Error('fixture planner retry during recovery');
+        }
+        if (recovering && /r2(?:_|\b)/.test(label)) {
+          const cap = state.options.processDeadlineEpoch;
+          const expected = /^(eng |deep |tech_lead:(?:plan|replan) )/.test(label) ? cutoff - 10 : cutoff;
+          assert.equal(cap, expected);
+          callsInRecovery.push({label, global: state.processDeadline, explicit: cap,
+            effective: Math.min(state.processDeadline, cap)});
+          const facts = field(prompt, 'DELIVERY_FACTS');
+          if (facts) {
+            assert.equal(facts.as_of_epoch, state.now);
+            assert.equal(facts.seconds_to_search_cutoff, cutoff - state.now);
+            assert.equal(facts.seconds_to_engineer_cutoff, cutoff - 10 - state.now);
+          }
+          if (label.startsWith('tech_lead:replan '))
+            assert.equal(field(prompt, 'MINUTES_REMAINING'), Math.round((cutoff - state.now) / 60));
+        }
+        if (label.startsWith('eng r2_d0:')) {
+          if (++engineerAttempts === 1) throw new Error('fixture engineer retry during recovery');
+          engineerRetried.resolve();
+        }
+      },
+      async onProcess(req, state) {
+        if (recovering && !held && req.cmd === 'git' && req.args[1] === state.canonical
+            && req.args.slice(2).join(' ') === 'rev-parse HEAD') {
+          held = true; await engineerRetried.promise;
+          if (expireDuringRestore) state.setNow(cutoff - 6);
+        }
+      }}, template));
+    check(rec);
+    assert.ok(held);
+    assert.ok(callsInRecovery.some(c => c.label === 'tech_lead:plan r2'));
+    assert.ok(callsInRecovery.some(c => c.label.startsWith('tech_lead:replan r2')));
+    assert.equal(callsInRecovery.filter(c => c.label.startsWith('eng r2_d0:')).length, 2);
+    assert.ok(callsInRecovery.every(c => c.global > cutoff && c.effective <= cutoff - 10));
+    if (expireDuringRestore) {
+      assert.equal(index(rec, 'verify r2_d0'), -1);
+      assert.equal(index(rec, 'tech_lead:plan r3'), -1);
+      assert.equal(rec.result.stopped_by, 'deadline_uncommitted');
+    } else {
+      assert.ok(index(rec, 'verify r2_d0') >= 0);
+      assert.equal(rec.result.final_speedup, 1.6);
+    }
+  }
+  reports.push('recovery interval: planner/replan/engineer retries retain fixed caps and truthful time facts; postrestore cutoff denies successor');
+}
+
 (async () => {
+  if (process.argv.includes('--closure-recovery-only')) {
+    await noPredecessorInputs(); await recoveredCommitClosure(); await recoveryCallCaps();
+    console.log(reports.map(row => 'PASS: ' + row).join('\n'));
+    console.log('Witness artifacts: ' + OUT);
+    return;
+  }
   if (process.argv.includes('--optional-closure-only')) {
     await optionalClosureFallbacks();
     console.log(reports.map(row => 'PASS: ' + row).join('\n'));
@@ -187,27 +315,9 @@ async function optionalClosureFallbacks() {
     reports.push('native stall: issued successor fully accounted and qualified; no r+2 after stop');
   }
 
-  {
-    const successorEdit = latch(), commitFailed = latch();
-    let successorActive = false;
-    const rec = await within(runMode('evo', {name: 'native_failed_closure', nativeRuntime: true,
-      args: args({budget: 2}), commitFail: 'r1', plans: {r1: plan(d('a', 'memory')), r2: plan(d('b', 'compute'))},
-      eng: {r1_d0: {speed: 2}, r2_d0: {speed: 1.5}}, verify: {r1_d0: 2, r2_d0: 1.5},
-      async onCall(label) { if (label === 'verify r1_d0') await successorEdit.promise; },
-      async onResult(label) { if (label === 'commit r1') commitFailed.resolve(); },
-      async beforeEngineerReturn(id) {
-        if (id === 'r2_d0') {successorActive = true; successorEdit.resolve(); await commitFailed.promise;
-          await delay(75); successorActive = false;}
-      }}, template));
-    check(rec); assert.equal(successorActive, false);
-    assert.equal(index(rec, 'verify r2_d0'), -1, 'failed closure never grants qualification');
-    assert.equal(rec.result.budget_used, 2);
-    assert.ok(rows(rec).r2_d0.patch_ref, 'issued source retained despite failed predecessor closure');
-    assert.equal(rows(rec).r2_d0.verifier, null);
-    assert.ok(events(rec).some(e => e.round === 1 && e.status === 'commit_failed'));
-    assert.ok(events(rec).some(e => e.round === 2 && e.status === 'predecessor_failed'));
-    reports.push('native commit failure: waits for active successor capture, denies successor qualification, retains exact issued source/credits');
-  }
+  await noPredecessorInputs();
+  await recoveredCommitClosure();
+  await recoveryCallCaps();
 
   for (const concurrency of [1, 2]) {
     const rec = await within(runMode('evo', {name: `native_slots_${concurrency}`, nativeRuntime: true, concurrency,
@@ -238,10 +348,10 @@ async function optionalClosureFallbacks() {
   {
     const rec = await within(runMode('evo', {name: 'native_missing_profile', nativeRuntime: true,
       profile: {bottleneck: 'reported only', summary_path: '/fixture/nonexistent/profile.md'},
-      args: args({budget: 1}), plans: {r1: plan(d('a', 'memory'))},
-      eng: {r1_d0: {speed: 1.2}}, verify: {r1_d0: 1.2}}, template));
+      args: args({budget: 2}), plans: {r1: plan(d('a', 'memory')), r2: plan(d('b', 'compute'))},
+      eng: {r1_d0: {speed: 1}, r2_d0: {speed: 1.2}}, verify: {r1_d0: 1, r2_d0: 1.2}}, template));
     check(rec);
-    const input = field(rec.calls.find(c => c.label === 'tech_lead:plan r1').role_prompt, 'PROFILE_SUMMARY');
+    const input = field(rec.calls.find(c => c.label === 'tech_lead:plan r2').role_prompt, 'PROFILE_SUMMARY');
     assert.equal(input.summary_path, undefined);
     assert.equal(input.summary_snapshot_unavailable, true);
     assert.equal(input.bottleneck, 'reported only');

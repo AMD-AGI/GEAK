@@ -47,7 +47,7 @@ const clone = (v) => (v === undefined ? null : JSON.parse(JSON.stringify(v)));
 // --- instrumentation: read-only probes at loop entry and right before the Report phase -------------
 const PROBE_KEYS = ['round', 'dispatched', 'cumulative', 'bestPerCase', 'finalWinner', 'roundsCommitted',
   'history', 'citations', 'profileSummary', 'deadlineHit', 'forcedReplans', 'kbCapBound'];
-const LOOP_LINE = 'while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {';
+const LOOP_LINE = 'let batch = null;';
 const REPORT_LINE = "phase('Report');";
 function instrument(src) {
   let body = src.replace(/^export const meta/m, 'const meta');
@@ -55,7 +55,7 @@ function instrument(src) {
     const n = body.split(marker).length - 1;
     if (n !== 1) throw new Error(`expected exactly one '${marker}' in ${LANE}, found ${n}`);
   }
-  const probe = (tag) => `__probe(${JSON.stringify(tag)}, { ${PROBE_KEYS.join(', ')} });\n`;
+  const probe = (tag) => `__probe(${JSON.stringify(tag)}, { ${PROBE_KEYS.map(k => k === 'round' && tag === 'loop_entry' ? 'round: rounds' : k).join(', ')} });\n`;
   return body.replace(LOOP_LINE, () => probe('loop_entry') + LOOP_LINE)
     .replace(REPORT_LINE, () => probe('after_loop') + REPORT_LINE);
 }

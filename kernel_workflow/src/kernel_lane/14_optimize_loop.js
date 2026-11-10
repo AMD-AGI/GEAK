@@ -68,7 +68,7 @@ if (overlap && await hostRun('sh', ['-c', 'set -Ce; cat > "$1"', 'sh', overlapGu
 const overlapEvents = [];
 const noteOverlap = (round, kind, fields = {}) => {
   if (!overlap) return;
-  const event = {round, kind, ...fields};
+  const event = {epoch: Date.now() / 1000, round, kind, ...fields};
   overlapEvents.push(event);
   log(`[bounded_overlap] ${JSON.stringify(event)}`);
 };
@@ -80,9 +80,18 @@ const latch = () => {
   }};
 };
 let pending = null, stopIssuing = false, deferredReclaim = null;
+let recoveryCutoffEpoch = null;
 async function beginBatch(predecessor = null, snapshotReady = null) {
   const round = rounds + 1;
   const evo = evolution;
+  // Recovery may temporarily widen the shared host deadline. A successor's
+  // calls and their retries retain the original search/earlier engineer cutoff.
+  const batchAgentT = (prompt, options) => agentT(prompt, predecessor ? {...options,
+    processDeadlineEpoch: Math.min(SEARCH_CUTOFF_EPOCH,
+      Number.isFinite(options.processDeadlineEpoch) ? options.processDeadlineEpoch : Infinity)} : options);
+  const batchRemaining = predecessor ? () => setProcessDeadline.secondsLeft()
+    - (recoveryCutoffEpoch == null ? 0 : recoveryCutoffEpoch - SEARCH_CUTOFF_EPOCH) : undefined;
+  const batchSecondsLeft = tag => batchRemaining ? batchRemaining() : secondsLeft(tag);
 // The planner sees the archive, its schema fields and the retained-approach policy once the archive
 // holds retained source; before that its round plans from the same inputs as greedy.
 const archiveHasSource = (live = false) => !!evo && (live ? evo.entries : view?.entries || evo.entries).some(row => row.patch_ref && !row.retention_error);
@@ -111,7 +120,7 @@ const measurementRef = winner => {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
-  let left = await secondsLeft(`pre-r${round}`);
+  let left = await batchSecondsLeft(`pre-r${round}`);
   if (left <= 0) {
     deadlineHit = true;
     log(`WALL-CLOCK DEADLINE reached after ${rounds} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
@@ -131,7 +140,7 @@ const measurementRef = winner => {
 
   rounds = round;
   deliveryEvo = evo;
-  const view = overlap ? await evo.snapshotBatch(round) : null;
+  const view = overlap && predecessor ? await evo.snapshotBatch(round) : null;
   // The first round that differs from greedy is this round's plan call.
   if (evo && history.evolution_start && history.evolution_start.first_round == null) {
     history.evolution_start.first_round = round;
@@ -142,9 +151,9 @@ const measurementRef = winner => {
   // Retained delivery needs each GEAK source's actual base; EVO sources share the archive base.
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
-  const planning = overlap ? JSON.parse(JSON.stringify({cumulative, bestPerCase, finalWinner,
+  const planning = view ? JSON.parse(JSON.stringify({cumulative, bestPerCase, finalWinner,
     profileSummary, history})) : null;
-  if (planning) planning.history.evolution_archive = view.path;
+  if (planning && archiveHasSource()) planning.history.evolution_archive = view.path;
   if (planning && !finalWinner && bestPerCase === BASELINE_PER_CASE) planning.bestPerCase = BASELINE_PER_CASE;
   // Reprofile may replace this file. Pin the actual known profile artifact as well as its JSON.
   if (planning?.profileSummary?.summary_path) {
@@ -274,7 +283,7 @@ const measurementRef = winner => {
   };
 
   const callPlanner = async (attempt, intro, forbidStop, label) => {
-    const inputs = planInputs(forbidStop, await deliveryFactsInput());
+    const inputs = planInputs(forbidStop, await deliveryFactsInput(batchRemaining));
     const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
     const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
     let plannerObservation;
@@ -301,7 +310,7 @@ const measurementRef = winner => {
         'STOP_NOT_PERMITTED', ...Object.keys(inputs)])) component(`inputs.${key}`, inputs[key]);
       plannerObservation = {eval_dir: EVAL_DIR, round, logical_attempt: attempt, components};
     }
-    return agentT(prompt, { phase: 'Optimize', label, schema, ...ENGINEER_CALL,
+    return batchAgentT(prompt, { phase: 'Optimize', label, schema, ...ENGINEER_CALL,
       ...(plannerObservation ? {plannerObservation} : {}) });
   };
 
@@ -309,7 +318,7 @@ const measurementRef = winner => {
     'Decide this round\'s orthogonal directions (or stop).' + evolutionInstructions(), false,
     `tech_lead:plan r${round}`);
   await recordProposedPlan('initial', plan);
-  if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
+  if (PROCESS_BOUNDED) left = await batchSecondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -328,7 +337,7 @@ const measurementRef = winner => {
       'Your stop was refused: plan at least one direction.' + evolutionInstructions(), true,
       `tech_lead:replan r${round}#${forcedReplans}`);
     await recordProposedPlan(`replan${forcedReplans}`, plan);
-    left = await secondsLeft(`replan-r${round}`);
+    left = await batchSecondsLeft(`replan-r${round}`);
   }
   if (engineerCutoffReached(left)) {
     deadlineHit = true;   // Planning reached the engineer cutoff: dispatch nothing.
@@ -373,7 +382,7 @@ const measurementRef = winner => {
   if (predecessor && deepDir) {
     noteOverlap(round, 'deep_wait', {predecessor_round: predecessor.round});
     const prior = await predecessor.closed.promise;
-    left = await secondsLeft(`deep-r${round}`);
+    left = await batchSecondsLeft(`deep-r${round}`);
     if (prior.status !== 'closed' || stopIssuing || left <= 7 || engineerCutoffReached(left)) {
       noteOverlap(round, 'deep_not_issued', {predecessor_status: prior.status});
       return null;
@@ -399,7 +408,7 @@ const measurementRef = winner => {
       return {d, eng, ver: null, patch, verification_input_error: 'source copy unavailable'};
     }
     const measured = verification ? verification.path : patch;
-    return observeRole('verify', d.id, () => agentT(
+    return observeRole('verify', d.id, () => batchAgentT(
       roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
         CANONICAL: evo ? evo.base : CANONICAL, PATCH: measured, VERIFY_DIR: `${d.out_dir}/verify`,
         ...(engineerWorkspace ? { ENGINEER_WORKSPACE: engineerWorkspace } : {}),
@@ -476,8 +485,8 @@ git -C ${d.out_dir}/workspace add -A
 git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost commit -qm 'Candidate baseline'
 ${!EXTERNAL_OBJECTIVE ? 'git -C ' + d.out_dir + '/workspace rev-parse HEAD > ' + d.out_dir + '/workspace_base_commit.txt\n' : ''}\`\`\`
 `;
-      const facts = await deliveryFactsInput();   // after workspace preparation, at dispatch
-      return await agentT(
+      const facts = await deliveryFactsInput(batchRemaining);   // after workspace preparation, at dispatch
+      return await batchAgentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
@@ -573,7 +582,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       cumulative, directions: directionHistory});
     return {status: 'predecessor_failed'};
   }
-  if (evo && PROCESS_BOUNDED && await secondsLeft(`archive-r${round}`) <= 7) {
+  if (evo && PROCESS_BOUNDED && await batchSecondsLeft(`archive-r${round}`) <= 7) {
     // The pipeline has settled. Use the existing finalization allowance only to
     // retain completed work; no new engineer or GPU evaluation starts here.
     await quiesce('deadline');
@@ -616,7 +625,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   let integrate = null;
   if (verified.length >= 2) {
     phase('Merge');
-    integrate = await observeRole('integrate', `r${round}`, () => agentT(
+    integrate = await observeRole('integrate', `r${round}`, () => batchAgentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
@@ -757,7 +766,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         }
       }
       await preservePatchObstructions(winner.patch, `round_${round}`);
-      commitResult = await observeRole('commit', `r${round}`, () => agentT(
+      commitResult = await observeRole('commit', `r${round}`, () => batchAgentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 set -e
@@ -795,19 +804,25 @@ already verified source, and the host checks the resulting tree. Return JSON {co
         ver: winner.verifier_report,
         evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
         base: evo ? evo.baseCommit : commitBase});
-      let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
-      // No shared deadline may move while an issued successor can still run/capture.
-      await quiesce(atDeadline ? 'deadline_uncommitted' : 'commit_failed');
-      // Search has settled. Only host recovery may use the existing Report allowance.
-      if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+      let atDeadline = commitDeadline || await batchSecondsLeft(`uncommitted-r${round}`) <= 7;
+      if (atDeadline) await quiesce('deadline_uncommitted');
+      // Only host recovery may use the existing Report allowance. In-flight
+      // successor agent calls remain explicitly capped at their original cutoff.
+      if (PROCESS_BOUNDED) {
+        recoveryCutoffEpoch = DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S;
+        setProcessDeadline(recoveryCutoffEpoch);
+      }
       const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      if (overlap && !recovery) throw new Error('bounded-overlap commit recovery has no restored-source receipt');
       await captureCanonicalSelection(history, 'after_restore', round, finalWinner);
       if (!atDeadline && PROCESS_BOUNDED) {
         setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
-        atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
+        recoveryCutoffEpoch = null;
+        atDeadline = await batchSecondsLeft(`restored-r${round}`) <= 7;
       }
       const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
       if (atDeadline) {
+        await quiesce(status);
         history.rounds.push({round, metric: handoffMetric, status, cumulative, improved: false,
           directions: directionHistory,
           winner: {source: winner.source, ...winnerScores(winner), patch: winner.patch}, recovery});
@@ -834,7 +849,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
+      profileSummary = await batchAgentT(
         roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
           WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
@@ -847,7 +862,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
-  const mem = await agentT(
+  const mem = await batchAgentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(true), {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, PRIMARY_METRIC: handoffMetric,
       ...(archiveHasSource(true) ? evo.memoryInputs(clean.map(r => r.d)) : {}),
@@ -950,7 +965,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
     ` fi` +
     `; echo STORAGE_RECLAIM_DONE round=${round}`;
-  const reclaim = () => agentT(
+  const reclaim = () => batchAgentT(
     `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
     `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
     `\`\`\`bash\n${reclaimCmd}\n\`\`\``,
@@ -971,11 +986,11 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     }
     if (evolution && A.evolution_import_stall_sources === true) await importStallSources(evolution, round);
   }
-  if (overlap && await secondsLeft(`closed-r${round}`) <= 7) {
+  if (overlap && await batchSecondsLeft(`closed-r${round}`) <= 7) {
     deadlineHit = true;
     return {status: 'deadline'};
   }
-  return {status: failedCommitRecovery ? 'commit_failed' : 'closed'};
+  return {status: 'closed'};
   }
 }
 // At most one successor is admitted. A charged successor is always drained and
