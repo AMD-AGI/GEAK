@@ -2792,6 +2792,8 @@ if (!MODEL_PATH && KERNEL_PATH) {
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
+      ...Object.fromEntries(['op_spec', 'workload_spec_path', 'workload']
+        .filter(key => A[key] !== undefined).map(key => [key, A[key]])),
       // The lane defaults to triton; a pass-through caller naming another backend must reach that
       // backend's own warm-start page (the slug is per-language), not triton's.
       ...(A.target_language ? { target_language: String(A.target_language) } : {}),
