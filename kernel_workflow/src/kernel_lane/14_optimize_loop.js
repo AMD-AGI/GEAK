@@ -935,12 +935,16 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
       }
     }
     const ok = ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && primSpeedup(ver) > 0;
-    if (ok && evo && c.d) {
+    const primary = primSpeedup(ver);
+    const measured = ok || (ver && says(ver.status, 'regression') && says(ver.correctness, 'pass') &&
+      Number.isFinite(primary) && primary > 0 && primary <= 1);
+    if (measured && evo && c.d) {
       const kept = await evo.record(c.d, c.eng, ver, src.path);
       if (kept && (kept.retention_error || kept.last_record_error)) row.archive_record_status = 'failed';
     }
     Object.assign(row, {status: !ver ? 'unmeasured' : ok ? 'qualified' : String(ver.status || 'unknown'),
-      primary: ok ? primSpeedup(ver) : null, source_sha256: src.sha256, tree: promo.tree});
+      primary: measured ? primary : null, verifier_report: measured ? ver : null,
+      source_sha256: src.sha256, tree: promo.tree});
     if (ok && row.primary > Math.max(cumulative, incumbentEvidence) && (!best || row.primary > best.primary)) {
       best = {c, ver, promo, primary: row.primary, row};
     }

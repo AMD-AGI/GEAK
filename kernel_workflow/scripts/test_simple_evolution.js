@@ -928,6 +928,28 @@ cases.push({name: 'final delivery preserves a verified gain below the search pro
     'unmeasured'),
   keptIncumbent('retained delivery refuses bytes that change during qualification',
     {mutateAfterVerification: source(9, 9)}, 'source_changed'));
+const retainedRegression = keptIncumbent('retained delivery preserves a reverified regression without delivering it',
+  {verifier: {...verifiedAt(0.8), status: 'regression', variance_note: 'fixture repeat spread'}}, 'regression');
+const checkRetainedRegression = retainedRegression.check;
+retainedRegression.check = observed => {
+  checkRetainedRegression(observed);
+  const {rec, archive, events, h: harness, temp} = observed;
+  const row = delivery(rec).candidates[0], kept = archive.entries.find(entry => entry.id === 'r2_d0');
+  assert.deepEqual(delivery(rec).incomplete, []);
+  assert.equal(row.basis, 'engineer_local');
+  assert.equal(row.evidence, 50, 'admission keeps the engineer claim distinct from remeasurement');
+  assert.equal(row.primary, 0.8);
+  assert.deepEqual(row.verifier_report, retainedRegression.candidates.r2_d0.verifier);
+  assert.equal(kept.verified, true);
+  assert.equal(kept.status, 'slower');
+  assert.equal(kept.speedup, 0.8);
+  assert.deepEqual(kept.verifier, row.verifier_report);
+  const verification = events.find(event => event.label === 'verify r2_d0 (delivery)');
+  assert.equal(hash(fs.readFileSync(harness.field(verification.prompt, 'PATCH'))), kept.patch_ref.sha256);
+  assert.equal(row.source_sha256, kept.patch_ref.sha256);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, 'eval/delivery/outcome.json'), 'utf8')).candidates[0], row);
+};
+cases.push(retainedRegression);
 cases.push({...cases[0], name: 'UTF-8 budget preserves bounded context and exact archive access',
   args: {...cases[0].args, evolution_evidence_handoff: true}, candidates: {...cases[0].candidates,
     r1_d0: {...cases[0].candidates.r1_d0,
