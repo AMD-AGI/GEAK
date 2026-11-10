@@ -691,9 +691,10 @@ try {
         const {label, prompt} = options;
         let result;
         if (label === 'director:setup') {
-          await cp(args.kernel_path, W, {recursive: true});
-          await git(W, 'init', '-q'); await git(W, 'add', '.'); await git(W, 'commit', '-q', '-m', 'ORIGINAL');
+          const prepared = field(prompt, 'MATERIALIZED_SETUP');
+          assert.equal(prepared.workspace, W);
           raw.initial_commit = (await git(W, 'rev-parse', 'HEAD')).trim();
+          assert.equal(raw.initial_commit, prepared.initial_commit);
           result = {eval_dir: E, workspace: W, kernel_name: 'fixture', device_gfx: 'gfx950',
             device_target: 'mi355x', physical_cu_count: 256, baseline_frozen: true, source_files: ['kernel_src/module.py']};
         } else if (label === 'tech_lead:analyze') {
@@ -806,6 +807,7 @@ test('joined one-member parity executes the real process-bounded workflow throug
       kb_remote: 'off', kb_store_dir: join(privateRoot, 'kb_store'), kb_artifacts_dir: join(privateRoot, 'kb_artifacts')};
     f.manifest.deadline_epoch = args.deadline_epoch;
     lane.env = {...lane.env, TEST_JOINED_ENDING: ending, GEAK_LIVE_TRACE: '0',
+      GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
       TEST_RUNTIME_MODULE: new URL('./run_workflow.mjs', import.meta.url).href,
       TEST_PROCESS_MODULE: new URL('./backends/base.mjs', import.meta.url).href,
       TEST_NATIVE_ID_COUNTER: join(privateRoot, 'native_counter')};
@@ -814,6 +816,7 @@ test('joined one-member parity executes the real process-bounded workflow throug
       await mkdir(args.exp_root, {recursive: true});
       await mkdir(join(args.workflow_dir, 'knowledge/learned'), {recursive: true});
       await cp(join(REPO, 'kernel_workflow/kernel_lane.js'), join(args.workflow_dir, 'kernel_lane.js'));
+      await symlink(join(REPO, 'kernel_workflow/scripts'), join(args.workflow_dir, 'scripts'), 'dir');
       await writeFile(join(args.workflow_dir, 'knowledge/learned/INDEX.md'), 'Synthetic empty learned index.\n');
       await mkdir(args.learned_dir, {recursive: true});
       await cp(join(args.workflow_dir, 'knowledge/learned/INDEX.md'), join(args.learned_dir, 'INDEX.md'));
