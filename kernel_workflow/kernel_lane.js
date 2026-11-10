@@ -25,6 +25,36 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+// Experimental source-bound planner entry. Refuse other lifecycle paths before any host/model call.
+const NATIVE_PLANNER_SEED = A.native_planner_seed_ref !== undefined;
+if (NATIVE_PLANNER_SEED) {
+  const ref = A.native_planner_seed_ref;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)
+      || Object.keys(ref).sort().join(',') !== 'bytes,path,sha256'
+      || typeof ref.path !== 'string' || !ref.path.startsWith('/')
+      || typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256)
+      || !Number.isSafeInteger(ref.bytes) || ref.bytes < 1 || ref.bytes > 4194304)
+    throw new Error('invalid native_planner_seed_ref');
+  const conflict = ['first_plan_ref', 'prepared_original_ref', 'state_dir', 'population_lineage',
+    'prepare_only', 'canonical_selection_resume', 'gpu_identity_capture_ref', 'deadline_epoch',
+    'search_reserve_s', 'search_duration_s', 'preparation_allowance_s', 'engineer_reserve_s',
+    'delivery_reserve_s', 'final_validation_reserve_s', 'final_cleanup_reserve_s', 'delivery_facts',
+    'settlement_deadline_epoch', 'wait_for_process_settlement', 'shared_kb', 'global_kb',
+    'e2e_feedback', 'harness_addendum', 'incremental_analyze', 'apply_to_original',
+    'external_measurement_command', 'external_result_command', 'external_final_measurement_command',
+    'external_final_result_command', 'objective', 'op_spec', 'budget', 'eval_dir',
+    'dra_enabled', 'dra_blindspot', 'dra_max_blindspots', 'dra_max_questions']
+    .find(key => Object.hasOwn(A, key));
+  if (conflict || (A.mode != null && A.mode !== 'optimize')
+      || (A.optimizer != null && A.optimizer !== 'evo')
+      || (A.warm_start != null && !['off', 'false', 'none'].includes(String(A.warm_start))))
+    throw new Error(`native planner seed conflicts with lifecycle configuration: ${conflict || 'mode'}`);
+  if (!Number.isSafeInteger(A.agent_timeout_ms) || A.agent_timeout_ms <= 0
+      || !Number.isSafeInteger(A.agent_retries) || A.agent_retries < 1
+      || !Number.isSafeInteger(A.native_planner_deadline_epoch) || A.native_planner_deadline_epoch <= 0
+      || !agent.processTimeoutSupported || typeof runProcess !== 'function')
+    throw new Error('native planner seed requires finite native process deadline, timeout and retry count');
+}
 if (A.evolution_planner_case_evidence_view !== undefined
     && typeof A.evolution_planner_case_evidence_view !== 'boolean')
   throw new Error('evolution_planner_case_evidence_view must be a boolean');
@@ -1170,16 +1200,18 @@ function roleAgent(role, phase, intro, inputs) {
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
+  const boundedCall = agent.processDeadlineActive
+    || (agent.processTimeoutSupported && Number.isFinite(o?.processDeadlineEpoch));
   if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       // The standalone runtime's bounded mode terminates and settles the actual
       // subprocess. Never race it with a Promise that abandons a live role.
-      if (groupTask || agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+      if (groupTask || boundedCall || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
         const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
           processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
-          : agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+          : boundedCall ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
         const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
@@ -1197,7 +1229,7 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      if ((groupTask || agent.processDeadlineActive) && e
+      if ((groupTask || boundedCall) && e
           && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
         log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
         return null;
@@ -1441,6 +1473,269 @@ function multiGpuBlock(role) {
     `rejected) and never background a lease (\`&\`, nohup). A leased command is killed after ` +
     `GEAK_GPU_RUN_TIMEOUT seconds (default 900); export a larger value for long runs such as a cold ` +
     `JIT build. Leases on the same GPUs serialize, so put the arms you compare into one run.`;
+}
+// Native planner construction shared by ordinary Optimize and a source-bound decision-only call.
+function nativeEvolutionPlannerSchema(hasArchive) {
+  return hasArchive ? {
+  ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
+    ...PLAN_SCHEMA.properties.directions, items: {
+      ...PLAN_SCHEMA.properties.directions.items, properties: {
+        ...PLAN_SCHEMA.properties.directions.items.properties,
+        parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
+        approach: {type: 'string'},
+      },
+    },
+  }},
+} : PLAN_SCHEMA;
+}
+
+function nativePlannerCall(context) {
+  const {EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema, allowInitialBenchmark = true, factsInput = deliveryFactsInput} = context;
+  let caseMeasurementObservation = null, constructedCall = null;
+  const planInputs = (forbidStop, facts = {}) => {
+    const left = getLeft();
+    const inputs = {
+    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
+    BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
+    ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner),
+      {baselinePerCase: BASELINE_PER_CASE, evalDir: EVAL_DIR, allowInitialBenchmark}), HISTORY: history,
+    ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
+    KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+    GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...KB_INPUTS,
+    // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
+    // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
+    // (or the research degraded) the key is absent and the prompt is byte-identical to a build
+    // without the feature. Threaded through `planInputs` rather than the call site so the forced
+    // re-plan below gets it too: a replan that silently loses the research brief would plan against
+    // a different input set than the round it is replacing.
+    ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
+    // Stated UNCONDITIONALLY, in both directions. `use_learned_kb=false` used to omit the budget and
+    // nothing else, while roles/tech_lead.md still listed knowledge/learned/INDEX.md among the files
+    // to read — so the off switch removed the budget that CONSTRAINS the KB and left the instruction
+    // that USES it, i.e. the arm it exists to produce (a clean KB-off control) was never clean. The
+    // role now gates on this value, so it has to be present whichever way it points.
+    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
+    ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
+      `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
+      `the cards you used in that direction's \`learned_refs\`. ` +
+      (KB_COLD_DIRECTION ? `At least ONE direction must be planned from the profile alone, with an ` +
+        `empty \`learned_refs\` — it is this round's control, and without it a round cannot tell you ` +
+        `whether the cards helped or merely crowded out what you would have tried anyway. ` : '') +
+      `Read as much of the index as you like; the budget is on how much of the ROUND the KB steers, ` +
+      `not on what you may look at.` } : {}),
+    // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
+    ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
+    ...facts,
+    ...(forbidStop ? { STOP_NOT_PERMITTED:
+      `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
+      `unspent. This run is a FIXED-WINDOW measurement: ending early is an invalid data point no ` +
+      `matter how good the number or how well argued the rationale, and your role's own convergence ` +
+      `gates (launch floor closed, gain under the promotion bar, roofline %, "only a different tech ` +
+      `stack is left") do NOT authorise stopping here. Plan at least one direction. Switch lever ` +
+      `rather than re-running an exhausted one — algorithm / memory / compute / host_runtime, or a ` +
+      `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
+      `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
+      `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
+    };
+    if (CASE_MEASUREMENT_VIEW !== undefined) {
+      try {
+        const visibleEntries = inputs.EVOLUTION_ENTRIES;
+        const initialOriginal = allowInitialBenchmark && !finalWinner && bestPerCase === BASELINE_PER_CASE;
+        const rawCases = value => value ? {native_primary: primSpeedup(value),
+          per_case: value.per_case ?? null, evidence_context: compactCaseMeasurementContext(value)} : null;
+        const decisionView = {
+          CURRENT_BEST_PER_CASE: inputs.CURRENT_BEST_PER_CASE,
+          CURRENT_BEST_CASE_MEASUREMENT: inputs.CURRENT_BEST_CASE_MEASUREMENT ?? null,
+          archive_present: Array.isArray(visibleEntries),
+          archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(row => ({id: row.id,
+            case_evidence_present: Object.hasOwn(row, 'case_evidence'), case_evidence: row.case_evidence ?? null})) : null,
+        };
+        // Copy now, before the planner runs or later archive/verifier updates.
+        // This is an observation only, never another prompt or acceptance input.
+        caseMeasurementObservation = JSON.parse(JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
+          authority: 'constructed planner case inputs and retained reported measurements; not proof of model reads',
+          decision_view: decisionView, decision_view_bytes: contextBytes(decisionView),
+          raw_current_best: {initial_original: initialOriginal,
+            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(finalWinner),
+            native_primary: initialOriginal ? null : cumulative,
+            per_case: bestPerCase, evidence_context: compactCaseMeasurementContext(finalWinner)
+              || compactCaseMeasurementContext(finalWinner?.reported_context?.verifier)},
+          raw_archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(visible => {
+            const row = evo?.entries.find(entry => entry.id === visible.id);
+            return {id: visible.id, present: !!row, patch_ref: row?.patch_ref ?? null,
+              engineer: rawCases(row?.engineer), verifier: rawCases(row?.verifier)};
+          }) : null}));
+      } catch (_) {
+        caseMeasurementObservation = {mode: CASE_MEASUREMENT_VIEW, unavailable: 'case_snapshot_serialization_failed'};
+      }
+    }
+    return inputs;
+  };
+
+  const callPlanner = async (attempt, intro, forbidStop, label) => {
+    const inputs = planInputs(forbidStop, await factsInput());
+    const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
+    const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
+    let plannerObservation;
+    if (A.record_planner_inputs === true || context.recordPlannerInputs === true) {
+      const components = {};
+      const component = (name, value) => {
+        try {
+          const serialized = JSON.stringify(value);
+          const representedValue = serialized === undefined ? undefined : JSON.parse(serialized);
+          const state = representedValue === undefined ? 'absent' : representedValue === null ? 'null'
+            : representedValue === '' || (Array.isArray(representedValue) ? representedValue.length === 0
+              : typeof representedValue === 'object' && Object.keys(representedValue).length === 0) ? 'empty' : 'present';
+          components[name] = {state, ...(serialized === undefined ? {} : {serialized})};
+        } catch (_) { components[name] = {state: 'error'}; }
+      };
+      component('inputs', inputs);
+      component('role_prompt', prompt);
+      component('response_schema', schema);
+      component('prepared_original_ref', A.prepared_original_ref);
+      component('TASK', Object.hasOwn(inputs, 'TASK') ? inputs.TASK
+        : typeof TASK === 'string' && TASK ? TASK : undefined);
+      for (const key of new Set(['PROFILE_SUMMARY', 'HISTORY', 'EVOLUTION_ENTRIES', 'DEEP_COST',
+        'DEEP_SEARCH_BRIEF', 'LEARNED_KB_BUDGET', 'MINUTES_REMAINING', 'ENGINEER_CUTOFF_EPOCH',
+        'STOP_NOT_PERMITTED', ...Object.keys(inputs)])) component(`inputs.${key}`, inputs[key]);
+      plannerObservation = {eval_dir: EVAL_DIR, round, logical_attempt: attempt, components};
+    }
+    const options = { phase: 'Optimize', label, schema, ...ENGINEER_CALL,
+      ...(plannerObservation ? {plannerObservation} : {}) };
+    if (context.recordPlannerInputs === true) constructedCall = JSON.parse(JSON.stringify({
+      boundary: 'before_agentT', prompt, options, inputs}));
+    return agentT(prompt, options);
+  };
+
+  return {callPlanner, planInputs, caseMeasurementObservation: () => caseMeasurementObservation,
+    constructedCall: () => constructedCall};
+}
+
+// Native round sizing; source-only decisions with unknown budget do not invoke this allocator.
+function nativeDirectionSelection(plan, remaining, round, evolution) {
+  let directions = plan.directions.slice(0, remaining).map((d, i) => ({
+    ...d, idx: i, id: d.id || `r${round}_d${i}`}));
+  const deepDir = directions.find(d => d.specialty === 'deep_explore');
+  if (deepDir) directions = [deepDir];
+  if (evolution) {
+    let allocated = 0;
+    directions = directions.filter(d => {
+      const cost = d.specialty === 'deep_explore' ? DEEP_COST : 1;
+      if (allocated + cost > remaining) return false;
+      allocated += cost;
+      return true;
+    });
+  }
+  return directions;
+}
+// Experimental decision-only entry, before Setup. The host reads exact trusted seed files;
+// the native planner constructs one new decision. No archive constructor or source application.
+if (NATIVE_PLANNER_SEED) return await nativeSeededPlannerDecision();
+
+async function nativeSeededPlannerDecision() {
+  const ref = A.native_planner_seed_ref;
+  const read = async () => {
+    const result = await runProcess({cmd: 'python3', args: ['-I', '-B',
+      `${WORKFLOW_DIR}/scripts/read_native_planner_seed.py`, ref.path, ref.sha256, String(ref.bytes)],
+      timeoutMs: Math.min(30000, AGENT_TIMEOUT_MS), graceMs: 2000, settleMs: 2000});
+    if (result.status !== 'completed' || result.code !== 0 || !result.group_cleared
+        || result.strays_killed || result.stdio_held || typeof result.stdout !== 'string'
+        || result.stdout.length > 4194304)
+      throw new Error('native planner seed source closure rejected');
+    const value = JSON.parse(result.stdout);
+    if (value?.seed?.schema !== 'geak.native_planner_seed/1' || !value.archive
+        || !Array.isArray(value.verified_refs)) throw new Error('invalid native planner seed reader output');
+    return value;
+  };
+  const bound = await read(), {seed, archive} = bound, c = seed.context;
+  if (KERNEL_PATH_ORIG !== seed.task_root)
+    throw new Error('native planner seed task_root must match kernel_path');
+  const handoffMetric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
+  const evo = evolutionDecisionView({base: archive.base, baseCommit: archive.base_commit,
+    archive: seed.archive.path, entries: archive.entries, getBestId: () => archive.best_id,
+    metric: archive.metric ?? null});
+  const archiveHasSource = () => evo.entries.some(row => row.patch_ref && !row.retention_error);
+  if (!archiveHasSource()) throw new Error('native planner seed has no retained source');
+  const planner = nativePlannerCall({EVAL_DIR: c.eval_dir, round: c.round,
+    remaining: c.budget_remaining, cumulative: c.cumulative_speedup,
+    handoffMetric,
+    BASELINE_GEOMEAN_MS: c.baseline_geomean_ms, profileSummary: c.profile_summary,
+    bestPerCase: c.current_best_per_case, finalWinner: c.final_winner,
+    measurementRef: () => c.current_best_ref || {unavailable: 'no bound current measurement'},
+    history: c.history, archiveHasSource, evo, GFX: c.gfx, DEVICE_TARGET: c.device_target,
+    PHYSICAL_CU_COUNT: c.physical_cu_count, ROOFLINE_STATUS: c.roofline_status,
+    researchBriefPath: c.research_brief_path, BASELINE_PER_CASE: c.baseline_per_case,
+    getLeft: () => Infinity, KK_OPERATOR: c.kk_operator, KK_LANGUAGE: c.kk_language, KK_REFS: c.kk_refs,
+    ENGINEER_CALL: {processDeadlineEpoch: A.native_planner_deadline_epoch, processTimeoutMs: AGENT_TIMEOUT_MS},
+    DEADLINE_EPOCH: 0, ENGINEER_RESERVE_S: 0, ENGINEER_CUTOFF_EPOCH: null,
+    evoPlanSchema: nativeEvolutionPlannerSchema(true), allowInitialBenchmark: false,
+    recordPlannerInputs: true, factsInput: async () => ({NATIVE_PLANNER_SEED_CONTEXT: {
+      id: seed.id, original_archive: seed.original_archive, archive: seed.archive,
+      authority: 'prospective decision from source-bound historical evidence; no current measurement or Git reconstruction',
+      historical_archive_metric: archive.metric ?? null,
+      historical_metric_scope: 'The prospective PRIMARY_METRIC does not identify historical archive aggregates; absent archival metric identity remains unknown.',
+      facts: c.facts}})});
+  const plan = await planner.callPlanner('initial',
+    'Decide this round\'s orthogonal directions (or stop).' +
+      ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.`,
+    false, `tech_lead:plan r${c.round}`);
+  const requested = Array.isArray(plan?.directions) ? plan.directions.map((direction, index) => ({
+    index, requested_id: direction?.id ?? null,
+    requested_parent_id: direction?.parent_id ?? null,
+    requested_donor_ids: direction?.donor_ids ?? null})) : [];
+  const result = {schema: 'geak.native_planner_decision/1', seed_id: seed.id, seed_ref: ref,
+    original_archive_ref: seed.original_archive, archive_ref: seed.archive,
+    verified_refs: bound.verified_refs, constructed_planner_call: planner.constructedCall(),
+    agent_timeline: LLM_TL,
+    requested_plan: plan ?? null, requested_selections: requested, resolved_selections: [],
+    case_measurement_observation: planner.caseMeasurementObservation(),
+    continuation_materialization_qualified: false,
+    authority: 'selection resolution only; historical archive verification is not current source qualification',
+    direction_allocation: c.budget_remaining === null ? {unavailable: 'budget_remaining is unbound'}
+      : {budget_remaining: c.budget_remaining},
+    source_closure_rechecked: false};
+  // A model tool may have altered a referenced file. Never return usable resolutions without rereading.
+  try {
+    const after = await read();
+    if (JSON.stringify(after) !== JSON.stringify(bound)) throw new Error('seed changed');
+    result.source_closure_rechecked = true;
+  } catch (_) { return {...result, status: 'source_closure_changed'}; }
+  if (!plan) return {...result, status: 'planner_unavailable'};
+  if (plan.stop === true) return {...result, status: 'stopped'};
+  if (!Array.isArray(plan.directions) || !plan.directions.length)
+    return {...result, status: 'selection_rejected', reference_errors: ['no requested directions']};
+  const retained = id => id === 'ORIGINAL' || evo.entries.some(row => row.id === id
+    && row.patch_ref && !row.retention_error);
+  const errors = [];
+  for (const row of requested) {
+    if (typeof row.requested_parent_id !== 'string' || !retained(row.requested_parent_id))
+      errors.push({index: row.index, field: 'parent_id', error: 'missing or unavailable requested parent'});
+    if (!Array.isArray(row.requested_donor_ids)
+        || row.requested_donor_ids.some(id => typeof id !== 'string' || !retained(id)))
+      errors.push({index: row.index, field: 'donor_ids', error: 'missing or unavailable requested donors'});
+  }
+  if (errors.length) return {...result, status: 'selection_rejected', reference_errors: errors};
+  // Unknown allocation is left unknown. IDs can still be resolved against the retained source set.
+  const directions = c.budget_remaining === null
+    ? plan.directions.map((d, idx) => ({...d, idx, id: d.id || `r${c.round}_d${idx}`}))
+    : nativeDirectionSelection(plan, c.budget_remaining, c.round, true);
+  const resolved = evo.prepare(directions, c.round);
+  if (!resolved.length) return {...result, status: 'budget_exhausted'};
+  if (resolved.some(d => d.evolution_context.parent_resolution !== 'explicit'
+      || d.evolution_context.reference_errors.length))
+    return {...result, status: 'selection_rejected', reference_errors: ['native resolution fallback refused']};
+  const sourceRef = id => id === 'ORIGINAL' ? {id, task_root: seed.task_root, task_files: seed.task_files}
+    : {id, ...seed.source_refs.find(ref => ref.entry_id === id)};
+  result.resolved_selections = resolved.map(d => ({
+    direction_index: d.idx, id: d.id, requested_id: requested[d.idx].requested_id,
+    requested_parent_id: requested[d.idx].requested_parent_id,
+    requested_donor_ids: requested[d.idx].requested_donor_ids,
+    parent_id: d.parent_id, donor_ids: d.donor_ids,
+    parent_ref: sourceRef(d.parent_id), donor_refs: d.donor_ids.map(sourceRef),
+    native_resolution: d.evolution_context}));
+  return {...result, status: 'resolved'};
 }
 // ===========================================================================
 // PHASE: Setup
@@ -2230,17 +2525,7 @@ async function greedyOptimize(start, evolutionPlan = {}, population = null) {
 // EVO: rounds run the stock greedy path (evo === null) until a round neither improves nor advances;
 // evolutionPlan.start then roots an archive at the incumbent and every later round develops from it.
 let evo = null, evolution = evolutionPlan.archive || null, startEvolution = evolutionPlan.start || null;
-const evoPlanSchema = evolution || startEvolution ? {
-  ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
-    ...PLAN_SCHEMA.properties.directions, items: {
-      ...PLAN_SCHEMA.properties.directions.items, properties: {
-        ...PLAN_SCHEMA.properties.directions.items.properties,
-        parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
-        approach: {type: 'string'},
-      },
-    },
-  }},
-} : PLAN_SCHEMA;
+const evoPlanSchema = nativeEvolutionPlannerSchema(!!(evolution || startEvolution));
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 // Additive prompt/history fields: legacy aliases keep their existing metric meaning.
@@ -2333,87 +2618,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
   // --- (a) Plan the round (TechLead) ------------------------------------
-  let caseMeasurementObservation = null;
-  const planInputs = (forbidStop, facts = {}) => {
-    const inputs = {
-    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
-    BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
-    ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner)), HISTORY: history,
-    ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
-    KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
-    GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
-    ...KB_INPUTS,
-    // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
-    // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
-    // (or the research degraded) the key is absent and the prompt is byte-identical to a build
-    // without the feature. Threaded through `planInputs` rather than the call site so the forced
-    // re-plan below gets it too: a replan that silently loses the research brief would plan against
-    // a different input set than the round it is replacing.
-    ...(researchBriefPath ? { DEEP_SEARCH_BRIEF: researchBriefPath } : {}),
-    // Stated UNCONDITIONALLY, in both directions. `use_learned_kb=false` used to omit the budget and
-    // nothing else, while roles/tech_lead.md still listed knowledge/learned/INDEX.md among the files
-    // to read — so the off switch removed the budget that CONSTRAINS the KB and left the instruction
-    // that USES it, i.e. the arm it exists to produce (a clean KB-off control) was never clean. The
-    // role now gates on this value, so it has to be present whichever way it points.
-    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
-    ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
-      `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
-      `the cards you used in that direction's \`learned_refs\`. ` +
-      (KB_COLD_DIRECTION ? `At least ONE direction must be planned from the profile alone, with an ` +
-        `empty \`learned_refs\` — it is this round's control, and without it a round cannot tell you ` +
-        `whether the cards helped or merely crowded out what you would have tried anyway. ` : '') +
-      `Read as much of the index as you like; the budget is on how much of the ROUND the KB steers, ` +
-      `not on what you may look at.` } : {}),
-    // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
-    ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
-    ...(ENGINEER_RESERVE_S ? { ENGINEER_CUTOFF_EPOCH } : {}),
-    ...facts,
-    ...(forbidStop ? { STOP_NOT_PERMITTED:
-      `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still ` +
-      `unspent. This run is a FIXED-WINDOW measurement: ending early is an invalid data point no ` +
-      `matter how good the number or how well argued the rationale, and your role's own convergence ` +
-      `gates (launch floor closed, gain under the promotion bar, roofline %, "only a different tech ` +
-      `stack is left") do NOT authorise stopping here. Plan at least one direction. Switch lever ` +
-      `rather than re-running an exhausted one — algorithm / memory / compute / host_runtime, or a ` +
-      `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
-      `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
-      `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
-    };
-    if (CASE_MEASUREMENT_VIEW !== undefined) {
-      try {
-        const visibleEntries = inputs.EVOLUTION_ENTRIES;
-        const initialOriginal = !finalWinner && bestPerCase === BASELINE_PER_CASE;
-        const rawCases = value => value ? {native_primary: primSpeedup(value),
-          per_case: value.per_case ?? null, evidence_context: compactCaseMeasurementContext(value)} : null;
-        const decisionView = {
-          CURRENT_BEST_PER_CASE: inputs.CURRENT_BEST_PER_CASE,
-          CURRENT_BEST_CASE_MEASUREMENT: inputs.CURRENT_BEST_CASE_MEASUREMENT ?? null,
-          archive_present: Array.isArray(visibleEntries),
-          archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(row => ({id: row.id,
-            case_evidence_present: Object.hasOwn(row, 'case_evidence'), case_evidence: row.case_evidence ?? null})) : null,
-        };
-        // Copy now, before the planner runs or later archive/verifier updates.
-        // This is an observation only, never another prompt or acceptance input.
-        caseMeasurementObservation = JSON.parse(JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
-          authority: 'constructed planner case inputs and retained reported measurements; not proof of model reads',
-          decision_view: decisionView, decision_view_bytes: contextBytes(decisionView),
-          raw_current_best: {initial_original: initialOriginal,
-            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(finalWinner),
-            native_primary: initialOriginal ? null : cumulative,
-            per_case: bestPerCase, evidence_context: compactCaseMeasurementContext(finalWinner)
-              || compactCaseMeasurementContext(finalWinner?.reported_context?.verifier)},
-          raw_archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(visible => {
-            const row = evo?.entries.find(entry => entry.id === visible.id);
-            return {id: visible.id, present: !!row, patch_ref: row?.patch_ref ?? null,
-              engineer: rawCases(row?.engineer), verifier: rawCases(row?.verifier)};
-          }) : null}));
-      } catch (_) {
-        caseMeasurementObservation = {mode: CASE_MEASUREMENT_VIEW, unavailable: 'case_snapshot_serialization_failed'};
-      }
-    }
-    return inputs;
-  };
-
+  const planner = nativePlannerCall({EVAL_DIR, round, remaining, cumulative, handoffMetric, BASELINE_GEOMEAN_MS, profileSummary, bestPerCase, finalWinner, measurementRef, history, archiveHasSource, evo, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS, researchBriefPath, BASELINE_PER_CASE, getLeft: () => left, KK_OPERATOR, KK_LANGUAGE, KK_REFS, ENGINEER_CALL, DEADLINE_EPOCH, ENGINEER_RESERVE_S, ENGINEER_CUTOFF_EPOCH, evoPlanSchema});
   // Preserve parsed proposals before deadline, stop and scheduling filters, outside injected history.
   // Stable attempt identity and noclobber preserve the first observation across resume/replay.
   const recordProposedPlan = async (attempt, proposed) => {
@@ -2421,44 +2626,14 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     let saved = null;
     try { saved = await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', path],
       { input: JSON.stringify({round, attempt, plan: proposed ?? null,
-          ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {case_measurement_observation: caseMeasurementObservation})}, null, 2) + '\n',
+          ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {case_measurement_observation: planner.caseMeasurementObservation()})}, null, 2) + '\n',
         timeoutMs: 1000, graceMs: 0 }); }
     catch (_) { /* Observation failure must not change the search decision. */ }
     if (saved === null)
       log(`Round ${round}: proposed-plan artifact unavailable or already recorded (${attempt}).`);
   };
 
-  const callPlanner = async (attempt, intro, forbidStop, label) => {
-    const inputs = planInputs(forbidStop, await deliveryFactsInput());
-    const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
-    const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
-    let plannerObservation;
-    if (A.record_planner_inputs === true) {
-      const components = {};
-      const component = (name, value) => {
-        try {
-          const serialized = JSON.stringify(value);
-          const representedValue = serialized === undefined ? undefined : JSON.parse(serialized);
-          const state = representedValue === undefined ? 'absent' : representedValue === null ? 'null'
-            : representedValue === '' || (Array.isArray(representedValue) ? representedValue.length === 0
-              : typeof representedValue === 'object' && Object.keys(representedValue).length === 0) ? 'empty' : 'present';
-          components[name] = {state, ...(serialized === undefined ? {} : {serialized})};
-        } catch (_) { components[name] = {state: 'error'}; }
-      };
-      component('inputs', inputs);
-      component('role_prompt', prompt);
-      component('response_schema', schema);
-      component('prepared_original_ref', A.prepared_original_ref);
-      component('TASK', Object.hasOwn(inputs, 'TASK') ? inputs.TASK
-        : typeof TASK === 'string' && TASK ? TASK : undefined);
-      for (const key of new Set(['PROFILE_SUMMARY', 'HISTORY', 'EVOLUTION_ENTRIES', 'DEEP_COST',
-        'DEEP_SEARCH_BRIEF', 'LEARNED_KB_BUDGET', 'MINUTES_REMAINING', 'ENGINEER_CUTOFF_EPOCH',
-        'STOP_NOT_PERMITTED', ...Object.keys(inputs)])) component(`inputs.${key}`, inputs[key]);
-      plannerObservation = {eval_dir: EVAL_DIR, round, logical_attempt: attempt, components};
-    }
-    return agentT(prompt, { phase: 'Optimize', label, schema, ...ENGINEER_CALL,
-      ...(plannerObservation ? {plannerObservation} : {}) });
-  };
+  const callPlanner = planner.callPlanner;
 
   let plan = await callPlanner('initial',
     'Decide this round\'s orthogonal directions (or stop).' + evolutionInstructions(), false,
@@ -2501,26 +2676,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     break;
   }
 
-  let directions = plan.directions.slice(0, remaining).map((d, i) => ({
+  let directions = nativeDirectionSelection(plan, remaining, round, !!evo).map(d => ({
     ...d,
-    idx: i,
-    id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
-    out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[d.idx % GPU_LIST.length] : GPU_POOL,
+    out_dir: `${EVAL_DIR}/round_${round}/engineer_${d.idx}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
   // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
-  const deepDir = directions.find(d => d.specialty === 'deep_explore');
-  if (deepDir) directions = [deepDir];
   if (evo) {
-    let allocated = 0;
-    directions = directions.filter(d => {
-      const cost = d.specialty === 'deep_explore' ? DEEP_COST : 1;
-      if (allocated + cost > remaining) return false;
-      allocated += cost;
-      return true;
-    });
     if (!directions.length) { plannerStopReason = 'budget'; break; }
     directions = await evo.prepare(directions, round);
   }
@@ -3566,11 +3730,15 @@ function measurementCaseView(value, fullRef = null) {
     full_context_ref: fullRef, evidence_refs: context?.evidence_refs ?? null})}`);
   return view;
 }
-function currentBestCaseInputs(rows, winner, fullRef) {
-  if (CASE_MEASUREMENT_VIEW !== undefined && !winner && rows === BASELINE_PER_CASE) {
+function currentBestCaseInputs(rows, winner, fullRef,
+  {baselinePerCase = BASELINE_PER_CASE, evalDir = EVAL_DIR, allowInitialBenchmark = true} = {}) {
+  if (!allowInitialBenchmark && rows === null) return {CURRENT_BEST_PER_CASE: null,
+    ...(CASE_MEASUREMENT_VIEW === undefined ? {} : {CURRENT_BEST_CASE_MEASUREMENT: {
+      unavailable: 'no bound current measurement', full_context_ref: fullRef}})};
+  if (CASE_MEASUREMENT_VIEW !== undefined && allowInitialBenchmark && !winner && rows === baselinePerCase) {
     const inputs = {CURRENT_BEST_PER_CASE: rows, CURRENT_BEST_CASE_MEASUREMENT: {
       source: 'ORIGINAL', basis: 'initial_benchmark', authority: 'benchmark_author_reported; no host validation',
-      full_context_ref: {path: `${EVAL_DIR}/baseline_timing.json`}}};
+      full_context_ref: {path: `${evalDir}/baseline_timing.json`}}};
     log(`[case_measurement_current_best_inline] ${JSON.stringify({mode: CASE_MEASUREMENT_VIEW,
       initial_original: true, inline_rows: Array.isArray(rows) ? rows.length : null,
       bytes: contextBytes(inputs), full_context_ref: inputs.CURRENT_BEST_CASE_MEASUREMENT.full_context_ref})}`);
@@ -3618,6 +3786,69 @@ function boundedCaseEvidence(rows, fullRef, limit = 16384) {
     inline_rows: overflow ? 0 : rows.reduce((n, row) => n + (row.engineer?.case_rows || 0) + (row.verifier?.case_rows || 0), 0),
     full_context_ref: fullRef})}`);
   return result;
+}
+
+// Shared read-only decision view. No filesystem, materialization, qualification or archive writes.
+// The ordinary archive and an exact prospective seed use these same projection/resolution methods.
+function evolutionDecisionView({base, baseCommit, archive, entries, getBestId, metric}) {
+  const retained = (id) => entries.find(row => row.id === id && row.patch_ref && !row.retention_error);
+  const defaultParent = () => retained(getBestId())?.verified ? getBestId() : 'ORIGINAL';
+  const caseEvidence = (row) => ({
+    archive_ref: {path: archive, entry_id: row.id},
+    patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
+    reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
+    authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
+    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
+    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
+  return {base, baseCommit, path: archive, entries, caseEvidence,
+    planInputs() {
+      const bestId = getBestId();
+      // Override only this recipient; memory, integration and engineer handoff keep their own controls.
+      const plannerCaseEvidence = A.evolution_planner_case_evidence_view === undefined
+        ? A.evolution_case_evidence_view === true : A.evolution_planner_case_evidence_view;
+      const summary = entries.slice(-12);
+      const best = entries.find(row => row.id === bestId);
+      if (best && !summary.includes(best)) summary.unshift(best);
+      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+        EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+        EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
+          title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
+          status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
+          retention_error: row.retention_error, last_record_error: row.last_record_error || null,
+          ...(plannerCaseEvidence ? {case_evidence: caseEvidence(row)} : {}),
+          strategy: row.engineer && row.engineer.strategy,
+          reported_context: boundedContext(row.reported_context,
+            row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
+      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
+        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
+          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
+          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
+      return inputs;
+    },
+    prepare(directions, round) {
+      if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
+      return directions.map((direction, index) => {
+        const errors = [], requested = direction.parent_id;
+        let parent = requested, resolution = 'explicit';
+        if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
+          if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
+          parent = defaultParent();
+          resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
+        }
+        const donors = [];
+        if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
+        for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
+          if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
+          else if (!donors.includes(donor)) donors.push(donor);
+        }
+        return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
+          parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
+            parent_id: parent,
+            parent_resolution: resolution, reference_errors: errors,
+            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
+      });
+    },
+  };
 }
 
 // Retained population for the stock GEAK loop. No model calls or separate runner.
@@ -3709,13 +3940,9 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     return hash[0];
   };
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
-  const caseEvidence = (row) => ({
-    archive_ref: {path: archive, entry_id: row.id},
-    patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
-    reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
-    authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
-    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
-    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
+  const decisionView = evolutionDecisionView({base, baseCommit, archive, entries,
+    getBestId: () => bestId, metric});
+  const caseEvidence = decisionView.caseEvidence;
   const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
     entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
@@ -3899,29 +4126,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
         selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
     },
-    planInputs() {
-      // Override only this recipient; memory, integration and engineer handoff keep their own controls.
-      const plannerCaseEvidence = A.evolution_planner_case_evidence_view === undefined
-        ? A.evolution_case_evidence_view === true : A.evolution_planner_case_evidence_view;
-      const summary = entries.slice(-12);
-      const best = entries.find(row => row.id === bestId);
-      if (best && !summary.includes(best)) summary.unshift(best);
-      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
-        EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
-        EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
-          title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
-          status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
-          retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          ...(plannerCaseEvidence ? {case_evidence: caseEvidence(row)} : {}),
-          strategy: row.engineer && row.engineer.strategy,
-          reported_context: boundedContext(row.reported_context,
-            row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
-      if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
-        mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
-          id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
-          verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
-      return inputs;
-    },
+    planInputs: decisionView.planInputs,
     memoryInputs(directions) {
       const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
         const row = entries.find(entry => entry.id === direction.id);
@@ -3938,29 +4143,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
       return inputs;
     },
-    prepare(directions, round) {
-      if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
-      return directions.map((direction, index) => {
-        const errors = [], requested = direction.parent_id;
-        let parent = requested, resolution = 'explicit';
-        if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
-          if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
-          parent = defaultParent();
-          resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
-        }
-        const donors = [];
-        if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
-        for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
-          if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
-          else if (!donors.includes(donor)) donors.push(donor);
-        }
-        return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
-          parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
-            parent_id: parent,
-            parent_resolution: resolution, reference_errors: errors,
-            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
-      });
-    },
+    prepare: decisionView.prepare,
     async prepareWorkspace(direction) {
       const workspace = `${direction.out_dir}/workspace`;
       const parent = direction.parent_id === 'ORIGINAL' ? null : retained(direction.parent_id);
