@@ -388,6 +388,17 @@ def test_metadata_excluded_from_patch_and_invalid_history_not_copied(parent, tmp
     assert len(ignored.stdout.splitlines()) == 2
 
 
+def author_setup(task, workspace):
+    """Run director.md's author-mode setup block."""
+    director = (SCRIPTS.parent / "roles/director.md").read_text()
+    setup = director.split("### `mode=author`", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
+    env = dict(os.environ, EVAL_DIR=str(workspace.parent), KERNEL_PATH_ORIG=str(task),
+               WORKFLOW_DIR=str(SCRIPTS.parent))
+    result = run("bash", "-e", "-c", setup, env=env)
+    assert result.returncode == 0, result.stderr
+    assert not list((workspace / "kernel_src").iterdir())
+
+
 @pytest.mark.parametrize("mode", ["optimize", "author"])
 def test_prepared_ut_resources_survive_lane_setup_and_next_copy(tmp_path, mode):
     """Run the unchanged UT after the real setup recipe and another lane copy."""
@@ -409,14 +420,7 @@ def test_prepared_ut_resources_survive_lane_setup_and_next_copy(tmp_path, mode):
     )
     workspace = tmp_path / "eval/workspace"
     if mode == "author":
-        director = (SCRIPTS.parent / "roles/director.md").read_text()
-        section = director.split("### `mode=author`", 1)[1]
-        setup = section.split("```bash\n", 1)[1].split("   cd ", 1)[0]
-        env = dict(os.environ, EVAL_DIR=str(workspace.parent), KERNEL_PATH_ORIG=str(parent),
-                   WORKFLOW_DIR=str(SCRIPTS.parent))
-        result = run("bash", "-e", "-c", setup, env=env)
-        assert result.returncode == 0, result.stderr
-        assert not list((workspace / "kernel_src").iterdir())
+        author_setup(parent, workspace)
     else:
         materialize(parent, workspace)
         assert (workspace / "kernel_src/original.py").is_file()
@@ -428,3 +432,24 @@ def test_prepared_ut_resources_survive_lane_setup_and_next_copy(tmp_path, mode):
             assert golden.is_symlink()
             assert golden.resolve() == parent / f"captures/{phase}/reference_io.pt"
     assert (parent / "kernel_src/original.py").read_text() == "VALUE = 1\n"
+
+
+def test_author_final_patch_applies_to_the_original_task(tmp_path):
+    """An extracted task ships a seed at the candidate path; root..HEAD must still apply to it."""
+    task = tmp_path / "task"
+    (task / "kernel_src").mkdir(parents=True)
+    (task / "kernel_src/candidate.py").write_text("SEED = 1\n")
+    (task / "unittest.py").write_text("")
+    workspace = tmp_path / "eval/workspace"
+    author_setup(task, workspace)
+    (workspace / "kernel_src/candidate.py").write_text("AUTHORED = 1\n")
+    git = ("git", "-c", "user.email=t@t", "-c", "user.name=t")
+    assert run(*git, "add", "-A", cwd=workspace).returncode == 0
+    assert run(*git, "commit", "-qm", "author", cwd=workspace).returncode == 0
+    # tech_lead.md's final_patch.diff, applied to a fresh copy of the task as the Director validates it
+    patch = run("bash", "-c", 'git diff "$(git rev-list --max-parents=0 HEAD)..HEAD"', cwd=workspace)
+    check = materialize(task, tmp_path / "validation")
+    assert run("git", "init", "-q", cwd=check).returncode == 0
+    applied = run("git", "apply", "-", cwd=check, input=patch.stdout)
+    assert applied.returncode == 0, applied.stderr
+    assert (check / "kernel_src/candidate.py").read_text() == "AUTHORED = 1\n"

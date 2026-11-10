@@ -82,9 +82,6 @@ Do this instead of the optimize-mode steps below:
    bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
      --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/workspace" \
      --shared-root "$EVAL_DIR/_shared" --link-aiter
-   # Only candidate source is replaced for author mode; retain every UT dependency.
-   rm -rf "$EVAL_DIR/workspace/kernel_src"
-   mkdir -p "$EVAL_DIR/workspace/kernel_src"
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
@@ -93,8 +90,14 @@ Do this instead of the optimize-mode steps below:
    printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
+   # Commit the task as extracted first: final_patch.diff (root..HEAD) must apply to the original.
    git -c user.email=team@workflow -c user.name=team add -A
-   git -c user.email=team@workflow -c user.name=team commit -q -m "empty baseline (author mode, lang=$TARGET_LANGUAGE)"
+   git -c user.email=team@workflow -c user.name=team commit -q -m "task as extracted (author mode)"
+   # Only candidate source is replaced for author mode; retain every UT dependency.
+   rm -rf "$EVAL_DIR/workspace/kernel_src"
+   mkdir -p "$EVAL_DIR/workspace/kernel_src"
+   git -c user.email=team@workflow -c user.name=team add -A
+   git -c user.email=team@workflow -c user.name=team commit -q --allow-empty -m "empty baseline (author mode, lang=$TARGET_LANGUAGE)"
    ```
    `kernel_src/` is the empty dir the Author Engineer will write its fresh implementation into. HEAD is
    the empty seed; the Author's first commit becomes the optimize loop's **CODE starting point** (what it
