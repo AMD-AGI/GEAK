@@ -1,12 +1,12 @@
 {
   "comment": "SHA256 of JSON.stringify(record) for each reviewed greedy scenario; includes calls, prompts, options, phases, logs, loop state and result.",
-  "source_lane_sha256": "4a2a7618e47c83b8c490ffe9794da7f0e2e8ab109a45c08d7f5e88f94ac3fde8",
+  "source_lane_sha256": "f61bb2076b3557aabddcb9841ade2859634b86a2f41d5b18dd57c0c53e73416e",
   "scenarios": {
-    "a_improve_then_budget": "b081921b7513617b9f3e7dde3b12288f755e88e270f03bf8d0fb0cc315ca2857",
-    "b_warmstart_then_no_improve": "81478cfb5a3db030651dc1d58495ab6685fd69d5997789945479a79080857450",
-    "c_planner_filter_stop": "cb5fe2d0c2ecb5d4f0c8d6640959ca476118c06ccb60564bd39f9a507e37f8f9",
-    "d_deadline_mid_loop": "bc9bee2253940d300b4aceda6fa0b7cd4f9a55df82e44b2763464e1ce1a64fc8",
-    "e_forced_replan_failures": "fd19718fc8a51c1de16716919dc708ba6ab455fd6fa9c77170aa17467c3ddefe",
-    "f_citations_kb_cap": "0b3a572fbf75780c2bdd2ef0792f27c82220b5a673278052e16d9309f3e034f0"
+    "a_improve_then_budget": "b58c2b3a32e207380f8f3935e4724d4b73c3237ad15ed131e7757824bc04fb68",
+    "b_warmstart_then_no_improve": "a2e1c534eb4fd0ddb6c428ee5b9ceebc8c6822bdfe49758f721b0ec0579f0c1a",
+    "c_planner_filter_stop": "257e7f0d404914699075f2029fbfda7454e4500ec9e82f099cdc04478cf0e802",
+    "d_deadline_mid_loop": "058d1cc01b695d12103fc7f366dcd85670b59725848c99b11057aa5692c91bea",
+    "e_forced_replan_failures": "e5ab890dfadf5f667d19819cfe1aafa2d2278e709aacca1f6eef4e9576c97b18",
+    "f_citations_kb_cap": "b4905e074fa4e603c9cfda60a46c1bb70888c105984898e155528ee2e8f5b369"
   }
 }

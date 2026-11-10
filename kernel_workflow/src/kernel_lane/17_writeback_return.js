@@ -115,6 +115,9 @@ return {
   final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
+  // Effective review object used by the existing acceptance logic, including host checks.
+  // Preserved for inspection, not a separate acceptance signal or added authority.
+  final_validation: validation ?? null,
   ...(!EXTERNAL_OBJECTIVE && validation?.measurement_valid === false ? {
     reported_status: validation.reported_status, reported_validation_status: validation.reported_validation_status,
   } : {}),
