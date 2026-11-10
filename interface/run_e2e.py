@@ -878,7 +878,7 @@ def map_args(
     # Evidence views use literal boolean true in the worker; preserve caller values. The worker
     # validates the EVO schedule selector itself.
     for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                 "evolution_preserve_founder_attempts", "evolution_start",
+                 "evolution_preserve_founder_attempts", "evolution_start", "evolution_visibility",
                  "evolution_return_development", "evolution_import_stall_sources",
                  "record_planner_inputs", "case_measurement_view"):
         if flag in h:

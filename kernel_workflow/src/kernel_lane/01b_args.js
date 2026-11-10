@@ -7,6 +7,19 @@ const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimiz
 if (retiredOptimizerArg) {
   throw new Error(`${retiredOptimizerArg} is retired; use optimizer=greedy or optimizer=evo`);
 }
+// Opt-in experiment: vary retained-source model handoff/selection onset on one common archive path.
+// Explicit preservation settings prevent changing the source-return policy with the onset treatment.
+const EVOLUTION_VISIBILITY = A.evolution_visibility;
+if (EVOLUTION_VISIBILITY !== undefined) {
+  if (!['first_source', 'first_stall'].includes(EVOLUTION_VISIBILITY)) {
+    throw new Error('evolution_visibility must be first_source or first_stall');
+  }
+  if (OPTIMIZER !== 'evo' || A.evolution_start !== 'search_start'
+      || A.evolution_preserve_founder_attempts !== true || A.evolution_return_development !== true) {
+    throw new Error('evolution_visibility requires optimizer=evo, evolution_start=search_start, '
+      + 'evolution_preserve_founder_attempts=true and evolution_return_development=true');
+  }
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the

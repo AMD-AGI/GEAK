@@ -157,7 +157,7 @@ const laneArgs = (wfArgs) => {
       ? { evolution_preserve_founder_attempts: A.evolution_preserve_founder_attempts } : {}),
     // The worker validates the EVO schedule selector itself.
     ...(A.evolution_start !== undefined ? { evolution_start: A.evolution_start } : {}),
-    ...Object.fromEntries(['evolution_return_development', 'evolution_import_stall_sources',
+    ...Object.fromEntries(['evolution_visibility', 'evolution_return_development', 'evolution_import_stall_sources',
       'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
       .map(key => [key, A[key]])),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),

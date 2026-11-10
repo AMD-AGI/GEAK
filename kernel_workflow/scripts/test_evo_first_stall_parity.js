@@ -86,7 +86,11 @@ async function runMode(mode, scenario, template) {
     deadline_epoch: OUTER, settlement_deadline_epoch: OUTER, editable_source_paths: ['k.py'],
     population_lineage: {...args0.population_lineage, id: 'lane', root: path.join(root, 'population')},
     ...(scenario.args || {})};
-  const rec = {mode, scenario: scenario.name, calls: [], logs: [], phases: [], host: [], planner_observations: []};
+  const rec = {mode, scenario: scenario.name, calls: [], logs: [], phases: [], host: [], planner_observations: [],
+    engineer_inputs: []};
+  let releaseSecondWorkspace;
+  const firstSourceCaptured = scenario.staggerPreparation
+    ? new Promise(resolve => { releaseSecondWorkspace = resolve; }) : null;
   const norm = s => String(s).split(root).join('<RUN>').split(WORKFLOW).join('<WORKFLOW>');
   const step = (label) => scenario.stepFor ? scenario.stepFor(label) : 60;
   const answer = async (label, prompt, opts) => {
@@ -120,12 +124,14 @@ async function runMode(mode, scenario, template) {
         const block = prompt.match(/```bash\n([\s\S]*?)\n```/);        // GEAK: execute the role's own setup block
         command('bash', ['-e', '-c', block[1]]);
       }
-      fs.writeFileSync(path.join(ws, 'k.py'), `A = ${JSON.stringify(id)}\nB = ${spec.speed}\n`);
-      fs.writeFileSync(path.join(out, 'best_patch.diff'), git(ws, 'diff', '--binary', anchor, '--', '.'));
+      rec.engineer_inputs.push({id, source: fs.readFileSync(path.join(ws, 'k.py'), 'utf8'), base_commit: anchor});
+      if (!spec.emptyPatch) fs.writeFileSync(path.join(ws, 'k.py'), `A = ${JSON.stringify(id)}\nB = ${spec.speed}\n`);
+      if (!spec.noPatch) fs.writeFileSync(path.join(out, 'best_patch.diff'), git(ws, 'diff', '--binary', anchor, '--', '.'));
       return spec.engineer || engOk(spec.speed);
     }
     if (label.startsWith('verify ')) {
       const id = label.slice(7).split(' ')[0];
+      if (id === 'r1_d0') releaseSecondWorkspace?.(); // Host capture precedes this call.
       const s = (scenario.verify || {})[id];
       return s == null ? {status: 'apply_failed', correctness: 'not_checked', verified_geomean: 0} : verified(s);
     }
@@ -168,7 +174,7 @@ async function runMode(mode, scenario, template) {
     if (o.plannerObservation) rec.planner_observations.push(JSON.parse(norm(JSON.stringify({
       ...o.plannerObservation, label}))));
     const dispatched = neutralizeForBackend(o.schema ? p + schemaInstruction(o.schema) : p, 'codex');
-    rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0,
+    rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0, host_count: rec.host.length,
       process_deadline_minus_now: processDeadline - now,
       prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched)), role_prompt: norm(p)});
     const r = await answer(label, p, o);
@@ -178,6 +184,13 @@ async function runMode(mode, scenario, template) {
   Object.defineProperty(agent, 'processTimeoutSupported', {value: true});
   Object.defineProperty(agent, 'processDeadlineActive', {get: () => true});
   const runProcess = async (req) => {
+    if (firstSourceCaptured && req.cmd === 'bash' && req.args?.some(a =>
+        a === path.join(evalDir, 'round_1/engineer_1/workspace'))) {
+      let timeout;
+      try { await Promise.race([firstSourceCaptured, new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('fixture first source was not captured')), 20000);
+      })]); } finally { clearTimeout(timeout); }
+    }
     rec.host.push(norm([req.cmd, ...(req.args || [])].join(' ')).slice(0, 300));
     const r = spawnSync(req.cmd, req.args, {encoding: 'utf8', timeout: 20000, input: req.input,
       cwd: req.cwd, env: {...ENV, ...(req.env || {})}});
@@ -210,6 +223,9 @@ async function runMode(mode, scenario, template) {
     ? JSON.parse(norm(fs.readFileSync(path.join(evalDir, name, 'archive.json'), 'utf8'))) : null;
   rec.archive = readArchive('evolution');
   rec.continuation_archive = readArchive('evolution_continuation');
+  rec.retained_patches = Object.fromEntries([rec.archive, rec.continuation_archive].filter(Boolean)
+    .flatMap(a => a.entries.filter(r => r.patch_ref && !r.retention_error).map(r => [r.id,
+      fs.readFileSync(r.patch_ref.path.replace('<RUN>', root), 'utf8')])));
   assert.ok(!fs.readdirSync(evalDir).some(n => /_inputs\.json$/.test(n)), 'observer writes no EVAL input artifact');
   return rec;
 }
@@ -482,6 +498,139 @@ const FALLBACK = 'Development fallback';
     assert.equal(replan.components['inputs.STOP_NOT_PERMITTED'].state, 'present');
     console.log('  ok: planner observer ON/OFF prompt/call parity, frozen states and eval/logical scope');
   }
+  {
+    // Scheduled model handoff is a separate opt-in contrast on the SAME search-start archive,
+    // preservation, fallback, budget and custody path. Raw references remain common and readable.
+    const common = {evolution_start: 'search_start', evolution_preserve_founder_attempts: true,
+      evolution_return_development: true, record_planner_inputs: true};
+    const runOnset = (visibility, sc, args = {}) => runMode('evo', {...sc,
+      name: `onset_${sc.name}_${visibility}`, args: {...common, ...(sc.args || {}),
+        evolution_visibility: visibility, ...args}}, TEMPLATE);
+    const trace = r => r.logs.filter(x => x.startsWith('[evolution_handoff] '))
+      .map(x => JSON.parse(x.slice('[evolution_handoff] '.length)));
+    const call = (r, label) => r.calls.find(c => c.label === label);
+    const hasHandoff = (r, label) => call(r, label).prompt.includes('/roles/evolution.md');
+    const row = (r, id) => r.archive.entries.find(x => x.id === id);
+    const plan = (...directions) => ({stop: false, reasoning: 'fixture', directions});
+    const runPair = async sc => {
+      const early = await runOnset('first_source', sc), deferred = await runOnset('first_stall', sc);
+      for (const r of [early, deferred]) assert.equal(r.error, null, r.error);
+      return [early, deferred];
+    };
+    const sc = {name: 'split', onPlan: cutAt('r4'), plans: {
+      r1: plan(d('r1_d0', 'memory'), d('r1_d1', 'algorithm')),
+      r2: plan(d('r2_d0', 'compute', {parent_id: 'r1_d1', donor_ids: ['r1_d0']})),
+      r3: plan(d('r3_d0', 'memory', {parent_id: 'r1_d1'}))},
+      eng: {r1_d0: {speed: 1.30}, r1_d1: {speed: 0.8, engineer: {...engOk(0.8), measurement_valid: false}},
+        r2_d0: {speed: 1.31}, r3_d0: {speed: 1.50}},
+      verify: {r1_d0: 1.30, r1_d1: 0.8, r2_d0: 1.31, r3_d0: 1.50}};
+    const [early, deferred] = await runPair(sc);
+    const initial = r => r.calls.slice(0, r.calls.findIndex(c => c.label === 'tech_lead:plan r2'));
+    assert.deepEqual(initial(early), initial(deferred), 'all initial prompts, schemas, calls and allowances match');
+    assert.deepEqual(early.planner_observations.filter(x => x.round === 1),
+      deferred.planner_observations.filter(x => x.round === 1), 'initial structured planner inputs match');
+    assert.deepEqual(early.engineer_inputs.filter(x => x.id.startsWith('r1_')),
+      deferred.engineer_inputs.filter(x => x.id.startsWith('r1_')), 'initial engineer source and base match');
+    assert.deepEqual(early.host.slice(0, call(early, 'tech_lead:plan r2').host_count),
+      deferred.host.slice(0, call(deferred, 'tech_lead:plan r2').host_count), 'initial host capture path matches');
+    for (const id of ['r1_d0', 'r1_d1']) {
+      assert.deepEqual(row(early, id), row(deferred, id), 'initial archive source identity and evidence match');
+      assert.equal(early.retained_patches[id], deferred.retained_patches[id], 'actual retained source bytes match');
+      assert.equal(sha(early.retained_patches[id]), row(early, id).patch_ref.sha256);
+    }
+    assert.equal(row(early, 'r1_d1').verified, true, 'the slower source is independently verified and retained');
+    assert.deepEqual(trace(early).map(t => t.visible), [false, true, true, true]);
+    assert.deepEqual(trace(deferred).map(t => t.visible), [false, false, true, true]);
+    assert.equal(trace(deferred)[2].first_stalled_round, 2);
+    assert.equal(trace(deferred)[2].onset_round, 3);
+    assert.equal(row(early, 'r2_d0').parent_id, 'r1_d1', 'visible planner can select a retained alternative');
+    assert.deepEqual(row(early, 'r2_d0').donor_ids, ['r1_d0']);
+    assert.equal(row(deferred, 'r2_d0').parent_id, 'r1_d0', 'hidden selection inherits the verified incumbent');
+    assert.deepEqual(row(deferred, 'r2_d0').donor_ids, [], 'hidden guessed donor references cannot resolve');
+    assert.deepEqual(field(call(early, 'tech_lead:plan r2').prompt, 'HISTORY'),
+      field(call(deferred, 'tech_lead:plan r2').prompt, 'HISTORY'), 'raw archive metadata and ordinary history stay common');
+    for (const r of [early, deferred]) {
+      assert.equal(hasHandoff(r, 'tech_lead:memory r1'), false, 'capture never opens handoff within its round');
+      for (const c of r.calls.filter(c => /^(eng|deep) /.test(c.label))) {
+        assert.match(c.prompt, /Return the best correct implementation of the requested realization even when it is slower/);
+        assert.match(c.prompt, /Development fallback, only after your normal engineering and evaluation obligations/);
+      }
+      assert.equal(r.result.final_speedup, 1.50);
+    }
+    console.log('  ok: source-onset initial input/capture parity, exact split and common preservation');
+
+    const stalled = {name: 'first_stall', onPlan: cutAt('r3'), plans: {
+      r1: plan(d('r1_d0', 'memory')), r2: plan(d('r2_d0', 'compute'))},
+      eng: {r1_d0: {speed: 1.01}, r2_d0: {speed: 1.30}}, verify: {r1_d0: 1.01, r2_d0: 1.30}};
+    const together = await runPair(stalled);
+    assert.deepEqual(together[0].calls, together[1].calls, 'first-round stall gives identical onset and model calls');
+    for (const r of together) assert.deepEqual(trace(r).map(t => t.visible), [false, true, true]);
+    for (const visibility of ['first_source', 'first_stall']) {
+      const capped = await runOnset(visibility, stalled, {max_no_improve: 1});
+      assert.equal(capped.error, null, capped.error);
+      assert.ok(!call(capped, 'tech_lead:plan r2'), 'onset never resets the stall cap');
+      assert.equal(capped.result.final_speedup, 1.01, 'delivery remains available after a capped hidden round');
+    }
+
+    const improving = {...stalled, name: 'no_stall', eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.50}},
+      verify: {r1_d0: 1.30, r2_d0: 1.50}, plans: {...stalled.plans,
+        r2: plan(d('r2_d0', 'compute', {parent_id: 'ORIGINAL', donor_ids: ['r1_d0']}))}};
+    const closed = await runOnset('first_stall', improving);
+    assert.equal(closed.error, null, closed.error);
+    assert.ok(trace(closed).every(t => !t.visible && t.first_stalled_round === null));
+    assert.equal(row(closed, 'r2_d0').parent_id, 'r1_d0', 'even explicit ORIGINAL cannot displace the hidden incumbent');
+    assert.match(closed.engineer_inputs.find(x => x.id === 'r2_d0').source, /r1_d0/,
+      'hidden preparation materializes the actual committed source');
+
+    const race = await runPair({...sc, name: 'staggered_preparation', staggerPreparation: true});
+    for (const r of race) {
+      assert.ok(call(r, 'verify r1_d0').seq < call(r, 'eng r1_d1:algorithm').seq,
+        'the first source was captured before the later peer prompt');
+      assert.equal(hasHandoff(r, 'eng r1_d1:algorithm'), false, 'later peer keeps the round-start handoff state');
+      assert.equal(field(call(r, 'eng r1_d1:algorithm').prompt, 'EVOLUTION'), undefined);
+      assert.equal(field(call(r, 'tech_lead:memory r1').prompt, 'EVOLUTION_ROUND'), undefined);
+    }
+    console.log('  ok: first-stall/no-stall/cap behavior and staggered peer preparation');
+
+    const sourceless = {...stalled, name: 'sourceless_stall', eng: {
+      r1_d0: {speed: 1.1, noPatch: true}, r2_d0: {speed: 1.30}}, verify: {r2_d0: 1.30}};
+    for (const r of await runPair(sourceless)) {
+      assert.deepEqual(trace(r).map(t => t.visible), [false, false, true]);
+      assert.equal(trace(r)[1].source_available, false, 'archive existence and failed capture do not open handoff');
+      assert.equal(trace(r)[2].first_stalled_round, 1, 'later improvement does not erase the earlier completed stall');
+    }
+    const empty = {...stalled, name: 'zero_byte_source', eng: {
+      r1_d0: {speed: 1.01, emptyPatch: true}, r2_d0: {speed: 1.30}}};
+    for (const r of await runPair(empty)) {
+      assert.equal(row(r, 'r1_d0').patch_ref.sha256, sha(''));
+      assert.equal(trace(r)[1].visible, true, 'existing valid zero-byte source predicate remains unchanged');
+      // Handoff of an unchanged baseline is not evidence of real developed-source reuse.
+    }
+
+    const late = {...stalled, name: 'hidden_delivery', onPlan: (k, c) => k === 'r2' ? c.processDeadline - 960 : null,
+      stepFor: label => label === 'storage:reclaim r2' ? 1000 : 60,
+      eng: {r1_d0: {speed: 1.30}, r2_d0: {speed: 1.31}}, verify: {r1_d0: 1.30, r2_d0: 1.31}};
+    const delivered = await runOnset('first_stall', late);
+    assert.equal(delivered.error, null, delivered.error);
+    assert.ok(trace(delivered).every(t => !t.visible));
+    assert.ok(!call(delivered, 'tech_lead:plan r3'), 'no new round after cutoff');
+    assert.equal(delivered.result.final_speedup, 1.31, 'qualified retained gain is delivered with handoff still closed');
+    assert.equal(delivered.archive.best_id, 'r2_d0', 'post-close archive promotion is never gated by handoff');
+    assert.equal(sha(delivered.retained_patches.r2_d0), row(delivered, 'r2_d0').patch_ref.sha256);
+    console.log('  ok: failed/empty capture fidelity and hidden post-close delivery');
+
+    for (const override of [{evolution_visibility: 'later'}, {evolution_start: 'first_stall'},
+      {evolution_preserve_founder_attempts: false}, {evolution_preserve_founder_attempts: 'true'},
+      {evolution_return_development: undefined}, {evolution_return_development: false}]) {
+      const invalid = await runOnset('first_source', stalled, override);
+      assert.match(invalid.error || '', /evolution_visibility (must be|requires)/);
+      assert.deepEqual(invalid.calls, [], 'invalid onset binding fails before Setup');
+    }
+    const greedyInvalid = await runMode('greedy', {...stalled, name: 'onset_greedy_invalid',
+      args: {...common, evolution_visibility: 'first_source'}}, TEMPLATE);
+    assert.match(greedyInvalid.error || '', /evolution_visibility requires optimizer=evo/);
+    assert.deepEqual(greedyInvalid.calls, []);
+  }
   fs.rmSync(OUT, {recursive: true, force: true});
-  console.log('PASS: EVO stays byte-identical to greedy until its first non-improving round, then evolves from that incumbent. CPU fixture only.');
+  console.log('PASS: default first-stall parity and opt-in retained-source handoff onset. CPU fixture only.');
 })().catch(error => { console.error(error); process.exit(1); });

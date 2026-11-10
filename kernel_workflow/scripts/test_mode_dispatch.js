@@ -191,7 +191,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       evolution_start: 'search_start', evolution_import_stall_sources: false,
       evolution_case_evidence_view: true, evolution_evidence_handoff: false,
       evolution_preserve_founder_attempts: false, record_planner_inputs: true,
-      case_measurement_view: 'native_consistent'};
+      case_measurement_view: 'native_consistent', evolution_visibility: 'first_source'};
     const {run, trace} = build({...BASE, mode: 'bakeoff', backends: ['hip'], ...controls}, {
       agent: healthy('triton', []),
     });

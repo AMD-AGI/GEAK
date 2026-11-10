@@ -42,10 +42,14 @@ const integrationScores = best => ({
     verified_weighted: best?.weighted, verified_geomean: best?.geomean})),
   claimed_geomean: handoffScore(best?.geomean), claimed_weighted: handoffScore(best?.weighted),
 });
-// The planner sees the archive, its schema fields and the retained-approach policy once the archive
-// holds retained source; before that its round plans from the same inputs as greedy.
+// Explicit archive handoff, schema fields and retained-approach policy require retained source.
+// Scheduled onset can defer that handoff while ordinary history and raw references stay available.
 const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
-const evolutionInstructions = () => archiveHasSource()
+// Scheduled handoff freezes at a planning boundary, including all its engineers and memory call.
+// Host capture, raw archive references and delivery remain common; this is not filesystem isolation.
+let handoffVisible = false, handoffOnsetRound = null, firstStalledRound = null;
+const archiveHandoffVisible = () => EVOLUTION_VISIBILITY === undefined ? archiveHasSource() : handoffVisible;
+const evolutionInstructions = () => archiveHandoffVisible()
   ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
 const citations = [];
 const contextRef = (id, outDir) => {
@@ -99,6 +103,16 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   round++;
   evo = evolution;
+  if (EVOLUTION_VISIBILITY !== undefined) {
+    const sourceAvailable = archiveHasSource();
+    if (handoffOnsetRound === null && sourceAvailable
+        && (EVOLUTION_VISIBILITY === 'first_source' || firstStalledRound !== null)) handoffOnsetRound = round;
+    handoffVisible = sourceAvailable && handoffOnsetRound !== null;
+    // Host observation only: do not reveal the assigned treatment in initial model inputs.
+    log(`[evolution_handoff] ${JSON.stringify({mode: EVOLUTION_VISIBILITY, round,
+      source_available: sourceAvailable, visible: handoffVisible,
+      first_stalled_round: firstStalledRound, onset_round: handoffOnsetRound})}`);
+  }
   // The first round that differs from greedy is this round's plan call.
   if (evo && history.evolution_start && history.evolution_start.first_round == null) {
     history.evolution_start.first_round = round;
@@ -116,7 +130,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner)), HISTORY: history,
-    ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
+    ...(archiveHandoffVisible() ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
@@ -208,7 +222,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   const callPlanner = async (attempt, intro, forbidStop, label) => {
     const inputs = planInputs(forbidStop, await deliveryFactsInput());
     const prompt = roleAgent('tech_lead', 'plan_round', intro, inputs);
-    const schema = archiveHasSource() ? evoPlanSchema : PLAN_SCHEMA;
+    const schema = archiveHandoffVisible() ? evoPlanSchema : PLAN_SCHEMA;
     let plannerObservation;
     if (A.record_planner_inputs === true) {
       const components = {};
@@ -299,7 +313,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       return true;
     });
     if (!directions.length) { plannerStopReason = 'budget'; break; }
-    directions = await evo.prepare(directions, round);
+    directions = await evo.prepare(directions, round,
+      {allowReferences: EVOLUTION_VISIBILITY === undefined || archiveHandoffVisible()});
   }
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
@@ -356,11 +371,11 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         }
       }
       const isDeep = d.specialty === 'deep_explore';
-      // Before any retained source exists, EVO engineers get the greedy development rules; the
-      // evolution policy applies once there is an archive source to develop from.
-      const evoEngineer = archiveHasSource();
+      // The retained-approach policy follows the handoff gate; preservation is configured separately.
+      const evoEngineer = archiveHandoffVisible();
       // Source preservation can be tested independently of the deferred evolution context.
-      const preserveFounder = !!evo && !evoEngineer && A.evolution_preserve_founder_attempts === true;
+      const preserveFounder = !!evo && A.evolution_preserve_founder_attempts === true
+        && (EVOLUTION_VISIBILITY !== undefined || !evoEngineer);
       const preserveAttempt = evoEngineer || preserveFounder;
       // Returning an unmeasured final implementation when nothing else would be saved is a separate factor.
       const returnDevelopment = !!evo && (A.evolution_return_development === undefined
@@ -740,7 +755,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   const mem = await agentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(), {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, PRIMARY_METRIC: handoffMetric,
-      ...(archiveHasSource() ? evo.memoryInputs(clean.map(r => r.d)) : {}),
+      ...(archiveHandoffVisible() ? evo.memoryInputs(clean.map(r => r.d)) : {}),
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, ...roundScores(r.eng, r.ver),
         status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
@@ -848,6 +863,9 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       schema: { type: 'object', additionalProperties: true,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
+  if (EVOLUTION_VISIBILITY !== undefined && firstStalledRound === null && noImprove > 0) {
+    firstStalledRound = round; // Completed stalled round; never reset or extend the stopping counter.
+  }
   if (startEvolution && !evolution && noImprove > 0) {
     try {
       evolution = await startEvolution({cumulative, finalWinner});

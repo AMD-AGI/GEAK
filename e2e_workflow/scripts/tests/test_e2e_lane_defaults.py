@@ -135,7 +135,7 @@ check("null and empty selectors use EVO",
 source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
 source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
 evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                  "evolution_preserve_founder_attempts", "evolution_start",
+                  "evolution_preserve_founder_attempts", "evolution_start", "evolution_visibility",
                   "evolution_return_development", "evolution_import_stall_sources",
                   "record_planner_inputs", "case_measurement_view")
 evidence_cases = [{"optimizer": "evo"}]
@@ -147,7 +147,7 @@ const {boundary, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
 const results = cases.map(A => vm.runInNewContext(boundary + `
 ({inherited: laneArgs({kernel_path: "/task"}),
   overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false,
-    evolution_preserve_founder_attempts: false, evolution_start: false,
+    evolution_preserve_founder_attempts: false, evolution_start: false, evolution_visibility: false,
     evolution_return_development: false, evolution_import_stall_sources: false,
     record_planner_inputs: false, case_measurement_view: false})})`, {
   A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,

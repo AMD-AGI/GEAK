@@ -476,10 +476,12 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
       return inputs;
     },
-    prepare(directions, round) {
+    prepare(directions, round, {allowReferences = true} = {}) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
       return directions.map((direction, index) => {
-        const errors = [], requested = direction.parent_id;
+        // Before scheduled handoff, keep the incumbent-compatible default parent even if an
+        // out-of-schema model answer guessed a retained ID. Host custody is unaffected.
+        const errors = [], requested = allowReferences ? direction.parent_id : null;
         let parent = requested, resolution = 'explicit';
         if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
           if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
@@ -487,8 +489,9 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
         }
         const donors = [];
-        if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
-        for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
+        const requestedDonors = allowReferences ? direction.donor_ids : null;
+        if (requestedDonors != null && !Array.isArray(requestedDonors)) errors.push('donor_ids must be an array');
+        for (const donor of Array.isArray(requestedDonors) ? requestedDonors : []) {
           if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
           else if (!donors.includes(donor)) donors.push(donor);
         }

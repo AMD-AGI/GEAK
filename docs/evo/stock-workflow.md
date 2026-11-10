@@ -37,6 +37,7 @@ paths and GPU ID are placeholders for the caller's environment.
 | --- | --- | --- |
 | `optimizer` | `"evo"` | Retained-candidate search; `"greedy"` selects the original policy. |
 | `evolution_start` | `"first_stall"` | Begin retained-candidate development after the first stalled round; `"search_start"` begins in round one. |
+| `evolution_visibility` | unset | Opt-in [retained-source handoff onset](early-source-onset.md): `"first_source"` or `"first_stall"` on a common `search_start` archive with explicit preservation flags. |
 | `evolution_return_development` | `true` | Retain a developed attempt when no measured candidate was saved; qualification is still required. |
 | `budget` | `6` | Direction budget; each deep engineer costs `deep_cost` units. |
 | `deep_cost` | `2` | Budget charge for a deep engineer. |
