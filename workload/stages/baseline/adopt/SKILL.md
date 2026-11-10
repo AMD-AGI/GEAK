@@ -25,7 +25,7 @@ prevent.
 | `reference_key` | no | dotted path to the reference value, in `reference_receipt` if set, otherwise in the receipt |
 | `valid_flags` | no | fields carrying the harness's validity verdict; defaults come from `config/default.json`. They are copied into `provenance` and the slot judges the same configured fields |
 | `metric`, `unit` | no | recorded as written; default `output_token_throughput` / `tok/s` |
-| `noise_band` | no | keep threshold; default `1.045`, calibrated by measurement rather than quoted |
+| `noise_band` | no | E2E decision threshold; default from `config/default.json`, separate from kernel `keep_threshold` |
 | `config` | no | deployment shape (`tp`/`ep`/`gpus`/`concurrency`) when the receipt does not carry it under those names |
 | `model_key`, `image_key` | no | dotted paths to what the receipt says it served; default `model` / `image`. Recorded in provenance, where `engine/core/target.py` cross-checks them against the declared target |
 | `node` | no | which machine the receipt was measured on. An A/B is same-node or it is nothing, so the slot requires this |

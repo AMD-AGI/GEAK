@@ -11,6 +11,12 @@ existing `e2e/bench_summary.json` convention, including an admissible fresh `sto
 otherwise the standard recipe's `RUN_ROOT/baseline/out/baseline.json` is used. Relative
 configured paths resolve from the repository root.
 
+The E2E decision threshold is `PARAMS.noise_band`, then the historical receipt's
+`noise_band`, then `stages.baseline.params.noise_band` in `config/default.json`.
+Explicit scenario values remain overrides. This is a policy threshold, separate from
+kernel `keep_threshold` and measured repeat variability. When changing policy for an
+existing comparison, retain its receipts and old verdict and re-evaluate in a new `OUT`.
+
 The call writes `ab.json`, `REPORT.md` and `result.json`. Set `OUT`, `PARAMS`, `STAGE=evaluate`
 and `STAGE_SKILL=native-e2e` for a direct call. The standard applyback finalizer first
 checks kernel integration, then calls this same evaluator with that verified metadata;

@@ -190,7 +190,10 @@ def main(integration=None):
 
     ratio = cand_tp / base_tp
     delta_pct = (ratio - 1.0) * 100.0
-    band_pct = ((historical.get("noise_band") or 1.045) - 1.0) * 100.0
+    defaults = read_json(os.path.join(HERE, "..", "..", "config", "default.json"))
+    noise_band = params.get("noise_band", historical.get("noise_band") or
+                            defaults["stages"]["baseline"]["params"]["noise_band"])
+    band_pct = (noise_band - 1.0) * 100.0
     verdict = ("no_change" if abs(delta_pct) <= band_pct
                else "gain" if delta_pct > 0 else "regression")
 

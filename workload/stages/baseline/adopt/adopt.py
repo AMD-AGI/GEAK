@@ -104,12 +104,14 @@ def main():
                if isinstance(doc, dict) and k in doc)
     cfg.update(p.get("config") or {})
 
+    defaults = read_json(os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                     "config", "default.json"))["stages"]["baseline"]["params"]
     baseline = {
         "metric": p.get("metric", "output_token_throughput"),
         "unit": p.get("unit", "tok/s"),
         "throughput": tput,
         "higher_is_better": True,
-        "noise_band": float(p.get("noise_band", 1.045)),
+        "noise_band": float(p.get("noise_band", defaults["noise_band"])),
         "config": cfg,
         "reference": None if not ref else {
             "name": rkey, "value": ref, "ratio": round(tput / ref, 8),

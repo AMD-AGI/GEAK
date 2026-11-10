@@ -38,7 +38,7 @@ reads only this file.
   "unit": "tok/s",
   "throughput": 446.87889,
   "higher_is_better": true,
-  "noise_band": 1.045,
+  "noise_band": 1.01,
   "config": {"tp": 8, "ep": 1, "gpus": 8, "concurrency": 10},
   "reference": {"name": "ci_output_tokens_per_second", "value": 446.56324, "ratio": 1.00071},
   "measured": true,
@@ -46,9 +46,10 @@ reads only this file.
 }
 ```
 
-`noise_band` is the **keep threshold**, and it is calibrated rather than quoted: four
-kernels in a previous campaign whose source was md5-identical to the original re-measured
-at 1.0246–1.0453 from cold, so the default is **1.045**, not the commonly cited 1.02.
+`noise_band` records the E2E decision threshold from `stages.baseline.params` in
+`config/default.json` or the scenario override. It is policy, not a measured noise
+estimate or the kernel `keep_threshold`. [Evaluate](../evaluate/README.md) owns its use;
+report repeat variability separately.
 
 `measure` fills the same schema and additionally records every pin plus the check-by-check
 alignment result under `provenance` (`alignment_verdict`, `alignment_checks`,

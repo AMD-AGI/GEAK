@@ -27,7 +27,7 @@
         "valid_flags": ["submission_valid", "power_valid"],
         "metric": "output_token_throughput",
         "unit": "tok/s",
-        "noise_band": 1.045
+        "noise_band": 1.01
       }
     },
     "profile": {
