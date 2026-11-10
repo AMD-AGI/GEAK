@@ -16,7 +16,7 @@ the task's timing boundary. Preserve the best accepted baseline.
 
 Use the workflow's configured recipe discovery; a reference does not enable an
 optional tool or establish that a backend is installed. The [hardware-evidence
-skill source](skills/kernel-hardware-evidence/SKILL.md) is prospective guidance.
+skill source](skills/kernel-hardware-evidence/SKILL.md) is guidance.
 
 Operator-card frontmatter feeds the generated registry and matrix. After editing
 cards, regenerate from the repository root:

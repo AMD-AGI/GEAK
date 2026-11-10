@@ -6,16 +6,10 @@ GEAK-EVO supplies the persistent engineering search inside Hyperloom or GEAK's
 end-to-end workflow. The outer workflow retains responsibility for the workload
 objective, serving configuration, task boundaries and final acceptance.
 
-This is the deployment target, not a claim of completed integration or general
-discovery capability. The [measured comparisons](geak-vs-evo.md) currently establish
-two task-local computational reorganization examples and one completed MoE
-population comparison favoring GEAK-EVO. They do not establish serving gains,
-general superiority or the benefit of protecting initially weaker approaches.
-
-The [evidence-to-policy record](evidence-to-policy.md) connects those completed
-results to generic behaviors and prospective ablations. The full recipe-level
-controller and its population, transfer and allocation policies remain research
-hypotheses; the first inner-worker integration does not freeze that architecture.
+The outer workflow supplies the workload and task contract. The inner kernel
+workflow returns a source change and its evaluation records for integration.
+See [using candidate evidence](evidence-to-policy.md) for how source, hypotheses
+and measurements support continued engineering.
 
 ```mermaid
 flowchart TD
@@ -38,8 +32,7 @@ flowchart TD
 Each trajectory uses the complete GEAK engineering loop. Its starting hypothesis
 may concern dataflow, decomposition, hardware mapping or scheduling; it can change
 that hypothesis after experiments. Retaining an alternative makes it available.
-Giving it a sustained development budget is a separate allocation decision, whose
-value is the subject of the weak-branch and depth-versus-breadth studies.
+Giving it a sustained development budget is a separate allocation decision.
 
 An existing kernel boundary must not silently become the limit of discovery.
 The task may need to encompass several producers and consumers, workspace,
@@ -50,8 +43,7 @@ The current single-GPU extraction lane does not establish arbitrary multi-rank
 region support.
 
 Public source inspected on 29 October 2026 identifies the following integration
-points. These pins describe current `main` code; they are not the frozen engine
-sources of the historical experiments or proof that this branch implements them.
+points at the linked revisions.
 
 | Boundary | Current implementation | Manual comparison |
 |---|---|---|
@@ -64,14 +56,11 @@ uses EVO for its search. Replacing Hyperloom's outer runner instead would requir
 implementing the entire e2e contract. A separate serving controller or a duplicate
 engineering engine is unnecessary.
 
-The population is not a drop-in replacement at that seam. The cited e2e source
-calls the worker directly because its runtime forbids the additional
-`e2e → dispatcher → worker` nesting level. The experimental population dispatcher
-itself launches workers. Reusing population dispatch at the e2e level, or using
-separately launched workflows, therefore needs a prospective integration change
-and qualification. A single-lineage EVO treatment must also bind and qualify its
-engine and option forwarding; it is distinct from the hybrid population that
-produced the MoE result.
+The e2e path calls one kernel workflow directly; its runtime does not allow a
+further `e2e → dispatcher → worker` nesting level. The population dispatcher
+launches workers and therefore cannot replace that direct call unchanged.
+A single-lineage EVO configuration binds its engine and option forwarding
+through the task interface.
 
 There are two relevant limits in the inspected code. First, isolated speedup above
 one gates an integration attempt in the cited path. An individually slower
@@ -107,23 +96,14 @@ Report the measured rate and the conditional model fraction separately. Recomput
 the same model for every comparison arm if an assumption is corrected, and
 reprofile after integration because the bottleneck may move.
 
-The next workload demonstration should retain a reviewable chain:
+For a workload integration:
 
-1. Freeze one model/configuration/request distribution and measure its original
-   serving performance and quality.
-2. Have the system inspect the workload and choose a region and testable
-   bottleneck hypothesis using available tools. Keep researcher-written kernel
-   answers out of the optimizer inputs.
-3. Run ordinary GEAK and GEAK-EVO through the same task, engineering and evaluation
-   interfaces, with declared search costs. Preserve the development histories.
-4. Verify that the intended reorganization executes, integrate the exact source,
-   and measure the same workload. Record throughput, latency, quality and
-   setup/search/validation costs with their actual measurement boundaries.
-5. Repeat on independently started searches and additional configurations. Reused
-   knowledge must retain its source and applicability; earlier correctness or
-   speed does not automatically transfer to a new workload or device.
-
-The active kernel comparisons test the inner discovery capability. Weak-branch
-development tests whether a protected alternative can mature; depth/breadth tests
-allocation. A completed serving comparison tests deployment value. Each answers
-its own question, and all contribute to the intended full workload system.
+1. Bind the exact model, configuration and request distribution; measure the
+   original serving performance and quality.
+2. Inspect the workload and select a region with an executable state and
+   correctness contract.
+3. Run the selected kernel optimizer through the shared engineering and
+   evaluation interfaces, retaining source and measurement records.
+4. Integrate the exact tested source, verify dispatch engagement and measure
+   throughput, latency, quality and costs on the same workload.
+5. Reprofile the deployed result to guide the next investigation.

@@ -5,19 +5,12 @@ setup, planner, engineer roles, tools, verifier, integration step, and final
 validation as GEAK. Select it with `optimizer: "evo"`; see the
 [run guide](stock-workflow.md).
 
-See the [10 November reviewed configuration and evaluation status](evaluation-20261110.md)
-for the explicit experiment settings, measured comparisons, and features that
-still need full-run qualification.
-
-For the distinction between one full GEAK lineage, a population of ordinary
-GEAK lineages, and the hybrid GEAK-EVO population used in v1 experiments, see
-[the updated diagrams, measured comparison, and code links](geak-vs-evo.md).
-That guide distinguishes the code on this branch from the later population
-extension and frozen experiment sources.
+See the [runtime configuration reference](configuration.md) for explicit
+optimizer settings, and the [workflow comparison](geak-vs-evo.md) for diagrams
+and source links.
 
 For the intended role inside Hyperloom and GEAK's end-to-end workflow, see
 [the workload discovery loop and pinned integration code](workload-discovery.md).
-It separates the current kernel evidence from the proposed workload-level system.
 
 ```mermaid
 flowchart LR
@@ -77,11 +70,6 @@ before the planner call; it does not prove that planning returned, an engineer r
 or retained-source guidance was supplied. Join it with the timeline and archive
 evidence for those questions. An absent record does not distinguish no attempt
 from failed initialization or an older result format.
-
-Useful diversity, semantic crossover, recovery of initially slower ideas, and
-sustained discovery remain research outcomes to establish. Software checks can
-verify source handling and control flow; they cannot establish those outcomes
-or a performance advantage over GEAK.
 
 The former `geak_evo` Python driver, research-store exporter, pilot launcher, and
 group coordination system are retired. The Python driver's earlier public source

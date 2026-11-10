@@ -6,9 +6,9 @@ A population can have one member. Every member may use `optimizer=greedy` or
 `optimizer=evo`; names have no policy meaning. The workflow, its optimizer, prompts,
 argument bytes, stopping rules and finalization stages are unchanged.
 
-This is the process and finalist boundary of a prospective population. It does
-not implement peer publication/import, archive-wide selection, or an evolutionary
-advantage. A lineage keeps its private loop and archive in its own workflow
+The composer defines the process and finalist boundary of a population;
+peer publication/import and archive-wide selection are outside its scope.
+A lineage keeps its private loop and archive in its own workflow
 process. Stock early-stop refusals remain in that workflow; an accepted self-stop
 finishes its postlude. The composer calls each workflow once, waits for all members,
 and neither retires a member because a peer is faster nor restarts a stopped member.
@@ -177,7 +177,7 @@ The metrics and optional recorder retain their existing call accounting. Exact
 search-stop time, evaluation counts and reserved-service delivery require their
 own runtime/evaluator evidence; missing values are not inferred from wall time.
 
-## Migration and remaining import seam
+## Schema migration and source imports
 
 Schema /1 is rejected explicitly. To migrate, add the common deadline, private
 paths and local device mappings, and replace the formerly reserved name with an
@@ -186,15 +186,11 @@ explicit `required` policy. Result consumers must replace `protected_geak` with
 labels above. There is no implicit name-based compatibility branch. Existing
 workflow behavior and frozen sources do not change.
 
-Selected immutable publication/import is still missing. The small integration
-seam is the existing canonical-selection capture in `01b_args.js` for stock and
-retained patch records in `14a_evolution.js` for EVO, followed by the existing
-`createEvolution` parent/donor selection and workspace preparation. A publication
-must bind lineage, original/base source, immutable content hash and evidence;
-only explicitly selected compatible sources may enter another private archive.
-Run-local candidate IDs and mutable whole-archive snapshots cannot serve as that
-interface. Warm-start bases require equality or normalization to the common
-ORIGINAL before import. No new shared mutable archive or scheduler is supplied.
+The composer does not provide cross-lineage source import. Each lineage uses
+its private source and archive. An import interface must bind the lineage,
+original/base source, immutable content hash and evidence; run-local candidate
+IDs and mutable whole-archive snapshots do not provide that identity.
+Warm-start bases require equality or normalization to the common ORIGINAL.
 
 The CPU composer tests use real child processes and existing native source/report
 helpers with synthetic timing evidence. Adapter cases use prepared workflow

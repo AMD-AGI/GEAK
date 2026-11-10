@@ -74,7 +74,7 @@ append its end, while the metrics retain their state at workflow return.
 
 ### Optional planner component observation
 
-For prospective audits, set the lane argument `record_planner_inputs:true` and
+To record planner inputs, set the lane argument `record_planner_inputs:true` and
 configure the existing runtime `--backend-events-file` sink. The lane flag defaults
 to off. With the flag off no planner observation metadata is attached; without
 backend tracing no component summaries are emitted.
@@ -118,6 +118,6 @@ Use the existing trace path outside EVAL_DIR where practical. Its ordinary 0600
 file and a different pathname do not prove unreadability to same-UID role shells;
 the runtime adds no isolation boundary. Serialization, hashing and trace writes
 consume ordinary wall time. Fixed-clock parity checks establish unchanged prompts
-and calls, not zero overhead. This is prospective only; active packets are unchanged.
+and calls, not zero overhead.
 This trace-only observer supersedes the a45 raw-snapshot implementation of
 `record_planner_inputs`; do not combine the two implementations.

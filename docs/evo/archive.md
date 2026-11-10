@@ -109,4 +109,4 @@ This preserves existing reader facts; it does not add a manifest join, infer
 shape/regime/counts, or compute roofline utilization. Ordinary-lane reports keep
 their existing authority. Gate formulas and task thresholds are unchanged, but
 native qualification/export now requires the reader to supply the facts they
-consume. Use this authority repair in both arms of a future presentation ablation.
+consume.
