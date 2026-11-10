@@ -543,6 +543,24 @@ const FALLBACK = 'Development fallback';
     assert.deepEqual(trace(deferred).map(t => t.visible), [false, false, true, true]);
     assert.equal(trace(deferred)[2].first_stalled_round, 2);
     assert.equal(trace(deferred)[2].onset_round, 3);
+    for (const r of [early, deferred]) {
+      const onset = r.result.evolution_handoff.onset_round;
+      assert.equal(onset, r === early ? 2 : 3);
+      for (const t of trace(r)) assert.equal(Object.hasOwn(t, 'mode'), false,
+        'runtime handoff diagnostics do not announce the assigned treatment');
+      for (const c of r.calls) {
+        assert.ok(!c.prompt.includes('"evolution_visibility"') && !c.prompt.includes('"evolution_handoff"'),
+          'host treatment/result metadata is not included in any role prompt');
+        const round = /(?:^|[ _])r(\d+)(?:[_ :]|$)/.exec(c.label);
+        if (round && Number(round[1]) < onset) {
+          assert.ok(!c.prompt.includes('/roles/evolution.md'),
+            `no explicit retained policy before onset: ${c.label}`);
+          assert.equal(field(c.prompt, 'EVOLUTION'), undefined);
+          assert.equal(field(c.prompt, 'EVOLUTION_ENTRIES'), undefined);
+          assert.equal(field(c.prompt, 'EVOLUTION_ROUND'), undefined);
+        }
+      }
+    }
     assert.equal(row(early, 'r2_d0').parent_id, 'r1_d1', 'visible planner can select a retained alternative');
     assert.deepEqual(row(early, 'r2_d0').donor_ids, ['r1_d0']);
     assert.equal(row(deferred, 'r2_d0').parent_id, 'r1_d0', 'hidden selection inherits the verified incumbent');

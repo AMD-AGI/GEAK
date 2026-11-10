@@ -141,6 +141,7 @@ return {
   stopped_by: stopReason,
   deadline_hit: deadlineHit,
   forced_replans: forcedReplans,
+  ...(evolutionHandoff ? {evolution_handoff: evolutionHandoff} : {}),
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
   // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
   learned_citations: citations,

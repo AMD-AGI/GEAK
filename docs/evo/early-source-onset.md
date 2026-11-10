@@ -56,8 +56,12 @@ retention error. Archive creation or failed retention alone does not qualify. A
 valid zero-byte patch still represents the unchanged archive base and satisfies
 that existing predicate; it does not establish development or reuse of an
 alternative. The host logs `[evolution_handoff]` records with the round, source
-availability, visible state, first stalled round and onset round. These records
-do not add the assigned setting to initial model inputs.
+availability, visible state, first stalled round and onset round. The assigned
+setting is omitted from runtime handoff diagnostics. The final lane result returns
+`evolution_handoff` with the setting and onset, outside the model-facing history.
+This does not hide configuration files or other same-user artifacts: an experiment
+must record their actual accessibility rather than infer treatment blinding from
+prompt parity.
 
 CPU regressions cover initial prompt/schema/source/capture parity, onset timing,
 staggered peer dispatch, unresolved hidden references, stop limits, failed and

@@ -109,7 +109,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         && (EVOLUTION_VISIBILITY === 'first_source' || firstStalledRound !== null)) handoffOnsetRound = round;
     handoffVisible = sourceAvailable && handoffOnsetRound !== null;
     // Host observation only: do not reveal the assigned treatment in initial model inputs.
-    log(`[evolution_handoff] ${JSON.stringify({mode: EVOLUTION_VISIBILITY, round,
+    log(`[evolution_handoff] ${JSON.stringify({round,
       source_available: sourceAvailable, visible: handoffVisible,
       first_stalled_round: firstStalledRound, onset_round: handoffOnsetRound})}`);
   }
@@ -1010,6 +1010,11 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
 return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
+  ...(EVOLUTION_VISIBILITY === undefined ? {} : {evolutionHandoff: {
+    mode: EVOLUTION_VISIBILITY, onset_round: handoffOnsetRound,
+    first_stalled_round: firstStalledRound,
+    scope: 'explicit policy handoff and parent/donor selection; raw source references remain available',
+  }}),
   // Which condition actually ended the loop (see `stopped_by` in the return value).
   stopReason: plannerStopReason === 'deadline_uncommitted' ? plannerStopReason : deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
@@ -1236,7 +1241,7 @@ async function commitExactTree(promo, message) {
 }
 
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.
-let stopReason = '';
+let stopReason = '', evolutionHandoff = null;
 function applyOptimizeResult(r) {
   round = r.rounds;
   dispatched = r.dispatched;
@@ -1251,4 +1256,5 @@ function applyOptimizeResult(r) {
   deadlineHit = r.stopReason === 'deadline' || r.stopReason === 'deadline_uncommitted';
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
+  evolutionHandoff = r.evolutionHandoff ?? null;
 }
