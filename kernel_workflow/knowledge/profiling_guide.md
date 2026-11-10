@@ -100,6 +100,14 @@ generations called this `--list-basic`, `--list-derived`, or
 phase** if MFMA% is absent — classify from kernel-trace durations + per-case latency + dispatch
 count + `amd_rdna4.md` §5. Never invent MFMA utilization.
 
+### RDNA 3.5 APU (gfx115x) — the same rule, different holes
+
+On gfx1151 with ROCm 7.2.3, `rocprofv3 -L` lists `SQ_WAVES`, `GL2C_HIT` / `GL2C_MISS`, `SQ_INSTS_LDS` and
+`SQC_LDS_BANK_CONFLICT`, but not the CDNA `TCP_*` / `TCC_*` names, and there is no matrix-unit
+utilization counter (`amd_ryzen.md` §2). Do not fail the profile phase on a missing MFMA%. The PMC
+limit is a hardware-counter budget: a set over it is rejected with error 38 and that pass then hangs
+until killed, so run every pass under a timeout. Measured detail: `$SKILL_DIR/../perf_knowledge/hardware/rdna35_gfx1151/` `pitfalls.md`.
+
 ## rocprof-compute (formerly omniperf) Output Interpretation
 
 ### Section 2: System Speed-of-Light (SoL)
@@ -109,10 +117,10 @@ The most important section. Shows overall utilization as percentage of peak.
 | Metric | What it means | Threshold |
 |--------|--------------|-----------|
 | VALU Utilization | Vector ALU usage | > 60% = compute-bound |
-| MFMA Utilization | Matrix unit usage (CDNA) | > 40% = MFMA-active; **often absent on RDNA4** — see below |
+| MFMA Utilization | Matrix unit usage (CDNA) | > 40% = MFMA-active; **often absent on RDNA4, absent on gfx115x** — see below |
 | VMEM Utilization | Vector memory pipe | > 60% = memory-bound |
 | LDS Utilization | Local data share | > 50% = LDS-heavy |
-| Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; R9700 datasheet ceiling in `amd_rdna4.md` §4, or a separately labeled streaming measurement |
+| Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; R9700 datasheet ceiling in `amd_rdna4.md` §4; gfx1151: the `peaks.md` roofline row is the 256 GB/s pin rate, the measured read ceiling ~232 GB/s (8060S, `$SKILL_DIR/../perf_knowledge/hardware/rdna35_gfx1151/` `peak_tables.md`) — say which one you divided by; or a separately labeled streaming measurement |
 
 **Classification from SoL:**
 - VALU > 60% AND VMEM < 40% → **compute-bound**
@@ -182,13 +190,15 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 **Key checks:**
 - Active Threads: compare against **this card's wavefront**, not a fixed 64.
   - **CDNA (gfx942/gfx950, wave64):** Active Threads < 64 → wavefront divergence.
-  - **R9700 / gfx1201 (wave32):** Active Threads < 32 → divergence. Do not apply the CDNA threshold.
+  - **R9700 / gfx1201 and gfx115x (wave32):** Active Threads < 32 → divergence. Do not apply the CDNA threshold.
 - VALU Util < 50% → occupancy or memory latency issue
 - High Branch Divergence → consider predication or data reorganization
 
 ## Occupancy (architecture-specific)
 
 **CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
+
+**gfx115x:** do **not** use the 512 combined-VGPR formula either; re-derive with `$SKILL_DIR/../perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py` `--compiler-sweep --arch <this box's gfx>`. The parts differ: gfx1151's steps start at 96 VGPRs for 16 waves, gfx1150 / gfx1152 / gfx1153's at 64.
 
 **R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
@@ -214,7 +224,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 |--------|--------------|
 | Read BW | HBM read bandwidth achieved |
 | Write BW | HBM write bandwidth achieved |
-| Total BW | Compare with the explicitly labeled denominator (Instinct table; R9700 640 GB/s datasheet ceiling or a separately recorded streaming measurement) |
+| Total BW | Compare with the explicitly labeled denominator (Instinct table; R9700 640 GB/s datasheet ceiling; gfx1151: one of the two in the Bandwidth row above, labelled; or a separately recorded streaming measurement) |
 
 ## Bottleneck Classification Decision Tree
 
@@ -262,10 +272,12 @@ real mislabel. Run them before forming a hypothesis.
   occupy the GPU — no tile or register tuning helps; you must partition more (split-K, finer tiles,
   more blocks). This is separate from occupancy: a kernel can hit its per-wave occupancy ceiling and
   still leave most of the GPU idle because it never launched enough work.
-- **Occupancy ceiling (CDNA):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
+- **Occupancy ceiling (CDNA):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula. **gfx115x:** look up your `next_free_vgpr` in the `vgpr_wave_steps` of the `amd_occupancy.py --compiler-sweep` above, not this formula.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
-- **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
-- **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
+- **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle
+  (gfx115x: `SQC_LDS_BANK_CONFLICT / SQC_LDS_IDX_ACTIVE`).
+- **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern
+  (gfx115x has no `TD_*` counters; judge coalescing from the disassembly's load widths).
 
 Only tune registers/occupancy when achieved occupancy actually sits at the register ceiling; if it is
 far below the ceiling, the register footprint is not what constrains you and cutting VGPRs does nothing.
