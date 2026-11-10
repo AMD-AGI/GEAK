@@ -40,9 +40,9 @@ to the local `gfx` at build time.
 | Mode | Notes |
 |---|---|
 | Natural language → `Workflow` tool | Describe the task to Claude Code; it maps the prompt onto `Workflow({ scriptPath, args })`. |
-| Direct `Workflow` call (e2e) | `scriptPath: "<repo>/e2e_workflow/e2e_workflow.js"` | 
-| Direct `Workflow` call (single kernel) | `scriptPath: "<repo>/kernel_workflow/kernel_workflow.js"` | 
-| External orchestrator (Hyperloom) | `python interface/run_e2e.py <handoff.json> <result.json>` | 
+| Direct `Workflow` call (e2e) | `scriptPath: "<repo>/e2e_workflow/e2e_workflow.js"` |
+| Direct `Workflow` call (single kernel) | `scriptPath: "<repo>/kernel_workflow/kernel_workflow.js"` |
+| External orchestrator (Hyperloom) | `python interface/run_e2e.py <handoff.json> <result.json>` |
 
 ## Profilers
 
@@ -50,7 +50,7 @@ The profiler is auto-detected using a degrade ladder
 (`PROFILER_PRIORITY="rocprof-compute rocprofv3 rocprof metrix"`).
 
 - `rocprof-compute`
-- `rocprofv3` 
+- `rocprofv3`
 - `rocprof`
 - `metrix`
 
@@ -58,10 +58,10 @@ The profiler is auto-detected using a degrade ladder
 
 The serving stack is not baked in; `args.backend` selects `scripts/adapters/<backend>.sh`.
 
-| Backend | Default port | 
+| Backend | Default port |
 |---|---|
-| Sglang | 30000 | 
-| vLLM | 8000 | 
+| Sglang | 30000 |
+| vLLM | 8000 |
 
 | Bench client | Notes |
 |---|---|
@@ -81,10 +81,10 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 
 ## Op-backend bake-off (`op_bench.py` head kernels)
 
-- hipblaslt 
+- hipblaslt
 - rocBLAS or TunableOp
-- aiter 
-- triton (with `--triton-autotune`) 
+- aiter
+- triton (with `--triton-autotune`)
 
 ## Precision and data types
 
@@ -96,8 +96,8 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 
 ## Accuracy gate (e2e_workflow)
 
-| Gate | Requirement | 
+| Gate | Requirement |
 |---|---|
 | `none` (default) | Throughput delta + greedy output parity. |
-| `gsm8k` | Sampled gsm8k (5-shot, greedy, fixed seed) using `scripts/gsm8k_eval.py` against an OpenAI-compatible `/v1` endpoint. | 
+| `gsm8k` | Sampled gsm8k (5-shot, greedy, fixed seed) using `scripts/gsm8k_eval.py` against an OpenAI-compatible `/v1` endpoint. |
 

@@ -41,7 +41,7 @@ Run the existing Hyperloom installation and workflow commands. Its GEAK installe
 resolves the selected branch; the handoff invocation stays:
 
 ```sh
-python "$GEAK_HOME/interface/run_e2e.py" handoff.json result.json
+python "$GEAK_E2E_RUNNER" handoff.json result.json
 ```
 
 No optimizer argument is needed. The bundled Node runtime provides orchestration
