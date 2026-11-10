@@ -3088,9 +3088,6 @@ class TestMain(_RunE2ECase):
             "workload": {"isl": 1024, "osl": 1024, "conc": 64},
             "exp_root": str(self.exp_root),
             "eval_dir": str(self.eval_dir),
-            # These tests cover the main workflow; the KernelFusion stage (on by default) would run
-            # first against the same mocked invoke_workflow and take its seconds off the main budget.
-            "kernel_fusion": False,
         }
         h.update(extra)
         path = self.tmp / "handoff.json"

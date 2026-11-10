@@ -49,8 +49,8 @@ ConfigSweep(flags/env/backends, FIRST) → Re-profile →
 LOOP milestone[ plan → per kernel: Extract → recursive kernel_workflow.js → Overlay+e2e gate → ] → Re-profile → grow playbook →
 Finalize(overlay+patch+launch bundle) → Architect Report → Director Validation
 ```
-When run through `interface/run_e2e.py`, an optional **KernelFusion stage** (`kernel_fusion/`, on by
-default) runs before this pipeline: trace → fusion analysis (`knowledge/kernel_fusion_skills/fusion-analysis/`)
+When run through `interface/run_e2e.py`, an optional **KernelFusion stage** (`kernel_fusion/`, off by
+default; `--kernel-fusion`, `GEAK_KERNEL_FUSION=1` or handoff `"kernel_fusion": true`) runs before this pipeline: trace → fusion analysis (`knowledge/kernel_fusion_skills/fusion-analysis/`)
 → fused kernels with region unit tests → one combined e2e A/B. An accepted fused overlay becomes this
 pipeline's initial overlay. See `kernel_fusion/README.md` and `docs/reference/run-e2e-contract.md`.
 

@@ -126,13 +126,15 @@ overlay, it becomes the main workflow's `initial_overlay_pythonpath`, so the mai
 workflow measures its own baseline on the fused stack. A stage that fails, finds
 nothing or is switched off leaves the main workflow's args unchanged.
 
-The stage is on by default. Precedence, highest first: the CLI flags, the
-`GEAK_KERNEL_FUSION=0|1` environment variable, then the handoff:
+The stage is off by default. Switch it on with `--kernel-fusion`,
+`GEAK_KERNEL_FUSION=1` or the handoff key below. Precedence, highest first: the
+CLI flags (`--kernel-fusion` / `--no-kernel-fusion`), the
+`GEAK_KERNEL_FUSION=1|0` environment variable, then the handoff:
 
 ```jsonc
 {
-  "kernel_fusion": false                      // off
-  // or a settings object (on unless "enabled": false):
+  "kernel_fusion": true                       // on with defaults (absent or false: off)
+  // or a settings object (switches it on unless "enabled": false):
   "kernel_fusion": {
     "prompt": "/path/deployment_notes.txt",   // run-specific prompt(s), comma-separated
     "budget_s": 14400,                        // default: min(12 h, 1/3 of the run); hard stop <= 40% of the run

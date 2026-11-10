@@ -126,7 +126,7 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
-# KernelFusion stage (e2e_workflow/kernel_fusion), run before the main workflow unless switched off.
+# KernelFusion stage (e2e_workflow/kernel_fusion): off by default; switched on, it runs before the main workflow.
 KF_STAGE_SCRIPT = E2E_DIR / "kernel_fusion" / "kf_stage.py"
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
@@ -8198,7 +8198,7 @@ def main(argv: list[str]) -> int:
     kf: dict | None = None
     run = _mark_run(eval_dir_hint)
     try:
-        # KernelFusion first (on unless switched off); the main workflow then starts from its
+        # KernelFusion first when switched on (off by default); the main workflow then starts from its
         # accepted overlay. Inside the try (and the run mark) so a SIGTERM or the run's exit
         # cleanup covers it like the main workflow.
         kf = _kf_stage().run_stage(h, ps_args, timeout_s, globals(), flags)

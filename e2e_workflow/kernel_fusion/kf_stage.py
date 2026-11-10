@@ -1,10 +1,10 @@
 """KernelFusion stage driver: the only KernelFusion code interface/run_e2e.py calls.
 
-The stage is ON by default and runs to completion BEFORE the main e2e workflow
-(baseline -> trace -> topk -> author -> apply back -> the e2e workflow). Switch it off with:
+The stage is OFF by default. Switched on, it runs to completion BEFORE the main e2e workflow
+(baseline -> trace -> topk -> author -> apply back -> the e2e workflow). Switch it on with:
 
-    handoff  "kernel_fusion": false | {"enabled": false}   (an object configures it: {"prompt": "...", ...})
-    env      GEAK_KERNEL_FUSION=0|1            (overrides the handoff)
+    handoff  "kernel_fusion": true | {...settings}  (a settings object switches it on unless "enabled": false)
+    env      GEAK_KERNEL_FUSION=1|0            (overrides the handoff)
     CLI      run_e2e.py ... --kernel-fusion | --no-kernel-fusion   (overrides both)
 
 It runs kernel_fusion/kf_workflow.js through run_e2e's own invoke_workflow (Claude SDK / CLI / standalone
@@ -69,10 +69,11 @@ def _truthy(v: Any) -> bool:
 
 
 def config(h: dict, flags: set[str] | frozenset = frozenset()) -> dict | None:
-    """The stage config when the switch is on (the default), else None. CLI > env > handoff."""
+    """The stage config when the switch is on, else None (the default). CLI > env > handoff. A handoff
+    ``true`` or settings object switches it on (an object stays off only with "enabled": false)."""
     raw = h.get("kernel_fusion")
     cfg: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
-    cfg["enabled"] = _truthy(cfg.get("enabled", True)) if isinstance(raw, dict) else (raw is None or _truthy(raw))
+    cfg["enabled"] = _truthy(cfg.get("enabled", True)) if isinstance(raw, dict) else (raw is not None and _truthy(raw))
     if os.environ.get("GEAK_KERNEL_FUSION", "").strip():
         cfg["enabled"] = _truthy(os.environ["GEAK_KERNEL_FUSION"])
     if "--kernel-fusion" in flags:

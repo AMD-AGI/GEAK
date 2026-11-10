@@ -1,6 +1,6 @@
 # KernelFusion — optional stage before the GEAK e2e workflow
 
-A separate module, **on by default**: every external `interface/run_e2e.py` call runs it to
+A separate module, **off by default**. Switched on, an `interface/run_e2e.py` call runs it to
 completion **before** the main e2e workflow (baseline → trace → Opportunity Analysis → Feasibility Review +
 author → Integration Review + apply back → the e2e workflow). When it accepts a fused overlay, the main workflow starts from that overlay (its own
 baseline is measured on the fused stack). Switched off, nothing changes.
@@ -28,11 +28,13 @@ Step keys (`kf_steps`) keep their short names: `trace`, `topk` (Opportunity Anal
 Precedence: CLI > env > handoff.
 
 ```
-run_e2e.py handoff.json result.json                        # on (default)
-run_e2e.py handoff.json result.json --no-kernel-fusion     # off for this run
-GEAK_KERNEL_FUSION=0|1                                     # env
-"kernel_fusion": false                                     # handoff, or an object that configures it:
-"kernel_fusion": {"prompt": "/path/deploy.txt", "trace_dir": "...", ...}
+run_e2e.py handoff.json result.json                        # off (default)
+run_e2e.py handoff.json result.json --kernel-fusion        # on for this run
+run_e2e.py handoff.json result.json --no-kernel-fusion     # off for this run, whatever env / handoff say
+GEAK_KERNEL_FUSION=1|0                                     # env
+"kernel_fusion": true                                      # handoff: on with defaults, or an object that
+"kernel_fusion": {"prompt": "/path/deploy.txt", "trace_dir": "...", ...}   # switches it on and configures it
+"kernel_fusion": {"enabled": false, ...}                   # configured but off
 ```
 
 | key (handoff) | env | default | meaning |

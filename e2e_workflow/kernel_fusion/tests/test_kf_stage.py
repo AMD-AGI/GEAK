@@ -22,8 +22,9 @@ def _clean_env(monkeypatch):
             monkeypatch.delenv(k)
 
 
-def test_switch_on_by_default_and_precedence(monkeypatch):
-    assert kf_stage.config({})["enabled"]                                         # external call => on
+def test_switch_off_by_default_and_precedence(monkeypatch):
+    assert kf_stage.config({}) is None                                            # nothing said => off
+    assert kf_stage.config({}, {"--kernel-fusion"})["enabled"]                    # CLI switches it on
     assert kf_stage.config({"kernel_fusion": False}) is None
     assert kf_stage.config({"kernel_fusion": True})["enabled"]
     assert kf_stage.config({"kernel_fusion": {"prompt": "/p"}})["prompt"] == "/p"   # object => on
@@ -191,7 +192,10 @@ def _dry_run(tmp_path, extra_handoff, flags=(), env=None):
 def test_run_e2e_dry_run_reports_the_switch(tmp_path):
     assert _dry_run(tmp_path, {}, ("--no-kernel-fusion",))["kernel_fusion"] == {"enabled": False}
     assert _dry_run(tmp_path, {"kernel_fusion": False})["kernel_fusion"] == {"enabled": False}
-    on = _dry_run(tmp_path, {})["kernel_fusion"]                                  # default on
+    assert _dry_run(tmp_path, {})["kernel_fusion"] == {"enabled": False}           # default off
+    assert _dry_run(tmp_path, {}, env={"GEAK_KERNEL_FUSION": "1"})["kernel_fusion"]["enabled"]
+    assert _dry_run(tmp_path, {}, ("--kernel-fusion",))["kernel_fusion"]["enabled"]
+    on = _dry_run(tmp_path, {"kernel_fusion": True})["kernel_fusion"]
     assert on["enabled"] and on["script"].endswith("kernel_fusion/kf_workflow.js")
     assert on["args"]["tp"] == 2 and on["args"]["kf_dir"].startswith(str(tmp_path / "kf_M_"))
     assert _dry_run(tmp_path, {"kernel_fusion": True}, env={"GEAK_KERNEL_FUSION": "0"})["kernel_fusion"] == {"enabled": False}

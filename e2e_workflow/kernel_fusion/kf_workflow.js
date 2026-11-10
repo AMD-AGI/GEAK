@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-fusion',
   description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), rank the fusion opportunities (Opportunity Analysis) with a user-supplied analysis prompt, build a region UT and have an agent write each fused kernel against it, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
-  whenToUse: 'Started by interface/run_e2e.py before the e2e workflow unless switched off (handoff "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
+  whenToUse: 'Started by interface/run_e2e.py before the e2e workflow when switched on (off by default; handoff "kernel_fusion": true or a settings object, GEAK_KERNEL_FUSION=1 or --kernel-fusion; off again with "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput, one fresh server and one timed round, no warmup round (roles/director.md PHASE=setup)' },
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
