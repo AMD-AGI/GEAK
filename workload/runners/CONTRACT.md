@@ -55,6 +55,13 @@ retries, and retrying the former ten thousand times produces the same result.
   `/dev/dri/renderD<128+8*i>`.
 - Log ownership: one `log_file` per worker, never shared.
 
+Before dispatching a long measurement, verify that the effective command timeout and
+every enclosing session or allocation limit cover the full run and result collection.
+Keep the initiating session alive until completion unless an explicit durable owner
+will await the command and collect its result independently of that session.
+Retain the invocation identity, command, logs, available exit status and native
+receipts before runner or session cleanup removes transient state.
+
 ## Shipped implementations
 
 | File | Status |
