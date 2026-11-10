@@ -204,7 +204,9 @@ async function main() {
       assert.deepEqual(inputs.PRIMARY_METRIC, {kind: 'time_weighted'});
       assert.equal(inputs.EVOLUTION_ENTRIES[0].case_evidence.metric, null,
         'a prospective objective cannot relabel unknown historical aggregate metrics');
-      assert.equal(inputs.NATIVE_PLANNER_SEED_CONTEXT.historical_archive_metric, null);
+      assert.equal(Object.hasOwn(inputs, 'NATIVE_PLANNER_SEED_CONTEXT'), false);
+      assert.equal(inputs.scope, f.seed.context.facts.scope);
+      assert.equal(inputs.EVALUATION_SERVICE.required_gpus_per_evaluation, 1);
       assert(result.direction_allocation.unavailable);
     });
 

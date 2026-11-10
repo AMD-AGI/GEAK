@@ -1674,12 +1674,9 @@ async function nativeSeededPlannerDecision() {
     ENGINEER_CALL: {processDeadlineEpoch: A.native_planner_deadline_epoch, processTimeoutMs: AGENT_TIMEOUT_MS},
     DEADLINE_EPOCH: 0, ENGINEER_RESERVE_S: 0, ENGINEER_CUTOFF_EPOCH: null,
     evoPlanSchema: nativeEvolutionPlannerSchema(true), allowInitialBenchmark: false,
-    recordPlannerInputs: true, factsInput: async () => ({NATIVE_PLANNER_SEED_CONTEXT: {
-      id: seed.id, original_archive: seed.original_archive, archive: seed.archive,
-      authority: 'prospective decision from source-bound historical evidence; no current measurement or Git reconstruction',
-      historical_archive_metric: archive.metric ?? null,
-      historical_metric_scope: 'The prospective PRIMARY_METRIC does not identify historical archive aggregates; absent archival metric identity remains unknown.',
-      facts: c.facts}})});
+    // Operational facts use the ordinary input boundary. Seed provenance and
+    // study bookkeeping stay in the returned receipt, outside model conditioning.
+    recordPlannerInputs: true, factsInput: async () => ({EVALUATION_SERVICE: evaluationServiceFacts(), ...c.facts})});
   const plan = await planner.callPlanner('initial',
     'Decide this round\'s orthogonal directions (or stop).' +
       ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.`,
