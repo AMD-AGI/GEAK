@@ -300,7 +300,7 @@ const R9700 = {
   }
   {
     ok(!/one fp8 MFMA/.test(BODY), 'R9700-reachable graph/head prompts have no hard-coded fp8 MFMA');
-    ok(/MATRIX_CORE_NAME = RDNA4_ISOLATE \? 'WMMA' : 'MFMA'/.test(BODY),
+    ok(/MATRIX_CORE_NAME = GPU_FAMILY\.matrixCore/.test(BODY),
       'matrix-core guidance is architecture-aware');
     for (const role of ['op_benchmarker.md', 'system_architect.md', 'config_tuner.md']) {
       const text = fs.readFileSync(path.join(E2E_DIR, 'roles', role), 'utf8');

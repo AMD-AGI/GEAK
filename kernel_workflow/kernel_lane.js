@@ -49,6 +49,21 @@ if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201')
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
+// ---- GPU families: keep this block identical in kernel_workflow.js, kernel_lane.js and e2e_workflow.js ----
+// Per-GPU-family policy, looked up by ISA. The Workflow sandbox has no import, so each workflow carries
+// a copy (kernel_workflow/scripts/test_gpu_family_table.js keeps them identical). An ISA no row
+// matches gets GPU_FAMILY_DEFAULT, the Instinct (CDNA) policy. Each workflow reads the fields it needs.
+//   name        how the bake-off Discover prompt names an isolated family (gfx1201 keeps
+//               upstream's 'R9700' label)
+//   isolate     withhold the MI-series-calibrated inputs (perf_knowledge cards, expert skills, learned
+//               KB, warm start, tuning skillset); the in-tree guide is the hardware reference
+//   matrixCore  the matrix ISA the prompts name
+const GPU_FAMILIES = [
+  { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
+];
+const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
+const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
+// ---- end GPU families ----
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -238,7 +253,7 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
 // Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
-let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201';
+let SKILLS_ISOLATE = gpuFamily(EXPECTED_GFX).isolate;
 
 // --- Deep Research Agent (DRA) -------------------------------------------------------------------
 // OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
@@ -966,8 +981,8 @@ const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
   : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
-const RDNA4_ISOLATE = GFX === 'gfx1201';
-if (RDNA4_ISOLATE) {
+const GPU_FAMILY = gpuFamily(GFX);
+if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
   USE_EXPERT_SKILLS = false;
@@ -1953,8 +1968,8 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimar
         'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
           SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
-          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
-          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
+          CURATION_ISOLATE: GPU_FAMILY.isolate ? 'true' : 'false',
+          REQUIRED_PLATFORMS: GPU_FAMILY.isolate ? [GFX] : [],
           WINNER: {
             kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
             device_target: DEVICE_TARGET, physical_cu_count: PHYSICAL_CU_COUNT,

@@ -277,8 +277,7 @@ function mustInclude(hay, needle, msg) {
   const dispatcher = fs.readFileSync(path.join(wfDir, 'kernel_workflow.js'), 'utf8');
   mustInclude(dispatcher, 'expected_gfx: LANE_GFX');
   mustInclude(dispatcher, 'expected_target: LANE_TARGET');
-  mustInclude(dispatcher, 'RDNA4_ISOLATE');
-  mustInclude(dispatcher, 'R9700 / gfx1201 ISOLATION');
+  mustInclude(dispatcher, 'gpuFamily(DETECTED_GFX).isolate');
 
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   mustInclude(e2e, 'E2E is vLLM-only');

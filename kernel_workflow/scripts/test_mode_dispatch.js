@@ -35,7 +35,7 @@ const ok = (cond, msg, detail) => {
 // returns; `stubs.lane` maps a lane's target_language to its final_speedup.
 function build(argsObj, stubs) {
   const s = stubs || {};
-  const trace = { phases: [], logs: [], lanes: [], workflowCalls: [], agentLabels: [] };
+  const trace = { phases: [], logs: [], lanes: [], workflowCalls: [], agentLabels: [], prompts: [] };
   const g = {
     args: argsObj,
     phase: (t) => trace.phases.push(t),
@@ -49,6 +49,7 @@ function build(argsObj, stubs) {
     agent: async (p, o) => {
       const label = (o && o.label) || '';
       trace.agentLabels.push(label);
+      trace.prompts.push({ label, prompt: p });
       return s.agent ? s.agent(label) : null;
     },
     parallel: async (thunks) => Promise.all(thunks.map((t) => t().catch(() => null))),
@@ -368,6 +369,8 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       'auto-detected bakeoff forwards exact structured product identity');
     ok(lane && lane.args.use_expert_skills === 'false',
       'auto-detected gfx1201 isolates before Discover and lane dispatch');
+    const discover = trace.prompts.find((e) => e.label === 'op_benchmarker:discover');
+    ok(discover && discover.prompt.includes('R9700 / gfx1201 ISOLATION:'), 'Discover names the gfx1201 isolation');
   }
 
   console.log('\n# M. an unvalidated ISA (gfx1200) is rejected before Discover');
