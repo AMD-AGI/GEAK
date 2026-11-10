@@ -311,9 +311,8 @@ def read_seed(seed_ref):
         relative = ref["path"][len(prefix):]
         require(relative not in task_paths, "duplicate_task_reference")
         task_paths.add(relative)
-    require({"meta.json", "case_manifest.json"} <= task_paths
-            and any(path.startswith("kernel_src/") for path in task_paths),
-            "required_task_closure_missing")
+    # Bind the declared files without imposing one task layout. This is a
+    # decision context, not certification of an executable replay dependency closure.
     for ref in seed["source_refs"]:
         reader.read(ref, source=True)
     for ref in seed["task_files"]:

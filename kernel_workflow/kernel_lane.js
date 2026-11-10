@@ -42,13 +42,15 @@ if (NATIVE_PLANNER_SEED) {
     'settlement_deadline_epoch', 'wait_for_process_settlement', 'shared_kb', 'global_kb',
     'e2e_feedback', 'harness_addendum', 'incremental_analyze', 'apply_to_original',
     'external_measurement_command', 'external_result_command', 'external_final_measurement_command',
-    'external_final_result_command', 'objective', 'op_spec', 'budget', 'eval_dir',
+    'external_final_result_command', 'op_spec', 'budget', 'eval_dir',
     'dra_enabled', 'dra_blindspot', 'dra_max_blindspots', 'dra_max_questions']
     .find(key => Object.hasOwn(A, key));
   if (conflict || (A.mode != null && A.mode !== 'optimize')
       || (A.optimizer != null && A.optimizer !== 'evo')
       || (A.warm_start != null && !['off', 'false', 'none'].includes(String(A.warm_start))))
     throw new Error(`native planner seed conflicts with lifecycle configuration: ${conflict || 'mode'}`);
+  if (Object.hasOwn(A, 'objective') && A.objective?.kind !== 'external_primary')
+    throw new Error('native planner seed objective must be supported external_primary metadata');
   if (!Number.isSafeInteger(A.agent_timeout_ms) || A.agent_timeout_ms <= 0
       || !Number.isSafeInteger(A.agent_retries) || A.agent_retries < 1
       || !Number.isSafeInteger(A.native_planner_deadline_epoch) || A.native_planner_deadline_epoch <= 0
@@ -317,7 +319,7 @@ if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 
 }
 const externalArgv = (value) => Array.isArray(value) && value.length
   && value.every(v => typeof v === 'string' && v) ? value : null;
-if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+if (EXTERNAL_OBJECTIVE && !NATIVE_PLANNER_SEED && (!externalArgv(A.external_result_command)
     || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
   throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
 }
@@ -339,7 +341,8 @@ const finalMeasurementArgv = () => [
   ...(frozenFinalEvaluation ? ['--candidate-id', frozenFinalEvaluation.candidate_id,
     '--evaluation-id', frozenFinalEvaluation.evaluation_id] : []),
 ];
-const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
+// A seeded planner receives objective metadata, without an executable measurement assignment.
+const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE && !NATIVE_PLANNER_SEED ? `
 External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
 ${final ? `The workflow host has launched the final evaluation using ${JSON.stringify(finalMeasurementArgv())}.
 Review its retained evidence for ${JSON.stringify(frozenFinalEvaluation)}; do not launch another evaluation.

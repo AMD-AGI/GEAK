@@ -219,6 +219,38 @@ async function main() {
       assert.equal(h.rt.state.schemaFails, 0);
     });
 
+    await test('generic task layout retains external objective without executing measurements', async () => {
+      const f = fixture(root);
+      const objective = {kind: 'external_primary', primary_regime: 'fixture_full_region_weighted_time'};
+      fs.mkdirSync(path.join(f.task, 'source'));
+      const source = path.join(f.task, 'source/kernel.py');
+      fs.renameSync(f.source, source);
+      fs.rmSync(path.join(f.task, 'kernel_src'), {recursive: true});
+      fs.rmSync(path.join(f.task, 'meta.json'));
+      fs.rmSync(path.join(f.task, 'case_manifest.json'));
+      const descriptor = writeJSON(path.join(f.task, 'task.json'), {objective, source_paths: ['source/kernel.py']});
+      f.seed.task_files = [descriptor, ref(source)];
+      const h = harness(f, {args: {objective, workload: undefined, case_measurement_view: undefined}});
+      const result = await h.run();
+      assert.equal(result.status, 'resolved');
+      assert.deepEqual(result.constructed_planner_call.inputs.PRIMARY_METRIC, objective);
+      assert.equal(result.constructed_planner_call.inputs.EVOLUTION_ENTRIES[0].case_evidence.metric, null);
+      assert.equal(result.continuation_materialization_qualified, false);
+      assert.equal(result.source_closure_rechecked, true);
+      assert.equal(h.hostCalls.length, 2, 'only pre/post seed readers execute');
+      assert.equal(h.agentCalls.length, 1);
+      assert.deepEqual(h.phases, []);
+      assert(!result.constructed_planner_call.prompt.includes('Use the existing admitted owner command'));
+      assert(!result.constructed_planner_call.prompt.includes('One evaluation runs the'));
+      for (const command of ['external_measurement_command', 'external_result_command',
+        'external_final_measurement_command', 'external_final_result_command']) {
+        const rejected = harness(f, {args: {objective, [command]: ['must-not-run']}});
+        await assert.rejects(rejected.run(), /conflicts with lifecycle/);
+        assert.equal(rejected.hostCalls.length, 0);
+        assert.equal(rejected.agentCalls.length, 0);
+      }
+    });
+
     await test('early conflicts and invalid references do not dispatch', async () => {
       for (const args of [{first_plan_ref: {}}, {prepared_original_ref: {}}, {state_dir: '/resume'},
         {population_lineage: {}}, {prepare_only: false}, {mode: 'author'}, {optimizer: 'greedy'},

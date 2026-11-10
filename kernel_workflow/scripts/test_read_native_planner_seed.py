@@ -193,8 +193,8 @@ class NativePlannerSeedTests(unittest.TestCase):
 
     def test_rejects_task_closure_missing_duplicate_or_escape(self):
         task_files = copy.deepcopy(self.fixture.seed["task_files"])
-        self.fixture.seed["task_files"] = task_files[:-1]
-        self.rejected("required_task_closure_missing")
+        self.fixture.seed["task_files"] = []
+        self.rejected("invalid_seed_ref_lists")
         self.fixture.seed["task_files"] = task_files + [task_files[0]]
         self.rejected("duplicate_task_reference")
         sibling = self.fixture.root / "task-sibling"

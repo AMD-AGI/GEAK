@@ -217,7 +217,7 @@ if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 
 }
 const externalArgv = (value) => Array.isArray(value) && value.length
   && value.every(v => typeof v === 'string' && v) ? value : null;
-if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+if (EXTERNAL_OBJECTIVE && !NATIVE_PLANNER_SEED && (!externalArgv(A.external_result_command)
     || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
   throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
 }
@@ -239,7 +239,8 @@ const finalMeasurementArgv = () => [
   ...(frozenFinalEvaluation ? ['--candidate-id', frozenFinalEvaluation.candidate_id,
     '--evaluation-id', frozenFinalEvaluation.evaluation_id] : []),
 ];
-const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
+// A seeded planner receives objective metadata, without an executable measurement assignment.
+const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE && !NATIVE_PLANNER_SEED ? `
 External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
 ${final ? `The workflow host has launched the final evaluation using ${JSON.stringify(finalMeasurementArgv())}.
 Review its retained evidence for ${JSON.stringify(frozenFinalEvaluation)}; do not launch another evaluation.
