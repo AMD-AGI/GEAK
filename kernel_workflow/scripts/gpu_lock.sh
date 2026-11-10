@@ -268,7 +268,9 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        # Preserve the default; a caller can bind a different wait within its outer deadline.
+        _single_wait_s="${GEAK_GPU_LOCK_WAIT:-1200}"
+        flock -x -w "$_single_wait_s" 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after ${_single_wait_s}s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
