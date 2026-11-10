@@ -1,13 +1,23 @@
 # GEAK-evo
 
-GEAK-evo is an agentic GPU optimization system. It profiles a kernel or serving
-workload, develops implementation alternatives, verifies them independently,
-and delivers the tested source through the existing GEAK interface.
+GEAK-evo is an **agentic evolutionary optimization system built on GEAK**. It
+supports sustained development of multiple optimization approaches, retaining
+candidate programs and their measurements in an archive. Agents can deepen a
+promising lineage, revisit earlier alternatives, and perform crossovers by
+combining contributions from different programs. Configured parallel lineages
+can exchange verified checkpoints through migration. Together, these operations
+form a branching evolutionary history with explicit parent and donor relationships.
 
-EVO is the default optimizer for standalone kernels and for kernel lanes started
-by the serving workflow or Hyperloom. Its planner can develop retained programs
-and combine ideas from their source and measurement evidence. Explicit
-`optimizer: "greedy"` selects the original search policy.
+GEAK's greedy search is the incumbent-focused policy within this generalized
+engineering workflow. EVO preserves GEAK's planner, specialist and deep engineers,
+tools, knowledge, and iterative implementation, profiling and measurement loops.
+Its planning policy balances continued development of the best program with
+exploration and development of other promising approaches.
+
+Engineering and verification are pipelined across directions within the assigned
+model and GPU resources. The [sustained-search configuration](docs/evo/configuration.md)
+controls direction budgets, stopping conditions and time allowances so runs can
+budget for reasoning and implementation as well as evaluation and delivery.
 
 ## Get started
 
@@ -68,9 +78,10 @@ tasks. Fixed-load serving also has an outer strategy, configuration and reprofil
 loop. Both use the same kernel optimizer and serving acceptance contract; see the
 [serving workflow](e2e_workflow/README.md) for their phase routing.
 
-EVO starts retained-candidate development after the first stalled round by default.
-Budgets and optional evidence/development controls are documented in the
-[run guide](docs/evo/stock-workflow.md). Use a fresh evaluation directory for each run.
+EVO is the default optimizer; explicit `optimizer: "greedy"` selects GEAK's original
+search policy. EVO starts retained-candidate development after the first stalled
+round by default. Sustained searches and checkpoint migration have explicit
+[configuration](docs/evo/configuration.md); use a fresh evaluation directory for each run.
 
 ## Code layout
 

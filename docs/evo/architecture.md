@@ -1,9 +1,12 @@
 # GEAK-evo architecture
 
-GEAK-evo retains alternative candidates inside GEAK's kernel workflow. It uses the same
-setup, planner, engineer roles, tools, verifier, integration step, and final
-validation as GEAK. EVO is the default; `optimizer: "greedy"` selects the original policy. See the
-[run guide](stock-workflow.md).
+GEAK-evo is an agentic evolutionary optimization system built on GEAK. It extends
+the shared engineering workflow with an archive of candidate programs, sustained
+development from selected parents, deliberate crossover using donor programs,
+and checkpoint migration between configured lineages. GEAK's greedy policy
+develops the incumbent through the same setup, planner, specialist and deep
+engineers, tools, verifier, integration step and final validation. EVO is the
+default; see the [run guide](stock-workflow.md).
 
 See the [runtime configuration reference](configuration.md) for explicit
 optimizer settings, and the [workflow comparison](geak-vs-evo.md) for diagrams
@@ -39,6 +42,38 @@ return to those candidates. The best validated candidate is tracked separately;
 retention alone does not make a candidate eligible for promotion. The shared
 promotion and final-validation rules still apply.
 
+## Branching development, crossover and migration
+
+Parent links form the branches of an evolutionary history. Donor links connect
+those branches when an engineer investigates a crossover. The planner can choose
+an earlier implementation for its computational organization or useful case-level
+behavior, even when another program has the best aggregate score. It directs
+continued development of the incumbent alongside justified alternatives; the
+planner chooses breadth and depth from the available evidence and budget.
+
+With `population_lineage` and `evolution_start: "search_start"`, independently
+launched lineages publish committed checkpoints and import compatible checkpoints
+from explicitly named peers. Imports enter the local archive as selectable source
+and evidence, while the lineage keeps its own incumbent and budget. Engineers can
+develop an imported parent or use it as a donor. Imported source must satisfy the
+existing local verification and promotion rules before replacing the incumbent.
+See the [migration configuration](configuration.md#checkpoint-migration).
+
+## Preserve engineering time
+
+Both policies use the same role allowances and engineering/verification pipeline.
+A direction can enter verification while another engineer continues developing;
+integration follows the completed pipeline. Deep engineers keep their dedicated
+round and multi-iteration rewrite loop. EVO adds source materialization, retention
+and selection to this machinery; those operations also consume time.
+
+Use the [search controls](configuration.md#sustained-development-and-time-allocation)
+to allow several rounds of development, size the engineering fan-out to the
+evaluation pool, and reserve enough time to verify and deliver candidates. The
+planner's exploration/development balance is a policy decision, not an enforced
+tree shape or a guaranteed fraction of wall time spent reasoning. GPU locks,
+model concurrency and role deadlines still bound the work.
+
 ## Source map
 
 | Source | Responsibility |
@@ -57,10 +92,12 @@ it is off by default. See [archive fields](archive.md).
 
 ## Scope
 
-This implementation provides source retention and a way to select and develop
-earlier work within one run. It has no separate population service, semantic
-cell allocation, or cross-run archive resume protocol. Deep engineers run in dedicated rounds; slower candidates may be verified and retained.
-These choices can change the cost of a search.
+Each run owns its archive; configured peer lineages exchange committed checkpoints
+through a shared directory. The caller launches those lineages and assigns their
+resources. There is no separate population service, automatic branch quota,
+semantic cell allocation, or cross-run archive resume protocol. Migration is
+opt-in; the default first-stall continuation uses a local archive rooted at the
+incumbent reached before the stall.
 
 When first-stall initialization succeeds, the lane result includes the existing
 `evolution_start` record: `after_round`, the current `cumulative` score, the archive

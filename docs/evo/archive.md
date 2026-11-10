@@ -62,9 +62,12 @@ budget. Otherwise it supplies no partial case table: it reports the omission,
 row counts and exact archive entries to read. This option defaults to false and
 does not change stored archive rows or promotion rules.
 
-The archive is a per-run record, without a separate exporter, semantic diversity
-index, or cross-run resume protocol. An ancestry link records a selection; useful
-contribution survival and later improvement require inspection and measurement.
+The archive is a per-run record. Configured population lineages can publish
+committed checkpoints and import peer source/evidence into it; see
+[checkpoint migration](configuration.md#checkpoint-migration). This exchange is
+separate from resuming a terminated archive, for which there is no protocol.
+An ancestry link records a selection; useful contribution survival and later
+improvement require inspection and measurement.
 
 With `evolution_case_evidence_view: true`, each exposed planning entry and current
 round-memory entry also carries `case_evidence`: its archive/patch references,
@@ -86,8 +89,8 @@ arithmetic metrics and verifier variance/graph-safety notes. The recent-twelve-p
 best entry selection, full-archive access, eligibility and delivery rules are unchanged.
 Both options are supported by the direct lane, optimize/author pass-through, and
 the E2E handoff's existing nested-lane argument mapping. Values are forwarded
-without coercion; only boolean `true` enables a view. Bakeoff remains unsupported
-for these options: its explicit mapping also does not forward the EVO selector.
+without coercion; only boolean `true` enables a view. Bakeoff also forwards these
+evidence options and the EVO selector into its language lanes.
 Forwarding establishes configuration support, not actual evidence reads or gains.
 
 ## Native observations and reported rows
