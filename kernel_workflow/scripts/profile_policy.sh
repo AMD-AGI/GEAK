@@ -38,7 +38,7 @@ profile_detect_arch() {
 
 profiler_priority_for_arch() {
     case "${1:-}" in
-        gfx1201) printf '%s\n' "rocprofv3 rocprof metrix rocprof-compute omniperf" ;;
+        gfx1201|gfx115[0-9]) printf '%s\n' "rocprofv3 rocprof metrix rocprof-compute omniperf" ;;
         *)       printf '%s\n' "rocprof-compute omniperf rocprofv3 rocprof metrix" ;;
     esac
 }

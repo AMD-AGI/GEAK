@@ -42,7 +42,7 @@ When you see that block, **do not just accept the degraded result** — work thi
    tool and why (e.g. "rocprofv3 rejected `--output-format`; fell back to rocprof --stats"). Never let a
    degrade pass unrecorded.
 
-Priority / degrade order is architecture-specific: gfx1201 uses
+Priority / degrade order is architecture-specific: gfx1201 and gfx115x use
 `rocprofv3 → rocprof → metrix → rocprof-compute → omniperf → benchmark-only`; CDNA/other devices use
 `rocprof-compute → omniperf → rocprofv3 → rocprof → metrix → benchmark-only`.
 Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMUP_RUNS`,
