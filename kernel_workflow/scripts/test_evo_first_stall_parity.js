@@ -66,13 +66,14 @@ async function runMode(mode, scenario, template) {
   fs.mkdirSync(evalDir);
   command('git', ['clone', '-q', task, canonical]);
   // Clock: deterministic fake time. Runtime semantics: initial process deadline = outer - cleanup.
-  const T0 = 1000000;
+  const T0 = scenario.nativeRuntime ? Math.floor(Date.now() / 1000) : 1000000;
   let now = T0;
   const args0 = JSON.parse(JSON.stringify(template));
   const OUTER = T0 + args0.preparation_allowance_s + args0.search_duration_s + args0.search_reserve_s + 600;
   let processDeadline = OUTER - (args0.final_cleanup_reserve_s || 0);
   const setProcessDeadline = (epoch) => {
     if (!Number.isFinite(epoch) || epoch > OUTER - (args0.final_cleanup_reserve_s || 0)) throw new Error('bad deadline');
+    if (scenario.onDeadline) scenario.onDeadline(epoch, {now, processDeadline});
     processDeadline = epoch;
   };
   setProcessDeadline.secondsLeft = () => processDeadline - now;
@@ -99,8 +100,11 @@ async function runMode(mode, scenario, template) {
     if (label === 'benchmark_engineer') return {commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
       baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, correctness_cmd: 'c', benchmark_cmd: 'b',
       reliable: true, ...(scenario.bench || {})};
-    if (label === 'profile_engineer:baseline') return Object.hasOwn(scenario, 'profile') ? scenario.profile
-      : {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
+    if (label === 'profile_engineer:baseline') {
+      fs.writeFileSync(evalDir + '/p0.md', 'fixture profile before engineering\n');
+      return Object.hasOwn(scenario, 'profile') ? scenario.profile
+        : {bottleneck: 'memory', top_opportunities: [], summary_path: evalDir + '/p0.md'};
+    }
     if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
       const key = label.split(' ')[1];
       if (scenario.failPlan === key) throw new Error('fixture planner failure');
@@ -122,6 +126,7 @@ async function runMode(mode, scenario, template) {
       }
       fs.writeFileSync(path.join(ws, 'k.py'), `A = ${JSON.stringify(id)}\nB = ${spec.speed}\n`);
       fs.writeFileSync(path.join(out, 'best_patch.diff'), git(ws, 'diff', '--binary', anchor, '--', '.'));
+      if (scenario.beforeEngineerReturn) await scenario.beforeEngineerReturn(id, {ws, out, rec});
       return spec.engineer || engOk(spec.speed);
     }
     if (label.startsWith('verify ')) {
@@ -148,8 +153,11 @@ async function runMode(mode, scenario, template) {
       command('bash', ['-e', '-c', block[1]]);
       return {committed: true, current_best_diff: evalDir + '/current_best.diff'};
     }
-    if (label.startsWith('reprofile ')) return {bottleneck: 'compute', top_opportunities: [],
-      summary_path: `${evalDir}/p_${label.slice(10)}.md`, shift_note: 'fixture shift'};
+    if (label.startsWith('reprofile ')) {
+      const file = `${evalDir}/p_${label.slice(10)}.md`;
+      fs.writeFileSync(file, 'fixture profile after ' + label + '\n');
+      return {bottleneck: 'compute', top_opportunities: [], summary_path: file, shift_note: 'fixture shift'};
+    }
     if (label.startsWith('tech_lead:memory ')) return {insights: ['fixture insight'],
       ledger: [{direction: label.slice(17), verdict: 'partial'}], bottleneck_now: 'compute', suggest_next: 'fixture next'};
     if (label.startsWith('storage:reclaim')) return {ok: true, note: 'reclaimed'};
@@ -171,8 +179,10 @@ async function runMode(mode, scenario, template) {
     rec.calls.push({seq: rec.calls.length, label, phase: o.phase || '', at: now - T0,
       process_deadline_minus_now: processDeadline - now,
       prompt: norm(dispatched), prompt_sha256: sha(norm(dispatched)), role_prompt: norm(p)});
+    if (scenario.onCall) await scenario.onCall(label, p, {rec, root, evalDir, canonical, args, command, git, field});
     const r = await answer(label, p, o);
-    now += step(label);
+    if (scenario.onResult) await scenario.onResult(label, r, {rec, root, evalDir, canonical, args, setNow: value => {now = value;}, processDeadline});
+    if (!scenario.nativeRuntime) now += step(label);
     return r === undefined ? null : JSON.parse(JSON.stringify(r));
   };
   Object.defineProperty(agent, 'processTimeoutSupported', {value: true});
@@ -194,15 +204,47 @@ async function runMode(mode, scenario, template) {
     }
     return prev;
   }));
-  const body = fs.readFileSync(LANE, 'utf8').replace(/^[ \t]*export\s+(?=(const|let|var|function|class|async|default)\b)/gm, '');
+  const source = scenario.laneSource || fs.readFileSync(LANE, 'utf8');
+  const body = source.replace(/^[ \t]*export\s+(?=(const|let|var|function|class|async|default)\b)/gm, '');
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
     'setTimeout', 'clearTimeout', 'setProcessDeadline', body);
   let result = null, error = null;
   try {
-    result = await fn(agent, parallel, pipeline, t => rec.phases.push(t), m => rec.logs.push(norm(m)),
-      async () => { throw new Error('no nesting'); }, args, {total: null, spent: () => 0, remaining: () => Infinity},
-      runProcess, setTimeout, clearTimeout, setProcessDeadline);
+    if (scenario.nativeRuntime) {
+      const {createRuntime} = await import(path.join(ROOT, 'interface/runtime/engine/run_workflow.mjs'));
+      const complete = (schema, value) => {
+        if (schema.type === 'object') {
+          const out = {...value};
+          for (const key of schema.required || []) if (out[key] === undefined)
+            out[key] = complete(schema.properties[key], undefined);
+          return out;
+        }
+        if (value !== undefined) return value;
+        if (schema.enum) return schema.enum[0];
+        return schema.type === 'array' ? [] : schema.type === 'boolean' ? false
+          : schema.type === 'number' || schema.type === 'integer' ? 0 : '';
+      };
+      const rt = createRuntime({concurrency: scenario.concurrency || 8, schemaRetries: 0,
+        log: message => rec.logs.push(norm(message)), backend: {name: 'codex', async runAgent({prompt, label}) {
+          const match = prompt.match(/The JSON MUST validate against this JSON Schema:\n\n```json\n([\s\S]*?)\n```/);
+          const schema = match ? JSON.parse(match[1]) : null;
+          const value = await agent(prompt, {label});
+          return {text: JSON.stringify(schema ? complete(schema, value) : value)};
+        }}});
+      const fixture = path.join(root, 'native_lane.js');
+      fs.writeFileSync(fixture, source);
+      const keys = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'];
+      const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+      for (const key of keys) process.env[key] = ENV[key];
+      try { result = await rt.runScript(fixture, args, 0); }
+      finally { for (const key of keys) saved[key] === undefined ? delete process.env[key] : process.env[key] = saved[key]; }
+      rec.runtime_state = rt.state;
+    } else {
+      result = await fn(agent, parallel, pipeline, t => rec.phases.push(t), m => rec.logs.push(norm(m)),
+        async () => { throw new Error('no nesting'); }, args, {total: null, spent: () => 0, remaining: () => Infinity},
+        runProcess, setTimeout, clearTimeout, setProcessDeadline);
+    }
   } catch (e) { error = String(e && e.stack || e); }
   rec.result = result ? JSON.parse(norm(JSON.stringify({...result, llm_timeline: undefined}))) : null;
   rec.error = error ? norm(error) : null;
@@ -210,6 +252,9 @@ async function runMode(mode, scenario, template) {
     ? JSON.parse(norm(fs.readFileSync(path.join(evalDir, name, 'archive.json'), 'utf8'))) : null;
   rec.archive = readArchive('evolution');
   rec.continuation_archive = readArchive('evolution_continuation');
+  const overlapFile = path.join(evalDir, 'bounded_overlap.json');
+  rec.bounded_overlap = fs.existsSync(overlapFile) ? JSON.parse(norm(fs.readFileSync(overlapFile, 'utf8'))) : null;
+  rec.fixture_root = root;
   assert.ok(!fs.readdirSync(evalDir).some(n => /_inputs\.json$/.test(n)), 'observer writes no EVAL input artifact');
   return rec;
 }
@@ -261,7 +306,7 @@ const SCENARIOS = [
     verify: {r1_d0: 1.30, r2_d0: 1.29, r4_d0: 1.45}},
 ];
 const FALLBACK = 'Development fallback';
-(async () => {
+if (require.main === module) (async () => {
   for (const sc of SCENARIOS) {
     const g = await runMode('greedy', sc, TEMPLATE), e = await runMode('evo', sc, TEMPLATE);
     assert.equal(g.error, null, `${sc.name} greedy: ${g.error}`);
@@ -485,3 +530,5 @@ const FALLBACK = 'Development fallback';
   fs.rmSync(OUT, {recursive: true, force: true});
   console.log('PASS: EVO stays byte-identical to greedy until its first non-improving round, then evolves from that incumbent. CPU fixture only.');
 })().catch(error => { console.error(error); process.exit(1); });
+
+module.exports = {runMode, TEMPLATE, SCENARIOS, d, OUT, field};

@@ -2226,7 +2226,15 @@ correctness check; only report committed=true if it still passes. Return JSON {c
 async function greedyOptimize(start, evolutionPlan = {}, population = null) {
 // EVO: rounds run the stock greedy path (evo === null) until a round neither improves nor advances;
 // evolutionPlan.start then roots an archive at the incumbent and every later round develops from it.
-let evo = null, evolution = evolutionPlan.archive || null, startEvolution = evolutionPlan.start || null;
+let deliveryEvo = null, evolution = evolutionPlan.archive || null, startEvolution = evolutionPlan.start || null;
+if (A.evolution_bounded_overlap != null && typeof A.evolution_bounded_overlap !== 'boolean')
+  throw new Error('evolution_bounded_overlap must be a boolean');
+const overlap = A.evolution_bounded_overlap === true;
+if (overlap && (OPTIMIZER !== 'evo' || !PROCESS_BOUNDED || EXTERNAL_OBJECTIVE || !evolution))
+  throw new Error('evolution_bounded_overlap requires process-bounded native EVO with a search-start fixed-base archive');
+if (overlap && (STATE_DIR || SHARED_KB || GLOBAL_KB || E2E_FEEDBACK || HARNESS_ADDENDUM))
+  throw new Error('evolution_bounded_overlap does not yet support mutable deep-mode state/feedback hooks');
+
 const evoPlanSchema = evolution || startEvolution ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
@@ -2262,12 +2270,44 @@ const integrationScores = best => ({
     verified_weighted: best?.weighted, verified_geomean: best?.geomean})),
   claimed_geomean: handoffScore(best?.geomean), claimed_weighted: handoffScore(best?.weighted),
 });
+const citations = [];
+let dispatched = 0, rounds = 0, noImprove = 0, roundsCommitted = 0;
+let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
+await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
+  ? 'resume_unknown' : 'initial', 0, finalWinner);
+if (population) await population.publishCheckpoint(0, finalWinner || bench,
+  await population.checkpointTree(null, 0));
+const searchTiming = beginSearchWindow();
+if (searchTiming) history.search_timing = searchTiming;
+const overlapGuard = `${EVAL_DIR}/.geak_overlap_active`;
+if (overlap && await hostRun('sh', ['-c', 'set -Ce; cat > "$1"', 'sh', overlapGuard],
+  {input: 'Active bounded-overlap consumers: only the host removes this after all issued batches settle.\n'}) === null)
+  throw new Error('bounded-overlap dependency guard unavailable');
+// beginBatch owns the existing plan and per-direction pipeline. closeBatch is the
+// same ordered verification/integration/promotion/memory path; there is no second optimizer.
+const overlapEvents = [];
+const noteOverlap = (round, kind, fields = {}) => {
+  if (!overlap) return;
+  const event = {round, kind, ...fields};
+  overlapEvents.push(event);
+  log(`[bounded_overlap] ${JSON.stringify(event)}`);
+};
+const latch = () => {
+  let resolve, result = null;
+  const promise = new Promise(done => { resolve = done; });
+  return {promise, get result() { return result; }, settle(value) {
+    if (result === null) { result = value; resolve(value); }
+  }};
+};
+let pending = null, stopIssuing = false, deferredReclaim = null;
+async function beginBatch(predecessor = null, snapshotReady = null) {
+  const round = rounds + 1;
+  const evo = evolution;
 // The planner sees the archive, its schema fields and the retained-approach policy once the archive
 // holds retained source; before that its round plans from the same inputs as greedy.
-const archiveHasSource = () => !!evo && evo.entries.some(row => row.patch_ref && !row.retention_error);
-const evolutionInstructions = () => archiveHasSource()
+const archiveHasSource = (live = false) => !!evo && (live ? evo.entries : view?.entries || evo.entries).some(row => row.patch_ref && !row.retention_error);
+const evolutionInstructions = (live = false) => archiveHasSource(live)
   ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
-const citations = [];
 const contextRef = (id, outDir) => {
   if (evo) return {path: evo.path, entry_id: id, field: 'reported_context'};
   const retained = retainedSources.find(row => row.id === id);
@@ -2277,8 +2317,8 @@ const contextRef = (id, outDir) => {
 };
 const measurementRef = winner => {
   const id = winner?.id;
-  if (id && evo?.entries.some(row => row.id === id && row.verifier)) {
-    return {path: evo.path, entry_id: id, field: 'verifier'};
+  if (id && (view?.entries || evo?.entries)?.some(row => row.id === id && row.verifier)) {
+    return {path: view?.path || evo.path, entry_id: id, field: 'verifier'};
   }
   const retained = id && retainedSources.find(row => row.id === id && row.d && !row.archived && row.ver
     && row.source && !row.retention_error);
@@ -2287,29 +2327,21 @@ const measurementRef = winner => {
       evidence_refs: winner?.evidence_context?.evidence_refs
         || winner?.reported_context?.verifier?.evidence_context?.evidence_refs || null};
 };
-let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
-let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
-await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
-  ? 'resume_unknown' : 'initial', 0, finalWinner);
-if (population) await population.publishCheckpoint(0, finalWinner || bench,
-  await population.checkpointTree(null, 0));
-const searchTiming = beginSearchWindow();
-if (searchTiming) history.search_timing = searchTiming;
-while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
-  let left = await secondsLeft(`pre-r${round + 1}`);
+  let left = await secondsLeft(`pre-r${round}`);
   if (left <= 0) {
     deadlineHit = true;
-    log(`WALL-CLOCK DEADLINE reached after ${round} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
+    log(`WALL-CLOCK DEADLINE reached after ${rounds} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
         `starting no further rounds; going straight to report + validation.`);
-    break;
+    return null;
   }
   if (engineerCutoffReached(left)) {
     deadlineHit = true;
-    log(`ENGINEER CUTOFF reached after ${round} round(s): no new round starts; delivery keeps the search cutoff.`);
-    break;
+    log(`ENGINEER CUTOFF reached after ${rounds} round(s): no new round starts; delivery keeps the search cutoff.`);
+    return null;
   }
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
 
@@ -2317,8 +2349,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // Peer checkpoints share the lineage's initial base, so they enter only an archive rooted there.
   if (population && evolution === population) await population.refreshPeers();
 
-  round++;
-  evo = evolution;
+  rounds = round;
+  deliveryEvo = evo;
+  const view = overlap ? await evo.snapshotBatch(round) : null;
   // The first round that differs from greedy is this round's plan call.
   if (evo && history.evolution_start && history.evolution_start.first_round == null) {
     history.evolution_start.first_round = round;
@@ -2329,14 +2362,47 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // Retained delivery needs each GEAK source's actual base; EVO sources share the archive base.
   const roundBase = !EXTERNAL_OBJECTIVE && !evo ? await headCommit() : null;
 
+  const planning = overlap ? JSON.parse(JSON.stringify({cumulative, bestPerCase, finalWinner,
+    profileSummary, history})) : null;
+  if (planning) planning.history.evolution_archive = view.path;
+  if (planning && !finalWinner && bestPerCase === BASELINE_PER_CASE) planning.bestPerCase = BASELINE_PER_CASE;
+  // Reprofile may replace this file. Pin the actual known profile artifact as well as its JSON.
+  if (planning?.profileSummary?.summary_path) {
+    const source = planning.profileSummary.summary_path;
+    const target = `${EVAL_DIR}/evolution/batch_${round}_profile`;
+    const copy = await verificationCopy(source, target);
+    if (copy && await hostRun('chmod', ['a-w', '--', target]) !== null) {
+      planning.profileSummary.summary_path = target;
+      planning.profile_ref = copy;
+    } else {
+      // A missing optional profile is unknown, not a new optimizer admission gate.
+      // Keep reported JSON, but never point successor tools at the mutable file.
+      delete planning.profileSummary.summary_path;
+      planning.profileSummary.summary_snapshot_unavailable = true;
+      planning.profile_ref = {unavailable: 'profile file could not be captured', reported_path: source};
+    }
+  }
+  if (planning) {
+    const path = `${EVAL_DIR}/evolution/batch_${round}_context.json`;
+    if (await hostRun('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"', 'sh', path],
+      {input: JSON.stringify({planning, archive: {path: view.path, sha256: view.sha256},
+        predecessor_round: predecessor?.round ?? null}, null, 2) + '\n'}) === null)
+      throw new Error('bounded-overlap planning snapshot unavailable');
+    noteOverlap(round, 'planning_snapshot', {path, archive: view.path, archive_sha256: view.sha256,
+      best_id: view.best_id, cumulative: planning.cumulative, predecessor_round: predecessor?.round ?? null,
+      search_cutoff_epoch: SEARCH_CUTOFF_EPOCH, engineer_cutoff_epoch: ENGINEER_CUTOFF_EPOCH});
+  }
+  snapshotReady?.settle({status: 'ready'});
   // --- (a) Plan the round (TechLead) ------------------------------------
   let caseMeasurementObservation = null;
   const planInputs = (forbidStop, facts = {}) => {
     const inputs = {
-    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative, PRIMARY_METRIC: handoffMetric,
-    BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
-    ...currentBestCaseInputs(bestPerCase, finalWinner, measurementRef(finalWinner)), HISTORY: history,
-    ...(archiveHasSource() ? {...evo.planInputs(), DEEP_COST} : {}),
+    EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: planning ? planning.cumulative : cumulative, PRIMARY_METRIC: handoffMetric,
+    BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: planning ? planning.profileSummary : profileSummary,
+    ...currentBestCaseInputs(planning ? planning.bestPerCase : bestPerCase,
+      planning ? planning.finalWinner : finalWinner, measurementRef(planning ? planning.finalWinner : finalWinner)),
+    HISTORY: planning ? planning.history : history,
+    ...(archiveHasSource() ? {...evo.planInputs(view), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
@@ -2379,7 +2445,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     if (CASE_MEASUREMENT_VIEW !== undefined) {
       try {
         const visibleEntries = inputs.EVOLUTION_ENTRIES;
-        const initialOriginal = !finalWinner && bestPerCase === BASELINE_PER_CASE;
+        const initialOriginal = !(planning ? planning.finalWinner : finalWinner)
+          && (planning ? planning.bestPerCase : bestPerCase) === BASELINE_PER_CASE;
         const rawCases = value => value ? {native_primary: primSpeedup(value),
           per_case: value.per_case ?? null, evidence_context: compactCaseMeasurementContext(value)} : null;
         const decisionView = {
@@ -2395,12 +2462,13 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
           authority: 'constructed planner case inputs and retained reported measurements; not proof of model reads',
           decision_view: decisionView, decision_view_bytes: contextBytes(decisionView),
           raw_current_best: {initial_original: initialOriginal,
-            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(finalWinner),
-            native_primary: initialOriginal ? null : cumulative,
-            per_case: bestPerCase, evidence_context: compactCaseMeasurementContext(finalWinner)
-              || compactCaseMeasurementContext(finalWinner?.reported_context?.verifier)},
+            source_ref: initialOriginal ? {path: `${EVAL_DIR}/baseline_timing.json`} : measurementRef(planning ? planning.finalWinner : finalWinner),
+            native_primary: initialOriginal ? null : planning ? planning.cumulative : cumulative,
+            per_case: planning ? planning.bestPerCase : bestPerCase,
+            evidence_context: compactCaseMeasurementContext(planning ? planning.finalWinner : finalWinner)
+              || compactCaseMeasurementContext((planning ? planning.finalWinner : finalWinner)?.reported_context?.verifier)},
           raw_archive_entries: Array.isArray(visibleEntries) ? visibleEntries.map(visible => {
-            const row = evo?.entries.find(entry => entry.id === visible.id);
+            const row = (view?.entries || evo?.entries)?.find(entry => entry.id === visible.id);
             return {id: visible.id, present: !!row, patch_ref: row?.patch_ref ?? null,
               engineer: rawCases(row?.engineer), verifier: rawCases(row?.verifier)};
           }) : null}));
@@ -2485,7 +2553,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   if (engineerCutoffReached(left)) {
     deadlineHit = true;   // Planning reached the engineer cutoff: dispatch nothing.
     log(`Round ${round}: the engineer cutoff was reached while planning; no engineer starts.`);
-    break;
+    return null;
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
@@ -2495,7 +2563,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
     }
-    break;
+    return null;
   }
 
   let directions = plan.directions.slice(0, remaining).map((d, i) => ({
@@ -2510,6 +2578,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
   if (deepDir) directions = [deepDir];
+  if (overlap && stopIssuing) return null;
   if (evo) {
     let allocated = 0;
     directions = directions.filter(d => {
@@ -2518,11 +2587,22 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       allocated += cost;
       return true;
     });
-    if (!directions.length) { plannerStopReason = 'budget'; break; }
-    directions = await evo.prepare(directions, round);
+    if (!directions.length) { plannerStopReason = 'budget'; return null; }
+    directions = await evo.prepare(directions, round, view);
+  }
+  if (predecessor && deepDir) {
+    noteOverlap(round, 'deep_wait', {predecessor_round: predecessor.round});
+    const prior = await predecessor.closed.promise;
+    left = await secondsLeft(`deep-r${round}`);
+    if (prior.status !== 'closed' || stopIssuing || left <= 7 || engineerCutoffReached(left)) {
+      noteOverlap(round, 'deep_not_issued', {predecessor_status: prior.status});
+      return null;
+    }
   }
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
+  noteOverlap(round, 'issued', {cost: roundCost, dispatched, predecessor_round: predecessor?.round ?? null,
+    deep: !!deepDir});
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
   // Preserve issued direction labels even when an engineer returns no result or the round hits its cutoff.
   // learned_refs here records issued references; later citation-cap accounting uses the working directions and may strip their attribution.
@@ -2564,11 +2644,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   };
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
-  const results = await pipeline(
+  const closed = latch();
+  let remainingEngineers = directions.length, resolveEngineers;
+  const engineeringSettled = new Promise(done => { resolveEngineers = done; });
+  const resultPromise = pipeline(
     directions,
     async (d) => {
+      try {
       if (evo) {
-        try { await evo.prepareWorkspace(d); }
+        try { await evo.prepareWorkspace(d, view); }
         catch (error) {
           log(`[evolution] ${d.id}: parent initialization failed: ${String(error)}`);
           await evo.record(d, {status: 'failed', notes: 'parent initialization failed'}, null, null);
@@ -2613,7 +2697,7 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
 ${!EXTERNAL_OBJECTIVE ? 'git -C ' + d.out_dir + '/workspace rev-parse HEAD > ' + d.out_dir + '/workspace_base_commit.txt\n' : ''}\`\`\`
 `;
       const facts = await deliveryFactsInput();   // after workspace preparation, at dispatch
-      return agentT(
+      return await agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
 ${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
@@ -2624,7 +2708,7 @@ Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_candidate_patch.sh 
 ${cfg({
         ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
-        ...(evoEngineer ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
+        ...(evoEngineer ? {EVOLUTION: evo.engineerContext(d, view), EVOLUTION_ARCHIVE: view?.path || evo.path} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
           'Improve the measured primary metric within the assigned budget. Work toward any supplied engineering target using the fixed-reference method in knowledge/kernel_hardware_evidence.md. ' +
@@ -2634,11 +2718,12 @@ ${cfg({
         OUTPUT_DIR: d.out_dir,
         CANONICAL: evo ? evo.base : CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
-        profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        profiling_summary: planning ? planning.profileSummary?.summary_path || ''
+          : profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
         // Common native source recovery applies before an EVO archive exists.
         ...(!EXTERNAL_OBJECTIVE && !evo ? {UNVERIFIED_SOURCE_RECOVERY: true} : {}),
-        INSIGHTS: history.insights,
+        INSIGHTS: planning ? planning.history.insights : history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
         GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
@@ -2661,9 +2746,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       await retainResult(d, eng, null, measured, evo, roundBase, retained);
       return {d, eng, patch: measured};
     });
+      } finally {
+        // Includes settled model processes, checked reports, pinned source and retention.
+        if (--remainingEngineers === 0) {
+          noteOverlap(round, 'engineering_settled');
+          resolveEngineers();
+        }
+      }
     },
 
     async (prev) => {
+      if (predecessor) {
+        const prior = await predecessor.closed.promise;
+        if (prior.status !== 'closed') return {...prev, ver: null, qualification_blocked: prior.status};
+      }
       const { d, eng } = prev;
       if (prev.initialization_failed) return {...prev, ver: null, patch: null};
       const patch = prev.patch || `${d.out_dir}/best_patch.diff`;
@@ -2685,10 +2781,23 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   );
 
+  const batch = {round, evo, deep: !!deepDir, closed, engineeringSettled, results: resultPromise,
+    close: closeBatch};
+  return batch;
+
+  async function closeBatch(quiesce = async () => {}) {
+  const results = await resultPromise;
   const clean = results.filter(Boolean);
+  let closureIncomplete = null;
+  if (predecessor && predecessor.closed.result?.status !== 'closed') {
+    history.rounds.push({round, metric: handoffMetric, status: 'predecessor_failed', improved: false,
+      cumulative, directions: directionHistory});
+    return {status: 'predecessor_failed'};
+  }
   if (evo && PROCESS_BOUNDED && await secondsLeft(`archive-r${round}`) <= 7) {
     // The pipeline has settled. Use the existing finalization allowance only to
     // retain completed work; no new engineer or GPU evaluation starts here.
+    await quiesce('deadline');
     setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
     for (const r of clean) {
       const patch = r.patch || `${r.d.out_dir}/best_patch.diff`;
@@ -2699,7 +2808,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     history.rounds.push({round, metric: handoffMetric, status: 'deadline', improved: false, cumulative,
       directions: directionHistory});
     deadlineHit = true;
-    break;
+    return {status: 'deadline'};
   }
   const isQualified = r => r.ver && (!r.verification || r.verification_status === true) &&
     (says(r.ver.status, 'verified') || (!EXTERNAL_OBJECTIVE && says(r.ver.status, 'regression') && primSpeedup(r.ver) <= 1)) &&
@@ -2745,6 +2854,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA }));
+    if (overlap && !integrate) closureIncomplete = 'integration_incomplete';
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
@@ -2908,6 +3018,8 @@ already verified source, and the host checks the resulting tree. Return JSON {co
         evidence: winner.geomean, archived: !!evo, source: evo ? null : pinned(winner.patch),
         base: evo ? evo.baseCommit : commitBase});
       let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
+      // No shared deadline may move while an issued successor can still run/capture.
+      await quiesce(atDeadline ? 'deadline_uncommitted' : 'commit_failed');
       // Search has settled. Only host recovery may use the existing Report allowance.
       if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
       const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
@@ -2923,7 +3035,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
           winner: {source: winner.source, ...winnerScores(winner), patch: winner.patch}, recovery});
         plannerStopReason = status;
         log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
-        break;
+        return {status};
       }
       log(`Round ${round}: commit failed; retained the previous winner and continuing search.`);
       improved = false;
@@ -2950,6 +3062,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
           COMMANDMENT, PREVIOUS_METRICS: profileSummary,
         }),
         { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      if (overlap && !profileSummary) closureIncomplete = 'profile_incomplete';
     }
   }
 
@@ -2958,9 +3071,9 @@ already verified source, and the host checks the resulting tree. Return JSON {co
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
-    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(), {
+    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions(true), {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR, PRIMARY_METRIC: handoffMetric,
-      ...(archiveHasSource() ? evo.memoryInputs(clean.map(r => r.d)) : {}),
+      ...(archiveHasSource(true) ? evo.memoryInputs(clean.map(r => r.d)) : {}),
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, ...roundScores(r.eng, r.ver),
         status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
@@ -2979,6 +3092,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       ...(SHARED_KB ? { SHARED_KB, TARGET_LANGUAGE } : {}),
     }),
     { phase: 'Optimize', label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
+  if (overlap && !mem) closureIncomplete = 'memory_incomplete';
   if (mem) {
     if (mem.insights) history.insights = mem.insights;
     if (mem.ledger) history.ledger = history.ledger.concat(mem.ledger);
@@ -3033,6 +3147,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   }
   history.rounds.push({
     round, metric: handoffMetric,
+    ...(closureIncomplete ? {closure_incomplete: closureIncomplete} : {}),
     ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directionHistory,
     results: clean.map(r => ({ id: r.d.id, ...roundScores(r.eng, r.ver),
@@ -3060,7 +3175,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
     ` fi` +
     `; echo STORAGE_RECLAIM_DONE round=${round}`;
-  await agentT(
+  const reclaim = () => agentT(
     `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
     `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
     `\`\`\`bash\n${reclaimCmd}\n\`\`\``,
@@ -3068,6 +3183,8 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       schema: { type: 'object', additionalProperties: true,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
+  if (overlap) { deferredReclaim = reclaim; noteOverlap(round, 'reclaim_deferred'); }
+  else { await reclaim(); deferredReclaim = null; }
   if (startEvolution && !evolution && noImprove > 0) {
     try {
       evolution = await startEvolution({cumulative, finalWinner});
@@ -3079,7 +3196,75 @@ already verified source, and the host checks the resulting tree. Return JSON {co
     }
     if (evolution && A.evolution_import_stall_sources === true) await importStallSources(evolution, round);
   }
+  if (overlap && await secondsLeft(`closed-r${round}`) <= 7) {
+    deadlineHit = true;
+    return {status: 'deadline'};
+  }
+  return {status: failedCommitRecovery ? 'commit_failed' : closureIncomplete || 'closed'};
+  }
 }
+// At most one successor is admitted. A charged successor is always drained and
+// accounted, even if its predecessor reaches the budget/stall/acceptance cutoff.
+let batch = null;
+try {
+  while (batch || (!stopIssuing && !skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE)) {
+    batch ||= await beginBatch();
+    if (!batch) break;
+    if (overlap && !batch.deep && !stopIssuing && dispatched < BUDGET) {
+      await batch.engineeringSettled;
+      const ready = latch();
+      pending = beginBatch(batch, ready).then(value => ({value}), error => ({error}));
+      // Finish the small source/context capture before closure can mutate the
+      // incumbent/profile; planning and real engineering then overlap closure.
+      await Promise.race([ready.promise, pending]);
+    }
+    const quiesce = async status => {
+      if (!overlap || !pending) return;
+      stopIssuing = true;
+      // A failed predecessor denies qualification before draining the successor.
+      // The successor's result cannot deadlock on this gate after it is denied.
+      batch.closed.settle({status});
+      const next = await pending;
+      if (next.value) await next.value.results;
+    };
+    let outcome;
+    try { outcome = await batch.close(quiesce); }
+    catch (error) {
+      await quiesce('closure_error');
+      batch.closed.settle({status: 'closure_error'});
+      const next = pending ? await pending : null;
+      if (next?.value) {
+        const abandoned = await next.value.close();
+        next.value.closed.settle(abandoned);
+        noteOverlap(next.value.round, 'closed', abandoned);
+      }
+      pending = null;
+      throw error;
+    }
+    batch.closed.settle(outcome);
+    noteOverlap(batch.round, 'closed', outcome);
+    if (overlap && noImprove >= MAX_NO_IMPROVE && !plannerStopReason) plannerStopReason = 'no_improve';
+    if ((overlap && outcome.status !== 'closed') || deadlineHit || plannerStopReason
+        || dispatched >= BUDGET || noImprove >= MAX_NO_IMPROVE) stopIssuing = true;
+    const next = pending ? await pending : null;
+    pending = null;
+    if (next?.error) throw next.error;
+    if (next && !next.value) stopIssuing = true;
+    batch = next?.value || null;
+  }
+  if (overlap) {
+    if (await hostRun('rm', ['--', overlapGuard]) === null)
+      throw new Error('bounded-overlap dependency guard could not be released');
+    if (deferredReclaim) await deferredReclaim();
+  }
+} finally {
+  if (overlap) {
+    history.bounded_overlap = {events: overlapEvents, issued_credits: dispatched};
+    try { await writeFile(`${EVAL_DIR}/bounded_overlap.json`, JSON.stringify(history.bounded_overlap, null, 2) + '\n'); }
+    catch (_) { log('[bounded_overlap] final event receipt unavailable; runtime events remain authoritative'); }
+  }
+}
+const evo = deliveryEvo;
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
 if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
   // Qualified custody and host promotion use the existing Report allowance, even with no optional
@@ -3210,7 +3395,7 @@ if (!EXTERNAL_OBJECTIVE && retainedSources.length) {
   log(`[delivery] ${rows.length} retained source(s); delivered ${history.delivery.delivered || 'none (incumbent kept)'}.`);
 }
 return {
-  rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
+  rounds, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
   // Which condition actually ended the loop (see `stopped_by` in the return value).
   stopReason: plannerStopReason === 'deadline_uncommitted' ? plannerStopReason : deadlineHit ? 'deadline'
@@ -3706,15 +3891,16 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     return hash[0];
   };
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
-  const caseEvidence = (row) => ({
-    archive_ref: {path: archive, entry_id: row.id},
+  const caseEvidence = (row, archiveRef = archive) => ({
+    archive_ref: {path: archiveRef, entry_id: row.id},
     patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
-    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
-    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
-  const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
-    entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
+    engineer: caseEvidenceReport(row.engineer, {path: archiveRef, entry_id: row.id, role: 'engineer'}),
+    verifier: caseEvidenceReport(row.verifier, {path: archiveRef, entry_id: row.id, role: 'verifier'})});
+  const selectedCases = (ids, view = null) => boundedCaseEvidence(ids.map(id => caseEvidence(
+    (view?.entries || entries).find(row => row.id === id) || {id}, view?.path || archive)),
+    {path: view?.path || archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
   const checkpointTree = async (winner, round) => {
@@ -3873,19 +4059,28 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
     caseInputs: selectedCases,
-    engineerContext(direction) {
+    snapshotBatch(round) {
+      return serial(async () => {
+        if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive snapshot round required');
+        const view = JSON.parse(JSON.stringify(snapshot(entries, bestId)));
+        const file = `${path}/batch_${round}.json`;
+        await immutable(file, JSON.stringify(view, null, 2) + '\n');
+        return {...view, path: file, sha256: await digest(file)};
+      });
+    },
+    engineerContext(direction, view = null) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
       const proseReport = value => value ? Object.fromEntries(Object.entries(value)
         .filter(([key]) => !['per_case', 'reported_per_case', 'observed_evidence'].includes(key))) : null;
       const selected = (id) => {
-        const row = entries.find(entry => entry.id === id);
+        const row = (view?.entries || entries).find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
           verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
           last_record_error: row?.last_record_error ?? null,
           engineer: proseReport(row?.engineer), verifier: proseReport(row?.verifier),
           reported_context: row?.reported_context || null,
-          reported_context_ref: row?.reported_context_ref || {path: archive, entry_id: id},
+          reported_context_ref: row?.reported_context_ref || {path: view?.path || archive, entry_id: id},
           peer_checkpoint: row?.peer_checkpoint || null};
       };
       // Prompt-only view: never retain an expanded context inside archive rows.
@@ -3893,23 +4088,24 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         parent: selected(direction.parent_id),
         donors: (direction.donor_ids || []).map(selected)};
       return {...context, selected_evidence: boundedContext(selectedEvidence,
-        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
-        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
+        {path: view?.path || archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
+        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])], view)};
     },
-    planInputs() {
-      const summary = entries.slice(-12);
-      const best = entries.find(row => row.id === bestId);
+    planInputs(view = null) {
+      const rows = view?.entries || entries, bestKey = view?.best_id || bestId;
+      const summary = rows.slice(-12);
+      const best = rows.find(row => row.id === bestKey);
       if (best && !summary.includes(best)) summary.unshift(best);
-      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
-        EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+      const inputs = {EVOLUTION_ARCHIVE: view?.path || archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+        EVOLUTION_BEST_ID: bestKey, EVOLUTION_ENTRY_COUNT: rows.length,
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row)} : {}),
+          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row, view?.path || archive)} : {}),
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
-            row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
+            row.reported_context_ref || {path: view?.path || archive, entry_id: row.id}, 2048)}))};
       if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
         mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
           id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
@@ -3932,32 +4128,36 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
       return inputs;
     },
-    prepare(directions, round) {
+    prepare(directions, round, view = null) {
+      const available = id => view ? view.entries.find(row => row.id === id && row.patch_ref && !row.retention_error) : retained(id);
+      const fallback = () => view ? available(view.best_id)?.verified ? view.best_id : 'ORIGINAL' : defaultParent();
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
       return directions.map((direction, index) => {
         const errors = [], requested = direction.parent_id;
         let parent = requested, resolution = 'explicit';
-        if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
+        if (!parent || (parent !== 'ORIGINAL' && !available(parent))) {
           if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
-          parent = defaultParent();
+          parent = fallback();
           resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
         }
         const donors = [];
         if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
         for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
-          if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
+          if (donor !== 'ORIGINAL' && !available(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
           else if (!donors.includes(donor)) donors.push(donor);
         }
         return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
           parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
             parent_id: parent,
             parent_resolution: resolution, reference_errors: errors,
-            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
+            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : available(id).patch_ref}))}};
       });
     },
-    async prepareWorkspace(direction) {
+    async prepareWorkspace(direction, view = null) {
       const workspace = `${direction.out_dir}/workspace`;
-      const parent = direction.parent_id === 'ORIGINAL' ? null : retained(direction.parent_id);
+      const parent = direction.parent_id === 'ORIGINAL' ? null : view
+        ? view.entries.find(row => row.id === direction.parent_id && row.patch_ref && !row.retention_error)
+        : retained(direction.parent_id);
       if (direction.parent_id !== 'ORIGINAL' && !parent) throw new Error('selected evolution parent is unavailable');
       const parentRef = parent ? {...parent.patch_ref} : null;
       if (parentRef && await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed');

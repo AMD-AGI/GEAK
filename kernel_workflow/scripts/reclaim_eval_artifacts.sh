@@ -39,6 +39,14 @@ done
 [[ -n "$EVAL_DIR" && -d "$EVAL_DIR" ]] || { echo "reclaim_eval_artifacts: --eval-dir required" >&2; exit 2; }
 EVAL_DIR="$(cd "$EVAL_DIR" && pwd)"
 
+# The host owns this guard while bounded-overlap batches have live consumers.
+# Cover ALL callers, including update_memory's STATE_DIR persistence block.
+# A crash leaves the guard in place: an unknown consumer state is not safe to reclaim.
+if [[ -e "$EVAL_DIR/.geak_overlap_active" || -L "$EVAL_DIR/.geak_overlap_active" ]]; then
+  printf '%s\n' '{"ok":true,"deferred":"active bounded-overlap consumers"}'
+  exit 0
+fi
+
 bytes_before=$(du -sb "$EVAL_DIR" 2>/dev/null | awk '{print $1}')
 removed=0
 bytes_reclaimed=0

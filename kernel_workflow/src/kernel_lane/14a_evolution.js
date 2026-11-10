@@ -250,15 +250,16 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     return hash[0];
   };
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
-  const caseEvidence = (row) => ({
-    archive_ref: {path: archive, entry_id: row.id},
+  const caseEvidence = (row, archiveRef = archive) => ({
+    archive_ref: {path: archiveRef, entry_id: row.id},
     patch_ref: row.patch_ref || null, entry_verified: row.verified ?? null, metric,
     reported_context_ref: row.reported_context_ref || null, peer_checkpoint: row.peer_checkpoint || null,
     authority: 'Retained evidence only; this view performs no new verification. Reference paths may be unavailable.',
-    engineer: caseEvidenceReport(row.engineer, {path: archive, entry_id: row.id, role: 'engineer'}),
-    verifier: caseEvidenceReport(row.verifier, {path: archive, entry_id: row.id, role: 'verifier'})});
-  const selectedCases = ids => boundedCaseEvidence(ids.map(id => caseEvidence(
-    entries.find(row => row.id === id) || {id})), {path: archive, entry_ids: ids});
+    engineer: caseEvidenceReport(row.engineer, {path: archiveRef, entry_id: row.id, role: 'engineer'}),
+    verifier: caseEvidenceReport(row.verifier, {path: archiveRef, entry_id: row.id, role: 'verifier'})});
+  const selectedCases = (ids, view = null) => boundedCaseEvidence(ids.map(id => caseEvidence(
+    (view?.entries || entries).find(row => row.id === id) || {id}, view?.path || archive)),
+    {path: view?.path || archive, entry_ids: ids});
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
   const checkpointTree = async (winner, round) => {
@@ -417,19 +418,28 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
     caseInputs: selectedCases,
-    engineerContext(direction) {
+    snapshotBatch(round) {
+      return serial(async () => {
+        if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive snapshot round required');
+        const view = JSON.parse(JSON.stringify(snapshot(entries, bestId)));
+        const file = `${path}/batch_${round}.json`;
+        await immutable(file, JSON.stringify(view, null, 2) + '\n');
+        return {...view, path: file, sha256: await digest(file)};
+      });
+    },
+    engineerContext(direction, view = null) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
       const proseReport = value => value ? Object.fromEntries(Object.entries(value)
         .filter(([key]) => !['per_case', 'reported_per_case', 'observed_evidence'].includes(key))) : null;
       const selected = (id) => {
-        const row = entries.find(entry => entry.id === id);
+        const row = (view?.entries || entries).find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
           verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
           last_record_error: row?.last_record_error ?? null,
           engineer: proseReport(row?.engineer), verifier: proseReport(row?.verifier),
           reported_context: row?.reported_context || null,
-          reported_context_ref: row?.reported_context_ref || {path: archive, entry_id: id},
+          reported_context_ref: row?.reported_context_ref || {path: view?.path || archive, entry_id: id},
           peer_checkpoint: row?.peer_checkpoint || null};
       };
       // Prompt-only view: never retain an expanded context inside archive rows.
@@ -437,23 +447,24 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         parent: selected(direction.parent_id),
         donors: (direction.donor_ids || []).map(selected)};
       return {...context, selected_evidence: boundedContext(selectedEvidence,
-        {path: archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
-        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])])};
+        {path: view?.path || archive, parent_id: direction.parent_id, donor_ids: direction.donor_ids || []}),
+        selected_case_evidence: selectedCases([...new Set([direction.parent_id, ...(direction.donor_ids || [])])], view)};
     },
-    planInputs() {
-      const summary = entries.slice(-12);
-      const best = entries.find(row => row.id === bestId);
+    planInputs(view = null) {
+      const rows = view?.entries || entries, bestKey = view?.best_id || bestId;
+      const summary = rows.slice(-12);
+      const best = rows.find(row => row.id === bestKey);
       if (best && !summary.includes(best)) summary.unshift(best);
-      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
-        EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+      const inputs = {EVOLUTION_ARCHIVE: view?.path || archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+        EVOLUTION_BEST_ID: bestKey, EVOLUTION_ENTRY_COUNT: rows.length,
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row)} : {}),
+          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row, view?.path || archive)} : {}),
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
-            row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};
+            row.reported_context_ref || {path: view?.path || archive, entry_id: row.id}, 2048)}))};
       if (CASE_MEASUREMENT_VIEW !== undefined) log(`[case_measurement_planner_inline] ${JSON.stringify({
         mode: CASE_MEASUREMENT_VIEW, bytes: contextBytes(inputs), row_counts: inputs.EVOLUTION_ENTRIES.map(row => ({
           id: row.id, engineer: row.case_evidence?.engineer?.case_rows || 0,
@@ -476,32 +487,36 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           verifier: row.case_evidence?.verifier?.case_rows || 0}))})}`);
       return inputs;
     },
-    prepare(directions, round) {
+    prepare(directions, round, view = null) {
+      const available = id => view ? view.entries.find(row => row.id === id && row.patch_ref && !row.retention_error) : retained(id);
+      const fallback = () => view ? available(view.best_id)?.verified ? view.best_id : 'ORIGINAL' : defaultParent();
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
       return directions.map((direction, index) => {
         const errors = [], requested = direction.parent_id;
         let parent = requested, resolution = 'explicit';
-        if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
+        if (!parent || (parent !== 'ORIGINAL' && !available(parent))) {
           if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
-          parent = defaultParent();
+          parent = fallback();
           resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
         }
         const donors = [];
         if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
         for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
-          if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
+          if (donor !== 'ORIGINAL' && !available(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
           else if (!donors.includes(donor)) donors.push(donor);
         }
         return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
           parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
             parent_id: parent,
             parent_resolution: resolution, reference_errors: errors,
-            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
+            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : available(id).patch_ref}))}};
       });
     },
-    async prepareWorkspace(direction) {
+    async prepareWorkspace(direction, view = null) {
       const workspace = `${direction.out_dir}/workspace`;
-      const parent = direction.parent_id === 'ORIGINAL' ? null : retained(direction.parent_id);
+      const parent = direction.parent_id === 'ORIGINAL' ? null : view
+        ? view.entries.find(row => row.id === direction.parent_id && row.patch_ref && !row.retention_error)
+        : retained(direction.parent_id);
       if (direction.parent_id !== 'ORIGINAL' && !parent) throw new Error('selected evolution parent is unavailable');
       const parentRef = parent ? {...parent.patch_ref} : null;
       if (parentRef && await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed');
