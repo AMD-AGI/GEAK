@@ -2399,10 +2399,18 @@ def _invoke_via_runtime(
     # Preserve the handoff entrypoint's Claude default and explicit overrides.
     # Profiles and GEAK_MODEL still take precedence in the registry resolver.
     runtime_env.setdefault("GEAK_CLAUDE_MODEL", CLAUDE_MODEL)
-    proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=runtime_env, capture_output=True,
-        text=True, timeout=wrap_timeout,
-    )
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(E2E_DIR), env=runtime_env, capture_output=True,
+            text=True, timeout=wrap_timeout,
+        )
+    except FileNotFoundError as exc:
+        if exc.filename != NODE_BIN:
+            raise
+        raise RuntimeError(
+            "GEAK-evo requires Node.js 18 or newer. Install Node.js or set "
+            f"GEAK_NODE_BIN to its executable (requested {NODE_BIN!r})."
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"runtime (node, {runtime_combo_label()}) failed (rc={proc.returncode}): "

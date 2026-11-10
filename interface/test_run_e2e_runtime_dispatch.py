@@ -168,6 +168,15 @@ def test_without_an_eval_dir_no_result_file_is_requested(monkeypatch):
     assert captured["kw"]["timeout"] is None
 
 
+def test_missing_node_names_the_existing_executable_override(monkeypatch):
+    rx = _fresh(monkeypatch)
+    def missing_node(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", rx.NODE_BIN)
+    monkeypatch.setattr(rx.subprocess, "run", missing_node)
+    with pytest.raises(RuntimeError, match="GEAK_NODE_BIN"):
+        rx._invoke_via_runtime({}, 60)
+
+
 def test_runtime_preserves_claude_model_and_seeded_config(monkeypatch):
     captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
     rx = _fresh(monkeypatch, GEAK_CLAUDE_MODEL="caller-model",
