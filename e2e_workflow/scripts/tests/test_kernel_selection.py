@@ -382,9 +382,10 @@ class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):
 
 
 class TestSelectionVerdict(unittest.TestCase):
-    def meta(self, calls=7, target=TARGET):
+    def meta(self, calls=7, target=TARGET, compiled=0):
         module, attr = target.split(":", 1)
-        return {"module": module, "attr": attr, "total_calls_observed": calls}
+        return {"module": module, "attr": attr, "total_calls_observed": calls,
+                "compiled_passthrough_observed": bool(compiled)}
 
     def test_0720_live_inner_launcher_is_selection_success(self):
         verdict = ks.verify(TARGET, KERNEL, self.meta(), trace())
@@ -600,6 +601,17 @@ class TestSelectionVerdict(unittest.TestCase):
         verdict = ks.verify(TARGET, KERNEL, self.meta(calls=0), trace())
         self.assertFalse(verdict["ok"])
         self.assertIn("target_not_observed", verdict["failed"])
+
+    def test_calls_seen_only_inside_compiled_regions_are_named_instead_of_read_from_a_trace(self):
+        verdict = ks.verify(TARGET, KERNEL, self.meta(calls=0, compiled=3), [])
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(verdict["failed"], ["capture_compiled_unobservable"])
+
+    def test_a_compiled_call_does_not_excuse_a_missing_trace_when_eager_calls_were_observed(self):
+        verdict = ks.verify(TARGET, KERNEL, self.meta(calls=2, compiled=3), trace(under_target=False))
+        self.assertFalse(verdict["ok"])
+        self.assertIn("device_kernel_not_under_target", verdict["failed"])
+        self.assertNotIn("capture_compiled_unobservable", verdict["failed"])
 
     def test_cli_writes_the_same_machine_verdict(self):
         with tempfile.TemporaryDirectory() as root:

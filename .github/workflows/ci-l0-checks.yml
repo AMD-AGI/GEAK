@@ -146,6 +146,8 @@ jobs:
             kernel_workflow/scripts/tests/test_experience_store.py \
             kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kernel_workflow/scripts/tests/test_workspace_sources.py \
+            kernel_workflow/scripts/tests/test_gpu_lease.py \
+            kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -158,6 +160,7 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
+            e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
             tools/tests/test_ep_task_runner.py \
@@ -303,6 +306,9 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
+      - name: workflow script size limit
+        run: node e2e_workflow/scripts/test_workflow_script_size.js
       - name: Candidate coverage and independent speedup review regression
         run: node --test e2e_workflow/scripts/test_speedup_review.js
       - name: AgentX-only kernel extraction and fixed-load compatibility
@@ -315,6 +321,8 @@ jobs:
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
+      - name: gfx1151 knowledge doc contract
+        run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
       # job can run the JS half, so without it the two implementations are pinned on the Python side
       # alone and are free to drift — which lets a kernel pass one side and be refused by the other.
@@ -344,6 +352,8 @@ jobs:
         run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
         run: node kernel_workflow/scripts/test_mode_dispatch.js
+      - name: kernel_workflow multi-GPU job resolution
+        run: node kernel_workflow/scripts/test_gpu_request.js
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

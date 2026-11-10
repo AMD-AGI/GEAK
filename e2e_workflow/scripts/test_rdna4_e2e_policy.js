@@ -13,9 +13,9 @@
 //      use_expert_skills=false, perf_knowledge_dir='', warm_start=off and the expected identity
 //      forwarded. A CDNA run of the same shape keeps all of it (the negative control — without it
 //      these assertions would also pass on a build that isolates unconditionally).
-//   B) SERVING BACKEND policy. R9700 accepts vllm and sglang, R9600D only vllm; backend=atom
-//      must fail closed and the default must be vllm. An unvalidated ISA (gfx1200) must be
-//      rejected before any backend/knowledge policy is chosen.
+//   B) SERVING BACKEND policy. R9700 serves vLLM or SGLang, so an explicit backend=sglang passes,
+//      backend=atom must fail closed and the default must be vllm. An
+//      unvalidated ISA (gfx1200) must be rejected before any backend/knowledge policy is chosen.
 //
 // The single-kernel pass-through is the entry point used for (A): it reaches `laneArgs()` after only
 // pure config, with no agent or server call in between.
@@ -176,16 +176,17 @@ const R9700 = {
     ok(forwarded.perf_knowledge_dir === '' && forwarded.warm_start === 'off', 'R9600D kernel handoff disables CDNA knowledge and warm start');
   }
 
-  console.log('\n# D. serving backend policy (R9700: vllm or sglang)');
+  console.log('\n# D. serving backend policy (R9700 serves vLLM or SGLang, nothing else)');
   {
+    // SGLang runs on R9700 through Magpie's sglang_gfx12.sh; reaching the probe stop proves the guard let it pass.
     const { run } = build({ model_path: '/models/m', backend: 'sglang', ...R9700 },
       { stopAtFirstPhase: true });
     let msg = '';
     try { await run(); } catch (e) { msg = e.message; }
-    ok(msg === PROBE_STOP, 'R9700 explicit backend=sglang is accepted', msg || 'no throw');
+    ok(msg === PROBE_STOP, 'explicit backend=sglang is allowed on R9700', msg || 'no throw');
   }
   {
-    // ATOM is an Instinct-only backend; the guard must still reject it on R9700.
+    // ATOM is an Instinct-only backend; the guard must reject every backend but vllm and sglang.
     const { run } = build({ model_path: '/models/m', backend: 'atom', ...R9700 },
       { stopAtFirstPhase: true });
     let msg = '';
@@ -253,7 +254,7 @@ const R9700 = {
   {
     const meta = BODY.slice(0, BODY.indexOf('};'));
     ok(/Radeon AI PRO R9700/.test(meta), 'meta names the validated product, not bare gfx1201');
-    ok(/R9700 \(gfx1201, vLLM or SGLang\)/.test(meta), 'meta states the R9700 backend constraint');
+    ok(/vLLM or SGLang only/i.test(meta), 'meta states the R9700 backend constraint');
     const kernelLane = fs.readFileSync(path.join(GEAK_ROOT, 'kernel_workflow/kernel_lane.js'), 'utf8');
     ok(/expected_gfx/.test(kernelLane), 'the lane worker accepts the identity e2e forwards');
   }
@@ -314,7 +315,7 @@ const R9700 = {
   }
 
   console.log(failures === 0
-    ? '\nPASS: E2E isolates R9700 lanes, leaves CDNA untouched, and fails closed on non-vLLM backends.'
+    ? '\nPASS: E2E isolates R9700 lanes, leaves CDNA untouched, and fails closed on backends other than vLLM and SGLang.'
     : `\nFAILED: ${failures} assertion(s).`);
   process.exit(failures === 0 ? 0 : 1);
 })();

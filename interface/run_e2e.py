@@ -766,8 +766,9 @@ def map_args(
         "search_replicas": 1,
         "validation_replicas": 3,
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
-        # on one server, report the second.  A 3-round median would be a different statistic from
-        # the one it rebenches against, so the round count is not a knob here.
+        # on one server, report the second (one pass for an AgentX replay, which warms itself per
+        # lane, as Hyperloom's AgentX rebench does).  A 3-round median would be a different
+        # statistic from the one it rebenches against, so the round count is not a knob here.
         "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
@@ -805,19 +806,25 @@ def map_args(
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget; a trace
+    # replay floors it at what its own final phase costs); this lets an operator widen it per
+    # run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
-    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
-    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
-    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
+    # not bound by it. Optional in the same way as the reserve itself.
     reserve_cap = _float_or_none(
         os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
     if reserve_cap is not None:
         ps_args["final_reserve_cap_frac"] = reserve_cap
+    # ...and the boot + replay warmup + drain that floor adds to each trace-replay leg's window
+    # (JS default 1200s). Raise it for a model whose server boots slower.
+    leg_overhead = _int_or_none(
+        os.environ.get("GEAK_AGENTX_LEG_OVERHEAD_S"), "GEAK_AGENTX_LEG_OVERHEAD_S")
+    if leg_overhead is not None:
+        ps_args["agentx_leg_overhead_s"] = leg_overhead
     # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
     # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
     # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
@@ -1206,7 +1213,9 @@ def apply_workload_spec(h: dict) -> dict:
         ("corpus", "AGENTX_DATASET"),
         ("canonical_corpus", "AGENTX_CANONICAL_DATASET"),
         ("num_entries", "AGENTX_NUM_ENTRIES"),
+        ("canonical_num_entries", "AGENTX_CANONICAL_NUM_ENTRIES"),
         ("duration_s", "GEAK_AGENTX_DURATION_S"),
+        ("canonical_duration_s", "AGENTX_CANONICAL_DURATION"),
         ("geak_loop_duration_s", "GEAK_AGENTX_LOOP_DURATION_S"),
         ("warmup_requests_per_lane", "AGENTX_WARMUP_REQUESTS_PER_LANE"),
         ("warmup_grace_period_s", "AGENTX_WARMUP_GRACE_PERIOD"),
@@ -1254,24 +1263,16 @@ def agentx_preflight(h: dict) -> list[str]:
     this model is a ~20 minute detour to reach a one-line error. This states the
     gap at dispatch instead.
 
-    Returns human-readable problem strings (empty when the run can proceed).
-    Deliberately NON-fatal: PATH inside the bench subprocess is not always the
-    PATH here, so a hard abort could refuse a run that would have worked.
+    Returns human-readable problem strings (empty when the run can proceed). It
+    only reports; agentx_refusal decides which problem stops the run.
     """
     spec = h.get("workload_spec")
     if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
         return []
     problems: list[str] = []
-    aiperf_bin = os.environ.get("AIPERF_BIN", "").strip() or "aiperf"
-    if not (
-        shutil.which(aiperf_bin)
-        or (os.path.isabs(aiperf_bin) and os.access(aiperf_bin, os.X_OK))
-    ):
-        problems.append(
-            f"aiperf not found on PATH (looked for {aiperf_bin!r}); the AgentX "
-            "client cannot replay traces. Install the AgentX-capable aiperf "
-            "into this environment, or set AIPERF_BIN to its path."
-        )
+    client_problem = _agentx_client_problem(spec)
+    if client_problem:
+        problems.append(client_problem[0])
     # The mapper is only a real gap when the vendored fallback is missing too.
     # GEAK ships a copy beside the client adapter precisely so a run without an
     # InferenceX checkout is not a failure; reporting its absence as a problem
@@ -1292,6 +1293,72 @@ def agentx_preflight(h: dict) -> list[str]:
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
     return problems
+
+
+def agentx_refusal(h: dict) -> str | None:
+    """Why an AgentX run must stop before its first server launch, or None.
+
+    A client named by an absolute path that cannot start is refused: no PATH can
+    change that. A bare name that does not resolve only warns, since PATH inside
+    the bench subprocess is not always the PATH here; GEAK_STRICT_AGENTX_PREFLIGHT=1
+    refuses it too.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    problem = _agentx_client_problem(spec)
+    if problem and (problem[1] or _env_flag("GEAK_STRICT_AGENTX_PREFLIGHT")):
+        return problem[0]
+    return None
+
+
+def _agentx_client_problem(spec: dict) -> tuple[str, bool] | None:
+    """Why the AgentX client cannot start here, and whether that holds on any PATH.
+
+    Resolved in the bench's order: AIPERF_BIN from the environment, else the
+    declaration's aiperf_bin (bench_env.sh assigns it only when the environment
+    left it unset), else aiperf on PATH.
+    """
+    client = (
+        os.environ.get("AIPERF_BIN", "").strip()
+        or str(spec.get("aiperf_bin") or "").strip()
+        or "aiperf"
+    )
+    if os.path.isabs(client):
+        why = _client_start_problem(client)
+        return (f"the AgentX client {client} {why}", True) if why else None
+    found = shutil.which(client)
+    if not found:
+        missing = (
+            f"aiperf not found on PATH (looked for {client!r}); the AgentX "
+            "client cannot replay traces. Install the AgentX-capable aiperf "
+            "into this environment, or set AIPERF_BIN to its path."
+        )
+        return missing, False
+    why = _client_start_problem(found)
+    return (f"the AgentX client {client!r} resolves to {found}, which {why}", False) if why else None
+
+
+def _client_start_problem(path: str) -> str | None:
+    """Why exec() of ``path`` fails here, or None when nothing says it would.
+
+    X_OK alone passes a venv's console script whose interpreter is gone. The venv's
+    python links to the interpreter that built it, outside the venv (uv installs its
+    own), so a container without that interpreter cannot start the script.
+    """
+    if not os.path.isfile(path):
+        return "does not exist"
+    if not os.access(path, os.X_OK):
+        return "is not executable"
+    bin_dir = os.path.dirname(os.path.realpath(path))
+    venv_python = os.path.join(bin_dir, "python")
+    if (
+        os.path.isfile(os.path.join(os.path.dirname(bin_dir), "pyvenv.cfg"))
+        and os.path.islink(venv_python)
+        and not os.path.exists(venv_python)
+    ):
+        return f"is in a venv whose interpreter is gone ({venv_python} -> {os.readlink(venv_python)})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2150,6 +2217,8 @@ def apply_bench_protocol(h: dict) -> dict:
         # Warm-server parity -- one server per leg, a discarded full warmup round, then the
         # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
         # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
+        # An AgentX replay gets no discarded round: bench_e2e.sh lets the replay warm itself per
+        # lane, which is exactly Hyperloom's AgentX baseline and rebench.
         aligned = {
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
@@ -2488,9 +2557,9 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         timeout=timeout_s,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        # A failed API call exits 1 with stderr empty: the error is in the stdout JSON.
+        detail = (proc.stderr or "")[-2000:] or (proc.stdout or "")[-2000:]
+        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {detail}")
     # claude -p --output-format json wraps the assistant text; try to unwrap.
     out = proc.stdout.strip()
     try:
@@ -2697,6 +2766,15 @@ def _parse_last_json_line(raw: str) -> dict:
     )
 
 
+# Claude Code's reply when it cannot reach the model API. 2.1.177 says "Unable to
+# connect to API (<code>)" for every connection failure; 2.1.309 and 2.1.316 say
+# e.g. "Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)".
+_LLM_UNREACHABLE_RE = re.compile(
+    r"API Error: (?:Unable to connect to API|Connection (?:error|refused|dropped|lost before)"
+    r"|Can't reach the API server|No internet route|Couldn't connect through your proxy)"
+)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
@@ -2707,11 +2785,15 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
+    # arrives as agent output inside a parse error or a failed CLI's message.
+    if _LLM_UNREACHABLE_RE.search(msg):
+        return "llm_unreachable"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -3040,15 +3122,22 @@ _SERVER_ARGS_IDENTITY_KEYS = (
     "disable_radix_cache",
     "trust_remote_code",
 )
+_SERVER_ARGS_RECORD_RE = re.compile(r"\bServerArgs\s*\(|\bserver_args\s*=\s*\{")
+_SERVER_ARGS_RECORD_MAX_CHARS = 65536
 
 
 def _balanced_server_args(text: str) -> str:
-    """Return one complete ``ServerArgs(...)`` expression from log text."""
-    start = text.find("ServerArgs(")
-    if start < 0:
+    """Return one complete SGLang startup argument expression from log text."""
+    match = _SERVER_ARGS_RECORD_RE.search(text)
+    if match is None:
         return ""
-    depth, quote, escaped = 0, "", False
-    for index, char in enumerate(text[start:], start):
+    opener = match.end() - 1
+    start = opener if text[opener] == "{" else match.start()
+    closers: list[str] = []
+    quote, escaped = "", False
+    for index, char in enumerate(text[opener:], opener):
+        if index - start >= _SERVER_ARGS_RECORD_MAX_CHARS:
+            return ""
         if quote:
             if escaped:
                 escaped = False
@@ -3059,11 +3148,12 @@ def _balanced_server_args(text: str) -> str:
             continue
         if char in ("'", '"'):
             quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
+        elif char in "({[":
+            closers.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif char in ")}]":
+            if not closers or closers.pop() != char:
+                return ""
+            if not closers:
                 return text[start : index + 1]
     return ""
 
@@ -3075,20 +3165,29 @@ def _parse_sglang_server_args(text: str) -> dict[str, Any]:
         return {}
     try:
         node = ast.parse(expression, mode="eval").body
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError):
         return {}
-    if not isinstance(node, ast.Call):
+    if isinstance(node, ast.Call):
+        fields = [(keyword.arg, keyword.value) for keyword in node.keywords]
+    elif isinstance(node, ast.Dict):
+        if any(
+            not isinstance(key, ast.Constant) or not isinstance(key.value, str)
+            for key in node.keys
+        ):
+            return {}
+        fields = [(key.value, value) for key, value in zip(node.keys, node.values)]
+    else:
         return {}
     observed: dict[str, Any] = {}
-    for keyword in node.keywords:
-        if keyword.arg not in _SERVER_ARGS_IDENTITY_KEYS:
+    for name, value_node in fields:
+        if name not in _SERVER_ARGS_IDENTITY_KEYS:
             continue
         try:
-            value = ast.literal_eval(keyword.value)
-        except (ValueError, TypeError):
+            value = ast.literal_eval(value_node)
+        except (ValueError, TypeError, RecursionError):
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
-            observed[keyword.arg] = value
+            observed[name] = value
     return observed
 
 
@@ -3215,20 +3314,66 @@ def _open_server_log(log_path: Path):
     return log_path.open(encoding="utf-8", errors="ignore")
 
 
+_VLLM_NON_DEFAULT_ARGS_MARKER = "non-default args: {"
+# Logged on every launch yet never part of the configuration: transport, the positional echo of ``model``, and
+# GEAK's own torch profiler wrapper (only its profile servers carry it).
+_VLLM_NON_IDENTITY_KEYS = frozenset({"host", "port", "model_tag", "profiler_config"})
+
+
+def _parse_vllm_non_default_args(text: str) -> dict[str, Any]:
+    """Extract launch fields from vLLM's ``non-default args: {...}`` line.
+
+    vLLM logs once, at startup, every CLI argument that differs from its default as a dict repr, so the key set is
+    open: every field except the run-scoped ``_VLLM_NON_IDENTITY_KEYS`` is part of the identity and is compared,
+    including one this parser has never seen. Each top-level item is evaluated on its own. A field whose value is
+    not a literal is listed under ``unparsed``, so a version-drifted log reads as unverified instead of as a value;
+    so is an item that is not a ``key: value`` pair.
+    """
+    start = text.find(_VLLM_NON_DEFAULT_ARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_VLLM_NON_DEFAULT_ARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        try:
+            key = ast.literal_eval(raw_key.strip()) if sep else None
+        except (ValueError, SyntaxError):
+            key = None
+        if not isinstance(key, str):
+            unparsed.append("<malformed item>")
+            continue
+        if key in _VLLM_NON_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value.strip())
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
         with _open_server_log(log_path) as handle:
             lines = iter(handle)
             for line in lines:
-                if "ServerArgs(" not in line:
+                if not _SERVER_ARGS_RECORD_RE.search(line):
                     continue
-                # SGLang normally emits one line. Permit a wrapped startup
-                # record too, but cap it so a malformed log cannot grow memory.
-                record = line
-                while not _balanced_server_args(record) and len(record) < 65536:
+                # Permit wrapped startup output while capping the accumulated
+                # record passed to the parser.
+                record = line[:_SERVER_ARGS_RECORD_MAX_CHARS]
+                while (
+                    not _balanced_server_args(record)
+                    and len(record) < _SERVER_ARGS_RECORD_MAX_CHARS
+                ):
                     try:
-                        record += next(lines)
+                        record += next(lines)[:_SERVER_ARGS_RECORD_MAX_CHARS - len(record)]
                     except StopIteration:
                         break
                 server_args = _parse_sglang_server_args(record)
@@ -3246,6 +3391,22 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
                 server_args = _parse_atom_engine_kwargs(line)
                 if server_args:
                     return {"backend": "atom", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
+    # vLLM logs the arguments that differ from its defaults once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _VLLM_NON_DEFAULT_ARGS_MARKER not in line:
+                    continue
+                server_args = _parse_vllm_non_default_args(line)
+                if server_args:
+                    return {
+                        "backend": "vllm",
+                        "server_args": server_args,
+                        "server_args_complete": True,
+                    }, ""
     except OSError:
         return {}, ""
 
@@ -3313,6 +3474,14 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     ]
     if not comparable_keys:
         return None
+    if expected.get("server_args_complete") is True and observed.get("server_args_complete") is True:
+        observed_keys = {
+            key
+            for key in observed_args
+            if key not in {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
+        }
+        if set(comparable_keys) != observed_keys:
+            return False
     if any(key not in observed_args for key in comparable_keys):
         return None
     for key, expected_value in expected_args.items():
@@ -3386,6 +3555,14 @@ def _identity_mismatches(expected: Any, observed: dict[str, Any]) -> list[dict[s
     observed_args = observed.get("server_args")
     if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
         return []
+    if expected.get("server_args_complete") is True and observed.get("server_args_complete") is True:
+        ignored = {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
+        keys = (set(expected_args) | set(observed_args)) - ignored
+        return [
+            {"key": key, "expected": expected_args.get(key), "observed": observed_args.get(key)}
+            for key in sorted(keys)
+            if expected_args.get(key) != observed_args.get(key)
+        ]
     return [
         {"key": key, "expected": value, "observed": observed_args.get(key)}
         for key, value in expected_args.items()
@@ -3465,6 +3642,11 @@ def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
     }
     if equal is False:
         out["mismatches"] = _identity_mismatches(expected, observed)
+    if any(path.is_file() for path in candidates) and not observed:
+        out["observed_problem"] = (
+            "no launch record this parser recognises (SGLang ServerArgs, ATOM Engine kwargs, vLLM non-default "
+            "args, identity=) in the Setup server log"
+        )
     if launched:
         out["geak_launched"] = launched
         out["geak_launched_reference"] = "orchestrator_server_log" if reference else expected_source
@@ -4884,6 +5066,9 @@ def _update_baseline_alignment_reports(result: dict[str, Any]) -> list[str]:
 WORKFLOW_RETURN_FILE = "workflow_return.json"
 KERNEL_JOURNEY_FILE = "kernel_journey.json"
 FINAL_REPORT_FILE = "final_report.md"
+# run_reaper.py's FENCE_FILE; its "stage" is the final-phase stage that took the GPUs.
+FINAL_PHASE_FENCE_FILE = ".final_phase_fence"
+FINAL_PHASE_STAGES = ("finalize", "validate")
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -6750,9 +6935,13 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    # bench_summarize.py writes the selected metric basis (output, total or an
+    # interactivity axis) to throughput_tok_s_median; output_throughput_tok_s_median
+    # is an alias it fills only on the output axis, so an AgentX baseline has it null.
     baseline_tput = (
         official.get("baseline_throughput_tok_s")
         or official.get("plateau_median_tok_s")
+        or summary.get("throughput_tok_s_median")
         or summary.get("output_throughput_tok_s_median")
     )
     if not baseline_tput:
@@ -6782,6 +6971,30 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
         "recovered_from_disk": True,
         "recovered_no_gain": True,
     }
+
+
+def _phase_reached(eval_dir: str | Path | None) -> str:
+    """The furthest workflow phase an eval dir shows, for a result with no workflow return.
+
+    ``setup`` until Setup's baseline summary exists, then ``search`` until the final
+    phase fences the GPUs, then the fenced stage (``finalize`` or ``validate``).
+    ``""`` when there is no eval dir to read.
+    """
+    if not eval_dir:
+        return ""
+    root = Path(eval_dir)
+    try:
+        if not root.is_dir():
+            return ""
+        fence = _read_json(root / FINAL_PHASE_FENCE_FILE)
+        stage = fence.get("stage") if isinstance(fence, dict) else None
+        if stage in FINAL_PHASE_STAGES:
+            return stage
+        if (root / "baseline" / "bench_summary.json").is_file():
+            return "search"
+    except OSError:
+        return ""
+    return "setup"
 
 
 def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
@@ -7714,6 +7927,7 @@ def main(argv: list[str]) -> int:
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
+    workload_refusal = agentx_refusal(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
@@ -7723,6 +7937,7 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,
                           "agentx_preflight_problems": workload_preflight,
+                          "agentx_refusal": workload_refusal,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
@@ -7789,12 +8004,21 @@ def main(argv: list[str]) -> int:
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
+                phase = _phase_reached(eval_dir_hint)
+                message = str(error or "")
+                if not message and error_class == "timeout":
+                    # anyio.fail_after raises a TimeoutError with no message.
+                    message = f"no workflow return within the {timeout_s}s budget"
+                    if phase:
+                        message += f" (furthest phase on disk: {phase})"
                 out = {
                     "schema_version": SCHEMA_VERSION,
                     "status": "timeout" if error_class == "timeout" else "error",
                     "error_class": error_class or "runner_error",
-                    "error": str(error or ""),
+                    "error": message,
                 }
+                if phase:
+                    out["phase_reached"] = phase
         except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,
@@ -7941,6 +8165,14 @@ def main(argv: list[str]) -> int:
                           "result_json": str(result_path),
                           "speedup": cached_out.get("throughput_speedup")}))
         return 0 if cached_out.get("status") != "error" else 1
+
+    if workload_refusal:
+        sys.stderr.write(f"GEAK e2e: refusing before any server launch: {workload_refusal}\n")
+        refused = _emit(error=workload_refusal, error_class="agentx_client_unavailable")
+        print(json.dumps({"status": refused.get("status"),
+                          "result_json": str(result_path),
+                          "speedup": refused.get("throughput_speedup")}))
+        return 0 if refused.get("status") != "error" else 1
 
     out: dict = {}
     wf: dict | None = None

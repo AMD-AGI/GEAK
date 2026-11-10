@@ -8,6 +8,7 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'e2e_workflow.js'), 'utf8
 const core = src.slice(src.indexOf('const CORRECTNESS_REJECT_RX ='), src.indexOf('// ---- DEEP MODE'));
 const wrapper = src.slice(src.indexOf('const SPEEDUP_REVIEW_RESULTS ='), src.indexOf('// Lightweight SURGICAL FIX'));
 const abDone = src.match(/^const abDone = .*;$/m)[0];
+const abLegs = src.match(/^const abLegs = .*;$/m)[0];
 
 const measurement = (name, extra = {}) => ({
   measurement_id: name, candidate_digest: 'candidate-content', reference_digest: 'h0-content',
@@ -31,24 +32,29 @@ const coverage = (rows = [7.18, 3.47, 1.37]) => ({
   kernels: rows.map((pct, i) => ({ id: `path-${i}`, pct_gpu_time: pct })),
 });
 
-function harness(original = candidate(), fresh = candidate({ measurement_evidence: measurement('confirmation') }), closed = false) {
-  const calls = [], checkpoints = [];
+function harness(original = candidate(), fresh = candidate({ measurement_evidence: measurement('confirmation') }), closed = false,
+  short = () => false) {
+  const calls = [], checkpoints = [], windows = [];
   const safeAgent = async (request, opts, tries) => {
     calls.push({ ...request, opts, tries });
     return structuredClone(request.inputs.FORCE_FRESH_AB ? fresh : original);
   };
-  const api = new Function('safeAgent', 'persistE2EValidationCheckpoint', 'searchClosed', `
+  const abWindowShort = (legs, what, passes = 1) => {
+    windows.push({ legs, what, passes });
+    return short(legs, what, passes);
+  };
+  const api = new Function('safeAgent', 'persistE2EValidationCheckpoint', 'searchClosed', 'abWindowShort', `
     const A = {}, ACCURACY_GATE = 'gsm8k', FIXABLE_REJECT_RX = /no_engagement|signature_mismatch/;
     const SEARCH_REPLICAS = 1, ACCURACY_INPUTS = {}, MEASUREMENT_MODE = 'warm_server';
     const EVAL_DIR = '/eval', WORKLOAD = {}, INTEGRATE_SCHEMA = {}, profile = {profile_topN_json:'/profile/h0.json'};
     const AB_FINISH_RETRIES = 3, log = () => {}, tuningIntegrateInputs = () => ({});
     const roleAgent = (role, phase, intro, inputs) => ({role, phase, intro, inputs});
     const adoptAbandonedVerdict = async r => r;
-    ${core}\n${abDone}\n${wrapper}
+    ${core}\n${abDone}\n${abLegs}\n${wrapper}
     return { speedupEstimate, speedupNeedsReview, confirmedSpeedup, integAccepted, gateRejectReason,
       rejectClass, reviewSpeedup, runIntegrateBothLegs };
-  `)(safeAgent, async (p, value) => checkpoints.push({ path: p, ...value }), () => closed);
-  return { ...api, calls, checkpoints };
+  `)(safeAgent, async (p, value) => checkpoints.push({ path: p, ...value }), () => closed, abWindowShort);
+  return { ...api, calls, checkpoints, windows };
 }
 
 test('workflow remains syntactically valid in its async workflow wrapper', () => {
@@ -227,6 +233,21 @@ test('timeouts, missing provenance and the final reserve stop review without a c
     assert.ok(h.calls.length <= 2);
     if (!original.measurement_evidence || closed) assert.equal(h.calls.length, 1);
   }
+});
+
+test('a confirmation that cannot finish before the final reserve is deferred, not started', async () => {
+  const h = harness(candidate(), candidate({ measurement_evidence: measurement('confirmation') }), false,
+    (legs, what) => what.endsWith(': speedup review'));
+  const result = await h.runIntegrateBothLegs('test', inputs, 'h1', 'HeadKernel');
+  assert.deepEqual(h.windows.map(({ legs, passes }) => [legs, passes]), [[1, 1], [2, 2]],
+    'the original A/B is checked for its one fresh leg, the confirmation for two fresh legs of two passes');
+  assert.equal(h.calls.length, 1);
+  assert.equal(result.speedup_review.status, 'inconclusive');
+  assert.match(result.reason, /^speedup_review_inconclusive: deferred/);
+  assert.equal(h.integAccepted(result, 7.18, 1.4596), false);
+  assert.equal(h.rejectClass(h.gateRejectReason(result, 7.18, 1.4596)), '');
+  assert.equal(h.checkpoints[0].committed, false);
+  assert.equal(h.checkpoints[0].validation_status, 'speedup_review_pending');
 });
 
 test('a claimed confirmation still requires an explicit completed correctness gate', () => {

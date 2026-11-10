@@ -2,7 +2,7 @@
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm/ATOM
 serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
-(gfx1201, vLLM or SGLang). Generic gfx1201 is an ISA identity, not a supported serving product.
+(gfx1201, vLLM or SGLang only). Generic gfx1201 is an ISA identity, not a supported serving product.
 It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
@@ -125,7 +125,7 @@ Workflow({
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
     expected_target: "unknown",                      // REQUIRED: r9700|r9600d|unknown; gfx1201 never implies a product
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 accepts vllm|sglang (default vllm)
+    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm or sglang only; R9600D is vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
@@ -222,7 +222,7 @@ which is the same object Hyperloom puts on its handoff:
       metric_basis: "p90_intvty_inferencex",   // or aggregate_total_token_tok_s,
                                                // aggregate_output_tok_s, e2e_norm_intvty_p90
       canonical_corpus: "semianalysis_cc_traces_weka_062126",   // optional; what results are
-      canonical_duration_s: 3600,                               // stamped canonical against
+      canonical_num_entries: 393, canonical_duration_s: 3600,   // stamped canonical against
       warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
       failed_request_threshold: 0.10,
       observed_isl: 0, observed_osl: 0,  // optional; omit to measure it off the baseline
@@ -242,10 +242,10 @@ Three parts of that object do more than they look:
   widen it: two same-config baseline replicas differed by 3.86% on P90 interactivity (3.43% on total
   tok/s). `noise_band_pct` sets that floor instead; the TTFT-inclusive `e2e_norm_intvty_p90` moved
   17% on the same pair, so pass one if you grade on it.
-- **The reference.** Overriding `corpus` or `duration_s` does not move what a result is stamped
-  canonical against, so a replay of anything else comes back `submission_valid=false`. To change the
-  reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
-  `canonical_duration_s` too.
+- **The reference.** Overriding `corpus`, `num_entries` or `duration_s` does not move what a result is
+  stamped canonical against, so a replay of anything else comes back `submission_valid=false`. To
+  change the reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
+  `canonical_num_entries` / `canonical_duration_s` too.
 - **The mapper.** An `inferencex_path` checkout's `map_aiperf.py` wins over GEAK's vendored copy, and
   upstream's own fallback mapping carries no P90 ITL, so outside Hyperloom's runtime it cannot grade
   the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the run would use
@@ -263,6 +263,12 @@ BASE_URL=http://127.0.0.1:8000 bash e2e_workflow/scripts/agentx_smoke.sh   # + a
 It never launches a server. Its most important check is that `aiperf` actually supports `--scenario`:
 a stock aiperf cannot replay the corpus at all, but pointed at a server it will still report a
 throughput — a "successful" run that measured a different workload.
+
+A handoff run checks the client before anything launches. `run_e2e.py` resolves the `aiperf` the
+bench will run (`AIPERF_BIN`, else `aiperf_bin`, else `aiperf` on `PATH`), and when that is an absolute
+path that is missing, not executable, or in a venv whose interpreter is gone, it writes
+`error_class: agentx_client_unavailable` instead of launching a server. A bare name missing from
+`PATH` only warns, since the bench's `PATH` can differ; `GEAK_STRICT_AGENTX_PREFLIGHT=1` refuses it too.
 
 ### What the declaration changes
 
@@ -478,7 +484,9 @@ Already confirmed evidence is reused only for the same candidate, reference, wor
 protocol identities. The workload identity covers only what decides the served requests, so a profile
 and an A/B of the same workload share it; bench/protocol details go in the separate protocol digest.
 Missing provenance, a timeout or repeated old A/B artifacts leaves the candidate unconfirmed without
-starting another kernel rewrite. Final Validate still performs the normal combined-stack check.
+starting another kernel rewrite. On a timed AgentX trace replay, a confirmation that would not finish
+before the final reserve (every timed replica counted as a leg) is not started, with the same result.
+Final Validate still performs the normal combined-stack check.
 
 The estimate uses the candidate's `affected_gpu_time` coverage when its profile matches the current
 reference and workload: all affected shapes/phases and removed auxiliary kernels, counted once.
