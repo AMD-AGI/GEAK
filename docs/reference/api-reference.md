@@ -1,27 +1,40 @@
 ---
 myst:
     html_meta:
-        "description": "GEAK v4 reference: the Workflow tool, e2e_workflow and kernel_workflow arguments, helper scripts, the external-orchestrator contract, and run artifacts."
-        "keywords": "GEAK, reference, Workflow, e2e_workflow, kernel_workflow, run_e2e, arguments, helper scripts, artifacts"
+        "description": "GEAK-evo reference: bundled runtime, workflow arguments, helper scripts, the external orchestrator contract, and run artifacts."
+        "keywords": "GEAK-evo, reference, Node, e2e_workflow, kernel_workflow, run_e2e, arguments, artifacts"
 ---
 
-# GEAK API reference
+# GEAK-evo API reference
 
-GEAK v4's public surface is not a CLI or a Python package. It is: the Workflow scripts
-(`e2e_workflow.js`, `kernel_workflow.js`), the helper scripts they call, and a stable
-external-orchestrator contract (`interface/run_e2e.py`). For walkthroughs see
-[Run a workflow](../how-to/run-agent.md).
+GEAK-evo exposes workflow scripts, the bundled Node runtime and the stable
+external orchestrator contract at `interface/run_e2e.py`. Repository paths,
+the `geak` package and `GEAK_*` settings retain their names. See
+[Run a workflow](../how-to/run-agent.md) for walkthroughs.
 
-## The `Workflow` tool
+## Runtime invocation
 
-Claude Code runs a workflow by calling:
+Save workflow arguments as JSON and invoke the bundled runtime from the repository root:
 
-```js
-Workflow({ scriptPath: "<absolute path to *.js>", args: { /* see below */ } })
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  kernel_workflow/kernel_workflow.js \
+  --agent claude --args-file kernel-args.json \
+  --result-file kernel-workflow-result.json
 ```
 
-`workflow_dir` is always required (a JS workflow can't read its own path). Natural-language prompts
-are mapped onto `args`; there is no config file for workflow parameters.
+`workflow_dir` is required. The runtime supplies the workflow primitives and
+measurement subprocess ownership; agents use the configured Claude or Codex
+backend. The native Claude `Workflow` tool lacks the required `runProcess`
+primitive. For Hyperloom, keep the existing two-file Python invocation:
+
+```bash
+python interface/run_e2e.py handoff.json result.json
+```
+
+Omitting `optimizer` selects `evo` for standalone and nested kernel runs.
+Explicit `"optimizer": "greedy"` selects the original search policy. See the
+[configuration reference](../evo/configuration.md) for optional EVO controls.
 
 | Workflow | scriptPath | Purpose |
 |---|---|---|
@@ -44,6 +57,7 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `kernel_path` | — | Single-kernel pass-through (mutually exclusive with `model_path`); delegates straight to the kernel layer. |
 | `workflow_dir` | — (**required**) | This folder (`e2e_workflow/`). |
 | `kernel_workflow_dir` | sibling `kernel_workflow/` | Recursive kernel layer location. |
+| `optimizer` | `evo` | Kernel search policy: `evo` or `greedy`. |
 | `exp_root` | sibling `exp/` | Output root. |
 | `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` (selects `scripts/adapters/<backend>.sh`). |
 | `launch_script` | `""` | Optional custom launch script; else the stack default. |
@@ -118,25 +132,36 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 
 ### Example
 
-```js
-Workflow({
-  scriptPath: "<REPO>/e2e_workflow/e2e_workflow.js",
-  args: {
-    model_path: "/models/Qwen3.5-27B-FP8",
-    workflow_dir: "<REPO>/e2e_workflow",
-    backend: "sglang", tp: 4, gpu_ids: "0,1,2,3",
-    expected_gfx: "gfx950", expected_target: "unknown",
-    expected_device_name: "AMD Instinct MI355X",
-    expected_physical_cu_count: 256,
-    isl: 1024, osl: 1024, conc: 64,
-    budget: 6, config_tune: "true"
-  }
-})
+Save as `e2e-args.json`, replacing paths and hardware settings:
+
+```json
+{
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "workflow_dir": "/absolute/path/GEAK/e2e_workflow",
+  "eval_dir": "/absolute/path/runs/qwen-001",
+  "backend": "sglang",
+  "tp": 4,
+  "gpu_ids": "0,1,2,3",
+  "expected_gfx": "gfx950",
+  "expected_target": "mi355x",
+  "isl": 1024,
+  "osl": 1024,
+  "conc": 64,
+  "budget": 6,
+  "config_tune": "true"
+}
+```
+
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  e2e_workflow/e2e_workflow.js \
+  --agent claude --args-file e2e-args.json \
+  --result-file e2e-workflow-result.json
 ```
 
 For normal launches, prefer `interface/run_e2e.py`; it runs the structured GPU
 identity probe and supplies these `expected_*` fields before backend or
-architecture policy is selected. Direct `Workflow(...)` model-mode calls must
+architecture policy is selected. Direct Node model-mode calls must
 supply `expected_gfx` and `expected_target` themselves.
 
 ## `kernel_workflow.js`
@@ -151,6 +176,7 @@ budget-controlled, each patch independently verified.
 |---|---|---|
 | `kernel_path` | — (**required**) | Kernel task directory (or a kernel source to wrap). |
 | `workflow_dir` | — (**required**) | This folder (`kernel_workflow/`). |
+| `optimizer` | `evo` | Kernel search policy: `evo` or `greedy`. |
 | `budget` | `6` | Optimization-task budget. |
 | `min_improve` | `0.02` | Minimum accepted improvement (2%). |
 | `deep_cost` | `2` | Budget cost of a deep-explore engineer. |
@@ -179,15 +205,16 @@ budget-controlled, each patch independently verified.
 time-weighted ratio-of-sums. Author mode writes a fresh baseline against an immutable oracle, then runs
 the same optimize loop.
 
-```js
-Workflow({
-  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
-  args: {
-    kernel_path: "<REPO>/examples/tasks/knn",
-    workflow_dir: "<REPO>/kernel_workflow",
-    budget: 8, gpu_ids: "0"
-  }
-})
+Save as `kernel-args.json` and use the runtime command above:
+
+```json
+{
+  "kernel_path": "/absolute/path/GEAK/examples/tasks/knn",
+  "workflow_dir": "/absolute/path/GEAK/kernel_workflow",
+  "eval_dir": "/absolute/path/runs/knn-001",
+  "budget": 8,
+  "gpu_ids": "0"
+}
 ```
 
 ## Helper scripts
