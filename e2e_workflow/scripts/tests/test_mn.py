@@ -156,6 +156,9 @@ class NormalizeSpecTest(unittest.TestCase):
         self.assertEqual((spec["serve_port"], spec["dist_init_port"], spec["tp"]), (30890, 30531, 16))
         self.assertEqual(spec["nodes"], [{"host": "10.0.0.1"}, {"host": "10.0.0.2"}])
         self.assertEqual(spec["layout"], [{"tp": 16, "gpus": 8}, {"tp": 16, "gpus": 8}])
+        self.assertEqual(spec["kb_topology"], "tpspan_n2")
+        self.assertEqual(mn.normalize_spec({"nodes": ["10.0.0.1"], "shared_fs": "/w"}, 8)["kb_topology"], "",
+                         "one node keeps the one-host KB address")
 
     def test_roles_order_pd_nodes_and_count_them(self):
         spec = mn.normalize_spec({"topology": "pd_disagg", "shared_fs": "/w", "tp_by_role": {"decode": 4},
@@ -163,6 +166,7 @@ class NormalizeSpecTest(unittest.TestCase):
         self.assertEqual([n["host"] for n in spec["nodes"]], ["p", "d"])
         self.assertEqual((spec["tp_by_role"], spec["nodes_by_role"]),
                          ({"prefill": 8, "decode": 4}, {"prefill": 1, "decode": 1}))
+        self.assertEqual(spec["kb_topology"], "pd_p8x1_d4x1")
 
     def test_an_explicit_rank_orders_the_nodes(self):
         spec = mn.normalize_spec({"shared_fs": "/w", "nodes": [{"host": "b", "rank": 1}, {"host": "a", "rank": 0}]}, 16)
@@ -214,6 +218,7 @@ class ProvidedSpecTest(unittest.TestCase):
                          [("prefill", 0), ("prefill", 1), ("decode", 0), ("decode", 1)])
         self.assertEqual((spec["nodes_by_role"], spec["replicas_by_role"]),
                          ({"prefill": 1, "decode": 1}, {"prefill": 2, "decode": 2}))
+        self.assertEqual(spec["kb_topology"], "pd_p8x2_d8x2")
         self.assertEqual([(n["port"], n.get("bootstrap_port")) for n in spec["nodes"]],
                          [(8000, 8998), (8000, 8998), (8000, None), (8000, None)])
         self.assertEqual((spec["router"]["host"], spec["router"]["port"]), ("r", 8000))

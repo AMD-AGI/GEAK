@@ -1451,10 +1451,11 @@ function noteKernelKB(r, label) {
 // a one-segment disagreement silently addresses a different page (see kb/identity.py).
 function kbIdentityFlags() {
   if (!KB_DIMS) return '';
+  const spread = (MN_SPEC && MN_SPEC.kb_topology) || '';   // mn.py normalize_spec; '' on one host
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
-    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
+    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`, ...(spread ? [`--topology ${spread}`] : []),
     // The declared kind, never the shape provenance (whose fallback values would mis-file
     // degraded AgentX runs).
     `--workload-kind ${shq(WORKLOAD_KIND)}`,
@@ -3279,6 +3280,7 @@ async function agentMnCheck() {
 }
 const mnHosts = (ns) => (Array.isArray(ns) ? ns : []).map((n) =>
   String((n && typeof n === 'object') ? (n.host || n.ip || '') : n).trim()).sort().join(', ');
+const mnNeedsSpread = (spec) => SERVING_TOPOLOGY === 'pd_disagg' || (spec && Array.isArray(spec.nodes) && spec.nodes.length > 1);
 // The verdict reaches this script through the main session's relay, which has dropped or rewritten
 // fields (#42). '' when every field used downstream is there, else why not.
 function mnVerdictDefect(v) {
@@ -3288,6 +3290,7 @@ function mnVerdictDefect(v) {
   if (!s || typeof s !== 'object') return 'no spec';
   for (const k of ['state', 'shared_fs']) if (typeof s[k] !== 'string' || !s[k].trim()) return `no spec.${k}`;
   if (mnHosts(s.nodes) !== mnHosts(MN.nodes)) return `spec.nodes (${mnHosts(s.nodes)}) are not args.multinode's (${mnHosts(MN.nodes)})`;
+  if (mnNeedsSpread(s) && (typeof s.kb_topology !== 'string' || !s.kb_topology.trim())) return 'no spec.kb_topology';
   if (SERVING_TOPOLOGY === 'pd_disagg') {
     const t = s.tp_by_role || {};
     if (!PD_ROLES.every((r) => Number.isInteger(t[r]) && t[r] > 0)) return `spec.tp_by_role ${JSON.stringify(s.tp_by_role)} is not a TP per engine`;

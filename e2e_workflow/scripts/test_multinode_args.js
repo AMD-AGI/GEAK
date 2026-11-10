@@ -29,7 +29,7 @@ const load = (A, gpuIds = '0') => new Function('A', 'GPU_IDS', 'GPU_LIST', 'WORK
 const IPS = ['10.10.0.166', '10.10.0.32'];
 const mn = (over = {}) => ({ nodes: IPS, shared_fs: '/shared/geak/', ...over });
 const SPEC = { topology: 'pd_disagg', nodes: [{ host: 'p1' }, { host: 'd1' }], shared_fs: '/shared/geak',
-  state: '/shared/geak/r1/mn_state.json', tp_by_role: { prefill: 8, decode: 4 } };
+  state: '/shared/geak/r1/mn_state.json', tp_by_role: { prefill: 8, decode: 4 }, kb_topology: 'pd_p8x1_d4x1' };
 
 console.log('single host');
 {
@@ -112,6 +112,7 @@ const verdictTests = (async () => {
   for (const [why, bad] of [
     ['no spec', { verdict: 'ok' }],
     ['no spec.state', { verdict: 'ok', spec: drop('state') }],
+    ['no spec.kb_topology', { verdict: 'ok', spec: drop('kb_topology') }],
     ['PD without tp_by_role', { verdict: 'ok', spec: drop('tp_by_role') }],
     ['other machines', { verdict: 'ok', spec: at(['10.9.9.9', IPS[1]]) }],
   ]) {
@@ -122,9 +123,14 @@ const verdictTests = (async () => {
   r = await run({ ...A, multinode_check: { verdict: 'refused', problems: ['rank1: GPUs busy'] } }, ok(IPS));
   eq([r.ret.multinode_check.verdict, r.ret.multinode_check.problems, r.calls.length],
     ['refused', ['rank1: GPUs busy'], 0], 'a relayed refusal stands, no agent re-runs the check');
-  r = await run({ ...A, multinode_check: { verdict: 'ok' } }, ok(IPS, drop('tp_by_role')));
-  eq([r.ret.multinode_check.verdict, /unusable: spec\.tp_by_role/.test(r.ret.error), r.used.length],
+  r = await run({ ...A, multinode_check: { verdict: 'ok' } }, ok(IPS, drop('kb_topology')));
+  eq([r.ret.multinode_check.verdict, /unusable: no spec\.kb_topology/.test(r.ret.error), r.used.length],
     ['refused', true, 0], 'a re-check whose own verdict is unusable is refused');
+  const one = { tp: 8, multinode: mn({ nodes: IPS.slice(0, 1) }) };
+  const single = { ...SPEC, topology: 'tp_span', nodes: [{ host: IPS[0] }], kb_topology: '' };
+  delete single.tp_by_role;
+  r = await run({ ...one, multinode_check: { verdict: 'ok', spec: single } }, '');
+  eq([r.ret, r.calls.length], ['passed', 0], 'one machine needs no kb_topology');
 
   r = await run(A, ok(IPS.slice().reverse()), { EVAL_DIR_OVERRIDE: '/shared/geak/exp/e1' });
   eq([r.ret, r.calls.length, r.used.length], ['passed', 1, 1], 'no verdict passed: one agent runs the check');

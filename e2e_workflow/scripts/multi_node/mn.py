@@ -364,6 +364,10 @@ def normalize_spec(block: dict, tp) -> dict:
                                  for r in PD_ROLES}
         if any(v > 1 for v in replicas.values()):
             spec["replicas_by_role"] = replicas
+    # The KB --topology: TP16 over two nodes or a PD split is not one host at the same tp.
+    tpr = spec.get("tp_by_role") or {}
+    spec["kb_topology"] = (f"pd_p{tpr['prefill']}x{replicas['prefill']}_d{tpr['decode']}x{replicas['decode']}"
+                           if topology == "pd_disagg" else f"tpspan_n{len(nodes)}" if len(nodes) > 1 else "")
     for key in ("backend", "model"):
         if block.get(key):
             spec[key] = str(block[key]).strip().rstrip("/")
