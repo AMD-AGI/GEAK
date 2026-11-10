@@ -5,6 +5,10 @@ setup, planner, engineer roles, tools, verifier, integration step, and final
 validation as GEAK. Select it with `optimizer: "evo"`; see the
 [run guide](stock-workflow.md).
 
+See the [10 November reviewed configuration and evaluation status](evaluation-20261110.md)
+for the explicit experiment settings, measured comparisons, and features that
+still need full-run qualification.
+
 For the distinction between one full GEAK lineage, a population of ordinary
 GEAK lineages, and the hybrid GEAK-EVO population used in v1 experiments, see
 [the updated diagrams, measured comparison, and code links](geak-vs-evo.md).
