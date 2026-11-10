@@ -60,6 +60,8 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
 //   matrixCore  the matrix ISA the prompts name
 const GPU_FAMILIES = [
   { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
+  // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
+  { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
 ];
 const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
@@ -251,7 +253,7 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
-// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
+// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared isolated run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
 let SKILLS_ISOLATE = gpuFamily(EXPECTED_GFX).isolate;
 
@@ -984,7 +986,7 @@ const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 
 const GPU_FAMILY = gpuFamily(GFX);
 if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
-  // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
+  // an isolating family (GPU_FAMILIES) gets the dedicated in-tree hardware guide but no CDNA-biased cards.
   USE_EXPERT_SKILLS = false;
   KERNEL_KNOWLEDGE_DIR = '';
   USE_LEARNED_READ = false;

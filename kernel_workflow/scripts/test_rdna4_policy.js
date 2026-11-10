@@ -25,6 +25,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     expectedPhysicalCuCount = 0,
     budget = 0,
     planDirections = null,
+    validate = null,
   } = extras;
   const globals = {
     args: {
@@ -89,6 +90,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       if (options.label.startsWith('tech_lead:plan')) {
         return { stop: false, directions: planDirections || [] };
       }
+      if (options.label === 'director:validate') return validate;
       if (options.label === 'update_experience') {
         return { action: 'skipped', card_path: '', key: '', note: 'test' };
       }
@@ -259,6 +261,28 @@ function mustInclude(hay, needle, msg) {
   }
   if (!cdna5Analyze.includes('Expert skills (ADVISORY')) {
     throw new Error('gfx1250 did not keep the CDNA expert-skill path');
+  }
+
+  // RDNA 3.5 (gfx115x) is isolated the same way, declared or only detected, and an accepted win is
+  // curated under the ISA that produced it. gfx950 is the control (test_gpu_family_table.js pins
+  // which ISAs isolate).
+  const accepted = { validation_status: 'accepted', director_verified_speedup_geomean: 1.5 };
+  for (const [gfx, expected, isolated] of [
+    ['gfx1151', 'gfx1151', true], ['gfx1151', '', true], ['gfx1150', '', true], ['gfx950', '', false],
+  ]) {
+    const where = `${expected ? 'declared' : 'detected'} ${gfx}`;
+    const lane = await run(gfx, expected, { physicalCuCount: 40, validate: accepted });
+    const analyzePrompt = lane.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(analyzePrompt, `- GFX: ${gfx}`, `${where}: GFX did not reach the analysis prompt`);
+    if (analyzePrompt.includes('Expert skills (ADVISORY') === isolated) {
+      throw new Error(`${where}: expert skills ${isolated ? 'reached an isolated' : 'missing on a CDNA'} lane`);
+    }
+    if (isolated && lane.prompts.some((entry) => entry.label.includes('warm_start'))) {
+      throw new Error(`${where}: attempted warm-start calls`);
+    }
+    const curate = (lane.prompts.find((entry) => entry.label === 'update_experience') || {}).prompt || '';
+    mustInclude(curate, `- CURATION_ISOLATE: ${isolated}`, `${where}: wrong CURATION_ISOLATE`);
+    mustInclude(curate, `- REQUIRED_PLATFORMS: ${isolated ? `["${gfx}"]` : '[]'}`, `${where}: card filed under the wrong platform`);
   }
 
   const director = fs.readFileSync(path.join(wfDir, 'roles/director.md'), 'utf8');

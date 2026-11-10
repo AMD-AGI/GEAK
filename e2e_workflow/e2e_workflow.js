@@ -113,6 +113,8 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
 //   matrixCore  the matrix ISA the prompts name
 const GPU_FAMILIES = [
   { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
+  // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
+  { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
 ];
 const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
@@ -121,8 +123,8 @@ const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
-// ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
-// an exact product identity selects calibrated peaks, serving backend and image policy.
+// ISA isolation and product policy are separate: any isolating family (GPU_FAMILIES) avoids CDNA
+// priors, but only an exact product identity selects calibrated peaks, serving backend and image policy.
 const GPU_FAMILY = gpuFamily(EXPECTED_GFX);
 const E2E_LEARNED_KB_ENABLED = !GPU_FAMILY.isolate;
 const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore;
@@ -135,7 +137,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // Every nested lane call builds its args here, so none silently takes the lane's own defaults;
 // test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
 // ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
-// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
+// explicitly. wfArgs spreads last so a per-call value wins (family isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,

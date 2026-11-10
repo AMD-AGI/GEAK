@@ -41,10 +41,12 @@ for (const row of GPU_FAMILIES) {
 const policy = (f) => `${f.name} ${f.isolate ? 'isolated' : 'open'} ${f.matrixCore}`;
 const CDNA = 'default open MFMA';
 const R9700 = 'R9700 isolated WMMA';
+const RDNA35 = 'RDNA 3.5 isolated WMMA';
 const EXPECT = {
   gfx90a: CDNA, gfx942: CDNA, gfx950: CDNA, gfx1250: CDNA,
   gfx1100: CDNA, gfx1101: CDNA, gfx1102: CDNA, gfx1103: CDNA, // RDNA3 has no row: the default
-  gfx1150: CDNA, gfx1151: CDNA, gfx1152: CDNA, gfx1153: CDNA,
+  gfx1150: RDNA35, gfx1151: RDNA35, gfx1152: RDNA35, gfx1153: RDNA35,
+  gfx11510: CDNA, gfx115: CDNA,
   gfx1200: CDNA, gfx1201: R9700, gfx12010: CDNA, gfx1201x: CDNA,
   '': CDNA, unknown: CDNA,
 };

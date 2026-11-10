@@ -313,6 +313,33 @@ const R9700 = {
     }
   }
 
+  console.log('\n# G. RDNA 3.5 (gfx115x) gets the same isolation from the ISA alone');
+  {
+    // gfx1151 has no product key (it ships as the 8060S, 8050S and 8040S); rocminfo gives it an
+    // empty marketing name. A bare gfx1150 must isolate too, without an invented product.
+    const HALO = {
+      expected_gfx: 'gfx1151', expected_target: 'unknown',
+      expected_device_name: '', expected_physical_cu_count: 40,
+    };
+    for (const identity of [HALO, { expected_gfx: 'gfx1150' }]) {
+      const { run, trace } = build({ kernel_path: '/tmp/k', ...identity });
+      await run();
+      const a = (trace.workflowCalls[0] || {}).args || {};
+      ok(a.use_learned_kb === 'false' && a.use_expert_skills === 'false' && a.perf_knowledge_dir === ''
+        && a.warm_start === 'off', `${identity.expected_gfx} lane isolated`, JSON.stringify(a));
+      ok(a.expected_target === identity.expected_target, `${identity.expected_gfx} product forwarded as given`,
+        JSON.stringify(a.expected_target));
+    }
+    const { run, trace } = build({ model_path: '/models/m', ...HALO }, {
+      stopAtPhase: 2, setupIdentity: { gfx: 'gfx1151', target: 'unknown', name: '', cu: 40 },
+    });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(msg === PROBE_STOP, 'gfx1151 setup reached the next phase', msg || 'no throw');
+    const directorPrompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
+    ok(/E2E_LEARNED_KB: off/.test(directorPrompt), 'gfx1151 role inputs disable the E2E learned KB');
+  }
+
   console.log(failures === 0
     ? '\nPASS: E2E isolates R9700 lanes, leaves CDNA untouched, and fails closed on non-vLLM backends.'
     : `\nFAILED: ${failures} assertion(s).`);

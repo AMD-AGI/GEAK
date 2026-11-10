@@ -8,8 +8,8 @@
 //   E-J) bake-off LANE ROUTING — the live language optimizes its existing impl, other languages follow
 //        Discover's author_plan.route (rewrite -> optimize, author -> author), explicit args.backends
 //        overrides auto-discovery, and the winner is picked by speedup on the one frozen baseline.
-//   L-M) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 isolates CDNA
-//        knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
+//   L-N) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 (L) and gfx115x
+//        (N) isolate CDNA knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
 //
 // The Workflow runtime globals (args/phase/log/workflow/agent/parallel/pipeline/budget) are stubbed, so
 // this runs in milliseconds and spawns nothing. The runtime wraps a workflow script body in an async
@@ -400,6 +400,42 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
     ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
       JSON.stringify(trace.agentLabels));
+  }
+
+  console.log('\n# N. gfx115x: detection alone isolates; a winning card is filed under the detected ISA');
+  for (const [gfx, cu, label] of [
+    ['gfx1151', 40, 'RDNA 3.5 / gfx1151'], ['gfx1150', 16, 'RDNA 3.5 / gfx1150'],
+    ['gfx1201', 64, 'R9700 / gfx1201'], ['gfx950', 256, null],
+  ]) {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff',
+      backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: gfx, device_target: 'unknown', device_name: '', physical_cu_count: cu,
+    }), lane: { hip: 1.5 } });
+    await run();
+    const a = (trace.workflowCalls[0] || {}).args || {};
+    const prompt = (l) => (trace.prompts.find((e) => e.label === l) || {}).prompt || '';
+    const iso = label !== null;
+    ok(iso ? prompt('op_benchmarker:discover').includes(`${label} ISOLATION:`)
+      : !prompt('op_benchmarker:discover').includes('ISOLATION'), `${gfx}: Discover isolation ${iso}`);
+    const off = [a.perf_knowledge_dir === '', a.warm_start === 'off', a.use_expert_skills === 'false'];
+    ok(off.every((x) => x === iso), `${gfx}: lane CDNA inputs ${iso ? 'off' : 'on'}`, JSON.stringify(a));
+    const card = prompt('update_experience');
+    ok(card.includes(`- CURATION_ISOLATE: ${iso}`) &&
+      card.includes(`- REQUIRED_PLATFORMS: ${iso ? `["${gfx}"]` : '[]'}`), `${gfx}: card platform`);
+  }
+  {
+    // A DECLARED gfx1151 is isolated before Freeze, so the expert-skills dir is never derived.
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff', expected_gfx: 'gfx1151',
+      expected_target: 'unknown', backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1151', device_target: 'unknown', device_name: '', physical_cu_count: 40,
+    }) });
+    await run();
+    const a = (trace.workflowCalls[0] || {}).args || {};
+    ok(a.expert_skills_dir === '', 'declared gfx1151 derives no expert_skills_dir', a.expert_skills_dir);
   }
 
   console.log(failures === 0
