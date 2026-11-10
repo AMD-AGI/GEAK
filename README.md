@@ -61,7 +61,12 @@ use the workload's correctness, quality and latency checks when deploying a chan
 2. Plan and develop alternatives using shared engineers, profiling tools and evaluators.
 3. Retain source and evidence; select earlier programs for further development or combination.
 4. Independently verify a candidate before promotion, and deliver the exact tested source.
-5. For serving tasks, integrate, measure the full workload and reprofile.
+5. For serving tasks, integrate and measure the full workload.
+
+AgentX trace replay uses its measured kernel inventory and prepared standalone
+tasks. Fixed-load serving also has an outer strategy, configuration and reprofiling
+loop. Both use the same kernel optimizer and serving acceptance contract; see the
+[serving workflow](e2e_workflow/README.md) for their phase routing.
 
 EVO starts retained-candidate development after the first stalled round by default.
 Budgets and optional evidence/development controls are documented in the

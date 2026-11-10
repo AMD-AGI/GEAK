@@ -89,15 +89,19 @@ node interface/runtime/engine/run_workflow.mjs \
   --result-file e2e-workflow-result.json
 ```
 
-The workflow profiles the server, tunes configuration and hot kernels, then
-re-measures integrated changes. Reports and the final overlay, patch and launch
+For fixed-load workloads, the workflow profiles the server, tunes configuration
+and hot kernels, then re-measures integrated changes. AgentX trace replay uses
+baseline measurement, kernel extraction and standalone task validation, kernel
+optimization, then serving validation; it skips the outer configuration sweep.
+Reports and the final overlay, patch and launch
 script are written under `eval_dir`. The direct Node return is separate from the
 normalized integration result produced by `interface/run_e2e.py`.
 
 ## Depth and accuracy options
 
-Add these fields to the E2E arguments as needed. Depth controls the outer serving
-pipeline; `optimizer` selects the search policy of its nested kernel workers.
+Add these fields to the E2E arguments as needed. The table describes the fixed-load
+serving pipeline. AgentX retains the head/milestone scheduling of its selected
+mode and skips ConfigSweep. `optimizer` selects the nested kernel search policy.
 
 | Mode | Fields | Phases |
 |---|---|---|

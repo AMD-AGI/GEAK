@@ -1,4 +1,11 @@
-# GEAK external orchestrator contract
+---
+myst:
+    html_meta:
+        "description": "GEAK-evo external orchestrator handoff, result, measurement and recovery contract."
+        "keywords": "GEAK-evo, Hyperloom, handoff, result, interface, serving"
+---
+
+# GEAK-evo external orchestrator contract
 
 Hyperloom and other callers use `interface/run_e2e.py` to pass a task to GEAK and
 receive measured results. The maintained specification is

@@ -43,11 +43,15 @@ Explicit `"optimizer": "greedy"` selects the original search policy. See the
 
 ## `e2e_workflow.js`
 
-`meta.name = "e2e-workflow"`. Phases:
+`meta.name = "e2e-workflow"`. Fixed-load phases:
 `Setup → Profile → Strategize → ConfigSweep → HeadKernel → Milestone → Finalize → Report → Validate`.
 
 Owns the server, throughput metric, profiling, Amdahl triage, config/backend tuning, hot-kernel
 extraction, and reversible reintegration; recursively calls `kernel_workflow.js` per kernel.
+
+AgentX trace replay uses baseline → extraction and standalone task validation →
+head/kernel optimization → E2E validation. It skips the outer Profile/Strategize,
+ConfigSweep and Tune phases. See the [AgentX route](../../e2e_workflow/README.md#agentx-kernel-extraction-and-ut-delivery).
 
 ### Core args
 
@@ -59,12 +63,12 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `kernel_workflow_dir` | sibling `kernel_workflow/` | Recursive kernel layer location. |
 | `optimizer` | `evo` | Kernel search policy: `evo` or `greedy`. |
 | `exp_root` | sibling `exp/` | Output root. |
-| `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` (selects `scripts/adapters/<backend>.sh`). |
+| `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` \| `atom` (selects `scripts/adapters/<backend>.sh`). |
 | `launch_script` | `""` | Optional custom launch script; else the stack default. |
 | `gpu_ids` | `0` | CSV optimization-parallelism pool. |
 | `tp` / `serving_tp` | `1` | Serving tensor-parallel size. |
 | `serving_gpu` | first `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
-| `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Workload; profiling and benchmarking share these. |
+| `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Synthetic workload fields; AgentX takes its actual request mix from the declared replay. |
 | `task` | `""` | Natural-language steer. |
 | `apply_to_original` | `false` | If `true`, emit an apply bundle (overlay + launch); never edits site-packages. |
 | `phases` | `all` | Run a subset: `{setup, config, head, kernel, final}`. `state` carries cross-phase state. |
@@ -76,8 +80,8 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `budget` | `6` | Max kernel-optimization tasks (config sweep is free). |
 | `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
-| `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
-| `config_tune` | `true` | Tier-0 flag/env/backend sweep on/off (runs FIRST). |
+| `milestone_min_pct` | `5` | Fixed-load milestone GPU-time threshold; AgentX uses its extraction inventory. |
+| `config_tune` | `true` | Fixed-load flag/env/backend sweep; AgentX skips it. |
 | `head_threshold_pct` | `5` | Head-kernel selection threshold. |
 | `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. |
 | `head_author_max` | `2` | Author languages per head (FlyDSL + Triton). |
