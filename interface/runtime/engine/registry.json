@@ -11,7 +11,13 @@
         "--allowedTools",
         "Bash",
         "Read",
-        "Write"
+        "Write",
+        "WebSearch",
+        "WebFetch"
+      ],
+      "options_env": [
+        {"env": "GEAK_CLAUDE_SETTINGS", "flag": "--settings"},
+        {"env": "GEAK_CLAUDE_EFFORT", "flag": "--effort", "values": ["low", "medium", "high", "xhigh", "max"]}
       ],
       "model_flag": "--model",
     "base_url_env": "ANTHROPIC_BASE_URL",

@@ -1,8 +1,8 @@
-# GEAK-EVO in a full workload optimization loop
+# GEAK-evo in a full workload optimization loop
 
 The intended Level 4 system autonomously investigates a workload, develops better
 computational organizations, integrates them, and measures the resulting workload.
-GEAK-EVO supplies the persistent engineering search inside Hyperloom or GEAK's
+GEAK-evo supplies the persistent engineering search inside Hyperloom or GEAK's
 end-to-end workflow. The outer workflow retains responsibility for the workload
 objective, serving configuration, task boundaries and final acceptance.
 
@@ -17,7 +17,7 @@ flowchart TD
     P[Measure workload and inspect its computational dependencies]
     B[Check applicable resource bounds and competing bottleneck explanations]
     T[Define an editable region with correctness, state and timing contracts]
-    E[GEAK-EVO: persistent parallel engineering trajectories]
+    E[GEAK-evo: persistent parallel engineering trajectories]
     M[(Retained source, design, measurements and unresolved questions)]
     V[Verify the realized computation and measure the complete region]
     I[Integrate candidate and verify the serving path uses it]

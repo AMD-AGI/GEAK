@@ -95,7 +95,7 @@ function build(body, argsObj, answer, observeCall, host = {}) {
 // Public fixture paths are normalized names. Each scenario now has a real temporary Git workspace
 // and host runtime because native delivery requires custody and an independently exported patch.
 const EVAL = '/cpu-fixture/eval';
-const BASE_ARGS = { kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
+const BASE_ARGS = { optimizer: 'greedy', kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
   editable_source_paths: ['k.py'], agent_timeout_ms: 0, agent_retries: 1 };
 const perCase = (s) => [{ name: 'c1', baseline_ms: 2, optimized_ms: +(2 / s).toFixed(4), speedup: s },
                         { name: 'c2', baseline_ms: 4, optimized_ms: +(4 / s).toFixed(4), speedup: s }];

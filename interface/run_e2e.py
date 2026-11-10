@@ -10,11 +10,9 @@ Contract (stable, see interface/run_e2e.md):
 * Maps the stable handoff fields onto ``e2e_workflow/e2e_workflow.js``
   args (this mapping is the ONLY thing that changes when the JS workflow's args
   evolve; the handoff/result JSON contract stays put).
-* Invokes the JS workflow through the Claude Code ``Workflow`` tool (the JS
-  workflow CANNOT be run with ``node`` directly — it needs the agent runtime's
-  Workflow/agent/parallel/phase primitives, which are only exposed under
-  ``--effort ultracode``). Prefers the Python ``claude_agent_sdk``; falls back
-  to the ``claude -p`` CLI.
+* Invokes the JS workflow through the bundled Node runtime, which supplies
+  workflow/agent/parallel/phase primitives and owns measurement subprocesses.
+  Agents use the configured Claude or Codex backend.
 * Normalizes the workflow artifacts (``director_e2e_validation.json`` +
   ``baseline/bench_summary.json`` + ``final/``) into the stable ``result.json``.
 
@@ -209,8 +207,8 @@ CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 # itself and dispatches each agent() call to the named backend's one-shot CLI
 # (codex exec / claude -p). This is what lets GEAK use a CLI that cannot itself
 # orchestrate parallel/nested subagents — the runtime does all of that.
-# With no backend selected AND no provider key configured, the original
-# Claude/Workflow path below runs byte-for-byte unchanged.
+# The standard handoff always uses this runtime: kernel delivery needs its
+# host-owned runProcess primitive. Agent/model selection remains configurable.
 AGENT_BACKEND = os.environ.get("GEAK_AGENT_BACKEND", "").strip()   # == --agent (back-compat alias)
 AGENT_PROFILE = os.environ.get("GEAK_AGENT_PROFILE", "").strip()   # a registry profile = (agent, model)
 AGENT_MODEL = os.environ.get("GEAK_MODEL", "").strip()             # override the model axis
@@ -226,7 +224,7 @@ NODE_BIN = os.environ.get("GEAK_NODE_BIN", "node")
 # are read from registry.json — the same data the JS side uses — so the two can
 # never disagree about which keys mean what. A key selects its own agent only
 # when no OTHER agent's side is configured (hyperloom's is_openai_only() shape
-# test); an ambiguous environment keeps the native Claude path rather than
+# test); an ambiguous environment keeps the Claude backend rather than
 # hijacking it. GEAK_AGENT_AUTO=0 opts out.
 def _side_env_names(agent: dict) -> list[str]:
     triggers = [(p or {}).get("trigger_env") for p in agent.get("provider_autoselect") or []]
@@ -241,7 +239,7 @@ def _derive_agent_from_env() -> str:
     try:
         reg = json.loads(RUNTIME_REGISTRY.read_text())
     except Exception:
-        return ""                            # no registry -> native Claude path
+        return ""                            # no registry -> default Claude backend
     agents = (reg.get("agents") or {}).items()
     configured = {
         name for name, agent in agents
@@ -264,10 +262,8 @@ def _derive_agent_from_env() -> str:
 AUTO_BACKEND = _derive_agent_from_env()
 # The backend actually used, however it was chosen. Passed to run_workflow.mjs as
 # an explicit --agent so the JS layer never re-derives and lands somewhere else.
-EFFECTIVE_BACKEND = AGENT_BACKEND or AUTO_BACKEND
-# Take the standalone-runtime path when an agent (explicit or derived) or a
-# profile is selected.
-USE_RUNTIME = bool(EFFECTIVE_BACKEND or AGENT_PROFILE)
+EFFECTIVE_BACKEND = AGENT_BACKEND or AUTO_BACKEND or ("" if AGENT_PROFILE else "claude")
+USE_RUNTIME = True
 
 # Background-task completion race (see _invoke_via_sdk completion gate):
 # when the SDK turn "looks done" (a background task notified terminal + the
@@ -702,7 +698,10 @@ def map_args(
 ) -> dict:
     if any(str(key).startswith("ablation_") for key in h):
         raise ValueError("ablation_* study controls are retired; use the original revision to replay those studies")
-    if "optimizer" in h and h["optimizer"] not in ("greedy", "evo"):
+    optimizer = h.get("optimizer")
+    if optimizer is None or optimizer == "":
+        optimizer = "evo"
+    if optimizer not in ("greedy", "evo"):
         raise ValueError("optimizer must be greedy or evo")
     if "kernel_budget" in h and (
         type(h["kernel_budget"]) is not int or not 1 <= h["kernel_budget"] <= 2**53 - 1
@@ -824,13 +823,14 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
-    # Select the policy of the same nested kernel worker; omission keeps its default.
-    if "optimizer" in h:
-        ps_args["optimizer"] = h["optimizer"]
+    # Make the effective default visible in the handoff artifacts and nested lanes.
+    ps_args["optimizer"] = optimizer
     # Evidence views use literal boolean true in the worker; preserve caller values. The worker
     # validates the EVO schedule selector itself.
     for flag in ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                 "evolution_preserve_founder_attempts", "evolution_start"):
+                 "evolution_preserve_founder_attempts", "evolution_start",
+                 "evolution_return_development", "evolution_import_stall_sources",
+                 "record_planner_inputs", "case_measurement_view"):
         if flag in h:
             ps_args[flag] = h[flag]
     if "kernel_budget" in h:
@@ -2387,11 +2387,18 @@ def _invoke_via_runtime(
         cmd += ["--result-file", result_file]
     if metrics_file:
         cmd += ["--metrics-file", metrics_file]
+    if eval_dir and ps_args.get("record_planner_inputs") is True:
+        cmd += ["--backend-events-file", str(Path(eval_dir) / "runtime_backend_events.jsonl")]
     # The JS enforces the wall-clock budget internally (args.time_budget_s); give
     # the wrapper a margin so a graceful finalize is never killed prematurely.
     wrap_timeout = (timeout_s + 900) if timeout_s else None
+    runtime_env = dict(os.environ)
+    runtime_env.update(_sdk_child_env())
+    # Preserve the handoff entrypoint's Claude default and explicit overrides.
+    # Profiles and GEAK_MODEL still take precedence in the registry resolver.
+    runtime_env.setdefault("GEAK_CLAUDE_MODEL", CLAUDE_MODEL)
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
+        cmd, cwd=str(E2E_DIR), env=runtime_env, capture_output=True,
         text=True, timeout=wrap_timeout,
     )
     if proc.returncode != 0:
@@ -2431,10 +2438,9 @@ def invoke_workflow(
 ) -> dict:
     """Run the JS workflow and return its parsed JSON return value.
 
-    Dispatches on GEAK_AGENT_BACKEND / GEAK_AGENT_PROFILE: when either is set
-    (and ps_args available), runs on the standalone Node runtime with the selected
-    agent/model; otherwise the original Claude/Workflow path (SDK preferred, CLI
-    fallback).
+    Structured handoffs run on the bundled Node runtime with the selected
+    agent/model. The legacy prompt-only helper remains available to callers
+    without structured workflow arguments.
     """
     if USE_RUNTIME and ps_args is not None:
         return _invoke_via_runtime(ps_args, timeout_s, eval_dir)

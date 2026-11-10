@@ -1,94 +1,80 @@
 ---
 myst:
     html_meta:
-        "description": "Install GEAK 4.0.0: pip install git+ downloads the repo, installs a recent Claude Code, and the Python deps (plus a serving backend for E2E, ROCm required)."
-        "keywords": "GEAK, install, ROCm, Claude Code, Workflow, sglang, vLLM, AMD Instinct, setup"
+        "description": "Install the GEAK-evo release checkout, Python dependencies and agent CLI, then run workflows with the bundled Node runtime."
+        "keywords": "GEAK-evo, install, ROCm, Node, Claude Code, sglang, vLLM, AMD Instinct, setup"
 ---
 
-# Install GEAK
+# Install GEAK-evo
 
-GEAK 4.0.0 is not a Python package. It is a set of Workflows (`e2e_workflow.js` / `kernel_workflow.js`)
-that run inside Claude Code. "Installing" means: get the repo, get a recent Claude Code, and have a
-working ROCm environment (plus a serving backend for E2E). For a first run, see
-[Run a workflow](../how-to/run-agent.md).
+GEAK-evo runs the repository's JavaScript workflows through the bundled Node runtime.
+The Python package installs dependencies and bootstraps Claude Code; keep the full
+checkout because it also supplies the workflows, roles, scripts and knowledge files.
+The package name `geak`, repository paths and `GEAK_*` environment variables remain
+unchanged for compatibility.
 
 ## Prerequisites
 
-GEAK 4.0.0 requires the following software and hardware.
-
 | Requirement | Detail |
 |---|---|
-| **AMD Instinct™ MI GPU** | CDNA, gfx942 (MI300X) / gfx950 (MI350X/MI355X). Auto-detected. |
+| **AMD Instinct™ MI GPU** | CDNA, gfx942 (MI300X) / gfx950 (MI350X/MI355X). See the [compatibility matrix](../compatibility.md) for other targets. |
 | **ROCm 6+** | `rocminfo` / `rocm-smi` must work. |
-| **A profiler** | One of `rocprof-compute`, `rocprofv3`, `rocprof` (also `omniperf` or `metrix`). Auto-detected. |
-| **Python 3.8+** | Tested on 3.12. |
-| **Claude Code ≥ 2.1.177** | Required for the dynamic Workflow feature. Check `claude --version`. |
-| **Anthropic API key** | Set as `ANTHROPIC_API_KEY`. Get one at [console.anthropic.com](https://console.anthropic.com). |
-| **Serving backend (E2E)** | A running-capable `sglang` or `vllm`, plus model weights on disk. |
+| **A profiler** | One of `rocprof-compute`, `rocprofv3`, `rocprof` (also `omniperf` or `metrix`). |
+| **Python 3.8+** | Package minimum; use a Python version supported by your serving stack. |
+| **Node.js 18+** | Required for the bundled runtime. Use Node 20+ for the Codex setup. The runtime itself has no npm dependencies. |
+| **Agent CLI and credentials** | Claude Code ≥ 2.1.177 is the bootstrap default. Configure your Claude login/API access, or select another supported backend using the [runtime setup guide](../../interface/runtime/SETUP.md). |
+| **Serving backend (E2E)** | A working `sglang` or `vllm` installation, plus model weights on disk. |
 
-## Set up GEAK
+## Install the release checkout
 
-Clone the repository and run the setup script.
-
-Installing GEAK installs the `geak` Python package + deps, clones the GEAK repo, and installs the Claude Code CLI.
-By default the repo lands in `./GEAK` under the directory you run the command from (override with `GEAK_HOME`).
-Pick either method — both end up the same:
-
-**A. One-liner** — run it in the directory where you want GEAK to live:
+Clone the release branch, then install from that checkout:
 
 ```bash
-pip install "git+https://github.com/AMD-AGI/GEAK"
-```
-
-**B. Clone first** — if you'd rather have the checkout up front (e.g. to work on a branch):
-
-```bash
-git clone https://github.com/AMD-AGI/GEAK.git
+git clone --single-branch --branch feature/evo-reviewed-release-20261110 \
+  https://github.com/AMD-AGI/GEAK.git
 cd GEAK
-pip install .
+GEAK_HOME="$PWD" pip install .
 ```
 
-It leaves PATH and API access configuration to you. Follow its printed next-steps to add `~/.local/bin` to PATH, then set your Anthropic API key:
+`GEAK_HOME="$PWD"` points the bootstrap at this checkout so it preserves the selected
+branch. Keep using this directory for launches. The install attempts to install or
+update Claude Code and prints any remaining setup steps; Node.js and the serving
+stack must already be available separately.
 
-```bash
-export ANTHROPIC_API_KEY=<your-key>
-```
-
-Get a key from [console.anthropic.com](https://console.anthropic.com) if you don't have one. Add the export to your shell profile (`~/.bashrc` or `~/.profile`) to avoid setting it each session.
-
-Launch GEAK:
-
-```bash
-IS_SANDBOX=1 claude --dangerously-skip-permissions
-```
-
-Nothing is compiled at clone time — the workflow `.js` files and their `roles/`, `knowledge/`, `scripts/`
-are used directly. Sandbox mode auto-approves the permissions the workflows need.
+Follow the printed PATH instructions for `~/.local/bin`, and configure your agent
+credentials. For Claude API access, set `ANTHROPIC_API_KEY` in your environment;
+existing Claude login or gateway settings can also be used. See
+[runtime setup](../../interface/runtime/SETUP.md) for backend and model selection.
 
 ## Verify the environment
 
-Run these checks before starting a workflow. A misconfigured environment fails deep into a multi-hour run.
-
 ```bash
-# Claude Code version (must be ≥ 2.1.177)
-claude --version
-
-# GPU is visible to ROCm
+python --version
+node --version
+claude --version                 # or the CLI selected in your runtime configuration
+git branch --show-current
 rocminfo | grep -E "Name:|gfx"
-
-# At least one profiler is on PATH
 command -v rocprof-compute || command -v rocprofv3 || command -v rocprof
 ```
 
-Expected output:
+Check that the branch is `feature/evo-reviewed-release-20261110`, Node is at least
+18, the chosen agent CLI is available, and ROCm reports the intended GPU. If
+`rocminfo` fails, check the ROCm installation and PATH. If no profiler resolves,
+install `rocprof-compute` or `rocprofv3`.
 
-- `claude --version` prints `2.1.177` or higher.
-- `rocminfo` lists your GPU name and a `gfx942` or `gfx950` target.
-- At least one profiler command resolves without error.
+## Start a run
 
-If `rocminfo` fails, your ROCm stack is not installed or not on PATH. If no profiler resolves, install `rocprof-compute` (preferred) or `rocprofv3`.
+Use [Run a workflow](../how-to/run-agent.md) for a kernel or serving example.
+Workflows run through `interface/runtime/engine/run_workflow.mjs`, including when
+Claude is the agent backend. Kernel delivery requires the runtime's `runProcess`
+primitive, which Claude Code's native `Workflow` tool does not provide.
 
-## Related topics
+Existing integrations keep the same command:
 
-- [Run a workflow](../how-to/run-agent.md): start a single-kernel or end-to-end run.
-- [Compatibility matrix](../compatibility.md): verified GPUs, ROCm versions, backends, and dtypes.
+```bash
+python interface/run_e2e.py /path/to/handoff.json /path/to/result.json
+```
+
+The wrapper selects the bundled runtime. Omitting `optimizer` now selects `evo`;
+set `"optimizer": "greedy"` in the handoff to use the original search policy.
+The [handoff and result contract](../../interface/run_e2e.md) is unchanged.

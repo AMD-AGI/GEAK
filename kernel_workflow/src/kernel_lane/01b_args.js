@@ -1,4 +1,4 @@
-const OPTIMIZER = String(A.optimizer || 'greedy');
+const OPTIMIZER = A.optimizer == null || A.optimizer === '' ? 'evo' : String(A.optimizer);
 if (!['greedy', 'evo'].includes(OPTIMIZER)) {
   throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
 }
@@ -123,6 +123,12 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+// Refuse malformed supplied weights instead of silently using unweighted geomean.
+// An absent workload or an empty cases list still means an unweighted task.
+if (WORKLOAD_SPEC && !HAS_WORKLOAD && !(Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length === 0)) {
+  throw new Error('unsupported workload shape: supply op_spec.workload as a non-empty cases list, ' +
+    'a workload-v1 object with kernels[], or a workload_spec_path');
+}
 const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
 const CASE_MEASUREMENT_VIEW = A.case_measurement_view;
 if (CASE_MEASUREMENT_VIEW !== undefined &&
@@ -255,7 +261,7 @@ async function measureFinalEvaluation(workspace) {
 // Optional prospective source history. Keep exact nanosecond values in the
 // existing Store evidence bytes; JavaScript numbers must not round them.
 const CAPTURE_CANONICAL_SELECTIONS = A.capture_canonical_selections === true;
-if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || String(A.optimizer || 'greedy') !== 'greedy')) {
+if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || OPTIMIZER !== 'greedy')) {
   throw new Error('canonical selection capture requires the external_primary GEAK lane');
 }
 async function captureCanonicalSelection(history, kind, round, winner = null, stoppedBy = null) {

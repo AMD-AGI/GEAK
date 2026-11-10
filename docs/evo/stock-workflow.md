@@ -1,7 +1,7 @@
-# Run GEAK-EVO
+# Run GEAK-evo
 
-GEAK-EVO runs through the ordinary kernel workflow. Set `optimizer` to `evo` in
-the workflow arguments; `greedy` is the default for GEAK. Install the runtime
+GEAK-evo runs through the shared kernel workflow. Omitted `optimizer` selects
+`evo`; set `optimizer: "greedy"` explicitly to use the original search policy. Install the runtime
 using the [installation guide](../install/install.md), and prepare a task that
 builds and passes its original correctness checks in the intended GPU environment.
 
@@ -35,7 +35,9 @@ paths and GPU ID are placeholders for the caller's environment.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
-| `optimizer` | `"greedy"` | `"evo"` enables the retained population in the shared loop. |
+| `optimizer` | `"evo"` | Retained-candidate search; `"greedy"` selects the original policy. |
+| `evolution_start` | `"first_stall"` | Begin retained-candidate development after the first stalled round; `"search_start"` begins in round one. |
+| `evolution_return_development` | `true` | Retain a developed attempt when no measured candidate was saved; qualification is still required. |
 | `budget` | `6` | Direction budget; each deep engineer costs `deep_cost` units. |
 | `deep_cost` | `2` | Budget charge for a deep engineer. |
 | `max_no_improve` | `2` | Consecutive rounds without qualifying progress before stopping. |
@@ -44,7 +46,7 @@ paths and GPU ID are placeholders for the caller's environment.
 | `evolution_case_evidence_view` | `false` | Boolean `true` adds retained case evidence to planning and round-memory inputs. |
 | `evolution_preserve_founder_attempts` | `false` | Boolean `true` asks EVO engineers to return correct slower founding implementations while archive/continuation context remains deferred. Failed or unfinished attempts stay separate evidence; qualification and promotion are unchanged. |
 
-GEAK-EVO can verify and retain slower candidates without promoting them. A deep
+GEAK-evo can verify and retain slower candidates without promoting them. A deep
 engineer occupies a dedicated round in both modes. Account for these choices when
 comparing search
 costs. Use the same task, model, numerical contract, objective, and measurement
@@ -55,7 +57,7 @@ policy in both runs; a large direction budget alone does not prevent early stops
 ## Outputs and limits
 
 The ordinary reports and final patch remain under the evaluation directory.
-GEAK-EVO also writes `evolution/archive.json`, its retained patches, and a fixed
+GEAK-evo also writes `evolution/archive.json`, its retained patches, and a fixed
 run base. See the [archive guide](archive.md) to inspect source and evidence.
 
 Use a fresh evaluation directory for each run. Archive files survive ordinary
@@ -64,6 +66,6 @@ terminated run. A hard termination can prevent final measurement.
 
 For tasks with a supplied native evaluator, use the existing measurement and
 result command fields described in [native measurements](direct-external-command.md).
-They are shared by GEAK and GEAK-EVO. The former Python EVO driver is retired.
+They are shared by GEAK and GEAK-evo. The former Python EVO driver is retired.
 Remove `optimizer_command`, `optimizer_task_ref`, and `optimizer_reserve_s` from
 old configurations; these arguments are rejected at startup.

@@ -1,8 +1,8 @@
-# GEAK-EVO architecture
+# GEAK-evo architecture
 
-GEAK-EVO retains alternative candidates inside GEAK's kernel workflow. It uses the same
+GEAK-evo retains alternative candidates inside GEAK's kernel workflow. It uses the same
 setup, planner, engineer roles, tools, verifier, integration step, and final
-validation as GEAK. Select it with `optimizer: "evo"`; see the
+validation as GEAK. EVO is the default; `optimizer: "greedy"` selects the original policy. See the
 [run guide](stock-workflow.md).
 
 See the [runtime configuration reference](configuration.md) for explicit
@@ -59,8 +59,7 @@ it is off by default. See [archive fields](archive.md).
 
 This implementation provides source retention and a way to select and develop
 earlier work within one run. It has no separate population service, semantic
-cell allocation, or cross-run archive resume protocol. Deep engineers may run
-alongside other EVO directions; slower candidates may be verified and retained.
+cell allocation, or cross-run archive resume protocol. Deep engineers run in dedicated rounds; slower candidates may be verified and retained.
 These choices can change the cost of a search.
 
 When first-stall initialization succeeds, the lane result includes the existing

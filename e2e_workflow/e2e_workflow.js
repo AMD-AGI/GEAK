@@ -130,7 +130,8 @@ const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 // Override per run with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
 // Select the policy inside the existing worker, without another workflow level.
-if (A.optimizer !== undefined && !['greedy', 'evo'].includes(A.optimizer)) {
+const LANE_OPTIMIZER = A.optimizer == null || A.optimizer === '' ? 'evo' : A.optimizer;
+if (!['greedy', 'evo'].includes(LANE_OPTIMIZER)) {
   throw new Error('optimizer must be greedy or evo');
 }
 const EXPLICIT_KERNEL_BUDGET = typeof A.kernel_budget === 'string' && /^\+?\d+$/.test(A.kernel_budget.trim())
@@ -149,7 +150,7 @@ if (A.kernel_budget !== undefined && (!Number.isSafeInteger(EXPLICIT_KERNEL_BUDG
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
-    ...(A.optimizer !== undefined ? { optimizer: A.optimizer } : {}),
+    optimizer: LANE_OPTIMIZER,
     // The worker enables these only for boolean true; do not coerce caller values.
     ...(A.evolution_case_evidence_view !== undefined
       ? { evolution_case_evidence_view: A.evolution_case_evidence_view } : {}),
@@ -159,6 +160,9 @@ const laneArgs = (wfArgs) => {
       ? { evolution_preserve_founder_attempts: A.evolution_preserve_founder_attempts } : {}),
     // The worker validates the EVO schedule selector itself.
     ...(A.evolution_start !== undefined ? { evolution_start: A.evolution_start } : {}),
+    ...Object.fromEntries(['evolution_return_development', 'evolution_import_stall_sources',
+      'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
+      .map(key => [key, A[key]])),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };

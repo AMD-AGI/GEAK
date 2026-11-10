@@ -1,6 +1,6 @@
 # Native measurements
 
-GEAK and GEAK-EVO can use the same supplied native task evaluator through
+GEAK and GEAK-evo can use the same supplied native task evaluator through
 `external_measurement_command` and `external_result_command`.
 [scripts/native_runtime/direct_external_command.py](../../scripts/native_runtime/direct_external_command.py)
 captures candidate source, calls `geak.native.external_runner`, and reads its raw

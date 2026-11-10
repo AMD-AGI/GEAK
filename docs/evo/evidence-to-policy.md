@@ -1,6 +1,6 @@
 # Using candidate evidence
 
-GEAK-EVO keeps source references and engineering evidence together so later
+GEAK-evo keeps source references and engineering evidence together so later
 planning can revisit an implementation and its unresolved questions. The
 [archive reference](archive.md) describes the recorded fields, and the
 [architecture guide](architecture.md) shows where selection and retention enter

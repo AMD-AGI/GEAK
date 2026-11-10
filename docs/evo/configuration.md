@@ -1,8 +1,8 @@
 # EVO runtime configuration
 
-This configuration reference applies to runtime
-`37501053c5c92dcc180087a29a730877043193a2`.
-GEAK-EVO uses the shared kernel workflow with retained candidate source,
+This reference describes the current branch. EVO is the default optimizer;
+the settings below explicitly configure a longer search.
+GEAK-evo uses the shared kernel workflow with retained candidate source,
 parent selection, independent verification and final source selection.
 Correct, slower measurements can be retained without promoting the candidate.
 
@@ -31,8 +31,8 @@ Merge these settings into a qualified task's launch arguments:
 }
 ```
 
-Selecting `optimizer: "evo"` alone uses the default direction budget of 6 and
-leaves development return off. Set the options explicitly when using the
+The default EVO configuration uses the default direction budget of 6 and
+enables development return after EVO activates. Set the options explicitly when using the
 configuration above. The optional flags control distinct evidence and
 initialization paths; see the [run guide](stock-workflow.md) and
 [archive fields](archive.md).

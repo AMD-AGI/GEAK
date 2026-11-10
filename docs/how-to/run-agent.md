@@ -1,114 +1,122 @@
 ---
 myst:
     html_meta:
-        "description": "Run a GEAK v4 workflow from Claude Code: end-to-end sglang/vLLM serving-throughput optimization or single-kernel optimization, with depth modes and the accuracy gate."
-        "keywords": "GEAK, run workflow, serving throughput, single kernel, Claude Code, Workflow, sglang, vLLM, deep mode, gsm8k"
+        "description": "Run GEAK-evo kernel and end-to-end serving workflows with the bundled Node runtime or the standard Python handoff entrypoint."
+        "keywords": "GEAK-evo, run workflow, serving throughput, kernel, Node, Claude Code, sglang, vLLM, gsm8k"
 ---
 
-# Run a GEAK workflow
+# Run a GEAK-evo workflow
 
-GEAK v4 runs inside Claude Code, orchestrated by deterministic JS Workflows. There is no
-`pip install` and no CLI: launch Claude Code and describe the task; it invokes the `Workflow` tool.
+GEAK-evo uses the bundled Node runtime to orchestrate the agent CLI and nested
+kernel work. Use this runtime even when Claude is the selected backend: kernel
+delivery needs `runProcess`, which the native Claude `Workflow` tool lacks.
+Omitting `optimizer` selects `evo`; add `"optimizer": "greedy"` to the workflow
+arguments or E2E handoff to select the original search policy.
 
 ## Prerequisites
 
-Before running a workflow, ensure the following are in place.
+Complete the [installation guide](../install/install.md), including Node.js,
+ROCm, a profiler and agent credentials. E2E runs also need a working serving
+backend and model weights. Run the commands below from the release checkout.
+Replace example paths and GPU IDs with your own; use a fresh evaluation directory
+for each run.
 
-- **AMD Instinct™ MI GPU**: CDNA (gfx942 / gfx950), auto-detected.
-- **ROCm 6+** with `rocminfo` / `rocm-smi`, and a profiler (`rocprof-compute` / `rocprofv3` / `rocprof`).
-- **Python 3.8+**.
-- **Claude Code ≥ 2.1.177** (dynamic Workflow feature). Check `claude --version`.
-- **For E2E:** a running-capable `sglang` or `vllm` and the model weights on disk.
+## Single kernel
 
-## Get the repo and launch Claude Code
+Save this as `kernel-args.json`. The task directory must contain the kernel and its
+correctness/benchmark harness; see the [kernel workflow guide](../../kernel_workflow/README.md).
 
-Clone the GEAK repository and launch Claude Code in sandbox mode.
+```json
+{
+  "kernel_path": "/absolute/path/GEAK/examples/tasks/knn",
+  "workflow_dir": "/absolute/path/GEAK/kernel_workflow",
+  "eval_dir": "/absolute/path/runs/knn-001",
+  "gpu_ids": "0",
+  "budget": 6
+}
+```
 
 ```bash
-claude update                          # ensure Claude Code >= 2.1.177
-git clone https://github.com/AMD-AGI/GEAK.git && cd GEAK
-IS_SANDBOX=1 claude --dangerously-skip-permissions
+node interface/runtime/engine/run_workflow.mjs \
+  kernel_workflow/kernel_workflow.js \
+  --agent claude --args-file kernel-args.json \
+  --result-file kernel-workflow-result.json
 ```
 
-Sandbox mode auto-approves permissions, which the workflows need to run profiling, benchmark, and build
-commands.
+The evaluation directory contains the reports, verified final patch and EVO
+archive. The result file contains the workflow's return value. See
+[Run GEAK-evo](../evo/stock-workflow.md) for retained-candidate options and output details.
+For concurrent runs, assign separate GPU sets and evaluation directories.
 
-## Run a workflow (natural language)
+## End-to-end serving
 
-The path you give Claude Code (for example, `path_to_GEAK/e2e_workflow`) is mapped to the `workflow_dir` argument that the workflow requires. Replace `path_to_GEAK` with the absolute path to your cloned GEAK repository.
-
-### End-to-end serving throughput (e2e_workflow)
-
-```
-use /absolute/path/to/GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024, conc=64, gpus 0,1,2,3
-```
-
-Profiles a running server, triages hot kernels by Amdahl (`pct_gpu_time × achievable_speedup`), pulls
-levers cheapest-first (config/backend sweep → head GEMM/attention bake-off → editable-kernel milestone
-loop), and overlays each accepted change back reversibly, gated on a measured throughput delta.
-
-Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `architect_report.md`, `final/`
-(overlay + patch + `final_launch.sh`).
-
-### Single kernel (kernel_workflow)
-
-```
-use /absolute/path/to/GEAK/kernel_workflow to optimize /absolute/path/to/GEAK/examples/tasks/knn
-use /absolute/path/to/GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
-```
-
-Director → TechLead → specialist engineers, multi-round and budget-controlled, each patch independently
-verified. Output: `kernel_workflow/exp/team_<kernel>_<timestamp>/`.
-
-**Batch:** run multiple kernels in parallel by launching one non-interactive Claude Code process per
-kernel. GPU access is serialized internally using `kernel_workflow/scripts/gpu_lock.sh`, so all
-processes can safely share the same GPUs.
+For Hyperloom or another integration, keep the standard two-file invocation:
 
 ```bash
-GEAK=/absolute/path/to/GEAK
-GPU_IDS="0,1,2,3"
-
-for KERNEL in /path/to/kernel_a /path/to/kernel_b /path/to/kernel_c; do
-  IS_SANDBOX=1 claude -p \
-    "use $GEAK/kernel_workflow to optimize $KERNEL, gpu_ids $GPU_IDS" \
-    --dangerously-skip-permissions \
-    > "$KERNEL/claude.log" 2>&1 &
-done
-
-wait
+python interface/run_e2e.py /path/to/handoff.json /path/to/result.json
 ```
 
-Each process writes its output to a per-kernel log. The `kernel_workflow` creates its experiment
-directory under `kernel_workflow/exp/team_<kernel>_<timestamp>/`. The `-p` flag runs Claude Code
-non-interactively (print mode); the process exits when the workflow completes.
+The wrapper detects the hardware identity, invokes the bundled runtime and writes
+the existing normalized `result.json`. See the [integration contract](../../interface/run_e2e.md)
+for the handoff fields, AgentX configuration and backend selection.
 
-## Depth modes (e2e)
+For a direct run, save the following as `e2e-args.json`. This example targets four
+MI355X GPUs; set `expected_gfx` and `expected_target` to the actual device identity.
+Direct model-mode runs require both fields.
 
-Both default off = **default** mode; mutually exclusive, deep wins.
+```json
+{
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "workflow_dir": "/absolute/path/GEAK/e2e_workflow",
+  "eval_dir": "/absolute/path/runs/qwen-001",
+  "expected_gfx": "gfx950",
+  "expected_target": "mi355x",
+  "backend": "sglang",
+  "tp": 4,
+  "gpu_ids": "0,1,2,3",
+  "isl": 1024,
+  "osl": 1024,
+  "conc": 64,
+  "budget": 4,
+  "kernel_budget": 6
+}
+```
 
-| Mode | Trigger | What runs |
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  e2e_workflow/e2e_workflow.js \
+  --agent claude --args-file e2e-args.json \
+  --result-file e2e-workflow-result.json
+```
+
+The workflow profiles the server, tunes configuration and hot kernels, then
+re-measures integrated changes. Reports and the final overlay, patch and launch
+script are written under `eval_dir`. The direct Node return is separate from the
+normalized integration result produced by `interface/run_e2e.py`.
+
+## Depth and accuracy options
+
+Add these fields to the E2E arguments as needed. Depth controls the outer serving
+pipeline; `optimizer` selects the search policy of its nested kernel workers.
+
+| Mode | Fields | Phases |
 |---|---|---|
-| **default** | *(none)* | ConfigSweep + HeadKernel + Milestone. |
-| **fast** | "fast mode" | HeadKernel only, parallel, time-boxed (`fast_budget_ms`, 5h). |
-| **deep** | "deep mode" | ConfigSweep + HeadKernel, cross-kernel×backend lane pool, many rounds (`deep_head_budget_ms`, 24h). |
+| Default | Omit `fast_mode` and `deep_mode`. | ConfigSweep, HeadKernel and Milestone. |
+| Fast | `"fast_mode": true` | HeadKernel only, with `fast_budget_ms` defaulting to five hours. |
+| Deep | `"deep_mode": true` | ConfigSweep and a multi-round HeadKernel pool, with `deep_head_budget_ms` defaulting to 24 hours. |
 
+Set only one mode; if both are true, deep takes precedence. For quantized workloads
+where task accuracy is the intended acceptance criterion, add these fields:
+
+```json
+{
+  "accuracy_gate": "gsm8k",
+  "accuracy_limit": 200,
+  "accuracy_tol": 0.01
+}
 ```
-use /absolute/path/to/GEAK/e2e_workflow, deep mode, to optimize /models/Qwen3.5-27B-FP8 on gpus 0-7
-```
 
-## Accuracy gate (quantized kernels)
-
-For FP8 / MXFP4, byte-parity is too strict — switch the e2e gate to task accuracy:
-
-```
-... use the gsm8k accuracy gate with limit 200 and tolerance 0.01
-```
-
-The Integrator then runs sampled gsm8k (5-shot, greedy, fixed seed) and accepts iff
-`cand_em >= baseline_em - tol`.
-
-## Related topics
-
-- [Install GEAK](../install/install.md) 
-- [API reference](../reference/api-reference.md) 
-- [Compatibility matrix](../compatibility.md)
+This selects sampled gsm8k acceptance within the declared tolerance instead of
+greedy output parity. See the [E2E guide](../../e2e_workflow/README.md) for the full
+measurement contract and [runtime setup](../../interface/runtime/SETUP.md) for
+agent and model selection. Existing `GEAK_*` settings remain supported.

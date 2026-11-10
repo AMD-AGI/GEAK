@@ -287,7 +287,9 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["apply_to_original"], "true")
 
     def test_kernel_optimizer_is_optional_and_forwarded(self):
-        self.assertNotIn("optimizer", rx.map_args(self._handoff()))
+        self.assertEqual(rx.map_args(self._handoff())["optimizer"], "evo")
+        for unset in (None, ""):
+            self.assertEqual(rx.map_args(self._handoff(optimizer=unset))["optimizer"], "evo")
         for optimizer in ("greedy", "evo"):
             with self.subTest(optimizer=optimizer):
                 ps = rx.map_args(self._handoff(optimizer=optimizer))
@@ -295,7 +297,9 @@ class TestMapArgs(_RunE2ECase):
 
     def test_kernel_evidence_flags_are_optional_and_not_coerced(self):
         flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                 "evolution_preserve_founder_attempts", "evolution_start")
+                 "evolution_preserve_founder_attempts", "evolution_start",
+                 "evolution_return_development", "evolution_import_stall_sources",
+                 "record_planner_inputs", "case_measurement_view")
         omitted = rx.map_args(self._handoff(optimizer="evo"))
         for flag in flags:
             self.assertNotIn(flag, omitted)
@@ -308,7 +312,7 @@ class TestMapArgs(_RunE2ECase):
 
     def test_invalid_kernel_optimizer_fails_before_gpu_probe(self):
         self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
-        for optimizer in (None, "", "population", "EVO", True, 1, [], {}):
+        for optimizer in ("population", "EVO", True, 1, [], {}):
             with self.subTest(optimizer=optimizer):
                 with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
                     rx.map_args(self._handoff(optimizer=optimizer))

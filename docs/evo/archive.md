@@ -1,6 +1,6 @@
 # Inspect retained candidates
 
-GEAK-EVO keeps its population under `<eval_dir>/evolution/`:
+GEAK-evo keeps its population under `<eval_dir>/evolution/`:
 
 ```text
 evolution/

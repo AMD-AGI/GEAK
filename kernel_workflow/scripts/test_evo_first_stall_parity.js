@@ -79,7 +79,7 @@ async function runMode(mode, scenario, template) {
   const subst = v => typeof v === 'string' ? v.replace(/^\/arm\//, root + '/arm/').replace(/^\/input\/task$/, task)
     : Array.isArray(v) ? v.map(subst) : v && typeof v === 'object'
       ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)])) : v;
-  const args = {...subst(args0), optimizer: mode,
+  const args = {...subst(args0), optimizer: mode, evolution_return_development: false,
     kernel_path: task, eval_dir: evalDir, exp_root: path.join(root, 'exp'), workflow_dir: WORKFLOW,
     // This fixture creates its canonical repository above; it does not exercise fresh Setup.
     canonical_selection_resume: true,
@@ -289,7 +289,7 @@ const FALLBACK = 'Development fallback';
         `${sc.name}: the first differentiated round is recorded`);
     }
     if (sc.args?.evolution_return_development !== true) {
-      assert.ok(![...g.calls, ...e.calls].some(c => c.prompt.includes(FALLBACK)), `${sc.name}: fallback is off by default`);
+      assert.ok(![...g.calls, ...e.calls].some(c => c.prompt.includes(FALLBACK)), `${sc.name}: explicit development-return opt-out is honored`);
     }
     console.log(`  ok: ${sc.name} (${g.calls.length}/${e.calls.length} calls, first divergence ${first === null ? 'none' : e.calls[first].label})`);
   }
@@ -297,6 +297,8 @@ const FALLBACK = 'Development fallback';
     const sc = SCENARIOS.find(s => s.name === 'development_fallback');
     const g = await runMode('greedy', sc, TEMPLATE), e = await runMode('evo', sc, TEMPLATE);
     assert.ok(!g.calls.some(c => c.prompt.includes(FALLBACK)), 'greedy never receives the fallback');
+    const defaultEvo = await runMode('evo', {...sc, args: {...sc.args, evolution_return_development: undefined}}, TEMPLATE);
+    assert.deepEqual(defaultEvo.calls, e.calls, 'omitted development-return matches explicit true');
     const engineer = id => e.calls.find(c => /^(eng|deep) /.test(c.label) && c.label.split(' ')[1].startsWith(`${id}:`));
     for (const id of ['r1_d0', 'r2_d0']) assert.ok(!engineer(id).prompt.includes(FALLBACK), `${id}: no fallback before the stall`);
     for (const id of ['r3_d0', 'r4_d0']) assert.ok(engineer(id).prompt.includes(FALLBACK), `${id}: fallback after the stall`);

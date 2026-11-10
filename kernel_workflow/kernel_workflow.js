@@ -605,6 +605,12 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
     const r = await workflow({ scriptPath: WORKER }, {
       kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
+      // Preserve explicit search policy and evidence controls in every language lane.
+      ...Object.fromEntries(['optimizer', 'evolution_start', 'evolution_return_development',
+        'evolution_import_stall_sources', 'evolution_case_evidence_view',
+        'evolution_evidence_handoff', 'evolution_preserve_founder_attempts',
+        'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
+        .map(key => [key, A[key]])),
       // This lane runs on an oracle_freezer-frozen task dir, so a GEAK_TIMING_RECEIPT is EXPECTED and
       // its absence is a real fault. The optimize/author path spreads {...A} and never sets this, so a
       // pass-through lane (and e2e, which calls this worker directly) correctly defaults to false —

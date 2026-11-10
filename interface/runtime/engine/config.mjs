@@ -156,6 +156,14 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
   const cmd = (agent.bin_env && penv[agent.bin_env]) || agent.bin;
 
   const args = [...(agent.args || [])];
+  // Keep structured CLI values (JSON settings or paths with spaces) as one argv
+  // entry. An optional allowlist omits legacy effort values unsupported by a CLI.
+  for (const option of agent.options_env || []) {
+    const value = penv[option.env];
+    if (value && (!option.values || option.values.includes(value))) {
+      args.push(option.flag, value);
+    }
+  }
 
   // auto-approve flag (env override wins; empty string disables)
   let approve = agent.approve;

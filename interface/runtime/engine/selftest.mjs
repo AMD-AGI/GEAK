@@ -391,6 +391,18 @@ async function testConfig() {
   // exactly two agents; an unknown name must fail loudly rather than fall back,
   // so a stale `--agent qwen` in someone's script cannot silently run on claude.
   const real = await loadRegistry();
+  const settings = '{"env":{"EXAMPLE":"a value with spaces"}}';
+  const claude = buildInvocation(real.agents.claude, null, 'P', {env: {
+    GEAK_CLAUDE_BIN: '/opt/agent/claude', GEAK_CLAUDE_MODEL: 'caller-model',
+    GEAK_CLAUDE_SETTINGS: settings, GEAK_CLAUDE_EFFORT: 'max',
+  }});
+  eq(claude.cmd, '/opt/agent/claude', 'Claude binary override survives runtime routing');
+  eq(claude.args[claude.args.indexOf('--model') + 1], 'caller-model', 'Claude model override survives');
+  eq(claude.args[claude.args.indexOf('--settings') + 1], settings, 'settings JSON stays one argv value');
+  eq(claude.args[claude.args.indexOf('--effort') + 1], 'max', 'valid Claude effort forwarded');
+  const legacyEffort = buildInvocation(real.agents.claude, null, 'P', {
+    env: {GEAK_CLAUDE_EFFORT: 'ultracode'}});
+  ok(!legacyEffort.args.includes('--effort'), 'legacy Workflow-only effort is not sent to the CLI');
   eq(resolveSelection(real, { profile: 'codex-gpt56' }).modelName, 'openai_gpt56', 'shipped registry: codex-gpt56 profile pins its model');
   eq(resolveSelection(real, { agent: 'codex' }).agentName, 'codex', 'shipped registry: codex agent');
   let gone = false; try { resolveSelection(real, { agent: 'qwen' }); } catch { gone = true; }

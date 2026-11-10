@@ -186,6 +186,21 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(trace.lanes.some((l) => l.lang === 'flydsl' && l.mode === 'author'), 'flydsl:author', lanesOf(trace));
   }
 
+  for (const optimizer of ['greedy', 'evo']) {
+    const controls = {optimizer, evolution_return_development: false,
+      evolution_start: 'search_start', evolution_import_stall_sources: false,
+      evolution_case_evidence_view: true, evolution_evidence_handoff: false,
+      evolution_preserve_founder_attempts: false, record_planner_inputs: true,
+      case_measurement_view: 'native_consistent'};
+    const {run, trace} = build({...BASE, mode: 'bakeoff', backends: ['hip'], ...controls}, {
+      agent: healthy('triton', []),
+    });
+    await run();
+    ok(trace.workflowCalls.length > 0 && trace.workflowCalls.every(({args}) =>
+      Object.entries(controls).every(([k, v]) => args[k] === v)),
+      `bakeoff forwards explicit ${optimizer} and development/evidence controls`);
+  }
+
   // -------------------------------------------------------------------------
   console.log('\n# F. explicit args.backends ADD rewrites but can NEVER drop the incumbent language');
   {

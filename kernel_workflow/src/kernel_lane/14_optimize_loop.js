@@ -363,7 +363,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       const preserveFounder = !!evo && !evoEngineer && A.evolution_preserve_founder_attempts === true;
       const preserveAttempt = evoEngineer || preserveFounder;
       // Returning an unmeasured final implementation when nothing else would be saved is a separate factor.
-      const returnDevelopment = !!evo && A.evolution_return_development === true;
+      const returnDevelopment = !!evo && (A.evolution_return_development === undefined
+        || A.evolution_return_development === true);
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +

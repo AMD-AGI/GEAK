@@ -35,6 +35,7 @@ _SELECTION_ENV = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GEAK_AGENT_BACKEND", "GEAK_AGENT_PROFILE", "GEAK_MODEL", "GEAK_AGENT_AUTO",
+    "GEAK_CLAUDE_MODEL", "GEAK_CLAUDE_CONFIG_DIR", "CLAUDE_CONFIG_DIR",
 )
 
 
@@ -56,13 +57,13 @@ class _Proc:
 
 # ── selection ───────────────────────────────────────────────────────────────
 
-def test_no_credentials_stays_on_the_native_path(monkeypatch):
+def test_no_credentials_selects_claude_with_host_runtime(monkeypatch):
     rx = _fresh(monkeypatch)
     assert rx.AUTO_BACKEND == ""
-    assert rx.EFFECTIVE_BACKEND == ""
-    assert rx.USE_RUNTIME is False
-    assert rx.runtime_combo_label() == "native (claude/Workflow)"
-    assert rx._runtime_selection_args() == []
+    assert rx.EFFECTIVE_BACKEND == "claude"
+    assert rx.USE_RUNTIME is True
+    assert rx.runtime_combo_label() == "agent=claude"
+    assert rx._runtime_selection_args() == ["--agent", "claude"]
 
 
 @pytest.mark.parametrize("key", ["GEAK_AMDKEY", "OPENAI_API_KEY"])
@@ -76,18 +77,18 @@ def test_a_provider_key_alone_selects_codex(monkeypatch, key):
     assert rx.runtime_combo_label() == "agent=codex (from key)"
 
 
-def test_an_ambiguous_credential_environment_keeps_native(monkeypatch):
+def test_an_ambiguous_credential_environment_keeps_claude(monkeypatch):
     """A gateway key sitting next to an Anthropic-side variable is ambiguous.
     Silently moving that run onto codex would change which model answered."""
     rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32, ANTHROPIC_API_KEY="sk-ant-x")
     assert rx.AUTO_BACKEND == ""
-    assert rx.USE_RUNTIME is False
+    assert rx.USE_RUNTIME is True
 
 
 def test_geak_agent_auto_off_disables_key_based_selection(monkeypatch):
     rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32, GEAK_AGENT_AUTO="0")
     assert rx.AUTO_BACKEND == ""
-    assert rx.USE_RUNTIME is False
+    assert rx.USE_RUNTIME is True
 
 
 def test_explicit_backend_wins_and_is_not_labelled_as_derived(monkeypatch):
@@ -108,9 +109,9 @@ def test_a_profile_selects_the_runtime_and_carries_a_model_override(monkeypatch)
     assert rx.runtime_combo_label() == "profile=codex-gpt56 model=openai_gpt56"
 
 
-def test_an_unreadable_registry_degrades_to_native(monkeypatch, tmp_path):
+def test_an_unreadable_registry_does_not_guess_another_provider(monkeypatch, tmp_path):
     """Selection reads registry.json for the credential names. If it cannot be
-    read there is no basis to reroute the run, so it must stay native."""
+    read there is no basis to reroute the run, so it must retain Claude selection."""
     rx = _fresh(monkeypatch, GEAK_AMDKEY="x" * 32)
     monkeypatch.setattr(rx, "RUNTIME_REGISTRY", tmp_path / "missing.json")
     assert rx._derive_agent_from_env() == ""
@@ -165,6 +166,31 @@ def test_without_an_eval_dir_no_result_file_is_requested(monkeypatch):
     assert rx._invoke_via_runtime({"model_path": "/m"}, 0)["eval_dir"] == "/e"
     assert "--result-file" not in captured["cmd"]
     assert captured["kw"]["timeout"] is None
+
+
+def test_runtime_preserves_claude_model_and_seeded_config(monkeypatch):
+    captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
+    rx = _fresh(monkeypatch, GEAK_CLAUDE_MODEL="caller-model",
+                GEAK_CLAUDE_CONFIG_DIR="/seeded config", CLAUDE_CONFIG_DIR="/old")
+    def fake_run(cmd, **kw):
+        captured["cmd"], captured["kw"] = cmd, kw
+        return captured["proc"]
+    monkeypatch.setattr(rx, "subprocess", SimpleNamespace(run=fake_run))
+    rx._invoke_via_runtime({}, 60)
+    assert captured["kw"]["env"]["CLAUDE_CONFIG_DIR"] == "/seeded config"
+    assert captured["kw"]["env"]["GEAK_CLAUDE_MODEL"] == "caller-model"
+    assert captured["cmd"][captured["cmd"].index("--agent") + 1] == "claude"
+
+
+@pytest.mark.parametrize("enabled", [True, False, "true", None])
+def test_planner_observation_has_a_runtime_sink_only_when_enabled(monkeypatch, tmp_path, enabled):
+    captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
+    rx = _runtime_mod(monkeypatch, captured)
+    rx._invoke_via_runtime({"record_planner_inputs": enabled}, 60, str(tmp_path))
+    cmd = captured["cmd"]
+    assert ("--backend-events-file" in cmd) is (enabled is True)
+    if enabled is True:
+        assert cmd[cmd.index("--backend-events-file") + 1] == str(tmp_path / "runtime_backend_events.jsonl")
 
 
 def test_stdout_is_used_when_the_result_file_is_absent(monkeypatch, tmp_path):

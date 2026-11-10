@@ -1,7 +1,7 @@
 # Shared immutable task inputs
 
 Large immutable fixtures can remain at one read-only task root while GEAK and
-GEAK-EVO create private candidate source. The ordinary workspace materializer
+GEAK-evo create private candidate source. The ordinary workspace materializer
 and [native measurement adapter](direct-external-command.md) use the same
 `geak-native-shared-inputs-v1` manifest.
 

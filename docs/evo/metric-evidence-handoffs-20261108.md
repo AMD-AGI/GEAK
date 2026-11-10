@@ -1,6 +1,6 @@
 # Metric evidence handoffs
 
-The optimizer already ranks candidates by the declared primary, but some role and history inputs used a geometric-mean label for that primary or exposed only a secondary geomean. This common GEAK/GEAK-EVO correction names the primary explicitly in planner, integrator, memory and history handoffs while preserving available legacy aliases. Missing score evidence stays `null` rather than becoming a measured zero.
+The optimizer already ranks candidates by the declared primary, but some role and history inputs used a geometric-mean label for that primary or exposed only a secondary geomean. This common GEAK/GEAK-evo correction names the primary explicitly in planner, integrator, memory and history handoffs while preserving available legacy aliases. Missing score evidence stays `null` rather than becoming a measured zero.
 
 `verified_primary` identifies the verifier-returned metric; it does not itself establish correctness, measurement validity or source custody. Existing verification status and source evidence retain their authority. External objectives retain their checked native reader and diagnostic fields.
 

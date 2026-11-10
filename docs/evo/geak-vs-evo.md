@@ -1,6 +1,6 @@
-# GEAK and GEAK-EVO workflows
+# GEAK and GEAK-evo workflows
 
-GEAK and GEAK-EVO share the setup, planner, engineers, tools, verification and
+GEAK and GEAK-evo share the setup, planner, engineers, tools, verification and
 integration loop. Select ordinary search with `optimizer: "greedy"`, or retained
 candidate search with `optimizer: "evo"`.
 
@@ -28,7 +28,7 @@ using its accumulated history and measurements.
 
 ## Candidate handling
 
-| Operation | GEAK | GEAK-EVO |
+| Operation | GEAK | GEAK-evo |
 | --- | --- | --- |
 | Planning | Current source, history and hypotheses | History plus retained alternatives |
 | Starting source | Current canonical source | Selected retained parent, with recorded initialization |

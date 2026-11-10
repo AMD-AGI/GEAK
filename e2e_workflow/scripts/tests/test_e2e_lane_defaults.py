@@ -85,7 +85,8 @@ worker_src = os.path.join(os.path.dirname(E2E), "kernel_workflow", "src", "kerne
 worker_args = open(os.path.join(worker_src, "01b_args.js")).read().split("const BUDGET =")[0]
 dispatch = open(os.path.join(worker_src, "14b_optimize_dispatch.js")).read()
 cases = [{}, {"optimizer": "greedy"}, {"optimizer": "evo"}]
-cases += [{"optimizer": value} for value in (None, "", "population", "EVO", True, 1, [], {})]
+cases += [{"optimizer": None}, {"optimizer": ""}]
+cases += [{"optimizer": value} for value in ("population", "EVO", True, 1, [], {})]
 probe = subprocess.run(["node", "-e", """
 const fs = require('node:fs'), vm = require('node:vm');
 const {boundary, worker_args, dispatch, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -113,23 +114,30 @@ Promise.all(cases.map(async A => {
                         "dispatch": dispatch, "cases": cases}),
     text=True, capture_output=True, check=True)
 results = json.loads(probe.stdout)
-check("omitted optimizer preserves the worker default", "optimizer" not in results[0])
+check("omitted optimizer selects EVO", results[0].get("optimizer") == "evo")
 for i, optimizer in enumerate(("greedy", "evo"), 1):
     check(f"{optimizer} reaches the existing nested worker",
           results[i].get("optimizer") == optimizer and results[i].get("kernel_path") == "/task")
-check("omitted and greedy selectors enter the ordinary worker policy",
-      all(result.get("policy_calls") == ["ordinary"] for result in results[:2]))
+check("explicit greedy enters the ordinary worker policy",
+      results[1].get("policy_calls") == ["ordinary"])
+check("omitted optimizer enters EVO after first stall",
+      results[0].get("policy_calls") == ["evolution_after_first_stall"])
 check("evo selector runs the shared loop and roots evolution after its first non-improving round",
       results[2].get("policy_calls") == ["evolution_after_first_stall"])
 check("invalid optimizer is rejected before workflow dispatch",
-      all(result.get("error") == "optimizer must be greedy or evo" for result in results[3:]))
+      all(result.get("error") == "optimizer must be greedy or evo" for result in results[5:]))
+check("null and empty selectors use EVO",
+      all(result.get("optimizer") == "evo" and result.get("policy_calls") == ["evolution_after_first_stall"]
+          for result in results[3:5]))
 
 # Exercise the source argument boundary directly so this check also works before
 # assembled workflows are regenerated. The generated call-site checks above remain.
 source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
 source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
 evidence_flags = ("evolution_case_evidence_view", "evolution_evidence_handoff",
-                  "evolution_preserve_founder_attempts", "evolution_start")
+                  "evolution_preserve_founder_attempts", "evolution_start",
+                  "evolution_return_development", "evolution_import_stall_sources",
+                  "record_planner_inputs", "case_measurement_view")
 evidence_cases = [{"optimizer": "evo"}]
 evidence_cases += [{"optimizer": "evo", flag: value}
                   for flag in evidence_flags for value in (False, True, "true", "false", None, 0, 1)]
@@ -139,7 +147,9 @@ const {boundary, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
 const results = cases.map(A => vm.runInNewContext(boundary + `
 ({inherited: laneArgs({kernel_path: "/task"}),
   overridden: laneArgs({evolution_case_evidence_view: false, evolution_evidence_handoff: false,
-    evolution_preserve_founder_attempts: false, evolution_start: false})})`, {
+    evolution_preserve_founder_attempts: false, evolution_start: false,
+    evolution_return_development: false, evolution_import_stall_sources: false,
+    record_planner_inputs: false, case_measurement_view: false})})`, {
   A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,
 }));
 console.log(JSON.stringify(results));

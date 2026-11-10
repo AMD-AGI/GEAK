@@ -1,65 +1,83 @@
-# GEAK + GEAK-EVO
+# GEAK-evo
 
-GEAK improves GPU kernels by inspecting code, testing changes, and measuring the
-complete operation. GEAK-EVO retains alternative candidates in that workflow:
-the planner can develop an earlier candidate and refer to other candidates when
-combining ideas. Both use the same entry point, agents, tools, and evaluator.
+GEAK-evo is an agentic GPU optimization system. It profiles a kernel or serving
+workload, develops implementation alternatives, verifies them independently,
+and delivers the tested source through the existing GEAK interface.
 
-## Start here
+EVO is the default optimizer for standalone kernels and for kernel lanes started
+by the serving workflow or Hyperloom. Its planner can develop retained programs
+and combine ideas from their source and measurement evidence. Explicit
+`optimizer: "greedy"` selects the original search policy.
 
-| I want to… | Read |
+## Get started
+
+```sh
+git clone --branch feature/evo-reviewed-release-20261110 https://github.com/AMD-AGI/GEAK.git
+cd GEAK
+GEAK_HOME="$PWD" pip install .
+```
+
+Use the [installation guide](docs/install/install.md) to configure ROCm, Node.js,
+an authenticated agent backend, and the task's compiler and library dependencies.
+
+| Task | Guide |
 | --- | --- |
-| Install GEAK | [Installation](docs/install/install.md) |
-| Improve one kernel | [Kernel workflow](kernel_workflow/README.md) |
-| Enable GEAK-EVO | [Run the stock workflow](docs/evo/stock-workflow.md) |
-| Improve a serving workload | [Serving workflow](e2e_workflow/README.md) |
-| Use GEAK from Hyperloom | [Task and result interface](interface/run_e2e.md) |
-| Understand or change GEAK-EVO | [Architecture](docs/evo/architecture.md) |
-| Compare GEAK and GEAK-EVO workflows | [Diagrams and code comparison](docs/evo/geak-vs-evo.md) |
-| Inspect retained candidates | [Archive guide](docs/evo/archive.md) |
-| Use a supplied native task evaluator | [Native measurements](docs/evo/direct-external-command.md) |
-| Find existing examples and results | [GEAK guide](docs/reference/geak-guide.md) |
+| Optimize a kernel or complete computation region | [Run GEAK-evo](docs/evo/stock-workflow.md) |
+| Profile and optimize a serving workload | [Serving workflow](e2e_workflow/README.md) |
+| Configure search and retained-candidate development | [Configuration](docs/evo/configuration.md) |
+| Understand planning, verification and delivery | [Architecture](docs/evo/architecture.md) |
+| Inspect candidate source and per-case evidence | [Archive](docs/evo/archive.md) |
+| Use a task's native evaluator | [Native measurements](docs/evo/direct-external-command.md) |
 
-Build and test the original kernel in its GPU environment before optimizing it.
-GEAK uses the compiler, libraries, and model weights you provide.
+## Use from Hyperloom
 
-## GEAK-EVO
+Set this in the environment used by Hyperloom's GEAK installation step:
 
-Set `optimizer: "evo"` in the ordinary kernel workflow arguments. The default
-`optimizer: "greedy"` uses GEAK's existing search. GEAK-EVO adds three operations:
+```sh
+export GEAK_REF=feature/evo-reviewed-release-20261110
+```
 
-1. Select a retained parent and optional donor references during round planning.
-2. Develop that parent with the existing engineers and independent verifier.
-3. Retain the patch and evidence, including slower or unfinished attempts, for
-   later rounds. Promotion still requires the shared improvement checks.
+Run the existing Hyperloom installation and workflow commands. Its GEAK installer
+resolves the selected branch; the handoff invocation stays:
 
-The implementation supports these operations; their availability does not
-establish useful diversity, successful recombination, or sustained performance
-benefit. Those outcomes require measurements on the intended workload.
+```sh
+python "$GEAK_HOME/interface/run_e2e.py" handoff.json result.json
+```
 
-The former Python EVO driver and its pilot, group-control, and export tooling
-have been retired. The current path is the built-in kernel workflow described
-above. See [architecture](docs/evo/architecture.md) for scope and source links.
+No optimizer argument is needed. The bundled Node runtime provides orchestration
+and measurement-process ownership, while the configured Claude or Codex backend
+runs the agents. Existing backend/model settings and the two-JSON interface are
+preserved. See [the interface guide](interface/run_e2e.md) for configuration and
+CPU-only handoff validation with `--dry-run`.
 
-## Where the code lives
+The repository, Python package `geak`, `GEAK_*` environment variables and artifact
+paths retain their names so existing integrations can use this branch. A kernel
+measurement and its enclosing serving-workload measurement are separate results;
+use the workload's correctness, quality and latency checks when deploying a change.
+
+## How it works
+
+1. Measure the original implementation under the task's numerical and workload contract.
+2. Plan and develop alternatives using shared engineers, profiling tools and evaluators.
+3. Retain source and evidence; select earlier programs for further development or combination.
+4. Independently verify a candidate before promotion, and deliver the exact tested source.
+5. For serving tasks, integrate, measure the full workload and reprofile.
+
+EVO starts retained-candidate development after the first stalled round by default.
+Budgets and optional evidence/development controls are documented in the
+[run guide](docs/evo/stock-workflow.md). Use a fresh evaluation directory for each run.
+
+## Code layout
 
 | Directory | Responsibility |
 | --- | --- |
-| `interface/` | Accept tasks, run workflows, and return results |
-| `kernel_workflow/` | Set up, optimize, and validate kernels; retain EVO candidates |
-| `e2e_workflow/` | Profile and measure a serving workload |
-| `geak/` | Installation support and the shared native measurement helpers |
-| `scripts/native_runtime/` | Adapter for a supplied native task evaluator |
-| `kb/` | Store and retrieve verified run records |
-| `perf_knowledge/` | Hardware guides and reusable skills |
-| `docs/`, `examples/`, `ci/` | Guides, examples, and automation |
+| `interface/` | Stable task/result interface and bundled agent runtime |
+| `kernel_workflow/` | Kernel setup, search, archive, verification and delivery |
+| `e2e_workflow/` | Serving profiles, kernel integration and workload measurement |
+| `geak/` | Installation and native measurement helpers |
+| `kb/`, `perf_knowledge/` | Retained knowledge, hardware references and skills |
+| `scripts/native_runtime/` | Adapter for supplied task evaluators |
 
-Workflow code lives in the `src/` folders under `kernel_workflow/` and
-`e2e_workflow/`. Edit those files, then run `node scripts/build_workflows.mjs`.
-The generated scripts stay in the checkout because the workflow runner loads
-one file. CI checks that they match the source.
-
-## Contributing
-
-Keep shared logic in one place and put experiment-specific setup and results
-outside the runtime. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Edit workflow sources under `kernel_workflow/src/` and `e2e_workflow/src/`, then
+run `node scripts/build_workflows.mjs`. Generated scripts are checked in for the
+runner. Keep shared logic in one place; see [CONTRIBUTING.md](CONTRIBUTING.md).
