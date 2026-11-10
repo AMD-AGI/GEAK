@@ -26,7 +26,7 @@ function environment() {
     KERNEL_BUDGET: 1, EVAL_DIR: 'fixture.eval', GRAPH_REQ: '', TASK: '', obj: value => value };
 }
 async function milestone(result, workloadPath = 'HYPOTHETICAL.workload.json', integration = { gate: 'accepted',
-  e2e_throughput_tok_s: 101, e2e_delta_pct: 1 }, corrective) {
+  e2e_throughput_tok_s: 101, e2e_delta_pct: 1 }, corrective, extractOn = false) {
   const calls = { workflows: [], integrations: [], guards: [], corrections: [] };
   const context = { ...environment(), want: () => true, dispatched: 0, BUDGET: 1, MIN_KERNEL_TASKS: 1,
     noImprove: 0, milestone: 0, phase() {}, kernelQueue: [{ short_name: 'HYPOTHETICAL', pct_gpu_time: 50 }],
@@ -38,7 +38,7 @@ async function milestone(result, workloadPath = 'HYPOTHETICAL.workload.json', in
     parallel: operations => Promise.all(operations.map(operation => operation())),
     extractWithBaseline: async () => ({ editable: true, unittest_smoke: 'pass', task_dir: 'fixture.task', workload_path: workloadPath }),
     laneArgs: value => value, workflow: async (reference, inputs) => { calls.workflows.push(inputs); return result; },
-    KERNEL_EXTRACT_ON: false, IS_AGENTX: false,
+    KERNEL_EXTRACT_ON: extractOn, IS_AGENTX: extractOn,
     reserveBoundedWorkflow: async (reference, inputs) => { calls.workflows.push(inputs); return result; },
     noteKernelKB() {}, runIntegrateBothLegs: async (intro, inputs) => { calls.integrations.push(inputs); return integration; },
     integAccepted: (value, percentage, primary) => { calls.guards.push(primary); return value.gate === 'accepted'; },
@@ -210,6 +210,27 @@ async function main() {
     check(JSON.parse(JSON.stringify(opSpec)), { op_kind: 'fixture.op', shapes: { batch: 2 }, dtype: 'bf16',
       regime: 'fixture.regime', cuda_graph_safe: true, workload_path: [parallelExtract, serialExtract][literalIndex].workload_path },
     'initial head workflow literal retains its existing shape and optional workload contract');
+  }
+  // Prepared AgentX tasks rank on the same lane primary: the binding reaches the lane, and a weighted
+  // field the lane reports beside its primary never replaces it.
+  const prepared = await milestone({ ...HYPOTHETICAL, final_weighted: 3 }, 'HYPOTHETICAL.workload.json',
+    undefined, undefined, true);
+  check(prepared.calls.workflows[0].op_spec.workload_path, 'HYPOTHETICAL.workload.json', 'prepared milestone lane receives the binding');
+  check(prepared.calls.integrations[0].KERNEL_RESULT.verified_isolated_speedup, 1.25, 'prepared milestone ranks on the lane primary');
+  const headRanks = Array.from(headSource.matchAll(/const alIso = [^\n]*;/g), match => match[0]);
+  check(headRanks.length, 2, 'both head author-lane ranks are located');
+  check(/final_weighted/.test(headSource), false, 'no head rank reads a field other than the lane primary');
+  for (const rank of headRanks) {
+    for (const [al, workloadPath, expected] of [
+      [{ ...HYPOTHETICAL, final_weighted: 3 }, 'HYPOTHETICAL.workload.json', 1.25],
+      [{ ...HYPOTHETICAL, final_speedup: null, final_weighted: 3 }, 'HYPOTHETICAL.workload.json', null],
+      [{ final_geomean: 1.4, workload_aligned: false }, undefined, 1.4],
+    ]) {
+      const extracted = { workload_path: workloadPath };
+      const context = { al, ext: extracted, j: { ext: extracted } };
+      vm.runInNewContext(primarySource, context, { timeout: 1000 });
+      check(vm.runInNewContext(`${rank} alIso`, context, { timeout: 1000 }), expected, 'head rank equals the lane primary');
+    }
   }
   console.log(`PASS: ${assertions} assertions; HYPOTHETICAL fixtures only; source execution with stubbed workflow/agent/A-B calls.`);
 }

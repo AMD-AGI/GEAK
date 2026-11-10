@@ -85,9 +85,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
       }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
-        // Prepared AgentX UTs carry their own case weights; otherwise the lane's accepted primary.
-        final_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? isolatedPrimary(r, ext.workload_path))
-          : isolatedPrimary(r, ext.workload_path),
+        // The lane's accepted primary; a weighted prepared UT's binding made it the weighted one.
+        final_speedup: isolatedPrimary(r, ext.workload_path),
         final_validation: r.final_validation ?? null, workload_aligned: r.workload_aligned,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };

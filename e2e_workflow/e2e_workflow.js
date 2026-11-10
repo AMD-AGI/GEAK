@@ -2247,6 +2247,10 @@ function preparedUtDefect(kernel, result, phase) {
   const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
   if (requested && returned && requested !== returned)
     return `op_kind differs between declaration and result: ${requested} / ${returned}`;
+  // A weighted UT reaches its lanes' weighted primary only through the packed workload binding.
+  if (kernel.prepared_ut && kernel.prepared_ut.weighted === true &&
+      !(typeof result.workload_path === 'string' && result.workload_path.startsWith('/')))
+    return 'weighted prepared UT carries no absolute workload_path binding';
   return '';
 }
 
@@ -5058,14 +5062,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      // Rank on the WORKLOAD-WEIGHTED speedup (the kernel layer's primary metric, comparable with
-      // bake.isolated_speedup), not the geomean, which low-weight prefill buckets dominate.
-      const alIso = KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
-        : (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      // Rank on the lane's accepted primary metric, the one it optimized and validated (weighted when
+      // its op_spec carries the workload binding); never on a different field.
+      const alIso = isolatedPrimary(al, j.ext.workload_path);
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
-        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
+        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x primary (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -5261,14 +5264,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
-      // geomean; only fixed-load runs fall back to the geomean.
-      const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
-        : (al.final_weighted != null ? al.final_weighted : al.final_geomean));
+      // Rank on the lane's accepted primary metric (see the fast-mode author fan-out above).
+      const alIso = al && isolatedPrimary(al, ext.workload_path);
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
-        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
+        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x primary (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -5508,9 +5509,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
       }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
-        // Prepared AgentX UTs carry their own case weights; otherwise the lane's accepted primary.
-        final_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? isolatedPrimary(r, ext.workload_path))
-          : isolatedPrimary(r, ext.workload_path),
+        // The lane's accepted primary; a weighted prepared UT's binding made it the weighted one.
+        final_speedup: isolatedPrimary(r, ext.workload_path),
         final_validation: r.final_validation ?? null, workload_aligned: r.workload_aligned,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };

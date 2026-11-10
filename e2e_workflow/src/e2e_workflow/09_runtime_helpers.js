@@ -458,6 +458,10 @@ function preparedUtDefect(kernel, result, phase) {
   const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
   if (requested && returned && requested !== returned)
     return `op_kind differs between declaration and result: ${requested} / ${returned}`;
+  // A weighted UT reaches its lanes' weighted primary only through the packed workload binding.
+  if (kernel.prepared_ut && kernel.prepared_ut.weighted === true &&
+      !(typeof result.workload_path === 'string' && result.workload_path.startsWith('/')))
+    return 'weighted prepared UT carries no absolute workload_path binding';
   return '';
 }
 

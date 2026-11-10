@@ -74,6 +74,39 @@ export async function hydrateExtractionVerdicts(ext) {
   return out;
 }
 
+// harness_lib.serving_weighted_speedup weights a UT's primary metric when meta.workload declares
+// observed AgentX call mass or analytic calls; this mirrors its activation rule.
+export function declaresCaseWeights(meta) {
+  const workload = meta?.workload;
+  if (!workload || typeof workload !== 'object') return false;
+  const model = workload.serving_weight_model || {};
+  const observed = workload.kind === 'agentx_trace_replay' || (!workload.kind && model.source === 'agentx_log_fold');
+  const calls = model.analytic_calls;
+  return observed || (!!calls && typeof calls === 'object' && Object.keys(calls).length > 0);
+}
+
+// The kernel lane ranks on the weighted metric only when it receives a workload binding
+// (op_spec.workload_path). A weighted UT must therefore name, as `workload_path`, the task
+// meta.json that declares its case weights; without it the lane would rank on the unweighted
+// geomean. No meta.json means no declared weights.
+export async function workloadBinding(result) {
+  try {
+    const task = await fs.realpath(result.task_dir);
+    let meta;
+    try { meta = JSON.parse(await fs.readFile(path.join(task, 'meta.json'), 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return { ok: true, weighted: false }; throw error; }
+    if (!declaresCaseWeights(meta)) return { ok: true, weighted: false };
+    if (typeof result.workload_path !== 'string' || !result.workload_path.trim())
+      return { ok: false, weighted: true, why: 'meta.workload declares case weights; the result must name workload_path' };
+    const declared = await fs.realpath(path.join(task, 'meta.json'));
+    if (await fs.realpath(path.resolve(task, result.workload_path)) !== declared)
+      return { ok: false, weighted: true, why: `workload_path must name the task meta.json that declares the weights: ${result.workload_path}` };
+    return { ok: true, weighted: true, workload_path: declared };
+  } catch (error) {
+    return { ok: false, why: `workload binding unavailable: ${error.message}` };
+  }
+}
+
 export async function checkDelivery(kernel, result, phase, contract = null) {
   if (!['extract', 'extract_op'].includes(phase)) throw new Error('phase must be extract or extract_op');
   contract ||= await loadContract();
@@ -89,6 +122,7 @@ export async function checkDelivery(kernel, result, phase, contract = null) {
     task: { ok: !!hydrated?.task_dir && hydrated?.editable !== false },
     ut_status: { ok: smoke === 'pass', reported: smoke ?? null },
     source_delivery: await verifySourceDelivery(kernel, hydrated),
+    workload_binding: await workloadBinding(hydrated),
   };
   return { ok: Object.values(checks).every(c => c.ok), phase, checks,
     scope: 'delivery contract only; reads recorded evidence, does not run or independently certify GPU UTs' };
@@ -109,6 +143,7 @@ export async function checkPreparedUT(kernel, result, phase, contract = null) {
     task: { ok: typeof result?.task_dir === 'string' && !!result.task_dir && result.editable !== false },
     ut_status: { ok: smoke === 'pass', reported: smoke ?? null },
     source_delivery: await verifySourceDelivery({ ...kernel, source_delivery_required: true }, result),
+    workload_binding: await workloadBinding(result),
     boundary: { ok: Array.isArray(selected) && selected.length > 0 &&
       selected.every(k => typeof k === 'string' && k.trim()) &&
       (phases.length ? selected.every(k => declared.has(k)) : selected.length === 1) },
