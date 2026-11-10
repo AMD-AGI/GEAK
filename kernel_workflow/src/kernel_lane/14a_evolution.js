@@ -132,7 +132,8 @@ function currentBestCaseInputs(rows, winner, fullRef) {
 function caseEvidenceReport(value, fullRef = null) {
   if (!value) return null;
   const view = measurementCaseView(value, fullRef);
-  const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
+  const keys = ['status', 'correctness', 'measurement_valid', 'reported_status', 'reported_validation_status',
+    'external_measurement_valid',
     'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
     'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
     'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
@@ -234,7 +235,8 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
   const evidence = (value) => {
     if (!value) return null;
-    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
+    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid',
+      'reported_status', 'reported_validation_status', 'external_measurement_valid',
       'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',

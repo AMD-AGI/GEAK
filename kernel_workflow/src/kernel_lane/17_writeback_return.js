@@ -115,6 +115,9 @@ return {
   final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
+  ...(!EXTERNAL_OBJECTIVE && validation?.measurement_valid === false ? {
+    reported_status: validation.reported_status, reported_validation_status: validation.reported_validation_status,
+  } : {}),
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
   // host_bound/unprimed float as a clean device-time win. 'not_applicable' = this lane's own baseline
   // ratio, no frozen-oracle receipt behind it.

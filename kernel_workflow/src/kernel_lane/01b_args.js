@@ -307,7 +307,15 @@ async function checkedExternalMeasurement(value, workspace, patch = null, final 
   if (!EXTERNAL_OBJECTIVE) {
     if (!value) return value;
     const {observed_evidence, reported_per_case, ...reported} = value;
-    return reported; // Reserved host provenance cannot be authored by an ordinary role.
+    // Reserved host provenance cannot be authored by an ordinary role. Explicit
+    // invalidity vetoes acceptance labels while preserving reported correctness.
+    return reported.measurement_valid === false
+      ? {...reported,
+        reported_status: Object.hasOwn(reported, 'reported_status') ? reported.reported_status : reported.status ?? null,
+        reported_validation_status: Object.hasOwn(reported, 'reported_validation_status')
+          ? reported.reported_validation_status : reported.validation_status ?? null,
+        status: 'invalid_measurement', validation_status: 'invalid_measurement'}
+      : reported;
   }
   if (!value && !final) return value;
   // These fields feed native acceptance, delivery and evidence consumers. Missing
@@ -384,6 +392,7 @@ const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_sp
 const primSpeedup = (o) => {
   if (!o) return EXTERNAL_OBJECTIVE || HAS_WORKLOAD ? null : 0;
   if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
+  if (o.measurement_valid === false) return null;
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD) return Number.isFinite(w) && w > 0 ? w : null;

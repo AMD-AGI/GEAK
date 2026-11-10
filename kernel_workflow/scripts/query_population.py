@@ -161,6 +161,7 @@ def legacy_score(evidence, objective):
     need(isinstance(evidence, dict) and says(evidence.get("correctness"), "pass")
          and (says(evidence.get("status"), "verified") or says(evidence.get("status"), "regression")),
          "legacy verifier did not pass source correctness")
+    need(evidence.get("measurement_valid") is not False, "legacy measurement is explicitly invalid")
     weighted = (evidence["verified_weighted"] if evidence.get("verified_weighted") is not None
                 else evidence.get("speedup_weighted"))
     geomean = (evidence["verified_geomean"] if evidence.get("verified_geomean") is not None
@@ -312,6 +313,7 @@ def check_final(path, lane, manifest, timeout):
                       "outcome": "improved" if gain else "no_improvement",
                       "validation_status": "accepted" if gain else "no_improvement"}
         else:
+            need(result.get("measurement_valid") is not False, "legacy final measurement is explicitly invalid")
             score = result.get("final_speedup")
             need(positive(score), "final verifier has no finite positive score")
             gain = score > 1 and result["validation_status"] == "accepted"

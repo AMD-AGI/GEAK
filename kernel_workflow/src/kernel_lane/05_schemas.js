@@ -207,6 +207,7 @@ const ENG_SCHEMA = obj({
 const VERIFY_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {} : {measurement_valid: {type: 'boolean'}}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: secondaryMetric, verified_arithmetic: secondaryMetric,
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)

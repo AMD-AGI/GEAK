@@ -129,7 +129,8 @@ async function lane(sc) {
           if (sc.engineerReturn?.measurement_valid === false) {
             const receipt = JSON.parse(fs.readFileSync(`${pin}.json`, 'utf8'));
             assert.equal(receipt.evidence, null, 'unmeasured source has no fitness before verification');
-            assert.equal(receipt.eng.status, 'partial');
+            assert.equal(receipt.eng.status, 'invalid_measurement');
+            assert.equal(receipt.eng.reported_status, 'partial', 'keep the original partial-return label');
             assert.ok(!label.includes('(delivery)'), 'partial source uses ordinary round verification');
           }
           if (sc.workspaceMutation) {

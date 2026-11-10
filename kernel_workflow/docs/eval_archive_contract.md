@@ -101,6 +101,15 @@ actual numeric measurement. If native rows are unavailable, return `per_case:[]`
 that omission alone neither invalidates nor qualifies the native primary. Required
 correctness, source, timing and acceptance rules still apply.
 
+An explicit native `measurement_valid:false` vetoes qualification, promotion and
+delivery as a gain, even beside a passing correctness result or positive reported
+score. Correctness and raw observations remain diagnostic evidence; invalid timing
+has no fitness. A missing flag preserves the existing verifier contract, and `true`
+alone establishes neither correctness nor valid measurement. The same veto applies
+to legacy peer checkpoints and final results; the external host-reader contract
+remains unchanged. `reported_status` and `reported_validation_status` preserve the
+original role labels as diagnostics when the host vetoes them, never as authority.
+
 Keep frozen-reference rows under
 `evidence_context.frozen_reference_per_case`, with their definition and receipts.
 Only calculate them when case identity, units, baseline times, candidate reduction

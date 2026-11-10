@@ -346,6 +346,7 @@ async function runCase(sc) {
         return {attempted: true, conclusion: 'improved', best: {
           evidence_context: {tested_applicability: 'integrated fixture source', unresolved: ['integration rival']},
            geomean: sc.integration.speed, arithmetic: sc.integration.speed,
+          ...(sc.integration.measurement_valid === undefined ? {} : {measurement_valid: sc.integration.measurement_valid}),
           ...(sc.external ? {external_evaluation: registerExternal('integrated', workspace,
             sc.integration.speed, sc.integration.speed)} : {}),
           per_case: h.perCase(sc.integration.speed), patch_file: patch}};
@@ -393,6 +394,7 @@ async function runCase(sc) {
         }
         return {director_verified_speedup_geomean: h.field(prompt, 'TECH_LEAD_REPORTED_GEOMEAN'),
           ...(sc.workload ? {director_verified_speedup_weighted: h.field(prompt, 'TECH_LEAD_REPORTED_WEIGHTED')} : {}),
+          ...(sc.director === 'invalid_measurement' ? {correctness: 'pass', measurement_valid: false} : {}),
           validation_status: 'accepted', timing_basis: 'cpu_fixture'};
       }
       return fallback(label, prompt);
@@ -807,6 +809,42 @@ const keptIncumbent = (name, r2, status) => ({...cutRetained, name, best: 1.4, b
     assert.equal(rec.after_loop.roundsCommitted, 1);
     assert.ok(archive.entries.find(row => row.id === 'r2_d0').patch_ref, 'retained source is preserved');
   }});
+cases.push({
+  name: 'explicit invalid native verifier cannot qualify, select or deliver a gain',
+  args: {budget: 2}, best: 1.4, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('valid'), direction('invalid'))},
+  candidates: {r1_d0: {files: fast, speed: 1.4},
+    r1_d1: {files: source(4, 4), speed: 50, verifier: {...verifiedAt(50), measurement_valid: false}}},
+  check: ({archive, rec, events}) => {
+    const invalid = archive.entries.find(row => row.id === 'r1_d1');
+    assert.equal(invalid.verified, false);
+    assert.equal(invalid.status, 'unverified');
+    assert.equal(invalid.speedup, null);
+    assert.equal(invalid.verifier.correctness, 'pass');
+    assert.equal(invalid.verifier.verified_geomean, 50);
+    assert.equal(invalid.verifier.measurement_valid, false);
+    assert.equal(invalid.verifier.reported_status, 'verified');
+    assert.equal(invalid.verifier.reported_validation_status, null);
+    assert.ok(invalid.patch_ref, 'retain the source without accepting invalid timing');
+    assert.ok(!events.some(event => event.label.startsWith('integrate ')), 'invalid source is not a verified donor');
+    assert.equal(delivery(rec).delivered, null);
+    assert.equal(rec.after_loop.roundsCommitted, 1, 'the missing-flag valid verifier remains compatible');
+  },
+}, keptIncumbent('explicit invalid native delivery verification keeps the incumbent',
+  {verifier: {...verifiedAt(50), measurement_valid: false}}, 'invalid_measurement'), {
+  name: 'explicit invalid native director return withholds accepted final gain',
+  args: {budget: 1}, director: 'invalid_measurement', best: 1.4, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('valid'))}, candidates: {r1_d0: {files: fast, speed: 1.4}},
+  check: ({result}) => {
+    assert.equal(result.validation_status, 'invalid_measurement');
+    assert.equal(result.reported_validation_status, 'accepted');
+    assert.equal(result.reported_status, null);
+    assert.equal(result.process_validated, false);
+    assert.equal(result.final_speedup, null);
+    assert.equal(result.final_patch, '');
+    assert.ok(result.delivered_patch, 'source remains available even when final timing is invalid');
+  },
+});
 const retainedMain = {...cutRetained, name: 'retained delivery verifies a cut EVO source and commits it over a committed incumbent',
   best: 50, bestId: 'r2_d0', expected: source(4, 4),
   check: ({rec, archive, events, result, temp}) => {
@@ -940,6 +978,20 @@ const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, spee
   reps: 3, speedup_spread: 0.01}));
 const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
 const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+cases.push({...integrationFixture,
+  name: 'explicit invalid native integrator primary stays unavailable through adapters',
+  args: {budget: 2}, best: 1.4, bestId: 'r1_d1', expected: fast,
+  integration: {...integrationFixture.integration, measurement_valid: false},
+  check: ({archive, rec, events}) => {
+    const integrated = archive.entries.find(row => row.id === 'r1_integrated');
+    assert.ok(integrated.patch_ref, 'retain the implementation without invalid fitness');
+    assert.equal(integrated.verified, false);
+    assert.equal(integrated.speedup, null);
+    assert.equal(rec.after_loop.history.rounds[0].integrate.claimed_primary, null);
+    assert.ok(!events.some(event => event.label === 'verify r1_integrated'),
+      'the invalid provisional score cannot trigger a claimed-improvement verification');
+  },
+});
 for (const readerMissing of [null, 'status', 'correctness']) {
   cases.push({...integrationFixture, name: `native integrated reader authority with missing ${readerMissing}`,
     external: true, args: {budget: 2},

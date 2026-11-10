@@ -374,7 +374,15 @@ async function checkedExternalMeasurement(value, workspace, patch = null, final 
   if (!EXTERNAL_OBJECTIVE) {
     if (!value) return value;
     const {observed_evidence, reported_per_case, ...reported} = value;
-    return reported; // Reserved host provenance cannot be authored by an ordinary role.
+    // Reserved host provenance cannot be authored by an ordinary role. Explicit
+    // invalidity vetoes acceptance labels while preserving reported correctness.
+    return reported.measurement_valid === false
+      ? {...reported,
+        reported_status: Object.hasOwn(reported, 'reported_status') ? reported.reported_status : reported.status ?? null,
+        reported_validation_status: Object.hasOwn(reported, 'reported_validation_status')
+          ? reported.reported_validation_status : reported.validation_status ?? null,
+        status: 'invalid_measurement', validation_status: 'invalid_measurement'}
+      : reported;
   }
   if (!value && !final) return value;
   // These fields feed native acceptance, delivery and evidence consumers. Missing
@@ -451,6 +459,7 @@ const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_sp
 const primSpeedup = (o) => {
   if (!o) return EXTERNAL_OBJECTIVE || HAS_WORKLOAD ? null : 0;
   if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
+  if (o.measurement_valid === false) return null;
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD) return Number.isFinite(w) && w > 0 ? w : null;
@@ -877,6 +886,7 @@ const ENG_SCHEMA = obj({
 const VERIFY_SCHEMA = obj({
   evidence_context: evidenceContext,
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {} : {measurement_valid: {type: 'boolean'}}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: secondaryMetric, verified_arithmetic: secondaryMetric,
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
@@ -920,6 +930,7 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
 
 const VALIDATE_SCHEMA = obj({
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {} : {measurement_valid: {type: 'boolean'}}),
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: secondaryMetric,
   director_verified_speedup_arithmetic: secondaryMetric,
@@ -2134,6 +2145,7 @@ const winnerScores = winner => ({
 const integrationScores = best => ({
   metric: handoffMetric,
   claimed_primary: handoffScore(primSpeedup(EXTERNAL_OBJECTIVE ? best : {
+    measurement_valid: best?.measurement_valid,
     verified_weighted: best?.weighted, verified_geomean: best?.geomean})),
   claimed_geomean: handoffScore(best?.geomean), claimed_weighted: handoffScore(best?.weighted),
 });
@@ -2621,6 +2633,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
+      measurement_valid: integrate.best.measurement_valid,
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (!EXTERNAL_OBJECTIVE && integrate && integrate.best) {
@@ -3454,7 +3467,8 @@ function currentBestCaseInputs(rows, winner, fullRef) {
 function caseEvidenceReport(value, fullRef = null) {
   if (!value) return null;
   const view = measurementCaseView(value, fullRef);
-  const keys = ['status', 'correctness', 'measurement_valid', 'external_measurement_valid',
+  const keys = ['status', 'correctness', 'measurement_valid', 'reported_status', 'reported_validation_status',
+    'external_measurement_valid',
     'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
     'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
     'speedup_weighted', 'speedup_arithmetic', 'native_reproducible_gain', 'native_reproducible_regression',
@@ -3556,7 +3570,8 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
   const evidence = (value) => {
     if (!value) return null;
-    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
+    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid',
+      'reported_status', 'reported_validation_status', 'external_measurement_valid',
       'external_evaluation', 'source_identity', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'speedup_weighted', 'speedup_arithmetic', 'variance_note', 'graph_safe',
@@ -4319,6 +4334,9 @@ return {
   final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
+  ...(!EXTERNAL_OBJECTIVE && validation?.measurement_valid === false ? {
+    reported_status: validation.reported_status, reported_validation_status: validation.reported_validation_status,
+  } : {}),
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
   // host_bound/unprimed float as a clean device-time win. 'not_applicable' = this lane's own baseline
   // ratio, no frozen-oracle receipt behind it.

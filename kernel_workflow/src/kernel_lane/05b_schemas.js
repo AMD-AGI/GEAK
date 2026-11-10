@@ -1,5 +1,6 @@
 const VALIDATE_SCHEMA = obj({
   ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {} : {measurement_valid: {type: 'boolean'}}),
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: secondaryMetric,
   director_verified_speedup_arithmetic: secondaryMetric,

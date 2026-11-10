@@ -27,6 +27,20 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   + '\nreturn {primSpeedup,nativePrimary,nativeGainEligible,checkedExternalMeasurement};')(
     A, hasWorkload, runProcess, () => {});
 (async () => {
+  const {validate} = await import('../../interface/runtime/engine/schema.mjs');
+  const schemaParts = ['src/shared/helpers.js', 'src/kernel_lane/05_schemas.js', 'src/kernel_lane/05b_schemas.js']
+    .map(file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8')).join('\n');
+  for (const external of [null, objective]) {
+    const schemas = new Function('A', 'EXTERNAL_OBJECTIVE', 'HAS_WORKLOAD', schemaParts
+      + '\nreturn [VERIFY_SCHEMA, VALIDATE_SCHEMA];')({}, external, false);
+    for (const schema of schemas) {
+      const report = Object.fromEntries(schema.required.map(key => [key, key.includes('speedup') || key.includes('geomean') ? 1 : 'accepted']));
+      assert.equal(validate(report, schema).ok, true, 'the optional validity flag may be omitted');
+      assert.equal(validate({...report, measurement_valid: false}, schema).ok, true);
+      assert.equal(validate({...report, measurement_valid: 'false'}, schema).ok, !!external,
+        'native validity is a boolean; external schemas are unchanged');
+    }
+  }
   const legacy = make({});
   assert.equal(legacy.primSpeedup({verified_weighted: 2, verified_geomean: 3}), 2);
   assert.equal(legacy.nativePrimary({verified_weighted: 2, verified_geomean: 3}), 2);
@@ -34,6 +48,35 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
     observed_evidence: {authority: 'host_result_reader'}, reported_per_case: []}, '/candidate');
   assert.equal(Object.hasOwn(ordinary, 'observed_evidence'), false, 'ordinary roles cannot author host provenance');
   assert.equal(make({}, false).primSpeedup({verified_weighted: 2, verified_geomean: 3}), 3);
+  const contradictory = {status: 'verified', correctness: 'pass', validation_status: 'accepted',
+    measurement_valid: false, verified_weighted: 2, verified_geomean: 3,
+    per_case: [{name: 'reported', speedup: 3}], notes: 'timing invalid despite correct output'};
+  const originalReport = structuredClone(contradictory);
+  for (const weighted of [false, true]) {
+    const nativeMode = make({}, weighted);
+    const invalid = await nativeMode.checkedExternalMeasurement(contradictory, '/candidate');
+    assert.equal(invalid.status, 'invalid_measurement');
+    assert.equal(invalid.validation_status, 'invalid_measurement');
+    assert.equal(invalid.reported_status, 'verified');
+    assert.equal(invalid.reported_validation_status, 'accepted');
+    assert.deepEqual(await nativeMode.checkedExternalMeasurement(invalid, '/candidate'), invalid,
+      'rechecking keeps the original diagnostic labels');
+    assert.equal(invalid.correctness, 'pass', 'invalid timing does not erase reported correctness');
+    assert.equal(invalid.verified_geomean, 3, 'raw reported numbers remain diagnostic evidence');
+    assert.deepEqual(invalid.per_case, contradictory.per_case);
+    assert.equal(nativeMode.primSpeedup(invalid), null, 'explicit invalidity has no native fitness');
+    assert.equal(nativeMode.primSpeedup(contradictory), null, 'raw contradictory returns cannot score');
+    for (const valid of [undefined, true]) {
+      const compatible = {...contradictory};
+      if (valid === undefined) delete compatible.measurement_valid;
+      else compatible.measurement_valid = valid;
+      const checked = await nativeMode.checkedExternalMeasurement(compatible, '/candidate');
+      assert.equal(checked.status, 'verified');
+      assert.equal(checked.validation_status, 'accepted');
+      assert.equal(nativeMode.primSpeedup(checked), weighted ? 2 : 3);
+    }
+  }
+  assert.deepEqual(contradictory, originalReport, 'normalization does not mutate the role return');
   const mode = make({objective, external_measurement_command: ['/owner/evaluate'],
     external_result_command: ['/owner/read']});
   assert.throws(() => make({objective, external_measurement_command: ['/owner/evaluate'],
@@ -43,8 +86,11 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   assert.equal(mode.primSpeedup(null), null);
   assert.equal(mode.nativeGainEligible({...native, native_reproducible_gain: false}), false);
   const read = await mode.checkedExternalMeasurement({external_evaluation: ref,
-    primary_speedup: 999, verified_geomean: 3}, '/candidate', '/candidate.diff');
+    primary_speedup: 999, verified_geomean: 3, measurement_valid: false}, '/candidate', '/candidate.diff');
   assert.equal(mode.primSpeedup(read), 1.4);
+  assert.equal(read.measurement_valid, null, 'external mode retains reader authority over the role flag');
+  assert.equal(mode.primSpeedup({...read, measurement_valid: false}), 1.4,
+    'the external primary selector keeps its existing checked-reader contract');
   assert.equal(mode.nativePrimary(read), 1.4);
   assert.equal(read.development_geomean_speedup, 1.2, 'retain the checked all-case secondary');
   assert.equal(mode.primSpeedup({...read, primary_regime: 'foreign'}), null);

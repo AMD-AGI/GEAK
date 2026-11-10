@@ -38,6 +38,7 @@ const winnerScores = winner => ({
 const integrationScores = best => ({
   metric: handoffMetric,
   claimed_primary: handoffScore(primSpeedup(EXTERNAL_OBJECTIVE ? best : {
+    measurement_valid: best?.measurement_valid,
     verified_weighted: best?.weighted, verified_geomean: best?.geomean})),
   claimed_geomean: handoffScore(best?.geomean), claimed_weighted: handoffScore(best?.weighted),
 });
@@ -525,6 +526,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
+      measurement_valid: integrate.best.measurement_valid,
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (!EXTERNAL_OBJECTIVE && integrate && integrate.best) {
