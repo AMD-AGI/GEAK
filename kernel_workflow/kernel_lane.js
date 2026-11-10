@@ -994,10 +994,17 @@ const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
+// ISA rows of peaks.md that hold only at the CU count they were measured on: the 8050S / 8040S share
+// gfx1151 with the 40-CU 8060S. Any other part of an isolated family is a hard unknown, as
+// roofline_tools.resolve_peaks(gfx, cu=...) also returns.
+const TABULATED_CU = { gfx1151: 40 };
+const GPU_FAMILY = gpuFamily(GFX);
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
-  : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
-const GPU_FAMILY = gpuFamily(GFX);
+  : /^gfx120/.test(GFX) ? 'unknown-device-not-r9700'
+  : TABULATED_CU[GFX] === Number(PHYSICAL_CU_COUNT) ? `tabulated-${GFX}`
+  : GPU_FAMILY.isolate ? `unknown-${GFX}-not-tabulated`
+  : 'non-rdna';
 if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // an isolating family (GPU_FAMILIES) gets the dedicated in-tree hardware guide but no CDNA-biased cards.

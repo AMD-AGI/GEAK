@@ -41,7 +41,7 @@ when the trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700` or
 remains `unknown`. Recognition does not qualify R9600D kernel policy or permit
 R9700 calibration inheritance. Do **not** use
 `torch.cuda.get_device_properties().multi_processor_count` for physical CUs:
-on R9700 that is 32 WGPs, not 64 physical CUs.
+on R9700 that is 32 WGPs, not 64 physical CUs, and on a gfx1151 Radeon 8060S it is 20, not 40.
 
 If `EXPECTED_GFX` is non-empty, report any mismatch in `notes`; the orchestrator
 enforces the mismatch as a hard failure. Same for a non-empty `EXPECTED_TARGET`,
