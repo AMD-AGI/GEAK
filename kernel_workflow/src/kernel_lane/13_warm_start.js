@@ -159,7 +159,7 @@ ${resolveScript}
             CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut,
             VERIFY_DIR: `${EVAL_DIR}/warm_start/cand_${c.rank}`,
             EDITABLE_SET: (analysis && analysis.modifiable_files) || [],
-            GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+            GPU_ID: GPU_SINGLE, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
             ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
@@ -219,7 +219,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
                 'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: REQUIRED_GPU_COUNT > 1 ? GPU_POOL : GPU_LIST[0], ROUND: 0,
+                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
                 COMMANDMENT, PREVIOUS_METRICS: profileSummary,
               }),
               { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;

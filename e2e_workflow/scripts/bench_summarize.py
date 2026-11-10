@@ -273,6 +273,10 @@ def from_runs(args):
                              else "legacy_same_server"),
         "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
     }
+    # Only a trace replay says how its timed window was warmed (bench_e2e.sh "trace-replay
+    # warmup"); every other client keeps its exact field set.
+    if os.environ.get("BENCH_WARMUP_PROTOCOL"):
+        summary["warmup_protocol"] = os.environ["BENCH_WARMUP_PROTOCOL"]
     tail = (f"ttft_ms={summary['ttft_ms_median']} tpot_ms={summary['tpot_ms_median']} "
             f"runs={summary['runs']} ")
     warm = os.environ.get("WARM_SERVER_ROUNDS")

@@ -1,27 +1,10 @@
-// ===========================================================================
-// MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
-// ===========================================================================
-// A stored e2e record holds a WHOLE launch configuration, not a delta — the only form replayable on
-// a box whose baseline nobody recorded. Replaying it means combining it with the baseline THIS run
-// was handed, which under Hyperloom it does not own (interface/run_e2e.py seeds
-// `initial_extra_server_args` from EXPLORE and sets `config_tune: "false"`, so no later sweep
-// corrects anything either).
-//
-// That combination used to be a string concatenation performed by an agent, and it was wrong in a
-// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS`/`$EXTRA_ENV` straight
-// into argparse and `env`, both last-wins. So when the baseline and the record each pin
-// `--context-length`, which one applies is decided by the order the agent happened to write them
-// in. Lose that coin flip and the server runs the baseline twice: ~0% delta, no complaint in any
-// log — the flag WAS honoured, just not with the recorded value — and a record that wins is filed
-// as `rejected`, the one outcome the whole warm start exists to avoid.
-//
-// So the merge is arithmetic, done here, and it reports what it did — the same rule the launcher
-// already applies to one flag by hand (`adapters/sglang.sh` and `--watchdog-timeout`), generalized
-// and moved to where the string is built. The output names every key once, so last-wins never votes.
+// ---- MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED ----
+// A stored e2e record holds a WHOLE launch configuration. The launcher's flag/env expansion is
+// last-wins, so a key both sides pin would apply in join order; merge here instead, naming every key
+// once and reporting what changed.
 
-// Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
-// deduping it would silently drop adapters, while everything else in these configs is a scalar
-// where a second occurrence is a mistake we are here to remove. Grow it only with evidence.
+// Flags that may legitimately repeat (deduping `--lora-path` would drop adapters); every other flag
+// here is a scalar. Grow it only with evidence.
 const REPEATABLE_FLAGS = new Set(['--lora-path', '--lora-paths']);
 
 const _looksLikeFlag = (t) => /^--?[A-Za-z]/.test(t);
@@ -61,15 +44,10 @@ const renderEnvItems = (items) => items.map(
   (it) => (it.name == null ? it.value : `${it.name}=${it.value}`)).join(' ').trim();
 
 /**
- * Key-by-key merge of a recovered configuration onto this run's baseline.
- *
- * The recovered value WINS on a collision — it is the thing being tested, and applying the
- * baseline's value instead would test nothing. It wins IN PLACE, so the baseline's ordering
- * survives and the output contains each key once.
- *
- * Returns `{ merged, overrides, added, unchanged }`. `overrides` is the part that has to reach a
- * human and the tuner: it is the list of knobs where this box disagreed with the record, and it is
- * the first thing to look at when a replay comes back neutral.
+ * Key-by-key merge of a recovered configuration onto this run's baseline. The recovered value wins
+ * a collision IN PLACE (it is what is being tested), so baseline order survives and each key appears
+ * once. Returns `{ merged, overrides, added, unchanged }`; `overrides` lists the knobs where this box
+ * disagreed with the record.
  */
 function mergeConfig(baseline, recovered, { parse, render, repeatable }) {
   const out = parse(baseline).map((it) => ({ ...it }));
@@ -102,17 +80,9 @@ const mergeEnv = (baseEnv, storedEnv) => mergeConfig(baseEnv, storedEnv,
   { parse: parseEnvString, render: renderEnvItems, repeatable: new Set() });
 
 /**
- * Which trial actually ran, and what it measured. Once a repair pass exists, `trials[0]` and
- * `best_throughput_tok_s` are both the wrong place to read it from:
- *   * after a repair `trials[0]` is the corpse of the verbatim replay and the LAST trial is the one
- *     that came up. Taking `kept`/`parity`/notes from the corpse makes a repaired config unadoptable
- *     by construction and feeds its launch error to the `inert` regex, which then reads a successful
- *     repair as "the config never took effect".
- *   * the role returns THE BASELINE in `best_throughput_tok_s` when nothing was kept. Filing that as
- *     `measured_tok_s` writes a perfect 0.00% delta onto a record that was never measured.
- *
- * So: the last trial carrying a positive throughput, and `best` only when it is a number the
- * baseline cannot be mistaken for.
+ * Which trial actually ran, and what it measured: the LAST trial with a positive throughput (after a
+ * repair, trials[0] is the failed verbatim replay), and `best_throughput_tok_s` only when it differs
+ * from the baseline (the role returns the baseline there when nothing was kept).
  */
 function measuredTrialOf(sweep, baselineTput) {
   const trials = (sweep && Array.isArray(sweep.trials)) ? sweep.trials : [];
@@ -125,12 +95,8 @@ function measuredTrialOf(sweep, baselineTput) {
 }
 
 /**
- * Knobs the merged configuration asked for that the thing which actually ran does not carry.
- *
- * `repair.dropped_flags` is optional and the role often expresses the repair as a second trial and
- * leaves it empty. The string it benched is on the trial either way, so the drop list is recoverable
- * by subtraction — and without it `applied_partial` reads false on a run that dropped something,
- * which is the difference between "the record lost" and "most of the record lost".
+ * Knobs the merged configuration asked for that the trial that ran does not carry, recovered by
+ * subtraction (`repair.dropped_flags` is optional and often empty), so `applied_partial` is right.
  */
 function droppedByDiff(mergedFlags, mergedEnv, applied) {
   const app = String(applied || '').trim();

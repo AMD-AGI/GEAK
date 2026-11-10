@@ -1,7 +1,8 @@
 
 // Role prompt: the agent reads its role file and knowledge itself; the script passes only inputs.
 // roleAgentFrom reads the role from any roles/ dir (kernel_workflow uses it for e2e's op_benchmarker,
-// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow).
+// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow);
+// multiGpuBlock only by kernel_lane, the one workflow that runs multi-GPU jobs.
 function roleAgentFrom(dir, role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phase}.
@@ -13,6 +14,7 @@ ${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role)
+    + (typeof multiGpuBlock === 'function' ? multiGpuBlock(role) : '')
     + (typeof externalMetricInstructions === 'function'
       ? externalMetricInstructions(role === 'director' && phase === 'validate')
       : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');

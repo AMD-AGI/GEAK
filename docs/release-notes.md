@@ -1,13 +1,60 @@
 ---
 myst:
   html_meta:
-    "description": "GEAK 4.0.0 release notes: end-to-end LLM serving optimization, workflow-based orchestration, and a stronger single-kernel optimizer for AMD Instinct GPUs."
-    "keywords": "GEAK, release notes, GEAK 4.0, AMD Instinct, e2e_workflow, kernel_workflow, sglang, vLLM"
+    "description": "GEAK release notes for 4.2.0 and 4.0.0: knowledge base, Codex CLI backend, AgentX workloads, ATOM serving backend, end-to-end LLM serving optimization, and single-kernel optimizer for AMD Instinct GPUs."
+    "keywords": "GEAK, release notes, GEAK 4.2, GEAK 4.0, AMD Instinct, knowledge base, Hyperloom, Codex CLI, AgentX, ATOM, e2e_workflow, kernel_workflow, sglang, vLLM, ROCm 10.0"
 ---
 
 # GEAK release notes
 
 This topic summarizes the features available in each GEAK release. For the hardware and software versions validated for a release, see the [Compatibility matrix](compatibility.md).
+
+## GEAK 4.2.0
+
+GEAK 4.2.0 extends GEAK with a persistent knowledge base, an alternative agent backend, support for AgentX trace-replay workloads, a new serving backend, and expanded ROCm compatibility.
+
+### Release highlights
+
+GEAK 4.2.0 introduces five major additions.
+
+#### Kernel-level knowledge base and Hyperloom integration
+
+GEAK 4.2.0 introduces a kernel-level knowledge base that captures and reuses kernel optimization strategies, implementations, and validated results across runs. Hyperloom integration enables knowledge retrieval, warm-start optimization, and continuous learning from previous runs.
+
+#### Codex CLI agent backend
+
+Codex CLI is now a supported agent backend alongside Claude Code. It runs the existing `kernel_workflow` and `e2e_workflow` JavaScript Workflows without modification.
+
+#### AgentX workload support
+
+GEAK 4.2.0 adds optimization support for AgentX workloads using real trace replay instead of synthetic fixed-shape benchmarks, along with interactivity-based performance metrics and workload-aligned validation.
+
+#### ATOM serving backend
+
+ATOM is now a first-class serving backend alongside sglang and vLLM. The integration supports automated server launch, profiling, benchmarking, and end-to-end optimization.
+
+#### ROCm 10.0 compatibility
+
+The validated environment expands to include ROCm 10.0.
+
+## What's new in GEAK 4.2.0
+
+The following items were added or improved in GEAK 4.2.0.
+
+### Added
+
+- Kernel-level knowledge base for capturing and reusing optimization strategies, implementations, and validated results across runs.
+- Hyperloom integration for knowledge retrieval, warm-start optimization, and continuous learning.
+- Codex CLI as an alternative agent backend (runs existing `kernel_workflow` and `e2e_workflow` Workflows without modification).
+- AgentX trace-replay workload support with interactivity-based performance metrics and workload-aligned validation.
+- ATOM serving backend with automated server launch, profiling, benchmarking, and end-to-end optimization.
+- ROCm 10.0 compatibility.
+
+### Improved
+
+- Cross-run knowledge reuse and warm starts through the kernel-level knowledge base.
+- AgentX performance measurement and validation.
+- Flexibility across agent runtimes and serving backends.
 
 ## GEAK 4.0.0
 
@@ -54,7 +101,9 @@ Each patch is measured independently before it can become the new best candidate
 
 GEAK 4.0.0 adds a structured perf_knowledge layer for AMD GPU optimization. It organizes operator, backend, GPU-generation, dtype, and regime knowledge into a machine-queryable kernel matrix. Expert skills can seed high-value optimization directions, but they never replace measurement: every candidate must still pass on-box validation.
 
-## What’s New
+## What’s new
+
+The following items were added or improved in GEAK 4.0.0.
 
 ### Added
 

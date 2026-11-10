@@ -1,12 +1,9 @@
-// ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
-// ---------------------------------------------------------------------------
-// Workflow scripts have no filesystem API. The writer agent is therefore the
-// one component that can atomically snapshot mutable replay assets while the
-// measured stack still exists. The intent remains structured so every phase
-// feeds the same schema-v2 contract rather than inventing a private summary.
+
+// No filesystem here, so a writer agent snapshots mutable replay assets atomically while the
+// measured stack still exists, from a structured schema-v2 intent shared by every phase.
 let lastCommittedCheckpoint = null;
-async function persistE2EValidationCheckpoint(relativePath, intent) {
+async function persistE2EValidationCheckpoint(relativePath, intent, timeoutFor = agentTimeoutFor) {
   if (!EVAL_DIR) return null;
   const target = `${EVAL_DIR}/${relativePath}`;
   const payload = {
@@ -27,7 +24,8 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
     '```json\n' + JSON.stringify(payload, null, 2) + '\n```',
     { phase: intent.phase || 'Finalize', label: `persist-e2e-checkpoint:${relativePath}`,
       schema: CHECKPOINT_WRITE_SCHEMA },
-    2
+    2,
+    timeoutFor
   );
   // Candidate-local A/B snapshots are diagnostic evidence, never a replay
   // parent; only a complete accepted stack may advance the digest chain.
@@ -42,11 +40,10 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
   return written;
 }
 
-// Candidate-local incomplete A/B records stay best-effort diagnostics, but an
-// accepted config/tuning/overlay/final result must never silently continue
-// without the checkpoint that makes it replayable after an interrupted run.
+// Candidate-local A/B records are best-effort, but an accepted config/tuning/overlay/final result
+// must not continue without the checkpoint that makes it replayable.
 async function requireE2EValidationCheckpoint(relativePath, intent) {
-  const written = await persistE2EValidationCheckpoint(relativePath, intent);
+  const written = await persistE2EValidationCheckpoint(relativePath, intent, checkpointTimeoutFor);
   if (!written || written.written !== true || !written.checkpoint_sha256) {
     throw new Error(
       `checkpoint_write_failed: ${relativePath}; accepted result cannot be committed without a replayable checkpoint`
@@ -55,10 +52,8 @@ async function requireE2EValidationCheckpoint(relativePath, intent) {
   return written;
 }
 
-// Expert-skills prompt injection. PURELY ADDITIVE: returns '' whenever the feature is OFF or the role
-// is not a skills consumer, so roleAgent's output is byte-identical to the pre-feature build in those
-// cases. When ON, it appends a short advisory pointer that tells the agent to Read the fragment file
-// and query the skills index. (Workflow scripts have no fs access; the agent does the reading.)
+// Expert-skills prompt injection. '' when the feature is off or the role is not a skills consumer;
+// otherwise an advisory pointer telling the agent to Read the fragment and query the skills index.
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role)) return '';
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +

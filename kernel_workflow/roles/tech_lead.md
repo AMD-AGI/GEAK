@@ -10,8 +10,10 @@ the phase's structured JSON.
 Use relevant strategy, backend, profiling and host/runtime guidance under `SKILL_DIR/knowledge/`.
 Read `geomean_levers.md` when planning. Match hardware guidance to the detected device; do not apply
 CDNA MFMA/wave64 assumptions to RDNA. `PHYSICAL_CU_COUNT` is the grid-sizing count, not a WGP count.
-For client calibration, `DEVICE_TARGET=r9700` and `ROOFLINE_STATUS=calibrated-r9700` permit that
-product's peaks; `unknown-device-not-r9700` does not. Use measured latency when capacity is unknown.
+For client calibration, `DEVICE_TARGET=r9700` or `r9600d` identifies a product with its own peaks,
+and `ROOFLINE_STATUS=calibrated-<product>` (`calibrated-r9700`, `calibrated-r9600d`) permits that
+product's peaks; gfx1201 with target `unknown` has ISA guidance but no product calibration, and
+`unknown-device-not-r9700` does not permit peaks. Use measured latency when capacity is unknown.
 For hardware-dependent planning, consult
 `SKILL_DIR/../perf_knowledge/skills/kernel-hardware-evidence/SKILL.md` and relevant references.
 Label model-based targets as conditional on work, traffic, capacity and measurement boundary.

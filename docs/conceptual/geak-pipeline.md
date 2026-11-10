@@ -25,7 +25,7 @@ flowchart LR
 ## Inputs
 
 - **Model + serving backend**: a model on disk served by `sglang` or `vllm` (selected per run).
-- **Workload**: input/output sequence length and concurrency (ISL/OSL/conc). Profiling and benchmarking
+- **Workload**: input and output sequence length and concurrency (ISL/OSL/conc). Profiling and benchmarking
   use the *same* workload so numbers are comparable.
 
 ## Phases
@@ -34,7 +34,7 @@ The following phases make up an end-to-end run.
 
 ### Setup
 
-The Director builds an isolated evaluation directory, launches a warm server, and records the **true
+The Director builds an isolated evaluation directory, launches a warm server, and records the true
 baseline throughput and its noise band. Model weights and installed packages stay read-only.
 
 ### Profile
@@ -49,7 +49,7 @@ The System Architect routes each hot kernel to a track by Amdahl leverage
 
 ### ConfigSweep
 
-The Config Tuner tries service-level switches one at a time — attention backend, cuda/HIP graph,
+The Config Tuner tries service-level switches one at a time — attention backend, CUDA and HIP graph,
 scheduling and memory knobs, backend toggles, and (when enabled) lower precision — keeping only changes
 that measurably help. This is the cheapest, landscape-reshaping lever, so it runs first; the server is
 re-profiled afterward.

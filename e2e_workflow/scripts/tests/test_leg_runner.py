@@ -285,6 +285,14 @@ class Resolve(_LegRunnerTestCase):
 # main() -- the four modes
 # --------------------------------------------------------------------------- #
 class ModeResolve(_LegRunnerTestCase):
+    def test_an_additional_phase_entry_can_be_resolved(self):
+        self._write("meta.json", json.dumps({"target_callable": "absent_primary:op"}))
+        self._target_module(name="prefill_stack").op.__module__ = "prefill_stack"
+        ident = json.loads(self._main("--task", self.task, "--mode", "resolve",
+                                      "--target-callable", "prefill_stack:op"))
+        self.assertNotIn("error", ident)
+        self.assertTrue(ident["file"].endswith("prefill_stack.py"))
+
     def test_resolve_prints_the_identity_without_loading_the_harness(self):
         """resolve runs BEFORE harness_lib/cases are loaded, so a bare task dir is enough."""
         self._write("meta.json", json.dumps({"target_callable": "fake_live_stack:op"}))
@@ -310,6 +318,27 @@ class ModeList(_LegRunnerTestCase):
 
 
 class ModeTime(_LegRunnerTestCase):
+    def test_phase_graph_and_compile_modes_are_independent(self):
+        self._task_dir(meta={"target_callable": "fake_live_stack:op",
+                             "regime": {"compile_mode": "wrong_global", "graph_mode": True},
+                             "phase_regimes": {
+                                 "decode": {"graph_mode": True},
+                                 "prefill": {"graph_mode": False, "compile_mode": "max-autotune"},
+                             }})
+        self._target_module()
+        self._main("--task", self.task, "--mode", "time")
+        calls = sys.modules["harness_lib"].calls
+        self.assertEqual([c[1] for c in calls if c[0] == "time_op"], [True, False])
+        self.assertEqual([c for c in calls if c[0] == "compiled_op"],
+                         [("compiled_op", "max-autotune")])
+
+    def test_missing_phase_mode_does_not_fall_back_to_global(self):
+        self._task_dir(meta={"target_callable": "fake_live_stack:op",
+                             "phase_regimes": {"decode": {"graph_mode": True}}})
+        self._target_module()
+        with self.assertRaisesRegex(ValueError, "missing phase_regimes entry"):
+            self._main("--task", self.task, "--mode", "time", "--bucket", "prefill")
+
     def test_time_reports_every_case_plus_the_leg_identity(self):
         self._task_dir()
         self._target_module()

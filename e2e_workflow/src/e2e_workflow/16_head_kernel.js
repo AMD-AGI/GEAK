@@ -1,33 +1,30 @@
 // ===========================================================================
-// PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized
-// regardless of edit flag, via the bake-off ladder. This is the lever the old
-// design missed for GEMM (~78% of GPU time). Runs BEFORE the editable-kernel loop.
-// The op-identity guard (see Strategize) has already forced fused/monolithic heads to op_kind=moe with
-// dense-GEMM synth OFF + the live seam preserved, so each head is optimized AS the op the live kernel
-// dispatches (backend-swap / tune / author-fused) — never decomposed into an un-integrable dense GEMM.
+// PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized regardless of the
+// edit flag, via the bake-off ladder. Runs BEFORE the editable-kernel loop. The op-identity guard has
+// already forced fused/monolithic heads to op_kind=moe (dense-GEMM synth off, live seam kept), so
+// each head is optimized AS the op the live kernel dispatches, never as an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
-  log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
-  // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
+  log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, ${KERNEL_EXTRACT_ON ? 'prepared UT inventory' : `threshold=${HEAD_THRESHOLD_PCT}%`}.`);
+  // Preserve the prepared inventory order for AgentX, Architect order for fixed-load runs.
   const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
   }));
   if (DEEP) {
-    // ============ DEEP-MODE v2: GLOBAL cross-kernel × cross-backend co-optimization ====================
-    // One global lane pool over ALL (head op × backend) lanes (kernels + backends optimize concurrently);
-    // GPU-elastic serial e2e gate overlapping co-opt; full-backend roster with ceiling-aware patience +
-    // revive; per-op SHARED_KB + run-global GLOBAL_KB; budget-driven EV scheduling toward a +50% e2e goal.
+    // ==== DEEP-MODE: global cross-kernel × cross-backend co-optimization ====
+    // One lane pool over ALL (head op × backend) lanes; a serial e2e gate overlapping co-opt; full
+    // backend roster with ceiling-aware patience + revive; per-op SHARED_KB + run-global GLOBAL_KB;
+    // budget-driven EV scheduling toward DEEP_E2E_TARGET.
     const ROOFLINE_SCHEMA = { type: 'object', additionalProperties: true, properties: { roofline_note: { type: 'string' }, target_geomean: { type: 'number' } }, required: ['roofline_note'] };
     const OKV = { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, summary: { type: 'string' }, feedback_path: { type: 'string' }, addendum_path: { type: 'string' } }, required: ['ok'] };
     const HARVEST_SCHEMA = { type: 'object', additionalProperties: true, properties: { lanes: { type: 'array', items: { type: 'object', additionalProperties: true, properties: { uid: { type: 'string' }, has_state: { type: 'boolean' }, cumulative: { type: 'number' }, best_ms: { type: 'number' }, vs_live: { type: 'number' }, eval_dir: { type: 'string' }, patch: { type: 'string' } }, required: ['uid'] } } }, required: ['lanes'] };
 
-    // ---- GPU partition (N-adaptive, elastic; serial gate) -------------------------------------------
-    // Co-opt runs on cards NOT needed by the serving slot ('main', never paused). The serving cards form
-    // a second co-opt pool ('serve') used only in waves with NO due gate; a gate wave runs the e2e A/B on
-    // the serving slot CONCURRENTLY with co-opt on the dedicated cards (overlap, no idle). With exactly TP
-    // cards (no dedicated), 'main' is empty and a gate wave runs the gate alone (graceful time-slice).
+    // ---- GPU partition (N-adaptive, elastic; serial gate) ----
+    // 'main' = cards outside the serving slot (never paused); 'serve' = the serving cards, used for
+    // co-opt only in waves with no due gate. A gate wave runs the e2e A/B on the serving slot while
+    // 'main' keeps co-optimizing; with exactly TP cards 'main' is empty and the gate runs alone.
     const servingCards = SERVING_GPU.split(',').map(s => s.trim()).filter(Boolean);
     const servingSet = new Set(servingCards);
     const dedicatedCoopt = GPU_LIST.filter(g => !servingSet.has(g));
@@ -38,12 +35,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const serveSlots = haveSpare ? servingCards.length : GPU_LIST.length;
     log(`[deep] partition: serving {${servingCards.join(',')}} TP=${SERVING_TP}; dedicated co-opt {${dedicatedCoopt.join(',') || '(none)'}}; mode=${haveSpare ? 'OVERLAP gate||co-opt' : 'TIME-SLICE (N==TP)'}; budget ${Math.round(DEEP_HEAD_BUDGET_MS / 3600000)}h; e2e target ×${DEEP_E2E_TARGET} (${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s).`);
 
-    // ---- ceiling prior: GENERAL (by lane ROLE, not model/shape) -------------------------------------
+    // ---- ceiling prior: by lane ROLE, not model/shape ----
     const ceilingPrior = (lang, mode) => (mode === 'author' ? 2.2 : (lang === 'triton' && mode === 'optimize' ? 1.6 : 1.8));
 
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
+      if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
       const ext = await extractWithBaseline(
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
@@ -68,9 +66,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
-      // Lane roster: ALWAYS tune the live editable kernel + author EVERY backend the bake-off proposes
-      // (no backend dropped a priori — unbiased), then fill remaining diversity with distinct authoring
-      // directions. Steers are DIRECTIONS (generic), never hard-coded magic numbers.
+      // Lane roster: always tune the live kernel, author EVERY backend the bake-off proposes, then add
+      // distinct authoring directions (generic steers, no magic numbers).
       let lanesSpec = [];
       if (DEEP_BACKENDS_OVERRIDE) {
         lanesSpec = DEEP_BACKENDS_OVERRIDE.split(',').map(s => s.trim()).filter(Boolean).map(s => {
@@ -128,7 +125,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     for (const p of preps) for (const l of p.lanes) allLanes.push(l);
     if (!allLanes.length) { log('[deep] no viable head lanes; nothing to optimize.'); }
 
-    // ---- EV: Amdahl mass × remaining ceiling gap × recent improvement (with exploration floor) -------
+    // ---- EV: Amdahl mass × remaining ceiling gap × recent improvement (exploration floor) ----
     const evOf = (l) => {
       const amdahl = Math.max(0.01, (l.head.pct_gpu_time || 1) / 100);
       const gap = Math.max(0.02, (l.ceiling || 1.5) - l.best);
@@ -136,16 +133,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return amdahl * gap * rate;
     };
 
-    // ---- batched HARVEST of a set of lanes from DISK truth (immune to a nulled burst) ----------------
+    // ---- batched HARVEST of lanes from DISK truth (immune to a nulled burst) ----
     const harvestLanes = async (set, tag) => {
       if (!set.length) return;
       const byHead = {}; for (const l of set) (byHead[l.head.short_name] = byHead[l.head.short_name] || []).push(l);
       for (const sn of Object.keys(byHead)) {
         const ls = byHead[sn]; const base = ls[0].liveBaselineMs;
+        const metric = KERNEL_EXTRACT_ON
+          ? 'Use the prepared UT workload and frozen baseline. vs_live is the recorded workload-weighted speedup (sum of baseline_ms * effective_calls divided by sum of candidate_ms * effective_calls); best_ms is diagnostic only. Missing weighted evidence gives vs_live=1, never a scalar geomean fallback.'
+          : `LIVE baseline geomean = ${base || '?'} ms. best_ms is the absolute geomean across cases; vs_live=${base || 0}/best_ms when both>0, else 1.0.`;
         const harvest = await safeAgent(
-          `Deep-v2 co-opt harvest [${tag}] for head ${sn} (${ls[0].ext.op_kind}). LIVE baseline geomean = ${base || '?'} ms (the bar; a lane's own "cumulative" is self-relative and NOT comparable — compute speedup vs THIS baseline). Read DISK, do not guess. Lanes:\n` +
+          `Deep-v2 co-opt harvest [${tag}] for head ${sn} (${ls[0].ext.op_kind}). ${metric} A lane's own cumulative gain is self-relative, not vs-live. Read DISK, do not guess. Lanes:\n` +
           ls.map(l => `- uid=${l.uid}: STATE.json=${l.state_dir}/STATE.json; cumulative-best workspace=${l.state_dir}/best; newest finished run under ${l.deepDir}/runs/${l.key}/team_*/*/ with a final_patch.diff (+ baseline_timing.json / tech_lead_report.md for the optimized per-case ms)`).join('\n') + '\n' +
-          `For EACH uid return: uid; has_state (STATE.json AND best/kernel_src exist); best_ms (ABSOLUTE geomean ms of the lane's cumulative-best across cases); vs_live (= ${base || 0}/best_ms when both>0, else 1.0); cumulative (self-relative, ref); eval_dir (newest runs/<key>/team_*/<op> with non-empty final_patch.diff, else ""); patch (that diff path, else ""). Return {lanes:[{uid,has_state,best_ms,vs_live,cumulative,eval_dir,patch}]}.`,
+          `For EACH uid return: uid; has_state (STATE.json AND best/kernel_src exist); best_ms and vs_live using the metric above; cumulative (self-relative, ref); eval_dir (newest runs/<key>/team_*/<op> with non-empty final_patch.diff, else ""); patch (that diff path, else ""). Return {lanes:[{uid,has_state,best_ms,vs_live,cumulative,eval_dir,patch}]}.`,
           { phase: 'HeadKernel', label: `harvest ${sn} ${tag}`, schema: HARVEST_SCHEMA });
         const hmap = {}; for (const e of (harvest && Array.isArray(harvest.lanes) ? harvest.lanes : [])) hmap[e.uid] = e;
         const anyState = Object.values(hmap).some(e => e && e.has_state);
@@ -156,15 +156,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           else if (l.ran > 0) { l.lastGain = 0; l.noImprove++; }
           if (e.eval_dir) l.lastEval = e.eval_dir;
           if (e.patch) l.patch = e.patch;
-          if (e.has_state) l.noStateStreak = 0;   // P3: produced a result -> not infeasible
+          if (e.has_state) l.noStateStreak = 0;   // produced a result -> not infeasible
           // ceiling-aware patience: lanes still far from their ceiling get MORE waves before parking.
           const farFromCeiling = (l.ceiling - l.best) > 0.3 * Math.max(l.ceiling, 1e-9);
           const streakCap = farFromCeiling ? DEEP_PLATEAU_STREAK_HIGH : DEEP_PLATEAU_STREAK;
           if (e.has_state === false && anyState && l.ran > 0) {
             l.active = false; l.noStateStreak = (l.noStateStreak || 0) + 1;
-            // P3: 2 consecutive bursts with NO persisted result while peers produced => structurally
-            // infeasible backend\u00d7op (the backend has no primitive for this op, e.g. flydsl on grouped-MoE).
-            // Mark dead so reseed/revive never waste budget re-trying it.
+            // 2 consecutive bursts with no persisted result while peers produced => infeasible
+            // backend×op (no primitive for it); dead lanes are never reseeded or revived.
             if (l.noStateStreak >= 2) { l.dead = true; log(`  [deep] DEAD ${l.uid} \u2014 infeasible (no result ${l.noStateStreak}x while peers produced); won't reseed/revive.`); }
             else log(`  [deep] park ${l.uid} \u2014 no persisted result while peers produced.`);
           }
@@ -173,7 +172,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     };
 
-    // ---- CURATE per-op SHARED_KB + run-global GLOBAL_KB, and REVIVE high-ceiling parked lanes ---------
+    // ---- CURATE per-op SHARED_KB + run-global GLOBAL_KB; REVIVE high-ceiling parked lanes ----
     const curateAndRevive = async (tag) => {
       for (const p of preps) {
         const ls = allLanes.filter(l => l.head.short_name === p.h.short_name && (l.lastEval || l.ran > 0));
@@ -185,8 +184,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           `ALSO append cross-KERNEL transferable techniques to ${GLOBAL_KB} (techniques that should generalize to OTHER head ops/backends in this run; one line each, with the source uid). Keep both concise/high-signal. Return {ok,summary}.`,
           { phase: 'HeadKernel', label: `curate ${p.h.short_name} ${tag}`, schema: OKV });
       }
-      // revive: a parked lane that is still HIGH-ceiling (big remaining gap) gets one more shot with the
-      // freshly-curated cross-backend borrows — so an initially-poor high-ceiling backend is not abandoned.
+      // Revive: a parked lane with a big remaining ceiling gap gets another shot (at most 2) with the
+      // freshly curated borrows.
       let revived = 0;
       for (const l of allLanes) {
         if (l.active || l.dead || (l.revives || 0) >= 2) continue;
@@ -195,16 +194,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (revived) log(`  [deep] revived ${revived} high-ceiling parked lane(s) with fresh borrows.`);
     };
 
-    // ---- BATCHED serial e2e GATE on the serving slot (runs concurrently with co-opt on dedicated cards)
+    // ---- BATCHED serial e2e GATE on the serving slot (concurrent with co-opt on dedicated cards) ----
     const runGate = async (opts = {}) => {
-      // P4: at FINALIZE, sweep ALL patched lanes (incl. isolated~1.0) onto the CUMULATIVE overlay \u2014 the
-      // e2e gate is the true arbiter, so a host-level / oracle-invisible win (isolated~1.0 but real e2e
-      // gain, e.g. fused_moe big-M coarsen) still gets banked. Per-wave gates keep the cheap top-2-by-iso.
+      // At FINALIZE, sweep ALL patched lanes (incl. isolated ~1.0) onto the cumulative overlay: the e2e
+      // gate is the arbiter, so an oracle-invisible e2e win still banks. Per-wave gates take the top 2.
       const cands = opts.final
         ? allLanes.filter(l => (l.lastEval || l.patch)).sort((a, b) => b.best - a.best)
         : allLanes.filter(l => (l.lastEval || l.patch) && l.best > 1.0).sort((a, b) => b.best - a.best).slice(0, 2);
       if (!cands.length) return;
-      const bankedHeads = new Set();   // P4: one kernel per head in the combined overlay (same-head lanes edit the SAME module -> cannot stack; keep the first lane that converts e2e)
+      const bankedHeads = new Set();   // one kernel per head: same-head lanes edit the SAME module
       if (opts.final) log(`[deep] FINALIZE gate: sweeping ${cands.length} patched lane(s) onto the cumulative overlay (combined cross-kernel deliverable).`);
       e2eGateCount++;
       log(`[deep] E2E GATE #${e2eGateCount} on serving {${SERVING_GPU}} TP=${SERVING_TP}: [${cands.map(c => c.uid + ' ' + c.best.toFixed(3) + 'x').join(', ')}] (overlapping co-opt on dedicated cards).`);
@@ -228,9 +226,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
           ...(opts.final && ACCURACY_GATE !== 'none' ? { ACCURACY_LIMIT: DEEP_FINAL_ACCURACY_LIMIT } : {}),   // de-noise the finalize accuracy decision
         };
-        const integ = await safeAgent(
-          roleAgent('e2e_integrator', 'integrate', 'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.', deepInputs),
-          { phase: 'HeadKernel', label: `integrate ${c.uid} g${e2eGateCount}`, schema: INTEGRATE_SCHEMA });
+        const integ = await runIntegrateBothLegs(
+          'Apply a deep head candidate; gate on e2e throughput; report engagement/cudagraph/mem/decode for feedback.',
+          deepInputs, `integrate ${c.uid} g${e2eGateCount}`, 'HeadKernel');
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
@@ -240,8 +238,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // Route the integrator's actual rejection evidence to the corresponding corrective.
-          // A conditional profile projection does not manufacture a corruption verdict.
+          // Only actual correctness/integration failures enter the corrective helper; neither the
+          // profile estimate nor an inconclusive speedup review re-authors the candidate.
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
@@ -279,7 +277,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       gateFeedbackPath = (fb && fb.feedback_path) || `${EVAL_DIR}/deep_head/e2e_feedback.md`;
       gateHarnessPath = (fb && fb.addendum_path) || `${EVAL_DIR}/deep_head/HARNESS_ADDENDUM.md`;
       // re-profile if the stack moved enough — chase the new dominant bottleneck (Amdahl shifted).
-      if (want('profile') && curTput > lastReprofileTput * (1 + DEEP_REPROFILE_GAIN)) {
+      if (!KERNEL_EXTRACT_ON && want('profile') && curTput > lastReprofileTput * (1 + DEEP_REPROFILE_GAIN)) {
         log(`[deep] e2e +${((curTput / lastReprofileTput - 1) * 100).toFixed(1)}% since last profile — re-profiling to chase the moving bottleneck.`);
         const rp = await safeAgent(
           roleAgent('profiler', 'reprofile', 'Re-profile the CURRENT overlaid server; return refreshed head pct_gpu_time so EV re-weights toward the new bottleneck.', {
@@ -289,7 +287,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (rp && Array.isArray(rp.heads)) {
           for (const nh of rp.heads) {
             const tgt = allLanes.filter(l => l.head.short_name === (nh.short_name || nh.name));
-            for (const l of tgt) if (Number.isFinite(nh.pct_gpu_time)) l.head.pct_gpu_time = nh.pct_gpu_time;
+            for (const l of tgt) if (Number.isFinite(nh.pct_gpu_time)) {
+              l.head.pct_gpu_time = nh.pct_gpu_time;
+            }
           }
           log(`[deep] re-profile updated head Amdahl weights.`);
         }
@@ -297,9 +297,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     };
 
-    // ---- DEPTH: fresh authoring directions to RE-SEED a plateaued lane (so it keeps going DEEPER) ----
-    // When a lane plateaus we don't abandon it (and its share of the budget) — we hand it a NEW direction
-    // it hasn't tried, biased to the dominant-Amdahl head, so the search compounds depth instead of exiting.
+    // ---- DEPTH: fresh authoring directions to RE-SEED plateaued lanes ----
     const DEEP_STEERS = {
       triton: [
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
@@ -320,8 +318,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       ],
     };
     const nextSteer = (l) => { const lib = DEEP_STEERS[l.lang] || DEEP_STEERS._default; const s = lib[(l.steerIdx || 0) % lib.length]; l.steerIdx = (l.steerIdx || 0) + 1; return s; };
-    // RE-SEED when all lanes parked but budget remains: revive lanes (dominant head first) with a FRESH
-    // direction so deep optimization uses the FULL budget instead of exiting at the first global plateau.
+    // When all lanes are parked but budget remains, revive them (dominant head first) with a fresh
+    // direction instead of exiting at the first global plateau.
     const reseedForDepth = () => {
       let n = 0;
       const order = allLanes.slice().sort((a, b) => (b.head.pct_gpu_time || 0) - (a.head.pct_gpu_time || 0) || b.best - a.best);
@@ -333,14 +331,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       return n > 0;
     };
 
-    // ---- GLOBAL WAVE LOOP (runs until the budget; re-seeds on plateau for depth) ---------------------
+    // ---- GLOBAL WAVE LOOP (runs until the budget; re-seeds on plateau) ----
     let wave = 0, e2eGateCount = 0, lastE2eIsoBest = 1.0, lastReprofileTput = curTput, gateFeedbackPath = '', gateHarnessPath = '', e2eIntervalHit = false;
     const armInterval = () => { if (typeof setTimeout === 'function' && DEEP_E2E_MAX_INTERVAL_MS > 0) setTimeout(() => { e2eIntervalHit = true; }, DEEP_E2E_MAX_INTERVAL_MS); };
     armInterval();
     let convergeStreak = 0, deepBurstsSpent = 0;
     try {
-    // Honour TIME_DEADLINE_HIT as well as DEEP_DEADLINE_HIT (both armed off the same deadline) so the deep
-    // wave loop can never become the one dispatcher that runs past the reserve.
+    // TIME_DEADLINE_HIT too (same deadline), so the wave loop never runs past the reserve.
     while (!DEEP_DEADLINE_HIT && !TIME_DEADLINE_HIT) {
       if (convergeStreak >= DEEP_CONVERGE_STREAK) { log(`[deep] CONVERGED \u2014 ${convergeStreak} consecutive zero-gain waves; stopping to finalize.`); break; }
       const projAgents = (deepBurstsSpent + mainSlots + serveSlots) * DEEP_AGENTS_PER_BURST + wave * 6;   // project a FULL next wave of bursts + per-wave overhead (harvest/curate/gate)
@@ -366,7 +363,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ...KB_ARGS,
           budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
-          incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
+          incremental_analyze: l.ran > 1 ? 'true' : 'false',   // 2nd+ burst = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
           exp_root: `${l.deepDir}/runs/${l.key}`, apply_to_original: 'false',
@@ -383,31 +380,22 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       deepBurstsSpent += ready.length;
       await harvestLanes(ready, `w${wave}`);
       await curateAndRevive(`w${wave}`);
-      const newIsoBest = Math.max(1.0, ...allLanes.map(l => l.best));   // P1 convergence: did this wave move e2e OR any lane's isolated best?
+      const newIsoBest = Math.max(1.0, ...allLanes.map(l => l.best));   // convergence: did e2e OR any isolated best move?
       convergeStreak = (curTput > prevTput * 1.001 || newIsoBest > globalIsoBest * 1.001) ? 0 : convergeStreak + 1;
     }
     } catch (e) { log(`[deep] wave loop aborted (${(e && e.message) || e}); proceeding to finalize so progress is still banked + reported.`); }
-    // FINALIZE \u2014 always runs (convergence / agent-budget / deadline / throw all land here). Wrapped so
-    // that even if it hits the runtime cap mid-sweep, the overlay banked so far (curOverlay/curTput) holds.
+    // FINALIZE always runs (convergence, agent budget, deadline or a throw); if it is cut off mid-sweep,
+    // what is banked so far (curOverlay/curTput) holds.
     try {
       await harvestLanes(allLanes.filter(l => l.lastEval || l.ran > 0), 'final');
-      await runGate({ final: true });   // P4 FINALIZE: every patched lane -> cumulative overlay (the combined cross-kernel deliverable; banks oracle-invisible host/e2e wins like the manual +21.8%)
+      await runGate({ final: true });   // every patched lane -> cumulative overlay
     } catch (e) { log(`[deep] finalize partial (${(e && e.message) || e}); best banked overlay so far: e2e ${curTput} tok/s.`); }
     log(`[deep] done after ${wave} wave(s), ${e2eGateCount} gate(s). e2e ${curTput} tok/s (${(curTput / Math.max(BASELINE_TPUT, 1e-9)).toFixed(3)}× baseline; target ×${DEEP_E2E_TARGET}). per-lane vs-live: ${allLanes.map(l => l.uid + '=' + l.best.toFixed(2) + 'x').join(', ')}.`);
   } else if (FAST_MODE && GPU_LIST.length > 1) {
-    // ========================= FAST-MODE PARALLEL HEAD TRACK (fast-mode only) =========================
-    // The default behavior is the byte-identical serial `else` branch below — this whole block only runs
-    // when FAST_MODE is on AND there is more than one card. Design (FAST_PLAN §4, STRICT timing):
-    //   opt-A  parallel: per-head extract + bake-off, each leasing ONE card exclusively
-    //   opt-B  parallel: ALL (operator × direction) author jobs in one pool, each leasing ONE card
-    //   BARRIER: every isolated job has released its card -> ISO pool fully idle
-    //   integrate SERIAL on the fixed serving slot {SERVING_GPU} (TP=SERVING_TP), one op at a time
-    // Why this satisfies the three requirements:
-    //   (1) operators AND optimization directions both fan out (flattened (head,language) job pool);
-    //   (2) the GPU semaphore gives every op-bench / kernel-layer job an EXCLUSIVE card, so no two
-    //       speed measurements ever share a GPU -> no timing contention while optimizing;
-    //   (3) integration happens only AFTER the barrier and SERIALLY on the serving slot (which itself
-    //       spans all TP cards), so no isolated work can preempt the e2e A/B -> the gate number is clean.
+    // ==== FAST-MODE PARALLEL HEAD TRACK (FAST_MODE, >1 card; else the serial branch below) ====
+    // Per-head extract + bake-off, then every (operator, direction) author job in parallel, each on ONE
+    // exclusively leased card. After a BARRIER (all cards released), integration runs SERIALLY on the
+    // serving slot {SERVING_GPU} (TP=SERVING_TP), one op at a time, so nothing disturbs the e2e A/B.
     const ISO = makeSem(GPU_LIST);
     log(`[fast-mode] PARALLEL head track: ISO lanes={${GPU_LIST.join(',')}} (${GPU_LIST.length}); ` +
       `serving slot={${SERVING_GPU}} TP=${SERVING_TP} reserved for the serial e2e gate (hard barrier between).`);
@@ -417,6 +405,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
+        if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
         const ext = await extractWithBaseline(
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
@@ -438,7 +427,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       });
     }));
 
-    // ---- process opt-A: dominant-head flagging (never silently skip), seed direct_light + author jobs ----
+    // ---- process opt-A: flag dominant heads (never silently skip); seed direct_light + author jobs ----
     const headState = new Map();   // short_name -> { h, ext, cands: [] }
     const authorJobs = [];         // flattened (operator × direction) author directions
     for (const p of prepared) {
@@ -514,11 +503,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      // Rank candidates on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, = the env/
-      // direct_light candidate's bake.isolated_speedup), NOT the unweighted geomean. In a decode-bound
-      // serving regime the geomean is dominated by zero/low-weight prefill buckets and buries the decode
-      // bucket that governs throughput — ranking by geomean can drop the truly-best authored kernel.
-      const alIso = al.final_weighted != null ? al.final_weighted : al.final_geomean;
+      // Rank on the WORKLOAD-WEIGHTED speedup (the kernel layer's primary metric, comparable with
+      // bake.isolated_speedup), not the geomean, which low-weight prefill buckets dominate.
+      const alIso = KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
+        : (al.final_weighted != null ? al.final_weighted : al.final_geomean);
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
@@ -529,7 +517,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
 
-    // ---- integrate SERIAL on the fixed serving slot, in head order, ISO quiesced (no GPU preemption) ----
+    // ---- integrate SERIALLY on the serving slot, in head order, ISO quiesced ----
     for (const h of heads) {
       const st = headState.get(h.short_name); if (!st) continue;
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
@@ -552,9 +540,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
           code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
           verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
-          // Pass the Architect's live seam + a concrete engagement assertion so the Integrator can
-          // VERIFY the overlay actually binds on the live path BEFORE spending a full e2e A/B — an
-          // unreachable lever is then rejected in minutes (no_engagement), not hours.
+          // Live seam + engagement check: an overlay that does not bind on the live path is rejected
+          // (no_engagement) before a full e2e A/B is spent.
           live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
           parity_note: cand.parity_note || 'expected_close' },
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
@@ -573,7 +560,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        // Corrective routing follows the integrator's measured rejection, not the profile projection.
+        // Neither the profile estimate nor a measurement review routes to the correctness corrective.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
@@ -608,26 +595,22 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   } else {
   for (const h of heads) {
-    // Budget guard: stop STARTING new head ops once a dispatch deadline has fired, so the in-flight work +
-    // Finalize/Validate still land inside the wall-clock budget. FAST_DEADLINE_HIT covers fast mode;
-    // TIME_DEADLINE_HIT covers ALL modes when time_budget_s was passed (inert otherwise => no-op default).
+    // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
+    // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
     if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
       log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
       break;
     }
     headDispatched++;
-    // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
-    // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
-    // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
+    if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
+    // (h1) Extract the op into a standalone immutable unittest (fused heads stay fused: gemmSynthFor).
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
-        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
-        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
-        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
+        // The unittest MUST span BOTH regimes (kernel_extractor.md "Shapes must span BOTH regimes"):
+        // decode M (running batch ≈ conc) and M=1 are passed explicitly so they are never dropped.
         REQUIRE_DECODE_BUCKET: true,
         DECODE_M_BUCKETS: [1, CONC],
         PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
@@ -658,9 +641,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const gate = bake ? bake.gate : 'null';
       const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
       const hasPlan = !!(bake && Array.isArray(bake.author_plan) && bake.author_plan.length);
-      // A DOMINANT head, or a HARNESS fault (not a real no-win), must NEVER be silently skipped.
-      // Flag it loudly; and if there is an author_plan, STILL try the author route (it is judged by the
-      // immutable unittest, independent of the broken bake-off probe) — so fall through instead of skip.
+      // A DOMINANT head or a HARNESS fault is flagged, never silently skipped; with an author_plan it
+      // still falls through to the author route (judged by the immutable unittest).
       if (isDominant || harness) {
         log(`  ⚠️ FLAG ${h.short_name}: ${isDominant ? `DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU)` : 'head'} bake-off gate=${gate}${harness ? ' (HARNESS ERROR — bake-off could not measure; NOT a real no-win)' : ''}. ${hasPlan ? 'Proceeding to author route anyway.' : 'No author_plan to fall back on.'}`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate, harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || gate : 'bakeoff returned null' });
@@ -682,17 +664,19 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup,
         parity_note: bake.parity_note || 'expected_close' });
     }
-    // Author/rewrite route: write (+optimize) a fresh impl per planned language via the recursive kernel
-    // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
-    // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
+    // Author/rewrite route per planned language via the kernel layer: mode=author writes from scratch
+    // then optimizes, mode=optimize rewrites an existing impl; the oracle in ext.task_dir judges both.
     let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
     for (const ap of plan) {
       const lang = ap.language || 'triton';
+      if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
+        history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
+          lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
+        break;
+      }
       let al;
-      // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
-      // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
-      // language (it dropped FlyDSL in the 2026-06-12 run). Do NOT retry a COMPLETED no-speedup
-      // (final_geomean present but <=1.0) — that's a real result, retrying just wastes budget.
+      // Retry a TRANSIENT failure (threw, or no final_geomean) so a language is not silently dropped;
+      // never retry a completed no-speedup (final_geomean <= 1.0), which is a real result.
       const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : (FAST_MODE ? 1 : 2), 10);
       for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
         try {
@@ -722,11 +706,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
-      // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
-      // decode-bound regime is dragged down by low/zero-weight prefill buckets and can bury the decode
-      // bucket that actually governs serving throughput. Fall back to geomean if no weighted number.
-      const alIso = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
+      // geomean; only fixed-load runs fall back to the geomean.
+      const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
+        : (al.final_weighted != null ? al.final_weighted : al.final_geomean));
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
@@ -751,15 +734,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     headCands.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
     log(`  ${h.short_name}: ${headCands.length} candidate(s) [${headCands.map(c => `${c.source} ${(c.isolated || 0).toFixed(2)}x`).join(', ')}] — e2e-testing EACH; reference leg measured ONCE and reused.`);
 
-    // (h3) e2e gate. Test EVERY candidate, not just the top-iso one: isolated speedup is a weak predictor
-    // of e2e (a decode-bound run had an iso-1.055 env tune deliver +14.5% e2e), so the truly-best candidate
-    // can only be found by measuring each on the live server. All of a head's candidates A/B against the
-    // SAME current config, so the REFERENCE leg is identical for all of them — measure it ONCE (first
-    // candidate) and reuse it for the rest via REUSE_REF/SHARED_REF_MED (the integrator then skips the
-    // reference server launch and only benches the candidate leg). CAND_TAG keeps each candidate's cand
-    // bench/overlay in its own dir so they don't clobber each other. Pick the candidate with the highest
-    // MEASURED e2e that clears the gate; only if NONE clears do we fall back to corrective/pending/reject on
-    // the top candidate. Inputs are built per-candidate so Fix C can re-issue the SAME A/B at Finalize.
+    // (h3) e2e gate on EVERY candidate (isolated speedup is a weak predictor of e2e). All A/B against
+    // the same config, so the reference leg is measured once and reused (REUSE_REF/SHARED_REF_MED);
+    // CAND_TAG keeps each candidate's bench/overlay apart. The best MEASURED e2e that clears the gate
+    // wins; if none clears, the top candidate goes to corrective/pending/reject. Inputs are built per
+    // candidate so Fix C can re-issue the same A/B at Finalize.
     const mkIntegrateInputs = (cand, ci, sharedRefMed) => ({
       EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
@@ -790,8 +769,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
       const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
-      // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
-      // report + experience library keep the full per-backend picture — not just the winning backend.
+      // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
         e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
         verdict: passed ? 'candidate_passed' : (abc ? 'candidate_rejected' : 'candidate_incomplete'),
@@ -805,8 +783,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
 
     if (bestPick) {
-      // Best MEASURED e2e among all candidates that cleared the gate. A head winner may be carried as an
-      // overlay (authored/patch) AND/OR config (env/flag) — capture both.
+      // A head winner may carry an overlay (authored/patch) and/or config (env/flag): capture both.
       const cand = bestPick.cand, integ = bestPick.integ;
       curOverlay = integ.accepted_overlay || curOverlay;
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -816,14 +793,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       log(`  ${h.short_name}: ACCEPTED best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x iso). e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
-      // No candidate cleared the gate. Operate on the TOP (highest-weighted) candidate: corrective re-author
-      // for a fixable reject/crash, else keep an incomplete A/B as PENDING, else a plain reject. Same
-      // three-state handling as before, now applied to the best candidate after testing them all.
+      // None cleared: on the TOP candidate, corrective re-author for a fixable reject/crash, else an
+      // incomplete A/B stays PENDING, else a plain reject.
       const cand = top.cand, integ = top.integ, headIntegrateInputs = top.inputs;
       if (!top.abc) {
-        // A FIXABLE crash-during-warmup (cand server died -> ZERO A/B samples) is the most common corrective
-        // case (cuda_graph_capture_unsafe / host-sync / NO_BINARY_FOR_GPU). Try the corrective re-author
-        // first; only keep PENDING if it is not fixable (a real transient timeout/hang) or the fix didn't land.
+        // A FIXABLE warmup crash (zero A/B samples: graph-capture-unsafe, host sync, NO_BINARY_FOR_GPU)
+        // tries the corrective re-author first; PENDING only if not fixable or the fix did not land.
         const reason = integ ? (integ.reason || integ.gate || '') : '';
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
@@ -849,8 +824,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
         }
       } else {
-        // Route actual parity/accuracy failures to correctness and JIT/capture/host-sync failures
-        // to integration. A conditional profile estimate does not supply a corruption verdict.
+        // Route actual parity/accuracy failures to correctness fixes and JIT/capture failures to
+        // integration fixes; neither the estimate nor an inconclusive speedup review is a kernel defect.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
@@ -874,8 +849,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
-  // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
-  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {
+  // Head wins reshape the profile: re-profile before the kernel loop.
+  if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',

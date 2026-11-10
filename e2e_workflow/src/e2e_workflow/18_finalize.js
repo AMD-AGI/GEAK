@@ -5,26 +5,16 @@ let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
+let validateSkip = '', finalFromAb = false;
 
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
-// Completeness guarantee (general, not per-kernel): an A/B that measured only the
-// reference leg (gate:'incomplete' / ab_complete:false) is NOT a result. Before
-// finalizing we
-//   (1) RECONSTRUCT from disk every overlay whose integrate_result shows the A/B
-//       never completed both legs — so incompletes from ANY integrate branch, or
-//       from a prior crashed/killed/resumed run (the JS has no fs and no carried
-//       state across a process restart), are recovered, then
-//   (2) drive EVERY pending integration to a complete ref+cand measurement
-//       (runIntegrateBothLegs re-invokes the integrator to run the missing leg).
-// This replaces the old "finish only the single best, and only when nothing else
-// was accepted" gate, which stranded sibling incompletes (e.g. an env-config
-// head) at ref-only whenever any other head/kernel had been accepted. Keys ONLY
-// off the stable overlay/cand_*/integrate_result.json layout. Bounded by
-// AB_FINISH_RETRIES + each agent's agentBounded guard + the outer runner budget
-// + TIME_FINAL_DEADLINE_HIT (this gate must NEVER spend the final reserve; see below).
+// A reference-only A/B is not a result. (1) Reconstruct from disk (overlay/cand_*/
+// integrate_result.json) every A/B that never completed, including from a killed or resumed run;
+// (2) finish each pending one (runIntegrateBothLegs runs the missing leg). Bounded by
+// AB_FINISH_RETRIES, agentBounded and TIME_FINAL_DEADLINE_HIT: never spends the final reserve.
 if (want('final')) {
-  // Issue #429: reclaim leftover process-local capture dirs before Finalize burns more disk.
-  // Run even when TIME_FINAL_DEADLINE_HIT — reclaim is cheap local FS work, not a bench.
+  // Reclaim leftover process-local capture dirs before Finalize uses more disk; runs even past
+  // TIME_FINAL_DEADLINE_HIT (cheap local FS work, not a bench).
   try {
     const { execFileSync } = require('child_process');
     const out = execFileSync('python3', [
@@ -43,15 +33,13 @@ if (want('final')) {
   } catch (reclaimErr) {
     log(`Finalize: capture workspace reclaim skipped (${reclaimErr && reclaimErr.message ? reclaimErr.message : reclaimErr})`);
   }
-  // (0) The reserve is not ours. Each iteration below boots a server and runs two benches, so past
-  // the boundary there is no time to finish even one: skip the whole gate, scan agent included.
-  // Pending entries stay in pendingIntegrations and reach the caller — deferred, not discarded.
+  // (0) Past the final-reserve boundary skip the whole gate (scan included); pending entries reach
+  // the caller via pendingIntegrations: deferred, not discarded.
   if (TIME_FINAL_DEADLINE_HIT) {
     log(`Finalize-gate: SKIPPED entirely — the final reserve has already begun. ` +
       `${pendingIntegrations.length} pending A/B(s) deferred to the caller (surfaced in pending_integrations).`);
   } else {
-  // (1) Disk-reconstruct incomplete A/Bs. The JS has no fs, so a read-only Bash
-  // agent enumerates the overlay layout and reports which A/Bs never completed.
+  // (1) Disk-reconstruct incomplete A/Bs via a read-only agent (the JS has no fs).
   const RECON_SCHEMA = obj({ incomplete: { type: 'array', items: obj({
     short_name: { type: 'string' }, overlay_dir: { type: 'string' },
     winner_kind: { type: 'string' }, apply_env: { type: 'string' }, apply_flags: { type: 'string' },
@@ -92,8 +80,7 @@ if (want('final')) {
           verified_isolated_speedup: it.isolated || 0, pct_gpu_time: it.pct_gpu_time,
           parity_note: 'expected_close',
         },
-        // The candidate overlay is already built on disk; the integrator benches
-        // it directly on resume (RESUME_AB) — it does NOT rebuild it.
+        // The overlay is already built: the integrator benches it directly (RESUME_AB), no rebuild.
         CAND_OVERLAY_DIR: it.overlay_dir, RESUME_AB: true, SKILL_DIR: WORKFLOW_DIR,
       },
     });
@@ -101,9 +88,7 @@ if (want('final')) {
       `(winner_kind=${it.winner_kind || '?'}, ref=${!!it.ref_present}, cand=${!!it.cand_present}); queued to finish.`);
   }
 
-  // (2) Drive EVERY pending integration to a complete ref+cand measurement — but never
-  // past the reserve boundary. Highest isolated speedup first, so if the clock cuts the
-  // queue short the most valuable A/B is the one that got finished.
+  // (2) Finish every pending A/B, never past the reserve boundary; highest isolated speedup first.
   pendingIntegrations.sort((a, b) => (b.isolated || 0) - (a.isolated || 0));
   const stillIncomplete = [];
   while (pendingIntegrations.length) {
@@ -114,14 +99,19 @@ if (want('final')) {
         `Finalize/Report/Validate must run. Deferred, not discarded: they are surfaced in pending_integrations.`);
       break;
     }
+    if (abWindowShort(abLegs(pendingIntegrations[0].inputs), `Finalize-gate: ${pendingIntegrations[0].short_name}`)) {
+      log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}): the next cannot finish before the final ` +
+        'reserve. Deferred to pending_integrations.');
+      break;
+    }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
     const integ = await runIntegrateBothLegs(
       'Finish the e2e A/B for this verified-isolated win. Run BOTH legs (reference + candidate) to ' +
       'completion, then return accepted/stack/rejected with ab_complete:true.',
-      // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
-      // measured against the latest accepted baseline.
+      // Measured against the latest accepted baseline (current overlay/flags/env/throughput).
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
@@ -174,18 +164,55 @@ if (allAccepted.length) {
     integrity: { checkpoint_assets: [] },
   });
 }
+// The reserve boundary abandons a search agent's promise, not the agent, so detached search work may
+// still hold GPUs. Finalize and Validate each start with run_reaper.py (selects by this run's marker,
+// not by name), bounded on its own clock; a failed fence is non-fatal.
+const RUN_REAPER = `${WORKFLOW_DIR}/scripts/run_reaper.py`;
+const FENCE_TIMEOUT_MS = 10 * 60000;
+const FENCE_SCHEMA = obj({ ok: { type: 'boolean' }, stage: { type: 'string' }, stopped: arrObj,
+  survivors: arrObj, note: { type: 'string' } }, []);
+async function finalPhaseFence(stage, phaseName) {
+  if (!EVAL_DIR) return null;
+  const cmd = `python3 ${shq(RUN_REAPER)} fence --eval-dir ${shq(EVAL_DIR)} --stage ${stage}`;
+  const r = await safeAgent(
+    `You are the final-phase GPU fence. Run EXACTLY this command, once, and return its JSON stdout verbatim ` +
+    `as StructuredOutput; it pretty-prints over several lines, so return the whole object. It is this ` +
+    `workflow's own cleanup and the sanctioned way to do what PROCESS SAFETY asks — stop only what this run ` +
+    `started: it selects processes by this run's marker and eval dir, never by a name pattern, and never ` +
+    `signals PID 1, the caller, or your own shell. Do not edit it, retry it, or act on what it reports; a ` +
+    `non-zero exit is a valid answer, so return what it printed.\n` +
+    '```bash\n' + cmd + '\n```',
+    { phase: phaseName, label: `fence:${stage}`, schema: FENCE_SCHEMA }, 1, () => FENCE_TIMEOUT_MS);
+  if (!r) {
+    log(`[final-phase fence] ${stage}: the fence returned nothing — continuing without it (NON-FATAL).`);
+    return null;
+  }
+  const stopped = Array.isArray(r.stopped) ? r.stopped : [];
+  const survivors = Array.isArray(r.survivors) ? r.survivors : [];
+  const names = [...new Set(stopped.map((p) => String((p && p.name) || (p && p.pid) || '?')))].slice(0, 8);
+  log(`[final-phase fence] ${stage}: stopped ${stopped.length} process(es) still running from the search` +
+    `${names.length ? ` (${names.join(', ')})` : ''}${survivors.length ? `; ${survivors.length} still up` : ''}` +
+    `${r.note ? ` — ${r.note}` : ''}.`);
+  return r;
+}
+
 if (want('final')) {
   if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
   FINAL_PHASE_STARTED = true;   // the one place the reserve exemption is granted — by position, not label
   phase('Finalize');
+  await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
-    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
+    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
     { phase: 'Finalize', label: 'e2e_integrator:finalize', schema: FINALIZE_SCHEMA });
   finalTput = (finalize && finalize.final_throughput_tok_s) || curTput;
+  // The stock bundle's number is Setup's canonical one, not Finalize's search leg.
+  const adoptedNothing = agentxAdoptedNothing({ setup: SETUP_CONFIG, accepted: allAccepted.length, tput: curTput,
+    baseline: BASELINE_TPUT, flags: curFlags, env: curEnv, overlay: curOverlay });
+  if (adoptedNothing) finalTput = BASELINE_TPUT;
   if (finalize && finalTput > BASELINE_TPUT * (1 + NOISE_BAND / 100)) {
     await requireE2EValidationCheckpoint('final/e2e_validation.json', {
       phase: 'Finalize', validation_level: 'final_pair', gate: 'accepted',
@@ -232,13 +259,21 @@ if (want('final')) {
     }),
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
-  // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
-  // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
-  // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
-  // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
+  // Validate is sized into FINAL_RESERVE_MS and not time-gated (skips only per agentxValidateSkip);
+  // if a hard kill lands mid-bench, Report's files and run_e2e.py's fallback
+  // (director_e2e_validation.json, then the best overlay's integrate_result.json) still carry a win.
   phase('Validate');
-  validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
+  validateSkip = agentxValidateSkip(adoptedNothing, remainingMs());
+  if (validateSkip === 'final_is_baseline') {
+    log(`Validate SKIPPED: nothing adopted, so the final bundle is the stock one (Setup's ${BASELINE_TPUT} tok/s).`);
+  } else if (validateSkip === 'no_time') {
+    log(`Validate SKIPPED: ~${remainingMin()}min left, under its ${Math.round(AGENTX_VALIDATE_WINDOWS_MS / 60000)}min of timed windows.`);
+  } else {
+    await finalPhaseFence('validate', 'Validate');
+  }
+  validation = validateSkip ? null : await safeAgent(
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
+      agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
@@ -247,36 +282,28 @@ if (want('final')) {
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
       SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
-      // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
-      // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
-      // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
-      // can never disagree. Paths default to the standard EVAL_DIR names if the report result is absent.
+      // Report wrote these before Validate ran: the Director rewrites their headline numbers (and
+      // status/parity) to its own, so they never disagree. Defaults are the standard EVAL_DIR names.
       ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
-  // A Validate that did NOT produce a usable number (e.g. its server crashed in
-  // engine-core init) must NEVER erase the accepted same-session A/B win we
-  // already carry in finalTput/curTput. Trust the Director's independent number
-  // ONLY when it is a real positive measurement; otherwise fall back to the
-  // carried best-accepted throughput so a real, parity-checked win is never
-  // reported as 0 / no_gain downstream.
+  // Trust the Director's number only when it is a real positive measurement; a Validate with no
+  // usable number never erases the accepted A/B win carried in finalTput.
   validatedOk = !!(validation && validation.director_verified_throughput_tok_s > 0 && validation.throughput_speedup > 0);
   finalSpeedup = validatedOk ? validation.throughput_speedup : (BASELINE_TPUT ? finalTput / BASELINE_TPUT : finalSpeedup);
+  // A search leg over a canonical baseline is no speedup: run_e2e.py reports the accepted A/B's own pair.
+  finalFromAb = IS_AGENTX && !validatedOk && allAccepted.length > 0;
   log(`COMPLETE. ${MODEL_NAME}: ${BASELINE_TPUT} -> ${validatedOk ? validation.director_verified_throughput_tok_s : finalTput} tok/s ` +
-    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validation ? validation.validation_status : '?'}` +
+    `(${finalSpeedup ? finalSpeedup.toFixed(3) : '?'}x, status ${validationStatusOf()}` +
     `${validation && !validatedOk ? '; Validate produced no number — using carried accepted A/B win' : ''}). Results in ${EVAL_DIR}`);
+  if (finalFromAb) {
+    log("Validate gave no number: returning no final or speedup, so run_e2e.py reports the accepted A/B's own pair.");
+  }
 
-  // --- FINAL experience reconciliation (post-gate) -----------------------
-  // The per-milestone update_experience (in the Milestone loop above) is the ONLY
-  // curate step, and it runs on that milestone's ledger. But a head/kernel whose
-  // e2e A/B was still INCOMPLETE at milestone time is recorded as "Integrator
-  // pending", and the Finalize-gate (Fix C) that actually CONFIRMS its e2e win runs
-  // AFTER the last milestone curate — as does the Director's Validate. Without a
-  // pass here, those cards stay frozen at "pending" and never receive the verified
-  // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
-  // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
-  // post-Validate numbers, so finalize-gate confirmations are written back.
+  // --- FINAL experience reconciliation (post-gate) ----
+  // Cards written as "pending" before the Finalize-gate (Fix C) and Validate confirmed them get the
+  // verified post-Validate numbers here, in one re-curate.
   if (allAccepted.length && E2E_LEARNED_KB_ENABLED) {
     const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
     await safeAgent(
@@ -307,42 +334,44 @@ if (want('final')) {
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
   backend: BACKEND,
+  ...(KERNEL_EXTRACT_ON
+    ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },
+        profile_workload_json: profile ? profile.profile_workload_json || '' : '',
+        kernel_ranking_json: profile ? profile.kernel_ranking_json || '' : '',
+        kernel_extraction_delivery_json: profile ? profile.kernel_extraction_delivery_json || '' : '',
+        kernel_extraction_summary: {
+          failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],
+          coverage_summary: profile?.coverage_summary || {},
+        } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   baseline_flags: BASELINE_FLAGS, baseline_env: BASELINE_ENV, baseline_overlay: BASELINE_OVERLAY,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
+  // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
+  // undispatched task survives a resume (references/workflow-handoff.md).
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
-  // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
-  // phase still has the attribution numbers when it runs in a later invocation.
+  // Full tuning result: a phase-by-phase resume neither re-runs tuning nor loses its attribution.
   ...(tuning ? { tuning } : {}),
-  // Carry pending (verified-isolated, A/B-incomplete) wins WITH their inputs so a
-  // resumed phase run can finish their A/B instead of re-discovering them.
+  // Pending wins WITH their inputs, so a resumed run can finish their A/B.
   pending_integrations: pendingIntegrations,
   history,
 };
 
-// What this run got from the KB, and — separately — what it added on its own. The split is the
-// point: a warm-started run's headline speedup is partly inherited, and reporting the whole of it as
-// this run's work is how a knowledge base starts flattering itself. BASELINE_TPUT stays the true
-// cold baseline throughout, so `throughput_speedup` above is still measured against the real floor.
+// What this run got from the KB, and separately what it added (a warm start's headline speedup is
+// partly inherited). BASELINE_TPUT stays the true cold baseline throughout.
 const kbWarmStart = (E2E_WARM_START_ON && KB_DIMS) ? {
   identity: KB_DIMS, plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
   reference_dir: KB_REF_DIR,
   adopted_throughput_tok_s: kbSeedTput || null,
   adopted_kernels: kbSeedKernels.map(k => k.name).filter(Boolean),
-  // The gain that is genuinely THIS run's: everything after the warm start's own contribution. Null
-  // when nothing was adopted, because then the ordinary speedup already answers the question.
+  // This run's own gain past the warm start; null when nothing was adopted.
   incremental_speedup: kbSeedTput ? Number((finalTput / kbSeedTput).toFixed(6)) : null,
-  // The full recall ledger, both planes. Same object the Report role was handed, so the prose in
-  // final_report.md and whatever a downstream consumer reads cannot disagree about what was
-  // recalled or how it fared.
+  // The full recall ledger (both planes), the same object the Report role was handed.
   recall: KB_RECALL,
 } : null;
-// Attribution block for the standalone tuning phase. Because the phase measured its OWN interleaved
-// pre/post legs, its contribution can be expressed both absolutely (delta%) and as a SHARE of the run's
-// total gain — which is the number "how much did the tuning actually help?" is asking for. share is null
-// (not 0) when the run had no net gain to apportion, so a caller never divides by a meaningless total.
+// Attribution for the standalone tuning phase (its own pre/post legs): delta% and its SHARE of the
+// run's total gain (null, not 0, when there is no net gain to apportion).
 function tuningReturn() {
   if (!TUNING_SKILLSET_ENABLED) return { enabled: false };
   const base = {
@@ -363,13 +392,11 @@ function tuningReturn() {
       isolated_speedup: o.isolated_speedup || 0, engaged: o.engaged === true, artifact: o.artifact || '',
     })),
     artifacts: tuning.artifacts || [],
-    // How the win reaches production. Consumers that need to reproduce the tuning outside this run read
-    // deploy_bundle (its deploy.sh is idempotent); final_launch.sh already invokes it.
+    // To reproduce the tuning elsewhere: deploy_bundle (idempotent deploy.sh, run by final_launch.sh).
     deploy_bundle: tuning.deploy_bundle || '', deploy_verified: tuning.deploy_verified === true,
     cache_invalidation: tuning.cache_invalidation || [], live_tree_files: tuning.live_tree_files || [],
     apply_overlay: tuning.apply_overlay || '',
-    // Finalize's independent answer to "did the tuning actually make it into the shipped bundle, and
-    // does it still engage there?". null when Finalize did not run (a phase-scoped invocation).
+    // Finalize's check that the tuning is in the shipped bundle and engages; null if it did not run.
     in_final_bundle: finalize ? (finalize.tuning_in_bundle === true) : null,
     final_bundle_engagement_recheck: (finalize && finalize.tuning_engagement_recheck) || '',
     apply_env: tuning.apply_env || '', apply_flags: tuning.apply_flags || '',
@@ -391,44 +418,48 @@ function tuningReturn() {
   };
 }
 
+// A Validate that returned nothing is flagged, so no KB writer records the carried number.
+function validationStatusOf() {
+  return validatedOk ? validation.validation_status
+    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
+      : (!want('final') ? 'phase_partial'
+        : validateSkip === 'final_is_baseline' ? 'skipped_final_is_baseline'
+          : (IS_AGENTX ? 'flagged_no_number_used_carried_ab' : 'unknown')));
+}
+
 const wfReturn = {
-  // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
-  // breaking change to the keys below; run_e2e.py keys its canonical-artifact
-  // read off this so it never silently mis-parses a future shape.
+  // The contract shape run_e2e.py reads; bump only on a breaking change to the keys below.
   schema_version: 1,
   mode: 'e2e',
-  fast_mode: FAST_MODE,   // true => ConfigSweep + Milestone skipped; HeadKernel-only within the time budget
-  deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler (20h)
+  fast_mode: FAST_MODE,   // true => ConfigSweep, TuningSkillset and Milestone skipped (HeadKernel-only)
+  deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler
   backend: BACKEND,
   phases_run: PHASES,
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
-  // Trust the Director's independent number ONLY when it is a real positive
-  // measurement (validatedOk). A crashed/degenerate Validate falls back to the
-  // carried accepted same-session A/B win — never 0 — so a real, parity-checked
-  // gain is not silently demoted to no_gain by run_e2e.py.
-  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : finalTput,
-  throughput_speedup: finalSpeedup,
-  validation_status: validatedOk ? validation.validation_status
-    : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
-       : (want('final') ? 'unknown' : 'phase_partial')),
+  // The Director's number only when validatedOk; else the carried accepted A/B win, never 0 (except
+  // finalFromAb's empty pair, which run_e2e.py fills from disk).
+  final_throughput_tok_s: validatedOk ? validation.director_verified_throughput_tok_s : (finalFromAb ? 0 : finalTput),
+  throughput_speedup: finalFromAb ? 0 : finalSpeedup,
+  validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
-  // Standalone tuning-skillset phase: its own measured pre/post legs plus the share of the run's TOTAL
-  // gain those legs account for. Reported separately from accepted_heads/accepted_kernels precisely
-  // because the phase is standalone — "how much did tuning buy" is answerable, not folded into the total.
+  // Tuning phase attribution, reported apart from accepted_heads/accepted_kernels.
   tuning_skillset: tuningReturn(),
-  // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).
-  // A REAL isolated speedup that simply ran out of A/B time — surfaced (slim) so
-  // the caller can resume/finish it, never silently discarded as a rejection.
+  ...(KERNEL_EXTRACT_ON ? { kernel_extraction: {
+    delivery_path: profile?.kernel_extraction_delivery_json || '',
+    failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],
+    coverage_summary: profile?.coverage_summary || {},
+  } } : {}),
+  // Verified-isolated wins whose e2e A/B never completed, surfaced (slim) for the caller to finish.
   pending_integrations: pendingIntegrations.map(p => ({
     short_name: p.short_name, track: p.track, isolated: p.isolated,
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
-  flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
+  flagged_heads: flaggedHeads,   // dominant heads not optimized (harness/extract/no-candidate)
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,
@@ -436,22 +467,16 @@ const wfReturn = {
   budget_used: dispatched,
   budget_total: BUDGET,
   final_overlay: (validation && validation.final_overlay) || (finalize && finalize.final_overlay) || curOverlay,
-  // FINALIZE_SCHEMA has always defined final_patch and the Finalizer has always returned it, but it
-  // was never surfaced here — so the single diff carrying the whole run's win reached neither the
-  // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
-  // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
-  // drops it, so a run with no final_patch uploads no reproducible code at all.
+  // final_patch is the KB's reproducible code (e2e_store.py _ARTIFACT_KEYS reads
+  // result["final_patch"]); final_overlay, a directory, cannot stand in for it.
   ...kbResultMetadata(),
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,
-  // Conditional spread, never an unconditional key: with the feature off this contributes no own
-  // property and both the returned object and the persisted file are byte-identical to before.
+  // Conditional spread: with the feature off the key is absent.
   ...(kbWarmStart ? { kb_warm_start: kbWarmStart } : {}),
-  // Emitted independently of kb_warm_start. kbWarmStart is null whenever KB_DIMS was never
-  // established (a preflight that produced no gfx), but the KERNEL lanes can still have recalled by
-  // then — folding recall only into kbWarmStart would drop exactly the runs where knowing what was
-  // recalled matters most. Absent entirely when nothing was recalled on either plane.
+  // Independent of kb_warm_start (null without KB_DIMS, while kernel lanes may still have recalled);
+  // absent when nothing was recalled on either plane.
   ...((KB_RECALL.e2e || KB_RECALL.kernel.length) ? { kb_recall: KB_RECALL } : {}),
   state: carryState,
 };

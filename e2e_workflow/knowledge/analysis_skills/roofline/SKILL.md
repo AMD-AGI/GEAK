@@ -39,7 +39,7 @@ Call `resolve_peaks(peaks_md_path, gfx, device=device_id, product=env_report.dev
 with this skill's `peaks.md` path and the measured GPU's device index. Use
 `peak_flops_for()` for the actual arithmetic dtype/unit. `device_target=unknown`
 does not restrict the existing ISA-keyed tables. Client `gfx120x` requires a known
-product table (`r9700`); a bare `gfx1201` has no numeric fallback. `gfx125x` is CDNA5,
+product table (`r9700`, `r9600d`); a bare `gfx1201` has no numeric fallback. `gfx125x` is CDNA5,
 not that client family. Unknown dtype means unknown compute capacity, never the
 largest available peak. The `dtype_bytes()` compatibility default is not evidence
 for an unknown storage dtype. Derived peaks are low-confidence, display-only estimates.

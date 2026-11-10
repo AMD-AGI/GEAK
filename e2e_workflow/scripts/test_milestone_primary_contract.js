@@ -38,6 +38,8 @@ async function milestone(result, workloadPath = 'HYPOTHETICAL.workload.json', in
     parallel: operations => Promise.all(operations.map(operation => operation())),
     extractWithBaseline: async () => ({ editable: true, unittest_smoke: 'pass', task_dir: 'fixture.task', workload_path: workloadPath }),
     laneArgs: value => value, workflow: async (reference, inputs) => { calls.workflows.push(inputs); return result; },
+    KERNEL_EXTRACT_ON: false, IS_AGENTX: false,
+    reserveBoundedWorkflow: async (reference, inputs) => { calls.workflows.push(inputs); return result; },
     noteKernelKB() {}, runIntegrateBothLegs: async (intro, inputs) => { calls.integrations.push(inputs); return integration; },
     integAccepted: (value, percentage, primary) => { calls.guards.push(primary); return value.gate === 'accepted'; },
     gateRejectReason: (value, percentage, primary) => { calls.guards.push(primary); return value?.reason || ''; },

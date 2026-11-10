@@ -26,6 +26,7 @@ import ast
 import atexit
 import glob
 import hashlib
+import importlib.util
 import json
 import uuid as _uuid
 import datetime as _dt
@@ -90,6 +91,11 @@ try:
         SCHEMA_VERSION, SPEEDUP_SELF_CONSISTENCY_TOL, WORKLOAD_KIND_AGENTX,
         WORKLOAD_KIND_SYNTHETIC, WORKLOAD_KIND_UNKNOWN, _HANDOFF_IDENTITY_KEYS,
         _SERVER_ARGS_IDENTITY_KEYS, _STACK_SIGNAL_PATTERNS, _STACK_SIGNAL_MAX_PICKS,
+        _SERVER_ARGS_RECORD_RE, _SERVER_ARGS_RECORD_MAX_CHARS, _ATOM_ENGINE_IDENTITY_KEYS,
+        _ATOM_ENGINE_KWARGS_MARKER, _split_top_level_items, _parse_atom_engine_kwargs,
+        _open_server_log, _VLLM_NON_DEFAULT_ARGS_MARKER, _VLLM_NON_IDENTITY_KEYS,
+        _parse_vllm_non_default_args, _orchestrator_server_log_identity,
+        _orchestrator_server_log_candidates, _GEAK_LAUNCHED_SERVER_LOGS, _identity_mismatches,
     )
     from interface.e2e.reports import (
         _existing_report_path, _format_optional_number, _render_baseline_alignment_section,
@@ -113,6 +119,11 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
         SCHEMA_VERSION, SPEEDUP_SELF_CONSISTENCY_TOL, WORKLOAD_KIND_AGENTX,
         WORKLOAD_KIND_SYNTHETIC, WORKLOAD_KIND_UNKNOWN, _HANDOFF_IDENTITY_KEYS,
         _SERVER_ARGS_IDENTITY_KEYS, _STACK_SIGNAL_PATTERNS, _STACK_SIGNAL_MAX_PICKS,
+        _SERVER_ARGS_RECORD_RE, _SERVER_ARGS_RECORD_MAX_CHARS, _ATOM_ENGINE_IDENTITY_KEYS,
+        _ATOM_ENGINE_KWARGS_MARKER, _split_top_level_items, _parse_atom_engine_kwargs,
+        _open_server_log, _VLLM_NON_DEFAULT_ARGS_MARKER, _VLLM_NON_IDENTITY_KEYS,
+        _parse_vllm_non_default_args, _orchestrator_server_log_identity,
+        _orchestrator_server_log_candidates, _GEAK_LAUNCHED_SERVER_LOGS, _identity_mismatches,
     )
     from e2e.reports import (
         _existing_report_path, _format_optional_number, _render_baseline_alignment_section,
@@ -132,11 +143,16 @@ E2E_CHECKPOINT_LEVELS = {
     "final_pair",
 }
 
-# Legacy configuration name for the advisory Amdahl-discrepancy threshold.
-# A value of 1.0 reports gains above twice the conditional estimate; it never
-# changes acceptance. GPU-time share need not be an elapsed critical-path share.
-# map_args() forwards this validated value to the JS diagnostic so both paths
-# retain the existing environment/argument contract and use the same threshold.
+# Headroom over an Amdahl estimate before an accuracy-gated win gets an
+# independent measurement review (1.0 => the gain exceeds 2x the estimate). The
+# GPU-time share behind the estimate need not be an elapsed critical-path share,
+# so the threshold is advisory: exceeding it is not a correctness failure and
+# never by itself withholds a candidate; only a review that measured a rejection
+# does. Mirrors IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js, and both sides
+# MUST agree, so this is the SINGLE source of truth: map_args() forwards it to
+# the JS workflow (A.implausible_speedup_margin, a legacy name) and the recovery
+# path reads the same constant. Overridable via env for tuning; validated
+# finite/non-negative exactly like SAME_CONFIG_DIVERGENCE_WARN_PCT below.
 try:
     IMPLAUSIBLE_SPEEDUP_MARGIN = float(
         os.environ.get("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", "1.0")
@@ -168,7 +184,13 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+# Products with a `product:` section in roofline/peaks.md; keep in sync with it
+# and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
+RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
+RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
+# run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
+RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
@@ -311,6 +333,26 @@ def _note_session_id(msg: object) -> None:
         _LAST_SDK_SESSION["session_id"] = sid.strip()
 
 
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def _foreground_wait_env() -> dict[str, str]:
+    """Turn Claude Code background tasks off unless the operator chose a value.
+
+    Role agents wait out hour-long serving legs in foreground Bash calls. With
+    background tasks on, Claude Code 2.1.310+ refuses a call that starts with
+    ``sleep N`` (N >= 25) and steers the agent to Monitor/``run_in_background``,
+    whose notification arrives after a workflow agent's turn has ended, and a
+    turn ending is that agent's return.
+
+    Returns:
+        ``{BACKGROUND_TASKS_ENV: "1"}``, or ``{}`` when it is already set.
+    """
+    if BACKGROUND_TASKS_ENV in os.environ:
+        return {}
+    return {BACKGROUND_TASKS_ENV: "1"}
+
+
 def _sdk_child_env() -> dict[str, str]:
     """Build the environment overlay for the Claude Code child process.
 
@@ -333,6 +375,10 @@ def _sdk_child_env() -> dict[str, str]:
     config_dir = os.environ.get("GEAK_CLAUDE_CONFIG_DIR", "").strip()
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
+    run_mark = os.environ.get(RUN_MARK_ENV, "")
+    if run_mark:
+        env[RUN_MARK_ENV] = run_mark
+    env.update(_foreground_wait_env())
     return env
 
 
@@ -549,10 +595,12 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. Shared ISAs alone never imply
-    a product; exact supported product names select their target.
+    a product (a bare gfx1201 remains `unknown`); exact supported product names
+    select their target without establishing serving-policy qualification.
     """
     product_names = {
         "r9700": ("gfx1201", "AMD Radeon AI PRO R9700"),
+        "r9600d": ("gfx1201", "AMD Radeon AI PRO R9600D"),
         "mi350x": ("gfx950", "AMD Instinct MI350X"),
         "mi355x": ("gfx950", "AMD Instinct MI355X"),
     }
@@ -576,14 +624,15 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in {"r9700", "mi350x", "mi355x", "unknown"}:
+        if explicit_target not in {*product_names, "unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700', 'mi350x', 'mi355x' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d', 'mi350x', 'mi355x' or 'unknown'"
             )
-        if explicit_target == "r9700" and explicit_gfx != "gfx1201":
-            raise ValueError("expected_target=r9700 requires expected_gfx=gfx1201")
-        if explicit_target in {"mi350x", "mi355x"} and explicit_gfx != "gfx950":
-            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx950")
+        if explicit_target in product_names and explicit_gfx != product_names[explicit_target][0]:
+            raise ValueError(
+                f"expected_target={explicit_target} requires "
+                f"expected_gfx={product_names[explicit_target][0]}"
+            )
         check_name(explicit_gfx, explicit_target, h.get("expected_device_name"), ValueError)
         return {
             "gfx": explicit_gfx,
@@ -623,12 +672,12 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in {"r9700", "mi350x", "mi355x", "unknown"}:
+    if target not in {*product_names, "unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target == "r9700" and gfx != "gfx1201":
-        raise RuntimeError("GPU identity probe returned r9700 on a non-gfx1201 ISA")
-    if target in {"mi350x", "mi355x"} and gfx != "gfx950":
-        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx950 ISA")
+    if target in product_names and gfx != product_names[target][0]:
+        raise RuntimeError(
+            f"GPU identity probe returned {target} on a non-{product_names[target][0]} ISA"
+        )
     check_name(gfx, target, identity.get("marketing_name"), RuntimeError)
     return {
         "gfx": gfx,
@@ -767,7 +816,7 @@ def map_args(
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
+            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
@@ -813,8 +862,9 @@ def map_args(
         "search_replicas": 1,
         "validation_replicas": 3,
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
-        # on one server, report the second.  A 3-round median would be a different statistic from
-        # the one it rebenches against, so the round count is not a knob here.
+        # on one server, report the second (one pass for an AgentX replay, which warms itself per
+        # lane, as Hyperloom's AgentX rebench does).  A 3-round median would be a different
+        # statistic from the one it rebenches against, so the round count is not a knob here.
         "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
@@ -864,19 +914,25 @@ def map_args(
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget; a trace
+    # replay floors it at what its own final phase costs); this lets an operator widen it per
+    # run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
-    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
-    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
-    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
+    # not bound by it. Optional in the same way as the reserve itself.
     reserve_cap = _float_or_none(
         os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
     if reserve_cap is not None:
         ps_args["final_reserve_cap_frac"] = reserve_cap
+    # ...and the boot + replay warmup + drain that floor adds to each trace-replay leg's window
+    # (JS default 1200s). Raise it for a model whose server boots slower.
+    leg_overhead = _int_or_none(
+        os.environ.get("GEAK_AGENTX_LEG_OVERHEAD_S"), "GEAK_AGENTX_LEG_OVERHEAD_S")
+    if leg_overhead is not None:
+        ps_args["agentx_leg_overhead_s"] = leg_overhead
     # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
     # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
     # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
@@ -991,8 +1047,11 @@ def map_args(
         run_id = uuid.uuid4().hex[:8]
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
-    # Keep live and recovery diagnostics on the same advisory threshold. Preserve
-    # the legacy argument name; this margin no longer changes eligibility.
+    # Keep the JS live-path speedup-review trigger and THIS runner's recovery path
+    # on ONE advisory margin: forward the (validated) Python value so the workflow's
+    # A.implausible_speedup_margin (legacy name) can never silently drift from the
+    # constant the recovery path applies. See IMPLAUSIBLE_SPEEDUP_MARGIN above.
+    # Forwarded unconditionally (not gated on a handoff key) so both sides always agree.
     ps_args["implausible_speedup_margin"] = IMPLAUSIBLE_SPEEDUP_MARGIN
     # Bridge the upstream TraceLens / kernel-agent artifacts INTO the workflow args
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
@@ -1249,7 +1308,9 @@ def apply_workload_spec(h: dict) -> dict:
         ("corpus", "AGENTX_DATASET"),
         ("canonical_corpus", "AGENTX_CANONICAL_DATASET"),
         ("num_entries", "AGENTX_NUM_ENTRIES"),
+        ("canonical_num_entries", "AGENTX_CANONICAL_NUM_ENTRIES"),
         ("duration_s", "GEAK_AGENTX_DURATION_S"),
+        ("canonical_duration_s", "AGENTX_CANONICAL_DURATION"),
         ("geak_loop_duration_s", "GEAK_AGENTX_LOOP_DURATION_S"),
         ("warmup_requests_per_lane", "AGENTX_WARMUP_REQUESTS_PER_LANE"),
         ("warmup_grace_period_s", "AGENTX_WARMUP_GRACE_PERIOD"),
@@ -1297,24 +1358,16 @@ def agentx_preflight(h: dict) -> list[str]:
     this model is a ~20 minute detour to reach a one-line error. This states the
     gap at dispatch instead.
 
-    Returns human-readable problem strings (empty when the run can proceed).
-    Deliberately NON-fatal: PATH inside the bench subprocess is not always the
-    PATH here, so a hard abort could refuse a run that would have worked.
+    Returns human-readable problem strings (empty when the run can proceed). It
+    only reports; agentx_refusal decides which problem stops the run.
     """
     spec = h.get("workload_spec")
     if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
         return []
     problems: list[str] = []
-    aiperf_bin = os.environ.get("AIPERF_BIN", "").strip() or "aiperf"
-    if not (
-        shutil.which(aiperf_bin)
-        or (os.path.isabs(aiperf_bin) and os.access(aiperf_bin, os.X_OK))
-    ):
-        problems.append(
-            f"aiperf not found on PATH (looked for {aiperf_bin!r}); the AgentX "
-            "client cannot replay traces. Install the AgentX-capable aiperf "
-            "into this environment, or set AIPERF_BIN to its path."
-        )
+    client_problem = _agentx_client_problem(spec)
+    if client_problem:
+        problems.append(client_problem[0])
     # The mapper is only a real gap when the vendored fallback is missing too.
     # GEAK ships a copy beside the client adapter precisely so a run without an
     # InferenceX checkout is not a failure; reporting its absence as a problem
@@ -1335,6 +1388,72 @@ def agentx_preflight(h: dict) -> list[str]:
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
     return problems
+
+
+def agentx_refusal(h: dict) -> str | None:
+    """Why an AgentX run must stop before its first server launch, or None.
+
+    A client named by an absolute path that cannot start is refused: no PATH can
+    change that. A bare name that does not resolve only warns, since PATH inside
+    the bench subprocess is not always the PATH here; GEAK_STRICT_AGENTX_PREFLIGHT=1
+    refuses it too.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    problem = _agentx_client_problem(spec)
+    if problem and (problem[1] or _env_flag("GEAK_STRICT_AGENTX_PREFLIGHT")):
+        return problem[0]
+    return None
+
+
+def _agentx_client_problem(spec: dict) -> tuple[str, bool] | None:
+    """Why the AgentX client cannot start here, and whether that holds on any PATH.
+
+    Resolved in the bench's order: AIPERF_BIN from the environment, else the
+    declaration's aiperf_bin (bench_env.sh assigns it only when the environment
+    left it unset), else aiperf on PATH.
+    """
+    client = (
+        os.environ.get("AIPERF_BIN", "").strip()
+        or str(spec.get("aiperf_bin") or "").strip()
+        or "aiperf"
+    )
+    if os.path.isabs(client):
+        why = _client_start_problem(client)
+        return (f"the AgentX client {client} {why}", True) if why else None
+    found = shutil.which(client)
+    if not found:
+        missing = (
+            f"aiperf not found on PATH (looked for {client!r}); the AgentX "
+            "client cannot replay traces. Install the AgentX-capable aiperf "
+            "into this environment, or set AIPERF_BIN to its path."
+        )
+        return missing, False
+    why = _client_start_problem(found)
+    return (f"the AgentX client {client!r} resolves to {found}, which {why}", False) if why else None
+
+
+def _client_start_problem(path: str) -> str | None:
+    """Why exec() of ``path`` fails here, or None when nothing says it would.
+
+    X_OK alone passes a venv's console script whose interpreter is gone. The venv's
+    python links to the interpreter that built it, outside the venv (uv installs its
+    own), so a container without that interpreter cannot start the script.
+    """
+    if not os.path.isfile(path):
+        return "does not exist"
+    if not os.access(path, os.X_OK):
+        return "is not executable"
+    bin_dir = os.path.dirname(os.path.realpath(path))
+    venv_python = os.path.join(bin_dir, "python")
+    if (
+        os.path.isfile(os.path.join(os.path.dirname(bin_dir), "pyvenv.cfg"))
+        and os.path.islink(venv_python)
+        and not os.path.exists(venv_python)
+    ):
+        return f"is in a venv whose interpreter is gone ({venv_python} -> {os.readlink(venv_python)})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1978,6 +2097,8 @@ def apply_bench_protocol(h: dict) -> dict:
         # Warm-server parity -- one server per leg, a discarded full warmup round, then the
         # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
         # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
+        # An AgentX replay gets no discarded round: bench_e2e.sh lets the replay warm itself per
+        # lane, which is exactly Hyperloom's AgentX baseline and rebench.
         aligned = {
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
@@ -2316,9 +2437,9 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         timeout=timeout_s,
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI failed (rc={proc.returncode}): {proc.stderr[-2000:]}"
-        )
+        # A failed API call exits 1 with stderr empty: the error is in the stdout JSON.
+        detail = (proc.stderr or "")[-2000:] or (proc.stdout or "")[-2000:]
+        raise RuntimeError(f"claude CLI failed (rc={proc.returncode}): {detail}")
     # claude -p --output-format json wraps the assistant text; try to unwrap.
     out = proc.stdout.strip()
     try:
@@ -2541,6 +2662,15 @@ def _parse_last_json_line(raw: str) -> dict:
     )
 
 
+# Claude Code's reply when it cannot reach the model API. 2.1.177 says "Unable to
+# connect to API (<code>)" for every connection failure; 2.1.309 and 2.1.316 say
+# e.g. "Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)".
+_LLM_UNREACHABLE_RE = re.compile(
+    r"API Error: (?:Unable to connect to API|Connection (?:error|refused|dropped|lost before)"
+    r"|Can't reach the API server|No internet route|Couldn't connect through your proxy)"
+)
+
+
 def _classify_error(exc: BaseException) -> str:
     """Map an internal failure onto a stable ``error_class`` for Hyperloom.
 
@@ -2551,11 +2681,15 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
+    # arrives as agent output inside a parse error or a failed CLI's message.
+    if _LLM_UNREACHABLE_RE.search(msg):
+        return "llm_unreachable"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -2688,6 +2822,9 @@ def _workload_comparability(h: dict) -> dict:
 # model/run-specific assumptions — they key only off the stable artifact
 # layout the workflow always writes.
 # ---------------------------------------------------------------------------
+# run_reaper.py's FENCE_FILE; its "stage" is the final-phase stage that took the GPUs.
+FINAL_PHASE_FENCE_FILE = ".final_phase_fence"
+FINAL_PHASE_STAGES = ("finalize", "validate")
 
 # ---------------------------------------------------------------------------
 # KB write-back, salvage path
@@ -4025,7 +4162,7 @@ def _ir_float(ir: dict, *keys: str) -> float:
 
 
 def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
-    """Conditional Amdahl gain estimate; the legacy name is not an E2E bound.
+    """Advisory e2e estimate from a GPU-time share and isolated speedup, not an E2E bound.
 
     GPU-time share may use summed device durations rather than elapsed time.
     Port of ``amdahlCeilingPct`` in e2e_workflow.js, retaining its arithmetic.
@@ -4038,8 +4175,110 @@ def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
     return (1.0 / (1.0 - share * (1.0 - 1.0 / speedup)) - 1.0) * 100.0
 
 
+def _parity_is_soft(ir: dict) -> bool:
+    """Accuracy-gated results can need review. Legacy unlabelled disk results
+    are treated as soft because the workflow's accuracy_gate arg is unavailable.
+    """
+    kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
+    if kind in ("byte_exact", "none"):
+        return False
+    return True
+
+
+def _speedup_estimate(ir: dict) -> dict:
+    """Mirror speedupEstimate: disjoint current-reference coverage, else head fallback."""
+    isolated = _ir_float(ir, "isolated_speedup")
+    pct = _ir_float(ir, "pct_gpu_time")
+    fallback = {"pct_gpu_time": pct, "estimate_pct": _amdahl_ceiling_pct(pct, isolated),
+                "source": "head_estimate"}
+    coverage = ir.get("affected_gpu_time") or {}
+    measured = ir.get("measurement_evidence") or {}
+    if not isinstance(coverage, dict) or not isinstance(measured, dict):
+        return fallback
+    rows = coverage.get("kernels")
+    if (not coverage.get("profile_path") or not measured.get("candidate_digest")
+            or coverage.get("candidate_digest") != measured["candidate_digest"]
+            or not measured.get("reference_digest")
+            or not measured.get("workload_digest")
+            or coverage.get("reference_digest") != measured["reference_digest"]
+            or coverage.get("workload_digest") != measured["workload_digest"]
+            or not isinstance(rows, list) or not rows):
+        return fallback
+    seen = {}
+    pct, saved, uniform = 0.0, 0.0, False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            return fallback
+        share = row.get("pct_gpu_time")
+        if (type(share) not in (int, float) or not math.isfinite(share)
+                or not 0 <= share <= 100):
+            return fallback
+        signature = (share, row.get("isolated_speedup"), row.get("removed") is True)
+        if row["id"] in seen:
+            if seen[row["id"]] != signature:
+                return fallback
+            continue
+        seen[row["id"]] = signature
+        pct += share
+        if row.get("removed") is True:
+            saved += share / 100
+        else:
+            speedup = row.get("isolated_speedup")
+            if type(speedup) not in (int, float) or not math.isfinite(speedup) or speedup <= 0:
+                speedup, uniform = isolated, True
+            if not math.isfinite(speedup) or speedup <= 0:
+                return fallback
+            saved += share / 100 * (1 - 1 / speedup)
+    if not 0 < pct <= 100 + 1e-9:
+        return fallback
+    return {"pct_gpu_time": pct,
+            "estimate_pct": math.inf if saved >= 1 else (1 / (1 - saved) - 1) * 100,
+            "source": "coverage_uniform_estimate" if uniform else "coverage_per_path"}
+
+
+def _confirmation_evidence_matches(ir: dict) -> bool:
+    """A distinct pair with the same candidate, baseline and workload confirms a win."""
+    review = ir.get("speedup_review") or {}
+    if not isinstance(review, dict) or review.get("status") != "confirmed":
+        return False
+    before = review.get("original_measurement") or {}
+    after = ir.get("measurement_evidence") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    paths = [before.get("ref_summary"), before.get("cand_summary"),
+             after.get("ref_summary"), after.get("cand_summary")]
+    if (not before.get("measurement_id") or not after.get("measurement_id")
+            or before["measurement_id"] == after["measurement_id"]
+            or not all(isinstance(p, str) and p for p in paths) or len(set(paths)) != 4
+            or after.get("fresh_pair") is not True or after.get("configs_matched") is not True
+            or after.get("workload_matched") is not True):
+        return False
+    for key in ("ref_replicas", "cand_replicas"):
+        value = after.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 2 or value != int(value)):
+            return False
+    # protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+    if ((before.get("protocol_digest") or after.get("protocol_digest"))
+            and before.get("protocol_digest") != after.get("protocol_digest")):
+        return False
+    return all(isinstance(before.get(key), str) and before[key] and before[key] == after.get(key)
+               for key in ("candidate_digest", "reference_digest", "workload_digest"))
+
+
+def _confirmed_speedup(ir: dict) -> bool:
+    return (ir.get("gate") == "accepted" and ir.get("ab_complete") is True
+            and ir.get("output_parity") == "pass" and ir.get("parity_kind") in ("accuracy", "byte_exact")
+            and _confirmation_evidence_matches(ir))
+
+
+def _speedup_needs_review(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """Review trigger only; it never withholds a candidate, and confirmed gains can exceed it."""
+    return _parity_is_soft(ir) and _has_amdahl_model_discrepancy(delta_pct, ceiling_pct)
+
+
 def _has_amdahl_model_discrepancy(delta_pct: float, ceiling_pct: float) -> bool:
-    """Report a model discrepancy for any parity kind, without judging correctness."""
+    """A gain past the estimate by the margin, for any parity kind; never a correctness verdict."""
     if not math.isfinite(ceiling_pct):
         return False
     return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
@@ -4056,27 +4295,56 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     that was ever run.
 
     Eligibility retains the integrator's actual gate, parity and completion
-    checks. An Amdahl-model discrepancy is diagnostic only and does not turn an
-    accepted measurement into a correctness failure.
+    checks, and excludes a candidate whose speedup review ran and measured a
+    rejection. An Amdahl-model discrepancy, and a review that is pending,
+    inconclusive or never ran, are reported but do not turn an accepted
+    measurement into a failure.
     """
     records: list[dict] = []
     seen: set[str] = set()
     for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
         if not base.is_dir():
             continue
+        # The workflow checkpoint records the final reviewed result, after the agent's raw A/B.
+        # Match the immutable original measurement ID before applying it to a disk candidate.
+        reviewed = {}
+        for checkpoint in sorted(base.glob("candidate_*/e2e_validation.json")):
+            result = (_read_json(checkpoint) or {}).get("integration_result") or {}
+            if not isinstance(result, dict):
+                continue
+            review = result.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                continue
+            original = review.get("original_measurement") or {}
+            if isinstance(original, dict) and isinstance(original.get("measurement_id"), str):
+                reviewed[original["measurement_id"]] = result
         for cand in sorted(base.glob("cand_*")):
             if cand.name in seen:
                 continue
             ir = _read_json(cand / "integrate_result.json")
             if not ir:
                 continue
+            original = ir.get("measurement_evidence") or {}
+            if not isinstance(original, dict):
+                original = {}
+            result = reviewed.get(original.get("measurement_id"))
+            if result and (result["speedup_review"].get("original_measurement") == original):
+                ir = {**ir, **result}
             seen.add(cand.name)
             gate = str(ir.get("gate") or "")
             delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            ceiling_pct = _amdahl_ceiling_pct(
-                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
-            )
+            estimate = _speedup_estimate(ir)
+            ceiling_pct = estimate["estimate_pct"]
             model_discrepancy = _has_amdahl_model_discrepancy(delta_pct, ceiling_pct)
+            review = ir.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                review = {}
+            # Only a review that ran and measured a rejection withholds the candidate.
+            review_rejected = review.get("status") == "rejected"
+            review_pending = not review_rejected and (
+                review.get("status") in ("pending", "inconclusive")
+                or (_speedup_needs_review(ir, delta_pct, ceiling_pct)
+                    and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
             if separated is None:
@@ -4097,6 +4365,10 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
                 ),
                 "amdahl_model_discrepancy": model_discrepancy,
+                "speedup_estimate": {**estimate, "estimate_pct": (
+                    ceiling_pct if math.isfinite(ceiling_pct) else None)},
+                "speedup_review_pending": review_pending,
+                "speedup_review_rejected": review_rejected,
                 "output_parity": parity or None,
                 "separated": separated,
                 # winner_kind in {"env","config","flags"} => config-only.
@@ -4106,6 +4378,7 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     and delta_pct > 0.0
                     and parity != "fail"
                     and ir.get("ab_complete") is not False
+                    and not review_rejected
                 ),
             })
     return records
@@ -4396,12 +4669,21 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             ),
             "amdahl_model_note": (
                 "Legacy ceiling fields are conditional GPU-time estimates, not E2E bounds. "
-                "Discrepancies are advisory and do not establish output corruption or change eligibility."
+                "Discrepancies are advisory and do not establish output corruption or change eligibility; "
+                "only a speedup review that measured a rejection withholds a candidate."
             ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
             "amdahl_model_discrepancies": [
                 c["short_name"] for c in candidates if c["amdahl_model_discrepancy"]
+            ] or None,
+            "speedup_estimate": best["speedup_estimate"],
+            # Advisory: an accuracy-gated gain past the estimate with no confirming review yet.
+            "awaiting_speedup_review": [
+                c["short_name"] for c in candidates if c["speedup_review_pending"]
+            ] or None,
+            "rejected_by_speedup_review": [
+                c["short_name"] for c in candidates if c["speedup_review_rejected"]
             ] or None,
         },
     }
@@ -4435,9 +4717,13 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     """
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
+    # bench_summarize.py writes the selected metric basis (output, total or an
+    # interactivity axis) to throughput_tok_s_median; output_throughput_tok_s_median
+    # is an alias it fills only on the output axis, so an AgentX baseline has it null.
     baseline_tput = (
         official.get("baseline_throughput_tok_s")
         or official.get("plateau_median_tok_s")
+        or summary.get("throughput_tok_s_median")
         or summary.get("output_throughput_tok_s_median")
     )
     if not baseline_tput:
@@ -4467,6 +4753,30 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
         "recovered_from_disk": True,
         "recovered_no_gain": True,
     }
+
+
+def _phase_reached(eval_dir: str | Path | None) -> str:
+    """The furthest workflow phase an eval dir shows, for a result with no workflow return.
+
+    ``setup`` until Setup's baseline summary exists, then ``search`` until the final
+    phase fences the GPUs, then the fenced stage (``finalize`` or ``validate``).
+    ``""`` when there is no eval dir to read.
+    """
+    if not eval_dir:
+        return ""
+    root = Path(eval_dir)
+    try:
+        if not root.is_dir():
+            return ""
+        fence = _read_json(root / FINAL_PHASE_FENCE_FILE)
+        stage = fence.get("stage") if isinstance(fence, dict) else None
+        if stage in FINAL_PHASE_STAGES:
+            return stage
+        if (root / "baseline" / "bench_summary.json").is_file():
+            return "search"
+    except OSError:
+        return ""
+    return "setup"
 
 
 def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
@@ -5092,6 +5402,67 @@ def _publish_protected_pgids() -> str:
     return value
 
 
+_RUN_REAPER: Any = None
+
+
+def _run_reaper() -> Any:
+    """``e2e_workflow/scripts/run_reaper.py``, loaded once: the workflow runs it as a script, the runner imports it."""
+    global _RUN_REAPER
+    if _RUN_REAPER is None:
+        spec = importlib.util.spec_from_file_location("geak_run_reaper", RUN_REAPER_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUN_REAPER = module
+    return _RUN_REAPER
+
+
+def _mark_run(eval_dir: str) -> dict | None:
+    """Mark every process this run is about to start, so its exit can find them however they were detached.
+
+    Returns:
+        dict | None: the run record ``_stop_run_processes`` needs, or None when the run could not be marked.
+    """
+    try:
+        return _run_reaper().mark_run(eval_dir)
+    except Exception as exc:  # an unmarked run still runs; only its exit cleanup is lost
+        sys.stderr.write(
+            f"[run_e2e] could not mark this run's processes ({type(exc).__name__}: {exc}); "
+            "whatever it leaves running at exit will not be stopped\n"
+        )
+        return None
+
+
+def _stop_run_processes(run: dict | None, eval_dir: str) -> dict | None:
+    """Stop everything this run left running, so the caller gets its GPUs back free.
+
+    A leg launched detached (``setsid nohup``) outlives the workflow and every agent in it, and the caller's
+    next server boot fails its memory-balance check on GPUs that still hold that leg's weights. Called after
+    result.json is written: the interface files outrank this, so a slow stop can never cost them.
+
+    Returns:
+        dict | None: the reaper's receipt, or None when there was no run record or the reaper failed.
+    """
+    if not run:
+        return None
+    try:
+        receipt = _run_reaper().reap(eval_dir, mode="exit", run=run)
+    except Exception as exc:
+        sys.stderr.write(f"[run_e2e] could not stop this run's leftover processes ({type(exc).__name__}: {exc})\n")
+        return None
+    stopped = receipt.get("stopped") or []
+    survivors = receipt.get("survivors") or []
+    names = ", ".join(sorted({str(row.get("name")) for row in stopped}))[:300]
+    line = f"[run_e2e] exit: stopped {len(stopped)} process(es) this run left running"
+    if names:
+        line += f" ({names})"
+    if survivors:
+        line += f"; {len(survivors)} still up: " + ", ".join(f"{s.get('pid')} {s.get('name')}" for s in survivors)
+    if receipt.get("note"):
+        line += f"; {receipt['note']}"
+    sys.stderr.write(line + "\n")
+    return receipt
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -5223,6 +5594,7 @@ def main(argv: list[str]) -> int:
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
+    workload_refusal = agentx_refusal(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
@@ -5232,6 +5604,7 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,
                           "agentx_preflight_problems": workload_preflight,
+                          "agentx_refusal": workload_refusal,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
@@ -5298,12 +5671,21 @@ def main(argv: list[str]) -> int:
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
+                phase = _phase_reached(eval_dir_hint)
+                message = str(error or "")
+                if not message and error_class == "timeout":
+                    # anyio.fail_after raises a TimeoutError with no message.
+                    message = f"no workflow return within the {timeout_s}s budget"
+                    if phase:
+                        message += f" (furthest phase on disk: {phase})"
                 out = {
                     "schema_version": SCHEMA_VERSION,
                     "status": "timeout" if error_class == "timeout" else "error",
                     "error_class": error_class or "runner_error",
-                    "error": str(error or ""),
+                    "error": message,
                 }
+                if phase:
+                    out["phase_reached"] = phase
         except Exception as norm_exc:  # normalize blew up: still emit an error.
             out = {
                 "schema_version": SCHEMA_VERSION,
@@ -5451,10 +5833,19 @@ def main(argv: list[str]) -> int:
                           "speedup": cached_out.get("throughput_speedup")}))
         return 0 if cached_out.get("status") != "error" else 1
 
+    if workload_refusal:
+        sys.stderr.write(f"GEAK e2e: refusing before any server launch: {workload_refusal}\n")
+        refused = _emit(error=workload_refusal, error_class="agentx_client_unavailable")
+        print(json.dumps({"status": refused.get("status"),
+                          "result_json": str(result_path),
+                          "speedup": refused.get("throughput_speedup")}))
+        return 0 if refused.get("status") != "error" else 1
+
     out: dict = {}
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    run = _mark_run(eval_dir_hint)
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
@@ -5473,6 +5864,7 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
+        _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),
                       "result_json": str(result_path),

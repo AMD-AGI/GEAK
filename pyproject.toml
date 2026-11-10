@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "geak"
 version = "4.0.0"
-description = "GEAK v4 — clones the repo locally and installs the Claude Code CLI its Workflows run inside."
+description = "GEAK-evo — evolutionary GPU kernel and inference optimization with a bundled agent runtime."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE.md" }

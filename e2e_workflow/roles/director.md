@@ -37,8 +37,11 @@ Inputs: launch/model/backend paths, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `MODEL_NAME
    command lines. When absent, create no such file. An empty LAUNCH_SCRIPT means backend defaults
    plus supplied model/workload/seed config; record resolved flags in `config/baseline_flags.json`.
 4. Run `python3 "$SKILL_DIR/../scripts/gpu_identity.py"`. Use its actual `gfx`, target, device name
-   and physical CUs; only exact `AMD Radeon AI PRO R9700` maps to `r9700`, not every gfx1201 product.
-   Check supplied EXPECTED_GFX/TARGET/DEVICE_NAME/PHYSICAL_CU_COUNT and stop on a mismatch.
+   and physical CUs. Return its `target` unchanged as `device_target`: only the exact marketing names
+   `AMD Radeon AI PRO R9700` / `AMD Radeon AI PRO R9600D` map to `r9700` / `r9600d`, never gfx1201
+   alone; `AMD Instinct MI350X` / `AMD Instinct MI355X` on gfx950 map to `mi350x` / `mi355x`; any
+   other product is `unknown`. Check supplied EXPECTED_GFX/TARGET/DEVICE_NAME/PHYSICAL_CU_COUNT and
+   stop on a mismatch.
    Follow preflight: verify model, backend and admitted GPU availability; record framework/ROCm
    versions, model architecture, available backends and trace sources in `env_report.{md,json}` and
    `env_info.txt`. Missing optional tools become `absent_backends[name]={probe,remedy,mandated_by}`;
@@ -59,7 +62,10 @@ Inputs: launch/model/backend paths, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `MODEL_NAME
    Return a measured baseline only if `status:complete`, `usable_for_acceptance:true`, and every
    required case/sample finished. Otherwise report a setup blocker; do not promote a partial median.
 6. Pass `MEASUREMENT_MODE` unchanged: warm_server discards a full warmup then times rounds on one
-   server; isolated_server uses a fresh server per replica with its declared client warmups. A single
+   server; isolated_server uses a fresh server per replica with its declared client warmups. A trace
+   replay (`BENCH_CLIENT=agentx`) has no discarded round: the replay warms every lane before its window
+   opens, so each leg is only its timed round(s), one pass at `REPLICAS=1` (how Hyperloom measures
+   AgentX baseline and rebench). A single
    timed sample has no dispersion evidence even if spread=0. With multiple samples, investigate large
    spread (about >5%) within budget. Default `noise_band_pct=0.5`; widen only with measured evidence.
 
@@ -78,7 +84,7 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<required gfx target from step 4, e.g. gfx950>",
-  "device_target": "r9700|mi350x|mi355x|unknown",
+  "device_target": "r9700|r9600d|mi350x|mi355x|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
@@ -99,7 +105,8 @@ original seed configuration. Use supplied `BASELINE_FLAGS`, `BASELINE_ENV`, `BAS
 not final flags with a few kernels removed. Empty strings are known empty values; null/missing
 fields require recorded setup/baseline evidence. If the seed cannot be established, return
 validation_status:"flagged" with the missing reference; do not report passed correctness or a validated win. The reference and candidate must share metric basis, workload, TP/GPU
-and lifecycle. Re-measure both now; the initial baseline may be stale.
+and lifecycle (setup step 6, including a trace replay's single timed pass). Re-measure both now; the
+initial baseline may be stale.
 ```bash
 BACKEND="$BACKEND" OUT_DIR="$EVAL_DIR/validation/base" GPU="$SERVING_GPU" TP="$SERVING_TP" MODEL="$MODEL_PATH" \
 OVERLAY_PYTHONPATH="$BASELINE_OVERLAY" EXTRA_SERVER_ARGS="<baseline seed flags>" EXTRA_ENV="<baseline seed env>" \
@@ -129,9 +136,9 @@ servers; throughput retains them and cannot reuse those correctness launches.
 
 Return `validation_status`:
 - `validated_win`: complete, correct, reproduced gain above noise with the available dispersion
-  check, and consistent with the claim (or higher).
+  check, and your number is within the noise band of the claim (or higher).
 - `validated_no_win`: trustworthy measurement showing no material regression or demonstrated gain.
-- `flagged`: regression, a claim exceeding measured results beyond the band, failed correctness,
+- `flagged`: regression, Director lower than the claim by more than the band, failed correctness,
   failed launch or unusable measurement. Never use `accepted` as this status.
 
 If `APPLY_TO_ORIGINAL=true` and validated_win, export the overlay, reproducible final_launch.sh and

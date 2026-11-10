@@ -159,6 +159,19 @@ def test_the_command_carries_the_selection_the_files_and_a_timeout_margin(monkey
     assert captured["kw"]["timeout"] == 3600 + 900
 
 
+def test_the_runtime_child_turns_background_tasks_off_unless_the_operator_set_them(monkeypatch, tmp_path):
+    """The runtime's claude profile runs `claude -p` per agent with this env."""
+    captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
+    rx = _runtime_mod(monkeypatch, captured)
+    monkeypatch.delenv(rx.BACKGROUND_TASKS_ENV, raising=False)
+    rx._invoke_via_runtime({}, 60, str(tmp_path))
+    assert captured["kw"]["env"][rx.BACKGROUND_TASKS_ENV] == "1"
+
+    monkeypatch.setenv(rx.BACKGROUND_TASKS_ENV, "0")
+    rx._invoke_via_runtime({}, 60, str(tmp_path))
+    assert captured["kw"]["env"][rx.BACKGROUND_TASKS_ENV] == "0"
+
+
 def test_without_an_eval_dir_no_result_file_is_requested(monkeypatch):
     captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
     rx = _runtime_mod(monkeypatch, captured)

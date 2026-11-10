@@ -10,6 +10,8 @@ Inputs: eval/model/backend paths, assigned GPU and serving TP/GPU invariant, `WO
 `NOISE_BAND_PCT`, `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `KERNEL_RESULT`,
 `CURRENT_OVERLAY`, `CURRENT_FLAGS`, `CURRENT_ENV`, `CURRENT_THROUGHPUT`, `SKILL_DIR`, and optional
 engagement/accuracy, tuning deployment, resume/shared-reference and candidate-tag inputs.
+Optional: `PROFILE_TOPN_JSON` (latest profile, possibly stale), `FORCE_FRESH_AB`, `SPEEDUP_REVIEW`,
+`CAND_OVERLAY_DIR` (the already-built candidate; benchmark it without rebuilding).
 
 ### Provenance and deployment
 
@@ -107,15 +109,25 @@ require `candidate_score >= baseline_score - ACCURACY_TOL` and preserve scores.
 With `CORRECTNESS_UNSET_ENV`, remove those names from process env AND EXTRA_ENV for BOTH correctness
 servers. Throughput keeps them, so use separate launches. Always report `parity_kind:byte_exact`,
 `accuracy`, or `none` based on what actually ran. These are sampled checks, not proofs for all inputs.
-For accuracy-based acceptance with unexpectedly large gain versus the conditional Amdahl estimate,
-check work/generation completeness, model assumptions and a larger quality sample. A model mismatch
-alone is not corruption. Preserve reasons `parity_regression`, `accuracy_regression`,
-`implausible_speedup`, `output_corruption` when supported so corrective routing works.
+An accept still requires correctness evidence; `none` does not waive it.
+
+A surprising speedup is a measurement-review signal, not a correctness verdict. Amdahl's estimate
+`1/(1 - sum(p_i * (1 - 1/S_i))) - 1` depends on complete coverage and representative timings; summed
+GPU kernel duration also omits launch gaps and other wall-time effects. Exceeding it never proves
+incorrect output and is not a reason to rewrite the kernel: report the measured gate normally. For an
+accuracy-based accept with an unexpectedly large gain, check work/generation completeness, model
+assumptions and a larger quality sample; the orchestrator may request one independent A/B with
+`FORCE_FRESH_AB` (below). Reject for actual failures, with the reasons `parity_regression`,
+`accuracy_regression` or `output_corruption` so corrective routing works, or for measured
+throughput/engagement failures; never for `implausible_speedup` alone.
 
 ### Measure and decide
 
 Use the run lifecycle unchanged: warm_server discards a full warmup before timed rounds on one
-server; isolated_server uses the specified fresh-server replicas. Preserve caller-owned
+server; isolated_server uses the specified fresh-server replicas. A trace replay
+(`BENCH_CLIENT=agentx`) skips the discarded round: the replay warms every lane before its window
+opens, so each leg is only its timed round(s), one pass at `REPLICAS=1` (how Hyperloom measures
+AgentX). Preserve caller-owned
 `RANDOM_RANGE_RATIO`, `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED`, client/metric and bench_env settings.
 Only candidate overlay/flags/env vary between legs.
 ```bash
@@ -139,11 +151,12 @@ parent record alone does not mark tagged candidates complete. Keep the shared re
 Use default `$CB/cand` without CAND_TAG; tagged candidates have distinct overlays/results and share
 only a valid identical reference.
 
-For `RESUME_AB`, reuse a reference summary only if complete and usable for acceptance and its
-configuration still matches. Use supplied `CAND_OVERLAY_DIR` directly. `REUSE_REF`/`SHARED_REF_MED`
-explicitly supplies a shared same-config reference: skip its launch, echo that ref_med, preserve
-available dispersion/age evidence, and measure the candidate. Do not claim a median is a measured
-ref_max when no range is available; final same-session validation resolves borderline comparisons.
+Unless `FORCE_FRESH_AB` is set, for `RESUME_AB` reuse a reference summary only if complete and
+usable for acceptance and its configuration still matches. Use supplied `CAND_OVERLAY_DIR` directly.
+`REUSE_REF`/`SHARED_REF_MED` explicitly supplies a shared same-config reference: skip its launch,
+echo that ref_med, preserve available dispersion/age evidence, and measure the candidate. Do not
+claim a median is a measured ref_max when no range is available; final same-session validation
+resolves borderline comparisons.
 
 Both timing legs must have all required samples/cases, `status:complete` and
 `usable_for_acceptance:true` for a performance verdict. Compute medians, ranges and
@@ -163,6 +176,80 @@ Write full evidence to `integrate_result.json`. With `DEEP_FEEDBACK`, also write
 `deep_head/<short_name>/integrate_<lane>.json` (lane, else backend) containing engagement, graph
 outcome, memory note, decode regression, parity, delta and supported root cause/uncertainty.
 
+### Measurement identity and candidate coverage
+
+Report `measurement_evidence` on every completed A/B, including when recovering an on-disk result.
+Derive it from artifacts; missing evidence stays missing, never invented:
+
+- `candidate_digest`, `reference_digest`: SHA-256 of canonical manifests of the respective deployed
+  overlay/patch/table contents and effective serving configuration (including model identity, TP,
+  memory fraction, flags/env and relevant library/source revisions). Exclude benchmark output/logs
+  from these manifests. Hash content, not just paths. Recompute before reuse or confirmation.
+- `workload_digest`: SHA-256 of the canonical workload IDENTITY manifest: only the fields that decide
+  which requests are served (request set/dataset or generator, seed, ISL/OSL and length range,
+  concurrency, token limits). Build this manifest once from the run's workload and reuse the SAME
+  value in `measurement_evidence` and `affected_gpu_time`; a profile and an A/B of the same workload
+  must have equal digests. Never include profile/trace file hashes, bench script hashes, warmups,
+  request counts or other measurement-protocol fields: they differ between profiling and benchmarking
+  of the same workload, and then the coverage estimate can never be used.
+- `protocol_digest`: SHA-256 of the A/B measurement protocol manifest: bench client and script
+  revision, measurement mode, timed request count, warmups and metric basis. Timed replica count is
+  recorded separately so confirmation can use more samples without changing the protocol.
+- `ref_summary`, `cand_summary`: absolute, immutable paths to the completed benchmark summaries.
+  `measurement_id`: SHA-256 of both summary paths and their contents. Report the actual
+  `ref_replicas` / `cand_replicas`, not the requested count.
+- `fresh_pair`: both legs were independently launched for this A/B (false for a shared/cached ref).
+  `configs_matched`: both use the same serving configuration except the declared candidate change.
+  `workload_matched`: same requests and work contract, with successful response counts and token
+  counts checked; no missing, truncated or degenerate work. Record the detailed checks in the result.
+
+Before returning a cached A/B, inspect `EVAL_DIR/overlay/candidate_*/e2e_validation.json` for a matching
+`integration_result`. Match the original measurement ID and candidate/reference/workload/protocol manifests.
+Return that reviewed result, preserving `speedup_review` and the fresh pair's numbers when present.
+An inconclusive review is still inconclusive after a workflow resume; do not replace it with the old
+raw `accepted` result and restart the same review. New candidate content or a new reference requires
+a new measurement identity.
+
+Preserve `pct_gpu_time` as the selected head's share. Separately report `affected_gpu_time` by mapping
+the actual candidate patch/rebinds to ALL affected reference-profile rows: all selected shape buckets,
+prefill and decode, plus auxiliary kernels removed by the patch. A whole-module rebind can cover many
+rows; a guarded shape-specific replacement only covers its matching buckets. A module import alone
+does not establish that every path changed.
+
+`affected_gpu_time` contains `profile_path`, the patch's `candidate_digest`, the profile's
+`reference_digest` and `workload_digest` (the workload identity digest defined above, computed the
+same way as for the measurement; profile file provenance belongs in `profile_path`, not the digest),
+and `kernels: [{id, pct_gpu_time, isolated_speedup?, removed?}]`. IDs must identify disjoint rows in
+one profile/denominator (device kernel + shape + phase); do not mix module totals with child rows,
+repeat grouped reductions, sum ranks, or mix profiles. Use the CURRENT accepted reference stack.
+Check the profile provenance against the measurement manifests. If the profile is from before an
+accepted change, retain its real old digest or omit coverage; never relabel it as current. If needed
+for diagnosis, collect a separate untimed reference profile; profiling must not contaminate the A/B.
+
+Report measured per-path speedups where available; mark a completely eliminated kernel `removed:true`
+without also charging its removal in another row's speedup. Omit unmeasured per-path speedups. The
+workflow labels a fallback using the head speedup across coverage as `coverage_uniform_estimate`,
+not a measured per-path prediction. Invalid/stale coverage falls back to the advisory head estimate.
+
+### Independent speedup confirmation (`FORCE_FRESH_AB=true`)
+
+This takes precedence over RESUME_AB, REUSE_REF, SHARED_REF_MED, and the ordinary disk-resume rule.
+Keep the exact candidate and current accepted reference; do not rebuild or rewrite the kernel.
+Under the candidate's existing `$CB`, use `speedup_review_<original measurement_id>/ref` and `/cand`
+as new output directories, leaving the original A/B intact. Launch fresh servers for BOTH legs and
+run at least two timed replicas per leg with the run-wide lifecycle. Repeat engagement and the
+configured accuracy/parity gate, comparing accuracy to the TRUE baseline as usual. An already
+completed review in that directory can be returned only after verifying both content manifests,
+workload, protocol, artifact identity and replica counts; it is the same review, not another measurement.
+Never fall back to the original/shared reference or silently reduce this review to one replica.
+
+`SPEEDUP_REVIEW.original_measurement` identifies the original pair. Return the new pair's evidence
+and ordinary measured verdict; the workflow checks distinct artifact identities and matching
+candidate/reference/workload/protocol digests. Reconstruct missing original provenance during ordinary disk
+recovery, before requesting a review; never manufacture a matching identity. Missing provenance or incomplete review is
+inconclusive, not a correctness failure. No additional kernel fix/re-measure loops are authorized
+by this review. The normal final Validate phase remains authoritative.
+
 Return JSON:
 ```json
 {
@@ -170,6 +257,23 @@ Return JSON:
   "provenance_ok": true,
   "isolated_speedup": 0.0,
   "pct_gpu_time": 0.0,
+  "affected_gpu_time": {
+    "profile_path": "<current reference profile, omit this object when unavailable>",
+    "candidate_digest": "<candidate manifest SHA-256>",
+    "reference_digest": "<profile reference manifest SHA-256>",
+    "workload_digest": "<workload identity manifest SHA-256, same definition as measurement_evidence>",
+    "kernels": [{"id": "<disjoint kernel/shape/phase row>", "pct_gpu_time": 0.0}]
+  },
+  "measurement_evidence": {
+    "measurement_id": "<pair artifact SHA-256>",
+    "candidate_digest": "<candidate manifest SHA-256>",
+    "reference_digest": "<reference manifest SHA-256>",
+    "workload_digest": "<workload identity manifest SHA-256>",
+    "protocol_digest": "<measurement protocol manifest SHA-256>",
+    "ref_summary": "<absolute path>", "cand_summary": "<absolute path>",
+    "ref_replicas": 1, "cand_replicas": 1,
+    "fresh_pair": true, "configs_matched": true, "workload_matched": true
+  },
   "e2e_throughput_tok_s": 0.0,
   "e2e_delta_pct": 0.0,
   "ref_med": 0.0,

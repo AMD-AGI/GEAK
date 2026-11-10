@@ -39,8 +39,10 @@ The owner authenticates the capture's observation and physical-device provenance
 Use the successful helper JSON exactly: `gfx` → `device_gfx`, `target` → `device_target`,
 `marketing_name` → `device_name`, and `physical_cu_count` → `physical_cu_count`.
 The parser binds fields to the same GPU identity and rejects
-mixed visible identities. Only exact Marketing Name `AMD Radeon AI PRO R9700` maps to `r9700`;
-other gfx1201 products stay `unknown`. Physical CUs are not PyTorch's WGP count. Report mismatches
+mixed visible identities. On gfx1201 only the exact Marketing Names `AMD Radeon AI PRO R9700` and
+`AMD Radeon AI PRO R9600D` map to `r9700` and `r9600d`; other gfx1201 products stay `unknown`.
+Recognition does not qualify R9600D kernel policy or permit R9700 calibration inheritance.
+Physical CUs are not PyTorch's WGP count. Report mismatches
 against `EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, `EXPECTED_PHYSICAL_CU_COUNT`;
 the captured route requires all four to match before Setup can proceed.
 
@@ -63,37 +65,38 @@ files, and commit the seeded state. Return `resumed:true` and `prior_state` from
 the original and return `resumed:false` with the reason. With no saved best, use normal setup and
 `resumed:false`; do not create or modify `STATE_DIR` here.
 
-### Author mode
+### `mode=author`
 
-`KERNEL_PATH_ORIG` is the immutable operation task, not editable source. Create an empty `kernel_src`
-and copy the present oracle/helper files and frozen baseline. `reference_io.pt` is optional for a
-seeded synthetic oracle; do not invent a missing golden. Share a present golden by absolute symlink.
-```bash
-mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
-echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
-  [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
-done
-[ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
-for d in baseline_overlay baseline_ref baseline_src; do
-  [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
-done
-chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
-for d in baseline_overlay baseline_ref baseline_src; do
-  [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
-done
-cd "$EVAL_DIR/workspace"
-# Preserve supplied task ignores and prerequisite exceptions.
-printf '%s\n' '' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' >> .gitignore
-export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
-git init -q
-git -c user.email=team@workflow -c user.name=team add -A
-git -c user.email=team@workflow -c user.name=team commit -q -m "empty baseline (author mode, lang=$TARGET_LANGUAGE)"
-```
-The author's first commit is the code starting point, not the speedup denominator. Validate that the
-frozen live baseline is available through `baseline_overlay/` or a resolvable `meta.baseline_callable`.
-Report `baseline_frozen:true` only then. Otherwise report false and explain; do not use the authored
-scaffold as baseline. Name the kernel from `OP_SPEC.op_kind` and language, and list oracle files present.
+`KERNEL_PATH_ORIG` is the immutable operation task, not editable source.
+1. Materialize the complete task, then empty only the candidate source directory. Phase-local
+   captures, baseline overlays, helpers and build resources may live below subdirectories; the
+   materializer shares each present immutable golden by symlink. `reference_io.pt` is optional for
+   a seeded synthetic oracle; do not invent a missing golden.
+   ```bash
+   mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
+   echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/workspace" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   rm -rf "$EVAL_DIR/workspace/kernel_src"
+   mkdir -p "$EVAL_DIR/workspace/kernel_src"
+   chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
+   for d in baseline_overlay baseline_ref baseline_src; do
+     [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
+   done
+   cd "$EVAL_DIR/workspace"
+   # Preserve supplied task ignores and prerequisite exceptions.
+   printf '%s\n' '' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' >> .gitignore
+   export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+   git init -q
+   git -c user.email=team@workflow -c user.name=team add -A
+   git -c user.email=team@workflow -c user.name=team commit -q -m "empty baseline (author mode, lang=$TARGET_LANGUAGE)"
+   ```
+2. The author's first commit is the code starting point, not the speedup denominator. Validate that
+   the frozen live baseline is available through `baseline_overlay/` or a resolvable
+   `meta.baseline_callable`. Report `baseline_frozen:true` only then. Otherwise report false and
+   explain; do not use the authored scaffold as baseline. Name the kernel from `OP_SPEC.op_kind` and
+   language, and list oracle files present.
 
 ### Optimize mode
 
@@ -173,6 +176,24 @@ fi   # end GEAK_FREEZE_HARNESS
 List source/config files under the workspace for downstream roles. All git operations must be
 noninteractive with explicit identity and no pager/editor.
 
+### GPU requirement (all setup modes)
+
+Decide how many GPUs ONE run of this task's correctness test / benchmark needs; every later GPU
+command leases that many together. Skip this if `OP_SPEC.resource` already sets `gpus_per_job`.
+1. Run `python3 "$SKILL_DIR/scripts/detect_gpu_requirement.py" <files>` on the task's own test and
+   benchmark entry files plus its `meta.json` (a small task dir may be passed whole; never a whole
+   repository).
+2. `single` → return it as is. Otherwise read the code it cites and find the rank count the test runs
+   with as written: torchrun `--nproc_per_node`, a `mp.spawn`/`Pool` process count, a count passed in
+   code (e.g. `run_test(8, ...)`), or a fixed parallel layout (e.g. EP8). Several counts → the largest.
+   A count that follows the visible GPUs → `scalable`. Ignore counts in capture files
+   (`selection_trace*`, `capture*`, `_capture/`): they describe the server the task was captured from.
+3. If the code does not say, return `unknown` — never guess; the lane then stays single-GPU and
+   warns that it needs `gpus_per_job`.
+
+Return it as `"gpu_requirement": {"kind": "single|fixed|scalable|unknown", "gpus_per_job": <N>,
+"evidence": "<file:line and why>"}`.
+
 Return JSON (omit the four device identity fields when `VERIFIED_GPU_IDENTITY` is supplied):
 ```json
 {
@@ -181,10 +202,11 @@ Return JSON (omit the four device identity fields when `VERIFIED_GPU_IDENTITY` i
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
   "device_gfx": "<detected real gfx token>",
-  "device_target": "r9700|mi350x|mi355x|unknown",
+  "device_target": "r9700|r9600d|mi350x|mi355x|unknown",
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
+  "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
   "notes": "anything unusual about the layout"
@@ -286,6 +308,14 @@ if [ ! -d .git ]; then
 fi
 git apply --allow-empty "$FINAL_PATCH"
 ```
+After all of your own GPU commands have exited, stop lease jobs this run left behind (a
+backgrounded `gpu_lock.sh` job can still acquire GPUs after the run ends):
+```bash
+bash "$SKILL_DIR/scripts/sweep_orphan_leases.sh" --kill --eval-dir "$EVAL_DIR"
+```
+If it found any, say so in `arbitration_note`: the run produced a measurement that is not in the
+report, and it may have contended with the numbers you just validated.
+
 Write `EVAL_DIR/director_validation.json`, including cache/timing receipts and any limitations.
 
 Return JSON:

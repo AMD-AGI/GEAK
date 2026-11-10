@@ -119,7 +119,7 @@ async function deliveryFacts() {
 // Common assigned-pool facts at each dispatch; observed delivery facts remain opt-in.
 const evaluationServiceFacts = () => ({
   assigned_gpu_ids: GPU_LIST, lock_argument: GPU_POOL, mode: GPU_MODE,
-  required_gpus_per_evaluation: REQUIRED_GPU_COUNT,
+  required_gpus_per_evaluation: GPU_RESOURCE.gpusPerJob,
   meaning: 'Configured assigned evaluation pool, not an observation of live availability or throughput. ' +
     (GPU_LIST.length === 1 ? 'All GPU evaluations in this lane serialize through the one assigned device lock. ' :
       'Evaluations acquire the existing device/group locks. ') +
@@ -212,4 +212,18 @@ function expertSkillsBlock(role) {
     `\`validated\`, and ` +
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
+}
+
+// Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
+function multiGpuBlock(role) {
+  if (!GPU_JOB) return '';
+  const n = GPU_RESOURCE.gpusPerJob;
+  return `\n\n## Multi-GPU job (GPUS_PER_JOB=${n})\n` +
+    `Every GPU command of this op needs ${n} GPUs. \`GPU_ID\` is the group spec \`${GPU_JOB}\`: one ` +
+    `\`gpu_lock.sh $GPU_ID <cmd>\` holds the whole group for the whole command and sets ` +
+    `HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call (e.g. ` +
+    `\`torchrun --nproc_per_node=${n} ...\`). Never call gpu_lock.sh from inside a leased command (it is ` +
+    `rejected) and never background a lease (\`&\`, nohup). A leased command is killed after ` +
+    `GEAK_GPU_RUN_TIMEOUT seconds (default 900); export a larger value for long runs such as a cold ` +
+    `JIT build. Leases on the same GPUs serialize, so put the arms you compare into one run.`;
 }

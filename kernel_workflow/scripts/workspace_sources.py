@@ -33,7 +33,8 @@ def lexical(path: Path) -> Path:
     return Path(os.path.abspath(path))
 
 
-def links(root: Path):
+def links(root: Path, keep=()):
+    """Yield workspace symlinks; names in ``keep`` (shared-input leaves) are never exempt."""
     def fail(error):
         raise error
 
@@ -43,6 +44,10 @@ def links(root: Path):
         if base == root:
             dirs[:] = [d for d in dirs if d not in FROZEN]
             files = [f for f in files if f not in FROZEN]
+        # Phase-local oracle files are immutable shares too, never source links. A shared-input
+        # manifest leaf is still yielded so check() verifies its exact link.
+        files = [f for f in files
+                 if f != "reference_io.pt" or (base / f).relative_to(root).as_posix() in keep]
         for name in dirs + files:
             path = base / name
             if path.is_symlink():
@@ -118,7 +123,7 @@ def check(workspace: Path):
         from kernel_workflow.scripts.task_shared_inputs import load_shared_inputs
         shared_root = Path(options[2])
         shared = load_shared_inputs(options[0], options[1], shared_root)["shared_files"]
-    for link in links(workspace):
+    for link in links(workspace, keep=shared):
         name = link.relative_to(workspace).as_posix()
         if name in shared:
             if shared_input_digest(workspace, name, shared_root) != shared[name]:

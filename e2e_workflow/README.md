@@ -1,7 +1,8 @@
 # GEAK-evo end-to-end serving workflow
 
 This JavaScript workflow profiles and optimizes sglang/vLLM/ATOM serving on AMD
-Instinct GPUs and the validated Radeon AI PRO R9700 (gfx1201, vLLM only).
+Instinct GPUs and provides product-specific gfx1201 support for Radeon AI PRO
+R9700 and R9600D (vLLM only).
 It runs through the bundled Node runtime and delegates extracted kernel tasks
 through the shared `kernel_workflow`. Generic gfx1201 identifies an ISA, not a
 supported serving product.
@@ -18,14 +19,19 @@ supported serving product.
 Passing `kernel_path` without `model_path` delegates directly to the kernel layer.
 Existing repository paths, the `geak` package and `GEAK_*` settings are retained.
 
-## Why a system layer at all (the doctrine)
-e2e throughput is **Amdahl-dominated**: only a speedup on a kernel that is a large share of GPU time,
-times how often that path runs, moves the headline number. A 5× on a 2%-of-time kernel is invisible.
-So the system layer always reasons in `pct_gpu_time × achievable_speedup`, tunes the cheap
-landscape-reshaping config knobs FIRST, and gates every kernel change on a measured end-to-end
-throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md`.
+## Selecting useful workload changes
+
+Profiled GPU-time share helps prioritize kernel work. Converting a kernel speedup
+into a workload estimate also requires the timing boundary, call distribution and
+overlap assumptions. Configuration, cache and scheduling changes can alter those
+costs. Integration measures the full serving workload under the same request and
+correctness contract. See `knowledge/e2e_optimization.md`.
 
 ## Roles → workflow mapping
+
+These roles describe the fixed-load workflow. AgentX uses the extraction route
+[described below](#agentx-kernel-extraction-and-ut-delivery).
+
 - **e2e Director** = setup (isolated eval dir + TRUE baseline throughput) + final independent
   throughput validation/arbitration + output-parity gate.
 - **System Architect** = strategy: read the standardized Top-N, route by Amdahl into config/kernel/
@@ -40,12 +46,19 @@ throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md
 - **Kernel squad** = the shared `../kernel_workflow/kernel_workflow.js`, invoked recursively.
 
 ## Pipeline
+
+Fixed ISL/OSL workloads:
+
 ```
 Setup(preflight env-check + baseline throughput) → Baseline Profile(Top-N) → Strategize(Amdahl routing) →
 ConfigSweep(flags/env/backends, FIRST) → Re-profile →
 LOOP milestone[ plan → per kernel: Extract → recursive kernel_workflow.js → Overlay+e2e gate → ] → Re-profile → grow playbook →
 Finalize(overlay+patch+launch bundle) → Architect Report → Director Validation
 ```
+AgentX trace replay instead uses baseline measurement → extraction and UT
+validation → head/kernel optimization → E2E validation. It skips the outer
+Profile/Strategize, ConfigSweep and Tune phases.
+
 Setup runs a **preflight** (see `knowledge/preflight.md`) — a judgment-guided env self-check (not a
 rigid script): it confirms the chosen `backend` stack, the model, GPU visibility; verifies the
 caller-established structured product/ISA/CU identity, detects trace
@@ -139,8 +152,8 @@ which the native Claude `Workflow` tool does not provide.
 
 Direct model-mode runs require both `expected_gfx` and `expected_target`.
 At Setup/Freeze, `expected_target: "unknown"` leaves the product unconstrained;
-pin `r9700`, `mi350x` or `mi355x` to require that product. The gfx1201 serving entry
-requires an explicit R9700 identity before setup. `workflow_dir` must name this
+pin `r9700`, `r9600d`, `mi350x` or `mi355x` to require that product. The gfx1201
+serving entry requires an explicit R9700 or R9600D identity before setup. `workflow_dir` must name this
 folder; `kernel_workflow_dir` defaults to its sibling `kernel_workflow/`.
 
 Common optional fields in the JSON arguments:
@@ -150,9 +163,9 @@ Common optional fields in the JSON arguments:
 | `optimizer` | `"evo"` by default; `"greedy"` selects the original kernel search policy. |
 | `launch_script` | Use a supplied serving launch script. |
 | `budget`, `kernel_budget` | Maximum kernel tasks and the direction budget for each nested task. |
-| `milestone_min_pct` | Minimum profiled GPU-time share for Milestone extraction; default 5. |
-| `config_tune` | Enable the configuration sweep; default `"true"`. |
-| `tuning_skillset` | Enable the separate tuning phase; default `"true"`. See below. |
+| `milestone_min_pct` | Fixed-load Milestone GPU-time threshold; default 5. AgentX uses its extraction inventory. |
+| `config_tune` | Fixed-load configuration sweep; default `"true"`. AgentX skips it. |
+| `tuning_skillset` | Fixed-load tuning phase; default `"true"`. AgentX skips it. See below. |
 | `tuning_kb` | Consult the per-model tuning KB; default `"true"`. Use `"false"` for blind evaluation. |
 | `analysis_skill` | Profile analysis, default `"roofline"`; `"none"` disables it. |
 | `use_expert_skills` | Advisory expert priors, default `"false"`; forwarded to kernel workers. |
@@ -238,6 +251,7 @@ which is the same object Hyperloom puts on its handoff:
     "concurrency": 8,
     "metric_basis": "p90_intvty_inferencex",
     "canonical_corpus": "semianalysis_cc_traces_weka_062126",
+    "canonical_num_entries": 393,
     "canonical_duration_s": 3600,
     "warmup_requests_per_lane": 10,
     "warmup_grace_period_s": 1800,
@@ -265,10 +279,10 @@ Three parts of that object do more than they look:
   widen it: two same-config baseline replicas differed by 3.86% on P90 interactivity (3.43% on total
   tok/s). `noise_band_pct` sets that floor instead; the TTFT-inclusive `e2e_norm_intvty_p90` moved
   17% on the same pair, so pass one if you grade on it.
-- **The reference.** Overriding `corpus` or `duration_s` does not move what a result is stamped
-  canonical against, so a replay of anything else comes back `submission_valid=false`. To change the
-  reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
-  `canonical_duration_s` too.
+- **The reference.** Overriding `corpus`, `num_entries` or `duration_s` does not move what a result is
+  stamped canonical against, so a replay of anything else comes back `submission_valid=false`. To
+  change the reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
+  `canonical_num_entries` / `canonical_duration_s` too.
 - **The mapper.** An `inferencex_path` checkout's `map_aiperf.py` wins over GEAK's vendored copy, and
   upstream's own fallback mapping carries no P90 ITL, so outside Hyperloom's runtime it cannot grade
   the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the run would use
@@ -286,6 +300,12 @@ BASE_URL=http://127.0.0.1:8000 bash e2e_workflow/scripts/agentx_smoke.sh   # + a
 It never launches a server. Its most important check is that `aiperf` actually supports `--scenario`:
 a stock aiperf cannot replay the corpus at all, but pointed at a server it will still report a
 throughput — a "successful" run that measured a different workload.
+
+A handoff run checks the client before anything launches. `run_e2e.py` resolves the `aiperf` the
+bench will run (`AIPERF_BIN`, else `aiperf_bin`, else `aiperf` on `PATH`), and when that is an absolute
+path that is missing, not executable, or in a venv whose interpreter is gone, it writes
+`error_class: agentx_client_unavailable` instead of launching a server. A bare name missing from
+`PATH` only warns, since the bench's `PATH` can differ; `GEAK_STRICT_AGENTX_PREFLIGHT=1` refuses it too.
 
 ### What the declaration changes
 
@@ -388,8 +408,57 @@ Results land in `EVAL_DIR/tuning/`, in `final_report.md` **§2b**, in
 `wfReturn.tuning_skillset` (`tuning_delta_pct`, `tuning_speedup`, `share_of_total_gain_pct`), and in
 `result.json` under a **purely additive** `tuning_skillset` key — no existing key changes name, type or
 meaning, and a run without the phase produces a byte-identical `result.json`.
-Fast mode skips the phase; deep mode keeps it. Full contract:
+Fast mode skips the phase; deep mode keeps it for fixed-load workloads. AgentX skips
+it as described below. Full contract:
 `knowledge/tuning_skillset_integration.md`.
+
+## AgentX kernel extraction and UT delivery
+
+An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
+activates the [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
+The extractor follows the complete procedure: measured baseline logs
+→ observed workload → sampling points → runtime kernel selection → source extraction
+→ standalone GPU UTs. The method comes from the validated standalone skill at `ce1dbe5`. It retains the
+five-stage procedure and the additional sampling, coverage, reference-output and
+self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
+are reused from the repository; their regression tests remain in one place.
+
+UT inputs default to fixed-seed generators at the observed shapes/dtypes/layouts;
+reference outputs come from the frozen baseline in an isolated process. UT execution
+does not launch serving, profile or capture shapes. Reuse or reliably reconstruct
+routing, indices, page tables and other structural metadata; capture only missing
+state. Necessary captures default to `structure_only`, with reference regeneration
+before validation. An explicit `capture_persist_policy` overrides the fallback
+storage policy; non-AgentX capture defaults are unchanged.
+
+GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
+budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).
+The skill completes scheduled UT work before returning a delivery path. The packaging
+adapter reads each task's saved declaration and return, preserves failed/deferred
+tasks and coverage, and feeds verified tasks into the existing optimization queues.
+It checks source/binding/UT evidence without repeating selection or GPU tests; changes
+to source, cases or recorded results invalidate reuse. Task-count budgets affect
+scheduling, not the selected inventory or its reported coverage.
+
+AgentX follows baseline → B extraction and UT validation → head optimization →
+kernel milestones → E2E validation. Outer Profile/Strategize, ConfigSweep and Tune
+are skipped. B still uses bounded trace sampling to establish kernel identity and
+cost. All three head modes and the milestone loop reuse the prepared task directory
+and immutable UT, running it against optimization candidates instead of authoring
+another test. Workspace setup retains phase-local oracles, helpers and baseline
+resources; head and milestone use the workload-weighted result. Missing or changed
+preparation evidence fails the task locally. Current optimization lanes are single-GPU:
+completed multi-rank UTs retain their artifacts and are deferred for separate scheduling.
+
+The default selection remains per-phase Top 5 intersected with whole-workload
+GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
+wins. Head routing uses the prepared task kind; milestones consume the remaining
+kernel queue without Architect nomination or the fixed-load 5% filter. Optimization
+wins do not trigger another extraction; scheduling uses the original measured order
+and weights. Dispatched tasks leave the queue, pending tasks survive resume, and an
+empty queue stops dispatch. Fast/deep modes retain their head-only scheduling.
+Fixed ISL/OSL workloads keep their existing flow. Each optimization still runs its
+existing UT and E2E A/B gate; a UT pass alone does not establish an E2E improvement.
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
@@ -401,12 +470,14 @@ profiled GPU time. It predicts workload latency only if that fraction matches th
 interval and other costs and overlap remain unchanged. Measure the workload result separately.
 The Architect reports both orderings and states which it followed.
 
-Integration and recovery also treat their Amdahl projections as diagnostics. The legacy
-`implausible_speedup_margin` option controls diagnostic reporting; it cannot override an integration
-verdict or manufacture a correctness failure. Actual quality, parity, engagement and complete
-measurement requirements remain. Removing the model-only veto removes its extra rejection of
-degenerate outputs that happen to pass sampled quality checks; those checks do not prove correctness
-for every input. Investigate a discrepancy using work completeness, timing scope and quality evidence.
+Integration and recovery treat Amdahl projections as diagnostics. The legacy
+`implausible_speedup_margin` controls discrepancy reporting and the independent
+A/B review for an accuracy-gated gain. The projection alone cannot reject a
+candidate or establish a correctness failure. Actual quality, parity, engagement
+and complete-measurement requirements still apply. A review that ran and measured
+a rejection withholds its candidate; a pending or inconclusive review leaves the
+original measured verdict in effect. Investigate model discrepancies using work
+completeness, timing scope and quality evidence.
 
 **Roofline is advisory and never prunes a candidate.** Estimated shapes are low-confidence and
 display-only; captured shapes with supported models can guide secondary prioritization. Matched
@@ -451,6 +522,29 @@ kernel rounds differently and flips a few borderline greedy argmaxes — so you 
   boundary). `accuracy_tol` = allowed exact-match drop (default **0.01**).
 - The eval client is `scripts/gsm8k_eval.py` (model-agnostic; queries the OpenAI-compatible endpoint).
 - Leaving it unset (`"none"`) changes nothing vs before — the gate stays throughput + parity only.
+
+An accuracy-gated speedup above the Amdahl estimate triggers **one independent A/B review**, not a
+correctness rewrite. The existing `implausible_speedup_margin` option remains supported (default
+`1.0`, review above twice the estimate; the runner forwards `GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN`). A
+confirmation uses fresh reference/candidate servers, at least two timed replicas per leg, and the
+same correctness and engagement gates. If the gain reproduces, it is accepted even above the estimate.
+Already confirmed evidence is reused only for the same candidate, reference, workload and measurement
+protocol identities. The workload identity covers only what decides the served requests, so a profile
+and an A/B of the same workload share it; bench/protocol details go in the separate protocol digest.
+Missing provenance, a timeout or repeated old A/B artifacts leaves the review
+inconclusive. A confirmation that cannot finish before the final reserve is not
+started; each timed replica counts as a leg. These outcomes are recorded with the
+candidate and leave its original measured verdict in effect. Only a review that
+ran and measured a rejection withholds the candidate. No review outcome starts a
+kernel rewrite. Final Validate still checks the combined stack.
+
+The estimate uses the candidate's `affected_gpu_time` coverage when its profile matches the current
+reference and workload: all affected shapes/phases and removed auxiliary kernels, counted once.
+Per-path timings are used when available; applying the head speedup to unmeasured paths is explicitly
+labelled an approximation. Stale/missing coverage falls back to the head estimate. The head's original
+`pct_gpu_time` is preserved for ranking. Candidate checkpoints include the reviewed integration result,
+so timeout recovery respects the same acceptance decision. See [the integrator contract](roles/e2e_integrator.md)
+for coverage and measurement-evidence fields.
 
 ## Output
 Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:

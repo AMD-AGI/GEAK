@@ -1,22 +1,7 @@
-// ---------------------------------------------------------------------------
-// Canonical handoff to run_e2e.py — write the SCHEMA-VALIDATED return to a FIXED
-// on-disk path from INSIDE the workflow.
-//
-// WHY (the perfect-cooperation contract): run_e2e.py must produce a TRUTHFUL
-// result.json regardless of HOW the agent ran this Workflow. Newer Claude CLIs
-// run a Workflow invocation as a NON-BLOCKING background task: the orchestrating
-// turn ends before completion, so this return value is NEVER echoed to the
-// transcript for run_e2e.py to scrape. The script itself has no fs, so we have an
-// agent (the only thing with Write) persist `wfReturn` to
-// <eval_dir>/workflow_return.json as the workflow's FINAL act. run_e2e.py reads
-// THAT one contracted file first (deterministic, no transcript scrape, no parsing
-// of free-form per-candidate files).
-//
-// Best-effort by design: if this persist fails (agent variance), the returned
-// value is UNCHANGED and run_e2e.py still falls back to its layered, schema-robust
-// disk recovery (director_e2e_validation.json -> accepted intermediate win ->
-// measured-baseline no_gain). So correctness never DEPENDS on this single write —
-// it is the preferred fast path, not the only path.
+// ---- Canonical handoff to run_e2e.py ----
+// The return value may never reach the transcript (the Workflow can run as a background task) and
+// the script has no fs, so an agent persists `wfReturn` to <eval_dir>/workflow_return.json, which
+// run_e2e.py reads first. Best-effort: on failure run_e2e.py recovers from disk.
 if (EVAL_DIR) {
   try {
     const json = JSON.stringify(wfReturn, null, 2);

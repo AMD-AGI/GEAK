@@ -1,15 +1,19 @@
-// ---------------------------------------------------------------------------
+// RUNTIME SANDBOX CONTRACT -- read before adding any Node API to this file.
+// The script runs on two runtimes with different globals:
+//                                             process   require   import()
+//   Claude Code's native Workflow tool          no        no      REFUSED AT LAUNCH
+//   interface/runtime/engine/run_workflow.mjs   yes       no      yes
+// The native sandbox has only the JS built-ins plus agent/parallel/pipeline/phase/log/workflow/
+// args/budget/console/setTimeout: no filesystem, no child_process, and one `import(` in code
+// rejects the whole script at launch. So: no `import(` and no load-bearing `require(`; file work
+// goes in a scripts/ CLI that an agent runs. test_llm_ledger.py enforces the `import(` rule.
+
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
-// ---------------------------------------------------------------------------
 let _rawArgs = args;
 let _parseErr = '';
-// The driver agent sometimes passes `args` as a JSON STRING rather than an object. The
-// string is COMPLETE -- measured 2026-09-15: a valid 32-key object with `state` intact --
-// but carries a stray trailing character (one spurious '}'), so a plain JSON.parse throws
-// 'Extra data', the coercion fails, workflow_dir is undefined and the run aborts in 28ms.
-// This is NOT truncation and NOT a payload-size problem; trimming the state does not fix
-// it. Parse tolerantly: retry while dropping trailing junk, bounded so a genuinely
-// malformed payload still fails loudly instead of looping.
+// The driver agent may pass `args` as a complete JSON string with stray trailing characters
+// (e.g. an extra '}'). Parse tolerantly: retry while trimming the tail, bounded so a truly
+// malformed payload still fails loudly.
 if (typeof _rawArgs === 'string') {
   let _s = _rawArgs.trim();
   for (let _i = 0; _i < 8 && _s.length > 1; _i++) {
@@ -42,9 +46,7 @@ if (!WORKFLOW_DIR) {
 // The UNCHANGED single-kernel workflow. Default: sibling "kernel_workflow" dir next to this one.
 const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
-// The single-language WORKER lane. kernel_workflow.js is now a dispatcher (mode=optimize/author ->
-// this worker; mode=bakeoff -> multi-language fan-out), so e2e MUST call the worker DIRECTLY
-// (kernel_lane.js) — routing through the dispatcher would add a nesting level (e2e -> dispatcher ->
-// worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
+// Call the single-language worker lane directly: going through the kernel_workflow.js dispatcher
+// would nest e2e -> dispatcher -> worker (3 levels), which the runtime forbids.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 

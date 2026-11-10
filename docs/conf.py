@@ -4,7 +4,7 @@ flavor defines the site header display, select the flavor for the corresponding 
 flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
 """
 
-version_number = "4.0.0"
+version_number = "4.2.0"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
@@ -23,7 +23,7 @@ all_article_info_os = ["linux"]
 all_article_info_author = ""
 
 # for PDF output on Read the Docs
-project = "GEAK"
+project = "GEAK-evo"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
 version = version_number

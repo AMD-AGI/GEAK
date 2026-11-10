@@ -75,8 +75,84 @@ if (GPU_PROCESS_SETTLEMENT && (!agent.processTimeoutSupported
   throw new Error('GPU group requires native process settlement and its original absolute deadline');
 const GPU_MODE = REQUIRED_GPU_COUNT > 1 ? 'set'
   : String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
-const GPU_POOL = GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
-  : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(',');
+// Multi-GPU jobs (multi-rank ops). gpus_per_job > 1 leases any N GPUs of gpu_ids per command
+// (gpu_lock.sh pool:N:<ids>); job_gpu_ids pins one fixed group (group:<ids>). Either may also come
+// from op_spec.resource. Without any of them the count is what Setup found in the task's own
+// test/benchmark (`detected`, see scripts/detect_gpu_requirement.py). Every GPU consumer then gets
+// that one spec, so each command holds the whole group. One GPU per job leaves everything unchanged.
+// Setup's finding is a static hint: one that cannot run in gpu_ids (unknown, no usable count, more
+// GPUs than the pool) keeps the lane single-GPU with a warning. Only an explicit request throws.
+// required_gpu_count > 1 is the other request form: the lane's whole allocation as one set: lease
+// under native process settlement (above). It is explicit too, so it excludes these requests and
+// is never resized by Setup's finding.
+function resolveGpuRequest(A, gpuList, detected) {
+  const resource = (A.op_spec && A.op_spec.resource) || {};
+  const parseIds = (name, value) => {
+    const parts = String(value).split(',').map(s => s.trim()).filter(Boolean);
+    if (!parts.length) throw new Error(`${name} must contain at least one GPU id`);
+    if (parts.some(id => !/^\d+$/.test(id))) throw new Error(`${name} contains a non-numeric GPU id`);
+    const ids = parts.map(id => String(Number(id)));
+    if (new Set(ids).size !== ids.length) throw new Error(`${name} contains duplicate GPU ids`);
+    return ids;
+  };
+  const pool = parseIds('gpu_ids', gpuList.join(','));
+  const fixedValue = String(A.job_gpu_ids || '').trim() || resource.job_gpu_ids;
+  const fixedIds = String(fixedValue || '').trim() ? parseIds('job_gpu_ids', fixedValue) : [];
+  const explicit = A.gpus_per_job != null || resource.gpus_per_job != null || fixedIds.length > 0;
+  const found = (!explicit && detected) || {};
+  let foundCount = found.kind === 'scalable' ? pool.length : 1;
+  let problem = '';
+  if (found.kind === 'unknown') {
+    problem = 'Setup found multi-GPU code in this task but could not tell how many GPUs one run needs';
+  } else if (found.kind === 'fixed') {
+    const n = Number(found.gpus_per_job);
+    if (!Number.isSafeInteger(n) || n < 1) {
+      problem = `Setup reported no usable GPU count (${found.gpus_per_job})`;
+    } else if (n > pool.length) {
+      problem = `Setup found ${n} GPUs per run but gpu_ids holds ${pool.length}`;
+    } else {
+      foundCount = n;
+    }
+  }
+  const warning = problem ? `${problem} (${found.evidence || 'no evidence'}); running single-GPU. ` +
+    'Pass gpus_per_job=<N> (or job_gpu_ids) with enough gpu_ids to run it on N GPUs.' : '';
+  const countValue = A.gpus_per_job != null ? A.gpus_per_job
+    : (resource.gpus_per_job != null ? resource.gpus_per_job : (fixedIds.length || foundCount));
+  const countText = String(countValue).trim();
+  if (!/^[1-9]\d*$/.test(countText)) throw new Error('gpus_per_job must be a positive integer');
+  const gpusPerJob = Number(countText);
+  if (!Number.isSafeInteger(gpusPerJob)) throw new Error('gpus_per_job is too large');
+  if (fixedIds.length && fixedIds.length !== gpusPerJob) {
+    throw new Error(`gpus_per_job=${gpusPerJob} does not match job_gpu_ids size ${fixedIds.length}`);
+  }
+  if (!fixedIds.length && gpusPerJob > pool.length) {
+    throw new Error(`gpus_per_job=${gpusPerJob} exceeds gpu_ids pool size ${pool.length}; ` +
+      `pass gpu_ids with at least ${gpusPerJob} GPUs`);
+  }
+  if (fixedIds.some(id => !pool.includes(id))) throw new Error('job_gpu_ids must be a subset of gpu_ids');
+  const jobSpec = fixedIds.length ? `group:${fixedIds.join(',')}`
+    : (gpusPerJob > 1 ? `pool:${gpusPerJob}:${pool.join(',')}` : '');
+  return { gpusPerJob, fixedIds, jobSpec, explicit, warning };
+}
+// Validated now so a bad request fails before Setup; re-resolved from Setup's finding when implicit.
+let GPU_RESOURCE = null;
+let GPU_JOB = '';
+let GPU_POOL = '';
+let GPU_SINGLE = '';
+function applyGpuResource(r) {
+  GPU_RESOURCE = r;
+  GPU_JOB = r.jobSpec;
+  GPU_POOL = GPU_JOB || (GPU_MODE === 'set' ? `set:${GPU_LIST.join(',')}`
+    : GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
+  GPU_SINGLE = GPU_JOB || (GPU_MODE === 'set' ? GPU_POOL : GPU_LIST[0]);
+}
+const GPU_REQUEST = resolveGpuRequest(A, GPU_LIST);
+if (REQUIRED_GPU_COUNT > 1 && GPU_REQUEST.explicit) {
+  throw new Error('required_gpu_count cannot be combined with gpus_per_job, job_gpu_ids or op_spec.resource');
+}
+applyGpuResource(REQUIRED_GPU_COUNT > 1
+  ? { gpusPerJob: REQUIRED_GPU_COUNT, fixedIds: GPU_LIST, jobSpec: '', explicit: true, warning: '' }
+  : GPU_REQUEST);
 const GPU_GROUP_INSTRUCTIONS = REQUIRED_GPU_COUNT > 1 ? `
 This task requires ${REQUIRED_GPU_COUNT} GPUs together. Its assigned raw IDs are ${GPU_IDS}.
 GPU_ID=${GPU_POOL} is a lock argument: pass it unchanged to gpu_lock.sh or profile_kernel.sh

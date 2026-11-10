@@ -8,11 +8,9 @@ const SETUP_SCHEMA = obj({
   server_flags: { type: 'object', additionalProperties: true }, server_env: { type: 'string' },
   tp: { type: 'number' }, workload: { type: 'object', additionalProperties: true },
   bench_script: { type: 'string' }, notes: { type: 'string' },
-  // The four deployment dimensions the KB addresses a page by, beyond model/framework/workload which
-  // this script already knows. The Director establishes all four during its existing preflight (it
-  // has to, to launch the server at all) and previously just discarded them. gfx, product target,
-  // and physical CU count are required; device_name remains optional telemetry. A GUESS is not
-  // acceptable: the service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
+  // Deployment dimensions the KB addresses a page by, from the Director's preflight. gfx, product
+  // target and physical CU count are required (device_name is optional telemetry). Never guess: the
+  // service has no DELETE, so a wrong page is permanent.
   gfx: { type: 'string' }, device_target: { type: 'string' },
   device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
   precision: { type: 'string' },
@@ -43,6 +41,20 @@ const STRATEGY_SCHEMA = obj({
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
+// Returned after source extraction and GPU UT validation. Ranking metadata stays in files, but the
+// finished envelope travels in the reply (this script can't read files; see RUNTIME SANDBOX
+// CONTRACT): `prepared` is the verbatim, gated stdout of `agentx_kernel_preparation.mjs
+// --emit-prepared`, shaped like STRATEGY_SCHEMA's queues.
+const AGENTX_PREPARATION_SCHEMA = obj({
+  delivery_path: { type: 'string' },
+  prepared: obj({
+    head_candidates: arrObj, kernel_candidates: arrObj,
+    failed_tasks: arrObj, deferred_tasks: arrObj,
+    profile_workload_json: { type: 'string' }, kernel_ranking_json: { type: 'string' },
+    kernel_extraction_delivery_json: { type: 'string' },
+  }, ['head_candidates', 'kernel_candidates']),
+}, ['delivery_path', 'prepared']);
+
 // Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
 // (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
 const FLYDSL_GATE_SCHEMA = obj({
@@ -54,9 +66,8 @@ const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
-  // Only the warm-start repair pass fills this, and it stays OUT of `required` so every ordinary
-  // sweep keeps validating unchanged. It is the structured half of "why did this not run here" —
-  // read in place of guessing at the free-text notes with a regex.
+  // Filled only by the warm-start repair pass (so not `required`): the structured "why did this not
+  // run here", read instead of regexing the notes.
   repair: obj({
     attempted: { type: 'boolean' },
     classification: { type: 'string' },   // upstream_gone | conflicts_with_baseline | env_unsupported | mixed | unknown
@@ -66,53 +77,37 @@ const SWEEP_SCHEMA = obj({
   }, []),
 }, ['accepted_flags', 'best_throughput_tok_s']);
 
-// `e2e_store.py resolve` output, passed through VERBATIM. Nothing is `required` and no field is
-// typed as a number: a page that was never written answers with empty candidates and a
-// `read_reason`, and a recorded run legitimately has `speedup: null` when it only ever measured
-// absolute throughput. Typing either would turn a truthful answer into a schema failure and a
-// cold start.
+// `e2e_store.py resolve` output, passed through verbatim. Nothing is required or typed as a number:
+// an unwritten page answers with empty candidates + `read_reason`, and `speedup` can be null.
 const KB_RESOLVE_SCHEMA = obj({
   tried: arrStr, canonical_id: { type: 'string' }, match_tier: { type: 'string' },
   ranked_by: { type: 'string' }, candidates: arrObj, read_reason: { type: 'string' },
-  // `plane` is what was ASKED for; `read_plane` is which one answered. Under `both` they differ,
-  // and only the second one explains where the offer came from.
+  // `plane` is what was asked for; `read_plane` is which one answered (they differ under `both`).
   plane: { type: 'string' }, read_plane: { type: 'string' },
-  // How the offer was ORDERED (throughput, high to low, on every rung) versus which metric that
-  // rung crowns its champion on. Two different things that used to share one word: a coarse rung
-  // is ranked by absolute throughput here but still promotes on speedup, and a reader told only
-  // 'speedup' would mis-explain the order it is looking at.
+  // How the offer is ordered (throughput, high to low) vs the metric the rung crowns its champion
+  // on; a coarse rung is ordered by throughput but still promotes on speedup.
   sorted_by: { type: 'string' }, champion_metric: { type: 'string' },
-  // Why a rung came back empty, in counts — the only thing separating "nobody recorded this
-  // deployment" from "the floor ate the records". Named explicitly so the resolver agent cannot
-  // summarise it away. Its `read_plane` is the FIRST rung that saw anything, not necessarily the
-  // one that answered.
+  // Why a rung came back empty, in counts ("never recorded" vs "filtered by the floor"). Its
+  // `read_plane` is the first rung that saw anything, not necessarily the one that answered.
   curation: { type: 'object', additionalProperties: true },
 }, []);
-// Result of the standalone tuning-skillset phase. pre/post are ITS OWN in-session isolated-server A/B
-// legs (NOT the run baseline), which makes tuning_delta_pct an attributable share of the total gain.
-// engagement_verified is load-bearing: the skillset's own thesis is that an unproven artifact is not a
-// win, so the orchestrator refuses to bank an accept without it.
+// Result of the tuning-skillset phase. pre/post are its own isolated-server A/B legs (not the run
+// baseline), so tuning_delta_pct is an attributable share. No accept is banked without
+// engagement_verified.
 const TUNING_SCHEMA = obj({
   ran: { type: 'boolean' }, mode: { type: 'string' }, skills_used: arrStr,
   preflight: { type: 'object', additionalProperties: true },
   ops_tuned: arrObj, artifacts: arrStr,
-  // Deploy bundle: how a tuned DATA artifact reaches production. GEAK's overlay is a PYTHONPATH
-  // mechanism for code, but tuned config tables are data a library reads from its own package dir, and
-  // some need a derived cache dropped before they take effect. Neither travels in the overlay — so the
-  // role writes EVAL_DIR/tuning/deploy/{MANIFEST.json,tuning_patch.diff,files/,deploy.sh} and Finalize
-  // folds it into EVAL_DIR/final/ (diff concatenated, deploy.sh invoked from final_launch.sh).
+  // Deploy bundle for tuned DATA (config tables a library reads from its package dir, caches to
+  // drop), which the PYTHONPATH overlay can't carry: EVAL_DIR/tuning/deploy/{MANIFEST.json,
+  // tuning_patch.diff,files/,deploy.sh}, folded into EVAL_DIR/final/ by Finalize.
   deploy_bundle: { type: 'string' }, deploy_verified: { type: 'boolean' },
   cache_invalidation: arrStr,
-  // DATA paths the deploy writes INSIDE an installed package tree (e.g. aiter/configs/*.csv). The
-  // Integrator forbids live-tree edits and asserts `git status --porcelain` is empty before/after every
-  // A/B leg; this list is the carve-out that keeps a banked tuning from being cleaned away. Data only —
-  // a source change belongs in apply_overlay, see below.
+  // DATA paths the deploy writes inside an installed package tree (e.g. aiter/configs/*.csv): the
+  // carve-out from the Integrator's clean-live-tree check. Data only; code goes in apply_overlay.
   live_tree_files: arrStr,
-  // A tuned artifact binds only if the live seam dispatches the backend that consumes it, so tuning
-  // sometimes needs a CODE change to land (a routing switch, or a wrapper that drops the kernel
-  // selection — tuning-aiter/SKILL.md §2b measures a correctly-tuned row going 85.7% SLOWER on a wrapper
-  // that ignores kernelName). That is in scope, and it travels as a reversible overlay, exactly like a
-  // head env-winner's routing patch: never as a live-tree .py edit, which cannot be varied per A/B leg.
+  // Code a tuned artifact needs in order to bind (e.g. a routing switch), shipped as a reversible
+  // overlay like a head env-winner's routing patch, never as a live-tree .py edit.
   apply_overlay: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
@@ -130,13 +125,26 @@ const PLAN_SCHEMA = obj({
   config_directions: arrObj, head_candidates: arrObj, kernel_candidates: arrObj,
 }, ['stop']);
 
-// Extraction smoke gate: EXACTLY lowercase "pass" or "fail". Every gate below tests `=== 'pass'`, and a
-// free string let agents answer "PASS (exit 0) on GPU 1 ..." — a passing unittest then read as a failed
-// extraction and the head was silently dropped. The enum makes StructuredOutput reject anything else so
-// the agent must re-answer; the prose belongs in smoke_detail / notes.
+// Extraction smoke gate: exactly lowercase "pass" or "fail" (every gate tests `=== 'pass'`); the
+// enum makes StructuredOutput reject free text, which belongs in smoke_detail / notes.
 const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
+// Large machine verdicts travel as immutable task-local files, not LLM summaries.
+const SELECTION_VERDICT_REF_SCHEMA = obj({
+  path: { type: 'string' }, sha256: { type: 'string' },
+}, ['path', 'sha256']);
+const EXTRACTION_SELECTION_FIELDS = {
+  selection_validation_ref: SELECTION_VERDICT_REF_SCHEMA,
+  source_delivery_ref: SELECTION_VERDICT_REF_SCHEMA,
+  joint_ut: { type: 'object', additionalProperties: true },
+  phase_selection_validations: { type: 'array', items: obj({
+    regime: { type: 'string' }, target_callable: { type: 'string' }, seam_candidates: arrObj,
+    selection_validation: { type: 'object', additionalProperties: true },
+    selection_validation_ref: SELECTION_VERDICT_REF_SCHEMA,
+  }, ['regime', 'target_callable']) },
+};
 
 const EXTRACT_OP_SCHEMA = obj({
+  ...EXTRACTION_SELECTION_FIELDS,
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
   workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
@@ -154,8 +162,7 @@ const EXTRACT_OP_SCHEMA = obj({
 const OPBENCH_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
   winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
-  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
+  // null when nothing was timed (0.0 would read as "not faster"); gate on `measured`, not the number.
   isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
   winner_editable: { type: 'boolean' },
   best_known_ms: { type: 'number' },
@@ -167,6 +174,7 @@ const OPBENCH_SCHEMA = obj({
 }, ['gate', 'isolated_speedup']);
 
 const EXTRACT_SCHEMA = obj({
+  ...EXTRACTION_SELECTION_FIELDS,
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
@@ -182,20 +190,45 @@ const EXTRACT_SCHEMA = obj({
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
+const KERNEL_LAYER_SCHEMA = obj({
+  ran: { type: 'boolean' }, kernel_eval_dir: { type: 'string' },
+  final_patch: { type: 'string' }, final_geomean: { type: 'number' },
+  validation_status: { type: 'string' }, note: { type: 'string' },
+}, ['ran', 'final_patch', 'final_geomean']);
+
+const MEASUREMENT_EVIDENCE_SCHEMA = obj({
+  measurement_id: { type: 'string' }, candidate_digest: { type: 'string' },
+  reference_digest: { type: 'string' }, workload_digest: { type: 'string' }, protocol_digest: { type: 'string' },
+  ref_summary: { type: 'string' }, cand_summary: { type: 'string' },
+  ref_replicas: { type: 'number' }, cand_replicas: { type: 'number' },
+  fresh_pair: { type: 'boolean' }, configs_matched: { type: 'boolean' }, workload_matched: { type: 'boolean' },
+}, []);
 const INTEGRATE_SCHEMA = obj({
   short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
+  affected_gpu_time: obj({
+    candidate_digest: { type: 'string' },
+    profile_path: { type: 'string' }, reference_digest: { type: 'string' }, workload_digest: { type: 'string' },
+    kernels: { type: 'array', items: obj({
+      id: { type: 'string' }, pct_gpu_time: { type: 'number' }, isolated_speedup: { type: 'number' },
+      removed: { type: 'boolean' },
+    }, ['id', 'pct_gpu_time']) },
+  }, ['profile_path', 'candidate_digest', 'reference_digest', 'workload_digest', 'kernels']),
+  measurement_evidence: MEASUREMENT_EVIDENCE_SCHEMA,
+  speedup_review: obj({
+    status: { type: 'string', enum: ['pending', 'confirmed', 'inconclusive', 'rejected'] },
+    original_measurement: MEASUREMENT_EVIDENCE_SCHEMA,
+    estimate: { type: 'object', additionalProperties: true },
+  }, ['status']),
   e2e_throughput_tok_s: { type: 'number' }, e2e_delta_pct: { type: 'number' },
-  // A/B completion signals: the integrator MUST set ab_complete=true ONLY when
-  // BOTH the reference and candidate serving legs were measured. When it ran out
-  // of time / hung mid-gate it returns gate:'incomplete' (ab_complete=false) with
-  // whatever partial legs it has (ref_med / cand_med) — that is NOT a rejection.
+  // ab_complete=true only when both serving legs were measured; a timed-out or hung gate returns
+  // gate:'incomplete' (ab_complete=false) with any partial ref_med / cand_med — not a rejection.
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
-  // Which correctness check actually ran: 'byte_exact' (sampled greedy byte parity against the
-  // original baseline), 'accuracy' (sampled task-quality probe), or 'none'. Neither sampled check
-  // proves correctness for every input; a model discrepancy is advisory for every parity kind.
+  // How an accept's correctness was established: 'byte_exact' (sampled greedy byte parity vs the
+  // original baseline), 'accuracy' (sampled task-accuracy probe) or 'none'. Neither sampled check
+  // proves correctness for every input.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
@@ -205,9 +238,8 @@ const FINALIZE_SCHEMA = obj({
   final_overlay: { type: 'string' }, final_patch: { type: 'string' }, final_launch_script: { type: 'string' },
   final_throughput_tok_s: { type: 'number' }, throughput_speedup: { type: 'number' },
   accepted_kernels: arrStr, accepted_config: { type: 'object', additionalProperties: true }, note: { type: 'string' },
-  // Did the tuning deploy bundle make it into final/ AND still engage on the assembled bundle? Reported
-  // rather than assumed: a data artifact that silently fails to install would leave a bundle that looks
-  // complete and reproduces none of the tuning gain.
+  // Whether the tuning deploy bundle reached final/ and still engages there (reported, not assumed:
+  // a silently failed data install reproduces none of the tuning gain).
   tuning_in_bundle: { type: 'boolean' }, tuning_engagement_recheck: { type: 'string' },
 }, ['final_throughput_tok_s']);
 
