@@ -74,7 +74,8 @@ vocabulary and test it before adding a custom checker.
 `expert_workflows/<id>/` holds an expert workflow: a whole sub-workflow that a skill alone cannot express,
 packaged with everything it reads. The kernel-workflow dispatcher runs `<id>/workflow.js` when its
 mode maps to it or `expert_workflow: "<id>"` is passed; today `mode=mega` runs `expert_workflows/mega_fusion/`
-(see its README). Nothing outside the package depends on it.
+(see its README). Nothing outside the package depends on it. L0 CI runs every package's
+`<id>/tests/` (`test_*.js` with node, `test_*.py` with pytest).
 
 `tuning/` is the one skill family that does not follow that layout, because it is not ours to lay
 out: it is vendored from upstream and pinned byte-for-byte by
