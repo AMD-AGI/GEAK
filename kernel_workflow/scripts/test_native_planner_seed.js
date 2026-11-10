@@ -98,10 +98,11 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-native-planner-seed-'));
   const passed = [];
   const test = async (name, run) => {
+    if (process.argv.includes('--optional-donors-only') && name !== 'optional donors preserve native empty resolution') return;
     try { await run(); passed.push(name); }
     catch (error) { error.message = `${name}: ${error.message}`; throw error; }
   };
-  function harness(f, {args = {}, respond = () => plan([direction()]), schemaRetries = 1} = {}) {
+  function harness(f, {args = {}, respond = () => plan([direction()]), schemaRetries = 1, hostResponse} = {}) {
     const hostCalls = [], agentCalls = [], backendCalls = [], phases = [];
     const rt = createRuntime({schemaRetries, concurrency: 1, agentTimeoutMs: 5000,
       log: () => {}, backend: {name: 'test', async runAgent(options) {
@@ -112,6 +113,7 @@ async function main() {
     // Match runScript's capability-bearing wrapper while retaining native rt.agent dispatch.
     const agent = (prompt, options) => {
       agentCalls.push({prompt, options});
+      if (hostResponse !== undefined) return Promise.resolve(clone(hostResponse));
       return rt.agent(prompt, options);
     };
     Object.defineProperty(agent, 'processTimeoutSupported', {value: true});
@@ -241,7 +243,7 @@ async function main() {
     });
 
     await test('missing, unknown, and rejected requested references never fall back', async () => {
-      for (const change of [d => { delete d.parent_id; }, d => { delete d.donor_ids; },
+      for (const change of [d => { delete d.parent_id; },
         d => { d.parent_id = 'missing'; }, d => { d.parent_id = 'r1_d2'; },
         d => { d.parent_id = 'r1_d3'; }, d => { d.donor_ids = ['missing']; },
         d => { d.donor_ids = ['r1_d2']; }, d => { d.donor_ids = ['r1_d3']; }]) {
@@ -254,6 +256,31 @@ async function main() {
         assert.deepEqual(result.requested_plan, plan([d]));
         assert.equal(result.source_closure_rechecked, true);
         assert.equal(h.backendCalls.length, 1);
+      }
+    });
+
+    await test('optional donors preserve native empty resolution', async () => {
+      for (const donors of [undefined, null, 'wrong-type', ['missing']]) {
+        const d = direction();
+        if (donors === undefined) delete d.donor_ids;
+        else d.donor_ids = donors;
+        const requested = plan([d]);
+        // Omission uses native rt.agent. Null/wrong type witness only the host resolver:
+        // the unchanged native response schema requires an array when the field is present.
+        const h = harness(fixture(root), {respond: () => requested,
+          ...(donors === null || typeof donors === 'string' ? {hostResponse: requested} : {})});
+        const result = await h.run();
+        assert.deepEqual(result.requested_plan, requested);
+        assert.deepEqual(result.requested_selections[0].requested_donor_ids, donors ?? null);
+        if (donors == null) {
+          assert.equal(result.status, 'resolved');
+          assert.equal(result.resolved_selections[0].requested_donor_ids, null);
+          assert.deepEqual(result.resolved_selections[0].donor_ids, []);
+          assert.deepEqual(result.resolved_selections[0].donor_refs, []);
+        } else {
+          assert.equal(result.status, 'selection_rejected');
+          assert.deepEqual(result.resolved_selections, []);
+        }
       }
     });
 

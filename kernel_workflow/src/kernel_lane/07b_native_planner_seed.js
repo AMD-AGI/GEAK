@@ -80,9 +80,9 @@ async function nativeSeededPlannerDecision() {
   for (const row of requested) {
     if (typeof row.requested_parent_id !== 'string' || !retained(row.requested_parent_id))
       errors.push({index: row.index, field: 'parent_id', error: 'missing or unavailable requested parent'});
-    if (!Array.isArray(row.requested_donor_ids)
-        || row.requested_donor_ids.some(id => typeof id !== 'string' || !retained(id)))
-      errors.push({index: row.index, field: 'donor_ids', error: 'missing or unavailable requested donors'});
+    if (row.requested_donor_ids !== null && (!Array.isArray(row.requested_donor_ids)
+        || row.requested_donor_ids.some(id => typeof id !== 'string' || !retained(id))))
+      errors.push({index: row.index, field: 'donor_ids', error: 'invalid or unavailable requested donors'});
   }
   if (errors.length) return {...result, status: 'selection_rejected', reference_errors: errors};
   // Unknown allocation is left unknown. IDs can still be resolved against the retained source set.
