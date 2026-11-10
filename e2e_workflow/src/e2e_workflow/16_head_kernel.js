@@ -573,8 +573,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
+        // Corrective routing follows the integrator's measured rejection, not the profile projection.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
@@ -850,9 +849,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
         }
       } else {
-        // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
-        // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
-        // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
+        // Route actual parity/accuracy failures to correctness and JIT/capture/host-sync failures
+        // to integration. A conditional profile estimate does not supply a corruption verdict.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
@@ -893,4 +891,3 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       `. These carry the most headroom — see the report's FLAGGED section.`);
   }
 }
-

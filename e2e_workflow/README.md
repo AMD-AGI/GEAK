@@ -366,6 +366,13 @@ profiled GPU time. It predicts workload latency only if that fraction matches th
 interval and other costs and overlap remain unchanged. Measure the workload result separately.
 The Architect reports both orderings and states which it followed.
 
+Integration and recovery also treat their Amdahl projections as diagnostics. The legacy
+`implausible_speedup_margin` option controls diagnostic reporting; it cannot override an integration
+verdict or manufacture a correctness failure. Actual quality, parity, engagement and complete
+measurement requirements remain. Removing the model-only veto removes its extra rejection of
+degenerate outputs that happen to pass sampled quality checks; those checks do not prove correctness
+for every input. Investigate a discrepancy using work completeness, timing scope and quality evidence.
+
 **Roofline is advisory and never prunes a candidate.** Estimated shapes are low-confidence and
 display-only; captured shapes with supported models can guide secondary prioritization. Matched
 counters raise confidence only for quantities with validated definitions, units and capacities.

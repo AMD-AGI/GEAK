@@ -29,6 +29,37 @@ const between = (start, end) => {
   return i === -1 || j === -1 ? null : src.slice(i, j);
 };
 
+console.log('\n# summed GPU share cannot veto a valid wall-time gain');
+const gateSrc = between('const FIXABLE_REJECT_RX', '// ---- DEEP MODE');
+ok(!!gateSrc, 'actual integration acceptance and corrective classification located');
+if (!gateSrc) process.exit(1);
+const diagnosticLogs = [];
+const gates = new Function('A', 'log', `${gateSrc}\nreturn { amdahlCeilingPct, integAccepted, gateRejectReason, rejectClass };`)(
+  {}, message => diagnosticLogs.push(message));
+// Constructed timeline: A=40 ms on one GPU, then B=60 ms concurrently on eight GPUs.
+// A's SUM share is 40/(40+8*60), although it occupies 40% of the serial wall interval.
+const sumShare = 100 * 40 / (40 + 8 * 60);
+const actualGain = 100 * ((40 + 60) / (40 / 2 + 60) - 1);
+ok(Math.abs(gates.amdahlCeilingPct(sumShare, 2) - 4) < 1e-10 && actualGain === 25,
+  'the conditional model predicts 4%, while halving A actually gives 25%');
+for (const parity_kind of ['accuracy', 'byte_exact', 'none', undefined]) {
+  const result = { gate: 'accepted', e2e_delta_pct: actualGain, output_parity: 'pass', parity_kind,
+    reason: 'complete matched measurement and declared quality passed' };
+  ok(gates.integAccepted(result, sumShare, 2), `${parity_kind}: model-only discrepancy does not reject`);
+  ok(gates.gateRejectReason(result, sumShare, 2) === result.reason,
+    `${parity_kind}: no fabricated corruption reason`);
+}
+ok(diagnosticLogs.length === 4 && diagnosticLogs.every(message => /model discrepancy alone does not change the gate/.test(message)),
+  'each discrepancy remains an advisory diagnostic for every parity kind');
+for (const reason of ['accuracy_regression', 'parity_regression', 'output_corruption']) {
+  const rejected = { gate: 'rejected', e2e_delta_pct: actualGain, output_parity: 'fail', reason };
+  ok(!gates.integAccepted(rejected, sumShare, 2), `${reason}: actual failed verdict stays rejected`);
+  ok(gates.rejectClass(gates.gateRejectReason(rejected, sumShare, 2)) === 'correctness',
+    `${reason}: real failure still reaches the correctness corrective`);
+}
+ok(!gates.integAccepted({ gate: 'incomplete' }, sumShare, 2) && !gates.integAccepted(null, sumShare, 2),
+  'incomplete and absent verdicts stay unaccepted');
+
 console.log('\n# correctness_unset_env is parsed into plain variable names');
 const envSrc = between('const CORRECTNESS_UNSET_ENV', '// The AMD authoring knowledge base');
 ok(!!envSrc, 'CORRECTNESS_UNSET_ENV / CORRECTNESS_PROBE_ROLES located');

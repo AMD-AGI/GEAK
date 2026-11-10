@@ -134,15 +134,11 @@ E2E_CHECKPOINT_LEVELS = {
     "final_pair",
 }
 
-# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
-# is treated as corruption rather than a win. Mirrors
-# IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
-# ceiling); both sides MUST agree or the recovery path banks what the live path
-# refuses, so this is the SINGLE source of truth: map_args() forwards it to the
-# JS workflow (A.implausible_speedup_margin) and the recovery path reads the same
-# constant. Overridable via env for tuning; validated finite/non-negative (an
-# accepted nan/inf/negative would silently disable the guard) exactly like
-# SAME_CONFIG_DIVERGENCE_WARN_PCT below.
+# Legacy configuration name for the advisory Amdahl-discrepancy threshold.
+# A value of 1.0 reports gains above twice the conditional estimate; it never
+# changes acceptance. GPU-time share need not be an elapsed critical-path share.
+# map_args() forwards this validated value to the JS diagnostic so both paths
+# retain the existing environment/argument contract and use the same threshold.
 try:
     IMPLAUSIBLE_SPEEDUP_MARGIN = float(
         os.environ.get("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", "1.0")
@@ -995,11 +991,8 @@ def map_args(
         run_id = uuid.uuid4().hex[:8]
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
-    # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
-    # path on ONE margin: forward the (validated) Python value so the workflow's
-    # A.implausible_speedup_margin can never silently drift from the constant the
-    # recovery path applies. See IMPLAUSIBLE_SPEEDUP_MARGIN above. Forwarded
-    # unconditionally (not gated on a handoff key) so both sides always agree.
+    # Keep live and recovery diagnostics on the same advisory threshold. Preserve
+    # the legacy argument name; this margin no longer changes eligibility.
     ps_args["implausible_speedup_margin"] = IMPLAUSIBLE_SPEEDUP_MARGIN
     # Bridge the upstream TraceLens / kernel-agent artifacts INTO the workflow args
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
@@ -4016,10 +4009,11 @@ def _ir_float(ir: dict, *keys: str) -> float:
 
 
 def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
-    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+    """Conditional Amdahl gain estimate; the legacy name is not an E2E bound.
 
-    Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
-    missing, so an unknown profile never flags anything (fail-open).
+    GPU-time share may use summed device durations rather than elapsed time.
+    Port of ``amdahlCeilingPct`` in e2e_workflow.js, retaining its arithmetic.
+    ``inf`` when inputs are unknown, so no discrepancy is reported.
     """
     share = max(0.0, min(1.0, (pct_gpu_time or 0.0) / 100.0))
     speedup = isolated if (isolated and isolated > 1.0) else 1.0
@@ -4028,29 +4022,9 @@ def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
     return (1.0 / (1.0 - share * (1.0 - 1.0 / speedup)) - 1.0) * 100.0
 
 
-def _parity_is_soft(ir: dict) -> bool:
-    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
-
-    Byte-exact parity is a hard correctness guarantee, so a speedup above the
-    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
-    degenerate output, so an impossible speedup there is treated as corruption.
-
-    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
-    back to the run's ``accuracy_gate`` arg when the label is absent or
-    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
-    candidate is therefore treated as soft — the guard still needs the delta to
-    exceed twice the ceiling before it fires, and a missing profile makes the
-    ceiling infinite, so this cannot drop a win on schema grounds alone.
-    """
-    kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
-    if kind in ("byte_exact", "none"):
-        return False
-    return True
-
-
-def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
-    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
-    if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
+def _has_amdahl_model_discrepancy(delta_pct: float, ceiling_pct: float) -> bool:
+    """Report a model discrepancy for any parity kind, without judging correctness."""
+    if not math.isfinite(ceiling_pct):
         return False
     return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
 
@@ -4065,9 +4039,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     two — a cumulative numerator over a local denominator — describes no A/B
     that was ever run.
 
-    Eligibility mirrors what the live workflow requires before it banks a
-    candidate (``integAccepted`` + the parity check), so a candidate the live
-    path would refuse cannot slip in through recovery.
+    Eligibility retains the integrator's actual gate, parity and completion
+    checks. An Amdahl-model discrepancy is diagnostic only and does not turn an
+    accepted measurement into a correctness failure.
     """
     records: list[dict] = []
     seen: set[str] = set()
@@ -4086,7 +4060,7 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
             ceiling_pct = _amdahl_ceiling_pct(
                 _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
             )
-            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            model_discrepancy = _has_amdahl_model_discrepancy(delta_pct, ceiling_pct)
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
             if separated is None:
@@ -4102,10 +4076,11 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                 "ref_med": _ir_float(ir, "ref_med", "ref_median_tok_s"),
                 "cand_med": _ir_float(ir, "cand_med", "cand_median_tok_s"),
                 "stack_tput": _ir_float(ir, "e2e_throughput_tok_s"),
+                # Legacy field name: conditional estimate, not an E2E bound.
                 "amdahl_ceiling_pct": (
                     round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
                 ),
-                "implausible": implausible,
+                "amdahl_model_discrepancy": model_discrepancy,
                 "output_parity": parity or None,
                 "separated": separated,
                 # winner_kind in {"env","config","flags"} => config-only.
@@ -4115,7 +4090,6 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     and delta_pct > 0.0
                     and parity != "fail"
                     and ir.get("ab_complete") is not False
-                    and not implausible
                 ),
             })
     return records
@@ -4404,10 +4378,14 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
                 round(delta_pct / best["amdahl_ceiling_pct"], 2)
                 if best["amdahl_ceiling_pct"] else None
             ),
+            "amdahl_model_note": (
+                "Legacy ceiling fields are conditional GPU-time estimates, not E2E bounds. "
+                "Discrepancies are advisory and do not establish output corruption or change eligibility."
+            ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
-            "excluded_as_implausible": [
-                c["short_name"] for c in candidates if c["implausible"]
+            "amdahl_model_discrepancies": [
+                c["short_name"] for c in candidates if c["amdahl_model_discrepancy"]
             ] or None,
         },
     }

@@ -363,44 +363,31 @@ const SURGICAL_FIX = String(A.surgical_fix != null ? A.surgical_fix : 'true') ==
 const FIXABLE_REJECT_RX = /cuda_graph_capture_unsafe|no[_ ]?binary|NO_BINARY_FOR_GPU|hipErrorNoBinaryForGpu|capture[_ ]?(unsafe|hang)|host[_ ]?sync|graph[_ ]?capture|no[_ ]?rebind[_ ]?seam|no[_ ]?engagement|not[_ ]?engaged|signature[_ ]?mismatch|wrong[_ ]?seam/i;
 // ---- CORRECTNESS-class reject (auto-correct) --------------------------------------------------------
 // A SECOND fix-and-retryable class: the candidate ENGAGED and beat the isolated oracle but produces the
-// WRONG output on the LIVE path (parity/accuracy failure) — OR posts an IMPLAUSIBLE e2e speedup (faster
-// only because it computes degenerate/less work). Distinct from the integration-POSTURE class above: the
+// WRONG output on the LIVE path (parity/accuracy failure). Distinct from the integration-POSTURE class above: the
 // kernel over-fit the single captured snapshot, assuming input-buffer identity / contents / routing are
 // stable across calls (e.g. a cache keyed by data_ptr(), a stale reused index/mask, a persistent-state
 // assumption). A single-snapshot isolated unittest can NEVER catch this (fixed tensors → any such cache
 // is always "correct"), so a blind re-run reproduces the bug; the corrective loop below feeds this
 // diagnosis back so the re-author actually removes the over-fit. GENERIC — no kernel/model specifics.
 const CORRECTNESS_REJECT_RX = /parit|corrupt|mismatch|diverge|garbage|degener|\bnan\b|\binf\b|accuracy[_ ]?regress|wrong[_ ]?output|incorrect|implausible/i;
-// Amdahl ceiling: the MOST e2e speedup an op that is `pct`% of GPU time can yield at isolated speedup S is
-// 1/(1 - (pct/100)(1 - 1/S)). A measured e2e delta far above this ceiling can be the fingerprint of a
-// kernel doing degenerate/less work (corruption). Uses ONLY the profile pct + isolated speedup.
-const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0); // headroom over the theoretical ceiling before flagging (1.0 = must exceed 2x the ceiling)
+// Conditional Amdahl projection. Summed device-duration share is not a critical wall-time fraction;
+// exceeding this estimate cannot establish corruption or override measured correctness/quality.
+// Keep the existing argument as a diagnostic threshold (1.0 means twice the modeled gain).
+const IMPLAUSIBLE_SPEEDUP_MARGIN = parseFloat(A.implausible_speedup_margin != null ? A.implausible_speedup_margin : 1.0);
 function amdahlCeilingPct(pct_gpu_time, isolated) {
   const p = Math.max(0, Math.min(1, (pct_gpu_time || 0) / 100));
   const s = (isolated && isolated > 1) ? isolated : 1;
   if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
   return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
 }
-// PARITY-AWARE guard (fixes the false-positive that would DROP real wins). The Amdahl ceiling is derived
-// from an imperfect profile `pct_gpu_time`; a genuine win can legitimately exceed it when the profile
-// under-counts the op, or when the change has system-wide effects (memory pressure / batching / a config
-// swap). So the implausible-speedup verdict is applied ONLY when the acceptance rests on the SOFT gate —
-// a sampled task-accuracy probe (quant / `accuracy_gate=gsm8k`), where a degenerate output could squeak
-// past a small sample. A BYTE-EXACT parity pass is a HARD correctness guarantee → its speedup is real
-// even above the ceiling → never flagged. This removes the false-positive on byte-exact (incl. config
-// env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
-// integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
-function parityIsSoft(integ) {
-  const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
-  if (pk === 'accuracy') return true;
-  if (pk === 'byte_exact' || pk === 'none') return false;
-  return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
-}
-function isImplausibleSpeedup(pct_gpu_time, isolated, integ) {
-  if (!parityIsSoft(integ)) return false;              // hard byte-exact correctness -> trust the speedup
+function logAmdahlDiagnostic(pct_gpu_time, isolated, integ) {
   const ceilPct = amdahlCeilingPct(pct_gpu_time, isolated);
-  if (!Number.isFinite(ceilPct)) return false;
-  return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
+  const deltaPct = integ && integ.e2e_delta_pct;
+  if (Number.isFinite(ceilPct) && Number.isFinite(deltaPct)
+      && deltaPct > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9) {
+    log(`  [amdahl diagnostic] measured +${deltaPct.toFixed(1)}% exceeds conditional +${ceilPct.toFixed(1)}% estimate. ` +
+      'Check timing boundary, overlap, work completeness and quality evidence; model discrepancy alone does not change the gate.');
+  }
 }
 // Classify a reject reason into a fix-and-retry class ('' = terminal, not auto-correctable).
 // POSTURE IS TESTED FIRST. CORRECTNESS_REJECT_RX contains a bare `mismatch`, which used to swallow
@@ -417,19 +404,15 @@ function rejectClass(reason) {
   if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
-// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
-// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
-// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
+// Measured integration verdicts govern acceptance. The profile projection is advisory for every
+// parity kind; even byte-exact checks cover only their sampled inputs.
 function integAccepted(integ, pct_gpu_time, isolated) {
-  return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-    && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
+  const accepted = !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack'));
+  if (accepted) logAmdahlDiagnostic(pct_gpu_time, isolated, integ);
+  return accepted;
 }
-// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
-// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
+// Preserve the integrator's evidence-backed reason; a model discrepancy is not a correctness failure.
 function gateRejectReason(integ, pct_gpu_time, isolated) {
-  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-      && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
-    return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
   return integ ? (integ.reason || integ.gate || '') : '';
 }
 // ---- DEEP MODE (opt-in, default OFF) ----------------------------------------------------------------
@@ -546,4 +529,3 @@ const KB_ARGS = {
 };
 // Same off-spelling set the kernel layer accepts; an off run must stay off everywhere.
 const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim().toLowerCase());
-

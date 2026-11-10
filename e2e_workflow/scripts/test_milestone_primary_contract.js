@@ -55,7 +55,7 @@ async function correction(result, workloadPath = 'HYPOTHETICAL.workload.json', c
     safeAgent: async () => { calls.surgeon++; return { fixed: true, final_patch: 'legacy.patch', final_geomean: 9 }; },
     fastBoundedWorkflow: async (reference, inputs) => { calls.native.push(inputs); return result; },
     runIntegrateBothLegs: async (intro, inputs) => { calls.integrations.push(inputs); return { gate: 'accepted', e2e_throughput_tok_s: 101 }; },
-    isImplausibleSpeedup: (percentage, primary) => { calls.guards.push(primary); return false; }, rejectClass: () => 'integration' };
+    integAccepted: (value, percentage, primary) => { calls.guards.push(primary); return value.gate === 'accepted'; }, rejectClass: () => 'integration' };
   vm.runInNewContext(helperSource.slice(primaryStart, correctiveEnd), context, { timeout: 1000 });
   const value = await context.tryCorrectiveReauthor({ short_name: 'HYPOTHETICAL', workload_path: workloadPath,
     ...(callerBasis === undefined ? {} : { workload_aligned: callerBasis }),
@@ -141,7 +141,7 @@ async function main() {
   check(native.calls.integrations[0].KERNEL_RESULT.isolated_geomean, 0.9, 'corrective integrator replaces stale original geomean diagnostic');
   check(native.calls.integrations[0].KERNEL_RESULT.code_patch, HYPOTHETICAL.final_patch, 'corrective code patch propagates');
   check(native.calls.integrations[0].KERNEL_RESULT.final_patch, HYPOTHETICAL.final_patch, 'corrective final patch propagates');
-  check(native.calls.guards[0], 1.25, 'corrective plausibility guard receives primary');
+  check(native.calls.guards[0], 1.25, 'corrective integration diagnostic receives primary');
   check(native.value.isolated, 1.25, 'corrective return carries primary');
   check(native.value.isolated_geomean, 0.9, 'corrective return carries matching diagnostic');
   for (const callerBasis of [undefined, true, null]) {

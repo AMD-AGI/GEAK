@@ -3,14 +3,12 @@
 
 Run:  python3 -m pytest interface/test_run_e2e_margin.py -q
 
-The JS live-path guard (``A.implausible_speedup_margin`` in e2e_workflow.js) and
-THIS runner's recovery path must apply the SAME margin, or a speedup the live
-path accepts could be re-flagged (or vice versa) on recovery. run_e2e.py makes
-the Python constant the single source of truth: it validates the env-overridable
-value (finite, non-negative -- an accepted nan/inf/negative would silently
-disable the guard) and ``map_args`` forwards THAT value to the workflow
-unconditionally. These tests pin both halves so a refactor cannot reintroduce
-Python/JS drift or let a bad env value through.
+The JS live path and this runner's recovery path use the same advisory threshold,
+retaining the legacy ``A.implausible_speedup_margin`` configuration name. It no
+longer changes acceptance. run_e2e.py validates the env-overridable value (finite,
+non-negative), and ``map_args`` forwards that value to the workflow unconditionally.
+These tests preserve the configuration contract without treating the model as a
+correctness gate.
 """
 from __future__ import annotations
 
@@ -62,8 +60,7 @@ def test_zero_is_a_valid_margin(monkeypatch) -> None:
 
 @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "-0.5", "abc", ""])
 def test_non_finite_negative_or_garbage_falls_back_to_one(monkeypatch, bad) -> None:
-    """A value that would silently disable the guard must fall back to 1.0, and
-    the forwarded value must be that safe fallback (never nan/inf/negative)."""
+    """Keep the existing fallback and forwarded value (never nan/inf/negative)."""
     rx = _load_with_env(monkeypatch, bad)
     assert rx.IMPLAUSIBLE_SPEEDUP_MARGIN == 1.0
     assert math.isfinite(rx.IMPLAUSIBLE_SPEEDUP_MARGIN)

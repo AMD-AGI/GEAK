@@ -255,22 +255,44 @@ def test_a_stack_only_salvage_is_reported_as_provisional(tmp_path):
     assert out["validation_evidence"]["recovery"]["selected"] == "gemm1"
 
 
-def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
-    """The live path refuses to bank a soft-gated candidate whose delta exceeds
-    twice its theoretical ceiling (corruption doing less work looks like a win).
-    Recovery must not be a way around that check."""
-    eval_dir = tmp_path / "e2e_implausible"
-    # 25.5% GPU time at 1.0338x isolated caps the e2e gain at ~0.84%.
-    _candidate(eval_dir, "corrupt", parity_kind="accuracy", pct_gpu_time=25.5,
-               isolated_speedup=1.0338, e2e_delta_pct=1.95,
-               ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
+@pytest.mark.parametrize("parity_kind", ["accuracy", "byte_exact", "none", None])
+def test_sum_gpu_share_does_not_veto_accepted_wall_time_improvement(
+    tmp_path, monkeypatch, parity_kind
+):
+    """A correct fixed-work DAG can exceed the SUM-share model without losing work.
 
-    assert rx._recover_best_intermediate_win(eval_dir) is None
+    A takes 40 ms on one GPU, then B takes 60 ms concurrently on eight GPUs.
+    A's SUM share is 40/520; speeding A up 2x gives 100/80 = 1.25x throughput.
+    The conditional model predicts 4%, but that is not the elapsed-time bound.
+    """
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 1.0)
+    eval_dir = tmp_path / "e2e_sum_share"
+    _candidate(eval_dir, "critical_path", parity_kind=parity_kind,
+               pct_gpu_time=100 * 40 / (40 + 8 * 60), isolated_speedup=2.0,
+               e2e_delta_pct=25.0, ref_med=1000.0, cand_med=1250.0,
+               e2e_throughput_tok_s=1250.0)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf is not None
+    assert wf["throughput_speedup"] == pytest.approx(1.25)
+    evidence = wf["recovery_evidence"]
+    assert evidence["candidates_eligible"] == 1
+    assert evidence["amdahl_ceiling_pct"] == pytest.approx(4.0)
+    assert evidence["delta_over_amdahl_ceiling"] == pytest.approx(6.25)
+    assert evidence["amdahl_model_discrepancies"] == ["critical_path"]
+    assert "conditional" in evidence["amdahl_model_note"]
+    assert "excluded_as_implausible" not in evidence
+
+    # The compatible margin changes only the diagnostic, not the accepted result.
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 100.0)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["throughput_speedup"] == pytest.approx(1.25)
+    assert wf["recovery_evidence"]["amdahl_model_discrepancies"] is None
 
 
-def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
-    """The ceiling comes from an imperfect profile, so a hard correctness
-    guarantee outranks it — the guard only applies where parity was waived."""
+def test_byte_exact_accept_keeps_conditional_model_diagnostic(tmp_path, monkeypatch):
+    """The sampled parity label does not establish the model's applicability."""
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 1.0)
     eval_dir = tmp_path / "e2e_byte_exact"
     _candidate(eval_dir, "real", parity_kind="byte_exact", pct_gpu_time=5.09,
                isolated_speedup=1.1362, e2e_delta_pct=2.935,
@@ -280,18 +302,30 @@ def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
     wf = rx._recover_best_intermediate_win(eval_dir)
     assert wf is not None
     assert wf["recovery_evidence"]["delta_over_amdahl_ceiling"] == pytest.approx(4.78, abs=0.02)
+    assert wf["recovery_evidence"]["amdahl_model_discrepancies"] == ["real"]
+
+
+@pytest.mark.parametrize("gate", ["rejected", "incomplete"])
+def test_model_discrepancy_does_not_override_actual_gate(tmp_path, gate):
+    eval_dir = tmp_path / "e2e_quality_gate"
+    _candidate(eval_dir, "failed_quality", gate=gate, reason="accuracy_regression",
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0,
+               e2e_delta_pct=25.0)
+    assert rx._recover_best_intermediate_win(eval_dir) is None
 
 
 def test_a_parity_failure_is_never_salvaged(tmp_path):
     eval_dir = tmp_path / "e2e_parity"
-    _candidate(eval_dir, "broken", output_parity="fail", e2e_delta_pct=12.0)
+    _candidate(eval_dir, "broken", output_parity="fail", e2e_delta_pct=25.0,
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0)
     assert rx._recover_best_intermediate_win(eval_dir) is None
 
 
 def test_an_incomplete_ab_is_never_salvaged(tmp_path):
     """Only one leg was measured, so there is no ratio to report."""
     eval_dir = tmp_path / "e2e_incomplete"
-    _candidate(eval_dir, "half_measured", ab_complete=False, e2e_delta_pct=12.0)
+    _candidate(eval_dir, "half_measured", ab_complete=False, e2e_delta_pct=25.0,
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0)
     assert rx._recover_best_intermediate_win(eval_dir) is None
 
 

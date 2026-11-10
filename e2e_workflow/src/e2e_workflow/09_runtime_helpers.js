@@ -657,8 +657,8 @@ async function tryCorrectiveReauthor(spec) {
   if (!eligible) return { banked: false };
   const curTput = (spec.cur && spec.cur.tput) || 0;
   // The corrective instruction is CLASS-SPECIFIC. `integration` = the posture is wrong (JIT/capture/
-  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy fail or an
-  // implausible speedup), i.e. the kernel over-fit the single captured snapshot. Both KEEP the
+  // host-sync); `correctness` = the output is wrong on the live path (parity/accuracy failure),
+  // possibly because the kernel over-fit the single captured snapshot. Both KEEP the
   // algorithm + isolated win and fix only the defect. GENERIC — the text describes the failure CLASS,
   // never this specific kernel/model.
   const INTEGRATION_FIX_TASK =
@@ -686,7 +686,7 @@ async function tryCorrectiveReauthor(spec) {
     `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
     `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
     `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
-    `An implausible speedup (far above the op's Amdahl ceiling) means it is doing less/degenerate work — treat as wrong.`;
+    `A gain above the conditional Amdahl projection alone does not establish wrong output; preserve actual correctness evidence.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
     log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
     // TIER 1 — lightweight SURGICAL patch (one agent, minutes). Most rejects are a tiny seam bug.
@@ -740,32 +740,25 @@ async function tryCorrectiveReauthor(spec) {
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
-    const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    // Implausible-speedup guard: a "win" whose e2e delta blows past the op's Amdahl ceiling is corruption
-    // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
-    // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
-    const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
-      && isImplausibleSpeedup(pctForGuard, fixedIsolated, integ2);
-    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
+    const pctForDiagnostic = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
+    if (ab2 && integAccepted(integ2, pctForDiagnostic, fixedIsolated) && integ2.e2e_throughput_tok_s > curTput) {
       // Carry the CORRECTED patch out to the caller's bankAccepted. The gated KERNEL_RESULT at the
       // call site still holds the broken kernel, and recording that into the KB would publish a
       // patch that was rejected on this very box as if it were the win.
       return { banked: true, integ: integ2, isolated: fixedIsolated, isolated_geomean: fix.final_geomean ?? null, patch: fix.final_patch,
         kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || '' };
     }
-    reason = implausible2
-      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fixedIsolated).toFixed(1)}% — corruption)`
-      : ((integ2 && (integ2.reason || integ2.gate)) || reason);
+    reason = (integ2 && (integ2.reason || integ2.gate)) || reason;
     // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
     // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no
-    // longer failing) and it was not an implausible speedup, the ONLY remaining problem is throughput/
-    // do-no-harm — more re-authoring cannot create Amdahl headroom that isn't there, so STOP now.
-    if (ab2 && integ2.output_parity !== 'fail' && !implausible2) {
-      log(`  ${spec.short_name}: corrective produced a CORRECT kernel with no e2e win (do-no-harm: ${reason}) — stopping; throughput headroom for this op is exhausted.`);
+    // longer failing), stop this corrective on the measured do-no-harm result. It does not establish
+    // that every alternative has exhausted the region's performance opportunity.
+    if (ab2 && integ2.output_parity !== 'fail') {
+      log(`  ${spec.short_name}: corrective produced no e2e win without a reported parity failure (do-no-harm: ${reason}) — stopping this corrective.`);
       break;
     }
     log(`  ${spec.short_name}: corrective still rejected (${reason}).`);
-    fixClass = implausible2 ? 'correctness' : rejectClass(reason);
+    fixClass = rejectClass(reason);
     if (fixClass === '') break;   // new failure not auto-correctable -> stop retrying
     // Progressive: the NEXT attempt builds on this attempt's (partially) fixed kernel, not the original.
     spec.kernel_eval_dir = fix.eval_dir || spec.kernel_eval_dir;
