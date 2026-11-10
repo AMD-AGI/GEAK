@@ -140,12 +140,27 @@ const E2E_LEARNED_KB_ENABLED = !GPU_FAMILY.isolate;
 const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore;
 // E2E-only facts per GPU family (GPU_FAMILIES name). A family with no entry gets none of them, so its
 // prompts are unchanged.
-//   vllmOnly     vLLM is the only serving backend validated on the family: it is the default, and model
-//                mode refuses any other (the R9700 / R9600D rule below is product policy)
-//   noFp8Matrix  no fp8 matrix instruction: the fused-fp8 prompts name an in-register upcast instead
+//   vllmOnly         vLLM is the only serving backend validated on the family: it is the default,
+//                    and model mode refuses any other (the R9700 / R9600D rule below is product policy)
+//   noFp8Matrix      no fp8 matrix instruction: the fused-fp8 prompts name an in-register upcast
+//   archConstraints  what the MI-series role files and e2e knowledge get wrong on the family, given
+//                    to every E2E role (ARCH_CONSTRAINTS) and the three hand-built DEEP prompts
 const E2E_FAMILY = {
-  'RDNA 3.5': { vllmOnly: true, noFp8Matrix: true },
+  'RDNA 3.5': {
+    vllmOnly: true,
+    noFp8Matrix: true,
+    archConstraints: `${EXPECTED_GFX}: WMMA and wave32, no MFMA (matrix_instr_nonkdim / kpack and MFMA tile ` +
+      'tables do not apply); no fp8 matrix instruction (an fp8 GEMM saves bytes only); leave ' +
+      'VLLM_ROCM_USE_AITER* unset (vLLM enables aiter only on gfx942 / gfx950, and =1 makes MoE backend ' +
+      'selection raise); the aiter / CK tuning DBs and gemm_tuning/*.md recipes are MI-series calibrated; ' +
+      `take roofline peaks only from roofline_tools.py --peaks ${EXPECTED_GFX} --cu <rocminfo CU count> ` +
+      '(the roofline skill), and if it reports no calibrated peaks set no roofline target (target_geomean 0); ' +
+      'probe a backend on this box before using it ' +
+      `(${KERNEL_WF_DIR}/knowledge/amd_ryzen.md §2).`,
+  },
 }[GPU_FAMILY.name] || {};
+const ARCH_CONSTRAINTS = E2E_FAMILY.archConstraints || '';
+const DEEP_ARCH_NOTE = ARCH_CONSTRAINTS ? ` ARCH_CONSTRAINTS: ${ARCH_CONSTRAINTS} ` : '';
 // The fp8 matrix op the three fused-fp8 prompts name; every family with one keeps the original words.
 const FP8_MMA = E2E_FAMILY.noFp8Matrix ? 'fp8-weight (upcast in registers)' : `fp8 ${MATRIX_CORE_NAME}`;
 
@@ -1689,6 +1704,7 @@ function roleAgent(role, phase, intro, inputs) {
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
+    ...(ARCH_CONSTRAINTS ? { ARCH_CONSTRAINTS } : {}),
     // Only surfaced on a trace replay.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
@@ -4756,7 +4772,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) };
       const anchor = await safeAgent(
         `You are the ROOFLINE ANCHOR + shared-KB bootstrapper for DEEP cross-backend optimization of head op ${h.short_name} (${ext.op_kind}). ` +
-        `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth). ` +
+        `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth).${DEEP_ARCH_NOTE} ` +
         `DO: (a) mkdir -p ${deepDir}; (b) compute the ROOFLINE ceiling per case (compute- vs memory-bound, target ms/case + an overall SOTA geomean ~80-90% of roofline); ` +
         `(c) bootstrap ${sharedKb} (markdown) with sections: Roofline target; Current best per backend (table backend|best geomean|technique|wave — empty now); Techniques that WORK (technique -> measured effect -> source); Dead-ends (scoped, evidence); Cross-backend assignments (borrow); Open hypotheses. ` +
         (E2E_LEARNED_KB_ENABLED
@@ -4837,7 +4853,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const ls = allLanes.filter(l => l.head.short_name === p.h.short_name && (l.lastEval || l.ran > 0));
         if (!ls.length) continue;
         await safeAgent(
-          `KB CURATOR [deep ${tag}] for ${p.h.short_name} (${p.lanes[0] ? p.lanes[0].ext.op_kind : ''}). Per-lane vs-live best: ${JSON.stringify(ls.map(l => ({ uid: l.uid, lang: l.lang, vs_live: l.best, active: l.active, eval_dir: l.lastEval })))}. ` +
+          `KB CURATOR [deep ${tag}] for ${p.h.short_name} (${p.lanes[0] ? p.lanes[0].ext.op_kind : ''}). Per-lane vs-live best: ${JSON.stringify(ls.map(l => ({ uid: l.uid, lang: l.lang, vs_live: l.best, active: l.active, eval_dir: l.lastEval })))}. ${DEEP_ARCH_NOTE}` +
           `For each lane with an eval_dir, READ its insight_log.md + tech_lead_report.md; extract what WORKED (measured), what FAILED (scoped dead-end), and any technique another lane should borrow. ` +
           `REWRITE ${p.sharedKb} (keep sections; "Current best per backend" one row per lane; every technique a MEASURED effect + SOURCE; disproven -> Dead-ends; fill "Cross-backend assignments (borrow)" with concrete "lane X found Y -> lane Z try W"). ` +
           `ALSO append cross-KERNEL transferable techniques to ${GLOBAL_KB} (techniques that should generalize to OTHER head ops/backends in this run; one line each, with the source uid). Keep both concise/high-signal. Return {ok,summary}.`,
@@ -4928,7 +4944,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         }
       }
       const fb = await safeAgent(
-        `You are the e2e FEEDBACK + HARNESS refiner [deep g${e2eGateCount}]. For the candidates just gated, write ${EVAL_DIR}/deep_head/e2e_feedback.md (per candidate: e2e delta; ENGAGED-live vs eager-fell-back under cudagraph; cudagraph/memory/decode behavior; parity/accuracy; ROOT CAUSE of any isolated->e2e gap). ` +
+        `You are the e2e FEEDBACK + HARNESS refiner [deep g${e2eGateCount}]. For the candidates just gated, write ${EVAL_DIR}/deep_head/e2e_feedback.md (per candidate: e2e delta; ENGAGED-live vs eager-fell-back under cudagraph; cudagraph/memory/decode behavior; parity/accuracy; ROOT CAUSE of any isolated->e2e gap). ${DEEP_ARCH_NOTE}` +
         `Then refresh ${EVAL_DIR}/deep_head/HARNESS_ADDENDUM.md so the isolated target ALIGNS with e2e WITHOUT touching the frozen oracle: (a) e2e-critical decode M-buckets to weight; (b) whether a cudagraph capture/replay measurement wrapper is needed; (c) hard gates (decode-no-regress, memory cap, graph-safe) so an isolated "win" that is all-NUL/eager under graph is caught EARLY. Return {ok, feedback_path, addendum_path}.`,
         { phase: 'HeadKernel', label: `feedback g${e2eGateCount}`, schema: OKV });
       gateFeedbackPath = (fb && fb.feedback_path) || `${EVAL_DIR}/deep_head/e2e_feedback.md`;
