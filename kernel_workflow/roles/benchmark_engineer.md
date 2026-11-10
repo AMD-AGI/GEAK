@@ -110,7 +110,9 @@ For `--correctness` in the no-runner case (no oracle at all), compare to a trust
 Verify, and later-wave directories. Build from the CURRENT workspace (`Path.cwd()`, since all
 commands run there), never from an absolute parent workspace embedded during harness generation.
 Keep generated overlays, source mirrors and build metadata under `build/` so materialization drops
-them. A fresh `.torch_ext` alone does not fix stale source links elsewhere.
+them. A fresh `.torch_ext` alone does not fix stale source links elsewhere. Never read `_cand_overlay/`
+as an input: it is generated (`harness_lib.build_candidate_overlay`) and the original task, which the
+Director's validation copies, has none; take the binding from `meta.candidate_bind`.
 
 For every target source override in a generated builder:
 
