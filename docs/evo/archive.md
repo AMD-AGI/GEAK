@@ -101,6 +101,9 @@ retained source. A ledger row can add `question_id`, `next_question`, `source_id
 stays stable when revisiting the same question. Each update supplies its complete
 current interpretation; omitted fields remain unknown.
 
+`revision` is an append sequence across the archive's questions, not a separate
+counter for each question.
+
 The archive retains these rows unchanged in append-only `question_revisions`,
 alongside source references and their status at the time of linking. The planner
 receives a compact latest-question index and may set `DIRECTION.question_id` to
@@ -120,6 +123,18 @@ when an imported source has the same ID: older planner IDs and `ORIGINAL` can
 refer to another source namespace. The agent must inspect and relink them in a
 new revision. Question context follows the existing retained-source visibility
 rule; an empty archive does not add evolutionary guidance to the initial plan.
+
+When this option is enabled for a publishing population lineage, each immutable
+checkpoint context includes the `question_revisions` available at publication.
+`question_state_scope` records the origin lineage, checkpoint round, archive and
+last linked round. Publication precedes the current round's memory update: a
+checkpoint does not include questions written afterwards and is never refreshed
+to add them. Question identity includes the origin lineage, checkpoint,
+`question_id` and revision; a peer's local IDs must not be treated as local sources.
+The context can be read through its existing `reported_context_ref`. Questions
+remain author interpretations, and their linked sources and evidence are
+unavailable to peers unless separately shared. Qualification of the checkpoint
+does not qualify those other sources.
 
 ## Native observations and reported rows
 

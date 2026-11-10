@@ -3822,8 +3822,22 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         deliveryRef = {path: delivery, sha256: deliveryHash, base: 'ORIGINAL'};
       } catch (error) { log(`[population] checkpoint r${round} retained without an ORIGINAL delivery patch: ${String(error)}`); }
       let reported = null, reportedRef = null;
-      if (winner?.reported_context) {
-        reported = {...winner.reported_context,
+      if (winner?.reported_context || questionsEnabled) {
+        reported = {...winner?.reported_context,
+          ...(questionsEnabled ? {
+            // Copy only the ledger revisions present now. Publication precedes
+            // this round's memory update; an immutable context is never refreshed.
+            question_revisions: questionRevisions,
+            question_state_scope: {
+              lineage_id: population.id, checkpoint_round: round,
+              origin_archive_ref: {path: archive, field: 'question_revisions'},
+              last_linked_after_round: questionRevisions.length
+                ? questionRevisions[questionRevisions.length - 1].linked_after_round : null,
+              authority: 'author_reported_interpretation_only',
+              identity: 'Question identity is origin lineage, checkpoint, question_id and revision; local IDs are not peer IDs.',
+              timing: 'Snapshot of revisions available at checkpoint publication, before the current-round memory update.',
+              source_scope: 'Linked sources and evidence stay in the origin archive unless separately shared. Checkpoint qualification applies only to the published source.'},
+          } : {}),
           published_source_binding: {lineage_id: population.id, round, source_id: checked?.source_id || null,
             source_tree: retainedTree, patch_ref: {path: patch, sha256: hash}},
           evidence_ref_scope: 'Paths quoted inside author reports belong to the origin lineage. They are unavailable locally unless separately shared; only this shared context artifact and published patch have shared custody.'};

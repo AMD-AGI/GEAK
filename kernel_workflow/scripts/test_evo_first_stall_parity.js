@@ -500,6 +500,53 @@ const FALLBACK = 'Development fallback';
     assert.equal(replan.components['inputs.STOP_NOT_PERMITTED'].state, 'present');
     console.log('  ok: planner observer ON/OFF prompt/call parity, frozen states and eval/logical scope');
   }
+  {
+    // Actual publication occurs before memory. Later ledger updates must not
+    // rewrite immutable peer contexts or change the delivered source/score.
+    const results = [];
+    for (const enabled of [false, true]) {
+      const name = `published_questions_${enabled}`;
+      const r = await runMode('evo', {...SCENARIOS[0], name,
+        args: {evolution_start: 'search_start', evolution_question_state: enabled},
+        memory: label => ({insights: [], ledger: [{question_id: 'q-one',
+          next_question: label.endsWith('r1') ? 'first premise' : 'revised premise',
+          source_ids: ['r1_d1', 'missing-source'], development_tip_id: 'r1_d1',
+          evidence_refs: ['/unavailable/author-evidence.json']}]})}, TEMPLATE);
+      assert.equal(r.error, null, r.error);
+      const run = path.join(OUT, 'runs', name, 'evo');
+      const published = round => JSON.parse(fs.readFileSync(path.join(run,
+        'population/lane', `r${round}.json`), 'utf8'));
+      results.push({speedup: r.result.final_speedup, source_tree: published(2).source_tree});
+      const context = round => {
+        const ref = published(round).reported_context_ref;
+        const raw = fs.readFileSync(ref.path, 'utf8');
+        assert.equal(sha(raw), ref.sha256, 'published context hash remains exact after later memory');
+        return JSON.parse(raw);
+      };
+      if (!enabled) {
+        assert.equal(published(0).reported_context_ref, null);
+        assert.equal(Object.hasOwn(context(2), 'question_revisions'), false);
+        continue;
+      }
+      assert.deepEqual(context(0).question_revisions, []);
+      assert.deepEqual(context(1).question_revisions, [], 'current-round memory is not published early');
+      const c = context(2), archive = JSON.parse(fs.readFileSync(path.join(run,
+        'eval/evolution/archive.json'), 'utf8'));
+      assert.equal(archive.question_revisions.length, 2);
+      assert.deepEqual(c.question_revisions, archive.question_revisions.slice(0, 1),
+        'published question revisions are verbatim and contain only the earlier epoch');
+      assert.equal(c.question_state_scope.lineage_id, 'lane');
+      assert.equal(c.question_state_scope.checkpoint_round, 2);
+      assert.equal(c.question_state_scope.last_linked_after_round, 1);
+      assert.equal(c.question_revisions[0].source_refs[0].verified, false,
+        'an unverified retained alternative is not qualified by checkpoint publication');
+      assert.match(c.question_revisions[0].source_refs[1].unavailable, /no such entry/);
+      assert.equal(c.question_revisions[0].reported.next_question, 'first premise');
+      assert.match(c.question_state_scope.source_scope, /only to the published source/);
+    }
+    assert.deepEqual(results[0], results[1]);
+    console.log('  ok: published question snapshots preserve epoch, source scope and delivery');
+  }
   fs.rmSync(OUT, {recursive: true, force: true});
   console.log('PASS: EVO stays byte-identical to greedy until its first non-improving round, then evolves from that incumbent. CPU fixture only.');
 })().catch(error => { console.error(error); process.exit(1); });
