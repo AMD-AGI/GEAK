@@ -266,6 +266,23 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(result["verified"], "partial")
         self.assertFalse(result["exact_shape_present"])
 
+    def test_mixed_prefill_probe_matches_total_query_tokens(self):
+        for decode_requests in (1, 6):
+            with self.subTest(decode_requests=decode_requests):
+                trace = self.root / "mixed.trace.json"
+                trace.write_text(json.dumps({"traceEvents": [
+                    {"name": "execute_206_context_1(sq200sk1200)_generation_%d(sq6sk406)"
+                             % decode_requests,
+                     "cat": "gpu_user_annotation", "ts": 0, "dur": 10},
+                    {"name": "kernel", "cat": "kernel", "ts": 1, "dur": 1},
+                ]}))
+                paths = [{"path": str(trace)}]
+                result = probe.verify_trace(paths, "PREFILL", "new_tokens", 206, [])
+                self.assertIs(result["verified"], True)
+                self.assertEqual(result["step_spans_by_phase_shape"], {"PREFILL": {206: 1}})
+                wrong = probe.verify_trace(paths, "PREFILL", "new_tokens", 200, [])
+                self.assertFalse(wrong["exact_shape_present"])
+
     def test_sglang_request_does_not_receive_vllm_cache_salt(self):
         with patch.object(probe, "FRAMEWORK", "sglang"), patch.object(probe, "CACHE_SALT", "salt"), \
                 patch.object(probe, "post", return_value="{}") as post:

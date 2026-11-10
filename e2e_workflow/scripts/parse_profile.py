@@ -156,8 +156,10 @@ def _seg(name, tag):
 # step-shaped spans it cannot read. A new deployment should cost one entry here, not
 # a silently empty census.
 #
-# Each dialect: (name, detector, parser). parser -> (is_prefill, ctx_tokens,
+# Each dialect: (name, detector, parser). parser -> (is_prefill, prefill_step_tokens,
 # decode_batch, kv) or None if this particular span is genuinely not a forward.
+# prefill_step_tokens includes all query tokens in a mixed step, while decode_batch
+# counts requests. These differ under speculative decoding and must not be added.
 
 # sglang: sglang.srt.utils.profile_utils.build_step_span_name
 #   step[EXTEND bs=<bs> toks=<n>] / step[TARGET_VERIFY bs=<bs>]
@@ -202,7 +204,7 @@ STEP_DIALECTS = [
 
 
 def _classify_step(name):
-    """-> (is_prefill, ctx_tokens, decode_batch, kv) for a forward span, else None."""
+    """-> (is_prefill, prefill_step_tokens, decode_batch, kv), else None."""
     for _dname, detect, parse in STEP_DIALECTS:
         if detect(name):
             c = parse(name)
@@ -224,7 +226,7 @@ def _step_span_candidates(events):
 
 
 def _collect_step_spans(events, strict=False):
-    """Sorted GPU-timeline step windows: [(ts, end, 'P'|'D', ctx_tok, dec_batch)].
+    """Sorted windows: [(ts, end, 'P'|'D', prefill_step_tokens, decode_batch)].
 
     Raises when the trace contains step-shaped annotations that no registered
     dialect can parse: an empty phase split must not be mistaken for a trace that
@@ -373,9 +375,9 @@ def parse_torch_trace(path):
         i = bisect.bisect_right(_starts, ts) - 1
         if i < 0 or ts >= spans[i][1]:
             return None, 0
-        _, _, ph, ctx_tok, dec_batch = spans[i]
+        _, _, ph, prefill_step_tokens, dec_batch = spans[i]
         if ph == "P":
-            return "prefill", ctx_tok + dec_batch      # dense/MoE M = all tokens in the step
+            return "prefill", prefill_step_tokens      # mixed-step decode tokens already included
         return "decode", dec_batch
 
     agg = {}  # name -> dict
@@ -434,7 +436,7 @@ def parse_torch_trace(path):
             "has_annotations": True,
             "n_prefill_steps": len(pref),
             "n_decode_steps": len(dec),
-            "prefill_tokens": sum(s[3] for s in pref),
+            "prefill_tokens": sum(s[3] for s in pref),  # all query tokens in prefill/mixed steps
             "decode_batches": [s[4] for s in dec],
         }
     return agg, total_us, launches, phase_meta
