@@ -186,11 +186,13 @@ def test_runtime_preserves_claude_model_and_seeded_config(monkeypatch):
 def test_planner_observation_has_a_runtime_sink_only_when_enabled(monkeypatch, tmp_path, enabled):
     captured = {"proc": _Proc(stdout='{"eval_dir": "/e"}')}
     rx = _runtime_mod(monkeypatch, captured)
-    rx._invoke_via_runtime({"record_planner_inputs": enabled}, 60, str(tmp_path))
+    eval_dir = tmp_path / "new-evaluation"
+    rx._invoke_via_runtime({"record_planner_inputs": enabled}, 60, str(eval_dir))
     cmd = captured["cmd"]
     assert ("--backend-events-file" in cmd) is (enabled is True)
+    assert eval_dir.is_dir() is (enabled is True)
     if enabled is True:
-        assert cmd[cmd.index("--backend-events-file") + 1] == str(tmp_path / "runtime_backend_events.jsonl")
+        assert cmd[cmd.index("--backend-events-file") + 1] == str(eval_dir / "runtime_backend_events.jsonl")
 
 
 def test_stdout_is_used_when_the_result_file_is_absent(monkeypatch, tmp_path):

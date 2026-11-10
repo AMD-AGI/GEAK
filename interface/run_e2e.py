@@ -2388,6 +2388,8 @@ def _invoke_via_runtime(
     if metrics_file:
         cmd += ["--metrics-file", metrics_file]
     if eval_dir and ps_args.get("record_planner_inputs") is True:
+        # The observer opens its sink before Setup creates the evaluation directory.
+        Path(eval_dir).mkdir(parents=True, exist_ok=True)
         cmd += ["--backend-events-file", str(Path(eval_dir) / "runtime_backend_events.jsonl")]
     # The JS enforces the wall-clock budget internally (args.time_budget_s); give
     # the wrapper a margin so a graceful finalize is never killed prematurely.
