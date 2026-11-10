@@ -603,12 +603,18 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
 // (correctness PASS + geomean preserved), and emits a final_patch. Returns a fix object shaped like the
 // kernel_workflow result ({final_patch, final_geomean, eval_dir, authored}) so the corrective re-gate path
 // is identical, or null if it could not produce a verified patch (=> escalate to the heavy re-author).
+function isolatedPrimary(result, workloadPath) {
+  if (!result) return null;
+  return result.final_speedup === undefined && !workloadPath && result.workload_aligned === false
+    ? result.final_geomean : result.final_speedup;
+}
+
 const SURGEON_SCHEMA = obj({
   fixed: { type: 'boolean' }, final_patch: { type: 'string' }, final_geomean: { type: 'number' },
   eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
 }, ['fixed']);
 async function trySurgicalFix(spec, reason, fixClass, attempt) {
-  if (!SURGICAL_FIX) return null;
+  if (!SURGICAL_FIX || spec.workload_path || spec.workload_aligned !== false) return null;
   const intro = `A verified-isolated ${spec.language || 'triton'} kernel winner for op "${spec.short_name}" ` +
     `(${(spec.isolated || 0).toFixed(2)}x isolated) ENGAGED live but was REJECTED at the e2e gate. ` +
     `Reject class = ${fixClass}. Reject reason: "${reason}". Make the SMALLEST possible fix that clears it ` +
@@ -624,7 +630,7 @@ async function trySurgicalFix(spec, reason, fixClass, attempt) {
     }),
     { phase: spec.phase_name || 'HeadKernel', label: `surgeon ${spec.short_name} (${attempt})`, schema: SURGEON_SCHEMA });
   if (s && s.fixed && s.final_patch && (s.final_geomean || 0) > 1.0) {
-    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean,
+    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean, workload_aligned: false,
       eval_dir: s.eval_dir || spec.kernel_eval_dir || '', reason: s.root_cause || 'surgical fix' };
   }
   log(`  ${spec.short_name}: surgical fix did not produce a verified patch (${s ? (s.note || s.root_cause || 'not fixed') : 'null'}) — escalating to re-author.`);
@@ -707,11 +713,14 @@ async function tryCorrectiveReauthor(spec) {
         }, `${spec.short_name}:corrective`);
       } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
     }
-    if (!fix || fix.authored === false || !(fix.final_geomean > 1.0) || !fix.final_patch) {
+    const fixedIsolated = isolatedPrimary(fix, spec.workload_path);
+    if (!fix || fix.authored === false || !Number.isFinite(fixedIsolated) || !(fixedIsolated > 1.0)
+        || (!viaSurgical && fix.validation_status !== 'accepted')
+        || typeof fix.final_patch !== 'string' || !fix.final_patch.trim()) {
       log(`  ${spec.short_name}: corrective produced no usable kernel (${fix ? fix.reason || fix.validation_status : 'null'}).`);
       return { banked: false };
     }
-    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; iso geomean ${(fix.final_geomean || 0).toFixed(2)}. Re-gating e2e.`);
+    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; isolated primary ${fixedIsolated.toFixed(2)}. Re-gating e2e.`);
     // Re-gate the FIXED kernel. Preserve the caller's KERNEL_RESULT SHAPE (head=authored/code_patch,
     // milestone=editable/final_patch) and only swap in the corrected patch + eval_dir + iso speedup, so the
     // helper is track-agnostic. Set BOTH patch fields to the new patch — the integrator reads whichever
@@ -721,7 +730,7 @@ async function tryCorrectiveReauthor(spec) {
       KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
         code_patch: fix.final_patch, final_patch: fix.final_patch,
         authored_kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || (base.KERNEL_RESULT && base.KERNEL_RESULT.authored_kernel_eval_dir) || '',
-        verified_isolated_speedup: fix.final_geomean,
+        verified_isolated_speedup: fixedIsolated, isolated_geomean: fix.final_geomean ?? null,
         corrective_fix_of: reason } };
     if (spec.cur) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
@@ -736,16 +745,16 @@ async function tryCorrectiveReauthor(spec) {
     // masquerading as a win (does less/degenerate work) — never bank it; treat as a correctness reject and
     // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
     const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
-      && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
+      && isImplausibleSpeedup(pctForGuard, fixedIsolated, integ2);
     if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
       // Carry the CORRECTED patch out to the caller's bankAccepted. The gated KERNEL_RESULT at the
       // call site still holds the broken kernel, and recording that into the KB would publish a
       // patch that was rejected on this very box as if it were the win.
-      return { banked: true, integ: integ2, isolated: fix.final_geomean, patch: fix.final_patch,
+      return { banked: true, integ: integ2, isolated: fixedIsolated, isolated_geomean: fix.final_geomean ?? null, patch: fix.final_patch,
         kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || '' };
     }
     reason = implausible2
-      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fix.final_geomean).toFixed(1)}% — corruption)`
+      ? `implausible_speedup (+${(integ2.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pctForGuard, fixedIsolated).toFixed(1)}% — corruption)`
       : ((integ2 && (integ2.reason || integ2.gate)) || reason);
     // STRUCTURED stop (do NOT re-classify from the prose reason — it may MENTION "corruption" while saying
     // it was RESOLVED, which would loop wastefully). If this attempt made the kernel CORRECT (parity no

@@ -245,6 +245,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
+            workload_path: c.ext.workload_path,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
             isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
             base_inputs: {
@@ -578,6 +579,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
+              workload_path: st.ext.workload_path,
               gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
               isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
@@ -827,6 +829,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              workload_path: ext.workload_path,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
@@ -854,6 +857,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              workload_path: ext.workload_path,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },

@@ -67,6 +67,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     try {
       const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        ...(ext.workload_path ? { op_spec: { workload_path: ext.workload_path } } : {}),
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -76,6 +77,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       }));
       noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
+        final_speedup: isolatedPrimary(r, ext.workload_path), final_validation: r.final_validation ?? null,
+        workload_aligned: r.workload_aligned,
         final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
     } catch (e) {
@@ -95,18 +98,31 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       continue;
     }
     const { ext, kl } = o;
-    if (!kl || !kl.ran || !(kl.final_geomean > 1.0) || !kl.final_patch) {
-      log(`  ${c.short_name}: kernel layer produced no speedup (${kl ? kl.final_geomean : '?'}x); skipping integrate.`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl ? kl.final_geomean : 0, verdict: 'dead_end', lesson: 'no isolated speedup' });
+    const isolatedSpeedup = kl?.final_speedup;
+    if (!kl?.ran || kl.validation_status !== 'accepted' || !Number.isFinite(isolatedSpeedup)
+        || !(isolatedSpeedup > 0)
+        || (isolatedSpeedup > 1 && (typeof kl.final_patch !== 'string' || !kl.final_patch.trim()))) {
+      log(`  ${c.short_name}: kernel qualification incomplete (${kl?.validation_status || 'unavailable'}); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: Number.isFinite(isolatedSpeedup) ? isolatedSpeedup : null,
+        isolated_geomean: kl?.final_geomean ?? null, validation_status: kl?.validation_status ?? 'unavailable',
+        final_validation: kl?.final_validation ?? null, kernel_eval_dir: kl?.kernel_eval_dir ?? null,
+        verdict: 'incomplete', lesson: kl?.note || 'isolated qualification or promotable patch unavailable' });
       continue;
     }
-    log(`  ${c.short_name}: kernel layer ${kl.final_geomean.toFixed(2)}x isolated. Integrating to e2e.`);
+    if (!(isolatedSpeedup > 1.0)) {
+      log(`  ${c.short_name}: kernel layer produced no primary speedup (${isolatedSpeedup}x); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, verdict: 'dead_end', lesson: 'no isolated primary speedup' });
+      continue;
+    }
+    log(`  ${c.short_name}: kernel layer ${isolatedSpeedup.toFixed(2)}x isolated primary. Integrating to e2e.`);
     // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
     const mileIntegrateInputs = {
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-        final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
+        final_patch: kl.final_patch, verified_isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
@@ -118,24 +134,27 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, isolatedSpeedup) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
-      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.final_geomean }, krOf(mileIntegrateInputs));
+      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: isolatedSpeedup }, krOf(mileIntegrateInputs));
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
       // Unified reject/incomplete handling (same as the head track): a FIXABLE reject OR fixable
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const reason = gateRejectReason(integ, c.pct_gpu_time, isolatedSpeedup);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
+            workload_path: ext.workload_path,
+            workload_aligned: kl.workload_aligned,
             gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
-            isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
+            isolated: isolatedSpeedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -144,16 +163,19 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
         milestoneImproved = true;
         log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated,
+          isolated_geomean: corr.isolated_geomean ?? null, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
       } else if (!abDone) {
-        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
+        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: isolatedSpeedup,
           pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
           partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
         log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
       } else {
         log(`  ${c.short_name}: REJECTED at e2e gate (${reason}).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
       }
     }
   }
@@ -190,4 +212,3 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   history.milestones.push({ milestone, accepted: acceptedKernels.length, throughput: curTput, improved: milestoneImproved });
   log(`Milestone ${milestone} done. throughput=${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x), noImprove=${noImprove}`);
 }
-
