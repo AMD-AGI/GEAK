@@ -473,9 +473,7 @@ def cmd_add_rebind(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     runtime = Path(a.overlay) / "sitecustomize.py"
     shim = runtime.read_text()
-    if shim in _GENERIC_SITECUSTOMIZES:
-        runtime.write_text(SITECUSTOMIZE)
-    elif "." in a.target.partition(":")[2]:
+    if shim not in _GENERIC_SITECUSTOMIZES and "." in a.target.partition(":")[2]:
         raise SystemExit("cannot add a class-method rebind to a custom sitecustomize; preserve its hooks first")
     if a.impl_file:
         shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
@@ -483,6 +481,8 @@ def cmd_add_rebind(a):
     m["rebinds"] = [e for e in m.get("rebinds", []) if e["target"] != a.target]
     m["rebinds"].append({"target": a.target, "impl_module": a.impl_module, "impl_attr": a.impl_attr})
     _save_man(man, m)
+    if shim in _GENERIC_SITECUSTOMIZES:
+        runtime.write_text(SITECUSTOMIZE)
     print(f"OVERLAY_DIR={a.overlay}")
     print(f"add-rebind {a.target} -> {a.impl_module}.{a.impl_attr}")
     print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")

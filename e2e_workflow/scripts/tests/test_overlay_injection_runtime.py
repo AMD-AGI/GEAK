@@ -376,6 +376,15 @@ print(json.dumps([obj.method(1), Alias.method(obj, 2), Alias.static(3), obj.stat
                 self.assertNotIn("[overlay] rebound", proc.stderr)
                 self.assertNotIn("property must not execute", proc.stderr)
 
+    def test_failed_add_keeps_prior_shim_and_manifest(self):
+        overlay = self.overlay([self.entry("module_fn", "module_fn")], OV.PREVIOUS_SITECUSTOMIZE)
+        manifest = (overlay / "_overlay_manifest.json").read_bytes()
+        with self.assertRaises(FileNotFoundError):
+            OV.cmd_add_rebind(SimpleNamespace(overlay=str(overlay), base="", target="sample:Model.method",
+                impl_module="impl", impl_attr="method", impl_file=str(self.root / "missing.py")))
+        self.assertEqual((overlay / "sitecustomize.py").read_text(), OV.PREVIOUS_SITECUSTOMIZE)
+        self.assertEqual((overlay / "_overlay_manifest.json").read_bytes(), manifest)
+
     def test_prior_generic_shims_upgrade_through_stack_installer_and_merge(self):
         priors = [(OV.PREVIOUS_SITECUSTOMIZE, "efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4"),
                   (OV.LEGACY_SITECUSTOMIZE, "1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9")]
