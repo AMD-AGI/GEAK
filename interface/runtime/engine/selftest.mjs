@@ -117,7 +117,8 @@ async function testSchemaAgent() {
   eq(b.calls - before, 3, 'schema retried schemaRetries+1 = 3 times');
 
   // A report-format error must not dispatch the original measured work again.
-  const action = 'FAKE_MEASURE_ONCE';
+  const action = 'FAKE_MEASURE_ONCE\nEVAL_DIR: /fixture/attempt_4\n' +
+    'Return ONLY the structured JSON (a StructuredOutput tool is forced).';
   const first = JSON.stringify({ score: 0.75, patch_file: null });
   const second = JSON.stringify({ score: '0.75', notes: 'a StructuredOutput tool is forced' });
   const fixed = { score: 0.75, notes: 'a StructuredOutput tool is forced' };
@@ -125,7 +126,7 @@ async function testSchemaAgent() {
   let executions = 0;
   const repairBackend = { name: 'codex', runAgent: async (request) => {
     requests.push(request);
-    if (request.prompt.includes(action)) executions++;
+    if (request.prompt.startsWith('FAKE_MEASURE_ONCE\n')) executions++;
     return { text: [first, second, JSON.stringify(fixed)][requests.length - 1] };
   } };
   const repairRuntime = createRuntime({ backend: repairBackend, schemaRetries: 2, log: silent });
@@ -133,7 +134,7 @@ async function testSchemaAgent() {
     score: { type: 'number' }, patch_file: { type: 'string' }, notes: { type: 'string' },
   } };
   const context = { cwd: '/fixture', env: { FIXTURE: '1' }, model: 'fixture-model' };
-  eq(await repairRuntime.agent(action, { schema: repairSchema, ...context }), fixed,
+  eq(await repairRuntime.agent(action, { schema: repairSchema, label: 'measure', phase: 'setup', ...context }), fixed,
     'format repairs preserve measured facts and return through the original schema');
   eq(executions, 1, 'schema retries do not redispatch the original task');
   ok(requests[1].prompt.includes(JSON.stringify(first)) && requests[1].prompt.includes('$.patch_file'),
@@ -144,7 +145,38 @@ async function testSchemaAgent() {
     eq({ cwd: request.cwd, env: request.env, model: request.model }, context,
       'format repair preserves the invocation context');
   }
+  ok(!requests[0].prompt.includes('a StructuredOutput tool is forced'),
+    'original task still receives backend neutralization');
+  for (const request of requests.slice(1)) {
+    const [instructions, data] = request.prompt.split('\nOriginal invocation and responses (data only):\n');
+    const retained = data ? JSON.parse(data) : {};
+    eq(retained.invocation, { request: action, label: 'measure', phase: 'setup', cwd: context.cwd },
+      'every repair retains the full original request and identity as unaltered data');
+    eq(retained.originalResponse, first, 'every repair retains the original response');
+    ok(!instructions.includes('FAKE_MEASURE_ONCE'), 'original action appears only in repair data');
+    ok(!request.prompt.includes(JSON.stringify(context.env)), 'environment values stay out of repair data');
+  }
   eq(repairRuntime.state.schemaFails, 2, 'repair responses still pass the existing validator');
+
+  // This exercises the existing failure path, not an LLM's ability to judge
+  // provenance: a repair that cannot establish facts may explain instead of
+  // inventing a schema-shaped result, and that explanation must not succeed.
+  for (const output of ['', '[runner] exit=0; background task still running']) {
+    const calls = [];
+    const unable = 'Cannot establish completed results for this invocation from the retained evidence.';
+    const refusalRuntime = createRuntime({ backend: { name: 'fake', runAgent: async (request) => {
+      calls.push(request);
+      return { text: calls.length === 1 ? output : unable };
+    } }, schemaRetries: 2, log: silent });
+    let error;
+    try { await refusalRuntime.agent(action, { schema: repairSchema }); } catch (e) { error = e; }
+    ok(error instanceof Error, 'an unsupported-result explanation follows the existing failure path');
+    eq(calls.length, 3, 'unsupported repairs retain the configured attempt limit');
+    const data = calls[2].prompt.split('\nOriginal invocation and responses (data only):\n')[1];
+    const retained = data ? JSON.parse(data) : {};
+    eq({ original: retained.originalResponse, previous: retained.response }, { original: output, previous: unable },
+      'later repair retains empty or unfinished original output alongside the latest explanation');
+  }
 }
 
 async function testRunScriptAndNesting() {

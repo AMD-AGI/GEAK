@@ -27,7 +27,10 @@ Repeat:
 4. **Report.** Read the module's native results and `REPORT.md`, including failures.
    Match receipts to their invocations and retain them before reusing an output path;
    failed calls and later exports can expose another invocation's files.
-   Repair report formatting from retained evidence before rerunning work.
+   Repair report formatting from evidence attributable to the same invocation,
+   retaining its original request and output as context. An empty response or
+   unfinished execution is not a formatting error; missing facts cannot be filled
+   from another invocation, inferred units or placeholder values.
    Record changes, findings and uncertainty; adopt, reject, investigate further or wait,
    then return to reasoning.
 
