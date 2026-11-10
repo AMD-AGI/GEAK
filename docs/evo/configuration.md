@@ -19,6 +19,7 @@ Merge these settings into a qualified task's launch arguments:
   "evolution_case_evidence_view": false,
   "evolution_preserve_founder_attempts": false,
   "evolution_evidence_handoff": false,
+  "evolution_question_state": false,
   "budget": 96,
   "max_no_improve": 96,
   "max_forced_replans": 96,

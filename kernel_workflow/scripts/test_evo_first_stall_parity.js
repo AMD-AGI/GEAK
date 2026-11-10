@@ -150,6 +150,7 @@ async function runMode(mode, scenario, template) {
     }
     if (label.startsWith('reprofile ')) return {bottleneck: 'compute', top_opportunities: [],
       summary_path: `${evalDir}/p_${label.slice(10)}.md`, shift_note: 'fixture shift'};
+    if (label.startsWith('tech_lead:memory ') && scenario.memory) return scenario.memory(label);
     if (label.startsWith('tech_lead:memory ')) return {insights: ['fixture insight'],
       ledger: [{direction: label.slice(17), verdict: 'partial'}], bottleneck_now: 'compute', suggest_next: 'fixture next'};
     if (label.startsWith('storage:reclaim')) return {ok: true, note: 'reclaimed'};
@@ -428,7 +429,24 @@ const FALLBACK = 'Development fallback';
     assert.equal(pOn.result.final_speedup, 1.40, 'delivery still finds the earlier verified source');
     const bad = await runMode('greedy', {...sc, name: 'stall_sources_greedy', args: {evolution_import_stall_sources: true}}, TEMPLATE);
     assert.match(bad.error || '', /evolution_import_stall_sources requires optimizer=evo/);
+    const question = await runMode('evo', {...sc, name: 'first_stall_question_namespace',
+      args: {evolution_import_stall_sources: true, evolution_question_state: true},
+      memory: label => ({insights: [], ledger: label.endsWith('r1') ? [{
+        question_id: 'q-before-archive', next_question: 'which premise remains unresolved?',
+        direction: 'r2_d0', source_ids: ['r2_d0', 'ORIGINAL'], development_tip_id: 'r2_d0',
+        evidence_refs: ['/unavailable/prior.json']}]: []})}, TEMPLATE);
+    assert.equal(question.error, null, question.error);
+    const linked = question.continuation_archive.question_revisions[0];
+    assert.equal(linked.source_scope, 'pre_archive_history');
+    assert.equal(linked.linked_after_round, 2);
+    assert.ok(question.continuation_archive.entries.some(row => row.id === 'r2_d0'));
+    assert.ok(linked.source_refs.every(ref => ref.unavailable && !ref.patch_ref),
+      'old planner IDs cannot falsely join an identically named imported source or new ORIGINAL');
+    assert.match(linked.development_tip.unavailable, /pre-archive ID namespace/);
+    const firstAfter = question.calls.find(c => c.label === 'tech_lead:plan r3');
+    assert.equal(field(firstAfter.prompt, 'EVOLUTION_QUESTION_STATE').questions[0].question_id, 'q-before-archive');
     console.log('  ok: stall-round sources enter the first-stall archive only when enabled; delivery stays consistent');
+    console.log('  ok: first-stall questions survive with explicit unresolved prior-source namespace');
   }
   {
     // Common preparation contract: search refuses an empty or unreliable native baseline, as

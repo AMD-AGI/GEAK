@@ -93,6 +93,34 @@ without coercion; only boolean `true` enables a view. Bakeoff also forwards thes
 evidence options and the EVO selector into its language lanes.
 Forwarding establishes configuration support, not actual evidence reads or gains.
 
+## Question-linked development
+
+Optional `evolution_question_state: true` links the existing memory ledger to
+retained source. A ledger row can add `question_id`, `next_question`, `source_ids`,
+`evidence_refs`, `next_experiment`, `reopen_if`, and `development_tip_id`. The ID
+stays stable when revisiting the same question. Each update supplies its complete
+current interpretation; omitted fields remain unknown.
+
+The archive retains these rows unchanged in append-only `question_revisions`,
+alongside source references and their status at the time of linking. The planner
+receives a compact latest-question index and may set `DIRECTION.question_id` to
+carry that exact revision to the engineer. Full records remain in the archive
+when prompt context is abbreviated. Unknown question IDs are reported explicitly;
+the workflow does not substitute another question.
+
+A development tip is an agent-nominated source for further work, including a
+slower or unverified attempt. It does not change `best_id`, choose the next parent,
+or qualify a measurement. Unknown source references and absent patches remain
+visible. Evidence paths and applicability are author claims until checked; the
+linker does not open them or infer whether a hypothesis is true. The option is
+off by default and adds no model phase or evaluation.
+At first-stall activation, existing question rows are copied with
+`source_scope: pre_archive_history`. Their source IDs remain unresolved, even
+when an imported source has the same ID: older planner IDs and `ORIGINAL` can
+refer to another source namespace. The agent must inspect and relink them in a
+new revision. Question context follows the existing retained-source visibility
+rule; an empty archive does not add evolutionary guidance to the initial plan.
+
 ## Native observations and reported rows
 
 For checked external results, `observed_evidence` is built only from the trusted

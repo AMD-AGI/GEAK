@@ -1120,10 +1120,90 @@ cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view 
   },
 })));
 
+for (const enabled of [false, true]) {
+  for (const requested of ['q-local', 'q-absent']) {
+    cases.push({
+      ...approachMemoryCase,
+      name: `question-linked state ${enabled}, selected ${requested}`,
+      args: {...approachMemoryCase.args, evolution_question_state: enabled},
+      plans: {...approachMemoryCase.plans, r2: plan(direction('continue-a', {
+        parent_id: 'r1_d0', donor_ids: ['r1_d1'], question_id: requested,
+        approach: 'approach-a', prompt: 'Resolve question-a using the retained source and report.'}))},
+      candidates: {...approachMemoryCase.candidates, r2_d0: {
+        ...approachMemoryCase.candidates.r2_d0,
+        inspect: ({h, prompt}) => {
+          const selected = h.field(prompt, 'EVOLUTION').selected_question;
+          if (!enabled) return assert.equal(selected, undefined);
+          assert.equal(selected.requested_question_id, requested);
+          if (requested === 'q-absent') {
+            assert.equal(selected.question_id, null);
+            assert.match(selected.unavailable, /no question was substituted/);
+          } else {
+            assert.equal(selected.question_id, 'q-local');
+            assert.equal(selected.ref.revision, 1);
+            assert.equal(selected.question.reported.next_question, 'question-a');
+            assert.equal(selected.question.development_tip.entry_id, 'r1_d0');
+            assert.equal(selected.question.development_tip.verified, false,
+              'a retained development tip is not upgraded to independently verified');
+          }
+        },
+      }},
+      memory: ({label, prompt, h}) => {
+        const first = label.endsWith('r1');
+        const context = h.field(prompt, 'EVOLUTION_QUESTION_STATE');
+        assert.equal(context !== undefined, enabled, 'question guidance is strictly opt-in');
+        return {insights: [], ledger: [{direction: first ? 'r1_d0' : 'r2_d0',
+          approach: 'approach-a', question_id: 'q-local', next_question: first ? 'question-a' : 'question-b',
+          source_ids: ['r1_d0', 'not_recorded'], development_tip_id: first ? 'r1_d0' : 'not_recorded',
+          evidence_refs: ['/absent/raw-evidence.json'], next_experiment: 'test the remaining premise',
+          reopen_if: 'the measured premise changes', verdict: first ? 'partial' : 'confirmed'}]};
+      },
+      inspectPlan: ({label, prompt, h}) => {
+        const context = h.field(prompt, 'EVOLUTION_QUESTION_STATE');
+        if (label !== 'tech_lead:plan r2' || !enabled) return assert.equal(context, undefined);
+        assert.equal(context.questions.length, 1);
+        const question = context.questions[0];
+        assert.equal(question.next_question, 'question-a');
+        assert.equal(question.development_tip.entry_id, 'r1_d0');
+        assert.equal(h.field(prompt, 'EVOLUTION_BEST_ID'), 'r1_d1',
+          'the slower development tip cannot replace the independent incumbent');
+        const saved = JSON.parse(fs.readFileSync(context.archive_ref.path, 'utf8'));
+        assert.deepEqual(saved.question_revisions[0].reported, h.field(prompt, 'HISTORY').ledger[0],
+          'structured linkage retains the same author facts as ordinary history');
+      },
+      check: ({archive, events, h}) => {
+        if (!enabled) {
+          assert.equal(Object.hasOwn(archive, 'question_revisions'), false);
+          return;
+        }
+        const [first, second] = archive.question_revisions;
+        assert.equal(archive.question_revisions.length, 2, 'question revisions are append-only');
+        assert.deepEqual([first.revision, second.revision], [1, 2]);
+        assert.equal(first.reported.next_question, 'question-a', 'later revision does not overwrite prior facts');
+        assert.equal(second.reported.next_question, 'question-b');
+        assert.deepEqual(first.source_refs.map(ref => ref.entry_id), ['r1_d0', 'not_recorded']);
+        assert.deepEqual(first.source_refs[0].patch_ref, archive.entries[0].patch_ref);
+        assert.equal(first.source_refs[0].verified, false);
+        assert.match(first.source_refs[1].unavailable, /no such entry/);
+        assert.match(second.development_tip.unavailable, /no such entry/);
+        assert.ok(second.reference_errors.includes('development tip unavailable: not_recorded'));
+        assert.equal(archive.best_id, 'r2_d0', 'unknown or author-confirmed development never overrides selection');
+        assert.deepEqual(first.reported.evidence_refs, ['/absent/raw-evidence.json']);
+        assert.match(first.evidence_ref_scope, /have not been checked/);
+        const memory = events.find(event => event.label === 'tech_lead:memory r2');
+        assert.equal(h.field(memory.prompt, 'EVOLUTION_QUESTION_STATE').questions[0].revision, 1);
+        const selected = archive.entries.find(row => row.id === 'r2_d0').evolution_context.selected_question;
+        assert.equal(selected.question_id, requested === 'q-local' ? 'q-local' : null);
+      },
+    });
+  }
+}
+
 (async () => {
   console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
   const h = harness({});
   const invalidArgs = [
+    [{evolution_question_state: 'true'}, /evolution_question_state must be a boolean/],
     [{optimizer: 'external'}, /unknown optimizer: external; use greedy or evo/],
     [{optimizer: 'evo', optimizer_command: ['python3', 'retired.py']}, /optimizer_command is retired/],
     [{optimizer: 'greedy', optimizer_command: null}, /optimizer_command is retired/],

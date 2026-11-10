@@ -27,6 +27,8 @@ export const meta = {
 const A = args || {};
 if (A.record_planner_inputs != null && typeof A.record_planner_inputs !== 'boolean')
   throw new Error('record_planner_inputs must be a boolean');
+if (A.evolution_question_state != null && typeof A.evolution_question_state !== 'boolean')
+  throw new Error('evolution_question_state must be a boolean');
 if (A.prepare_only != null && typeof A.prepare_only !== 'boolean')
   throw new Error('prepare_only must be a boolean');
 if (A.prepare_only === true && ((String(A.mode ?? 'optimize').trim() || 'optimize') !== 'optimize'
@@ -2234,6 +2236,7 @@ const evoPlanSchema = evolution || startEvolution ? {
         ...PLAN_SCHEMA.properties.directions.items.properties,
         parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
         approach: {type: 'string'},
+        ...(A.evolution_question_state === true ? {question_id: {type: 'string'}} : {}),
       },
     },
   }},
@@ -2982,6 +2985,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   if (mem) {
     if (mem.insights) history.insights = mem.insights;
     if (mem.ledger) history.ledger = history.ledger.concat(mem.ledger);
+    if (evo && A.evolution_question_state === true) await evo.recordQuestions(mem.ledger, round);
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
@@ -3078,6 +3082,10 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       log(`[evolution] could not root an archive at the incumbent (${String(error)}); continuing greedy rounds.`);
     }
     if (evolution && A.evolution_import_stall_sources === true) await importStallSources(evolution, round);
+    // Preserve authored questions at activation without guessing how old planner IDs
+    // or ORIGINAL map onto this new archive's source namespace.
+    if (evolution && A.evolution_question_state === true)
+      await evolution.recordQuestions(history.ledger, round, 'pre_archive_history');
   }
 }
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
@@ -3631,7 +3639,8 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       || (OPTIMIZER !== 'evo' && population.imports.length))) {
     throw new Error('invalid population lineage configuration');
   }
-  const entries = [];
+  const entries = [], questionRevisions = [];
+  const questionsEnabled = A.evolution_question_state === true;
   let baseCommit, baseTree, baseSourceId = null, sourcePaths = null, bestId = 'ORIGINAL', queue = Promise.resolve();
   let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin};
   const run = async (cmd, args, opts) => {
@@ -3644,14 +3653,16 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
     queue = pending.catch(() => {});
     return pending;
   };
-  const snapshot = (rows, best) => ({schema: 'geak.evolution/1', base, base_commit: baseCommit,
+  const snapshot = (rows, best, questions) => ({schema: 'geak.evolution/1', base, base_commit: baseCommit,
     ...(population ? {base_tree: baseTree, base_source_id: baseSourceId, lineage_id: population.id} : {}),
+    ...(questionsEnabled ? {question_revisions: questions} : {}),
     baseline, best_id: best, entries: rows});
-  const save = async (rows, best = bestId) => {
+  const save = async (rows, best = bestId, questions = questionRevisions) => {
     await run('sh', ['-c',
       'set -e; tmp=$(mktemp "$1/.archive.XXXXXX"); trap \'rm -f -- "$tmp"\' EXIT; cat > "$tmp"; mv -f -- "$tmp" "$2"',
-      'sh', path, archive], {input: JSON.stringify(snapshot(rows, best), null, 2) + '\n'});
+      'sh', path, archive], {input: JSON.stringify(snapshot(rows, best, questions), null, 2) + '\n'});
     entries.splice(0, entries.length, ...rows);
+    questionRevisions.splice(0, questionRevisions.length, ...questions);
     bestId = best;
   };
   // Each run starts fresh. Atomic directory creation refuses reuse without a
@@ -3689,6 +3700,40 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   await save([], 'ORIGINAL');
   const retained = (id) => entries.find(row => row.id === id && row.patch_ref && !row.retention_error);
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
+  // Questions are the existing memory author's ledger, linked to actual archive
+  // revisions. A source join proves neither an explanation nor a useful parent.
+  const questionRef = question => ({path: archive, question_id: question.question_id,
+    revision: question.revision, field: 'question_revisions'});
+  const questionSource = id => {
+    if (id === 'ORIGINAL') return {entry_id: id, source: base, base_commit: baseCommit,
+      source_id: baseSourceId, patch_ref: null, status: 'archive_base',
+      qualification: 'see baseline evidence', evidence_ref: {path: archive, field: 'baseline'}};
+    const row = entries.find(entry => entry.id === id);
+    if (!row) return {entry_id: id, unavailable: 'no such entry in this archive'};
+    return {entry_id: id, patch_ref: row.patch_ref || null,
+      source_id: row.reported_context?.source_binding?.source_id || null,
+      verified: row.verified ?? null, status: row.status ?? null,
+      ...(row.retention_error || !row.patch_ref ? {unavailable: row.retention_error || 'no retained patch'} : {}),
+      evidence_ref: {path: archive, entry_id: id},
+      authority: 'archive state at link time; no new source or measurement validation'};
+  };
+  const latestQuestions = () => [...new Map(questionRevisions.map(q => [q.question_id, q])).values()];
+  const questionInputs = () => !questionsEnabled ? {} : {EVOLUTION_QUESTION_STATE: {
+    authority: 'Agent-authored ledger links; questions, applicability and conclusions remain interpretations.',
+    archive_ref: {path: archive, field: 'question_revisions'},
+    selection: 'An optional DIRECTION.question_id links the question to its actual parent/donors. It never selects or promotes a source; choose parent_id explicitly.',
+    memory_update: 'Use the existing ledger rows. To create/revise a question add question_id (stable within this archive), next_question, source_ids, evidence_refs, next_experiment, reopen_if, and development_tip_id (retained source or null). Keep the complete current question in each revision; omitted facts remain unknown. A development tip may be slower or unfinished and is separate from the verified best.',
+    questions: boundedContext(latestQuestions().map(q => ({question_id: q.question_id,
+      revision: q.revision, next_question: q.reported.next_question ?? null,
+      approach: q.reported.approach ?? null, development_tip: q.development_tip,
+      reference_errors: q.reference_errors, full_context_ref: questionRef(q)})),
+    {path: archive, field: 'question_revisions'}, 8192)}};
+  const selectedQuestion = id => {
+    const selected = questionRevisions.findLast(q => q.question_id === id);
+    return selected ? {requested_question_id: id, question_id: id, ref: questionRef(selected),
+      question: boundedContext(selected, questionRef(selected), 8192)}
+      : {requested_question_id: id, question_id: null, unavailable: 'unknown question_id; no question was substituted'};
+  };
   const evidence = (value) => {
     if (!value) return null;
     const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid',
@@ -3873,6 +3918,44 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
     caseInputs: selectedCases,
+    recordQuestions(ledger, round, sourceScope = 'current_archive') {
+      return serial(async () => {
+        if (!questionsEnabled || ledger == null) return;
+        if (!Array.isArray(ledger) || !Number.isSafeInteger(round) || round < 1) {
+          log('[evolution] question update needs a ledger array and positive round'); return;
+        }
+        const next = [...questionRevisions];
+        const sourceFor = id => sourceScope === 'current_archive' ? questionSource(id)
+          : {entry_id: id, unavailable: 'pre-archive ID namespace; inspect source evidence and relink explicitly'};
+        for (const reported of ledger) {
+          if (!reported || reported.question_id === undefined) continue;
+          if (typeof reported.question_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(reported.question_id)) {
+            log('[evolution] ignored invalid question_id; original row remains in HISTORY.ledger'); continue;
+          }
+          const errors = [], sourceIds = new Set();
+          if (reported.source_ids !== undefined && !Array.isArray(reported.source_ids)) errors.push('source_ids is not an array');
+          for (const id of [...(Array.isArray(reported.source_ids) ? reported.source_ids : []),
+            ...(reported.direction ? [reported.direction] : [])]) {
+            if (typeof id !== 'string' || !id) errors.push('source reference is not a nonempty entry ID');
+            else sourceIds.add(id);
+          }
+          const tipId = reported.development_tip_id;
+          if (tipId != null && (typeof tipId !== 'string' || !tipId)) errors.push('development_tip_id is not a nonempty entry ID or null');
+          const tip = typeof tipId === 'string' && tipId ? sourceFor(tipId) : null;
+          if (tip?.unavailable) errors.push(`development tip unavailable: ${tipId}`);
+          const sources = [...sourceIds].map(sourceFor);
+          for (const source of sources) if (source.unavailable) errors.push(`source unavailable: ${source.entry_id}`);
+          next.push({question_id: reported.question_id, revision: next.length + 1, linked_after_round: round, source_scope: sourceScope,
+            authority: 'author_reported_interpretation_only', reported,
+            source_refs: sources, development_tip: tip,
+            reference_errors: errors,
+            evidence_ref_scope: 'Author evidence_refs are quoted only; existence, source applicability and content have not been checked.'});
+        }
+        if (next.length === questionRevisions.length) return;
+        try { await save([...entries], bestId, next); }
+        catch (error) { log(`[evolution] question links not checkpointed; HISTORY.ledger remains authoritative: ${String(error)}`); }
+      });
+    },
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
@@ -3902,6 +3985,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       if (best && !summary.includes(best)) summary.unshift(best);
       const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
         EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+        ...questionInputs(),
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
@@ -3917,7 +4001,7 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
       return inputs;
     },
     memoryInputs(directions) {
-      const inputs = {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
+      const inputs = {EVOLUTION_ARCHIVE: archive, ...questionInputs(), EVOLUTION_ROUND: directions.map(direction => {
         const row = entries.find(entry => entry.id === direction.id);
         return {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
           approach: direction.approach || null, patch_ref: row?.patch_ref || null,
@@ -3950,8 +4034,10 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
         }
         return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
           parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
-            parent_id: parent,
-            parent_resolution: resolution, reference_errors: errors,
+          parent_id: parent,
+          parent_resolution: resolution, reference_errors: errors,
+          ...(questionsEnabled && direction.question_id !== undefined
+            ? {selected_question: selectedQuestion(direction.question_id)} : {}),
             donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
       });
     },

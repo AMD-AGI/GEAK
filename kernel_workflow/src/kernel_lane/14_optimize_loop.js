@@ -14,6 +14,7 @@ const evoPlanSchema = evolution || startEvolution ? {
         ...PLAN_SCHEMA.properties.directions.items.properties,
         parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
         approach: {type: 'string'},
+        ...(A.evolution_question_state === true ? {question_id: {type: 'string'}} : {}),
       },
     },
   }},
@@ -762,6 +763,7 @@ already verified source, and the host checks the resulting tree. Return JSON {co
   if (mem) {
     if (mem.insights) history.insights = mem.insights;
     if (mem.ledger) history.ledger = history.ledger.concat(mem.ledger);
+    if (evo && A.evolution_question_state === true) await evo.recordQuestions(mem.ledger, round);
     if (mem.bottleneck_now) history.bottleneck_now = mem.bottleneck_now;
     if (mem.suggest_next) history.suggest_next = mem.suggest_next;
   }
@@ -858,6 +860,10 @@ already verified source, and the host checks the resulting tree. Return JSON {co
       log(`[evolution] could not root an archive at the incumbent (${String(error)}); continuing greedy rounds.`);
     }
     if (evolution && A.evolution_import_stall_sources === true) await importStallSources(evolution, round);
+    // Preserve authored questions at activation without guessing how old planner IDs
+    // or ORIGINAL map onto this new archive's source namespace.
+    if (evolution && A.evolution_question_state === true)
+      await evolution.recordQuestions(history.ledger, round, 'pre_archive_history');
   }
 }
 // End-of-run delivery commits the best verified retained source above the incumbent; search promotion keeps MIN_IMPROVE.
