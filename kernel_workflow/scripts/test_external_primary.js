@@ -204,6 +204,7 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
       agent_timeout_ms: 0, agent_retries: 1, objective,
       external_measurement_command: ['/owner/evaluate'], external_result_command: ['/owner/read'],
       capture_canonical_selections: captureSelections,
+      ...(captureSelections ? {optimizer: 'greedy'} : {}),
       ...(staged ? {external_final_measurement_command: ['/owner/final-evaluate'],
         external_final_result_command: ['/owner/final-read']} : {}),
       ...(bounded ? {deadline_epoch: 10000, search_reserve_s: 300,

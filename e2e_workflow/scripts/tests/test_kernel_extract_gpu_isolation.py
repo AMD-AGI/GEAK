@@ -1,16 +1,54 @@
 """Exercise kernel-extract's real GPU lock with CPU-only placeholder commands."""
 
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 LOCK = Path(__file__).resolve().parents[3] / "kernel_workflow/scripts/gpu_lock.sh"
 SET_LOCK = Path(__file__).resolve().parents[1] / "gpu_lock_set.py"
+
+
+class GpuSetInvocationTest(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("gpu_set_invocation", SET_LOCK)
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_canonical_acquisition_order_preserves_command_and_requested_mapping(self):
+        command = ["python3", "task with spaces.py", "literal;$value"]
+        for requested in ("7,4", "04,07"):
+            for separator in ([], ["--"]):
+                with self.subTest(requested=requested, separator=separator), \
+                     mock.patch.object(sys, "argv", [str(SET_LOCK), requested, *separator, *command]), \
+                     mock.patch.dict(os.environ, {"GEAK_GPU_ALLOWED": "4,7", "ROCR_VISIBLE_DEVICES": "GPU-fixture"}), \
+                     mock.patch.object(self.module.os, "execvp") as execute:
+                    self.module.main()
+                    normalized = ",".join(str(int(value)) for value in requested.split(","))
+                    execute.assert_called_once_with("bash", ["bash", str(LOCK), "4",
+                        "bash", str(LOCK), "7", "env", f"HIP_VISIBLE_DEVICES={normalized}",
+                        f"GEAK_GPU_LOCKED_SET={normalized}", *command])
+                    self.assertEqual(os.environ["ROCR_VISIBLE_DEVICES"], "GPU-fixture")
+
+    def test_invalid_sets_or_missing_command_never_execute(self):
+        cases = [(value, ["true"]) for value in ("", "4,", "-1", "４", "4;true", "4,04", "4,8")]
+        cases += [("4", []), ("4", ["--"])]
+        for requested, command in cases:
+            with self.subTest(requested=requested, command=command), \
+                 mock.patch.object(sys, "argv", [str(SET_LOCK), requested, *command]), \
+                 mock.patch.dict(os.environ, {"GEAK_GPU_ALLOWED": "4,7"}), \
+                 mock.patch.object(self.module.os, "execvp") as execute:
+                with self.assertRaises(SystemExit) as result:
+                    self.module.main()
+                self.assertEqual(result.exception.code, 2)
+                execute.assert_not_called()
 
 
 @unittest.skipUnless(shutil.which("bash") and shutil.which("flock"), "requires bash/flock")

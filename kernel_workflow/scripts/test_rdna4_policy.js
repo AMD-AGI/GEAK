@@ -464,8 +464,10 @@ function mustInclude(hay, needle, msg) {
   }
   const apiReference = fs.readFileSync(
     path.join(geakRoot, 'docs/reference/api-reference.md'), 'utf8');
-  mustInclude(apiReference, 'expected_gfx: \"gfx950\"');
-  mustInclude(apiReference, 'expected_target: \"unknown\"');
+  const examples = [...apiReference.matchAll(/^```json\s*\n([\s\S]*?)^```/gm)]
+    .map(match => JSON.parse(match[1]));
+  assert.ok(examples.some(example => example.expected_gfx === 'gfx950'
+    && example.expected_target === 'mi355x'), 'the serving example pins both ISA and product');
   const runE2eDocs = fs.readFileSync(
     path.join(geakRoot, 'interface/run_e2e.md'), 'utf8');
   mustInclude(runE2eDocs, 'GEAK_GPU_IDENTITY_JSON');
