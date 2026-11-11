@@ -618,8 +618,6 @@ ok(/async function requireE2EValidationCheckpoint\(relativePath, intent\) \{\s*c
 const persistSrc = src.slice(src.indexOf('let lastCommittedCheckpoint = null;'),
   src.indexOf('// Expert-skills prompt injection.'));
 const dispatchSrc = src.slice(src.indexOf('function agentBounded('), src.indexOf('// --- FlyDSL provisioning gate'));
-const hardwareSrc = src.slice(src.indexOf('// BEGIN GENERATED hardware_context_workflow.js'),
-  src.indexOf('// END GENERATED hardware_context_workflow.js'));
 ok(persistSrc.includes('async function requireE2EValidationCheckpoint(') &&
   dispatchSrc.includes('async function safeAgent('), 'checkpoint writer and dispatch loop located');
 const SCALE = 15000;
@@ -629,7 +627,7 @@ const commitHarness = ({ leftMs = RESERVE, retry = false, writer }) => {
     'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'AGENT_TIMEOUT_RETRY',
     'withProcessSafety', 'ablEffortFor', 'ablEvent', 'ABL', 'tlAgent', 'LLM_TL', 'log', 'agent',
     'EVAL_DIR', 'CHECKPOINT_WRITE_SCHEMA', 'setTimeout',
-    `const A = {};\n${hardwareSrc}\n${src.slice(aStart, kEnd)}\n${dispatchSrc}\n${persistSrc}
+    `${src.slice(aStart, kEnd)}\n${dispatchSrc}\n${persistSrc}
      return { persistE2EValidationCheckpoint, requireE2EValidationCheckpoint, ABANDONED_RUNS };`)(
     H, AGENT_MAX, RESERVE, () => leftMs, retry,
     (p) => p, () => null, () => {}, () => false, () => null, { nested: [] }, (m) => logs.push(m),

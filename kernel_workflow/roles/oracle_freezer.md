@@ -24,7 +24,6 @@ freeze directly from the **input kernel dir**. You do NOT optimize; you build th
 > random in-regime values**, which is exactly what `h.check_random_vs_baseline` is for — see its docstring:
 > *"using the real production kernel as the truth source for each fresh draw — no stored golden needed."*
 
-
 ## Inputs
 `KERNEL_PATH` (input kernel dir), `EXP_ROOT` (where run dirs go), `KERNEL_NAME_HINT`, `GPU_ID`,
 `OP_SPEC` (optional hints: op_kind, shapes, dtype, regime), `WORKLOAD_SPEC_PATH` (optional real-workload

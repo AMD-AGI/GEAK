@@ -85,24 +85,18 @@ see the disagreement rather than a single blended number that hides it.
    what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve the observed product and resource scope using
-   `resolve_peaks(peaks_md_path, gfx, hardware_context=env_report.hardware_context)`
-   or export `GEAK_HARDWARE_CONTEXT` to the run's `hardware_context.json` file.
-   `device_target=unknown` is not a product identity. Matched context takes
-   priority. Without one, bare gfx942/gfx950 retain labelled architecture
-   references (`sku=unknown`, `reference_sku`, `confidence=low`). Other non-client
-   targets can retain the legacy device-property fallback if no table exists.
-   These references cannot establish identity or rank candidates (§7).
-   Invalid/conflicting context, named unknown devices, or mismatching CU counts
-   return no reference. Exact MI308X uses its own low-confidence derived row.
-   Explicit product-only calls remain low-confidence reference lookups.
-   Client gfx120x requires a product; gfx115x requires rocminfo's physical CU count.
-   The 40-CU gfx1151 reference uses `scope=arch_cu_reference_only` and
-   `reference_sku=AI_MAX_395`; other/missing/invalid counts are unknown.
-   Torch's 20 WGPs must not be passed as 40 CUs.
-   Local SKU estimates are planning-only; native TraceLens retains independent
-   models, calibration and report semantics. Use `peak_flops_for()` for precision
-   lookup; a missing precision stays unknown.
+1. Resolve peaks from `peaks.md` via
+   `resolve_peaks(gfx, product=env_report.device_target)`.
+   `device_target=unknown` (every card without a product section, MI300/MI355
+   included) is no
+   product constraint: the ISA-keyed tables still resolve. Client RDNA4
+   numeric peaks exist only for the products with a `product:` section
+   (`r9700`, `r9600d`). A bare gfx1201 (or any other
+   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
+   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
+   — it must not use that gate. Other unknown architectures may derive from
+   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
+   canonical dtype keys; a missing dtype is unknown, never the table maximum.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.
@@ -250,7 +244,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | level | trigger | behavior |
 |---|---|---|
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | no compatible product/resource reference | Try the compatible architecture table, then the legacy device-property fallback where allowed (§3). If unavailable, emit unknown headroom. Fallbacks remain low-confidence, planning-only. |
+| **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
 | **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
@@ -273,11 +267,15 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
-`roofline_tools.TARGET_EFF` supplies generic op-class priors. For compatibility
-with existing GEAK behavior, `target_eff_for` retains R9700's **0.76** MoE and
-elementwise priors; R9600D and other products retain generic values. This is an
-existing heuristic, not new validation or a datasheet fact. Changing these priors
-needs separate workload evidence because it changes headroom classification.
+One measured product override is available through
+`roofline_tools.target_eff_for(op_class, product)`:
+
+| product / class | `target_eff` | evidence |
+|---|---:|---|
+| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
+
+This override does not change dense-GEMM compute efficiency or paged-attention
+priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
 
 ### Routing table (the actual point of this skill)
 
@@ -329,7 +327,7 @@ make the kernel move **fewer bytes for the same work**:
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated
    (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
-   op-class priors with the existing R9700 exception described in §7.
+   generic op-class priors, the same for every product.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the

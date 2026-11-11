@@ -156,8 +156,7 @@ def test_hw_budget_refuses_without_a_sku():
 def test_generated_doc_blocks_are_current(extract_sku):
     files = list(extract_sku.doc_files())
     rel = {str(Path(f).relative_to(REPO)) for f in files}
-    for must in ("kernel_workflow/knowledge/amd_instinct.md",
-                 "perf_knowledge/hardware/cdna4_mi350/peak_tables.md",
+    for must in ("perf_knowledge/hardware/cdna4_mi350/peak_tables.md",
                  "perf_knowledge/hardware/cdna3_mi300/peak_tables.md"):
         assert must in rel, must
     assert extract_sku.check_docs(extract_sku.load()) == []

@@ -180,28 +180,3 @@ def test_legacy_container_entry_maps_hardware_context(tmp_path):
                              str(PACK / 'scripts/locus.sh')], env=env, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.split(b'\0') == [b'-e', b'GEAK_HARDWARE_CONTEXT=/work/run/hardware context.json', b'']
-
-
-@pytest.mark.parametrize('cu,expected', [('40', True), ('32', False), ('20', False), ('0', False)])
-def test_legacy_roofline_cli_cu_reference(cu, expected):
-    tool = ROOT / 'e2e_workflow/knowledge/analysis_skills/roofline/roofline_tools.py'
-    result = run(tool, '--peaks', 'gfx1151', '--cu', cu)
-    assert result.returncode == 0, result.stderr
-    data = json.loads(result.stdout)
-    if expected:
-        assert data['reference_sku'] == 'AI_MAX_395'
-        assert data['sku'] == 'unknown' and data['may_gate'] is False
-        assert data['flops']['bf16'] == 59.4e12
-    else:
-        assert 'error' in data and 'flops' not in data
-
-
-def test_legacy_roofline_cli_context_and_cu_conflicts(tmp_path):
-    tool = ROOT / 'e2e_workflow/knowledge/analysis_skills/roofline/roofline_tools.py'
-    p = context_file(tmp_path)
-    matched = run(tool, '--peaks', 'gfx942', '--cu', '80', '--hardware-context', p)
-    assert matched.returncode == 0, matched.stderr
-    assert json.loads(matched.stdout)['sku'] == 'mi308x'
-    conflict = run(tool, '--peaks', 'gfx942', '--cu', '304', env={'GEAK_HARDWARE_CONTEXT': str(p)})
-    assert conflict.returncode == 0, conflict.stderr
-    assert 'error' in json.loads(conflict.stdout)

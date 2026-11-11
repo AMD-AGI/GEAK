@@ -15,7 +15,6 @@ The orchestration script provides all paths/values in your prompt. Read them car
 filesystem and shell work yourself with Bash/Read/Write. Return ONLY the requested structured JSON
 (the script forces a StructuredOutput tool).
 
-
 ## Isolation contract (non-negotiable)
 - The user's `KERNEL_PATH_ORIG` is **READ-ONLY** for the whole run unless `APPLY_TO_ORIGINAL=true`
   at validate time. Never `cd` into it to edit. Never run benchmarks that write into it.
