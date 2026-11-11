@@ -13,7 +13,10 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
                      right callable can still miss a stage, a dispatch branch or the
                      other phase. The kernels it did launch are recorded per phase
   correctness        baseline and candidate oracle legs in fresh processes, compared per output
-                     under the contract's bound, against a float64 reference where one exists
+                     under the contract's bound, against a float64 reference where one exists.
+                     A contract with `oracles` (another launch path of the same step, e.g. a
+                     monokernel's split stages) judges the candidate AND the baseline against
+                     every oracle leg instead; a baseline that fails one = oracle_floor, exit 3
   server_calls       (server evidence) the entry calls the probe server recorded when it first
                      compiled each of the task's Triton variants -- warmup and startup included --
                      replayed in both legs; the candidate must run every call the baseline runs
@@ -549,8 +552,155 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
     return ok, rows
 
 
+# Oracle legs (DESIGN 1.4). `cases: per_width_smallest` runs a leg only on the smallest-context
+# random case of each width (the rows of the step).
+WIDTH_AXIS, CONTEXT_AXIS = "rows", "context"
+ORACLE_OVERLAYS = ("baseline",)
+
+
+def oracle_legs(T):
+    """The contract's `oracles` (name -> leg). Non-empty: correctness judges the candidate AND
+    the baseline against every leg, and never the candidate against the baseline."""
+    return dict(T.doc.get("oracles") or {})
+
+
+def oracle_case_sigs(T, o):
+    """The random cases (manifest order) an oracle leg runs on."""
+    specs = T.random_specs()
+    if o.get("cases", "all") == "all":
+        return [s["sig"] for s in specs]
+    best = {}
+    for s in specs:
+        ax = s.get("axes") or {}
+        w, ctx = ax.get(WIDTH_AXIS), ax.get(CONTEXT_AXIS, 0)
+        if w not in best or ctx < best[w][0]:
+            best[w] = (ctx, s["sig"])
+    keep = {sig for _, sig in best.values()}
+    return [s["sig"] for s in specs if s["sig"] in keep]
+
+
+def _oracle_named(T, doc_o, out, sym):
+    """An oracle leg's return by output name: a dict as is, a tuple in the order of the outputs
+    the oracle produces (`oracles.<name>.outputs`) or of every contract output."""
+    if isinstance(out, (tuple, list)):
+        full = [n for n, s in T.doc["outputs"].items() if T.U.present(s, sym)]
+        if len(out) == len(full):
+            return {n: v for n, v in T.U.name_outputs(T.doc, out, sym).items() if n in doc_o["outputs"]}
+    return T.U.name_outputs(doc_o, out, sym)
+
+
+def compare_vs_oracle(T, name, subject, oracle_out, sym):
+    """One subject's outputs (a call leg: candidate or baseline) against oracle `name` under the
+    contract that oracle is judged by (outputs narrowed, its own bounds; ut_contract.oracle_doc)."""
+    doc_o = T.U.oracle_doc(T.doc, name)
+    ref = _oracle_named(T, doc_o, oracle_out, sym)
+    sub = T.U.name_outputs(T.doc, subject, sym)
+    return T.U.compare_outputs(doc_o, sub, ref, sym=sym, refs=ref)
+
+
+def _correctness_vs_oracles(T, a, state, base, cand, oracles):
+    """DESIGN 1.4: per batch a baseline call leg, a candidate call leg and one leg per oracle.
+    The candidate must pass every oracle. The baseline must too (the oracle floor): a baseline
+    that fails one means the harness or the oracle is wrong, not the candidate -- the gate is
+    harness_incomplete (exit 3, why=oracle_floor:<name>). Candidate vs baseline is not compared;
+    bit-exactness is compare.determinism=bitwise (the candidate run twice)."""
+    torch = T.U._torch()
+    device = _device(torch)
+    seed, draws = a.seed, a.draws
+    sd = state["scratch"]
+    for name, o in oracles.items():
+        if o.get("overlay", "baseline") not in ORACLE_OVERLAYS:
+            return {"status": "harness_incomplete",
+                    "why": "oracle %s: overlay %r not in %s" % (name, o.get("overlay"), ORACLE_OVERLAYS)}
+    covered = {name: set(oracle_case_sigs(T, o)) for name, o in oracles.items()}
+    bitwise = T.doc["compare"].get("determinism") == "bitwise"
+    rows, flaky, floor, uncovered, batches, oversized = [], [], [], [], 0, []
+    ok = True
+    try:
+        with oracle_workers(T, state):
+            for sigs, estimated in oracle_batches(T, draws, 2 + len(oracles) + int(bitwise)):
+                batches += 1
+                if estimated > int(T.mc.get("oracle_batch_bytes", 256 << 20)):
+                    oversized.extend(sigs)
+                # legs grouped by the cases they run: the call legs and `all` oracles on the
+                # batch, a per_width_smallest oracle on its share of it
+                groups = {tuple(sigs): [("base", {"overlay": base, "path": os.path.join(sd, "base.pt"),
+                                                  "seed": seed, "draws": draws, "watch": "oracle"}),
+                                        ("cand", {"overlay": cand, "path": os.path.join(sd, "cand.pt"),
+                                                  "seed": seed, "draws": draws})]}
+                for name, o in oracles.items():
+                    mine = tuple(s for s in sigs if s in covered[name])
+                    if mine:
+                        groups.setdefault(mine, []).append((name, {
+                            "overlay": base, "path": os.path.join(sd, "oracle_%s.pt" % name),
+                            "seed": seed, "draws": draws, "oracle_path": o["path"],
+                            "env": o.get("env") or {}}))
+                blobs = {}
+                for group_sigs, legs in groups.items():
+                    with case_batch(T, group_sigs):
+                        blobs.update(zip([label for label, _ in legs],
+                                         _oracles(T, state, [job for _, job in legs])))
+                if bitwise:
+                    with case_batch(T, sigs):
+                        again = _oracle(T, cand, os.path.join(sd, "cand2.pt"), seed, draws, state)
+                    flaky.extend(k for k in blobs["cand"] if
+                                 T.U.tensor_digest(blobs["cand"][k]) != T.U.tensor_digest(again.get(k)))
+                    del again
+                for spec in [T.spec(s) for s in sigs]:
+                    for i in range(draws):
+                        key = "%s|%d" % (spec["sig"], i)
+                        row = {"case": key, "ok": True}
+                        rows.append(row)
+                        missing = [label for label, blob in blobs.items() if
+                                   (label in ("base", "cand") or spec["sig"] in covered[label]) and key not in blob]
+                        if missing:
+                            row.update(ok=False, why="missing from %s" % ", ".join(missing))
+                            ok = False
+                            continue
+                        names = [n for n in oracles if spec["sig"] in covered[n]]
+                        if not names:
+                            row.update(ok=False, why="no oracle leg covers this case")
+                            uncovered.append(key)
+                            continue
+                        sym = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=False)["_sym"]
+                        for name in names:
+                            rc = compare_vs_oracle(T, name, blobs["cand"][key], blobs[name][key], sym)
+                            rb = compare_vs_oracle(T, name, blobs["base"][key], blobs[name][key], sym)
+                            row["vs_%s" % name] = {"cand": _summarize(rc), "base": _summarize(rb)}
+                            if not rc["ok"]:
+                                row["ok"] = False
+                            if not rb["ok"]:
+                                floor.append({"oracle": name, "case": key})
+                        ok = ok and row["ok"]
+                del blobs
+    except RuntimeError as exc:
+        if SENTINEL in str(exc):
+            return {"status": "harness_incomplete", "why": str(exc)[-2000:]}
+        raise
+    out = {"judged_against": "oracles", "cases": rows, "batches": batches,
+           "oversized_single_cases": oversized,
+           "output_budget_bytes": int(T.mc.get("oracle_batch_bytes", 256 << 20)),
+           "oracles": {name: {"path": o["path"], "cases": o.get("cases", "all"),
+                              "covered": sorted(covered[name]),
+                              "skipped": [s["sig"] for s in T.random_specs() if s["sig"] not in covered[name]]}
+                       for name, o in oracles.items()}}
+    if bitwise:
+        out["bitwise_repeat"] = {"ok": not flaky, "differing": flaky}
+    if floor or uncovered:
+        why = ("oracle_floor:%s" % ",".join(sorted({f["oracle"] for f in floor})) if floor
+               else "no oracle leg covers %d case(s)" % len(uncovered))
+        print("%s: correctness %s -- the baseline itself does not pass the contract's oracle(s); "
+              "fix the harness / oracle, not the candidate" % (SENTINEL, why), flush=True)
+        return {"status": "harness_incomplete", "why": why, "oracle_floor": floor,
+                "uncovered": uncovered, "seed": seed, "draws": draws, **out}
+    return {"status": "pass" if ok and rows and not flaky else "fail", "seed": seed, "draws": draws, **out}
+
+
 def gate_correctness(T, a, state):
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
+    oracles = oracle_legs(T)
+    if oracles:
+        return _correctness_vs_oracles(T, a, state, base, cand, oracles)
     seed, draws = a.seed, a.draws
     sd = state["scratch"]
     rows, flaky, ok, batches, oversized = [], [], True, 0, []

@@ -663,5 +663,181 @@ class EndToEndNoiseRelativeTest(EndToEndTest):
     test_lint_rejects_meta_out_of_sync_with_manifest = None
 
 
+# A worker-protocol leg_runner for a fake mono_layer task: every leg computes the same step from
+# (case, draw, seed) -- stream_in ~ N(0,1), each launch adds a change of rms 0.25 -- under the
+# overlay's fake_impl.MUTATION[<oracle path>]. `native` returns only its outputs, by name, with a
+# small independent error.
+_MONO_WORKER = r"""import json, os, sys, zlib, torch
+import fake_impl
+task = sys.argv[sys.argv.index("--task") + 1]
+axes = {c["sig"]: c["axes"] for c in json.load(open(os.path.join(task, "run", "ut_cases.json")))["cases"]}
+W, L, P, H, K, TOPK = 2, 2, 2, 16, 4, 2
+
+
+def step(sig, seed, path):
+    mut = fake_impl.MUTATION.get(path)
+    R = axes[sig]["rows"]
+    g = torch.Generator().manual_seed(zlib.crc32(sig.encode()) + 1000 * seed)
+    stream_in = torch.randn(W, R, H, generator=g)
+    layers, s = [], stream_in
+    for _ in range(L):
+        d = 0.25 * torch.randn(W, R, H, generator=g)
+        if mut == "scale":
+            d = 1.5 * d
+        if path == "native":
+            d = d + 1e-3 * torch.randn(W, R, H)
+        s = s + d
+        layers.append(s)
+    kv = torch.randn(W, L, P, 2, R, K, generator=g)
+    first = torch.randint(0, 32, (W, L, R, 1), generator=g)
+    ids = torch.cat([first, (first + 1 + torch.randint(0, 30, first.shape, generator=g)) % 32], -1).int()
+    out = {"stream_out": s.clone(), "attn_out": (0.5 * s).bfloat16(), "layer_out": torch.stack(layers, 1),
+           "stream_in": stream_in, "kv_rows": kv, "kv_stray": torch.zeros(W, L, P, dtype=torch.int64),
+           "ids": ids}
+    if mut == "ids_perm":
+        out["ids"] = out["ids"].flip(-1).contiguous()
+    if mut == "kv_stray":
+        out["kv_stray"][0, 0, 0] = 64
+    if mut == "nan":
+        out["stream_out"][0, 0, 0] = float("nan")
+    if path == "native":
+        return {k: out[k] for k in ("stream_in", "stream_out", "attn_out", "layer_out", "kv_rows")}
+    return tuple(out[k] for k in ("stream_out", "attn_out", "layer_out", "stream_in", "kv_rows",
+                                   "kv_stray", "ids"))
+
+
+for line in sys.stdin:
+    r = json.loads(line)
+    blob = {"%s|%d" % (sig, n): step(sig, r["seed"] + n, r.get("path", "call"))
+            for sig in r["sigs"] for n in range(r["draws"])}
+    torch.save(blob, r["out"])
+    print("GEAK_ORACLE_BATCH " + json.dumps({"out": r["out"], "n": len(blob)}), flush=True)
+"""
+
+
+@needs_torch
+class MonoOracleCorrectnessTest(unittest.TestCase):
+    """DESIGN 1.4 end to end on the CPU: ut_driver's correctness gate over a fake mono_layer task
+    (real Task, real oracle workers and compare, fake legs): the candidate and the baseline are
+    each judged against the split and native oracle legs, never against each other."""
+
+    CASES = [{"sig": "r2_c16", "axes": {"rows": 2, "context": 16}},
+             {"sig": "r2_c64", "axes": {"rows": 2, "context": 64}},
+             {"sig": "r4_c32", "axes": {"rows": 4, "context": 32}}]
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mono_w3_driver", os.path.join(UTC, "ut_driver.py"))
+        self.D = importlib.util.module_from_spec(spec)
+        previous = sys.path[:]
+        try:
+            spec.loader.exec_module(self.D)
+        finally:
+            sys.path[:] = previous
+        self.tmp = tempfile.mkdtemp(prefix="utc_mono_w3_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.task = os.path.join(self.tmp, "task")
+        os.makedirs(os.path.join(self.task, "run"))
+        shutil.copy(os.path.join(UTC, "ut_contract.py"), self.task)
+        doc = U.freeze_task_contract(U.load_family("mono_layer"),
+                                     attrs={"layer_kind": "routed_moe", "stream_dtype": "float32"},
+                                     const_axes={"hidden": 16, "world": 2, "launches": 2, "pools": 2,
+                                                 "kv_width": 4, "topk": 2})
+        files = {"run/ut_contract.json": doc, "meta.json": {"ut_contract": {"oracle_timeout": 120}},
+                 "run/ut_cases.json": {"cases": [dict(c, regime="DECODE", random=True, timed=True,
+                                                      effective_calls=1) for c in self.CASES]}}
+        for rel, obj in files.items():
+            with open(os.path.join(self.task, rel), "w") as f:
+                json.dump(obj, f)
+        with open(os.path.join(self.task, "leg_runner.py"), "w") as f:
+            f.write(_MONO_WORKER)
+        self.base, self.cand = os.path.join(self.tmp, "base"), os.path.join(self.tmp, "cand")
+        for d in (self.base, self.cand):
+            os.makedirs(d)
+            self.mutate(d, {})
+
+    def mutate(self, overlay, mutation):
+        with open(os.path.join(overlay, "fake_impl.py"), "w") as f:
+            f.write("MUTATION = %r\n" % (mutation,))
+
+    def task_obj(self):
+        from types import SimpleNamespace
+        T = self.D.Task(self.task)
+        T._h = SimpleNamespace(build_candidate_overlay=lambda d, m: (self.base, self.cand),
+                               gpu_env=lambda gpu: {})
+        T._cases = SimpleNamespace(make_args=lambda spec, gen=None, with_logical=False:
+                                   {"_sym": U.symbols_for(T.doc, spec["axes"])})
+        return T
+
+    def args(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(seed=0, draws=1, gates=["correctness"], validation_mode="correctness",
+                               keep_going=False, quick=False, out=None, reuse=False)
+
+    def correctness(self):
+        T = self.task_obj()
+        state = {"scratch": tempfile.mkdtemp(dir=self.tmp)}
+        return self.D.gate_correctness(T, self.args(), state)
+
+    def test_merged_equal_to_split_passes(self):
+        r = self.correctness()
+        self.assertEqual(r["status"], "pass", json.dumps(r, default=str)[:3000])
+        self.assertEqual(r["judged_against"], "oracles")
+        self.assertEqual(len(r["cases"]), 3)
+        for row in r["cases"]:
+            self.assertTrue(row["vs_split"]["cand"]["ok"] and row["vs_split"]["base"]["ok"])
+        # native runs only on each width's smallest context
+        self.assertEqual(r["oracles"]["native"]["covered"], ["r2_c16", "r4_c32"])
+        self.assertEqual(r["oracles"]["native"]["skipped"], ["r2_c64"])
+        native = {row["case"]: row.get("vs_native") for row in r["cases"]}
+        self.assertIsNone(native["r2_c64|0"])
+        self.assertTrue(native["r2_c16|0"]["cand"]["ok"])
+        self.assertNotIn("ids", native["r2_c16|0"]["cand"])            # native narrows its outputs
+        self.assertEqual(native["r2_c16|0"]["cand"]["stream_out"]["kind"], "sqnr")
+
+    def test_wrong_softmax_scale_fails_both_oracles(self):
+        self.mutate(self.cand, {"call": "scale"})
+        r = self.correctness()
+        self.assertEqual(r["status"], "fail")
+        row = r["cases"][0]
+        self.assertFalse(row["vs_split"]["cand"]["stream_out"]["ok"])
+        self.assertFalse(row["vs_native"]["cand"]["stream_out"]["ok"])
+        self.assertTrue(row["vs_split"]["base"]["ok"])
+
+    def test_wrong_split_is_the_oracle_floor_and_exit_3(self):
+        self.mutate(self.base, {"split": "scale"})
+        r = self.correctness()
+        self.assertEqual(r["status"], "harness_incomplete")
+        self.assertEqual(r["why"], "oracle_floor:split")
+        self.assertEqual({f["oracle"] for f in r["oracle_floor"]}, {"split"})
+        report, code = self.D.run_gates(self.task_obj(), self.args())
+        self.assertEqual((report["verdict"], code), ("harness_incomplete", 3))
+        self.assertEqual(report["gates"]["correctness"]["why"], "oracle_floor:split")
+
+    def test_permuted_ids_fail_exact(self):
+        self.mutate(self.cand, {"call": "ids_perm"})
+        r = self.correctness()
+        self.assertEqual(r["status"], "fail")
+        ids = r["cases"][0]["vs_split"]["cand"]["ids"]
+        self.assertEqual(ids["kind"], "exact")
+        self.assertFalse(ids["ok"])
+        self.assertGreater(ids["mismatches"], 0)
+
+    def test_stray_kv_write_fails(self):
+        self.mutate(self.cand, {"call": "kv_stray"})
+        r = self.correctness()
+        self.assertEqual(r["status"], "fail")
+        self.assertFalse(r["cases"][0]["vs_split"]["cand"]["kv_stray"]["ok"])
+
+    def test_subject_nan_where_the_oracle_is_finite_fails(self):
+        self.mutate(self.cand, {"call": "nan"})
+        r = self.correctness()
+        self.assertEqual(r["status"], "fail")
+        so = r["cases"][0]["vs_split"]["cand"]["stream_out"]
+        self.assertFalse(so["ok"])
+        self.assertEqual(so["status"], "subject_nonfinite")
+        self.assertFalse(r["cases"][0]["vs_native"]["cand"]["stream_out"]["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()
