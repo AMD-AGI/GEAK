@@ -289,9 +289,11 @@ Those require actual execution evidence.
    EVO-off and population-size-one compatibility. Mocked dispatch proves wiring;
    real filesystem/process witnesses test their exercised custody/settlement
    contracts. Neither establishes actual native-agent execution or GPU benefit.
-2. Native Claude and Codex episodes: prove roles actually read source/evidence,
-   dispatch from distinct evolving incumbents, retain local history, use exact
-   donor bytes when requested, and produce independently qualified descendants.
+2. Native Claude and Codex episodes on real captured kernel tasks: prove roles
+   actually read source/evidence, dispatch from distinct evolving incumbents,
+   retain local history, use exact donor bytes when requested, and produce
+   independently qualified descendants. Synthetic plumbing smoke tests do not
+   substitute for these actual-kernel episodes.
 3. Matched cold searches: compare one main worker, K independent main workers,
    K persistent EVO workers without exchange, and K with agent-requested exchange.
    Match initialization, tools, evidence, resource/stop contracts and final protocol
@@ -311,3 +313,26 @@ An apparent null can leave the idea unresolved if implementation, opportunity,
 source exposure, stopping or measurement failed. Positive results need the same
 fidelity audit. Parallelism, another archive or a plausible diagram is not itself
 a novelty or performance result.
+
+## Required independent kernel-run reviews
+
+At least three distinct researchers must independently review the same frozen
+actual-kernel-run evidence before this proposed architecture is considered
+evidence-supported. Source reviews, diagrams, mocked traces and CPU tests remain
+prerequisites, not substitutes or counted approvals. Historical runs of a
+different revision can motivate changes but cannot qualify this implementation.
+
+Each review must cite exact runs and source identities, actual lineage and tool
+execution, measured resource use, full correctness and per-case timings, and
+source-bound independent final evaluations. Reviewers must inspect all assigned
+failures and non-engagement, compare against strong equally resourced main
+workers, and distinguish implementation fidelity from the underlying idea.
+Donor requests alone do not prove recombination; surviving executed contributions
+and contributor comparisons are required for that claim.
+
+Record each review's supported claims, objections, missing evidence and required
+changes. Retain disagreement rather than selecting favorable votes. Three reviews
+of one run do not create three independent experiments, and neither review count
+nor a successful kernel episode establishes universal superiority or serving
+benefit. This documentation adds the review requirement, not completed reviews
+or qualifying population runs.
