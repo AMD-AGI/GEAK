@@ -58,3 +58,14 @@ result. Completion still requires the standard `unittest.py`, all declared
 positive-mass cases on both legs, baseline/candidate identity, observed-call
 weights, per-rank evidence and a final task report. Preserve the original
 whole-workload denominator when a collective case remains uncovered.
+
+## Whole-layer monokernels
+
+A monokernel that runs a whole layer with in-kernel peer exchanges (family `mono_layer`) is
+scaffolded with `timing.kind: rank_chain`. Keep the rank harness above for `call()` and the
+correctness gates; never time it -- its host-side input distribution, page-table build and
+output gather were ~100 ms around a ~0.15 ms launch. Write `cases.rank_chain()` from the
+kernel's own multi-rank tests (sgl-amd-mono `test/kernels`) and the layer team's frozen bench:
+per rank, a chain of distinct layers at the case's served rows and context, `step(n)` capturable,
+`check()` reading the guard words. `shared/rank_timing.py` captures and replays it on all ranks
+with fixed counts; the timing gate fails a graph phase that was timed any other way.

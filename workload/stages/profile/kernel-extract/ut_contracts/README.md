@@ -11,7 +11,7 @@ into a declared **contract** and one **driver**, the way SIKL's `OpContract`
 
 | Piece | What it is |
 |---|---|
-| `families/<family>.json` | the contract of one operator family (17 today, `scaffold_ut.py list`) |
+| `families/<family>.json` | the contract of one operator family (18 today, `scaffold_ut.py list`) |
 | `ut_contract.py` | contract loading, CPU lint, seeded operand construction, input checks, the bound compares |
 | `reference_f64.py` | float64 references, one per family that has one, row-subsettable |
 | `ut_driver.py` | every gate, driven by the frozen contract; a task's `unittest.py` calls it |
@@ -224,12 +224,41 @@ Timing is unchanged from the shared harness (`measure_legs` + `serving_weighted_
 the optimize stage reads the same number it always has; the report adds which buckets
 stopped before `--max-reps` and the recorded cache condition.
 
+The timing gate also refuses a number that is not the deployed device time, whatever the
+speedup: every leg carries a receipt (`baseline_timing` / `optimized_timing`: timers, `primed`,
+`host_ms`), and the gate fails when a phase that deploys under a CUDA graph was timed by any
+other timer (`time_op`'s silent eager fallback), when `primed` is False (host-bound: the number
+is dispatch latency) or when it is absent. A UT that timed ~100 ms of host work around a
+~0.15 ms monokernel passed this gate before the receipt was carried.
+
+## Whole-layer monokernels (`mono_layer`, timing `rank_chain`)
+
+A persistent monokernel that runs a whole decoder layer and exchanges data with its peer
+ranks inside the kernel cannot be timed by `time_op(call)`: rank 0 alone waits on its peers,
+and a `call()` that drives them puts the host-side rank harness in the window. Its family
+declares `timing.kind: rank_chain`; `scaffold_ut.py new` then writes `meta.timing`, copies
+`shared/rank_timing.py` and appends a `rank_chain()` stub to `cases.py`.
+
+| | correctness gates | timing |
+|---|---|---|
+| entry | `call()` through the task's rank harness (collective-ut.md) | `cases.rank_chain(rank, world, group, case)` |
+| processes | the harness's | `rank_timing.py`: one process per rank, `world` devices per leg, buckets one at a time |
+| what is timed | -- | CUDA-graph replays of a chain of `chain_length` DISTINCT layers minus the bootstrap step, every rank after a barrier, bucket = max over ranks |
+
+The method is the Muse Spark layer team's frozen benchmark (`bench_worker.target_chain`)
+built on sgl-amd-mono `test/kernels` (`test_muse_spark_layer.py`, `test_muse_spark_k3_tp8.py`);
+write `rank_chain` from those, at the manifest's served rows and contexts. Ground truth on
+MI355X for the Muse Spark target layer: ~130-180 us a launch at TP8 (rows 8/16).
+
 ## Limits
 
 - A family contract is not a substitute for reading the live call: shapes, dtypes and the
   boundary come from the trace and the installed source; the contract checks them.
 - `all_reduce` is declared but the single-process driver cannot run a collective; use the
   rank harness of `references/collective-ut.md` with the contract's bound.
+- `mono_layer` times through `rank_chain` only; its correctness still runs through `call()`
+  and the task's rank harness. Draft-style monokernels driven from one process on all devices
+  need a per-rank `rank_chain` all the same.
 - Hooks that quantize or shuffle must call the installed functions; the CPU tests use
   stand-ins and prove nothing about a real quantizer.
 - The float64 references are the operator's mathematics. When the installed baseline fails

@@ -377,18 +377,33 @@ def _run(a, task, meta):
         return phase_call, h.deployment_graph_mode(phase_regime)
 
     if a.mode == "time":
+        rt = _load("rank_timing", os.path.join(task, "rank_timing.py")) \
+            if (meta.get("timing") or {}).get("kind") == "rank_chain" else None
+        if rt is not None:
+            # Whole-layer monokernel with in-kernel peer exchanges: every rank times its own graph
+            # replays of a chain of layers (rank_timing.py); this process only spawns the ranks.
+            spec = rt.chain_spec(meta)
+            out = [rt.time_bucket(task, c, meta, spec) for c in rt.timed_rows(task, a.bucket)]
+            print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
+            return
         sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
         out = []
         for c in sel:
             case_call, case_graph = case_execution(c)
             r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True)
-            out.append({"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
-                        "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
-                        "timer": (r or {}).get("timer"),
-                        # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
-                        # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
-                        # see harness_lib.cache_policy), so the two must never be folded together.
-                        "cache_condition": (r or {}).get("cache_condition")})
+            row = {"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
+                   "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
+                   "timer": (r or {}).get("timer"),
+                   # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
+                   # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
+                   # see harness_lib.cache_policy), so the two must never be folded together.
+                   "cache_condition": (r or {}).get("cache_condition")}
+            # Whether `ms` is device work or host dispatch latency (time_op's three states:
+            # True / False / ABSENT). Dropping it here is how a host-bound UT passed the timing
+            # gate; carry both keys or neither.
+            if r and "primed" in r:
+                row["primed"], row["host_ms"] = r["primed"], r.get("host_ms")
+            out.append(row)
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
         return
 

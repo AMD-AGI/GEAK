@@ -33,7 +33,7 @@ import ut_contract as U  # noqa: E402
 SKILL_ROOT = os.path.dirname(HERE)
 SHARED_TOOLS = os.environ.get("SHARED_TOOLS") or os.path.join(SKILL_ROOT, "shared")
 SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py", "compile_watch.py",
-                  "kernel_source_delivery.mjs")
+                  "kernel_source_delivery.mjs", "rank_timing.py")
 CONTRACT_HELPERS = ("ut_contract.py", "reference_f64.py", "ut_driver.py")
 
 
@@ -92,6 +92,17 @@ def _hook_stubs(doc):
                      % (name, sig, what.replace('"""', "'''"), name))
     return "\n".join(stubs) if stubs else "# this family declares no hooks\n", \
         ", ".join("%r: %s" % (n, n) for n in names)
+
+
+def rank_chain_timing(doc):
+    """meta.timing for a family timed by shared/rank_timing.py, else None. `world` follows the
+    task's pinned world axis (the deployment's rank count), then the family's default."""
+    t = doc.get("timing") or {}
+    if t.get("kind") != "rank_chain":
+        return None
+    pinned = ((doc.get("task") or {}).get("const_axes") or {}).get("world")
+    return {"kind": "rank_chain", "world": int(pinned or t.get("world", 8)),
+            "chain_length": int(t.get("chain_length", 8))}
 
 
 def workload_cases(manifest):
@@ -185,6 +196,9 @@ def cmd_new(a):
             "min_control_margin": 10.0,
         },
     }
+    timing = rank_chain_timing(doc)
+    if timing is not None:
+        meta["timing"] = timing
     if phase_regimes is not None:
         meta["phase_regimes"] = phase_regimes
     else:
@@ -200,6 +214,9 @@ def cmd_new(a):
         cases = f.read().format(task_name=name, family=doc["family"], target_callable=meta["target_callable"],
                                 hook_stubs=stubs, hook_map=hook_map, outputs=outputs,
                                 call_note=doc.get("call", ""))
+    if timing is not None:
+        with open(os.path.join(HERE, "templates", "rank_chain.py.tmpl")) as f:
+            cases += f.read().format(world=timing["world"], chain_length=timing["chain_length"])
     _write(os.path.join(task, "cases.py"), cases, a.force)
     with open(os.path.join(HERE, "templates", "unittest.py.tmpl")) as f:
         ut = f.read().format(task_name=name, family=doc["family"])

@@ -1,0 +1,50 @@
+{
+  "ut_contract_version": 1,
+  "family": "mono_layer",
+  "op_kind": "collective",
+  "description": "Whole-layer persistent monokernel with in-kernel peer exchanges (sgl-amd-mono: Muse Spark target / draft layer, GLM flash, Kimi ...): ONE launch a layer runs attention over the paged KV cache, o_proj + TP all-reduce, router / top-k, the experts + EP exchange and the next layer's QKV / KV write, pairing with its peer ranks through IPC peer buffers and epoch-tagged mailboxes. Correctness runs through call() and the rank harness; timing is rank_chain (shared/rank_timing.py): every rank times CUDA-graph replays of a chain of distinct layers.",
+  "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_draft_layer|_mono_layer|monokernel"], "op": ["MonoRunner|MuseMonoRunner|mono_layer"]},
+  "reference": null,
+  "axes": {
+    "rows": {"var": true, "lo": 1, "hi": 512, "doc": "tokens of the step (verify rows: requests x draft tokens)"},
+    "context": {"var": true, "lo": 1, "hi": 4194304, "doc": "a request's keys including the step's rows (the census context); size the KV pool and page table from it"},
+    "hidden": {"lo": 1, "hi": 65536},
+    "world": {"lo": 1, "hi": 64, "doc": "TP/EP ranks of the deployment; timing runs exactly this many"}
+  },
+  "attrs": {},
+  "inputs": {
+    "stream": {"shape": ["rows", "hidden"], "dtype": "float32", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true,
+               "doc": "the residual stream entering the layer (replicated over the TP ranks); the launch updates it in place, so call() clones"},
+    "attn_input": {"shape": ["rows", "hidden"], "dtype": "bfloat16", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call",
+                   "doc": "the layer's attention input (replicated over the TP ranks)"}
+  },
+  "outputs": {
+    "stream_out": {"shape": ["world", "rows", "hidden"], "dtype": "float32", "bound": {"kind": "noise_relative", "m": 4.0, "k": 4.0},
+                   "doc": "every rank's residual stream after the step -- compare all ranks, not rank 0"},
+    "attn_out": {"shape": ["world", "rows", "hidden"], "dtype": "bfloat16", "bound": {"kind": "noise_relative", "m": 4.0, "k": 4.0},
+                 "doc": "every rank's next attention input"}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "A rank harness (references/collective-ut.md) runs the deployed runner's launches on every rank for one step and returns all ranks' outputs stacked; host setup (page tables, cache save/restore, input distribution) is part of call() and therefore must never be what is timed. Timing goes through rank_chain(), not call().",
+  "timing": {
+    "kind": "rank_chain",
+    "world": 8,
+    "chain_length": 8,
+    "doc": "shared/rank_timing.py. cases.rank_chain(rank, world, group, case) builds, OUTSIDE the timed window, a chain of chain_length DISTINCT layers (own weights and KV caches, so weights are L2/MALL-cold as in a ~60-layer step) at the case's rows and context, and exposes step(n) = bootstrap + n chained launches + epoch bump (graph-safe), check() = guard error words, close(). Per-launch ms = (T[step(length)] - T[step(short)]) / (length - short) of CUDA-graph replays, all ranks after a barrier, the bucket = max over ranks. Method of the Muse Spark layer team's frozen bench (bench_worker.target_chain) and sgl-amd-mono test/kernels."
+  },
+  "negative_controls": [
+    "drop a stage's contribution (the attention's softmax scale, the o_proj all-reduce's peer partials, an expert's routing score): the residual stream moves by ~|stream| on every rank",
+    "skip one peer's partial in the in-kernel all-reduce: rank outputs diverge from each other and from the baseline"
+  ],
+  "pitfalls": [
+    "Timing call() measures the host: a rank harness driving its peers over gloo, building page tables on the CPU and gathering outputs is ~100 ms against a ~0.15 ms launch (Muse Spark target layer, 2026-11-09). Time rank_chain only.",
+    "Eager timing is launch-bound: every FlyDSL launch costs ~135-170 us from the host regardless of work (sgl-amd-mono test_muse_spark_layer, MI355X), so a host-side Python change posts a fake speedup the served CUDA graph never sees.",
+    "One warm layer replayed over and over keeps its ~0.8 GB of weights in MALL; serving reads ~60 distinct layers a step. Chain distinct layers.",
+    "Contexts must be the served ones: a full-attention layer at 59k-566k keys costs far more than at 1k-8k; size the KV pool from the case.",
+    "Peer buffers and mailbox tags are collective state: every rank runs the same graphs, the same replay counts, in the same order, and the epoch advances once a step. A rank that stops early leaves the others spinning until the guard deadline -- a deadline hit is a FAILED measurement, never a slow one.",
+    "Exactly one device launch per layer call is part of the kernel's contract (MUSE_MONO_PROFILE launch audit); a candidate that splits the launch must be rejected even if faster in isolation.",
+    "Routing ids must stay bit-exact against the baseline (deterministic FP32 router); the float outputs within the baseline's own repeat noise."
+  ]
+}

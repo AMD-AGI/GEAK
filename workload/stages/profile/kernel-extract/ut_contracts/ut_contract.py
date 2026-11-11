@@ -305,6 +305,37 @@ def dtype_of(spec, sym):
 SERVING_FRAMEWORKS = {"sglang": "sglang.srt.utils.common", "vllm": None}
 
 
+def _lint_rank_chain(task_dir, doc, meta):
+    """A family timed by shared/rank_timing.py (timing.kind rank_chain): the task's meta must
+    route timing there for the deployment's rank count, and cases.py must define a filled-in
+    rank_chain(). Text checks only: the lint never imports cases.py."""
+    want = (doc.get("timing") or {}).get("kind") == "rank_chain"
+    got = meta.get("timing") or {}
+    if not want:
+        if got.get("kind") == "rank_chain":
+            return ["meta.timing.kind is rank_chain but family %r is not timed that way" % doc["family"]]
+        return []
+    errors = []
+    if got.get("kind") != "rank_chain":
+        errors.append("family %r is timed by rank_chain (shared/rank_timing.py) but meta.timing is %r: "
+                      "the leg would time call(), i.e. the host-side rank harness" % (doc["family"], got or None))
+    world = ((doc.get("task") or {}).get("const_axes") or {}).get("world")
+    if world is not None and got.get("kind") == "rank_chain" and int(got.get("world", 8)) != int(world):
+        errors.append("meta.timing.world %r != the task's world axis %r" % (got.get("world", 8), world))
+    if not os.path.exists(os.path.join(task_dir, "rank_timing.py")):
+        errors.append("rank_timing.py missing from the task (scaffold_ut.py new copies it)")
+    try:
+        with open(os.path.join(task_dir, "cases.py")) as f:
+            src = f.read()
+    except OSError:
+        src = ""
+    if "def rank_chain(" not in src:
+        errors.append("cases.py defines no rank_chain(rank, world, group, case)")
+    elif "NotImplementedError(\"FILL _Chain" in src:
+        errors.append("cases.py rank_chain is still the scaffold's FILL stub")
+    return errors
+
+
 def lint_task(task_dir):
     """Check a task directory against its frozen contract without importing torch.
 
@@ -335,6 +366,7 @@ def lint_task(task_dir):
                       "the contract changed after scaffolding — re-freeze it, do not hand-edit")
     if meta.get("op_kind") and meta["op_kind"] != doc["op_kind"]:
         errors.append("meta.op_kind %r != contract op_kind %r" % (meta["op_kind"], doc["op_kind"]))
+    errors.extend(_lint_rank_chain(task_dir, doc, meta))
 
     cases = manifest.get("cases") or []
     if not cases:

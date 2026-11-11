@@ -378,6 +378,39 @@ class ModeTime(_LegRunnerTestCase):
         out = json.loads(self._main("--task", self.task, "--mode", "time"))
         self.assertIsNone(out["cases"][0]["ms"])
         self.assertIsNone(out["cases"][0]["timer"])
+        self.assertNotIn("primed", out["cases"][0])
+
+    def test_primed_and_host_ms_reach_the_leg_row(self):
+        """Dropping them here is how a host-bound UT (100 ms for a 0.15 ms launch) passed timing."""
+        self._task_dir(harness=_HARNESS_STUB.replace(
+            '"timer": "event"}', '"timer": "event", "primed": False, "host_ms": 9.5}'))
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time"))
+        self.assertIs(out["cases"][0]["primed"], False)
+        self.assertEqual(out["cases"][0]["host_ms"], 9.5)
+
+    def test_rank_chain_task_is_timed_by_rank_timing_not_call(self):
+        self._task_dir(meta={"target_callable": "fake_live_stack:op", "regime": {"graph_mode": True},
+                             "timing": {"kind": "rank_chain", "world": 8}})
+        self._write("rank_timing.py", textwrap.dedent('''
+            seen = []
+            def chain_spec(meta):
+                return dict(meta["timing"], reps=1)
+            def timed_rows(task, bucket=""):
+                rows = [{"sig": "r8_c4k", "regime": "DECODE", "m": 8}, {"sig": "r16_c4k", "regime": "DECODE", "m": 16}]
+                return [r for r in rows if not bucket or r["sig"] == bucket]
+            def time_bucket(task, case, meta, spec):
+                seen.append((case["sig"], spec["world"]))
+                return {"sig": case["sig"], "ms": 0.15, "timer": "rank_chain_graph", "primed": True, "host_ms": 0.01}
+        '''))
+        self.addCleanup(sys.modules.pop, "rank_timing", None)
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time", "--bucket", "r16_c4k"))
+        self.assertEqual([c["sig"] for c in out["cases"]], ["r16_c4k"])
+        self.assertEqual(out["cases"][0]["timer"], "rank_chain_graph")
+        self.assertEqual(sys.modules["rank_timing"].seen, [("r16_c4k", 8)])
+        self.assertEqual(sys.modules["cases"].seen, [])               # call() never ran
+        self.assertFalse([c for c in sys.modules["harness_lib"].calls if c[0] == "time_op"])
 
 
 class ModeOracle(_LegRunnerTestCase):

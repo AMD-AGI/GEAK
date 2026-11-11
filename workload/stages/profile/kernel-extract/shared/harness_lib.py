@@ -1223,6 +1223,15 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     assert_legs_differ(task, base, cand, meta)
     sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
     gpus = list(gpus or [])
+    world = rank_chain_world(meta)
+    if world:
+        # A rank_chain bucket (rank_timing.py) runs one process per rank on `world` devices at
+        # once: buckets go one after another, each leg leased the whole set, never one GPU each.
+        if gpus and len(gpus) < world:
+            raise HarnessIncompleteError("rank_chain timing needs %d GPUs, given %s" % (world, gpus))
+        env = gpu_env(",".join(str(g) for g in gpus[:world])) if gpus else None
+        return [row for row in (_measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env)
+                                for sig in sigs) if row]
     if len(gpus) > 1 and len(sigs) > 1:
         import queue
         import threading
@@ -1251,10 +1260,26 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     return per_case
 
 
+def rank_chain_world(meta):
+    """Ranks a `timing.kind: rank_chain` task times at once (rank_timing.py), else None."""
+    t = (meta or {}).get("timing") or {}
+    return int(t.get("world", 8)) if t.get("kind") == "rank_chain" else None
+
+
+def _leg_receipt(rows):
+    """What the timing gate needs to know about how a leg's `ms` was produced."""
+    timers = sorted({str(r.get("timer")) for r in rows})
+    primed = [r.get("primed") for r in rows]
+    return {"timers": timers,
+            # True only if every pair says device-bound; None if any pair could not tell (ABSENT)
+            "primed": (None if any(p is None for p in primed) else all(primed)) if rows else None,
+            "host_ms": [r.get("host_ms") for r in rows]}
+
+
 def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_extra):
     """One bucket's interleaved B,C pairs (see measure_legs); None when nothing was timable."""
     lo, hi = undecided
-    row, bms, oms = None, [], []
+    row, bms, oms, brows, orows = None, [], [], [], []
     for _ in range(max(1, int(max_reps))):
         b = _run_leg(task, base, "time", bucket=sig, timeout=timeout, env_extra=env_extra)["cases"]
         o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout, env_extra=env_extra)["cases"]
@@ -1264,6 +1289,8 @@ def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_ext
             row = b[0]
         bms.append(b[0].get("ms"))
         oms.append(o[0].get("ms"))
+        brows.append(b[0])
+        orows.append(o[0])
         good_b, good_o = [x for x in bms if x], [y for y in oms if y]
         if not good_b or not good_o:
             break                      # nothing timable here; more pairs cannot change that
@@ -1280,4 +1307,5 @@ def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_ext
             "speedup": (bm / om) if (bm and om) else None,
             "reps": len(bms),
             "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
-                               if len(pair_sp) > 1 else 0.0)}
+                               if len(pair_sp) > 1 else 0.0),
+            "baseline_timing": _leg_receipt(brows), "optimized_timing": _leg_receipt(orows)}

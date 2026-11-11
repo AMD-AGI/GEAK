@@ -949,10 +949,48 @@ def gate_restore(T, a, state):
     return {"status": "pass" if not changed else "fail", "changed": changed}
 
 
+GRAPH_TIMERS = ("cuda_event_graph", "rank_chain_graph")
+
+
+def timing_basis_defects(T, per):
+    """Why a measured bucket's `ms` is not a device time of the deployed execution, if it is not.
+
+    Each leg's receipt (harness_lib._leg_receipt) says which timer produced `ms` and whether the
+    host could issue faster than the device ran (`primed`). Two failures are refused here rather
+    than left to a reader of the report:
+      * a phase that deploys under a CUDA graph was timed by any other timer -- time_op falls
+        back to eager timing when capture fails, and a candidate then "wins" by collapsing launch
+        overhead the served graph never pays;
+      * `primed` is False (host-bound: the number is dispatch latency) or ABSENT (the leg did not
+        say; an older leg_runner dropped it -- that is how a ~100 ms host-bound UT of a ~0.15 ms
+        monokernel passed this gate)."""
+    graph = {p for p, r in T.phase_regimes().items() if T.h.deployment_graph_mode(r or {})}
+    out = []
+    for c in per:
+        for leg in ("baseline_timing", "optimized_timing"):
+            rec = c.get(leg) or {}
+            timers = rec.get("timers") or []
+            if c.get("regime") in graph and any(t not in GRAPH_TIMERS for t in timers):
+                out.append("%s %s: phase %s deploys under a CUDA graph but was timed by %s (capture "
+                           "failed or was never attempted)" % (c["sig"], leg, c.get("regime"), timers))
+            if rec.get("primed") is False:
+                out.append("%s %s: host-bound (host_ms %s >= device ms): the number is dispatch latency, "
+                           "not kernel time" % (c["sig"], leg, rec.get("host_ms")))
+            elif rec.get("primed") is None:
+                out.append("%s %s: no primed receipt; cannot tell device time from host latency"
+                           % (c["sig"], leg))
+    return out
+
+
 def gate_timing(T, a, state):
     per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=T.gpus)
     w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
+    defects = timing_basis_defects(T, per)
+    if defects:
+        return {"status": "fail", "why": "timing does not measure the deployed device time",
+                "defects": defects, "per_case": per, "aggregate": w,
+                "cache_condition": T.h.cache_policy()}
     if w.get("primary") is not None:
         print("GEAK_WEIGHTED_SPEEDUP=%s" % w["primary"], flush=True)
     return {"status": "pass" if w.get("primary") is not None else "fail",

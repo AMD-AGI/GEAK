@@ -2357,6 +2357,59 @@ class TestMeasureLegs(_LegTestCase):
         self.assertEqual(self.sub.modes().count("time"), 2)
 
 
+class TestMeasureLegsRankChain(_LegTestCase):
+    """A rank_chain bucket (rank_timing.py) needs the whole device set per leg, and every pair's
+    timing receipt (timer / primed / host_ms) must reach the gate."""
+
+    def _receipted(self, primed=(True, True), timer="rank_chain_graph"):
+        sub = self._legs()
+        inner = sub._handler
+
+        def handler(cmd, env):
+            p = inner(cmd, env)
+            if "--mode" in cmd and cmd[cmd.index("--mode") + 1] == "time":
+                doc = json.loads(p.stdout)
+                is_base = env.get("PYTHONPATH", "").split(os.pathsep)[0] == self.base
+                for c in doc["cases"]:
+                    c.update(timer=timer, primed=primed[0 if is_base else 1], host_ms=0.01)
+                p = _Proc(0, json.dumps(doc))
+            return p
+        sub._handler = handler
+        return sub
+
+    def test_buckets_run_one_at_a_time_on_the_whole_set(self):
+        sub = self._receipted()
+        meta = dict(self.meta, timing={"kind": "rank_chain", "world": 8})
+        per = hl.measure_legs(self.task, meta, gpus=[str(i) for i in range(8)])
+        self.assertEqual([c["sig"] for c in per], ["decode", "prefill"])
+        envs = [c["env"] for c in sub.calls if "--mode" in c["cmd"]
+                and c["cmd"][c["cmd"].index("--mode") + 1] == "time"]
+        self.assertTrue(envs)
+        self.assertTrue(all(e.get("HIP_VISIBLE_DEVICES") == "0,1,2,3,4,5,6,7" for e in envs))
+        self.assertEqual(per[0]["baseline_timing"],
+                         {"timers": ["rank_chain_graph"], "primed": True, "host_ms": [0.01]})
+
+    def test_fewer_gpus_than_ranks_is_a_harness_defect(self):
+        self._receipted()
+        meta = dict(self.meta, timing={"kind": "rank_chain", "world": 8})
+        with self.assertRaises(hl.HarnessIncompleteError):
+            hl.measure_legs(self.task, meta, gpus=["0", "1"])
+
+    def test_a_host_bound_pair_and_an_unreceipted_leg_are_visible(self):
+        self._receipted(primed=(False, True), timer="cuda_event")
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertIs(per[0]["baseline_timing"]["primed"], False)
+        self.assertEqual(per[0]["optimized_timing"]["timers"], ["cuda_event"])
+        self._legs()                     # legs that print no primed at all
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertIsNone(per[0]["baseline_timing"]["primed"])
+
+    def test_rank_chain_world(self):
+        self.assertIsNone(hl.rank_chain_world({}))
+        self.assertEqual(hl.rank_chain_world({"timing": {"kind": "rank_chain"}}), 8)
+        self.assertEqual(hl.rank_chain_world({"timing": {"kind": "rank_chain", "world": 4}}), 4)
+
+
 class TestMeasureLegsResolution(_LegTestCase):
     """How many pairs a bucket costs, and in what order the legs run.
 

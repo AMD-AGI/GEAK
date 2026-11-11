@@ -1,0 +1,52 @@
+
+
+# ----------------------------------------------------------------------------- FILL: rank_chain
+# Timing of this task is `rank_chain` (meta.timing, shared/rank_timing.py): call() above is for
+# the correctness gates only and is NEVER timed. rank_timing starts {world} rank processes (one
+# device each, a gloo group), calls rank_chain() in every one of them, captures step(length) and
+# step(short) as CUDA graphs, replays both on all ranks after a barrier and reports
+# (T[length] - T[short]) / (length - short) per launch, the max over ranks.
+#
+# Write it from the kernel's own multi-rank tests, not from call():
+#   * sgl-amd-mono test/kernels/test_muse_spark_layer.py   Layer / Buffers / _kernels / _attn_args ...
+#     (deployed-layout weights, paged FP8 KV cache, page table) and its `_time_graph`;
+#   * test/kernels/test_muse_spark_k3_tp8.py               PeerBuffer over the gloo group, barrier,
+#     back-to-back launches paced by the in-kernel mailboxes;
+#   * the Muse Spark layer team's frozen bench (muse_layer_opt_1106/bin/bench_worker.py,
+#     target_chain / draft_chain): the chain this function returns.
+# Bind the launches through the ambient overlay (import the candidate module the same way call()
+# does), so the baseline and candidate legs time different code.
+
+CHAIN_LENGTH = {chain_length}
+
+
+class _Chain:
+    """One rank's chain. Everything is allocated in __init__; step() only enqueues launches."""
+
+    length = CHAIN_LENGTH
+    short = 0      # step(0) = the bootstrap alone (e.g. layer 0's K1); its time is subtracted
+
+    def __init__(self, rank, world, group, case):
+        axes = case.get("axes") or {{}}
+        self.rows, self.context = int(axes["rows"]), int(axes["context"])
+        # FILL: CHAIN_LENGTH distinct layers (own weights, own KV caches sized for self.context,
+        # the case's page table), one set of activation buffers, the peer buffer over `group`
+        # (rank, world), the epoch / guard words, and the built launch(es) at self.rows.
+        raise NotImplementedError("FILL _Chain.__init__")
+
+    def step(self, n):
+        """Graph-safe: bootstrap, then n chained layer launches (launch i hands its output and the
+        next layer's QKV to launch i+1), then the epoch bump. No sync, no allocation, no host
+        reads: it is captured and replayed."""
+        raise NotImplementedError("FILL _Chain.step")
+
+    def check(self):
+        """Raise if any device-side wait failed (the guard / epoch error words)."""
+        raise NotImplementedError("FILL _Chain.check")
+
+    def close(self):
+        """Release the peer buffer (IPC handles)."""
+
+
+def rank_chain(rank, world, group, case):
+    return _Chain(rank, world, group, case)
