@@ -23,10 +23,7 @@ export async function loadContract(filename = workflowPath) {
     block('const CALLABLE_SPEC_RX =', 'const PRE_FLAGGED_HEADS ='),
     block('const hasFrozenBaseline =', '// Why an extraction failed'),
   ].join('\n');
-  // The schema block also declares Setup, whose optional hardware fields read this
-  // flag. This offline adapter returns extraction schemas only; evaluate the
-  // unrelated Setup schema with the workflow default without probing hardware.
-  return new Function('USE_HARDWARE_CONTEXT = false', `${code}\nreturn {
+  return new Function(`${code}\nreturn {
     EXTRACT_SCHEMA, EXTRACT_OP_SCHEMA, kernelSelectionVerified, hasFrozenBaseline,
     guardUnhydratedVerdicts
   };`)();

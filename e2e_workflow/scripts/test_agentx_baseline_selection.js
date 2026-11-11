@@ -15,8 +15,8 @@ function between(start, end, from = 0) {
   return src.slice(a, b);
 }
 const schemas = between('const obj =', '// Result of the ensure_flydsl');
-const selectionSchema = new Function('USE_HARDWARE_CONTEXT = false', `${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
-const profileSchema = new Function('USE_HARDWARE_CONTEXT = false', `${schemas}\nreturn PROFILE_SCHEMA;`)();
+const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
+const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
@@ -34,8 +34,6 @@ const milestoneFilter = between('  const planCandsRaw =', '  if (!planCands.leng
 const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)',
   '  // --- (b) PARALLEL optimize');
 const carry = between('const carryState = {', '\n// What this run got from the KB');
-// Exercise the serializer used by carryState instead of duplicating its implementation.
-const hardwareArgs = src.match(/function hardwareArgs\(\) \{[\s\S]*?\n\}/)[0];
 
 function candidate(name) {
   // prepared_ut.result is the RETURN.json the packing adapter already validated. It travels WITH
@@ -71,7 +69,6 @@ async function run(body, overrides = {}, reply = selection()) {
     profile: { profile_workload_json: '/old/workload.json', kernel_ranking_json: '/old/ranking.json' },
     strategy: null, kernelQueue: [], headQueue: [], history: { ledger: [] },
     ST: {}, A: {}, FAST_MODE: false, DEEP_MODE: false,
-    USE_HARDWARE_CONTEXT: false, HARDWARE_CONTEXT: null, HARDWARE_CONTEXT_PATH: '',
     e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
     MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
@@ -86,7 +83,7 @@ async function run(body, overrides = {}, reply = selection()) {
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${hardwareArgs}\n${schemas}\n${phaseSelector}\n${helper}\n${body}
+    ${schemas}\n${phaseSelector}\n${helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
@@ -145,22 +142,6 @@ async function run(body, overrides = {}, reply = selection()) {
   const broad = await run(initial + carry, { BUDGET: 1, HEAD_BUDGET: 1 }, broadSelection);
   assert.equal(broad.headQueue.length, 3);
   assert.equal(broad.kernelQueue.length, 4);
-  const hardwareContext = { sku: 'mi308x', observed: { gfx: 'gfx942', physical_cu_count: 80 } };
-  const withHardware = await run(initial + carry, {
-    USE_HARDWARE_CONTEXT: true,
-    HARDWARE_CONTEXT: hardwareContext, HARDWARE_CONTEXT_PATH: '/eval/hardware_context.json',
-  });
-  assert.strictEqual(withHardware.state.use_hardware_context, true);
-  assert.strictEqual(withHardware.state.expected_sku, 'mi308x');
-  assert.strictEqual(withHardware.state.hardware_context, hardwareContext);
-  assert.equal(withHardware.state.hardware_context_path, '/eval/hardware_context.json');
-  const withoutHardware = await run(initial + carry, {
-    HARDWARE_CONTEXT: hardwareContext, HARDWARE_CONTEXT_PATH: '/eval/stale.json',
-  });
-  assert.strictEqual(withoutHardware.state.use_hardware_context, false);
-  for (const key of ['hardware_context', 'hardware_context_path', 'expected_sku']) {
-    assert(!Object.hasOwn(withoutHardware.state, key), `disabled hardware omits ${key}`);
-  }
   const broadResume = await run(resume, { ST: broad.state, BUDGET: 1, HEAD_BUDGET: 1 });
   assert.equal(broadResume.calls.length, 0, 'saved inventory queues do not require rerunning selection');
   assert.deepEqual(broadResume.headQueue.map(c => c.short_name), broad.headQueue.map(c => c.short_name));
