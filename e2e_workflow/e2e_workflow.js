@@ -712,9 +712,10 @@ const AGENTX_DEFAULTS = {
   // Not defaulted: the client picks the tolerance per leg (MEASUREMENT_PURPOSE: exploring vs
   // compared). A declared value overrides it for the whole run.
   failed_request_threshold: null,
-  // InferenceX P90 interactivity, 1000 / P90(ITL) tok/s/user (decode-only; bench_summarize.py
-  // also reports total tok/s as a guard). Hyperloom declares its own basis; this is the default.
-  metric_basis: 'p90_intvty_inferencex',
+  // TTFT-inclusive P50 interactivity, 1 / P50(E2EL/OSL) tok/s/user: the axis Hyperloom keeps
+  // AgentX candidates on, with its guards beside it (see agentxAxisNote). Hyperloom declares its
+  // own basis; this is the default.
+  metric_basis: 'e2e_norm_intvty_p50',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
 // ONE concurrency for the run: roles pass CONC=<WORKLOAD.conc> on every bench line, which outranks
@@ -861,6 +862,25 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// How far each guard may fall before a gain on the graded AgentX axis stops counting, when the
+// caller states no KEEP rule: the noise band Hyperloom holds its AgentX guards to.
+// run_e2e.py DEFAULT_AGENTX_GUARD_DROP_PCT is the same number.
+const AGENTX_GUARD_DROP_PCT = 5.0;
+// The prompt's note on the graded axis: its unit and the guards bench_summary.json carries beside
+// it. A caller's KEEP rule names its own guards, so the total guard and the Validate verdict on
+// the guards are only added without one.
+function agentxAxisNote() {
+  const note = /intvty/.test(AGENTX_METRIC_BASIS)
+    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
+    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.';
+  if (WORKLOAD_SPEC.acceptance != null || AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s') return note;
+  return note + '\n  Report `guard_aggregate_total_token_tok_s_median` beside every delta: the trace fixes the\n' +
+    '  work each request asks for, so this axis can rise while the server completes less of it, and a\n' +
+    '  candidate that does has not made the server faster. At Validate every guard named here is part\n' +
+    `  of the verdict: a gain whose final leg reads any of them more than ${AGENTX_GUARD_DROP_PCT}% below the base leg\n` +
+    '  is not a win, so report `validated_no_win` and name the guard in `arbitration_note`.';
+}
 // KB recall can use its own basis (e.g. only p50 candidates while the bench grades output/total);
 // it never changes the bench axis or the writer's basis.
 function resolveKbMetric() {
@@ -1535,10 +1555,7 @@ measurement duration. Consequences you must respect:
   \`E2E_METRIC\` or any \`AGENTX_*\` variable yourself, and never delete or edit that file.
 * **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
-  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
-    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
-      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
-    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
+  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${agentxAxisNote()}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
   timed-out leg blindly.
@@ -3163,6 +3180,7 @@ async function prepareAgentXKernels(round, throughput) {
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
     BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    BASELINE_ITERATION_DIR: `${EVAL_DIR}/baseline/iterations`,
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
     BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
     CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
