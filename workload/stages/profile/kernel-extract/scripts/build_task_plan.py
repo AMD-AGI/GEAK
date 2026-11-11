@@ -278,6 +278,63 @@ def frameworks(task, cv):
     return sorted({m for m in mods if m in SERVER_PREIMPORTS})
 
 
+# Families whose entry is a monokernel runner that falls back to the framework's own module
+# for some layers (Muse Spark: MuseMonoRunner.launch runs MuseSpark1xDecoderLayer.forward for
+# the bf16-expert layers 0 and 61). The Triton variants that fallback compiles sit under the
+# entry on the stack, so they are sliced into the task, but no monokernel launch builds them.
+FALLBACK_PATH_FAMILIES = {"mono_layer"}
+
+
+def _top(mod):
+    return mod.split(".")[0]
+
+
+def fallback_path_why(rec, kernel_names, target_callable):
+    """Why a server variant is the entry's fallback path, not the monokernel's; None if it is not.
+
+    All three must hold: (1) the variant is no kernel of the task; (2) the frame the entry
+    called (one frame inside it on the recorded stack, innermost first) is a `forward` in a
+    package other than the entry's -- the entry handed the layer to the framework module;
+    (3) it was compiled eagerly and not inside graph capture, so nothing captured the
+    monokernel launches depend on it."""
+    if rec.get("name") in kernel_names or not target_callable:
+        return None
+    if not rec.get("eager") or rec.get("in_graph_capture"):
+        return None
+    mod, _, qual = target_callable.partition(":")
+    leaf = qual.rsplit(".", 1)[-1]
+    stack = rec.get("stack") or []
+    at = None
+    for i, fr in enumerate(stack):     # the entry's frame, matched as compile_watch.belongs does
+        fmod, _, fqual = fr.partition(":")
+        if fmod == mod and (fqual == qual or fqual.rsplit(".", 1)[-1] == leaf):
+            at = i
+            break
+    if not at:              # entry absent, or the entry compiled it itself (index 0)
+        return None
+    callee = stack[at - 1]
+    cmod, _, cqual = callee.partition(":")
+    if _top(cmod) == _top(mod) or cqual.rsplit(".", 1)[-1] != "forward":
+        return None
+    return ("fallback path of %s, not its monokernel: %s compiled under %s, which the entry "
+            "calls in place of the monokernel (a module forward outside the %s package), "
+            "eager=True and in_graph_capture=False on the server -- no monokernel launch "
+            "builds it, so the task's UT cannot; waived by build_task_plan (family fallback "
+            "rule), the variant stays in run/server_variants.json"
+            % (target_callable, rec.get("name"), callee, _top(mod)))
+
+
+def merge_waivers(declared, auto):
+    """task_decls compile_variant_waivers first (theirs win on an id), then the automatic
+    ones. None when neither has any, so stamp_meta leaves an existing meta alone."""
+    if declared is None and not auto:
+        return None
+    out = list(declared or [])
+    have = {w.get("id") for w in out}
+    out += [w for w in auto or [] if w["id"] not in have]
+    return out
+
+
 # a recorded call larger than this is referenced where it is, never copied into the task
 SERVER_CALL_COPY_MAX = int(os.environ.get("SERVER_CALL_COPY_MAX", str(256 << 20)))
 
@@ -296,12 +353,19 @@ def server_evidence(eval_dir, task, tdir):
     target = task.get("target_callable")
     recs = [r for r in cv["variants"] if compile_watch.belongs(r, names, target)]
     slim = [{k: v for k, v in r.items() if k not in ("frames", "tensors", "tensors_b64")} for r in recs]
+    fallback = []
+    if task.get("ut_family") in FALLBACK_PATH_FAMILIES:
+        for r in recs:
+            why = fallback_path_why(r, names, target)
+            if why:
+                fallback.append({"id": r["id"], "why": why})
     run = os.path.join(tdir, "run")
     shutil.copy2(compile_watch.__file__, os.path.join(tdir, "compile_watch.py"))
     dump({"contract": "kernel_extract/server_variants/v1",
                "source": os.path.join(eval_dir, "evidence", "compile_variants.json"),
                "server_mode": cv.get("server_mode"), "env": cv.get("env") or {},
-               "kernels": sorted(names), "target_callable": target, "variants": slim},
+               "kernels": sorted(names), "target_callable": target, "variants": slim,
+               **({"fallback_path_variants": [w["id"] for w in fallback]} if fallback else {})},
          os.path.join(run, "server_variants.json"))
     calls, unmatched, seen, referenced = [], [], set(), []
     shutil.rmtree(os.path.join(run, "server_calls"), ignore_errors=True)
@@ -345,11 +409,12 @@ def server_evidence(eval_dir, task, tdir):
         c.pop("_key")
     dump({"contract": "kernel_extract/server_calls/v1", "target_callable": target,
           "calls": calls, "unmatched_variants": unmatched}, os.path.join(run, "server_calls.json"))
-    return {"server_preimports": pre,
+    return {"server_preimports": pre, "fallback_waivers": fallback,
             "server_evidence": {"compile_variants": "run/server_variants.json",
                                 "server_calls": "run/server_calls.json",
                                 "server_mode": cv.get("server_mode"),
                                 "variants": len(slim), "calls": len(calls),
+                                "fallback_path_variants_waived": len(fallback),
                                 "variants_without_entry_frame": len(unmatched),
                                 "calls_referenced_in_place": len(referenced),
                                 "bytes_referenced_in_place": sum(referenced)}}
@@ -500,7 +565,8 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
         se = server_evidence(eval_dir, t, tdir)
         sc = {"status": "skipped", "why": "--no-scaffold"} if no_scaffold else \
             scaffold(t, tdir, manifest(t, tc["cases"]), force)
-        stamp_meta(tdir, se, t.get("compile_variant_waivers"),
+        stamp_meta(tdir, se, merge_waivers(t.get("compile_variant_waivers"),
+                                           se.get("fallback_waivers")),
                    expected_launches(t, launched, phase_of))
         req["server_preimports"] = se["server_preimports"]
         req["server_evidence"] = se.get("server_evidence") or {"missing": se.get("why")}

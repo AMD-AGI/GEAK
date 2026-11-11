@@ -316,5 +316,105 @@ class TaskSliceTest(unittest.TestCase):
         self.assertIn("compile_variants.json", se["why"])
 
 
+class MonoFallbackPathTest(unittest.TestCase):
+    """build_task_plan on a mono_layer task: Triton variants the runner's fallback branch (a
+    framework module's forward, eager, outside capture) compiled are waived one by one with a
+    why; the monokernel path's own variants still count (G1, 11-11: 38 such variants under
+    MuseMonoRunner.launch -> MuseSpark1xDecoderLayer.forward failed compile_variants)."""
+
+    ENTRY = "mono.runner:Runner.launch"
+    OUTER = ["mono.spec:Built.forward", "fw.cuda_graph:run_once"]
+
+    def rec(self, name, warps, callee, eager=True, capture=False):
+        ident = cw.variant_identity("x.%s" % name, compile_info(warps=warps))
+        stack = ["triton.runtime.jit:JITFunction.run", "x:%s_op" % name, callee, self.ENTRY,
+                 *self.OUTER]
+        return dict(ident, id=cw.variant_id(ident), name=name, eager=eager,
+                    in_graph_capture=capture, stack=stack)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cw_mono_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.eval = os.path.join(self.tmp, "eval")
+        self.tdir = os.path.join(self.eval, "tasks", "mono")
+        os.makedirs(os.path.join(self.eval, "evidence"))
+        os.makedirs(os.path.join(self.tdir, "run"))
+        self.fb = [self.rec("_dense_partial", 4, "fw.model:DecoderLayer.forward"),
+                   self.rec("_qkv_epilogue", 8, "fw.model:DecoderLayer.forward")]
+        self.keep = [
+            # the monokernel package's own path: must stay counted
+            self.rec("_mono_prep", 4, "mono.stages:Prep.forward"),
+            # framework forward, but recorded inside graph capture: may be on the served path
+            self.rec("_captured", 4, "fw.model:DecoderLayer.forward", eager=False, capture=True),
+            # framework code that is not a module forward
+            self.rec("_helper", 4, "fw.ops:helper")]
+        with open(os.path.join(self.eval, "evidence", "compile_variants.json"), "w") as f:
+            json.dump({"variants": self.fb + self.keep, "watch_dir": self.tmp, "env": {},
+                       "server_mode": "profile_cuda_graph"}, f)
+        with open(os.path.join(self.tdir, "meta.json"), "w") as f:
+            json.dump({"ut_contract": {}}, f)
+
+    def task(self, **kw):
+        return dict({"label": "mono", "kernels": ["aiter::mono_layer_s8"], "companions": [],
+                     "target_callable": self.ENTRY, "ut_family": "mono_layer"}, **kw)
+
+    def build(self, task):
+        import build_task_plan as B
+        se = B.server_evidence(self.eval, task, self.tdir)
+        B.stamp_meta(self.tdir, se, B.merge_waivers(task.get("compile_variant_waivers"),
+                                                     se.get("fallback_waivers")))
+        with open(os.path.join(self.tdir, "meta.json")) as f:
+            meta = json.load(f)
+        with open(os.path.join(self.tdir, "run", "server_variants.json")) as f:
+            srv = json.load(f)
+        return se, meta, srv
+
+    def test_fallback_variants_are_waived_each_with_a_why(self):
+        se, meta, srv = self.build(self.task())
+        waivers = meta["ut_contract"]["compile_variant_waivers"]
+        self.assertEqual(sorted(w["id"] for w in waivers), sorted(r["id"] for r in self.fb))
+        for w in waivers:
+            self.assertIn("fallback path of %s" % self.ENTRY, w["why"])
+            self.assertIn("fw.model:DecoderLayer.forward", w["why"])
+            self.assertIn("in_graph_capture=False", w["why"])
+        # the variants stay in the evidence, flagged; the meta block counts them
+        self.assertEqual(len(srv["variants"]), 5)
+        self.assertEqual(sorted(srv["fallback_path_variants"]), sorted(r["id"] for r in self.fb))
+        self.assertEqual(se["server_evidence"]["fallback_path_variants_waived"], 2)
+
+    def test_monokernel_path_variants_still_count_toward_coverage(self):
+        _, meta, srv = self.build(self.task())
+        cov = cw.coverage(srv["variants"], [], meta["ut_contract"]["compile_variant_waivers"])
+        self.assertEqual(sorted(r["kernel"] for r in cov["waived"]),
+                         ["_dense_partial", "_qkv_epilogue"])
+        self.assertEqual(sorted(r["kernel"] for r in cov["missing"]),
+                         ["_captured", "_helper", "_mono_prep"])
+        ut = [dict(r, pid=1, t=1.0) for r in self.keep]
+        cov = cw.coverage(srv["variants"], ut, meta["ut_contract"]["compile_variant_waivers"])
+        self.assertEqual((cov["covered"], cov["missing"]), (3, []))
+
+    def test_declared_waivers_win_and_other_families_get_none(self):
+        own = {"id": self.fb[0]["id"], "why": "reviewed by hand"}
+        _, meta, _ = self.build(self.task(compile_variant_waivers=[own]))
+        waivers = meta["ut_contract"]["compile_variant_waivers"]
+        self.assertEqual(waivers[0], own)
+        self.assertEqual(len(waivers), 2)
+        with open(os.path.join(self.tdir, "meta.json"), "w") as f:
+            json.dump({"ut_contract": {}}, f)
+        se, meta, srv = self.build(self.task(ut_family="gemm"))
+        self.assertNotIn("compile_variant_waivers", meta["ut_contract"])
+        self.assertNotIn("fallback_path_variants", srv)
+        self.assertEqual(se["fallback_waivers"], [])
+
+    def test_a_task_kernel_or_an_entry_compile_is_never_a_fallback(self):
+        import build_task_plan as B
+        r = self.fb[0]
+        self.assertIsNone(B.fallback_path_why(r, {"_dense_partial"}, self.ENTRY))
+        own = dict(r, stack=[self.ENTRY, *self.OUTER])      # compiled by the entry itself
+        self.assertIsNone(B.fallback_path_why(own, set(), self.ENTRY))
+        self.assertIsNone(B.fallback_path_why(r, set(), "other.mod:launch"))
+        self.assertIsNotNone(B.fallback_path_why(r, set(), self.ENTRY))
+
+
 if __name__ == "__main__":
     unittest.main()

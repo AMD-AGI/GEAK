@@ -239,7 +239,11 @@ The UT must also cover what the server compiled, in the server's import environm
   UT variant; fix it with a case (the server call is in `run/server_calls.json`) or waive it
   in `meta.ut_contract.compile_variant_waivers` with a reason. Optional arguments in
   generated cases (descale, sinks, None-ness, index dtypes) come from these server calls,
-  not from defaults.
+  not from defaults. For a `mono_layer` task, `build_task_plan.py` waives, one id at a
+  time with its why, each variant the runner's fallback branch compiled: the frame the
+  entry called is a `forward` outside the entry's package, and the variant was eager and
+  outside graph capture (Muse Spark: `MuseMonoRunner.launch` -> `MuseSpark1xDecoderLayer.forward`
+  for the bf16-expert layers). The monokernel path's own variants are never waived.
 
 Before reporting a verdict, verify deterministic input construction, baseline
 self-noise and that numerical bad-source controls actually fail. For generated
