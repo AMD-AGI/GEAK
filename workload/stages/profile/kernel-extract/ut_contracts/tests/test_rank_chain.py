@@ -138,6 +138,25 @@ class TimingBasis(unittest.TestCase):
         d = driver.timing_basis_defects(self._task(), [{"sig": "x", "regime": "DECODE"}])
         self.assertTrue(d and all("no primed receipt" in x for x in d))
 
+    def test_wall_timer_without_a_device_has_no_receipt_to_give(self):
+        # time_op on a box without CUDA times "wall" and leaves primed ABSENT by design (the CPU
+        # suite's EndToEnd tests); that is not a dropped receipt, in an eager phase.
+        row = self._row("wall", primed=None)
+        for leg in ("baseline_timing", "optimized_timing"):
+            row[leg]["primed"] = None
+            row[leg]["host_ms"] = [None]
+        self.assertEqual(driver.timing_basis_defects(self._task(graph=False), [row]), [])
+        # ...but a device timer without the receipt, or a wall timer in a graph phase, still fails
+        row["optimized_timing"]["timers"] = ["cuda_event"]
+        d = driver.timing_basis_defects(self._task(graph=False), [row])
+        self.assertEqual(len(d), 1)
+        self.assertIn("optimized_timing: no primed receipt", d[0])
+        row["optimized_timing"]["timers"] = ["wall", "cuda_event"]
+        self.assertEqual(len(driver.timing_basis_defects(self._task(graph=False), [row])), 1)
+        row["optimized_timing"]["timers"] = ["wall"]
+        d = driver.timing_basis_defects(self._task(graph=True), [row])
+        self.assertTrue(d and all("deploys under a CUDA graph" in x for x in d))
+
     def test_the_gate_reports_the_defects_instead_of_a_speedup(self):
         T = self._task()
         T.dir, T.meta, T.gpus = "/t", {}, None

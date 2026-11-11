@@ -355,6 +355,7 @@ SMALL = {
     "varlen_attention": ({}, {"heads": 2, "kv_heads": 1, "head_size": 16, "v_head_size": 16},
                          {"batch": 2, "total_q": 6, "total_k": 10}),
     "all_reduce": ({"act_dtype": "float32"}, {"hidden": 16, "world": 4}, {"n_tokens": 3}),
+    "mono_layer": ({}, {"hidden": 16, "world": 2}, {"rows": 3, "context": 8}),
 }
 
 

@@ -982,7 +982,8 @@ def timing_basis_defects(T, per):
         overhead the served graph never pays;
       * `primed` is False (host-bound: the number is dispatch latency) or ABSENT (the leg did not
         say; an older leg_runner dropped it -- that is how a ~100 ms host-bound UT of a ~0.15 ms
-        monokernel passed this gate)."""
+        monokernel passed this gate). Exception: a leg timed only by the "wall" timer (no CUDA:
+        the CPU suite's toy kernels) has no host/device split, so ABSENT is its only answer."""
     graph = {p for p, r in T.phase_regimes().items() if T.h.deployment_graph_mode(r or {})}
     out = []
     for c in per:
@@ -995,7 +996,11 @@ def timing_basis_defects(T, per):
             if rec.get("primed") is False:
                 out.append("%s %s: host-bound (host_ms %s >= device ms): the number is dispatch latency, "
                            "not kernel time" % (c["sig"], leg, rec.get("host_ms")))
-            elif rec.get("primed") is None:
+            elif rec.get("primed") is None and set(timers) != {"wall"}:
+                # A leg timed only by "wall" ran on a box without a device timeline (time_op's CPU
+                # path): host and "device" are the same clock, so there is no dispatch latency to
+                # tell apart and ABSENT is the documented answer, not a dropped receipt. Any device
+                # timer without the receipt, or no timer at all, is still refused.
                 out.append("%s %s: no primed receipt; cannot tell device time from host latency"
                            % (c["sig"], leg))
     return out
