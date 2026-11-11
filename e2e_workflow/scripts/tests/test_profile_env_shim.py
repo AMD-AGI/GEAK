@@ -8,6 +8,7 @@ ROCPROFILER_REGISTER_LIBRARY, and its torch profiler then records no GPU events.
 drops the variable at interpreter start-up and then loads the overlay's sitecustomize, which
 does not chain, so it must come first on PYTHONPATH.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -103,6 +104,52 @@ class ProfileEnvShimTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         with open(log, encoding="utf-8") as fh:
             self.assertIn(f"VLLM_PYTHONPATH: {SHIM_DIR}:{self.overlay}:/opt/base", fh.read())
+
+    @unittest.skipIf(BASH is None, "bash is required to exercise the shell adapter")
+    def test_server_from_task_dir_can_import_stdlib_unittest(self):
+        """Exercise the real launcher with the task/unittest.py collision seen on GPU."""
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        with open(os.path.join(self.tmp, "unittest.py"), "w", encoding="utf-8") as fh:
+            fh.write("raise RuntimeError('task unittest.py shadowed stdlib')\n")
+        server = os.path.join(bin_dir, "vllm")
+        with open(server, "w", encoding="utf-8") as fh:
+            fh.write(f"#!{sys.executable}\nimport json, os, subprocess, sys, unittest.mock\n"
+                     "if sys.version_info >= (3, 11):\n"
+                     "    subprocess.run([sys.executable, '-c', 'import unittest.mock'], check=True)\n"
+                     "print(json.dumps(os.environ.get('PYTHONPATH', '')))\n")
+        os.chmod(server, 0o755)
+        log = os.path.join(self.tmp, "server.log")
+        for profile, overlay, inherited in (
+            (SHIM_DIR, self.overlay, None),
+            ("", self.overlay, ""),
+            (SHIM_DIR, "", None),
+            ("", "", None),
+            (SHIM_DIR, self.overlay, "/opt/base:/opt/extra"),
+        ):
+            with self.subTest(profile=profile, overlay=overlay, inherited=inherited):
+                env = dict(os.environ)
+                env.pop("PYTHONPATH", None)
+                env.pop("PYTHONSAFEPATH", None)
+                if inherited is not None:
+                    env["PYTHONPATH"] = inherited
+                env.update(
+                    PATH=bin_dir + os.pathsep + env.get("PATH", ""),
+                    PROFILE_PYTHONPATH=profile, OVERLAY_PYTHONPATH=overlay, PROFILE_DIR="",
+                    MODEL="/models/x", HOST="127.0.0.1", PORT="8000", TP="1", GPU="0",
+                    MEM_FRACTION="0.9", GPU_ARCHS="gfx950", SERVER_LAUNCH_PREFIX="",
+                    EXTRA_ENV="", EXTRA_SERVER_ARGS="", LOG=log,
+                )
+                proc = subprocess.run(
+                    [BASH, "-c", 'set -uo pipefail\nsource "$1"\nadapter_launch\nwait "$SERVER_PID"',
+                     "adapter-test", VLLM_ADAPTER], env=env, cwd=self.tmp,
+                    capture_output=True, text=True, timeout=60,
+                )
+                with open(log, encoding="utf-8") as fh:
+                    output = fh.read()
+                self.assertEqual(proc.returncode, 0, proc.stderr + output)
+                self.assertEqual(json.loads(output), ":".join(
+                    part for part in (profile, overlay, inherited) if part))
 
 
 if __name__ == "__main__":

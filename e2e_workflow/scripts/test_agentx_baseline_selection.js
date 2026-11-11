@@ -108,6 +108,7 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(first.calls[0].phase, 'prepare');
   assert.equal(input.BASELINE_LOG, '/eval/baseline/server.log');
   assert.equal(input.BASELINE_BENCH_DIR, '/eval/baseline');
+  assert.equal(input.BASELINE_ITERATION_DIR, '/eval/baseline/iterations');
   assert.equal(input.CURRENT_FLAGS, '--tp 8');
   assert.equal(input.CURRENT_OVERLAY, '/accepted-overlay');
   assert.equal(input.PREVIOUS_RANKING_JSON, '/old/ranking.json');
