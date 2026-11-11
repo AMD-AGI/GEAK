@@ -1,0 +1,3 @@
+interface:
+  display_name: "GEAK E2E Workflow"
+  short_description: "Run and validate GEAK whole-model optimization"

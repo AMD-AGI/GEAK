@@ -1,0 +1,3 @@
+interface:
+  display_name: "GEAK Kernel Workflow"
+  short_description: "Optimize and verify kernels with GEAK workflows"
