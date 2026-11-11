@@ -343,6 +343,7 @@ class _Stack:
         self.tunable_calls = []
         self.syncs = 0
         self.blas_unsupported = ("ck",)
+        self.live_blas = None        # what preferred_blas_library() answers before any switch
         self.have_tunable = True
         self.set_filename_raises = False
         self.write_file_raises = False
@@ -419,7 +420,9 @@ class _Stack:
         if self.have_tunable:
             cuda.tunable = tunable
 
-        def _prefer(lib):
+        def _prefer(lib=None):
+            if lib is None:
+                return stack.live_blas
             stack.blas.append(lib)
             if lib in stack.blas_unsupported:
                 raise RuntimeError("preferred_blas_library(%r) unsupported in this build" % lib)
@@ -651,9 +654,11 @@ class _ObStateMixin:
     def setUp(self):
         self._restore = []
         for mod in (ob, ob_nolib):
-            for attr in ("_GRAPH_MODE", "_TRITON_MM", "_hlib", "bench_gemm", "bench_attn"):
+            for attr in ("_GRAPH_MODE", "_TRITON_MM", "_hlib", "bench_gemm", "bench_attn",
+                         "_LIVE_BLAS_DEFAULT"):
                 self._restore.append((mod, attr, getattr(mod, attr)))
         ob._GRAPH_MODE = ob_nolib._GRAPH_MODE = False
+        ob._LIVE_BLAS_DEFAULT = ob_nolib._LIVE_BLAS_DEFAULT = None
         ob._TRITON_MM = ob_nolib._TRITON_MM = None
 
     def tearDown(self):
@@ -1364,6 +1369,12 @@ class TestBenchGemmDispatch(_FakeStackMixin, unittest.TestCase):
         _, res = self._run(backends="cutlass")
         self.assertEqual(res, [])
 
+    def test_the_live_blas_default_is_benched_when_backends_omit_it(self):
+        self.stack.live_blas = "_BlasBackend.Cublas"   # gfx1151: rocBLAS
+        _, res = self._run(backends="hipblaslt,tunableop")
+        self.assertEqual([r["backend"] for r in res], ["hipblaslt", "tunableop", "rocblas"])
+        self.assertEqual(ob._LIVE_BLAS_DEFAULT, "rocblas")
+
     def test_incorrect_backend_keeps_a_finite_error_and_a_timing(self):
         # A candidate that runs but returns the wrong values must stay AVAILABLE with a real ms:
         # "ran but incorrect" is not a harness fault, it just cannot win.
@@ -1642,6 +1653,25 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
                                              self._res("flydsl", ms=9.0, correct=True)])
         self.assertEqual(summary["apply_env"], "TORCH_BLAS_PREFER_HIPBLASLT=0")
         self.assertEqual(summary["winner_kind"], "env")
+
+    def test_the_speedup_is_scored_against_the_live_blas_default(self):
+        ob._LIVE_BLAS_DEFAULT = "rocblas"
+        rows = [self._res("hipblaslt", ms=0.2453, correct=True),
+                self._res("tunableop", ms=0.2027, correct=True),
+                self._res("rocblas", ms=0.1170, correct=True),
+                self._res("triton", ms=0.1274, correct=True)]
+        summary, _ = self._run_main({"op_kind": "gemm"}, results=rows)
+        self.assertEqual((summary["baseline_backend"], summary["winner_backend"]), ("rocblas", "rocblas"))
+        self.assertEqual(summary["isolated_speedup"], 1.0)
+        self.assertEqual((summary["apply_env"], summary["winner_kind"]), ("", "none"))
+        self.assertEqual(summary["deployable_note"], "rocblas default already in use; nothing to deploy")
+        self.assertEqual(summary["live_blas_default"], "rocblas")
+        # hipBLASLt beating a live rocBLAS default is deployed by switching to it.
+        rows[0]["ms"] = 0.1
+        summary, _ = self._run_main({"op_kind": "gemm"}, results=rows)
+        self.assertEqual(summary["isolated_speedup"], 1.17)
+        self.assertEqual((summary["apply_env"], summary["winner_kind"]),
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=1", "env"))
 
     def test_one_timed_gemm_arm_publishes_no_verdict(self):
         # One requested arm, and two requested arms of which one produced no timing.
