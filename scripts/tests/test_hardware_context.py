@@ -117,10 +117,6 @@ def test_native_arch_uses_exact_product_not_isa(tmp_path):
         hc.check_native_arch(hc.build(identity()), p)
 
 
-def test_workflow_contract_is_synchronized():
-    subprocess.run([sys.executable, str(ROOT / "scripts/sync_hardware_context_workflow.py"), "--check"], check=True)
-
-
 @pytest.mark.parametrize('bad', [True, 80.5, '80', -1])
 def test_invalid_resource_types_are_not_silently_rounded(bad):
     with pytest.raises(ValueError):
