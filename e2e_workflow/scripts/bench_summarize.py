@@ -116,9 +116,10 @@ def _guard_table(basis, trace_replay):
     A trace replay's corpus fixes the work each request asks for, so any axis but total can rise
     while the server completes less of it: the decode-only axis by shedding prefill, any of them by
     finishing short requests in place of long ones. Total token throughput is that work, so it
-    rides beside every other axis there, and GEAK's own KEEP rule for an AgentX run whose caller
-    states none holds it (``interface/run_e2e.py`` standalone_acceptance). A synthetic sweep serves
-    one shape, where total is a fixed multiple of output, so its summaries keep their field set.
+    rides beside every other axis there. GEAK's own KEEP rule for an AgentX run whose caller
+    states none holds every guard this returns (``interface/run_e2e.py`` default_acceptance). A
+    synthetic sweep serves one shape, where total is a fixed multiple of output, so its summaries
+    keep their field set.
     """
     table = dict(_GUARDS.get(basis, {}))
     if trace_replay and basis is not None and basis != TOTAL_BASIS:

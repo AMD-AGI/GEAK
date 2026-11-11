@@ -712,9 +712,10 @@ const AGENTX_DEFAULTS = {
   // Not defaulted: the client picks the tolerance per leg (MEASUREMENT_PURPOSE: exploring vs
   // compared). A declared value overrides it for the whole run.
   failed_request_threshold: null,
-  // InferenceX P90 interactivity, 1000 / P90(ITL) tok/s/user (decode-only; total tok/s rides
-  // beside it as a guard, see agentxAxisNote). Hyperloom declares its own basis; this is the default.
-  metric_basis: 'p90_intvty_inferencex',
+  // TTFT-inclusive P50 interactivity, 1 / P50(E2EL/OSL) tok/s/user: the axis Hyperloom keeps
+  // AgentX candidates on, with its guards beside it (see agentxAxisNote). Hyperloom declares its
+  // own basis; this is the default.
+  metric_basis: 'e2e_norm_intvty_p50',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
 // ONE concurrency for the run: roles pass CONC=<WORKLOAD.conc> on every bench line, which outranks
@@ -861,12 +862,13 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
-// How far total tok/s may fall before a gain on any other AgentX axis stops counting, when the
-// caller states no KEEP rule: the band Hyperloom holds an orchestrated AgentX run's guards to.
-// run_e2e.py STANDALONE_AGENTX_GUARD_DROP_PCT is the same number.
-const STANDALONE_TOTAL_GUARD_PCT = 5.0;
+// How far each guard may fall before a gain on the graded AgentX axis stops counting, when the
+// caller states no KEEP rule: the noise band Hyperloom holds its AgentX guards to.
+// run_e2e.py DEFAULT_AGENTX_GUARD_DROP_PCT is the same number.
+const AGENTX_GUARD_DROP_PCT = 5.0;
 // The prompt's note on the graded axis: its unit and the guards bench_summary.json carries beside
-// it. A caller's KEEP rule names its own guards, so the total guard is only added without one.
+// it. A caller's KEEP rule names its own guards, so the total guard and the Validate verdict on
+// the guards are only added without one.
 function agentxAxisNote() {
   const note = /intvty/.test(AGENTX_METRIC_BASIS)
     ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
@@ -875,9 +877,9 @@ function agentxAxisNote() {
   if (WORKLOAD_SPEC.acceptance != null || AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s') return note;
   return note + '\n  Report `guard_aggregate_total_token_tok_s_median` beside every delta: the trace fixes the\n' +
     '  work each request asks for, so this axis can rise while the server completes less of it, and a\n' +
-    '  candidate that does has not made the server faster. At Validate the guard is part of the\n' +
-    `  verdict: a gain whose final leg reads it more than ${STANDALONE_TOTAL_GUARD_PCT}% below the base leg is not a win, so\n` +
-    '  report `validated_no_win` and name the guard in `arbitration_note`.';
+    '  candidate that does has not made the server faster. At Validate every guard named here is part\n' +
+    `  of the verdict: a gain whose final leg reads any of them more than ${AGENTX_GUARD_DROP_PCT}% below the base leg\n` +
+    '  is not a win, so report `validated_no_win` and name the guard in `arbitration_note`.';
 }
 // KB recall can use its own basis (e.g. only p50 candidates while the bench grades output/total);
 // it never changes the bench axis or the writer's basis.

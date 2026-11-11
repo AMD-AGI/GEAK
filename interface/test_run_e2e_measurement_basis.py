@@ -868,55 +868,76 @@ def test_the_spread_is_read_on_an_interactivity_axis_too(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
-# an AgentX run that states no rule is held to GEAK's own: total guards any other axis
+# an AgentX run that states no rule is held to GEAK's own: Hyperloom's bars, total among the guards
 # --------------------------------------------------------------------------- #
-STANDALONE = {"workload_spec": {"kind": "agentx_trace_replay"}}
+NO_RULE = {"workload_spec": {"kind": "agentx_trace_replay"}}
+# What each guard reads on the base leg _intvty_legs writes.
+HELD = {P90: 80.0, OUTPUT: 2000.0, TOTAL: 50000.0}
 
 
-def _standalone(tmp_path: Path, *, final: float, total: float, basis: str = P90_IX,
-                handoff: dict = STANDALONE) -> dict:
+def _no_rule(tmp_path: Path, *, final: float, drop: dict | None = None, basis: str = P50,
+             handoff: dict = NO_RULE) -> dict:
+    """A Validate pair on *basis* whose final leg holds every guard at the base leg's value but *drop*."""
     eval_dir = _intvty_legs(tmp_path, base=100.0, final=final,
-                            final_guards={OUTPUT: 2000.0, TOTAL: total}, basis=basis)
+                            final_guards={**HELD, **(drop or {})}, basis=basis)
     return rx.normalize_result(
         handoff, _wf(eval_dir, base=100.0, final=final, speedup=final / 100))
 
 
-def test_a_standalone_gain_past_the_bar_with_total_held_is_ok(tmp_path: Path) -> None:
-    out = _standalone(tmp_path, final=103.5, total=47750.0)
+def test_on_the_default_axis_geaks_rule_is_hyperlooms_plus_total() -> None:
+    hl = HL_AGENTX["workload_spec"]["acceptance"]
+
+    assert rx.default_acceptance(NO_RULE) == {
+        **hl, "guard_max_drop_pct": {**hl["guard_max_drop_pct"], TOTAL: 5.0}}
+
+
+def test_a_gain_past_the_bar_with_every_guard_held_is_ok(tmp_path: Path) -> None:
+    out = _no_rule(tmp_path, final=103.5, drop={P90: 76.5, TOTAL: 47750.0})
 
     verdict = out["validation_evidence"]["acceptance"]
     assert out["status"] == "ok"
-    assert verdict["keep"] is True and verdict["reasons"] == []
-    assert verdict["objective"] == P90_IX and verdict["min_gain_pct"] == 3.0
-    assert verdict["guards"] == {TOTAL: {"reference": 50000.0, "candidate": 47750.0,
-                                         "max_drop_pct": 5.0, "holds": True}}
+    assert verdict["keep"] is True and verdict["reasons"] == [] and verdict["not_checked"] == []
+    assert verdict["objective"] == P50 and verdict["min_gain_pct"] == 3.0
+    assert verdict["guards"] == {
+        P90: {"reference": 80.0, "candidate": 76.5, "max_drop_pct": 5.0, "holds": True},
+        OUTPUT: {"reference": 2000.0, "candidate": 2000.0, "max_drop_pct": 5.0, "holds": True},
+        TOTAL: {"reference": 50000.0, "candidate": 47750.0, "max_drop_pct": 5.0, "holds": True},
+    }
 
 
-def test_a_standalone_gain_below_the_bar_is_not_ok(tmp_path: Path) -> None:
+def test_a_gain_below_the_bar_is_not_ok(tmp_path: Path) -> None:
     """GEAK's ratio alone would call +2% a win; an orchestrated AgentX run would not keep it."""
-    out = _standalone(tmp_path, final=102.0, total=50000.0)
+    out = _no_rule(tmp_path, final=102.0)
 
     assert out["status"] == "no_gain"
     assert out["throughput_speedup"] == 1.02
     assert out["validation_evidence"]["acceptance"]["reasons"] == [
-        "p90_intvty_inferencex gained 2.000%, below 3.0%"]
+        "e2e_norm_intvty_p50 gained 2.000%, below 3.0%"]
 
 
-def test_a_standalone_gain_bought_with_total_throughput_is_not_ok(tmp_path: Path) -> None:
-    """The axis is decode-only: serving less total work can raise it without a faster server."""
-    out = _standalone(tmp_path, final=110.0, total=47000.0)
+@pytest.mark.parametrize("guard, value, reason", [
+    (P90, 75.0, "guard e2e_norm_intvty_p90 fell 6.250%, past 5.0%"),
+    (OUTPUT, 1880.0, "guard aggregate_output_tok_s fell 6.000%, past 5.0%"),
+    (TOTAL, 47000.0, "guard aggregate_total_token_tok_s fell 6.000%, past 5.0%"),
+])
+def test_a_median_gain_bought_with_any_guard_is_not_ok(
+    tmp_path: Path, guard: str, value: float, reason: str,
+) -> None:
+    """The tail, the throughput the pareto trades against, or the work the trace asks for."""
+    out = _no_rule(tmp_path, final=110.0, drop={guard: value})
 
     assert out["status"] == "no_gain"
-    assert out["validation_evidence"]["acceptance"]["reasons"] == [
-        "guard aggregate_total_token_tok_s fell 6.000%, past 5.0%"]
+    assert out["validation_evidence"]["acceptance"]["reasons"] == [reason]
 
 
-@pytest.mark.parametrize("basis", [P90_IX, P50, P90, OUTPUT])
+@pytest.mark.parametrize("basis", [P50, P90, P90_IX, OUTPUT])
 def test_every_axis_but_total_is_held_to_the_total_guard(tmp_path: Path, basis: str) -> None:
     """Each can rise while the server completes less of the trace's fixed work."""
     handoff = {"workload_spec": {"kind": "agentx_trace_replay", "metric_basis": basis}}
-    held = _standalone(tmp_path / "held", final=110.0, total=48000.0, basis=basis, handoff=handoff)
-    shed = _standalone(tmp_path / "shed", final=110.0, total=47000.0, basis=basis, handoff=handoff)
+    held = _no_rule(tmp_path / "held", final=110.0, drop={TOTAL: 48000.0}, basis=basis,
+                    handoff=handoff)
+    shed = _no_rule(tmp_path / "shed", final=110.0, drop={TOTAL: 47000.0}, basis=basis,
+                    handoff=handoff)
 
     assert held["status"] == "ok"
     assert held["validation_evidence"]["acceptance"]["objective"] == basis
@@ -925,44 +946,121 @@ def test_every_axis_but_total_is_held_to_the_total_guard(tmp_path: Path, basis: 
         "guard aggregate_total_token_tok_s fell 6.000%, past 5.0%"]
 
 
-def test_a_standalone_run_on_total_keeps_geaks_own_verdict(tmp_path: Path) -> None:
+@pytest.mark.parametrize("basis, guards", [
+    (P50, {P90, OUTPUT, TOTAL}),
+    (P90, {OUTPUT, TOTAL}),
+    (P90_IX, {OUTPUT, TOTAL}),
+    (OUTPUT, {TOTAL}),
+])
+def test_each_axis_holds_the_guards_summarized_beside_it(basis: str, guards: set) -> None:
+    rule = rx.default_acceptance(
+        {"workload_spec": {"kind": "agentx_trace_replay", "metric_basis": basis}})
+
+    assert rule["guard_max_drop_pct"] == {guard: 5.0 for guard in guards}
+
+
+def test_a_run_on_total_keeps_geaks_own_verdict(tmp_path: Path) -> None:
     """There the objective IS the guard."""
     handoff = {"workload_spec": {"kind": "agentx_trace_replay", "metric_basis": TOTAL}}
-    out = _standalone(tmp_path, final=102.0, total=40000.0, basis=TOTAL, handoff=handoff)
+    out = _no_rule(tmp_path, final=102.0, drop={TOTAL: 40000.0}, basis=TOTAL, handoff=handoff)
 
     assert out["status"] == "ok"
     assert "acceptance" not in out["validation_evidence"]
 
 
-def test_a_standalone_run_whose_legs_carry_no_total_guard_is_not_ok(tmp_path: Path) -> None:
+def test_a_guard_no_leg_carries_is_left_unchecked_not_failed(tmp_path: Path) -> None:
+    """A final leg summarized before the guard existed: the verdict rests on the objective."""
     eval_dir = _intvty_legs(tmp_path, base=100.0, final=110.0,
-                            final_guards={OUTPUT: 2000.0}, basis=P90_IX)
-    out = rx.normalize_result(STANDALONE, _wf(eval_dir, base=100.0, final=110.0, speedup=1.1))
+                            final_guards={P90: 80.0, OUTPUT: 2000.0})
+    out = rx.normalize_result(NO_RULE, _wf(eval_dir, base=100.0, final=110.0, speedup=1.1))
 
-    assert out["status"] == "no_gain"
-    assert out["validation_evidence"]["acceptance"]["reasons"] == [
-        "guard aggregate_total_token_tok_s was not measured on both legs"]
+    verdict = out["validation_evidence"]["acceptance"]
+    assert out["status"] == "ok"
+    assert verdict["keep"] is True and verdict["reasons"] == []
+    assert verdict["not_checked"] == [TOTAL]
+    assert verdict["guards"][TOTAL] == {"reference": 50000.0, "candidate": None,
+                                        "max_drop_pct": 5.0, "holds": None}
 
 
-def test_the_standalone_bars_do_not_move_with_the_runs_noise_band(tmp_path: Path) -> None:
+def test_the_bars_do_not_move_with_the_runs_noise_band(tmp_path: Path) -> None:
     """They are an orchestrated run's KEEP bars, not a property of this box's scatter."""
-    eval_dir = _intvty_legs(tmp_path, base=100.0, final=103.5,
-                            final_guards={TOTAL: 47750.0}, basis=P90_IX)
+    eval_dir = _intvty_legs(tmp_path, base=100.0, final=103.5, final_guards=HELD)
     _write(eval_dir / "director_e2e_validation.json", {"noise_band_pct": 2.0})
-    out = rx.normalize_result(STANDALONE, _wf(eval_dir, base=100.0, final=103.5, speedup=1.035,
-                                              state={"noise_band_pct": 6.0}))
+    out = rx.normalize_result(NO_RULE, _wf(eval_dir, base=100.0, final=103.5, speedup=1.035,
+                                           state={"noise_band_pct": 6.0}))
 
     verdict = out["validation_evidence"]["acceptance"]
     assert out["status"] == "ok"
     assert verdict["min_gain_pct"] == 3.0
-    assert verdict["guards"][TOTAL]["max_drop_pct"] == 5.0
+    assert {guard["max_drop_pct"] for guard in verdict["guards"].values()} == {5.0}
+
+
+def _recovered(tmp_path: Path, handoff: dict, *, ref: float = 100.0,
+               cand_guards: dict | None = None, pair_dir: bool = True) -> dict:
+    """A 100 -> 110 win recovered from an integrate A/B whose legs are on disk; Validate left none."""
+    eval_dir = tmp_path / "e2e_cycle0"
+    cand_dir = eval_dir / "overlay" / "cand_rmsnorm"
+    for leg, value, guards in (("ref", ref, HELD), ("cand", 110.0, {**HELD, **(cand_guards or {})})):
+        _write(cand_dir / leg / "bench_summary.json", {
+            "throughput_tok_s_median": value,
+            "metric_basis": P50,
+            **{f"guard_{name}_median": v for name, v in guards.items()},
+        })
+    _write(eval_dir / "baseline" / "bench_summary.json",
+           {"throughput_tok_s_median": 100.0, "metric_basis": P50})
+    return rx.normalize_result(handoff, _wf(
+        eval_dir, base=100.0, final=110.0, speedup=1.1,
+        recovered_intermediate=True, recovered_from_disk=True,
+        **({"recovered_pair_dir": str(cand_dir)} if pair_dir else {}),
+    ))
+
+
+def test_a_recovered_win_is_judged_on_its_own_ab_legs(tmp_path: Path) -> None:
+    out = _recovered(tmp_path, NO_RULE, cand_guards={TOTAL: 49000.0})
+
+    verdict = out["validation_evidence"]["acceptance"]
+    assert out["status"] == "ok"
+    assert verdict["not_checked"] == []
+    assert verdict["guards"][TOTAL] == {"reference": 50000.0, "candidate": 49000.0,
+                                        "max_drop_pct": 5.0, "holds": True}
+
+
+def test_a_recovered_win_that_shed_work_is_not_ok(tmp_path: Path) -> None:
+    out = _recovered(tmp_path, NO_RULE, cand_guards={TOTAL: 47000.0})
+
+    assert out["status"] == "no_gain"
+    assert out["validation_evidence"]["acceptance"]["reasons"] == [
+        "guard aggregate_total_token_tok_s fell 6.000%, past 5.0%"]
+
+
+@pytest.mark.parametrize("ref, pair_dir", [(95.0, True), (100.0, False)])
+def test_a_recovered_pair_with_no_legs_of_its_own_leaves_the_guards_unchecked(
+    tmp_path: Path, ref: float, pair_dir: bool,
+) -> None:
+    """A reference leg whose median is not the published baseline belongs to another A/B."""
+    out = _recovered(tmp_path, NO_RULE, ref=ref, pair_dir=pair_dir)
+
+    verdict = out["validation_evidence"]["acceptance"]
+    assert out["status"] == "ok"
+    assert verdict["keep"] is True
+    assert verdict["not_checked"] == [P90, OUTPUT, TOTAL]
+
+
+def test_the_callers_rule_reads_no_legs_for_a_recovered_win(tmp_path: Path) -> None:
+    """Hyperloom's rule is applied as before: a recovered win cannot show its guards held."""
+    out = _recovered(tmp_path, HL_AGENTX)
+
+    assert out["status"] == "no_gain"
+    assert out["validation_evidence"]["acceptance"]["reasons"] == [
+        "guard e2e_norm_intvty_p90 was not measured on both legs",
+        "guard aggregate_output_tok_s was not measured on both legs"]
 
 
 @pytest.mark.parametrize("spec, exported, objective", [
-    ({}, None, P90_IX),
-    ({"metric_basis": P90_IX}, None, P90_IX),
-    ({"metric_basis": " P90_INTVTY_INFERENCEX "}, None, P90_IX),
+    ({}, None, P50),
     ({"metric_basis": P50}, None, P50),
+    ({"metric_basis": " E2E_NORM_INTVTY_P50 "}, None, P50),
+    ({"metric_basis": P90_IX}, None, P90_IX),
     ({"metric_basis": OUTPUT}, None, OUTPUT),
     ({"metric_basis": "output"}, None, OUTPUT),
     ({"metric_basis": "intvty"}, None, P90),
@@ -977,59 +1075,60 @@ def test_the_standalone_bars_do_not_move_with_the_runs_noise_band(tmp_path: Path
     ({}, "bogus", None),
     ({}, OUTPUT, None),
 ])
-def test_the_standalone_rule_follows_the_axis_the_workflow_grades(
+def test_the_rule_follows_the_axis_the_workflow_grades(
     monkeypatch, spec: dict, exported: str | None, objective: str | None,
 ) -> None:
     """Declared basis or token, else an exported E2E_METRIC token, else the default:
     resolveAgentxMetric's order. Total, and an axis the workflow refuses, get no rule."""
     if exported is not None:
         monkeypatch.setenv("E2E_METRIC", exported)
-    rule = rx.standalone_acceptance({"workload_spec": {"kind": "agentx_trace_replay", **spec}})
+    rule = rx.default_acceptance({"workload_spec": {"kind": "agentx_trace_replay", **spec}})
 
     if objective is None:
         assert rule is None
     else:
-        assert rule == {"objective": objective, "min_gain_pct": 3.0,
-                        "guard_max_drop_pct": {TOTAL: 5.0}}
+        assert rule["objective"] == objective and rule["min_gain_pct"] == 3.0
 
 
-def test_a_callers_rule_keeps_the_standalone_one_out(capsys) -> None:
+def test_a_callers_rule_keeps_geaks_out(capsys) -> None:
     """Even one that does not parse: the caller stated a rule, so GEAK does not add its own."""
     malformed = {"workload_spec": {"kind": "agentx_trace_replay",
-                                   "acceptance": {"objective": P90_IX, "min_gain_pct": "three"}}}
+                                   "acceptance": {"objective": P50, "min_gain_pct": "three"}}}
 
-    assert rx.standalone_acceptance(HL_AGENTX) is None
-    assert rx.standalone_acceptance(malformed) is None
+    assert rx.default_acceptance(HL_AGENTX) is None
+    assert rx.default_acceptance(malformed) is None
     assert rx.handoff_acceptance(malformed) is None
     assert "workload_spec.acceptance ignored" in capsys.readouterr().err
 
 
-def test_a_synthetic_run_has_no_standalone_rule(monkeypatch) -> None:
-    monkeypatch.setenv("E2E_METRIC", "p90_intvty_inferencex")
+def test_a_synthetic_run_has_no_rule_of_geaks(monkeypatch) -> None:
+    monkeypatch.setenv("E2E_METRIC", "e2e_norm_intvty_p50")
 
-    assert rx.standalone_acceptance({}) is None
-    assert rx.standalone_acceptance({"workload_spec": {"kind": "synthetic_isl_osl"}}) is None
-    assert rx.standalone_acceptance({"workload_spec": "agentx_trace_replay"}) is None
+    assert rx.default_acceptance({}) is None
+    assert rx.default_acceptance({"workload_spec": {"kind": "synthetic_isl_osl"}}) is None
+    assert rx.default_acceptance({"workload_spec": "agentx_trace_replay"}) is None
 
 
-def test_the_standalone_rule_reads_the_axes_the_workflow_and_the_summary_use() -> None:
-    """The token table, default axis, guard and band are copies: a drift would hold the rule
+def test_the_rule_reads_the_axes_the_workflow_and_the_summary_use() -> None:
+    """The token table, default axis, guards and band are copies: a drift would hold the rule
     on another axis than the one graded, or on a guard the summary never writes."""
     workflow = (_HERE.parent / "e2e_workflow" / "e2e_workflow.js").read_text(encoding="utf-8")
     default = re.search(r"^  metric_basis: '([^']+)',", workflow, re.MULTILINE).group(1)
-    guard_pct = re.search(r"^const STANDALONE_TOTAL_GUARD_PCT = ([0-9.]+);",
+    guard_pct = re.search(r"^const AGENTX_GUARD_DROP_PCT = ([0-9.]+);",
                           workflow, re.MULTILINE).group(1)
     spec = importlib.util.spec_from_file_location(
-        "bench_summarize_for_standalone_rule",
+        "bench_summarize_for_default_rule",
         _HERE.parent / "e2e_workflow" / "scripts" / "bench_summarize.py")
     summarize = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(summarize)
+    bases = {entry[1] for entry in summarize._BASES.values()}
 
     assert rx._METRIC_BASIS_OF_E2E_METRIC == {
         token: entry[1] for token, entry in summarize._BASES.items()}
-    assert default == rx.STANDALONE_AGENTX_OBJECTIVE
-    assert float(guard_pct) == rx.STANDALONE_AGENTX_GUARD_DROP_PCT
-    assert rx.STANDALONE_AGENTX_GUARD == summarize.TOTAL_BASIS
-    for basis in set(summarize._GUARDS) | {summarize.OUTPUT_BASIS}:
-        assert rx.STANDALONE_AGENTX_GUARD in summarize._guard_table(basis, True)
-        assert rx.STANDALONE_AGENTX_GUARD not in summarize._guard_table(basis, False)
+    assert default == rx.DEFAULT_AGENTX_OBJECTIVE == summarize.INTVTY_P50_BASIS
+    assert float(guard_pct) == rx.DEFAULT_AGENTX_GUARD_DROP_PCT
+    assert {basis: set(guards) for basis, guards in rx.DEFAULT_AGENTX_GUARDS.items()} == {
+        basis: set(summarize._guard_table(basis, True))
+        for basis in bases if summarize._guard_table(basis, True)}
+    for basis in bases:
+        assert summarize.TOTAL_BASIS not in summarize._guard_table(basis, False)

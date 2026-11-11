@@ -163,12 +163,16 @@ Workflow({
 `isl`/`osl`/`conc` describe a **synthetic sweep**: every request is the same shape, and the profile and
 the bench use it identically. An AgentX submission is not that. It replays a recorded corpus, so the
 client owns the request mix, the arrival pattern, its own warmup and the measurement duration.
-Standalone it is graded on **InferenceX P90 interactivity** — `p90_intvty_inferencex`, i.e.
-`1000 / P90(ITL)` in tok/s/user, decode only, the x-axis of the InferenceX pareto — with total
-(input+output) tok/s carried beside it as `guard_aggregate_total_token_tok_s_median`. Unless the
-caller states its own KEEP rule, a win must gain 3% on the graded axis with total tok/s at most 5%
-below the base leg, whichever axis is graded but total itself: the corpus fixes the work each request
-asks for, so a candidate that completes less of it can still raise the graded number. The output-only
+Standalone it is graded on the axis Hyperloom keeps AgentX candidates on, **TTFT-inclusive P50
+interactivity**: `e2e_norm_intvty_p50`, i.e. `1 / P50(E2EL/OSL)` in tok/s/user. Its guards ride
+beside it: the P90 tail (`guard_e2e_norm_intvty_p90_median`), output tok/s, and total (input+output)
+tok/s (`guard_aggregate_total_token_tok_s_median`). Unless the caller states its own KEEP rule, a win
+must gain 3% on the graded axis with each guard at most 5% below the base leg, whichever axis is
+graded but total itself; another axis keeps the guards summarized beside it, total among them. Total
+is there because the corpus fixes the work each request asks for, so a candidate that completes less
+of it can still raise the graded number. `interface/run_e2e.py` enforces the rule on a handoff. A
+direct `Workflow` call gets the guards as an instruction to the Director at Validate, where the gain
+bar is the run's noise band (4% on a trace replay unless `noise_band_pct` sets it). The output-only
 axis a sweep uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large
 change in work.
 
@@ -213,7 +217,7 @@ measured elsewhere — declare it, and the measurement will not override you:
 
 `workload_kind` expands to the graded setup: scenario `inferencex-agentx-mvp`, corpus
 `semianalysis_cc_traces_weka_062126`, 393 entries, a 3600s canonical window with 900s inner search
-legs, and `p90_intvty_inferencex` as the metric basis. Override any part with the long spelling,
+legs, and `e2e_norm_intvty_p50` as the metric basis. Override any part with the long spelling,
 which is the same object Hyperloom puts on its handoff:
 
 ```
@@ -223,8 +227,8 @@ which is the same object Hyperloom puts on its handoff:
       duration_s: 3600,            // canonical/parity window
       geak_loop_duration_s: 900,   // inner search legs (the scenario's own floor)
       concurrency: 8,              // also what every bench line passes as CONC; wins over args.conc
-      metric_basis: "p90_intvty_inferencex",   // or aggregate_total_token_tok_s,
-                                               // aggregate_output_tok_s, e2e_norm_intvty_p90
+      metric_basis: "e2e_norm_intvty_p50",     // or e2e_norm_intvty_p90, p90_intvty_inferencex,
+                                               // aggregate_output_tok_s, aggregate_total_token_tok_s
       canonical_corpus: "semianalysis_cc_traces_weka_062126",   // optional; what results are
       canonical_num_entries: 393, canonical_duration_s: 3600,   // stamped canonical against
       warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
@@ -251,9 +255,9 @@ Three parts of that object do more than they look:
   change the reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
   `canonical_num_entries` / `canonical_duration_s` too.
 - **The mapper.** An `inferencex_path` checkout's `map_aiperf.py` wins over GEAK's vendored copy, and
-  upstream's own fallback mapping carries no P90 ITL, so outside Hyperloom's runtime it cannot grade
-  the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the run would use
-  and blocks when the graded field is missing.
+  upstream's own fallback mapping predates the interactivity fields, so outside Hyperloom's runtime it
+  cannot grade the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the
+  run would use and blocks when the graded field is missing.
 
 **Check the box first.** Every AgentX prerequisite is invisible until the client has already launched
 and warmed a server, so a missing one costs 20+ minutes to discover:

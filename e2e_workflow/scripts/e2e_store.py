@@ -1632,6 +1632,9 @@ def win_gate(result: dict) -> str:
     acceptance = (result.get("validation_evidence") or {}).get("acceptance")
     if isinstance(acceptance, dict) and acceptance.get("keep") is not True:
         return "KEEP rule rejected the pair: " + "; ".join(acceptance.get("reasons") or [])
+    if isinstance(acceptance, dict) and acceptance.get("not_checked"):
+        return ("KEEP rule could not check %s: no bench summary of the pair carries it"
+                % ", ".join(str(g) for g in acceptance["not_checked"]))
     return ""
 
 
