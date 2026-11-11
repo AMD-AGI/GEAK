@@ -2025,10 +2025,20 @@ function templateArguments(value) {
   }
   return [fold(text.slice(start + 1)), false];
 }
+// Mirror of _tensile_solution_variants in kernel_selection.py: two Cijk symbols that differ only in
+// the Tensile solution knobs SIA/SU/SUS/WGM are one kernel.
+function tensileSolutionVariants(x, y) {
+  const a = x.split('_'), b = y.split('_'), knob = /^(sia|su|sus|wgm)[0-9]+$/;
+  return a[0] === 'cijk' && b[0] === 'cijk' && a.length === b.length && a.every((t, i) => {
+    if (t === b[i]) return true;
+    const l = knob.exec(t), r = knob.exec(b[i]);
+    return Boolean(l && r && l[1] === r[1]);
+  });
+}
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x) && !tensileSolutionVariants(x, y)) return false;
   // The base token drops template arguments so a bare name matches its decorated spelling; when
   // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);

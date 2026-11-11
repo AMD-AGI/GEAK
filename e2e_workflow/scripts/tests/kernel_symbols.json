@@ -173,6 +173,37 @@
       "why": "real head row: a memcpy row and its own rocprof spelling",
       "a": "Memcpy", "b": "Memcpy DtoD (Device -> Device)", "match": true
     },
-    { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false }
+    { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false },
+    {
+      "real": true,
+      "why": "verbatim gfx1151 bf16 GEMM seam (rocm_unquantized_gemm_impl): two Tensile solutions of one kernel, differing only in SIA, SU, SUS and WGM",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SN_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS3_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS1_ELFLR0_EMLL0_FSSC10_FL0_GLVWA8_GLVWB8_GRCGA1_GRCGB1_GRPM1_GRVW8_GSU1_GSUASB_GLS0_ISA1151_IU1_K1_KLA_LBSPPA128_LBSPPB128_LPA8_LPB8_LDL1_LRVW16_LWPMn1_LDW0_FMA_MIAV1_MDA2_MO40_MMFGLC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR1_PLR0_PKA0_SIA3_SLW1_SS1_SU32_SUM0_SUS256_SCIUI1_SPO0_SRVW0_SSO0_SVW2_SNLL0_TSGRA0_TSGRB0_TT4_64_TLDS1_UMLDSA1_UMLDSB1_U64SL1_USFGROn1_VAW1_VSn1_VW2_VWB2_VFLRP0_WSGRA1_WSGRB1_WS32_WG32_4_1_WGM4",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SN_1LDSB0_APM1_ABV0_ACED0_AF0EM1_AF1EM1_AMAS3_ASE_ASGT_ASLT_ASM_ASAE01_ASCE01_ASEM1_AAC0_BL1_BS1_CLR0_DTLA0_DTLB0_DTVA0_DTVB0_DVO0_ETSP_EPS1_ELFLR0_EMLL0_FSSC10_FL0_GLVWA8_GLVWB8_GRCGA1_GRCGB1_GRPM1_GRVW8_GSU1_GSUASB_GLS0_ISA1151_IU1_K1_KLA_LBSPPA128_LBSPPB128_LPA8_LPB8_LDL1_LRVW16_LWPMn1_LDW0_FMA_MIAV1_MDA2_MO40_MMFGLC_MKFGSU256_NTA0_NTB0_NTC0_NTD0_NEPBS0_NLCA1_NLCB1_ONLL1_OPLV0_PK0_PAP0_PGR1_PLR0_PKA0_SIA1_SLW1_SS1_SU0_SUM0_SUS0_SCIUI1_SPO0_SRVW0_SSO0_SVW2_SNLL0_TSGRA0_TSGRB0_TT4_64_TLDS1_UMLDSA1_UMLDSB1_U64SL1_USFGROn1_VAW1_VSn1_VW2_VWB2_VFLRP0_WSGRA1_WSGRB1_WS32_WG32_4_1_WGM8",
+      "match": true
+    },
+    { "why": "Tensile solutions differing at one character, WGM1 vs WGM8, are one kernel",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM8", "match": true },
+    { "why": "ISA is the target architecture, not a solution knob",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_ISA1151_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_ISA942_SIA1_SU32_SUS256_WG32_4_1_WGM1", "match": false },
+    { "why": "BBS (bf16) vs HHS (fp16) is a dtype crossing",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_HHS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1", "match": false },
+    { "why": "Alik vs Ailk transposes an operand",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Ailk_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1", "match": false },
+    { "why": "the macro tile is not a solution knob",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT256x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1", "match": false },
+    { "why": "a bare number in a Tensile symbol is a shape (WG32_4_1 is a workgroup)",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_8_1_WGM1", "match": false },
+    { "why": "only SIA/SU/SUS/WGM may differ, and only against the same knob name",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SU1_SU32_SUS256_WG32_4_1_WGM1", "match": false },
+    { "why": "outside a Tensile symbol the solution knobs are not relaxed",
+      "a": "k_pad_sia1_su2",
+      "b": "k_pad_sia3_su4", "match": false }
   ]
 }
