@@ -1,4 +1,4 @@
-"""CPU regressions for the vLLM observation -> sampling contract.
+"""CPU regressions for vLLM observation and shared serving-probe behavior.
 
 The same entry failures occurred in the Nov 2 DeepSeek-V4.1-Flash experiment
 and the Nov 5 Qwen3-8B-FP8 AgentX run: SGLang logs/CLI/RPCs were assumed.
@@ -356,6 +356,80 @@ class VllmProfileTest(unittest.TestCase):
         wins, _, err = point_census.instance_windows(gpu, cpu, "PREFILL")
         self.assertIsNone(err)
         self.assertEqual([(w["start"], w["end"], w["shape"]) for w in wins], [(100, 130, 206)])
+
+
+class SglangDecodeProbeTest(unittest.TestCase):
+    @staticmethod
+    def _metrics(decode, prefill_compute, prefill_cache, batch=2):
+        # Request-completion counters stay flat during a long generation. The
+        # readiness gate must instead use the scheduler's live phase counters.
+        return (
+            f'sglang:num_running_reqs{{model_name="test"}} {batch}\n'
+            'sglang:gen_throughput{model_name="test"} 100\n'
+            'sglang:generation_tokens_total{model_name="test"} 0\n'
+            'sglang:prompt_tokens_total{model_name="test"} 0\n'
+            f'sglang:realtime_tokens_total{{model_name="test",mode="decode"}} {decode}\n'
+            f'sglang:realtime_tokens_total{{mode="prefill_compute",model_name="test"}} {prefill_compute}\n'
+            f'sglang:realtime_tokens_total{{mode="prefill_cache",model_name="test"}} {prefill_cache}\n'
+        ).encode()
+
+    def _wait(self, snapshots):
+        now, calls, journal = [0.0], [], []
+
+        def scrape(url, **kwargs):
+            self.assertEqual(url, "http://server/metrics")
+            index = min(len(calls), len(snapshots) - 1)
+            calls.append(index)
+            return io.BytesIO(snapshots[index])
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        clock = types.SimpleNamespace(time=lambda: now[0], sleep=sleep)
+        with patch.object(probe, "FRAMEWORK", "sglang"), \
+                patch.object(probe, "ITERATION_LOG_DIR", None), \
+                patch.object(probe, "time", clock), \
+                patch.object(probe.urllib.request, "urlopen", side_effect=scrape):
+            result = probe.wait_for_occupancy(
+                "http://server", 2, journal, timeout=len(snapshots), poll=1)
+        return result, journal, calls
+
+    def test_decode_waits_for_live_progress_and_both_prefill_counters_to_be_quiet(self):
+        snapshots = [
+            self._metrics(100, 200, 20),  # occupied, but no progress interval yet
+            self._metrics(100, 200, 20),  # positive throughput alone is insufficient
+            self._metrics(102, 240, 20),  # decode advances, computed prefill still active
+            self._metrics(104, 240, 24),  # cached prefill still active
+            self._metrics(104, 240, 24),  # wait for the next step-counter update
+            self._metrics(105, 240, 24),  # less than one decode token per resident request
+            self._metrics(107, 240, 24),  # decode advances by batch size, prefill quiet
+        ]
+        result, journal, calls = self._wait(snapshots)
+        self.assertEqual(result, (True, 2, 100))
+        self.assertEqual(calls, list(range(len(snapshots))))
+        self.assertEqual(len(journal), 1)
+        self.assertEqual(journal[0]["event"], "steady_state_confirmed")
+        self.assertEqual(journal[0]["basis"], "occupancy + decode advancing + prefill quiet")
+        self.assertEqual(journal[0]["counters"], "realtime_tokens_total")
+        self.assertEqual(journal[0]["decode_tokens_delta"], 2)
+        self.assertEqual(journal[0]["prefill_tokens_delta"], 0)
+
+    def test_decode_timeout_does_not_confirm_from_throughput_or_prefill_progress(self):
+        cases = {
+            "stalled_decode": [self._metrics(100, 200, 20) for _ in range(4)],
+            "computed_prefill": [self._metrics(100 + 2*i, 200 + 40*i, 20) for i in range(4)],
+            "cached_prefill": [self._metrics(100 + 2*i, 200, 20 + 2*i) for i in range(4)],
+            "too_few_decode_tokens": [self._metrics(100 + i, 200, 20) for i in range(4)],
+            "wrong_batch": [self._metrics(100 + 2*i, 200, 20, batch=1) for i in range(4)],
+        }
+        for name, snapshots in cases.items():
+            with self.subTest(condition=name):
+                result, journal, calls = self._wait(snapshots)
+                self.assertFalse(result[0])
+                self.assertEqual(calls, list(range(len(snapshots))))
+                self.assertEqual(len(journal), 1)
+                self.assertEqual(journal[0]["event"], "steady_state_NOT_confirmed")
+                self.assertIn("window NOT armed", journal[0]["consequence"])
 
 
 if __name__ == "__main__":
