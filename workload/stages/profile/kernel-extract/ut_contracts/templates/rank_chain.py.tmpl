@@ -16,6 +16,9 @@
 #     target_chain / draft_chain): the chain this function returns.
 # Bind the launches through the ambient overlay (import the candidate module the same way call()
 # does), so the baseline and candidate legs time different code.
+# A JIT cache keyed per leg (FlyDSL's FLYDSL_RUNTIME_CACHE_DIR, by the digest of the source the leg
+# resolved) is set by meta.leg_env before the leg starts and inherited here: do not assign it to
+# os.environ in this file (the process_state gate reads that as the candidate's change).
 
 CHAIN_LENGTH = {chain_length}
 

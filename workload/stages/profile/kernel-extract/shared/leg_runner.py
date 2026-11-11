@@ -18,7 +18,8 @@ split path of a whole-layer monokernel (each stage launched on its own). A name 
 does not define prints UT_HARNESS_INCOMPLETE and exits 3: the UT is incomplete, not the kernel.
 Driven by harness_lib.measure_legs and ut_driver.py — a unittest.py should not invoke it directly.
 
-Before anything else a leg imports meta.server_preimports, so the kernel compiles in the import
+Before anything else a leg sets meta.leg_env (apply_leg_env: per-leg values such as a source-keyed
+cache directory) and imports meta.server_preimports, so the kernel compiles in the import
 environment the server gives it (sglang rebinds triton.next_power_of_2 at import). With
 COMPILE_WATCH_OUT set, the leg records every Triton variant it compiles (compile_watch.py) and
 writes them there on exit; ut_driver compares the baseline's set with the server's.
@@ -225,6 +226,33 @@ def _process_state():
     return state
 
 
+def apply_leg_env(task, meta):
+    """Set the task's per-leg environment (meta.leg_env) and return it.
+
+    meta.leg_env = "<file>:<function>" names a function in a task file (e.g.
+    "rank_harness:leg_env") that returns {name: value} for variables whose value depends on which
+    leg this is -- a cache directory keyed by the bytes of the source this leg resolves, so an
+    edited candidate never loads the baseline's stale binary. It runs first, before
+    server_preimports and before the process_state snapshot, so such a variable is part of both
+    snapshots and never reads as a change the leg made while it ran; anything set later still
+    does. The function must work out its values without importing the bound module (find the
+    package with importlib.util.find_spec), or that module's import-time code would run before
+    the snapshot and escape the process_state gate."""
+    decl = meta.get("leg_env")
+    if not decl:
+        return {}
+    fname, sep, fn = str(decl).partition(":")
+    fname = fname[:-3] if fname.endswith(".py") else fname
+    if not sep or not fname or not fn or os.sep in fname:
+        raise SystemExit(f"meta.leg_env {decl!r}: expected '<task file>:<function>'")
+    env = getattr(_load(fname, os.path.join(task, fname + ".py")), fn)()
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                            for k, v in env.items()):
+        raise SystemExit(f"meta.leg_env {decl!r} must return a dict of str -> str, got {env!r}")
+    os.environ.update(env)
+    return env
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
@@ -245,6 +273,7 @@ def main():
     task = os.path.abspath(a.task)
     with open(os.path.join(task, "meta.json")) as fh:
         meta = json.load(fh)
+    leg_env = apply_leg_env(task, meta)
     targets = [meta.get("target_callable", ""), a.target_callable,
                *(meta.get("phase_target_callables") or {}).values()]
     if any(t.startswith("aiter.") for t in targets):
@@ -268,7 +297,7 @@ def main():
             cw.dump(watch_out)
         if state_out:
             with open(state_out, "w") as fh:
-                json.dump({"before": before, "after": _process_state()}, fh)
+                json.dump({"before": before, "after": _process_state(), "leg_env": sorted(leg_env)}, fh)
 
 
 def _server_calls(a, task, meta):

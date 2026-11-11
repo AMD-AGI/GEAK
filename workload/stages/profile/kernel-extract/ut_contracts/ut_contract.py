@@ -29,6 +29,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 
 CONTRACT_VERSION = 1
@@ -492,6 +493,32 @@ def _lint_rank_chain(task_dir, doc, meta):
     return errors
 
 
+def _lint_leg_env(task_dir, meta):
+    """meta.leg_env names "<task file>:<function>" (shared/leg_runner.apply_leg_env); text checks
+    only. Every process_state_allow entry names a prefix and says why."""
+    errors = []
+    decl = meta.get("leg_env")
+    if decl:
+        fname, sep, fn = str(decl).partition(":")
+        fname = fname[:-3] if fname.endswith(".py") else fname
+        path = os.path.join(task_dir, fname + ".py")
+        try:
+            with open(path) as f:
+                src = f.read()
+        except OSError:
+            src = None
+        if not sep or not fname or not fn or os.sep in fname:
+            errors.append("meta.leg_env %r: expected '<task file>:<function>'" % (decl,))
+        elif src is None:
+            errors.append("meta.leg_env %r: %s.py is not in the task" % (decl, fname))
+        elif not re.search(r"^def %s\(" % re.escape(fn), src, re.M):
+            errors.append("meta.leg_env %r: %s.py defines no top-level %s()" % (decl, fname, fn))
+    for d in (meta.get("ut_contract") or {}).get("process_state_allow") or []:
+        if not (isinstance(d, dict) and d.get("prefix") and (d.get("why") or "").strip()):
+            errors.append("process_state_allow entries need prefix and why: %r" % (d,))
+    return errors
+
+
 def lint_task(task_dir):
     """Check a task directory against its frozen contract without importing torch.
 
@@ -523,6 +550,7 @@ def lint_task(task_dir):
     if meta.get("op_kind") and meta["op_kind"] != doc["op_kind"]:
         errors.append("meta.op_kind %r != contract op_kind %r" % (meta["op_kind"], doc["op_kind"]))
     errors.extend(_lint_rank_chain(task_dir, doc, meta))
+    errors.extend(_lint_leg_env(task_dir, meta))
 
     cases = manifest.get("cases") or []
     if not cases:

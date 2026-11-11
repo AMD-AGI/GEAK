@@ -975,7 +975,12 @@ def gate_process_state(T, a, state):
     callable passes every other gate, and in a server silently changes how every other op
     runs. Each leg runs each phase's smallest and largest case once with a snapshot before
     and after (leg_runner._process_state). A deliberate change is declared in
-    ut_contract.process_state_allow: [{"prefix": "<key prefix>", "why": "..."}]."""
+    ut_contract.process_state_allow: [{"prefix": "<key prefix>", "why": "..."}].
+
+    A value that legitimately differs per leg (a FlyDSL cache directory keyed by the source
+    the leg resolved) is not a change: the task declares it in meta.leg_env and leg_runner sets
+    it before the first snapshot, so it is in both snapshots of its leg. The report lists those
+    keys under leg_env; whatever a leg sets after that start is still judged here."""
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     specs = T.random_specs()
     if not specs:
@@ -1000,8 +1005,11 @@ def gate_process_state(T, a, state):
         with open(path) as fh:
             snaps[name] = json.load(fh)
     changed, allowed = candidate_only_changes(snaps["baseline"], snaps["candidate"], allow)
+    leg_env = sorted(set(snaps["baseline"].get("leg_env") or []) |
+                     set(snaps["candidate"].get("leg_env") or []))
     return {"status": "fail" if changed else "pass", "cases": sigs,
             "candidate_only_changes": changed, "allowed": allowed,
+            **({"leg_env": leg_env} if leg_env else {}),
             "baseline_changes": sorted(state_changes(snaps["baseline"]))[:50],
             **({"why": "the candidate changes process-wide state the baseline does not: %s. "
                        "In a server every other op runs under it, which no UT case exercises."
@@ -1603,6 +1611,8 @@ def main(task=None, argv=None):
     T.rank_group = None
     T.gpus = group_multi_rank(T, T.gpus)
     if a.inproc:
+        # the same per-leg environment a leg_runner leg sets first (meta.leg_env)
+        _load("leg_runner", os.path.join(T.dir, "leg_runner.py")).apply_leg_env(T.dir, T.meta)
         for mod in T.meta.get("server_preimports") or []:
             importlib.import_module(mod)
         fn = {"isolation": inproc_isolation, "replay-ref": inproc_replay_ref,

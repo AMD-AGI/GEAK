@@ -30,6 +30,13 @@ A module bind whose `file` is a package's `__init__.py` (for example
 binds the whole package directory: the candidate overlay copies it, and the package's
 `__file__` and `__path__` both point at that copy. Keep that `__init__.py` byte-identical to
 the installed one; it needs no path-redirecting adapter.
+A value the harness must set per leg (a JIT cache directory keyed by the bytes of the source the
+leg resolved, e.g. FlyDSL's `FLYDSL_RUNTIME_CACHE_DIR`, which FlyDSL only reads from
+`os.environ`) goes in `meta.leg_env = "<task file>:<function>"` returning `{name: value}`:
+leg_runner sets it before the process_state snapshot, so it is not the candidate changing process
+state. Compute it without importing the bound package (`importlib.util.find_spec`). Do not set
+such a variable in `os.environ` while the leg runs, and do not paper over it with
+`process_state_allow`.
 Native/JIT leaves must build and invoke the delivered computation, with its resources
 and architecture flags. A copied dispatcher alone is not extracted computation.
 
