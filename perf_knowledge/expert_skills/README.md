@@ -72,11 +72,11 @@ consumption, PlanIR assertions, provenance seals and optional reference-copy
 calibration. If a new invariant cannot be expressed safely, extend this shared
 vocabulary and test it before adding a custom checker.
 
-`expert_workflows/<id>/` holds an expert workflow: a whole sub-workflow that a skill alone cannot express,
-packaged with everything it reads. The kernel-workflow dispatcher runs `<id>/workflow.js` when its
-mode maps to it or `expert_workflow: "<id>"` is passed; today `mode=mega` runs `expert_workflows/mega_fusion/`
-(see its README). Nothing outside the package depends on it. L0 CI runs every package's
-`<id>/tests/` (`test_*.js` with node, `test_*.py` with pytest).
+`expert_workflows/<id>/` holds an expert workflow: a whole workflow that a skill alone cannot express,
+packaged with everything it reads, entry point included. Launch `<id>/workflow.js` directly; nothing in
+`kernel_workflow/` or `e2e_workflow/` refers to it. Today: `expert_workflows/mega_fusion/` (mode=mega,
+multi-rank fused kernels; see its README). L0 CI runs every package's `<id>/tests/` (`test_*.js` with
+node, `test_*.py` with pytest).
 
 `tuning/` is the one skill family that does not follow that layout, because it is not ours to lay
 out: it is vendored from upstream and pinned byte-for-byte by
@@ -101,7 +101,6 @@ AND model_arch_class ∈ match.arch_class   (or match.arch_class contains '*')
 AND (migration skills) from_backend/to_backend fit the live path
 AND scope matches the querying layer     (a kernel lane ignores scope: tuning, and vice versa)
 AND index.validation_status == validated  (stale/draft/failed are NOT auto-applied)
-AND index.auto_apply == true
 ```
 
 There is **no ranking** here (same as `capability_index.yaml`). Every match enters the candidate set;

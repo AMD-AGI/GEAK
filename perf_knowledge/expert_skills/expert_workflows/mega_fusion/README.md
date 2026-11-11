@@ -1,4 +1,4 @@
-# mega_fusion: mode=mega as an expert workflow
+# mega_fusion: the mode=mega expert workflow
 
 `mode="mega"` is for operators that run across several GPUs at once and are worth rewriting as one
 fused, persistent kernel — e.g. an EP MoE layer whose dispatch, GEMM1, GEMM2 and combine are
@@ -7,10 +7,9 @@ separate launches today.
 **Scope:** validated on EP MoE layers (MegaMoE) only. Other multi-rank operators (attention, a GEMM
 fused with its all-reduce, ...) are not validated yet; use it for EP MoE until they are.
 
-This directory is self-contained: the workflow, its roles, knowledge, tools, scripts and tests. The
-kernel-workflow dispatcher runs `workflow.js` as a sub-workflow when `mode=mega` is passed (or
-`expert_workflow: "mega_fusion"`); nothing in `kernel_workflow/` depends on it. Shared pieces it uses
-from `kernel_workflow/` are only the GPU lease scripts (`scripts/gpu_lock.sh`, `gpu_lease.py`), the
+This directory is self-contained: the entry point (`workflow.js`), its roles, knowledge, tools, scripts
+and tests. Nothing in `kernel_workflow/` or `e2e_workflow/` refers to it. Shared pieces it reads from
+`kernel_workflow/` are only the GPU lease scripts (`scripts/gpu_lock.sh`, `gpu_lease.py`), the
 profiling scripts and the shared knowledge files (`amd_instinct.md`, `hip_optimization.md`,
 `profiling_guide.md`, ...); `knowledge/*_mega.md` hold what mega adds to the shared ones.
 
@@ -29,15 +28,21 @@ profiling scripts and the shared knowledge files (`amd_instinct.md`, `hip_optimi
 
 ## Usage
 
-Every job needs the operator's full rank count, so pass `gpus_per_job` (or `job_gpu_ids`) with
-`gpu_ids`. `use_expert_skills=true` adds a matched Expert Skill (e.g.
-`perf_knowledge/expert_skills/skills/megamoe_ep_mega_fusion`) as knowledge for the same roles; with
-`false` the generic lifecycle runs unchanged. Optional `analysis_skill=moe_bottleneck` adds a
-route-attribution pass after Profile.
+Launch `workflow.js` directly; `mode` defaults to `mega`. Required: `kernel_path`, `workflow_dir` (the
+`kernel_workflow` directory, for the shared GPU lease scripts and knowledge), and `gpu_ids` with
+`gpus_per_job` (or `job_gpu_ids`), since every job needs the operator's full rank count. In Claude Code:
 
 ```
-Workflow({ scriptPath: "<GEAK>/kernel_workflow/kernel_workflow.js", args: {
-  mode: "mega", kernel_path: "<op task dir>", workflow_dir: "<GEAK>/kernel_workflow",
+use <GEAK>/perf_knowledge/expert_skills/expert_workflows/mega_fusion/workflow.js to optimize <op task dir>,
+workflow_dir <GEAK>/kernel_workflow, gpu_ids 0-7, 8 GPUs per job, budget 12,
+target guard 8192_uniform, regression guard 512_uniform, accuracy cases 128/8192, launch target 2
+```
+
+or with the full args:
+
+```
+Workflow({ scriptPath: "<GEAK>/perf_knowledge/expert_skills/expert_workflows/mega_fusion/workflow.js", args: {
+  kernel_path: "<op task dir>", workflow_dir: "<GEAK>/kernel_workflow",
   gpu_ids: "0,1,2,3,4,5,6,7", gpus_per_job: 8,
   budget: 12, task: "...",
   target_guards: ["8192_uniform"],          // cases that create speedup credit
@@ -48,10 +53,13 @@ Workflow({ scriptPath: "<GEAK>/kernel_workflow/kernel_workflow.js", args: {
 }})
 ```
 
-All other args (time budgets, final top-k, Expert Skill pinning, gates) are read at the top of
-`workflow.js` with their defaults. Launching `workflow.js` directly (with `mode: "mega"`,
-`workflow_dir` = the kernel_workflow directory) shows its phases individually; a caller that is
-itself a workflow (e.g. e2e) calls it directly too, since workflows nest one level only.
+Without a skill this runs the generic lifecycle. To guide it with a MegaMoE Expert Skill, add this
+workflow's own `use_expert_skills=true` plus the pin printed by
+`python perf_knowledge/expert_skills/_contribute/validate_skill.py <skill id> --emit-plan` (skill id,
+revision and component digests). Optional `analysis_skill=moe_bottleneck` adds a route-attribution
+pass after Profile. All other args (time budgets, final top-k, gates) are read at the top of
+`workflow.js` with their defaults. A caller that is itself a workflow (e.g. e2e) launches `workflow.js`
+the same way, as its one nested level.
 
 ## Layout
 

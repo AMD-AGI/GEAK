@@ -815,15 +815,20 @@ def emit_plan(skill_path, skill_id, fm, args):
         srcs = match.get("from_backend") or []
         srcs = [srcs] if isinstance(srcs, str) else list(srcs)
         cross_backend_srcs = [src for src in srcs if src and dst and src != dst]
-        print("# EFFICACY (kernel_workflow, isolated A/B vs the immutable oracle):")
-        print(f"Workflow scriptPath={GEAK}/kernel_workflow/kernel_workflow.js args:")
+        mega = identity["validation_status"] == "experimental"
+        if mega:
+            print("# EFFICACY (mega_fusion expert workflow, candidate A/B vs the frozen baseline):")
+            print(f"Workflow scriptPath={os.path.join(os.path.dirname(MEGA_TOOLS_DIR), 'workflow.js')} args:")
+        else:
+            print("# EFFICACY (kernel_workflow, isolated A/B vs the immutable oracle):")
+            print(f"Workflow scriptPath={GEAK}/kernel_workflow/kernel_workflow.js args:")
         extras = [
             f"expert_skill_id={skill_id}",
             f"expert_skill_revision={fm.get('revision') or ''}",
             f"expert_skill_bundle_sha256={identity['bundle_sha256']}",
             f"expert_skill_validation_status={identity['validation_status']}",
         ]
-        if identity["validation_status"] == "experimental":
+        if mega:
             extras.extend([
                 "mode=mega",
                 "expert_skill_usage=authoring",

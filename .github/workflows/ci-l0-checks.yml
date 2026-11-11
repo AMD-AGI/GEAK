@@ -366,7 +366,7 @@ jobs:
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       - name: kernel_workflow multi-GPU job resolution
         run: node kernel_workflow/scripts/test_gpu_request.js
-      - name: expert workflow regression tests (mode=mega -> mega_fusion)
+      - name: expert workflow regression tests (perf_knowledge/expert_skills/expert_workflows)
         run: |
           set -e
           for t in perf_knowledge/expert_skills/expert_workflows/*/tests/test_*.js; do node "$t"; done

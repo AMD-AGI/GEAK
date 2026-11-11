@@ -162,8 +162,7 @@ budget-controlled, each patch independently verified.
 | `exp_root` | Sibling `exp/` | Output root. |
 | `eval_dir` | — | Isolated evaluation directory. |
 | `apply_to_original` | `false` | Emit apply bundle vs edit-in-place. |
-| `mode` | `optimize` | `optimize` \| `author` \| `bakeoff` \| `mega` (multi-rank whole-kernel candidates, run by the expert workflow `perf_knowledge/expert_skills/expert_workflows/mega_fusion/`; see its README). |
-| `expert_workflow` | — | Run `perf_knowledge/expert_skills/expert_workflows/<id>/workflow.js` as the sub-workflow (`mode=mega` implies `mega_fusion`). |
+| `mode` | `optimize` | `optimize` \| `author`. |
 | `target_language` | `triton` | Author-mode language: `triton` \| `flydsl` \| `hip` \| `ck`. |
 | `op_spec` | `{}` | Op specification (author mode). |
 | `perf_knowledge_dir` | Sibling `perf_knowledge/` | Knowledge base. |

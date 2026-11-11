@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-mega',
   description: 'mode=mega (expert workflow mega_fusion): optimizes a multi-rank operator (e.g. an EP MoE layer) as a portfolio of independent whole-kernel candidate lanes, each authored, verified on-card against the frozen baseline, and only a fully verified winner is delivered. Validated on EP MoE layers only.',
-  whenToUse: 'Prefer the kernel-workflow dispatcher with args.mode=mega (it runs this package as a sub-workflow); launch this script directly only to see per-phase progress. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir) and optionally args.expert_workflow_dir (this package dir; default <perf_knowledge>/expert_skills/expert_workflows/mega_fusion), args.gpu_ids, args.gpus_per_job and the mega_* / guard / control args.',
+  whenToUse: 'Launch this script directly to optimize a multi-rank operator (mode defaults to mega). Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir: shared GPU lease scripts and knowledge), args.gpu_ids, args.gpus_per_job and the guard / control args; optionally args.expert_workflow_dir (this package dir; default <perf_knowledge>/expert_skills/expert_workflows/mega_fusion). See this directory\'s README.md.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
@@ -119,10 +119,10 @@ const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_origin
 const KERNEL_NAME_HINT = KERNEL_PATH_ORIG.replace(/\/+$/, '').split('/').pop();
 
 // mode=mega keeps independent whole-kernel candidate lanes and selects the fastest fully verified
-// speedup. The kernel-workflow dispatcher sends optimize/author runs to kernel_lane.js instead.
+// speedup. optimize/author run through kernel_workflow/kernel_workflow.js instead.
 const MODE = String(A.mode != null ? A.mode : 'mega').trim().toLowerCase() || 'mega';
 if (MODE !== 'mega') {
-  throw new Error(`the mega_fusion expert workflow runs mode=mega only, got '${MODE}'; use kernel_workflow.js for other modes`);
+  throw new Error(`the mega_fusion expert workflow runs mode=mega only, got '${MODE}'; other modes run through kernel_workflow/kernel_workflow.js`);
 }
 const MEGA_DEFAULT_SPECIALTY = String(A.mega_default_specialty ||
   (GPU_RESOURCE.gpusPerJob > 1 ? 'distributed' : 'compute'));
@@ -224,9 +224,9 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_DIR = EXPERT_SKILL_ID
   ? `${EXPERT_SKILLS_DIR}/skills/${EXPERT_SKILL_ID}` : '';
-// This expert workflow's package (roles/, knowledge/, tools/, scripts/); the dispatcher passes it.
+// This expert workflow's package (roles/, knowledge/, tools/, scripts/).
 const MEGA_DIR = String(A.expert_workflow_dir ||
-  (EXPERT_SKILLS_DIR ? `${EXPERT_SKILLS_DIR}/workflows/mega_fusion` : '')).replace(/\/+$/, '');
+  (EXPERT_SKILLS_DIR ? `${EXPERT_SKILLS_DIR}/expert_workflows/mega_fusion` : '')).replace(/\/+$/, '');
 const PINNED_MEGA_SKILL = MODE === 'mega' && USE_EXPERT_SKILLS && !!EXPERT_SKILL_DIR;
 const EXPERT_SKILL_PLANNER_GUIDE_FILE = `${EXPERT_SKILL_DIR}/planner_guide.md`;
 const EXPERT_SKILL_AUTHOR_GUIDE_FILE = `${EXPERT_SKILL_DIR}/author_guide.md`;
