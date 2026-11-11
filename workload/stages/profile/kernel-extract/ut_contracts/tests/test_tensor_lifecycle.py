@@ -157,6 +157,86 @@ class TensorLifecycleTests(unittest.TestCase):
 
 
 
+# A worker-protocol leg_runner: each blob value encodes (process, oracle path, STAGE env) so a
+# test can tell which process and which path produced it.
+_PATH_WORKER = """import json, os, sys, torch
+for line in sys.stdin:
+    r = json.loads(line)
+    if r.get("path", "call") not in ("call", "split"):
+        print("UT_HARNESS_INCOMPLETE: oracle path %r is not defined" % r["path"], flush=True)
+        sys.exit(3)
+    tag = "%d|%s|%s" % (os.getpid(), r.get("path", "call"), os.environ.get("STAGE", ""))
+    blob = {"%s|%d" % (s, n): tag for s in r["sigs"] for n in range(r["draws"])}
+    torch.save(blob, r["out"])
+    print("GEAK_ORACLE_BATCH " + json.dumps({"out": r["out"], "n": len(blob)}), flush=True)
+"""
+
+
+@unittest.skipIf(torch is None, 'requires CPU torch')
+class OraclePathWorkerTests(unittest.TestCase):
+    """DESIGN 1.4: jobs carry oracle_path and env; the worker key separates both."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, self.tmp, True)
+        Path(self.tmp, 'leg_runner.py').write_text(_PATH_WORKER)
+        self.task = SimpleNamespace(dir=self.tmp, meta={}, mc={'oracle_timeout': 60}, gpus=None,
+            sig_filter=None, U=U, random_specs=lambda: [{'sig': 'r8'}, {'sig': 'r16'}],
+            h=SimpleNamespace(gpu_env=lambda _: {}))
+        self.state = {'scratch': self.tmp}
+
+    def job(self, name, **kw):
+        return dict(overlay=self.tmp, path=str(Path(self.tmp, name)), seed=0, draws=1, **kw)
+
+    def batch(self, jobs):
+        return D._oracles(self.task, self.state, jobs)
+
+    def test_call_and_split_under_one_overlay_produce_different_blobs(self):
+        with D.oracle_workers(self.task, self.state):
+            call, split = self.batch([self.job('c.pt'), self.job('s.pt', oracle_path='split')])
+        self.assertEqual(sorted(call), sorted(split))
+        self.assertTrue(all(v.split('|')[1] == 'call' for v in call.values()))
+        self.assertTrue(all(v.split('|')[1] == 'split' for v in split.values()))
+        self.assertEqual(self.state['oracle_worker_starts'], 2)
+
+    def test_same_env_reuses_the_worker_and_a_different_env_starts_a_new_one(self):
+        with D.oracle_workers(self.task, self.state):
+            a, = self.batch([self.job('d.pt', env={'STAGE': 'dpre'})])
+            again, = self.batch([self.job('d.pt', env={'STAGE': 'dpre'})])
+            self.assertEqual(self.state['oracle_worker_starts'], 1)
+            other, = self.batch([self.job('d.pt', env={'STAGE': 'dmlp'})])
+            self.assertEqual(self.state['oracle_worker_starts'], 2)
+        pid = lambda blob: {v.split('|')[0] for v in blob.values()}
+        self.assertEqual(pid(a), pid(again))
+        self.assertNotEqual(pid(a), pid(other))
+        self.assertEqual({v.split('|')[2] for v in other.values()}, {'dmlp'})
+
+    def test_env_key_ignores_insertion_order_and_rejects_non_strings(self):
+        k1 = D.oracle_worker_key(self.job('x.pt', env={'A': '1', 'B': '2'}), 0)
+        k2 = D.oracle_worker_key(self.job('x.pt', env={'B': '2', 'A': '1'}), 0)
+        self.assertEqual(k1, k2)
+        self.assertNotEqual(k1, D.oracle_worker_key(self.job('x.pt', env={'A': '1'}), 0))
+        self.assertEqual(D.oracle_worker_key(self.job('x.pt'), 0),
+                         D.oracle_worker_key(self.job('x.pt', oracle_path='call', env={}), 0))
+        with self.assertRaises(ValueError):
+            D.oracle_worker_key(self.job('x.pt', env={'A': 1}), 0)
+
+    def test_a_missing_oracle_path_surfaces_the_sentinel(self):
+        with self.assertRaisesRegex(RuntimeError, D.SENTINEL):
+            with D.oracle_workers(self.task, self.state):
+                self.batch([self.job('n.pt', oracle_path='native')])
+
+    def test_one_shot_legs_get_the_path_and_env(self):
+        seen = []
+        def leg(task_dir, overlay, mode, *, out, env_extra, oracle_path=None, **kw):
+            seen.append((oracle_path, env_extra.get('STAGE')))
+            torch.save({'%s|0' % s: 0 for s in ('r8', 'r16')}, out)
+        self.task.h = SimpleNamespace(gpu_env=lambda _: {}, _run_leg=leg)
+        D._oracle(self.task, self.tmp, str(Path(self.tmp, 'o.pt')), 0, 1, self.state,
+                  oracle_path='split', env={'STAGE': 'dattn'})
+        self.assertEqual(seen, [('split', 'dattn')])
+
+
 @unittest.skipIf(torch is None, 'requires CPU torch')
 class BoundedOracleTests(unittest.TestCase):
     def setUp(self):

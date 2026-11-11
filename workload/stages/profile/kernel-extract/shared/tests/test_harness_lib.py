@@ -2070,6 +2070,21 @@ class TestRunLeg(_LegTestCase):
         self.assertEqual(self.sub.flag("--out"), "/tmp/o.pt")
         self.assertEqual(self.sub.flag("--draws"), "5")
 
+    def test_the_oracle_path_is_forwarded_only_when_not_call(self):
+        self._script(lambda cmd, env: _Proc(0, "{}"))
+        hl._run_leg(self.task, self.base, "oracle", out="/tmp/o.pt", oracle_path="split")
+        self.assertEqual(self.sub.flag("--oracle-path"), "split")
+        for default in (None, "call"):
+            hl._run_leg(self.task, self.base, "oracle", out="/tmp/o.pt", oracle_path=default)
+            self.assertIsNone(self.sub.flag("--oracle-path"))
+        with self.assertRaises(ValueError):
+            hl._run_leg(self.task, self.base, "time", oracle_path="split")
+
+    def test_an_incomplete_ut_keeps_its_sentinel_in_the_error(self):
+        self._script(lambda cmd, env: _Proc(3, "UT_HARNESS_INCOMPLETE: oracle path 'native'\n", "boom"))
+        with self.assertRaisesRegex(RuntimeError, "UT_HARNESS_INCOMPLETE: oracle path 'native'"):
+            hl._run_leg(self.task, self.base, "oracle", out="/tmp/o.pt", oracle_path="native")
+
     def test_the_timeout_is_forwarded_to_the_subprocess(self):
         self._script(lambda cmd, env: _Proc(0, "{}"))
         hl._run_leg(self.task, self.base, "list", timeout=42)

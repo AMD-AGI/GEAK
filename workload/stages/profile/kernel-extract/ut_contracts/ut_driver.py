@@ -289,11 +289,30 @@ def _parallel(items, gpus, fn):
     return out
 
 
+def job_env(job):
+    """A job's extra environment ({str: str}). Part of the worker key: a task module may read it
+    at import (e.g. the stage a draft layer runs), so a live process cannot switch it."""
+    env = job.get("env") or {}
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                            for k, v in env.items()):
+        raise ValueError("oracle job env must map str -> str, got %r" % (env,))
+    return env
+
+
+def oracle_worker_key(job, gpu):
+    """(overlay, blob, oracle path, sha1(sorted env), gpu): one process per distinct import state.
+    The blob path stays in the key so base and base2 (the noise leg) never share a process."""
+    env = job_env(job)
+    digest = hashlib.sha1(json.dumps(sorted(env.items())).encode()).hexdigest()
+    return (job["overlay"], job["path"], job.get("oracle_path") or "call", digest, gpu)
+
+
 class OracleWorker:
     """An isolated, immutable-overlay process reused across bounded output batches."""
     def __init__(self, T, state, job, gpu):
         serial = state["oracle_worker_starts"] = state.get("oracle_worker_starts", 0) + 1
         env, self.watch = _watch_env(T, state, job.get("watch") and "worker_%d" % serial)
+        env.update(job_env(job))
         env.update(T.h.gpu_env(gpu))
         env = dict(os.environ, **env)
         env["PYTHONPATH"] = os.pathsep.join([job["overlay"]] +
@@ -321,13 +340,17 @@ class OracleWorker:
             raise
 
     def _run(self, job, sigs, output):
-        request = dict(seed=job["seed"], draws=job["draws"], sigs=sigs, out=output)
+        request = dict(seed=job["seed"], draws=job["draws"], sigs=sigs, out=output,
+                       path=job.get("oracle_path") or "call")
+        incomplete = None
         self.proc.stdin.write((json.dumps(request) + "\n").encode())
         self.proc.stdin.flush()
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             while b"\n" in self.buffer:
                 line, self.buffer = self.buffer.split(b"\n", 1)
+                if line.startswith(SENTINEL.encode()):
+                    incomplete = line.decode(errors="replace")
                 if line.startswith(b"GEAK_ORACLE_BATCH "):
                     result = json.loads(line[len(b"GEAK_ORACLE_BATCH "):])
                     if result.get("out") != output:
@@ -346,7 +369,8 @@ class OracleWorker:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - 3000))
             why = f.read().decode(errors="replace")
-        raise RuntimeError("oracle worker failed or timed out: " + why)
+        raise RuntimeError("oracle worker failed or timed out: " +
+                           (incomplete + "\n" if incomplete else "") + why)
 
     def close(self):
         try:
@@ -434,7 +458,9 @@ def case_batch(T, sigs):
 
 
 def _oracles(T, state, jobs):
-    """Oracle legs -> one blob per job. A job is {overlay, path, seed, draws, watch}.
+    """Oracle legs -> one blob per job. A job is {overlay, path, seed, draws, watch, oracle_path,
+    env}: `path` is where the blob goes, `oracle_path` what is recorded (`call` = cases.call,
+    otherwise cases.ORACLES[name]; DESIGN 1.4) and `env` extra environment for the leg.
 
     With several GPUs (--gpus / GPU_IDS) every job is split into one shard of random cases
     per GPU and all shards of all jobs run concurrently. Draws are seeded per case, so a
@@ -453,15 +479,16 @@ def _oracles(T, state, jobs):
         out = "%s.s%d" % (job["path"], i)
         workers = state.get("_oracle_workers")
         if workers is not None:
-            key = (job["overlay"], job["path"], gpu)
+            key = oracle_worker_key(job, gpu)
             if key not in workers:
                 workers[key] = OracleWorker(T, state, job, gpu)
             workers[key].run(job, shards[i], out)
         else:
             env, wpath = _watch_env(T, state, job.get("watch") and "%s.b%d.s%d" % (job["watch"], batch_id, i))
+            env.update(job_env(job))
             env.update(T.h.gpu_env(gpu))
             T.h._run_leg(T.dir, job["overlay"], "oracle", out=out, seed=job["seed"],
-                         draws=job["draws"], env_extra=env,
+                         draws=job["draws"], env_extra=env, oracle_path=job.get("oracle_path"),
                          sigs=shards[i] if (k > 1 or T.sig_filter is not None) else None)
             _register_watch(state, wpath)
         return out
@@ -483,10 +510,10 @@ def _oracles(T, state, jobs):
     return blobs
 
 
-def _oracle(T, overlay, path, seed, draws, state=None, watch=None):
+def _oracle(T, overlay, path, seed, draws, state=None, watch=None, oracle_path="call", env=None):
     state = state if state is not None else {"scratch": os.path.dirname(path)}
     return _oracles(T, state, [{"overlay": overlay, "path": path, "seed": seed, "draws": draws,
-                                "watch": watch}])[0]
+                                "watch": watch, "oracle_path": oracle_path, "env": env or {}}])[0]
 
 
 def _needs_noise(T):

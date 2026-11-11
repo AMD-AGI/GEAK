@@ -1089,7 +1089,7 @@ def gpu_env(gpu):
 
 
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable="", env_extra=None, sigs=None):
+             target_callable="", env_extra=None, sigs=None, oracle_path=None):
     env = dict(os.environ)
     env.update(env_extra or {})
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
@@ -1107,6 +1107,11 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         if mode != "resolve":
             raise ValueError("target_callable override is only valid for identity resolution")
         cmd += ["--target-callable", target_callable]
+    if oracle_path and oracle_path != "call":
+        # Which reference the oracle leg records: cases.call (default) or cases.ORACLES[name].
+        if mode != "oracle":
+            raise ValueError("oracle_path is only valid for an oracle leg")
+        cmd += ["--oracle-path", oracle_path]
     # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
@@ -1119,7 +1124,11 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         stdout, stderr = p.communicate()
         raise
     if p.returncode != 0:
-        raise RuntimeError(f"leg({mode}) under {overlay} exited {p.returncode}: {stderr[-800:]}")
+        # exit 3 + UT_HARNESS_INCOMPLETE on stdout = the UT itself is incomplete; keep that line in
+        # the error so the driver can tell it from a kernel that crashed.
+        sentinel = [ln for ln in stdout.splitlines() if ln.startswith("UT_HARNESS_INCOMPLETE")]
+        raise RuntimeError(f"leg({mode}) under {overlay} exited {p.returncode}: "
+                           + (sentinel[-1] + "\n" if sentinel else "") + stderr[-800:])
     lines = [ln for ln in stdout.strip().splitlines() if ln.startswith("{")]
     if not lines:
         raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {stdout[-800:]}")

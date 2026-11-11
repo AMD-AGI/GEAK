@@ -461,6 +461,82 @@ class ModeOracle(_LegRunnerTestCase):
                 self.assertEqual(sys.modules["cases"].seen[-1]["device"], want)
 
 
+_CASES_ORACLES_STUB = textwrap.dedent('''
+    """cases.py with a named oracle path (DESIGN 1.4): `split` must be what gets recorded."""
+    seen = []
+
+    def timing_cases(h, meta):
+        return []
+
+    def random_shapes(h, meta):
+        return [{"sig": "decode", "make_inputs": lambda rng: {"seed": rng.seed}}]
+
+    def call(args):
+        seen.append(("call", args["seed"]))
+        return {"y": "call:%d" % args["seed"]}
+
+    def split(args):
+        seen.append(("split", args["seed"]))
+        return {"y": "split:%d" % args["seed"]}
+
+    ORACLES = {"split": split}
+''')
+
+
+class OraclePath(_LegRunnerTestCase):
+    """--oracle-path / the worker request's `path` pick cases.call or cases.ORACLES[name]."""
+
+    def _oracle(self, *extra):
+        return json.loads(self._main("--task", self.task, "--mode", "oracle", "--draws", "2",
+                                     "--out", os.path.join(self.task, "o.pt"), *extra))
+
+    def test_call_and_split_under_one_overlay_record_different_blobs(self):
+        self._task_dir(cases=_CASES_ORACLES_STUB)
+        self._target_module()
+        self._oracle()
+        call_blob = self.torch.saved[-1][0]
+        out = self._oracle("--oracle-path", "split")
+        split_blob = self.torch.saved[-1][0]
+        self.assertEqual(sorted(call_blob), sorted(split_blob))
+        self.assertEqual(call_blob["decode|1"], {"y": "call:1"})
+        self.assertEqual(split_blob["decode|1"], {"y": "split:1"})
+        self.assertEqual(out["path"], "split")
+        self.assertEqual(sys.modules["cases"].seen[-2:], [("split", 0), ("split", 1)])
+
+    def test_a_path_missing_from_oracles_exits_3_with_the_sentinel(self):
+        for cases in (_CASES_ORACLES_STUB, _CASES_STUB):      # wrong key / no ORACLES at all
+            with self.subTest(has_oracles="ORACLES" in cases):
+                self._task_dir(cases=cases)
+                self._target_module()
+                sys.argv = ["leg_runner.py", "--task", self.task, "--mode", "oracle",
+                            "--out", os.path.join(self.task, "o.pt"), "--oracle-path", "native"]
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+                    lr.main()
+                self.assertEqual(cm.exception.code, 3)
+                self.assertIn(lr.SENTINEL, out.getvalue())
+                self.assertIn("'native'", out.getvalue())
+                self.assertEqual(self.torch.saved, [])        # nothing recorded
+
+    def test_the_worker_takes_the_path_per_request(self):
+        self._task_dir(cases=_CASES_ORACLES_STUB)
+        self._target_module()
+        reqs = [dict(seed=5, draws=1, sigs=None, out="a.pt"),
+                dict(seed=5, draws=1, sigs=None, out="b.pt", path="split")]
+        stdin = io.StringIO("".join(json.dumps(r) + "\n" for r in reqs))
+        self.addCleanup(setattr, sys, "stdin", sys.stdin)
+        sys.stdin = stdin
+        lines = self._main("--task", self.task, "--mode", "oracle-worker").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual([b["decode|0"]["y"] for b, _ in self.torch.saved], ["call:5", "split:5"])
+
+    def test_oracle_path_is_refused_outside_oracle_mode(self):
+        self._task_dir(cases=_CASES_ORACLES_STUB)
+        with self.assertRaises(SystemExit) as cm:
+            self._main("--task", self.task, "--mode", "list", "--oracle-path", "split")
+        self.assertIn("--oracle-path", str(cm.exception.code))
+
+
 class OracleSnapshot(_LegRunnerTestCase):
     """What the oracle can record.
 

@@ -11,6 +11,11 @@ always measured against the live path, whatever LANGUAGE the candidate is writte
 
 Modes: list (bucket sigs) | resolve (leg identity, for the direction assert) | time | oracle |
 server_calls (replay the entry calls the probe server recorded, run/server_calls.json).
+
+oracle / oracle-worker take an oracle PATH (--oracle-path, or "path" in a worker request; default
+`call`): `call` records cases.call, any other name records cases.ORACLES[name](args) -- e.g. the
+split path of a whole-layer monokernel (each stage launched on its own). A name the task's cases.py
+does not define prints UT_HARNESS_INCOMPLETE and exits 3: the UT is incomplete, not the kernel.
 Driven by harness_lib.measure_legs and ut_driver.py — a unittest.py should not invoke it directly.
 
 Before anything else a leg imports meta.server_preimports, so the kernel compiles in the import
@@ -26,6 +31,7 @@ import os
 import sys
 import weakref
 
+SENTINEL = "UT_HARNESS_INCOMPLETE"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # this file lives IN the task dir next to a file named unittest.py — drop it from sys.path before
 # torch is imported, or that file shadows stdlib unittest.
@@ -232,6 +238,8 @@ def main():
                     help="oracle: comma list of random-case sigs to run (a shard); "
                          "server_calls: call ids to replay")
     ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
+    ap.add_argument("--oracle-path", default="call",
+                    help="oracle: `call` (cases.call) or a key of cases.ORACLES")
     a = ap.parse_args()
 
     task = os.path.abspath(a.task)
@@ -349,6 +357,8 @@ def _run(a, task, meta):
         return
     if a.target_callable:
         raise SystemExit("--target-callable is only valid with --mode resolve")
+    if a.oracle_path != "call" and a.mode != "oracle":
+        raise SystemExit("--oracle-path is only valid with --mode oracle (a worker reads it per request)")
 
     h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
     cases = _load("cases", os.path.join(task, "cases.py"))
@@ -409,13 +419,29 @@ def _run(a, task, meta):
 
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    def oracle(seed, draws, sigs, output):
+    def oracle_fn(path):
+        """The callable an oracle path records. `call` keeps the deployed execution (compile mode,
+        phase regimes); a named path is the task's own reference, called as written."""
+        if path == "call":
+            return None
+        fn = (getattr(cases, "ORACLES", None) or {}).get(path)
+        if not callable(fn):
+            print("%s: oracle path %r is not defined in cases.ORACLES (has %s); the task's contract "
+                  "names it, so cases.py must provide it. This is a UT generation defect, not a "
+                  "kernel failure." % (SENTINEL, path,
+                                       sorted(getattr(cases, "ORACLES", None) or {}) or "none"),
+                  flush=True)
+            sys.exit(3)
+        return fn
+
+    def oracle(seed, draws, sigs, output, path="call"):
+        named = oracle_fn(path)
         blob = {}
         only = set(sigs) if sigs is not None else None
         for shape in cases.random_shapes(h, meta):
             if only is not None and shape["sig"] not in only:
                 continue
-            case_call, _ = case_execution(shape)
+            case_call = named or case_execution(shape)[0]
             for i in range(max(1, draws)):
                 rng = torch.Generator(device=device).manual_seed(int(seed) + i)
                 out = case_call(shape["make_inputs"](rng))
@@ -424,18 +450,20 @@ def _run(a, task, meta):
         cache = getattr(cases, "_WEIGHTS", None)
         stats = ({"hits": cache.hits, "misses": cache.misses, "resident_bytes": cache.bytes}
                  if cache is not None else None)
-        return {"out": output, "n": len(blob), **({"weight_cache": stats} if stats else {})}
+        return {"out": output, "n": len(blob), **({"path": path} if path != "call" else {}),
+                **({"weight_cache": stats} if stats else {})}
 
     if a.mode == "oracle-worker":
         # One overlay per process. The controller sends one bounded batch at a time
         # and consumes/deletes its output before requesting the next batch.
         for line in sys.stdin:
             request = json.loads(line)
-            result = oracle(request["seed"], request["draws"], request["sigs"], request["out"])
+            result = oracle(request["seed"], request["draws"], request["sigs"], request["out"],
+                            request.get("path") or "call")
             print("GEAK_ORACLE_BATCH " + json.dumps(result), flush=True)
         return
     result = oracle(a.seed, a.draws or int(meta.get("random_draws", 3)),
-                    a.sigs.split(",") if a.sigs is not None else None, a.out)
+                    a.sigs.split(",") if a.sigs is not None else None, a.out, a.oracle_path)
     print(json.dumps(result))
 
 
