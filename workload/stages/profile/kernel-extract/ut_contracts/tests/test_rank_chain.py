@@ -180,5 +180,40 @@ class MultiRankLegs(unittest.TestCase):
             driver.group_multi_rank(self._T({"timing": {"kind": "rank_chain", "world": 8}}), ["0", "1"])
 
 
+class Checkpoint(unittest.TestCase):
+    """A run cut short (preempted node) keeps its finished gates for the next --reuse run."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ut_checkpoint_")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "run"))
+        self.T = SimpleNamespace(dir=self.root)
+
+    @staticmethod
+    def _a(**kw):
+        return SimpleNamespace(**dict(dict(quick=False, out=None, reuse=True), **kw))
+
+    def test_finished_gates_are_reused_under_the_same_key(self):
+        report = {"reuse_key": "k1", "validation_mode": "correctness",
+                  "gates": {"contract": {"status": "pass"}, "correctness": {"status": "pass"},
+                            "replay": {"status": "fail"}, "restore": {"status": "pass"}}}
+        driver._checkpoint(self.T, self._a(), report)
+        got = driver._reusable(self.T, self._a(), "k1")
+        self.assertEqual(sorted(got), ["contract", "correctness"])     # never a failure, never restore
+        self.assertEqual(driver._reusable(self.T, self._a(), "other"), {})
+        self.assertEqual(driver._reusable(self.T, self._a(reuse=False), "k1"), {})
+
+    def test_the_checkpoint_is_newer_than_the_full_report(self):
+        with open(os.path.join(self.root, "run", "ut_report.json"), "w") as f:
+            json.dump({"reuse_key": "k1", "gates": {"timing": {"status": "pass", "weighted_speedup": 1.0}}}, f)
+        driver._checkpoint(self.T, self._a(), {"reuse_key": "k1", "gates": {"timing": {"status": "pass", "weighted_speedup": 1.1}}})
+        self.assertEqual(driver._reusable(self.T, self._a(), "k1")["timing"]["weighted_speedup"], 1.1)
+
+    def test_quick_and_out_runs_write_none(self):
+        driver._checkpoint(self.T, self._a(quick=True), {"reuse_key": "k", "gates": {}})
+        driver._checkpoint(self.T, self._a(out="/x"), {"reuse_key": "k", "gates": {}})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "run", driver.CHECKPOINT)))
+
+
 if __name__ == "__main__":
     unittest.main()

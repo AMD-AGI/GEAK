@@ -1180,6 +1180,7 @@ def run_gates(T, a):
             r["seconds"] = round(time.time() - t0, 2)
             report["gates"][g] = r
             print("UT_GATE %-18s %s" % (g, r["status"]), flush=True)
+            _checkpoint(T, a, report)
             if r["status"] == "harness_incomplete":
                 incomplete = True
             if r["status"] not in ("pass", "not_required"):
@@ -1226,19 +1227,44 @@ def _reuse_key(T):
     return h.hexdigest()
 
 
+CHECKPOINT = "ut_report.checkpoint.json"
+
+
+def _checkpoint(T, a, report):
+    """Every finished gate, on disk at once: a run cut short (a preempted node, a killed
+    container) keeps what it measured, and the next --reuse run starts at the first gate that
+    has not passed. Removed once the full report is written. Never for --quick or --out."""
+    if a.quick or a.out:
+        return
+    path = os.path.join(T.dir, "run", CHECKPOINT)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"reuse_key": report.get("reuse_key"), "gates": report["gates"],
+                       "validation_mode": report.get("validation_mode"), "written": time.time()},
+                      f, indent=1, default=str)
+        os.replace(tmp, path)
+    except OSError:
+        pass                         # a checkpoint is an aid; the run itself must not fail on it
+
+
 def _reusable(T, a, key):
-    """--reuse: gates that passed in the last full report under the same reuse key."""
+    """--reuse: gates that passed under the same reuse key, in the last full report or in the
+    checkpoint of a run that did not finish (the checkpoint is newer, so it wins)."""
     if not a.reuse or a.quick:
         return {}
-    try:
-        with open(os.path.join(T.dir, "run", "ut_report.json")) as f:
-            prev = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    if prev.get("reuse_key") != key or prev.get("quick"):
-        return {}
-    return {g: r for g, r in (prev.get("gates") or {}).items()
-            if r.get("status") in ("pass", "not_required") and g != "restore"}
+    out = {}
+    for name in ("ut_report.json", CHECKPOINT):
+        try:
+            with open(os.path.join(T.dir, "run", name)) as f:
+                prev = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if prev.get("reuse_key") != key or prev.get("quick"):
+            continue
+        out.update({g: r for g, r in (prev.get("gates") or {}).items()
+                    if r.get("status") in ("pass", "not_required") and g != "restore"})
+    return out
 
 
 def _quick_subset(T, per_phase=3, calls=8):
@@ -1339,6 +1365,11 @@ def main(task=None, argv=None):
     with open(out, "w") as f:
         json.dump(report, f, indent=2, default=str)
         f.write("\n")
+    if not a.quick and not a.out:
+        try:
+            os.unlink(os.path.join(T.dir, "run", CHECKPOINT))   # the full report supersedes it
+        except OSError:
+            pass
     if a.quick:
         print("UT_VERDICT quick (exit 1) -> %s" % out, flush=True)
         return code

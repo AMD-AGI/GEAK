@@ -43,7 +43,9 @@ With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the drive
 its correctness legs by case and spreads timing buckets over them. `--quick` runs every gate
 but timing on the smallest, middle and largest case of each phase (one draw, a few server
 calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
-`--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
+Every finished gate is also written at once to `run/ut_report.checkpoint.json` (removed when the
+full report is written), so a run cut short by a preempted node keeps what it measured.
+`--reuse` keeps the gates that passed in `run/ut_report.json` or that checkpoint when nothing they read changed,
 including correctness receipts reused later by performance validation.
 
 UT extraction runs `--validation-mode correctness`: all twelve non-timing gates are
