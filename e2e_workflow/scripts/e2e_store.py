@@ -1631,7 +1631,10 @@ def win_gate(result: dict) -> str:
                 "not a gain" % (status, speedup))
     acceptance = (result.get("validation_evidence") or {}).get("acceptance")
     if isinstance(acceptance, dict) and acceptance.get("keep") is not True:
-        return "handoff KEEP rule rejected the pair: " + "; ".join(acceptance.get("reasons") or [])
+        return "KEEP rule rejected the pair: " + "; ".join(acceptance.get("reasons") or [])
+    if isinstance(acceptance, dict) and acceptance.get("not_checked"):
+        unchecked = ", ".join(str(g) for g in acceptance["not_checked"])
+        return f"KEEP rule could not check {unchecked}: no bench summary of the pair carries it"
     return ""
 
 
