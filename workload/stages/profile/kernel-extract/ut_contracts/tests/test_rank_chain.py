@@ -259,8 +259,8 @@ class TimingResume(unittest.TestCase):
 
 class InterleaveReplayCase(unittest.TestCase):
     """DESIGN 1.5: a replay bundle's optional `interleave` sequence (several widths' graphs and
-    eager steps on one runner) is reported as one more replay case and fails the gate unless it
-    returns a boolean ok."""
+    eager steps on one runner, back to back) is reported as one more replay case and fails the
+    gate unless it returns a boolean ok; a failure always carries a why."""
 
     def test_absent_adds_nothing(self):
         self.assertIsNone(driver._interleave_row({"fill": None}))
@@ -271,6 +271,26 @@ class InterleaveReplayCase(unittest.TestCase):
         self.assertEqual((row["case"], row["ok"], row["steps"]), ("interleave", True, steps))
         row = driver._interleave_row({"interleave": lambda: {"ok": False, "steps": [], "case": "x"}})
         self.assertEqual((row["case"], row["ok"]), ("interleave", False))
+
+    def test_failure_carries_a_why(self):
+        steps = [{"step": 0, "rows": 8, "mode": "g", "ok": True, "outputs": {"ids": {"ok": True}}},
+                 {"step": 1, "rows": 16, "mode": "g", "ok": False,
+                  "outputs": {"stream_out": {"ok": False, "max_abs": 0.7}, "ids": {"ok": True},
+                              "kv_rows": {"ok": False}}},
+                 {"step": 2, "rows": 8, "mode": "e", "ok": False, "outputs": {"ids": {"ok": False}}}]
+        row = driver._interleave_row({"interleave": lambda: {"ok": False, "steps": steps}})
+        self.assertFalse(row["ok"])
+        self.assertIn("step 1 (g16): stream_out, kv_rows", row["why"])
+        self.assertIn("step 2 (e8): ids", row["why"])
+        self.assertNotIn("step 0", row["why"])
+        # the harness's own why is kept
+        row = driver._interleave_row({"interleave": lambda: {"ok": False, "steps": steps, "why": "harness says"}})
+        self.assertEqual(row["why"], "harness says")
+        # no failed step to name: still a reason
+        row = driver._interleave_row({"interleave": lambda: {"ok": False, "steps": "garbled"}})
+        self.assertIn("no failed step", row["why"])
+        # a pass has no why
+        self.assertNotIn("why", driver._interleave_row({"interleave": lambda: {"ok": True, "steps": []}}))
 
     def test_raise_or_malformed_result_fails(self):
         def boom():

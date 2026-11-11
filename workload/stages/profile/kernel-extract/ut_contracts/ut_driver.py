@@ -1358,9 +1358,12 @@ def inproc_replay(T, a):
 def _interleave_row(b):
     """The bundle's optional `interleave` check as one more replay case (DESIGN 1.5): a stateful
     multi-width kernel (a monokernel runner) replays graphs of several widths and eager steps on
-    ONE instance in alternation, each step against its own eager reference. The harness runs and
-    judges the sequence (it alone holds the per-width graphs); `interleave()` returns
-    {"ok": bool, "steps": [...]}. Anything else -- not callable, raised, no boolean ok -- fails."""
+    ONE instance back to back, every step against an eager reference the harness computed before
+    the sequence (a reference run between the steps would hide a width switch and see the same
+    corrupted state). The harness runs and judges the sequence (it alone holds the per-width
+    graphs); `interleave()` returns {"ok": bool, "steps": [...], "why": str when not ok}. A failed
+    result without a why gets one from its steps (failed step / outputs). Anything else -- not
+    callable, raised, no boolean ok -- fails."""
     if "interleave" not in b:
         return None
     fn = b["interleave"]
@@ -1373,7 +1376,24 @@ def _interleave_row(b):
     if not isinstance(r, dict) or not isinstance(r.get("ok"), bool):
         return {"case": "interleave", "ok": False,
                 "why": "interleave must return {'ok': bool, ...}, got %r" % (type(r).__name__,)}
-    return {**r, "case": "interleave"}
+    row = {**r, "case": "interleave"}
+    if not r["ok"] and not (isinstance(r.get("why"), str) and r["why"]):
+        row["why"] = _interleave_why(r.get("steps"))
+    return row
+
+
+def _interleave_why(steps):
+    """A failed interleave result's reason from its steps: each failed step with the outputs
+    that disagree (`outputs` entries whose ok is false)."""
+    bad = []
+    for s in steps if isinstance(steps, list) else []:
+        if not isinstance(s, dict) or s.get("ok") is not False:
+            continue
+        outs = s.get("outputs") if isinstance(s.get("outputs"), dict) else {}
+        names = [n for n, v in outs.items() if isinstance(v, dict) and v.get("ok") is False]
+        bad.append("step %s (%s%s)%s" % (s.get("step", "?"), s.get("mode", ""), s.get("rows", ""),
+                                         (": " + ", ".join(names)) if names else ""))
+    return ("interleave failed at " + "; ".join(bad)) if bad else "interleave returned ok=False with no failed step"
 
 
 def _replay_doc(T, tol):
