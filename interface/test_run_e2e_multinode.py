@@ -276,6 +276,29 @@ def test_a_single_host_handoff_names_no_pin() -> None:
     assert "GEAK_MN_STATE" not in os.environ
 
 
+@pytest.mark.parametrize("leftover", [False, True], ids=["missing_pin", "leftover_pin"])
+def test_a_single_host_run_drops_an_inherited_pin(tmp_path, capsys, leftover) -> None:
+    pin = tmp_path / "old_run.json"
+    if leftover:
+        pin.write_text(json.dumps({"topology": "tp_span", "nodes": [{"ip": "10.0.9.9"}]}), encoding="utf-8")
+    for requested in ("", "native"):
+        os.environ["GEAK_MN_STATE"] = str(pin)
+        os.environ.pop("BENCH_LAUNCHER", None)
+        if requested:
+            os.environ["BENCH_LAUNCHER"] = requested
+        assert rx.apply_bench_launcher(_handoff()) == "native"
+        assert "GEAK_MN_STATE" not in os.environ
+        assert f"ignoring inherited GEAK_MN_STATE={pin}" in capsys.readouterr().err
+
+
+def test_a_multinode_launcher_without_node_state_is_refused() -> None:
+    os.environ["BENCH_LAUNCHER"] = "multinode"
+    with pytest.raises(SystemExit, match="needs MULTI_NODE_STATE"):
+        rx.apply_bench_launcher(_handoff())
+    with pytest.raises(SystemExit, match="needs MULTI_NODE_STATE"):
+        rx.apply_bench_launcher(_handoff(bench_launcher="multinode"))
+
+
 def test_single_node_still_prefers_magpie_when_a_script_exists(monkeypatch) -> None:
     monkeypatch.setenv("MAGPIE_LAUNCH_SCRIPT", "/opt/magpie/run.sh")
     assert rx.apply_bench_launcher(_handoff()) == "magpie"

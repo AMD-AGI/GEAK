@@ -2285,6 +2285,15 @@ def apply_bench_launcher(h: dict) -> str:
 
     mn = _multinode(h)
     provided = any(isinstance(n, dict) and n.get("launch_command") for n in mn.get("nodes") or [])
+    if not mn:
+        # Only MULTI_NODE_STATE makes a run multinode. An inherited pin would send this host's
+        # serving legs (bench_e2e.sh) and kernel GPU commands (gpu_lock.sh) to its nodes.
+        stray = os.environ.pop("GEAK_MN_STATE", None)
+        if stray:
+            sys.stderr.write(f"note: ignoring inherited GEAK_MN_STATE={stray}: no MULTI_NODE_STATE, "
+                             "this run serves on this host\n")
+        if requested == "multinode":
+            raise SystemExit("!!! BENCH_LAUNCHER=multinode needs MULTI_NODE_STATE (the caller's node_state.json)")
     if mn:
         # Every server starts on the pinned nodes (each pod's launch_command, wrapped per node
         # for magpie). GEAK_MN_STATE is the pin: bench_e2e.sh and gpu_lock.sh read it
