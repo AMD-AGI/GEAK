@@ -519,15 +519,160 @@ def _lint_leg_env(task_dir, meta):
     return errors
 
 
-def _leaf_control_waivers(mc, leaves, controls):
+def package_bind_dir(meta):
+    """`kernel_src/<package>` when meta.candidate_bind binds a whole package (a module bind whose
+    file is the package's `__init__.py`: overlay_setup copies the whole directory into the
+    candidate overlay), else None."""
+    b = meta.get("candidate_bind") or {}
+    f = str(b.get("file") or "")
+    if (b.get("kind") or "module") != "module" or os.path.basename(f) != "__init__.py":
+        return None
+    return os.path.dirname(os.path.normpath(f))
+
+
+def tree_file_hashes(root):
+    """{path relative to root: sha256 of its bytes} over every file under root, bytecode
+    (`__pycache__/`, .pyc, .pyo) excluded."""
+    out = {}
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if x != "__pycache__")
+        for f in sorted(files):
+            if f.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(d, f)
+            with open(path, "rb") as fh:
+                out[os.path.relpath(path, root).replace(os.sep, "/")] = \
+                    hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+BASELINE_PACKAGE = os.path.join("run", "baseline_package.json")
+
+
+def baseline_package_diff(task_dir, meta):
+    """A whole-package bind puts every file of `kernel_src/<package>/` in the candidate overlay,
+    so the candidate is whatever differs there from the INSTALLED package (the baseline leg),
+    not only what editable_leaves names. `run/baseline_package.json` records the installed
+    package ({package, root, files: {path: sha256}}, `scaffold_ut.py baseline-package`, run where
+    the package is installed); the binding gate re-checks it against the live install.
+
+    Returns (pkg_dir or None, {"kernel_src/<package>/<path>": "changed"|"added"|"removed"},
+    [errors])."""
+    pkg = package_bind_dir(meta)
+    if pkg is None:
+        return None, {}, []
+    try:
+        with open(os.path.join(task_dir, BASELINE_PACKAGE)) as f:
+            rec = json.load(f)
+        base = rec["files"]
+        if not isinstance(base, dict) or not base:
+            raise ValueError("files is empty")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        why = e.strerror if isinstance(e, OSError) and e.strerror else e
+        return pkg, {}, ["%s (%s): a whole-package bind needs the installed package's file hashes "
+                         "to tell what the candidate changes; record them with `scaffold_ut.py "
+                         "baseline-package --task <task>` where the package is installed"
+                         % (BASELINE_PACKAGE, why)]
+    mine = tree_file_hashes(os.path.join(task_dir, pkg))
+    diff = {}
+    for rel in sorted(set(base) | set(mine)):
+        kind = ("added" if rel not in base else "removed" if rel not in mine
+                else "changed" if base[rel] != mine[rel] else None)
+        if kind:
+            diff[pkg + "/" + rel] = kind
+    return pkg, diff, []
+
+
+def check_baseline_package(task_dir, installed_root):
+    """The binding gate's half of baseline_package_diff: run/baseline_package.json must still be
+    the package the baseline leg imports (`installed_root`), or the lint judged the candidate
+    against a stale baseline. Returns [errors]."""
+    try:
+        with open(os.path.join(task_dir, BASELINE_PACKAGE)) as f:
+            recorded = json.load(f)["files"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return ["%s: %s" % (BASELINE_PACKAGE, e)]
+    live = tree_file_hashes(installed_root)
+    bad = sorted(p for p in set(recorded) | set(live) if recorded.get(p) != live.get(p))
+    if bad:
+        return ["%s does not match the installed package at %s in %d file(s) (%s): re-record it "
+                "with `scaffold_ut.py baseline-package`" % (BASELINE_PACKAGE, installed_root,
+                                                            len(bad), ", ".join(bad[:5]))]
+    return []
+
+
+def _lint_package_diff(task_dir, meta, leaves):
+    """Every file of a whole-package bind that differs from the installed package is an editable
+    leaf, or is named in `meta.ut_contract.frozen_differs: [{path, why}]` -- a file (or a
+    directory, `path` ending in "/") the candidate tree carries changed but this task does not
+    claim (another model's subpackage of a shared plugin). Without this a candidate could change
+    any file of the package unseen, and the leaves/controls/waivers would cover only what the
+    author chose to declare."""
+    pkg, diff, errors = baseline_package_diff(task_dir, meta)
+    raw = (meta.get("ut_contract") or {}).get("frozen_differs") or []
+    if pkg is None:
+        if raw:
+            errors.append("meta.ut_contract.frozen_differs is only for a whole-package bind "
+                          "(candidate_bind of a package __init__.py)")
+        return errors
+    if not isinstance(raw, list):
+        return errors + ["meta.ut_contract.frozen_differs must be a list of {path, why}"]
+    leaves = set(leaves)
+    files, dirs, seen = set(), [], set()
+    for e in raw:
+        if not (isinstance(e, dict) and e.get("path") and str(e.get("why") or "").strip()):
+            errors.append("frozen_differs entries need path and why: %r" % (e,))
+            continue
+        path = str(e["path"])
+        if path in seen:
+            errors.append("frozen_differs names %s twice" % path)
+            continue
+        seen.add(path)
+        if not path.startswith(pkg + "/"):
+            errors.append("frozen_differs names %s, which is not under the bound package %s/"
+                          % (path, pkg))
+        elif path.endswith("/"):
+            inside = sorted(l for l in leaves if l.startswith(path))
+            if inside:
+                errors.append("frozen_differs directory %s holds editable leaves %s: list its "
+                              "other files one by one" % (path, inside[:4]))
+            elif not any(p.startswith(path) for p in diff):
+                errors.append("frozen_differs names %s, where nothing differs from the installed "
+                              "package: drop it" % path)
+            else:
+                dirs.append(path)
+        elif path in leaves:
+            errors.append("frozen_differs names %s, which is an editable leaf" % path)
+        elif path not in diff:
+            errors.append("frozen_differs names %s, which does not differ from the installed "
+                          "package: drop it" % path)
+        else:
+            files.add(path)
+    for path, kind in sorted(diff.items()):
+        if path in leaves and kind != "removed":
+            continue
+        if path in files or any(path.startswith(d) for d in dirs):
+            continue
+        errors.append("%s is %s relative to the installed package but is neither an editable leaf "
+                      "nor in frozen_differs: the candidate overlay carries it" % (path, kind))
+    return errors
+
+
+def _leaf_control_waivers(mc, leaves, controls, meta=None):
     """`meta.ut_contract.leaf_control_waivers: [{leaf, why}]`: editable leaves that carry no
     negative control of their own. A whole-package candidate (a monokernel bound at its package,
     DESIGN 6.0) edits helpers -- layouts, configs, the device runtime -- that no single numerical
-    mutation isolates; each such leaf is named with the reason, never left out silently. Returns
-    ({waived leaf}, [errors])."""
+    mutation isolates; each such leaf is named with the reason, never left out silently. Only a
+    whole-package bind may waive, and only leaves inside that package.
+    Returns ({waived leaf}, [errors])."""
     raw = mc.get("leaf_control_waivers") or []
     if not isinstance(raw, list):
         return set(), ["meta.ut_contract.leaf_control_waivers must be a list of {leaf, why}"]
+    pkg = package_bind_dir(meta or {})
+    if raw and pkg is None:
+        return set(), ["meta.ut_contract.leaf_control_waivers is only for a whole-package bind "
+                       "(candidate_bind of a package __init__.py); every leaf of this task needs "
+                       "its own negative control"]
     waived, errors = set(), []
     controlled = {c.get("leaf") for c in controls}
     for w in raw:
@@ -537,6 +682,9 @@ def _leaf_control_waivers(mc, leaves, controls):
         leaf = w["leaf"]
         if leaf not in leaves:
             errors.append("leaf_control_waivers names %s, which is not an editable leaf" % leaf)
+        elif not leaf.startswith(pkg + "/"):
+            errors.append("leaf_control_waivers names %s, which is outside the bound package %s/"
+                          % (leaf, pkg))
         elif leaf in controlled:
             errors.append("leaf_control_waivers names %s, which has a negative control: drop the "
                           "waiver" % leaf)
@@ -544,7 +692,9 @@ def _leaf_control_waivers(mc, leaves, controls):
             errors.append("leaf_control_waivers names %s twice" % leaf)
         else:
             waived.add(leaf)
-    if leaves and not controlled & set(leaves):
+    # Only a waiver can leave every leaf without a control; with none, each leaf already
+    # reports "has no negative control".
+    if waived and leaves and not controlled & set(leaves):
         errors.append("every editable leaf is waived: at least one needs a negative control")
     return waived, errors
 
@@ -664,8 +814,9 @@ def lint_task(task_dir):
     if not leaves:
         errors.append("meta.ut_contract.editable_leaves is empty: name every kernel_src file "
                       "this task claims to deliver")
-    waived, waiver_errors = _leaf_control_waivers(mc, leaves, controls)
+    waived, waiver_errors = _leaf_control_waivers(mc, leaves, controls, meta)
     errors.extend(waiver_errors)
+    errors.extend(_lint_package_diff(task_dir, meta, leaves))
     for leaf in leaves:
         path = os.path.join(task_dir, leaf)
         if not os.path.exists(path):

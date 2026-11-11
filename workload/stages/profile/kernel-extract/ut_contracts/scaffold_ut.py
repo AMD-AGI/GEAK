@@ -8,6 +8,7 @@
         --manifest cases.json [--phase-regimes regimes.json] [--override overrides.json]
     scaffold_ut.py sync-meta --task <task>
     scaffold_ut.py lint --task <task>
+    scaffold_ut.py baseline-package --task <task> [--root <installed package dir>]
 
 `new` copies the shared helpers (harness_lib, leg_runner, overlay_setup from $SHARED_TOOLS)
 and this directory's ut_contract.py / reference_f64.py / ut_driver.py into the task, freezes
@@ -15,6 +16,12 @@ the family plus the task's attrs, const axes and justified overrides as run/ut_c
 and writes meta.json, cases.py, unittest.py and run/ut_cases.json. It never overwrites an
 existing file without --force. What it cannot know — the live call, the family's hooks, the
 negative controls, the workload evidence — is left as FILL markers that fail loudly.
+
+`baseline-package` records the installed package a whole-package bind (candidate_bind of a
+package `__init__.py`) shadows, as run/baseline_package.json {package, root, files: {path:
+sha256}}; run it where the package is installed (the serving image). The lint then requires every
+file of kernel_src/<package>/ that differs from it to be an editable leaf or a frozen_differs
+entry with its why.
 
 `sync-meta` re-derives meta.workload.cases from the manifest's timed cases and re-stamps the
 contract hash; run it after editing run/ut_cases.json.
@@ -248,6 +255,36 @@ def cmd_sync_meta(a):
     return 0
 
 
+def cmd_baseline_package(a):
+    task = os.path.abspath(a.task)
+    with open(os.path.join(task, "meta.json")) as f:
+        meta = json.load(f)
+    if U.package_bind_dir(meta) is None:
+        raise SystemExit("meta.candidate_bind is not a whole-package bind (a package __init__.py)")
+    module = meta["candidate_bind"]["module"]
+    root = a.root
+    if not root:
+        import importlib.util
+        spec = importlib.util.find_spec(module)
+        if spec is None or not spec.submodule_search_locations:
+            raise SystemExit("%s is not an importable package here; pass --root" % module)
+        root = list(spec.submodule_search_locations)[0]
+        if os.path.abspath(root).startswith(task + os.sep):
+            raise SystemExit("%s resolves inside the task (%s), not to the installed package"
+                             % (module, root))
+    files = U.tree_file_hashes(root)
+    if not files:
+        raise SystemExit("no files under %s" % root)
+    rec = {"package": module, "root": os.path.abspath(root), "files": files}
+    path = os.path.join(task, U.BASELINE_PACKAGE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(rec, f, indent=1, sort_keys=True)
+        f.write("\n")
+    print("recorded %d files of %s (%s) in %s" % (len(files), module, root, path))
+    return 0
+
+
 def cmd_lint(a):
     return U.main([a.task])
 
@@ -276,6 +313,10 @@ def main(argv=None):
     p = sub.add_parser("lint")
     p.add_argument("--task", required=True)
     p.set_defaults(fn=cmd_lint)
+    p = sub.add_parser("baseline-package")
+    p.add_argument("--task", required=True)
+    p.add_argument("--root", help="the installed package directory (default: find_spec here)")
+    p.set_defaults(fn=cmd_baseline_package)
     a = ap.parse_args(argv)
     return a.fn(a)
 

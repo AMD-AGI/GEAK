@@ -6,7 +6,8 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
 
   contract           ut_contract.lint_task: contract, case manifest and meta agree (CPU only)
   inputs             each random case builds reproducibly, honours its layout facts and ranges
-  binding            harness_lib.build_candidate_overlay + assert_legs_differ
+  binding            harness_lib.build_candidate_overlay + assert_legs_differ; a whole-package
+                     bind's run/baseline_package.json must be the package the baseline imports
   launches           (meta.expected_launches, stamped by build_task_plan) the baseline runs
                      every case once under torch.profiler; each phase must launch every
                      task kernel the server launched in that phase -- a UT that calls the
@@ -224,10 +225,37 @@ def gate_inputs(T, a):
     return {"status": "pass" if ok else "fail", "cases": rows}
 
 
+def installed_package_root(T, base):
+    """The directory the baseline leg imports a whole-package bind's package from (find_spec
+    under the baseline overlay, in a fresh process)."""
+    module = T.meta["candidate_bind"]["module"]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([base] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    code = ("import importlib.util, json, sys; s = importlib.util.find_spec(sys.argv[1]); "
+            "print(json.dumps(list(s.submodule_search_locations or []) if s else []))")
+    r = subprocess.run([sys.executable, "-c", code, module], env=env, capture_output=True,
+                       text=True, cwd=base, timeout=600)
+    roots = json.loads((r.stdout.strip().splitlines() or ["[]"])[-1]) if r.returncode == 0 else []
+    if not roots:
+        raise RuntimeError("baseline leg cannot locate package %s: %s" % (module, r.stderr[-400:]))
+    return roots[0]
+
+
 def gate_binding(T, a):
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     bi, ci = T.h.assert_legs_differ(T.dir, base, cand, T.meta)
-    return {"status": "pass", "baseline": bi, "candidate": ci}
+    out = {"status": "pass", "baseline": bi, "candidate": ci}
+    if T.U.package_bind_dir(T.meta) is not None:
+        # A whole-package bind: the lint judged kernel_src/<package> against the recorded install;
+        # the record must be the package this baseline leg actually imports.
+        root = installed_package_root(T, base)
+        errors = T.U.check_baseline_package(T.dir, root)
+        _, diff, _ = T.U.baseline_package_diff(T.dir, T.meta)
+        out["package"] = {"installed_root": root, "differs": diff,
+                          "frozen_differs": T.mc.get("frozen_differs") or []}
+        if errors:
+            out.update(status="fail", why="; ".join(errors))
+    return out
 
 
 def _watch_env(T, state, name):

@@ -35,6 +35,15 @@ tree (another revision of it) replaces all of `kernel_src/<package>/`, its `__in
 expand a scope such as `<model>/gfx950/**` yourself); a leaf no single numerical mutation isolates
 (a layout, a config, the device runtime) goes in `leaf_control_waivers: [{leaf, why}]` instead of
 going without a control silently.
+The candidate is every file of `kernel_src/<package>/` that differs from the INSTALLED package (the
+baseline leg), not what the candidate was diffed against upstream: record the install with
+`scaffold_ut.py baseline-package --task <task>` (in the serving image; writes
+`run/baseline_package.json`), and the lint requires each differing file (changed, added or
+removed) to be an editable leaf or a `frozen_differs: [{path, why}]` entry -- a file, or a
+directory ending in `/` that holds no leaf (another model's subpackage nothing on the task's path
+imports). A runtime file the task's kernels import is a leaf (waived if need be), never frozen:
+the campaign engine exports only the leaves, so an undeclared runtime change would not ship.
+The binding gate re-checks the record against the live install.
 A value the harness must set per leg (a JIT cache directory keyed by the bytes of the source the
 leg resolved, e.g. FlyDSL's `FLYDSL_RUNTIME_CACHE_DIR`, which FlyDSL only reads from
 `os.environ`) goes in `meta.leg_env = "<task file>:<function>"` returning `{name: value}`:
