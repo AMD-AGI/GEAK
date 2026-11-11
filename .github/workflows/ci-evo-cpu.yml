@@ -61,7 +61,5 @@ jobs:
         run: |
           node --version
           git --version
-      - name: Check deterministic generated-worker parity
-        run: python evo/build_workflow.py --check
       - name: Archive, dispatch and real-materializer CPU tests
         run: python -m unittest discover -s evo/tests -p 'test_*.py' -v

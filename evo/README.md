@@ -5,10 +5,10 @@ and donor references to GEAK main. It does not replace the workflow host, role
 files, knowledge, skills, engineer allowances, objective, ORIGINAL measurement,
 independent verifier, promotion gate, or final validation.
 
-Omitted, null, empty, and `greedy` optimizer settings use the existing main worker.
+Omitted, null, empty, and `greedy` optimizer settings use the existing main behavior.
 Other supplied values must be strings; booleans, numbers, arrays and objects are
 rejected consistently by the JavaScript entries and Python interface.
-Only `optimizer: "evo"` selects the new worker. The Python E2E interface keeps
+Only `optimizer: "evo"` enables archive hooks in the same main worker. The Python E2E interface keeps
 main's existing Claude/SDK versus optional Node host selection; selecting EVO
 does not itself require Node. Python 3 and Git are needed by the EVO archive
 helper, invoked through the existing agent/Bash tools. Helper-agent calls consume
@@ -33,17 +33,43 @@ code. Directory, symlink, submodule and out-of-scope patch inputs are rejected.
 The first implementation supports optimize/author lanes, not multi-language
 bakeoff. An explicit custom `kernel_lane_script` cannot be combined with EVO.
 
-The top-level direct lane entry point also dispatches on the flag. E2E selects the EVO lane
-directly, avoiding an additional nested Workflow level, and forwards the explicit
-source list. Only select E2E tasks for which that source contract is valid; this
+The top-level direct lane, dispatcher and E2E all use the same main lane and
+forward the explicit source list. Only select E2E tasks for which that source contract is valid; this
 patch does not infer a safe editable scope from an arbitrary extraction. Normal
 HL+GEAK arguments and learned-KB policy remain unchanged when EVO is off.
 
-Custom callers that already nest the legacy lane must select
-`evo/kernel_lane.js` directly when enabling EVO, retaining `workflow_dir` as the
-original `kernel_workflow` directory. Calling the legacy trampoline from an
-already-nested workflow would exceed main's one-child-level limit. This patch
-does not raise that limit or silently migrate the host.
+Custom callers keep using `kernel_workflow/kernel_lane.js` and its ordinary
+`workflow_dir`. Enabling EVO does not add a workflow nesting level. This patch
+does not raise main's nesting limit or silently migrate the host.
+
+## Agent decisions and deterministic tools
+
+There is one shared JavaScript workflow, not a generated EVO copy of GEAK main.
+Small flag-gated hooks add archive initialization, parent materialization,
+source-custody checks and retention at the existing phase boundaries. No
+filesystem import, dynamic code evaluation or new workflow host is required.
+
+The existing TechLead reads `evo/roles/planner.md` only for EVO planning. It
+chooses investigations, parents and donors from evidence. Existing specialist
+and deep engineers read `evo/roles/engineer.md` only for EVO engineering and
+author the code themselves. These are addenda, not replacement roles or a new
+population of managerial agents. Main's shared role files are unchanged.
+
+`archive.py` is the deterministic Python tool implementation: it preserves
+source bytes and provenance, queries records, prepares selected sources and
+rejects out-of-scope patches. It does not choose parents, invent measurements,
+write a crossover implementation or promote an unverified source. JavaScript
+connects those operations to main's existing verification and promotion loop.
+
+Today this CLI tool is exposed through ordinary Bash calls, not a dedicated
+native or MCP tool registration. The workflow's helper-agent calls validate
+returned JSON receipts; this agent-mediated bridge does not independently prove
+that a command ran or its reported output is genuine. Real tool-call records,
+source-bound artifacts and independent final measurements remain necessary.
+A direct typed-tool adapter is a possible separate improvement if both existing
+hosts can support it without changing ordinary main runs. Rewriting the workflow
+in Python or introducing another agent framework would not itself make decisions
+more agentic or improve that evidence boundary.
 
 ## Retention and reuse
 
@@ -72,17 +98,15 @@ provenance; the archive is not an evaluator. A best-patch report never qualifies
 different unfinished bytes. Archive failures are also visible in the workflow's
 `evolution.errors` result. Original logs and full final endpoints remain required.
 
-## Build and validation
+## Validation
 
-`evo/kernel_lane.js` is generated only into this new directory from the reviewed
-main lane at `a48ac8bef9aeab299ba5ac9cb44164d997e94524`. Its small substitution list
-and extension are in `build_workflow.py` and `extension.js`. The build checks the
-entire main source digest after removing the explicit opt-in dispatch hook; a
-main update requires review and repinning, not a silent regenerated fork.
+No generated worker or build step is needed. CPU dispatch tests compare ordinary
+main behavior against `a48ac8bef9aeab299ba5ac9cb44164d997e94524`, including rendered
+prompts, schemas, calls, failures and terminal results. EVO uses the same lane
+and host-selection code with the flag enabled. Real-Git witnesses separately
+exercise archive/source custody and the existing workspace materializer.
 
 ```bash
-python3 evo/build_workflow.py
-python3 evo/build_workflow.py --check
 python3 -m unittest discover -s evo/tests -v
 ```
 

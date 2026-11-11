@@ -71,13 +71,21 @@ class DispatchTests(unittest.TestCase):
     def setUpClass(cls):
         cls.pinned = {filename: pinned_source(filename) for filename in JAVASCRIPT}
         cls.current = {filename: (ROOT / filename).read_text() for filename in JAVASCRIPT}
-        cls.current["evo/kernel_lane.js"] = (ROOT / "evo/kernel_lane.js").read_text()
         cls.pinned_runner = pinned_source(RUNNER)
         cls.current_runner = (ROOT / RUNNER).read_text()
 
     def run_workflow(self, entry, args=None, *, pinned=False, **options):
+        sources = self.pinned if pinned else self.current
+        if options.get("inspect") == "schemas":
+            options.pop("inspect")
+            source = sources[entry]
+            marker = "phase('Setup');"
+            self.assertEqual(source.count(marker), 1, "Lane schema inspection seam changed")
+            names = re.findall(r"const ([A-Z_]+_SCHEMA)\s*=", source[:source.index(marker)])
+            self.assertGreaterEqual(len(names), 15, "Lane schema capture is incomplete")
+            sources = {**sources, entry: source.replace(marker, f"return {{ {', '.join(names)} }};\n{marker}", 1)}
         request = {
-            "root": str(ROOT), "sources": self.pinned if pinned else self.current,
+            "root": str(ROOT), "sources": sources,
             "entry": entry, "args": {**BASE_ARGS, **(args or {})}, **options,
         }
         if entry.startswith("e2e_workflow/"):
@@ -109,14 +117,13 @@ class DispatchTests(unittest.TestCase):
             "6ab6132593eb9675df7a37b62fab428f61df82247a17f97ed55652e331e78b83",
         )
 
-    def test_generated_worker_is_current_without_regeneration(self):
-        result = subprocess.run(
-            [sys.executable, "-B", "evo/build_workflow.py", "--check"],
-            cwd=ROOT, env=SAFE_ENV, capture_output=True, text=True, timeout=15,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.current["evo/kernel_lane.js"], (ROOT / "evo/kernel_lane.js").read_text(),
-                         "Generated worker changed during the suite; rerun against one snapshot")
+    def test_shared_lane_has_no_generated_worker_or_extension(self):
+        for filename in ("evo/kernel_lane.js", "evo/build_workflow.py", "evo/extension.js"):
+            with self.subTest(filename=filename):
+                self.assertFalse((ROOT / filename).exists())
+        for filename, source in self.current.items():
+            with self.subTest(filename=filename):
+                self.assertNotIn("/../evo/kernel_lane.js", source)
 
     def test_legacy_direct_lane_complete_trace_matches_pinned_main(self):
         for mode in ("optimize", "author"):
@@ -225,7 +232,7 @@ class DispatchTests(unittest.TestCase):
 
     def test_evo_changes_only_the_planner_lineage_schema(self):
         before = self.assert_success(self.run_workflow(JAVASCRIPT[1], pinned=True, inspect="schemas"))
-        after = self.assert_success(self.run_workflow("evo/kernel_lane.js", {
+        after = self.assert_success(self.run_workflow(JAVASCRIPT[1], {
             "optimizer": "evo", "evolution_source_paths": ["kernel.py"],
         }, inspect="schemas"))
         properties = after["PLAN_SCHEMA"]["properties"]["directions"]["items"]["properties"]
@@ -258,28 +265,25 @@ class DispatchTests(unittest.TestCase):
                 self.assert_rejected_before_agents(outcome, "not bakeoff")
                 self.assertEqual(outcome["trace"]["workflows"], [])
 
-    def test_direct_evo_worker_cannot_bypass_unsupported_bakeoff(self):
-        for entry in (JAVASCRIPT[1], "evo/kernel_lane.js"):
-            with self.subTest(entry=entry):
-                outcome = self.run_workflow(entry, {
-                    "optimizer": "evo", "mode": "bakeoff", "evolution_source_paths": ["kernel.py"],
-                })
-                self.assert_rejected_before_agents(outcome, "bakeoff")
+    def test_shared_lane_evo_cannot_bypass_unsupported_bakeoff(self):
+        outcome = self.run_workflow(JAVASCRIPT[1], {
+            "optimizer": "evo", "mode": "bakeoff", "evolution_source_paths": ["kernel.py"],
+        })
+        self.assert_rejected_before_agents(outcome, "bakeoff")
+        self.assertEqual(outcome["trace"]["workflows"], [])
 
-    def test_direct_evo_worker_cannot_silently_ignore_custom_script_conflict(self):
-        for entry in (JAVASCRIPT[1], "evo/kernel_lane.js"):
-            with self.subTest(entry=entry):
-                outcome = self.run_workflow(entry, {
-                    "optimizer": "evo", "kernel_lane_script": "/fixture/custom.js",
-                    "evolution_source_paths": ["kernel.py"],
-                })
-                self.assert_rejected_before_agents(outcome, "kernel_lane_script")
+    def test_shared_lane_evo_cannot_silently_ignore_custom_script_conflict(self):
+        outcome = self.run_workflow(JAVASCRIPT[1], {
+            "optimizer": "evo", "kernel_lane_script": "/fixture/custom.js",
+            "evolution_source_paths": ["kernel.py"],
+        })
+        self.assert_rejected_before_agents(outcome, "kernel_lane_script")
+        self.assertEqual(outcome["trace"]["workflows"], [])
 
     def test_evo_direct_dispatcher_and_e2e_use_only_one_child_level(self):
         for entry, expected_depth, child_count in (
-            ("evo/kernel_lane.js", 1, 0),
             (JAVASCRIPT[0], 2, 1),
-            (JAVASCRIPT[1], 2, 1),
+            (JAVASCRIPT[1], 1, 0),
             (JAVASCRIPT[2], 2, 1),
         ):
             for optimizer in ("evo", "  EvO  "):
@@ -292,7 +296,7 @@ class DispatchTests(unittest.TestCase):
                     self.assertEqual(outcome["trace"]["maxDepth"], expected_depth)
                     self.assertEqual(len(outcome["trace"]["workflows"]), child_count)
                     for call in outcome["trace"]["workflows"]:
-                        self.assertEqual(Path(call["scriptPath"]).resolve(), ROOT / "evo/kernel_lane.js")
+                        self.assertEqual(Path(call["scriptPath"]).resolve(), ROOT / JAVASCRIPT[1])
                     labels = [call["options"]["label"] for call in outcome["trace"]["agents"]]
                     self.assertEqual(labels.count("evo:init"), 1)
                     self.assertEqual(labels.count("evo:prepare"), 2)
@@ -304,22 +308,47 @@ class DispatchTests(unittest.TestCase):
                     if entry != JAVASCRIPT[2]:
                         self.assertEqual(result["evolution"]["errors"], [])
 
-    def test_evo_worker_requires_explicit_opt_in_and_safe_source_paths(self):
-        for flags in (*LEGACY_FLAGS, {"optimizer": "invalid"}):
-            with self.subTest(flags=flags):
-                outcome = self.run_workflow("evo/kernel_lane.js", {**flags, "evolution_source_paths": ["kernel.py"]})
-                self.assert_rejected_before_agents(outcome, "requires optimizer=evo")
-        for source_paths in (None, [], "kernel.py", [""], [3], ["/absolute.py"], ["../escape.py"], ["a/../b.py"], ["a//b.py"], ["a\n.py"]):
-            with self.subTest(source_paths=source_paths):
-                outcome = self.run_workflow("evo/kernel_lane.js", {
-                    "optimizer": "evo", "evolution_source_paths": source_paths,
-                })
-                self.assert_rejected_before_agents(outcome, "evolution_source_paths")
+    def test_legacy_ignores_evolution_sources_without_initializing_evo(self):
+        for entry in JAVASCRIPT:
+            for flags in LEGACY_FLAGS:
+                for source_paths in ([], ["../escape.py"], ["kernel.py"]):
+                    with self.subTest(entry=entry, flags=flags, source_paths=source_paths):
+                        arguments = {**flags, "evolution_source_paths": source_paths}
+                        before = self.run_workflow(entry, arguments, pinned=True)
+                        after = self.run_workflow(entry, arguments)
+                        self.assert_success(after)
+                        self.assertEqual(after, before)
+                        labels = [call["options"]["label"] for call in after["trace"]["agents"]]
+                        self.assertFalse(any(label.startswith("evo:") for label in labels))
+
+    def test_shared_lane_evo_requires_safe_source_paths(self):
+        for source_paths in (
+            None, [], "kernel.py", [""], [None], [3], ["/absolute.py"], ["../escape.py"],
+            ["a/../b.py"], ["a//b.py"], ["a\n.py"], ["./kernel.py"], ["a/./b.py"],
+            ["a/"], ["a\\b.py"], [".git/config"], ["a/.GiT/config"], ["a\t.py"],
+            ["a\x00.py"], ["a\x7f.py"], ["\u00e9.py"], ["kernel.py", "kernel.py"],
+            ["a", "a/b.py"], ["a/b.py", "a"], ["a" * 1025],
+            [f"kernel_{index}.py" for index in range(257)],
+        ):
+            for entry in JAVASCRIPT:
+                with self.subTest(entry=entry, source_paths=source_paths):
+                    outcome = self.run_workflow(entry, {
+                        "optimizer": "evo", "evolution_source_paths": source_paths,
+                    })
+                    if entry == JAVASCRIPT[2] and isinstance(source_paths, list) and source_paths:
+                        result = self.assert_success(outcome)
+                        self.assertFalse(result["ran"])
+                        self.assertEqual(result["validation_status"], "error")
+                        self.assertIn("evolution_source_paths", result["note"])
+                        self.assertEqual(len(outcome["trace"]["workflows"]), 1)
+                        self.assertEqual(outcome["trace"]["agents"], [])
+                    else:
+                        self.assert_rejected_before_agents(outcome, "evolution_source_paths")
 
     def test_evo_author_route_and_ordinary_verifier_prompts_are_preserved(self):
         arguments = {"mode": "author", "optimizer": "evo", "evolution_source_paths": ["kernel.py"]}
         legacy = self.run_workflow(JAVASCRIPT[1], {"mode": "author"}, pinned=True)
-        for entry in (JAVASCRIPT[0], JAVASCRIPT[1], "evo/kernel_lane.js"):
+        for entry in (JAVASCRIPT[0], JAVASCRIPT[1]):
             with self.subTest(entry=entry):
                 evolved = self.run_workflow(entry, arguments)
                 result = self.assert_success(evolved)
@@ -341,8 +370,77 @@ class DispatchTests(unittest.TestCase):
                     self.assertEqual(before["prompt"], prompt, label)
                     self.assertEqual(before["options"], after["options"], label)
 
+    def test_evo_role_guidance_pointers_reach_only_planners_and_engineers(self):
+        planner_guide = f"{ROOT}/kernel_workflow/../evo/roles/planner.md"
+        engineer_guide = f"{ROOT}/kernel_workflow/../evo/roles/engineer.md"
+        for guide in (planner_guide, engineer_guide):
+            self.assertTrue(Path(guide).is_file(), guide)
+        for mode in ("optimize", "author"):
+            for specialty in ("memory", "deep_explore"):
+                for optimizer in ("greedy", "evo"):
+                    with self.subTest(mode=mode, specialty=specialty, optimizer=optimizer):
+                        outcome = self.run_workflow(JAVASCRIPT[1], {
+                            "mode": mode, "optimizer": optimizer, "budget": 2 if specialty == "deep_explore" else 1,
+                            "evolution_source_paths": ["kernel.py"],
+                        }, replies={"tech_lead:plan r1": {"stop": False, "directions": [{
+                            "id": "fixture_0", "title": "Guidance placement", "specialty": specialty,
+                            "focus_files": ["kernel.py"], "prompt": "Synthetic source candidate",
+                        }]}})
+                        self.assert_success(outcome)
+                        planners = engineers = 0
+                        for call in outcome["trace"]["agents"]:
+                            label, prompt = call["options"]["label"], call["prompt"]
+                            is_planner = label.startswith("tech_lead:plan ")
+                            is_engineer = label.startswith(("eng ", "deep "))
+                            planners += is_planner
+                            engineers += is_engineer
+                            self.assertEqual(planner_guide in prompt, optimizer == "evo" and is_planner, label)
+                            self.assertEqual(engineer_guide in prompt, optimizer == "evo" and is_engineer, label)
+                            self.assertEqual("\n- EVOLUTION: " in prompt,
+                                             optimizer == "evo" and (is_planner or is_engineer), label)
+                            if optimizer == "evo" and (is_planner or is_engineer):
+                                evolution = json.loads(prompt.split("\n- EVOLUTION: ", 1)[1].splitlines()[0])
+                                fields = {"archive", "query_command", "source_paths"}
+                                if is_engineer:
+                                    fields.update(("parent_id", "donor_ids", "prepared"))
+                                self.assertEqual(set(evolution), fields)
+                                self.assertEqual(evolution["source_paths"], ["kernel.py"])
+                                self.assertEqual(evolution["archive"], "/fixture/eval/evolution_archive")
+                        self.assertEqual(planners, 1)
+                        self.assertEqual(engineers, 1)
+
+    def test_forced_replan_preserves_legacy_trace_and_evo_guidance(self):
+        replies = {
+            "clock pre-r1": {"epoch": 100},
+            "clock replan-r1": {"epoch": 100},
+            "tech_lead:plan r1": {"stop": True, "directions": []},
+            "tech_lead:replan r1#1": {"stop": False, "directions": [{
+                "id": "fixture_0", "title": "Replan guidance", "specialty": "memory",
+                "focus_files": ["kernel.py"], "prompt": "Synthetic source candidate",
+            }]},
+        }
+        for flags in (*LEGACY_FLAGS, {"optimizer": "evo"}):
+            with self.subTest(flags=flags):
+                arguments = {**flags, "budget": 1, "deadline_epoch": 10000,
+                             "evolution_source_paths": ["kernel.py"]}
+                outcome = self.run_workflow(JAVASCRIPT[1], arguments, replies=replies)
+                self.assertEqual(self.assert_success(outcome)["validation_status"], "accepted")
+                planning = [call for call in outcome["trace"]["agents"]
+                            if call["options"]["label"].startswith(("tech_lead:plan ", "tech_lead:replan "))]
+                self.assertEqual(len(planning), 2)
+                self.assertIn("STOP_NOT_PERMITTED", planning[1]["prompt"])
+                if flags.get("optimizer") == "evo":
+                    for call in planning:
+                        self.assertIn(f"Read {ROOT}/kernel_workflow/../evo/roles/planner.md", call["prompt"])
+                    inputs = [json.loads(call["prompt"].split("\n- EVOLUTION: ", 1)[1].splitlines()[0])
+                              for call in planning]
+                    self.assertEqual(*inputs)
+                else:
+                    before = self.run_workflow(JAVASCRIPT[1], arguments, pinned=True, replies=replies)
+                    self.assertEqual(outcome, before)
+
     def test_failed_evo_prepare_cannot_reach_engineers_or_verifiers(self):
-        outcome = self.run_workflow("evo/kernel_lane.js", {
+        outcome = self.run_workflow(JAVASCRIPT[1], {
             "optimizer": "evo", "evolution_source_paths": ["kernel.py"],
         }, replies={"evo:prepare": {"exit_code": 1, "stdout": "", "stderr": "synthetic prepare failure"}})
         result = self.assert_success(outcome)
@@ -358,7 +456,7 @@ class DispatchTests(unittest.TestCase):
                         {"ok": True, "command": "init", "archive": "/wrong/archive"}, [], "invalid JSON"):
             with self.subTest(receipt=receipt):
                 stdout = receipt if isinstance(receipt, str) else json.dumps(receipt)
-                outcome = self.run_workflow("evo/kernel_lane.js", {
+                outcome = self.run_workflow(JAVASCRIPT[1], {
                     "optimizer": "evo", "evolution_source_paths": ["kernel.py"],
                 }, replies={"evo:init": {"exit_code": 0, "stdout": stdout, "stderr": ""}})
                 self.assertIsNotNone(outcome["error"])
@@ -371,16 +469,24 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(optimizer=optimizer):
                 with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
                     self.map_handoff(module, {"optimizer": optimizer})
-                for entry in (*JAVASCRIPT, "evo/kernel_lane.js"):
+                for entry in JAVASCRIPT:
                     self.assert_rejected_before_agents(self.run_workflow(entry, {"optimizer": optimizer}), "optimizer")
 
-    def test_custom_nested_caller_must_select_evo_worker_directly(self):
-        options = {"optimizer": "evo", "evolution_source_paths": ["kernel.py"]}
-        nested_legacy = self.run_workflow("kernel_workflow/kernel_lane.js", options, initialDepth=2)
-        self.assert_rejected_before_agents(nested_legacy, "nesting")
-        nested_evo = self.run_workflow("evo/kernel_lane.js", options, initialDepth=2)
-        self.assert_success(nested_evo)
-        self.assertEqual(nested_evo["trace"]["maxDepth"], 2)
+    def test_custom_nested_caller_uses_shared_lane_without_extra_depth(self):
+        for flags in (*LEGACY_FLAGS, {"optimizer": "evo"}, {"optimizer": "  EvO  "}):
+            for mode in ("optimize", "author"):
+                with self.subTest(flags=flags, mode=mode):
+                    options = {**flags, "mode": mode, "evolution_source_paths": ["kernel.py"]}
+                    nested = self.run_workflow(JAVASCRIPT[1], options, initialDepth=2)
+                    result = self.assert_success(nested)
+                    self.assertEqual(result["validation_status"], "accepted")
+                    self.assertEqual(nested["trace"]["maxDepth"], 2)
+                    self.assertEqual(nested["trace"]["workflows"], [])
+                    if str(flags.get("optimizer", "")).strip().lower() == "evo":
+                        self.assertEqual(result["evolution"]["errors"], [])
+                    else:
+                        before = self.run_workflow(JAVASCRIPT[1], options, pinned=True, initialDepth=2)
+                        self.assertEqual(nested, before)
 
     def test_e2e_lane_args_and_all_bound_wrappers_preserve_legacy_defaults(self):
         for flags in LEGACY_FLAGS:
@@ -411,7 +517,7 @@ class DispatchTests(unittest.TestCase):
         self.assert_success(outcome)
         self.assertEqual(len(outcome["trace"]["workflows"]), 4)
         for call in outcome["trace"]["workflows"]:
-            self.assertEqual(call["scriptPath"], "/fixture/custom-kernel/../evo/kernel_lane.js")
+            self.assertEqual(call["scriptPath"], "/fixture/custom-kernel/kernel_lane.js")
             self.assertEqual(call["args"]["optimizer"], "evo")
             self.assertEqual(call["args"]["evolution_source_paths"], ["kernel.py"])
             self.assertEqual(call["args"]["llm_stats"], "false")

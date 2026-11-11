@@ -100,8 +100,7 @@ if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
 if (OPTIMIZER === 'evo' && (!Array.isArray(A.evolution_source_paths) || !A.evolution_source_paths.length)) {
   throw new Error('optimizer=evo requires explicit evolution_source_paths for the selected kernel tasks');
 }
-const KERNEL_WF_SCRIPT = OPTIMIZER === 'evo' ? `${KERNEL_WF_DIR}/../evo/kernel_lane.js`
-  : `${KERNEL_WF_DIR}/kernel_lane.js`;
+const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();

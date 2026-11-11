@@ -35,8 +35,7 @@ if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
 if (OPTIMIZER === 'evo' && A.kernel_lane_script) {
   throw new Error('optimizer=evo cannot override kernel_lane_script');
 }
-const WORKER = OPTIMIZER === 'evo' ? `${WORKFLOW_DIR}/../evo/kernel_lane.js`
-  : String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
+const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
 if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
   throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');

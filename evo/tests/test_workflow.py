@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,9 +7,10 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+NODE = shutil.which("node") or str(Path.home() / ".local/bin/node")
 
 
-@unittest.skipUnless(shutil.which("node") and shutil.which("git"), "Node and Git required for CPU witness")
+@unittest.skipUnless(Path(NODE).is_file() and shutil.which("git"), "Node and Git required for CPU witness")
 class WorkflowWitness(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="evo-workflow-witness-")
@@ -21,14 +21,14 @@ class WorkflowWitness(unittest.TestCase):
         (self.folder / "eval").mkdir()
         (self.canonical / "kernel.py").write_text("value = 2\n")
         (self.canonical / "oracle.py").write_text("immutable oracle\n")
-        self.environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        self.environment = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
         self.environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
         for arguments in (["init", "--quiet", "--template="], ["add", "kernel.py", "oracle.py"]):
             subprocess.run(["git", "-C", str(self.canonical), *arguments], check=True,
                            capture_output=True, env=self.environment)
 
     def run_witness(self, scenario):
-        return subprocess.run(["node", str(ROOT / "evo/tests/workflow_witness.cjs"),
+        return subprocess.run([NODE, str(ROOT / "evo/tests/workflow_witness.cjs"),
                                str(self.folder), scenario], capture_output=True, text=True,
                               env=self.environment, timeout=90)
 
@@ -37,8 +37,16 @@ class WorkflowWitness(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads(result.stdout)
         self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["errors"], [])
+        self.assertEqual(receipt["archive"], str(self.folder / "eval/evolution_archive"))
+        self.assertIn("r1_d0-best", receipt["entries"])
+        self.assertIn("r1_d0-development", receipt["entries"])
         self.assertIn("r2_d0-development", receipt["entries"])
+        self.assertEqual(receipt["calls"].count("evo:init"), 1)
         self.assertEqual(receipt["calls"].count("evo:prepare"), 2)
+        self.assertEqual(receipt["calls"].count("evo:check-patch"), 1)
+        self.assertEqual(receipt["calls"].count("evo:record-batch"), 2)
+        self.assertEqual(receipt["calls"].count("evo:query"), 1)
 
     def test_success_exit_cannot_hide_failed_receipt(self):
         result = self.run_witness("false-receipt")
