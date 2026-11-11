@@ -215,5 +215,27 @@ class Checkpoint(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "run", driver.CHECKPOINT)))
 
 
+class TimingResume(unittest.TestCase):
+    """The timing gate keeps every measured bucket of an interrupted run."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ut_timing_resume_")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "run"))
+        self.T = SimpleNamespace(dir=self.root)
+
+    def test_buckets_persist_and_come_back_under_the_same_key(self):
+        a = SimpleNamespace(max_reps=3, reuse=True, quick=False, out=None)
+        done, on_bucket = driver._timing_resume(self.T, a, {"reuse_key": "k"})
+        self.assertEqual(done, {})
+        on_bucket({"sig": "r8", "speedup": 1.0})
+        on_bucket({"sig": "r16", "speedup": 0.99})
+        done, _ = driver._timing_resume(self.T, a, {"reuse_key": "k"})
+        self.assertEqual(sorted(done), ["r16", "r8"])
+        self.assertEqual(driver._timing_resume(self.T, a, {"reuse_key": "changed"})[0], {})
+        self.assertEqual(driver._timing_resume(self.T, SimpleNamespace(max_reps=1, reuse=True), {"reuse_key": "k"})[0], {})
+        self.assertEqual(driver._timing_resume(self.T, SimpleNamespace(max_reps=3, reuse=False), {"reuse_key": "k"})[0], {})
+
+
 if __name__ == "__main__":
     unittest.main()

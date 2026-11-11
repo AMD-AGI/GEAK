@@ -1001,8 +1001,43 @@ def timing_basis_defects(T, per):
     return out
 
 
+TIMING_CHECKPOINT = "ut_timing.checkpoint.json"
+
+
+def _timing_resume(T, a, state):
+    """Buckets an interrupted timing gate already measured under the same task state and rep
+    budget (--reuse only), and the callback that persists each new one at once."""
+    path = os.path.join(T.dir, "run", TIMING_CHECKPOINT)
+    key = [state.get("reuse_key"), int(a.max_reps)]
+    quick, out = getattr(a, "quick", False), getattr(a, "out", None)
+    done = {}
+    if getattr(a, "reuse", False) and not quick:
+        try:
+            with open(path) as f:
+                prev = json.load(f)
+            if prev.get("key") == key:
+                done = {r["sig"]: r for r in prev.get("rows") or []}
+        except (OSError, ValueError, KeyError, TypeError):
+            done = {}
+    rows = list(done.values())
+
+    def on_bucket(row):
+        if quick or out:
+            return
+        rows.append(row)
+        try:
+            with open(path + ".tmp", "w") as f:
+                json.dump({"key": key, "rows": rows}, f, default=str)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            pass
+    return done, on_bucket
+
+
 def gate_timing(T, a, state):
-    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=getattr(T, "rank_group", None) or T.gpus)
+    done, on_bucket = _timing_resume(T, a, state)
+    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=getattr(T, "rank_group", None) or T.gpus,
+                           done=done, on_bucket=on_bucket)
     w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
     defects = timing_basis_defects(T, per)
@@ -1015,6 +1050,7 @@ def gate_timing(T, a, state):
     return {"status": "pass" if w.get("primary") is not None else "fail",
             "weighted_speedup": w.get("primary"), "geomean": w.get("geomean"),
             "aggregate": w, "per_case": per, "stopped_before_max_reps": early,
+            "resumed_buckets": sorted(done),
             "note": ("stopped_before_max_reps buckets were decided by measure_legs' early exit "
                      "(ratio outside its undecided band after fewer pairs); their spread is from "
                      "fewer samples"),
@@ -1366,10 +1402,11 @@ def main(task=None, argv=None):
         json.dump(report, f, indent=2, default=str)
         f.write("\n")
     if not a.quick and not a.out:
-        try:
-            os.unlink(os.path.join(T.dir, "run", CHECKPOINT))   # the full report supersedes it
-        except OSError:
-            pass
+        for name in (CHECKPOINT, TIMING_CHECKPOINT):           # the full report supersedes them
+            try:
+                os.unlink(os.path.join(T.dir, "run", name))
+            except OSError:
+                pass
     if a.quick:
         print("UT_VERDICT quick (exit 1) -> %s" % out, flush=True)
         return code

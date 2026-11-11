@@ -1188,7 +1188,8 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None):
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
+                 done=None, on_bucket=None):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
     Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
@@ -1217,11 +1218,27 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
 
     `gpus` (logical indices) spreads BUCKETS over devices; every pair of one bucket stays on one
-    device, so a bucket's ratio never compares two GPUs."""
+    device, so a bucket's ratio never compares two GPUs.
+
+    `done` ({sig: row}) are buckets a previous, interrupted run already measured under the same
+    task state (the caller keys them); they are returned as they are, not re-timed. `on_bucket(row)`
+    is called after every bucket measured here, so the caller can persist it at once."""
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
     sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
+    done = dict(done or {})
+    todo = [s for s in sigs if s not in done]
+
+    def measured(sig, *args):
+        row = _measure_bucket(task, base, cand, sig, *args)
+        if row and on_bucket:
+            on_bucket(row)
+        return row
+
+    def ordered(rows):
+        rows = dict(rows, **{s: r for s, r in done.items() if s in sigs})
+        return [rows[s] for s in sigs if rows.get(s)]
     gpus = list(gpus or [])
     world = rank_chain_world(meta)
     if world:
@@ -1230,34 +1247,33 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
         if gpus and len(gpus) < world:
             raise HarnessIncompleteError("rank_chain timing needs %d GPUs, given %s" % (world, gpus))
         env = gpu_env(",".join(str(g) for g in gpus[:world])) if gpus else None
-        return [row for row in (_measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env)
-                                for sig in sigs) if row]
-    if len(gpus) > 1 and len(sigs) > 1:
+        return ordered({sig: measured(sig, timeout, max_reps, undecided, env) for sig in todo})
+    if len(gpus) > 1 and len(todo) > 1:
         import queue
         import threading
         free, rows = queue.Queue(), {}
         for g in gpus:
             free.put(g)
 
+        lock = threading.Lock()
+
         def one(sig):
             g = free.get()
             try:
-                rows[sig] = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided,
-                                            gpu_env(g))
+                row = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, gpu_env(g))
+                rows[sig] = row
+                if row and on_bucket:
+                    with lock:
+                        on_bucket(row)
             finally:
                 free.put(g)
-        threads = [threading.Thread(target=one, args=(sig,)) for sig in sigs]
+        threads = [threading.Thread(target=one, args=(sig,)) for sig in todo]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        return [rows[s] for s in sigs if rows.get(s)]
-    per_case = []
-    for sig in sigs:
-        row = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, None)
-        if row:
-            per_case.append(row)
-    return per_case
+        return ordered(rows)
+    return ordered({sig: measured(sig, timeout, max_reps, undecided, None) for sig in todo})
 
 
 def rank_chain_world(meta):

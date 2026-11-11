@@ -2404,6 +2404,18 @@ class TestMeasureLegsRankChain(_LegTestCase):
         per = hl.measure_legs(self.task, self.meta)
         self.assertIsNone(per[0]["baseline_timing"]["primed"])
 
+    def test_measured_buckets_are_not_retimed_and_new_ones_are_reported_at_once(self):
+        sub = self._legs()
+        seen = []
+        prev = {"decode": {"sig": "decode", "baseline_ms": 2.0, "optimized_ms": 1.0, "speedup": 2.0}}
+        per = hl.measure_legs(self.task, self.meta, done=prev, on_bucket=seen.append)
+        self.assertEqual([c["sig"] for c in per], ["decode", "prefill"])
+        self.assertIs(per[0], prev["decode"])
+        self.assertEqual([r["sig"] for r in seen], ["prefill"])
+        timed = [c["cmd"][c["cmd"].index("--bucket") + 1] for c in sub.calls
+                 if "--mode" in c["cmd"] and c["cmd"][c["cmd"].index("--mode") + 1] == "time"]
+        self.assertEqual(set(timed), {"prefill"})
+
     def test_rank_chain_world(self):
         self.assertIsNone(hl.rank_chain_world({}))
         self.assertEqual(hl.rank_chain_world({"timing": {"kind": "rank_chain"}}), 8)
