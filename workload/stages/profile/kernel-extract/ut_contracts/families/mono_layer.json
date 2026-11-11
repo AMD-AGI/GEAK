@@ -4,26 +4,61 @@
   "op_kind": "collective",
   "description": "Whole-layer persistent monokernel with in-kernel peer exchanges (sgl-amd-mono: Muse Spark target / draft layer, GLM flash, Kimi ...): ONE launch a layer runs attention over the paged KV cache, o_proj + TP all-reduce, router / top-k, the experts + EP exchange and the next layer's QKV / KV write, pairing with its peer ranks through IPC peer buffers and epoch-tagged mailboxes. Correctness runs through call() and the rank harness; timing is rank_chain (shared/rank_timing.py): every rank times CUDA-graph replays of a chain of distinct layers.",
   "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer|_mono_layer|monokernel"], "op": ["MonoRunner|MuseMonoRunner|DraftRunner|mono_layer"]},
-  "reference": null,
+  "reference": "oracle:split",
+  "oracles": {
+    "split": {"path": "split", "overlay": "baseline",
+              "doc": "the same step through the baseline's per-stage launches (target: the runner with use_layer=False; draft: the STAGE=2 runner), every gated output including the KV cache writes and routing ids. A whole-layer launch must reproduce what its stages compute; the candidate and the baseline both have to pass (the baseline is the oracle floor)."},
+    "native": {"path": "native", "overlay": "baseline", "controls": false, "cases": "per_width_smallest",
+               "doc": "an implementation that does not share the monokernel's code (target: the per-stage torch references of sgl-amd-mono test/kernels combined over the ranks; draft: the SGLang DFlash modules' own reference), so the whole layer and its split cannot be wrong the same way. Run only on each width's smallest-context random case; it is not a leg of the negative controls.",
+               "bounds": {"stream_out": {"kind": "sqnr", "min_db": 26}, "attn_out": {"kind": "sqnr", "min_db": 26},
+                          "layer_out": {"kind": "sqnr", "min_db": 26}, "kv_rows": {"kind": "sqnr", "min_db": 20}},
+               "outputs": ["stream_out", "attn_out", "layer_out", "kv_rows"]}
+  },
   "axes": {
     "rows": {"var": true, "lo": 1, "hi": 512, "doc": "tokens of the step (verify rows: requests x draft tokens)"},
     "context": {"var": true, "lo": 1, "hi": 4194304, "doc": "a request's keys including the step's rows (the census context); size the KV pool and page table from it"},
     "hidden": {"lo": 1, "hi": 65536},
-    "world": {"lo": 1, "hi": 64, "doc": "TP/EP ranks of the deployment; timing runs exactly this many"}
+    "world": {"lo": 1, "hi": 64, "doc": "TP/EP ranks of the deployment; timing runs exactly this many"},
+    "launches": {"lo": 1, "hi": 64, "doc": "layer launches the harness runs in one step (distinct layers, at least one full-attention and one sliding-window layer where the model has both)"},
+    "pools": {"lo": 1, "hi": 2, "doc": "KV pools a launch can write (full and sliding-window); kv_rows/kv_stray are kept per pool"},
+    "kv_width": {"lo": 1, "hi": 65536, "doc": "elements of one token's K (or V) row in a pool, decoded to float32"},
+    "topk": {"lo": 1, "hi": 64, "optional": true, "doc": "experts per token (routed_moe only)"}
   },
-  "attrs": {},
+  "attrs": {
+    "layer_kind": {"values": ["routed_moe", "dense"], "doc": "routed_moe: the layer routes tokens to experts and exposes ids (Muse Spark target); dense: no router (Muse Spark draft)"},
+    "stream_dtype": {"values": ["float32", "bfloat16"], "doc": "dtype of the residual stream the runner carries between layers"}
+  },
   "inputs": {
-    "stream": {"shape": ["rows", "hidden"], "dtype": "float32", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true,
+    "stream": {"shape": ["rows", "hidden"], "dtype": "attr:stream_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true,
                "doc": "the residual stream entering the layer (replicated over the TP ranks); the launch updates it in place, so call() clones"},
     "attn_input": {"shape": ["rows", "hidden"], "dtype": "bfloat16", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call",
                    "doc": "the layer's attention input (replicated over the TP ranks)"}
   },
   "outputs": {
-    "stream_out": {"shape": ["world", "rows", "hidden"], "dtype": "float32", "bound": {"kind": "noise_relative", "m": 4.0, "k": 4.0},
-                   "doc": "every rank's residual stream after the step -- compare all ranks, not rank 0"},
-    "attn_out": {"shape": ["world", "rows", "hidden"], "dtype": "bfloat16", "bound": {"kind": "noise_relative", "m": 4.0, "k": 4.0},
-                 "doc": "every rank's next attention input"}
+    "stream_out": {"shape": ["world", "rows", "hidden"], "dtype": "attr:stream_dtype",
+                   "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125},
+                   "doc": "every rank's residual stream after the step -- compare all ranks, not rank 0. 1/128: the split and whole-layer paths merge attention partitions in a different order (one bf16 ulp)"},
+    "attn_out": {"shape": ["world", "rows", "hidden"], "dtype": "bfloat16",
+                 "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125},
+                 "doc": "every rank's next attention input"},
+    "layer_out": {"shape": ["world", "launches", "rows", "hidden"], "dtype": "float32",
+                  "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125},
+                  "doc": "the stream / residual after each layer launch of the step: the interface state between launches, which an optimization cannot drop"},
+    "kv_rows": {"shape": ["world", "launches", "pools", 2, "rows", "kv_width"], "dtype": "float32",
+                "bound": {"kind": "tolerance", "atol": 0.015625, "rtol": 0.125, "per_row": true},
+                "max_violation_fraction": 0.0,
+                "doc": "the K and V rows each launch wrote for this step's tokens, per pool, decoded from fp8 to float32 (1/8 = one e4m3 code). Judged per row with no budget: one token's row written to the wrong slot, or left at the harness's NaN poison, fails"},
+    "kv_stray": {"shape": ["world", "launches", "pools"], "dtype": "int64",
+                 "bound": {"kind": "exact", "value": 0},
+                 "doc": "bytes of each pool that changed outside the step's target slots; must be 0 on every leg"},
+    "ids": {"shape": ["world", "launches", "rows", "topk"], "dtype": "int32",
+            "bound": {"kind": "exact"}, "present_when": "layer_kind == 'routed_moe'",
+            "optional_if_not_produced": {"poison": -7},
+            "doc": "routing ids of each launch, bit-exact (deterministic FP32 router). The harness fills the buffer with -7 before each launch: all -7 = the subject does not expose ids (not_produced; stream_out still catches a routing bug), part -7 = FAIL. The baseline must produce them"}
   },
+  "required_control_categories": {"by": "layer_kind", "cases": {
+    "routed_moe": ["softmax_scale", "peer_partial", "kv_slot", "routing_ids"],
+    "dense": ["softmax_scale", "peer_partial", "kv_slot", "norm_weight"]}},
   "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
   "layout_facts": [],
   "hooks": {},
@@ -45,6 +80,7 @@
     "Contexts must be the served ones: a full-attention layer at 59k-566k keys costs far more than at 1k-8k; size the KV pool from the case.",
     "Peer buffers and mailbox tags are collective state: every rank runs the same graphs, the same replay counts, in the same order, and the epoch advances once a step. A rank that stops early leaves the others spinning until the guard deadline -- a deadline hit is a FAILED measurement, never a slow one.",
     "Exactly one device launch per layer call is part of the kernel's contract (MUSE_MONO_PROFILE launch audit); a candidate that splits the launch must be rejected even if faster in isolation.",
-    "Routing ids must stay bit-exact against the baseline (deterministic FP32 router); the float outputs within the baseline's own repeat noise."
+    "Routing ids must stay bit-exact against the split oracle (deterministic FP32 router); the float outputs within 1/128 of it. Comparing the candidate only with the stock whole layer in another process is near-bitwise and has no KV/ids coverage: it rejects real optimizations and misses wrong-page KV writes.",
+    "A harness that does not poison the buffers a launch writes (KV target slots: fp8 0x7F, float: NaN, ids: -7) before each call compares the previous call's values: a kernel that skips a write passes."
   ]
 }

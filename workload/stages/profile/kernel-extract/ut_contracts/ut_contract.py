@@ -39,6 +39,10 @@ BOUND_KINDS = ("exact", "multiset_rows", "topk_equivalent", "tolerance", "dot_pr
                "output_rounding", "baseline_relative", "noise_relative", "sqnr", "bytes_exact",
                "harness")
 BOUNDS_NEEDING_REFERENCE = ("dot_product", "baseline_relative", "output_rounding")
+# `reference: "oracle:<name>"` names a leg of `oracles` (another launch path of the same step,
+# e.g. a monokernel's per-stage launches) instead of a float64 function in reference_f64.py.
+ORACLE_PREFIX = "oracle:"
+ORACLE_CASES = ("all", "per_width_smallest")
 DIST_KINDS = ("normal", "lecun_normal", "uniform", "log_uniform", "int_range", "permutation",
               "routing", "simplex", "cu_seqlens", "seq_lens", "page_table", "sparse_indices",
               "constant", "fixture", "hook", "produced")
@@ -178,11 +182,119 @@ def validate_family(doc):
                 raise ContractError("output %s: topk_equivalent scores must name an input or "
                                     "ref:<output> of a contract with a reference" % name)
         if bound["kind"] in BOUNDS_NEEDING_REFERENCE and not doc.get("reference"):
-            raise ContractError("output %s: bound %s needs a float64 reference and the contract "
-                                "names none" % (name, bound["kind"]))
+            raise ContractError("output %s: bound %s needs a reference (float64 or oracle:<name>) "
+                                "and the contract names none" % (name, bound["kind"]))
+        opt = s.get("optional_if_not_produced")
+        if opt is not None:
+            if not isinstance(opt, dict) or isinstance(opt.get("poison"), bool) \
+                    or not isinstance(opt.get("poison"), (int, float)):
+                raise ContractError("output %s: optional_if_not_produced needs {\"poison\": <number>}, "
+                                    "the value the harness fills the buffer with before the call" % name)
+            if bound["kind"] not in ("exact", "bytes_exact"):
+                raise ContractError("output %s: optional_if_not_produced is for exact outputs; a "
+                                    "poison value inside a tolerance cannot be told from a result" % name)
+    _validate_oracles(doc)
+    _validate_control_categories(doc)
     if doc["compare"].get("determinism", "bounded") not in DETERMINISM:
         raise ContractError("compare.determinism %r" % doc["compare"].get("determinism"))
     return doc
+
+
+def _validate_oracles(doc):
+    """`oracles` are named legs that recompute the step another way; `reference: "oracle:<name>"`
+    makes one of them what every output is compared against. An oracle may narrow the outputs
+    it produces and carry its own bounds (a looser one for an independent reimplementation)."""
+    oracles = doc.get("oracles")
+    if oracles is not None and not isinstance(oracles, dict):
+        raise ContractError("oracles must map a name to its leg")
+    oracles = oracles or {}
+    ref = doc.get("reference")
+    if isinstance(ref, str) and ref.startswith(ORACLE_PREFIX):
+        name = ref[len(ORACLE_PREFIX):]
+        if name not in oracles:
+            raise ContractError("reference %r names no oracle; declared: %s" % (ref, sorted(oracles)))
+    for name, o in oracles.items():
+        if not isinstance(o, dict) or not isinstance(o.get("path"), str) or not o["path"]:
+            raise ContractError("oracle %s needs a path (the cases.ORACLES entry it runs)" % name)
+        outs = o.get("outputs")
+        if outs is not None:
+            if not isinstance(outs, list) or not outs:
+                raise ContractError("oracle %s: outputs must be a non-empty list" % name)
+            extra = sorted(set(outs) - set(doc["outputs"]))
+            if extra:
+                raise ContractError("oracle %s: outputs %s are not outputs of the contract" % (name, extra))
+        allowed = set(outs if outs is not None else doc["outputs"])
+        for out, bound in (o.get("bounds") or {}).items():
+            if out not in allowed:
+                raise ContractError("oracle %s: bound for %s, which the oracle does not produce" % (name, out))
+            if not isinstance(bound, dict) or bound.get("kind") not in BOUND_KINDS:
+                raise ContractError("oracle %s: output %s: bound kind %r not in %s"
+                                    % (name, out, (bound or {}).get("kind"), BOUND_KINDS))
+            if bound["kind"] == "topk_equivalent":
+                raise ContractError("oracle %s: topk_equivalent ranks scores, not an oracle leg" % name)
+        if not isinstance(o.get("controls", True), bool):
+            raise ContractError("oracle %s: controls must be true or false" % name)
+        if o.get("cases", "all") not in ORACLE_CASES:
+            raise ContractError("oracle %s: cases %r not in %s" % (name, o.get("cases"), ORACLE_CASES))
+
+
+def _validate_control_categories(doc):
+    """`required_control_categories`: the kinds of injected bug a task's negative controls must
+    cover, `{"by": <attr>, "cases": {<attr value>: [category, ...]}}` or a plain list."""
+    req = doc.get("required_control_categories")
+    if req is None or isinstance(req, list) and all(isinstance(c, str) for c in req):
+        return
+    if not isinstance(req, dict) or not isinstance(req.get("cases"), dict):
+        raise ContractError("required_control_categories must be a list or {by, cases}")
+    attr = (doc.get("attrs") or {}).get(req.get("by"))
+    if attr is None:
+        raise ContractError("required_control_categories.by %r is not an attr" % req.get("by"))
+    for value, cats in req["cases"].items():
+        if value not in [str(v) for v in attr["values"]]:
+            raise ContractError("required_control_categories: %s=%r not in %s"
+                                % (req["by"], value, attr["values"]))
+        if not isinstance(cats, list) or not cats or not all(isinstance(c, str) for c in cats):
+            raise ContractError("required_control_categories[%s] must be a non-empty list" % value)
+
+
+def f64_reference(doc):
+    """The reference_f64.py function a contract names, or None (no reference, or an oracle leg)."""
+    ref = doc.get("reference")
+    if not ref or (isinstance(ref, str) and ref.startswith(ORACLE_PREFIX)):
+        return None
+    return ref
+
+
+def reference_oracle(doc):
+    """The oracle `reference: "oracle:<name>"` names, or None."""
+    ref = doc.get("reference")
+    if isinstance(ref, str) and ref.startswith(ORACLE_PREFIX):
+        return ref[len(ORACLE_PREFIX):]
+    return None
+
+
+def oracle_doc(doc, name):
+    """The contract one oracle leg is judged under: outputs narrowed to what the oracle produces,
+    each output's bound replaced by the oracle's own where it declares one."""
+    o = doc["oracles"][name]
+    out = json.loads(json.dumps(doc))
+    keep = o.get("outputs") or list(doc["outputs"])
+    out["outputs"] = {n: s for n, s in out["outputs"].items() if n in keep}
+    for n, bound in (o.get("bounds") or {}).items():
+        out["outputs"][n]["bound"] = dict(bound)
+    return out
+
+
+def control_categories(doc, sym):
+    """The negative-control categories a task with these attrs must cover."""
+    req = doc.get("required_control_categories")
+    if not req:
+        return []
+    if isinstance(req, list):
+        return list(req)
+    key = sym.get(req["by"])
+    key = str(key).lower() if isinstance(key, bool) else str(key)
+    return list(req["cases"].get(key, []))
 
 
 def freeze_task_contract(family_doc, *, attrs, const_axes, overrides=None):
@@ -976,9 +1088,12 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
         return res
     if kind in ("exact", "multiset_rows"):
         a, b = _f64(cand), _f64(base)
+        if "value" in bound:          # the output must hold this constant (a stray-write count of 0)
+            b = torch.full_like(a, bound["value"])
         if kind == "multiset_rows" or element_order == "any_in_full_rows":
             a, b = a.reshape(-1, a.shape[-1]).sort(dim=-1).values, b.reshape(-1, b.shape[-1]).sort(dim=-1).values
-        bad = int((a != b).sum())
+        # NaN on both sides is agreement (as in every other kind); NaN against a number is not.
+        bad = int(((a != b) & ~(a.isnan() & b.isnan())).sum())
         res.update(ok=bad <= max_violation_fraction * a.numel(), mismatches=bad, elements=a.numel())
         return res
     if kind == "topk_equivalent":
@@ -987,20 +1102,30 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
         return _harness_compare(res, cand, base, float(bound["tol"]))
 
     a, b = cand.to(torch.float64), base.to(torch.float64)
-    finite_b = torch.isfinite(b)
-    nonfinite_mismatch = int(((~finite_b) & ~((a == b) | (a.isnan() & b.isnan()))).sum())
+    finite_a, finite_b = torch.isfinite(a), torch.isfinite(b)
+    # A non-finite value where the compared-against output is finite is a violation in every
+    # kind: a buffer the harness poisoned (NaN) and the kernel never wrote must not pass because
+    # `NaN > limit` is False. Where both sides are non-finite they must agree (NaN with NaN).
+    nonfinite_mismatch = int(((~finite_b) & ~((a == b) | (a.isnan() & b.isnan()))).sum()
+                             + (finite_b & ~finite_a).sum())
     res["nonfinite_mismatches"] = nonfinite_mismatch
     u_out = UNIT_ROUNDOFF.get(out_dtype or "float32", 2.0 ** -24)
     if kind == "sqnr":
         y = ref if ref is not None else b
-        keep = torch.isfinite(y) & torch.isfinite(a)
-        noise = (a - y)[keep].norm().item()
+        keep = torch.isfinite(y)
+        if bool((~finite_a[keep]).any()):
+            noise, db = math.inf, -math.inf
+        else:
+            noise = (a - y)[keep].norm().item()
         signal = y[keep].norm().item()
-        db = math.inf if noise == 0 else (20 * math.log10(signal / noise) if signal else -math.inf)
+        if noise != math.inf:
+            db = math.inf if noise == 0 else (20 * math.log10(signal / noise) if signal else -math.inf)
         res.update(ok=db >= float(bound["min_db"]) and nonfinite_mismatch == 0, sqnr_db=db,
                    min_db=float(bound["min_db"]), against="reference" if ref is not None else "baseline")
         if ref is not None:
-            bn = (b - y)[keep].norm().item()
+            kb = keep & finite_b
+            bn = (b - y)[kb].norm().item()
+            signal = y[kb].norm().item()
             res["baseline_sqnr_db"] = math.inf if bn == 0 else 20 * math.log10(signal / bn) if signal else -math.inf
         return res
 
@@ -1034,15 +1159,21 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
         n = (base_noise.to(torch.float64) - b)
         n = n.masked_fill(~torch.isfinite(n), 0.0)
         rms = n.pow(2).mean(dim=-1, keepdim=True).sqrt()
-        multiple = float(bound.get("multiple", 4.0))
-        floor = float(bound.get("rounding_multiple", 4.0)) * u_out * b.abs()
+        # `m`/`k` are the README's names for the two multiples; `multiple`/`rounding_multiple`
+        # the original ones. Both are read, the short names win.
+        multiple = float(bound.get("m", bound.get("multiple", 4.0)))
+        floor = float(bound.get("k", bound.get("rounding_multiple", 4.0))) * u_out * b.abs()
         limit = multiple * torch.maximum(n.abs(), rms) + floor
         res["baseline_run_to_run_max"] = float(n.abs().max()) if n.numel() else 0.0
     else:
         raise ContractError("bound %s" % kind)
 
     keep = torch.isfinite(y) & finite_b
-    err = (a - y)[keep]
+    # Where the compared-against value is finite and the subject's is not, the error is +inf
+    # (not NaN, which no comparison flags).
+    diff = torch.where(finite_a, a - y, torch.full_like(a, math.inf))
+    over = (diff.abs() > limit) & keep
+    err = diff[keep]
     lim = limit[keep]
     n = err.numel()
     viol = float((err.abs() > lim).double().mean()) if n else 0.0
@@ -1051,13 +1182,23 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
     res.update(violation_fraction=viol, peak_bound_multiple=peak,
                max_abs_err=float(err.abs().max()) if n else 0.0)
     ok = viol <= max_violation_fraction and nonfinite_mismatch == 0
+    if bound.get("per_row") and a.dim():
+        # Judge rows (every leading index; the last axis is one row): a row with any element
+        # outside the bound is a violating row, and the budget counts rows, not elements.
+        bad_rows = over.reshape(-1, a.shape[-1]).any(dim=-1) if a.numel() else over.reshape(0)
+        nrows = int(bad_rows.numel())
+        res.update(violating_rows=int(bad_rows.sum()), rows=nrows)
+        ok = (int(bad_rows.sum()) <= max_violation_fraction * nrows) and nonfinite_mismatch == 0
     if ref is not None and kind in ("dot_product", "output_rounding", "baseline_relative",
                                     "tolerance") and n:
-        rms = err.pow(2).mean().sqrt().item()
-        z = abs(err.mean().item()) / rms if rms > 0 else 0.0
-        unbiased = z <= 5 / math.sqrt(n)
+        if not bool(torch.isfinite(err).all()):
+            rms, z, unbiased = math.inf, math.inf, False   # an infinite error has no bias test
+        else:
+            rms = err.pow(2).mean().sqrt().item()
+            z = abs(err.mean().item()) / rms if rms > 0 else 0.0
+            unbiased = z <= 5 / math.sqrt(n)
         if kind == "tolerance":
-            unbiased = unbiased or viol == 0      # a tolerance carries no bias test once it holds
+            unbiased = unbiased or (viol == 0 and math.isfinite(z))   # no bias test once it holds
         if kind == "baseline_relative" and not unbiased:
             be = (b - y)[keep]
             unbiased = abs(err.mean().item()) <= _MAX_ERROR_MULTIPLE * abs(be.mean().item()) + 5 * rms / n
@@ -1165,6 +1306,11 @@ def compare_outputs(doc, cand_out, base_out, *, sym, refs=None, magnitudes=None,
             b = b.gather(-1, base[spec["sort_by"]][rows if rows is not None else slice(None)]
                          .to(torch.int64).argsort(dim=-1))
         ref = None if bound.get("against") == "baseline" else (refs or {}).get(name)
+        produced = _produced(spec, c, b)
+        if produced is not None:
+            results[name] = produced
+            ok = ok and bool(produced["ok"])
+            continue
         r = compare_one(bound, c, b, ref=ref, magnitude=(magnitudes or {}).get(name),
                         base_noise=n, scores=scores, out_dtype=out_dtype,
                         max_violation_fraction=float(spec.get("max_violation_fraction",
@@ -1173,6 +1319,30 @@ def compare_outputs(doc, cand_out, base_out, *, sym, refs=None, magnitudes=None,
         results[name] = r
         ok = ok and bool(r.get("ok"))
     return {"ok": ok, "outputs": results}
+
+
+def _produced(spec, cand, base):
+    """`optional_if_not_produced: {"poison": v}`: the harness fills the buffer with `v` before
+    the call. A subject that left all of it at `v` did not produce the output (an optimized
+    kernel may legitimately stop exposing it): reported `not_produced`, neither passed against
+    stale values nor failed. A subject that wrote only part of it fails, and so does a compared-
+    against side that produced nothing (the oracle / baseline floor). None: compare normally."""
+    opt = spec.get("optional_if_not_produced")
+    if not opt:
+        return None
+    v = opt["poison"]
+    c_hit = cand.detach().cpu() == v
+    b_hit = base.detach().cpu() == v
+    if c_hit.numel() and bool(b_hit.all()):
+        return {"ok": False, "status": "reference_not_produced", "poison": v,
+                "why": "the compared-against side left every element at the poison value %r" % v}
+    if c_hit.numel() and bool(c_hit.all()):
+        return {"ok": True, "status": "not_produced", "poison": v}
+    if bool(c_hit.any()) and not bool((c_hit == b_hit).all()):
+        return {"ok": False, "status": "partially_written", "poison": v,
+                "unwritten": int((c_hit & ~b_hit).sum()), "elements": int(c_hit.numel()),
+                "why": "part of the output still holds the poison value %r" % v}
+    return None
 
 
 def control_margin(result):

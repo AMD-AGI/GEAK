@@ -159,10 +159,12 @@ any drift between them.
 | `attrs` | variant selectors with their legal `values` (dtype, layout, activation...); pinned per task with `--attr`, default = first value |
 | `constraints` | expressions every case must satisfy (`"topk <= n_experts"`) |
 | `inputs.<name>` | `shape` (axis expressions, or `{"by": attr, "cases": {...}}`), `dtype` (`"attr:<name>"` allowed), `dist`, `lifetime` (`weight`/`per_call`/`state`), optional `layout` hook, `present_when`, `writable` (the live entry writes it in place: `call()` must clone) |
-| `outputs.<name>` | `shape`, `dtype`, `bound` (below), optional `max_violation_fraction`, `sort_by` (compare rows in another output's order: weights follow their ids) |
+| `outputs.<name>` | `shape`, `dtype`, `bound` (below), optional `max_violation_fraction`, `sort_by` (compare rows in another output's order: weights follow their ids), `present_when`, `optional_if_not_produced: {poison}` (exact outputs: the harness fills the buffer with `poison` before the call; all-poison = `not_produced`, part-poison = FAIL, an all-poison reference = FAIL) |
 | `compare` | `determinism` (`bitwise` = the candidate must reproduce itself byte for byte), `max_violation_fraction`, `element_order` |
 | `layout_facts` | attributes the dispatcher reads that the built operands must carry (`b.is_shuffled`) |
-| `reference`, `reference_rows` | the float64 reference and how many rows of the token axis it computes |
+| `reference`, `reference_rows` | the float64 reference and how many rows of the token axis it computes; or `"oracle:<name>"`, a leg of `oracles` |
+| `oracles` | named legs that recompute the step another way (`{path, overlay, outputs?, bounds?, controls?, cases?: all \| per_width_smallest}`); `bounds` replace the outputs' own for that leg, `outputs` must be a subset of the contract's |
+| `required_control_categories` | kinds of injected bug the negative controls must cover: a list, or `{by: <attr>, cases: {<value>: [...]}}` |
 | `hooks`, `call` | what the task must write, and how |
 | `timing`, `negative_controls`, `pitfalls` | the cache condition to record, controls known to work, and failures seen on this family |
 
@@ -181,13 +183,18 @@ baseline's output, `u` the output dtype's unit roundoff.
 | `dot_product` | `|c - y| <= 2(6 sqrt(n_eff) + 2) u_acc (|a|@|b|) + u|y|`, n_eff from `length` and `max_split_k`; unbiased | GEMMs whose accumulation follows the IEEE model (bf16, MXFP4 operands) |
 | `baseline_relative` | `|c - y| <= 2 max(|b - y|, rms_row(b - y)) + u|y|`; unbiased or no more biased than the baseline | the default where the installed kernel is itself inexact (FP8 MFMA, atomics, attention) |
 | `output_rounding` | `|c - y| <= 2u|y|` | ops every correct kernel computes to one rounding (residual add) |
-| `tolerance` | `|c - y| <= atol + (rtol + u)|y|` (`against: baseline` uses `b`) | norms, activations, rope |
+| `tolerance` | `|c - y| <= atol + (rtol + u)|y|` (`against: baseline` uses `b`); `per_row: true` counts violating rows (last axis = a row) against the budget | norms, activations, rope, KV rows |
 | `noise_relative` | `|c - b| <= m max(|b2 - b|, rms_row(b2 - b)) + k u|b|`, b2 a second baseline run | quantized outputs whose last code flips at rounding boundaries |
 | `sqnr` | `20 log10(|y|/|c - y|) >= min_db` | whole-output checks when no elementwise model holds |
-| `exact`, `multiset_rows` | equal, or equal as per-row multisets | integer outputs, routing ids |
+| `exact`, `multiset_rows` | equal, or equal as per-row multisets; `value` compares to a constant instead | integer outputs, routing ids, stray-write counts |
 | `topk_equivalent` | per row: same count of valid entries, distinct, in range, and the selected `scores` equal the baseline's selected scores (within `score_atol/rtol`) | top-k indices; ties may pick either index; `scores: "ref:<name>"` for a fused score+top-k |
 | `bytes_exact` | equal bytes (up to `max_violation_fraction`) | packed FP4, caches |
 | `harness` | `harness_lib.correct` with `tol` | legacy; the lint warns |
+
+A non-finite subject value where the compared-against value is finite is a violation under
+every kind (error `+inf`, SQNR `-inf`, counted in `nonfinite_mismatches`, never budgeted): a
+poisoned buffer the kernel never wrote must not pass because `NaN > limit` is False. NaN on
+both sides is agreement.
 
 "Unbiased" is SIKL's test `|mean(e)| / rms(e) <= 5 / sqrt(n)`: a candidate whose errors all
 lean one way (a dropped scale, a truncating cast) fails even inside the elementwise bound.

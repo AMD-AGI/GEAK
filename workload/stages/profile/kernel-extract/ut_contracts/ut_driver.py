@@ -177,7 +177,7 @@ def _cpu(obj):
 
 def _references(T, args):
     """(refs, magnitudes, rows) of one built case, from its logical operands on the CPU."""
-    name = T.doc.get("reference")
+    name = T.U.f64_reference(T.doc)      # an oracle:<name> reference is a leg, not a function
     if not name:
         return None, None, None
     logical = _cpu(args["_logical"])
@@ -508,7 +508,7 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
                     "candidate" if key not in cand_blob else "baseline")})
                 ok = False
                 continue
-            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=bool(T.doc.get("reference")))
+            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=bool(T.U.f64_reference(T.doc)))
             refs, mags, sel = _references(T, args)
             score_inputs = {o["bound"].get("scores") for o in T.doc["outputs"].values()
                             if o["bound"]["kind"] == "topk_equivalent"}

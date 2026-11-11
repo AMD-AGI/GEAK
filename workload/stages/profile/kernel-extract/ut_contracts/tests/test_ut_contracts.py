@@ -38,8 +38,8 @@ class FamilyTest(unittest.TestCase):
             for key in ("hooks", "call", "timing", "negative_controls", "pitfalls"):
                 self.assertIn(key, doc, "%s lacks %s" % (f, key))
             self.assertTrue(doc["negative_controls"], f)
-            if doc.get("reference") and torch is not None:
-                self.assertIn(doc["reference"], R.REFERENCES, f)
+            if U.f64_reference(doc) and torch is not None:
+                self.assertIn(U.f64_reference(doc), R.REFERENCES, f)
             for name, s in doc["inputs"].items():
                 hook = (s.get("dist") or {}).get("hook") or (s.get("layout") or {}).get("hook")
                 if hook:
@@ -355,7 +355,8 @@ SMALL = {
     "varlen_attention": ({}, {"heads": 2, "kv_heads": 1, "head_size": 16, "v_head_size": 16},
                          {"batch": 2, "total_q": 6, "total_k": 10}),
     "all_reduce": ({"act_dtype": "float32"}, {"hidden": 16, "world": 4}, {"n_tokens": 3}),
-    "mono_layer": ({}, {"hidden": 16, "world": 2}, {"rows": 3, "context": 8}),
+    "mono_layer": ({}, {"hidden": 16, "world": 2, "launches": 2, "pools": 2, "kv_width": 4, "topk": 2},
+                   {"rows": 3, "context": 8}),
 }
 
 
@@ -428,9 +429,9 @@ class EveryFamilyBuildsTest(unittest.TestCase):
                     self.assertEqual(tuple(args[name].shape), U.shape_of(s, sym), name)
                     self.assertEqual(str(args[name].dtype), "torch." + U.dtype_of(s, sym), name)
                 self.assertTrue(U.check_layout_facts(doc, args, sym)[0])
-                if not doc.get("reference"):
+                if not U.f64_reference(doc):
                     continue
-                refs, _ = R.reference(doc["reference"], logical, sym)
+                refs, _ = R.reference(U.f64_reference(doc), logical, sym)
                 for name, s in doc["outputs"].items():
                     if U.present(s, sym) and name in refs:
                         self.assertEqual(tuple(refs[name].shape), U.shape_of(s, sym), name)
