@@ -4982,6 +4982,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_ENV: curEnv,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
       // Lane roster: always tune the live kernel, author EVERY backend the bake-off proposes, then add
@@ -5337,6 +5338,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_ENV: curEnv,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -5552,6 +5554,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_ENV: curEnv,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {

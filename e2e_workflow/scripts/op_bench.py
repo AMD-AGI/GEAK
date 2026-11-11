@@ -19,7 +19,15 @@ Task-dir contract (written by the Kernel Extractor PHASE=extract_op):
 Usage:
   python3 op_bench.py --task <op_task_dir> [--backends hipblaslt,tunableop,rocblas,aiter,triton]
                       [--repeats 50] [--warmup 10] [--tol 2e-2] [--out result.json]
-                      [--triton-autotune] [--seed 0]
+                      [--triton-autotune] [--seed 0] [--server-env "<the server's env>"]
+
+A dense GEMM is scored against the live BLAS default (`live_blas_default`): the library the server's
+torch BLAS calls go to. TORCH_BLAS_PREFER_HIPBLASLT / TORCH_BLAS_PREFER_CUBLASLT in --server-env decide
+when they are set there; otherwise it is torch's preference in this process, which runs on the server's
+image (rocBLAS on gfx1151, hipBLASLt on CDNA). That library is benched even when --backends omits it, and
+its arm is the only baseline (an fp8 blockscale GEMM is scored against its live `aiter_blockscale` path
+instead). When the baseline arm produced no correct timing, no GEMM verdict is published
+(`verdict_withheld` + `verdict_withheld_reason`, `OPBENCH NO_VERDICT`).
 
 Exit 0 always (unless the task dir is unreadable); per-backend failures are captured in the JSON so an
 unavailable backend on this image is a recorded "skipped", not a crash.
@@ -366,6 +374,54 @@ def _gemm_fn(torch, A, B, bias, transpose_b):
     return lambda: torch.addmm(bias, A, B) if A.dim() == 2 else (torch.matmul(A, B) + bias)
 
 
+# torch.backends.cuda.preferred_blas_library() names, as op_bench backends.
+_BLAS_FROM_TORCH = {"cublas": "rocblas", "cublaslt": "hipblaslt"}
+
+
+# torch reads both names for its BLAS switch.
+_BLAS_ENV_KEYS = ("TORCH_BLAS_PREFER_HIPBLASLT", "TORCH_BLAS_PREFER_CUBLASLT")
+
+
+def _server_env_blas(server_env):
+    """The BLAS library a server env string selects, else None.
+
+    Read the way the launchers apply it (`env $EXTRA_ENV`): split on whitespace, quotes kept, the last
+    setting of a name wins. torch honours exactly "1" and "0" (c10 check_env ignores anything else, so
+    torch's own default stands); "1" on either name selects hipBLASLt, otherwise "0" on either rocBLAS.
+    Measured on gfx1151 with torch 2.11."""
+    values = {}
+    for item in (server_env or "").split():
+        key, sep, value = item.partition("=")
+        if sep and key in _BLAS_ENV_KEYS:
+            values[key] = value
+    if "1" in values.values():
+        return "hipblaslt"
+    if "0" in values.values():
+        return "rocblas"
+    return None
+
+
+def live_blas_default(server_env=""):
+    """The BLAS library the server's torch GEMMs default to, and where that answer came from.
+
+    TORCH_BLAS_PREFER_HIPBLASLT in the server's env decides when it is set there. Otherwise the server
+    gets torch's per-arch default, read here before any arm switches it (op_bench runs on the server's
+    image). When neither can be read, hipBLASLt is assumed, as before, and the reason is returned."""
+    lib = _server_env_blas(server_env)
+    if lib:
+        return {"library": lib, "source": "server_env", "error": None}
+    try:
+        raw = str(_torch().backends.cuda.preferred_blas_library())
+    except Exception as e:  # noqa: BLE001 -- no torch, no device or an old build: the reason is reported
+        return {"library": "hipblaslt", "source": "assumed",
+                "error": f"preferred_blas_library() unreadable: {e!r}"}
+    lib = _BLAS_FROM_TORCH.get(raw.rsplit(".", 1)[-1].lower())
+    if lib:
+        return {"library": lib, "source": "torch", "error": None}
+    return {"library": "hipblaslt", "source": "assumed",
+            "error": f"preferred_blas_library() is {raw!r}, neither rocBLAS nor hipBLASLt"}
+
+
 def _set_prefer_blas(torch, lib):
     """Best-effort switch of torch's BLAS backend (ROCm: hipblaslt vs rocblas). Returns True if applied."""
     try:
@@ -481,7 +537,18 @@ def _bench_gemm_at(args, meta, m_override=None):
     # kernel-squad rewrite, not a bake-off candidate). Request it explicitly with --backends if wanted.
     want = [b.strip() for b in args.backends.split(",") if b.strip()] if args.backends else \
         ["hipblaslt", "tunableop", "rocblas", "ck", "aiter", "flydsl"]
+    # main() scores against the live BLAS default (args.live_blas), so bench it even when --backends
+    # omits it.
+    live = getattr(args, "live_blas", "")
+    if live and live not in want:
+        want.append(live)
+    live = live or "hipblaslt"
     results = []
+
+    def back_to_live(lib):
+        # An arm that switched the library hands the next arm the server's default, not hipBLASLt.
+        if lib != live:
+            _set_prefer_blas(torch, "cublas" if live == "rocblas" else live)   # cublas = rocBLAS on ROCm
 
     def record(name, fn, note="", artifact=""):
         try:
@@ -506,6 +573,7 @@ def _bench_gemm_at(args, meta, m_override=None):
     if "hipblaslt" in want:
         _set_prefer_blas(torch, "hipblaslt"); _tunableop(torch, False, False)
         record("hipblaslt", base_fn, note="torch default Lt path")
+        back_to_live("hipblaslt")
 
     # PyTorch TunableOp — tune once, persist CSV, freeze. The CSV is the DEPLOYABLE artifact: loaded at
     # server startup (TUNING=0) it is baked into the cuda-graph capture, unlike tune-during-serving which
@@ -542,7 +610,7 @@ def _bench_gemm_at(args, meta, m_override=None):
     if "rocblas" in want:
         applied = _set_prefer_blas(torch, "cublas")  # maps to rocblas on ROCm
         record("rocblas", base_fn, note="torch non-Lt path" + ("" if applied else " (switch unconfirmed)"))
-        _set_prefer_blas(torch, "hipblaslt")
+        back_to_live("rocblas")
 
     # CK / ck_tile GEMM — best-effort via torch's preferred-BLAS 'ck' (if this ROCm build exposes it).
     if "ck" in want:
@@ -552,7 +620,7 @@ def _bench_gemm_at(args, meta, m_override=None):
         else:
             results.append({"backend": "ck", "available": False, "correct": False, "ms": None,
                             "note": "torch preferred_blas_library('ck') unsupported in this build"})
-        _set_prefer_blas(torch, "hipblaslt")
+        back_to_live("ck")
 
     # aiter GEMM — scan the installed aiter API for a GEMM-like entrypoint (names vary by version).
     if "aiter" in want:
@@ -771,6 +839,9 @@ def main():
     ap.add_argument("--triton-autotune", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
+    ap.add_argument("--server-env", default="",
+                    help="the env the server runs with (e2e CURRENT_ENV): its TORCH_BLAS_PREFER_HIPBLASLT "
+                         "names the live BLAS default the speedup is scored against")
     a = ap.parse_args()
 
     meta_path = os.path.join(a.task, "meta.json")
@@ -787,6 +858,9 @@ def main():
     if _hlib is not None and meta.get("regime"):
         _GRAPH_MODE = _hlib.deployment_graph_mode(meta.get("regime"))
 
+    # Read once, before any arm switches torch's BLAS preference; every path reports it.
+    live = live_blas_default(a.server_env)
+    a.live_blas = live["library"]
     try:
         results = bench_gemm(a, meta) if op_kind == "gemm" else bench_attn(a, meta)
     except Exception as e:
@@ -795,7 +869,13 @@ def main():
 
     correct = [r for r in results if r.get("correct") and r.get("ms")]
     correct.sort(key=lambda r: r["ms"])
-    baseline = next((r for r in results if r["backend"] in ("hipblaslt", "current", "aiter_blockscale") and r.get("ms")), None)
+    # The one arm the speedup is scored against. No fallback to another library: a speedup over a
+    # library the server does not run is the number #603 is about.
+    blockscale = op_kind == "gemm" and _is_blockscale_gemm(meta)
+    baseline_name = ("aiter_blockscale" if blockscale else live["library"] if op_kind == "gemm"
+                     else "current")
+    baseline = next((r for r in results
+                     if r["backend"] == baseline_name and r.get("ms") and r.get("correct")), None)
     winner = correct[0] if correct else None
 
     # ---- Harness self-fault signal (for op_benchmarker self-repair + orchestrator dominant-head guard).
@@ -833,14 +913,15 @@ def main():
     apply_env, apply_flags, kind = "", "", "none"
     if wb in ("tunableop",):
         apply_env = f"PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_FILENAME={art}"; kind = "env"
-    elif wb == "rocblas":
-        apply_env = "TORCH_BLAS_PREFER_HIPBLASLT=0"; kind = "env"
+    elif wb in ("rocblas", "hipblaslt"):
+        if wb != live["library"]:  # the live default needs no change to deploy
+            # Appended to the server's env, where a 1 on either name keeps hipBLASLt: rocBLAS needs both at 0.
+            apply_env = ("TORCH_BLAS_PREFER_HIPBLASLT=1" if wb == "hipblaslt"
+                         else " ".join(f"{key}=0" for key in _BLAS_ENV_KEYS)); kind = "env"
     elif wb == "ck":
         apply_env = ""; kind = "flag"   # ck deploy path is build/flag-dependent; integrate must verify
     elif editable:
         kind = "patch_candidate"
-    elif wb == "hipblaslt":
-        kind = "none"  # default already; no change to deploy
 
     # Amdahl ceiling: the MAX e2e delta this isolated speedup can produce given the kernel's GPU-time
     # share (from the Architect/meta). The e2e Integrator uses this to refuse crediting an e2e delta
@@ -864,6 +945,9 @@ def main():
         "winner_ms": winner["ms"] if winner else None,
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
+        "live_blas_default": live["library"],
+        "live_blas_default_source": live["source"],
+        "live_blas_default_error": live["error"],
         "measured": measured,
         "isolated_speedup": round(speedup, 4) if speedup is not None else None,
         "pct_gpu_time": pct_gpu,
@@ -875,14 +959,32 @@ def main():
         "apply_flags": apply_flags,
         "deployable_note": ("env loaded at server startup is captured into the cuda-graph (deployable)"
                             if kind == "env" else
-                            "hipblaslt default already in use; nothing to deploy" if wb == "hipblaslt" else
+                            (f"{wb} default already in use; nothing to deploy"
+                             + (f" (assumed: {live['error']})" if live["source"] == "assumed" else ""))
+                            if wb == live["library"] else
                             "verify deployability at the e2e gate"),
     }
+    # A GEMM speedup is scored against the live path only: without its correct timing there is no verdict.
+    reason = None
+    if op_kind == "gemm" and winner is not None and baseline is None:
+        reason = (f"the {baseline_name} arm produced no correct timing, so there is no baseline to "
+                  "score against" + (" (it is the live BLAS default)" if not blockscale else ""))
+    summary["verdict_withheld"] = reason is not None
+    if reason:
+        summary["verdict_withheld_reason"] = reason
+        for k in ("winner_backend", "winner_ms", "baseline_backend", "baseline_ms",
+                  "isolated_speedup", "amdahl_ceiling_e2e_pct", "winner_editable", "winner_kind",
+                  "tuning_artifact", "apply_env", "apply_flags", "deployable_note"):
+            summary[k] = None
     out = json.dumps(summary, indent=2, default=str)
     if a.out:
         with open(a.out, "w") as fh:
             fh.write(out)
     print(out)
+    if summary["verdict_withheld"]:
+        print(f"OPBENCH NO_VERDICT harness_suspect={summary['harness_suspect']} "
+              f"reason={summary['verdict_withheld_reason']!r}")
+        return
     print(f"OPBENCH winner={summary['winner_backend']} speedup={summary['isolated_speedup']}x "
           f"editable={summary['winner_editable']} kind={summary['winner_kind']} "
           f"harness_suspect={summary['harness_suspect']}"
