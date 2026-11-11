@@ -190,9 +190,12 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
 2. **Build the candidate config/overlay** = current accepted + this ONE change, by `winner_kind`:
    > **🔴 If the task dir declares `meta.candidate_bind`, REPLAY IT VERBATIM — do not improvise a seam.**
    > That is the exact overlay entry the isolated unittest measured its win with (`kind:"module"` →
-   > `add-module --module <module> --patched-file <task>/<file>`; `kind:"rebind"` → `add-rebind --target
-   > <target> --impl-module/--impl-attr`), always seeded `--from "$CURRENT_OVERLAY"`. The branches below
-   > are for tasks that carry no `candidate_bind`.
+   > `add-module --module <module> --patched-file <task>/<file> --src-file <task>/baseline_ref/<basename
+   > of file>.orig`; `kind:"rebind"` → `add-rebind --target <target> --impl-module/--impl-attr`), always
+   > seeded `--from "$CURRENT_OVERLAY"` into `CAND="$EVAL_DIR/overlay/cand_<short_name>"`, after
+   > `rm -rf "$CAND/_patched" "$CAND/_overlay_manifest.json"`.
+   > If `CURRENT_OVERLAY` already patches that module, `add-module` merges onto its copy and exits
+   > non-zero on a clash (do not force it). The branches below are for tasks that carry no `candidate_bind`.
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
      **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is
@@ -206,12 +209,15 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      the patched submodule into the overlay (manifest `add-module`; NEVER copy a package subtree — that
      shadows the whole install, see [[sglang_internals]] §3):
      ```bash
-     CAND="$EVAL_DIR/overlay/cand_<short_name>"; cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
+     CAND="$EVAL_DIR/overlay/cand_<short_name>"; rm -rf "$CAND/_patched" "$CAND/_overlay_manifest.json"
+     cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
      python3 "$SKILL_DIR/scripts/overlay_setup.py" add-module \
        --overlay "$CAND" --module "<dotted.module.of.patched.file>" \
        --patch "<KERNEL_RESULT.code_patch>" --src-file "<installed source file to patch>"
      PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<dotted.module>"
      ```
+     If `$CAND` already patches that module (an earlier accepted head), the diff applies on top of that
+     copy. The `rm` drops an earlier attempt's copy from a reused `$CAND`; keep `$CAND` itself (`ref/` lives there).
      **When `final_patch.diff` paths point at a LIVE installed file** (e.g. `a/aiter/ops/triton/...`,
      i.e. the kernel layer optimized the installed module in place, so the diff does NOT apply inside the
      task `ws` — `git apply` in `ws` fails): this IS the **patch** case, not authored. Do NOT improvise by
@@ -269,20 +275,18 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
      need `authored_kernel_eval_dir/workspace/`, which does not exist for a kernel another run authored.
      When this input is set, SKIP them entirely: the record carries the finished overlay, so unpack it
      and bench that directory as the candidate.
-     It is a STANDALONE overlay from another run, so do not untar it over `CURRENT_OVERLAY` — that
-     overwrites `_overlay_manifest.json` and silently drops every rebind already accepted here. Graft
-     its rebinds on top instead:
+     It is a STANDALONE overlay from another run, so do not untar or copy it over `CURRENT_OVERLAY`:
+     that replaces `_overlay_manifest.json` (dropping every rebind accepted here) and any
+     `_patched/<module>.py` both carry (dropping an accepted edit). Merge them with the checked
+     `merge`, which keeps every manifest entry and exits non-zero, writing nothing, on a module, rebind
+     or file the two define differently. Report that as `gate:"rejected"` with reason
+     `overlay_conflict` (the record is inapplicable here); never resolve it by dropping an existing
+     hook. Use a fresh CAND directory:
      ```bash
      CAND="$EVAL_DIR/overlay/cand_<short_name>"
-     cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
-     KBO=$(mktemp -d); tar xzf "$KB_OVERLAY_TARBALL" -C "$KBO" --strip-components=1  # tar top level is overlay/
-     cp -r "$KBO"/. "$CAND"/                       # modules + _patched/
-     if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then
-       cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"
-       # then, per {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":
-       python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \
-         --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"
-     fi
+     KBO=$(mktemp -d) && tar xzf "$KB_OVERLAY_TARBALL" -C "$KBO" --strip-components=1  # tar top level is overlay/
+     python3 "$SKILL_DIR/scripts/overlay_setup.py" merge --overlay "$CAND" \
+       --from "$CURRENT_OVERLAY" --with "$KBO"
      PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"
      ```
      The manifest lists every rebind as `{target, impl_module, impl_attr}`. **Verify each one actually

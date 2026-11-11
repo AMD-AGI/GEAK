@@ -29,8 +29,8 @@ Two current-behavior bugs are pinned here rather than fixed, and flagged by name
 test_module_file_requires_the_caller_to_have_imported_importlib_util and
 test_plain_top_level_install_is_misreported_as_injected.
 
-Every test runs inside its own tempfile.TemporaryDirectory; subprocess is replaced by a recorder,
-so nothing is executed and nothing outside the temp dir is written.
+Every test runs inside its own tempfile.TemporaryDirectory and writes nothing outside it. Most replace
+subprocess with a recorder; the ones that compose two edits of one module run real patch(1)/git.
 """
 import argparse
 import contextlib
@@ -39,6 +39,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -398,6 +399,34 @@ class TestTryApply(_OverlayCase):
         self.assertEqual(len(run.calls), 4)
 
 
+class TestMergeOnto(_OverlayCase):
+    """--patched-file onto an existing copy: a clash, a git error and a missing git read differently."""
+
+    def setUp(self):
+        super().setUp()
+        self.dst = self._write("ov/_patched/m.py", "a = 1\nb = 2\n")
+        self.a = types.SimpleNamespace(src_file=self._write("base.py", "a = 0\nb = 2\n"),
+                                       patched_file=self._write("new.py", "a = 0\nb = 3\n"))
+
+    def _merge(self, run):
+        with mock.patch.object(ov.subprocess, "run", run), self.assertRaises(SystemExit) as caught:
+            ov._merge_onto(self.dst, self.a)
+        self.assertEqual(self._read(self.dst), "a = 1\nb = 2\n")
+        return str(caught.exception)
+
+    def test_a_git_error_is_not_reported_as_a_clash(self):
+        err = self._merge(lambda *a, **k: types.SimpleNamespace(
+            returncode=255, stdout=b"", stderr=b"fatal: cannot read new.py"))
+        self.assertIn("git merge-file failed", err)
+        self.assertIn("fatal: cannot read new.py", err)
+        self.assertNotIn("same lines", err)
+
+    def test_a_missing_git_is_named(self):
+        def run(*_a, **_k):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        self.assertIn("needs git", self._merge(run))
+
+
 # --------------------------------------------------------------------------- #
 # add-module -- whole-file source swap
 # --------------------------------------------------------------------------- #
@@ -467,6 +496,27 @@ class TestAddModule(_OverlayCase):
         self.assertTrue(os.path.isfile(self._patched_path()))
         self.assertEqual(self._manifest()["modules"], [])
 
+    def test_a_module_already_patched_needs_an_edit_to_build_on(self):
+        # --src-file alone on a module the overlay already patches would change nothing.
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=self._write("a.py", "A = 1\n")))
+        with self.assertRaises(SystemExit) as caught:
+            self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=self._write("s.py", "S = 1\n")))
+        self.assertIn("give --patch or --patched-file", str(caught.exception))
+        self.assertEqual(self._read(self._patched_path()), "A = 1\n")
+
+    def test_a_retry_does_not_build_on_the_copy_a_failed_attempt_left(self):
+        # That copy is unlisted, so a retry with the right --src-file starts over from it.
+        wrong = self._write("wrong.py", "WRONG = True\n")
+        right = self._write("right.py", "RIGHT = True\n")
+        diff = self._write("kernel.diff", "--- a\n+++ b\n")
+        with mock.patch.object(ov.subprocess, "run", _RecordingRun()):
+            with self.assertRaises(SystemExit):
+                self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=wrong, patch=diff))
+        with mock.patch.object(ov.subprocess, "run", _RecordingRun(succeed_at=0)):
+            self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=right, patch=diff))
+        self.assertEqual(self._read(self._patched_path()), "RIGHT = True\n")
+        self.assertEqual(len(self._manifest()["modules"]), 1)
+
     def test_a_patched_file_is_taken_verbatim_and_never_patched(self):
         src = self._write("candidate.py", "ALREADY_PATCHED = True\n")
         diff = self._write("kernel.diff", "--- a\n+++ b\n")
@@ -477,13 +527,58 @@ class TestAddModule(_OverlayCase):
         self.assertEqual(self._read(self._patched_path()), "ALREADY_PATCHED = True\n")
 
     def test_re_adding_the_same_module_replaces_it_in_place(self):
+        # A whole file built FROM the overlay's copy (--src-file names it) replaces it; one entry.
         first = self._write("v1.py", "V = 1\n")
         second = self._write("v2.py", "V = 2\n")
         self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=first))
-        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=second))
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=second, src_file=first))
 
         self.assertEqual(len(self._manifest()["modules"]), 1)
         self.assertEqual(self._read(self._patched_path()), "V = 2\n")
+        # Without --src-file nothing says what it was built from: refused, the copy kept.
+        third = self._write("v3.py", "V = 3\n")
+        with self.assertRaises(SystemExit):
+            self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=third))
+        self.assertEqual(self._read(self._patched_path()), "V = 2\n")
+
+    # Two accepted heads that edit one module must both survive (on gfx1151, two whole-file swaps of
+    # vllm.model_executor.layers.utils: the second replaced the first).
+    INSTALLED = "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"
+    HEAD_A = "a = 10\nb = 2\nc = 3\nd = 4\ne = 5\n"
+
+    @unittest.skipUnless(shutil.which("git"), "needs git merge-file")
+    def test_a_second_whole_file_is_merged_onto_the_first(self):
+        installed = self._write("installed.py", self.INSTALLED)
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=self._write("a.py", self.HEAD_A)))
+        head_b = self._write("b.py", "a = 1\nb = 2\nc = 3\nd = 4\ne = 50\n")
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=head_b, src_file=installed))
+        self.assertEqual(self._read(self._patched_path()), "a = 10\nb = 2\nc = 3\nd = 4\ne = 50\n")
+
+        clash = self._write("c.py", "a = 99\nb = 2\nc = 3\nd = 4\ne = 5\n")
+        with self.assertRaises(SystemExit):
+            self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=clash, src_file=installed))
+        self.assertEqual(self._read(self._patched_path()), "a = 10\nb = 2\nc = 3\nd = 4\ne = 50\n")
+
+    @unittest.skipUnless(shutil.which("patch"), "needs patch(1)")
+    def test_a_second_patch_applies_on_top_of_the_first(self):
+        installed = self._write("installed.py", self.INSTALLED)
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=self._write("a.py", self.HEAD_A)))
+        diff = self._write("b.diff", "--- a/m.py\n+++ b/m.py\n@@ -3,3 +3,3 @@\n c = 3\n d = 4\n-e = 5\n+e = 50\n")
+        self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patch=diff, src_file=installed))
+        self.assertEqual(self._read(self._patched_path()), "a = 10\nb = 2\nc = 3\nd = 4\ne = 50\n")
+
+    def test_the_harness_candidate_is_kernel_src_verbatim_when_seeded_from_the_overlays_copy(self):
+        # Even where kernel_src/ re-tunes the line the overlay's own edit changed.
+        hl = _load("harness_lib_compose", "harness_lib.py")
+        task = os.path.join(self.tmp, "task")
+        self._write(os.path.join("task", "baseline_overlay", "_patched", "m.py"), self.HEAD_A)
+        self._write(os.path.join("task", "baseline_overlay", "_overlay_manifest.json"),
+                    json.dumps({"modules": [{"module": "m", "file": os.path.join("_patched", "m.py")}]}))
+        shutil.copy2(os.path.join(SCRIPTS_DIR, "overlay_setup.py"), task)
+        retuned = self._write(os.path.join("task", "kernel_src", "m.py"), "a = 20\nb = 2\nc = 3\nd = 4\ne = 5\n")
+        _base, cand = hl.build_candidate_overlay(
+            task, {"candidate_bind": {"kind": "module", "module": "m", "file": "kernel_src/m.py"}})
+        self.assertEqual(self._read(os.path.join(cand, "_patched", "m.py")), self._read(retuned))
 
     def test_distinct_modules_compound(self):
         src = self._write("candidate.py", "x = 1\n")
