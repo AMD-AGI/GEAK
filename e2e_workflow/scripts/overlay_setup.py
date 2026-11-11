@@ -21,6 +21,8 @@ Commands:
   add-module    inject a patched submodule file in place of the installed one (whole-file source swap)
                 --overlay O --module sglang.srt.layers.activation
                 (--patched-file F  |  --patch D  [--src-file S])   # S defaults to the install's file
+                If O already patches the module, D applies to that copy, and F is 3-way merged onto it
+                (git merge-file) with S, then required, as F's base. A clash exits non-zero.
   add-rebind    rebind module:attr -> impl_module.impl_attr (single function/kernel swap; the default)
                 --overlay O --target sglang.srt.layers.activation:silu_and_mul
                 --impl-module fast_act --impl-attr fast_silu_and_mul [--impl-file fast_act.py]
@@ -401,19 +403,57 @@ def _try_apply(patch, target_file=None, cwd=None):
     return False
 
 
+def _read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _merge_onto(dst, a):
+    """3-way merge --patched-file onto this overlay's existing copy, --src-file as the base."""
+    if not os.path.isfile(a.src_file):
+        raise SystemExit(f"{dst} already exists: --src-file must name the file {a.patched_file} was built from")
+    if _read(a.src_file) == _read(dst):     # built from this very copy: take it as it is
+        shutil.copy2(a.patched_file, dst)
+        return
+    try:
+        merge = subprocess.run(["git", "merge-file", "-p", "-q", dst, a.src_file, a.patched_file],
+                               capture_output=True)
+    except FileNotFoundError:
+        raise SystemExit(f"cannot merge {a.patched_file} onto {dst}: needs git (git merge-file). "
+                         "The copy is unchanged.")
+    # git merge-file exits with the number of conflicts (1..127), and negative (255) on an error.
+    if not 0 <= merge.returncode < 128:
+        raise SystemExit(f"cannot merge {a.patched_file} onto {dst}: git merge-file failed "
+                         f"({merge.returncode}): {merge.stderr.decode(errors='replace').strip()}. "
+                         "The copy is unchanged.")
+    if merge.returncode != 0:
+        raise SystemExit(f"cannot merge {a.patched_file} onto {dst}: both change the same lines of "
+                         f"{a.src_file}. The copy is unchanged.")
+    with open(dst, "wb") as fh:
+        fh.write(merge.stdout)
+
+
 def cmd_add_module(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     patched_dir = os.path.join(a.overlay, "_patched")
     os.makedirs(patched_dir, exist_ok=True)
     dst = os.path.join(patched_dir, a.module + ".py")
-    if a.patched_file:
+    m = _load_man(man)
+    # A copy the manifest lists holds an earlier accepted edit of this module: build on it, never
+    # replace it. An unlisted one (left by a failed attempt) is loaded by nothing: start over.
+    accepted = os.path.exists(dst) and any(e["module"] == a.module for e in m.get("modules", []))
+    if a.patched_file and accepted:
+        _merge_onto(dst, a)
+    elif a.patched_file:
         shutil.copy2(a.patched_file, dst)
+    elif accepted and not a.patch:
+        raise SystemExit(f"{dst} already holds an accepted edit of {a.module}: give --patch or "
+                         "--patched-file to build on it. The copy is unchanged.")
     else:
-        src = a.src_file or module_file(a.module)
-        shutil.copy2(src, dst)
+        if not accepted:
+            shutil.copy2(a.src_file or module_file(a.module), dst)
         if a.patch and not _try_apply(a.patch, target_file=dst):
             raise SystemExit(f"failed to apply patch {a.patch} to {dst}")
-    m = _load_man(man)
     m["modules"] = [e for e in m.get("modules", []) if e["module"] != a.module]
     m["modules"].append({"module": a.module, "file": os.path.join("_patched", a.module + ".py")})
     _save_man(man, m)

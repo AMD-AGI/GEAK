@@ -19,8 +19,9 @@ You are invoked once per kernel candidate. Read first:
                         #   install + every already-accepted kernel). This IS the timing denominator.
                         #   It is never edited and never imported FROM the task dir — it goes on
                         #   PYTHONPATH and that is the whole mechanism.
-  baseline_ref/*.orig   # read-only TEXT copy of the baseline file(s) so the optimizer can diff. The
-                        #   .orig suffix makes it UNIMPORTABLE, so it can never become a timing leg.
+  baseline_ref/*.orig   # read-only TEXT copy of the baseline file(s): the optimizer diffs against it, and
+                        #   the e2e Integrator merges an accepted file onto its overlay with it as the base.
+                        #   The .orig suffix makes it UNIMPORTABLE, so it can never become a timing leg.
   cases.py              # task-specific: call(args) / timing_cases / random_shapes / eager_cases.
                         #   Run VERBATIM by both legs — this is why the two legs cannot diverge; IMMUTABLE
   reference_io.pt       # recorded inputs + golden outputs (oracle) — READ-ONLY for optimizers
@@ -264,7 +265,7 @@ freeze an out-of-regime oracle nobody should trust.
    >   prefill call is 1 count but huge GPU-time, decode is thousands of tiny calls; never weight by raw count.
 3. **Seed the editable workspace + declare how the candidate binds.** Resolve the target's file **as the
    CURRENT STACK sees it** (not via a bare `import` of the install), copy that ONE file into
-   `kernel_src/`, keep a `.orig` twin for diffing, and record the bind:
+   `kernel_src/`, keep a `.orig` twin (the diff and merge base), and record the bind:
    ```bash
    MOD="$(python3 -c 'print("<module:attr>".split(":")[0])')"
    SRC="$(PYTHONPATH="$TASK/baseline_overlay:$PYTHONPATH" \
@@ -286,9 +287,9 @@ freeze an out-of-regime oracle nobody should trust.
    > `import sglang` breaks. Single file + `add-module` is the only mechanism (see
    > `knowledge/sglang_internals.md` §3).
    > **🔴 `kernel_src/` is the ONLY writable path in the task dir.** `baseline_overlay/` is the live
-   > serving stack and is never touched; `baseline_ref/*.orig` is text for diffing and is deliberately
-   > unimportable. `candidate_bind` is also exactly what the e2e Integrator replays to wire an accepted
-   > kernel, so an isolated win is rebindable e2e by construction.
+   > serving stack and is never touched; `baseline_ref/*.orig` is text (the diff and merge base) and is
+   > deliberately unimportable. `candidate_bind` is also exactly what the e2e Integrator replays to
+   > wire an accepted kernel, so an isolated win is rebindable e2e by construction.
 4. **Write `unittest.py`** — backend-agnostic and IMMUTABLE. It is the SINGLE harness: it judges
    correctness AND measures the workload-weighted speedup; there is no separate downstream perf harness.
    **It MUST import the vendored `harness_lib` and use it for all timing + correctness** — do NOT
