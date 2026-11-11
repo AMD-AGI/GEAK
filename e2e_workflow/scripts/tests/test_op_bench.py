@@ -1606,7 +1606,8 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_amdahl_ceiling_is_omitted_without_a_gpu_time_share(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("hipblaslt", ms=1.0, correct=True)])
+                                    results=[self._res("hipblaslt", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         self.assertIsNone(summary["amdahl_ceiling_e2e_pct"])
         self.assertIsNone(summary["pct_gpu_time"])
 
@@ -1619,7 +1620,8 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_unparseable_gpu_time_share_omits_the_ceiling_instead_of_crashing(self):
         summary, _ = self._run_main({"op_kind": "gemm", "pct_gpu_time": "unknown"},
-                                    results=[self._res("hipblaslt", ms=1.0, correct=True)])
+                                    results=[self._res("hipblaslt", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         self.assertIsNone(summary["amdahl_ceiling_e2e_pct"])
 
     def test_tunableop_winner_emits_the_env_that_survives_cuda_graph_capture(self):
@@ -1636,13 +1638,29 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_rocblas_winner_emits_the_blas_preference_env(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("rocblas", ms=1.0, correct=True)])
+                                    results=[self._res("rocblas", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         self.assertEqual(summary["apply_env"], "TORCH_BLAS_PREFER_HIPBLASLT=0")
         self.assertEqual(summary["winner_kind"], "env")
 
+    def test_one_timed_gemm_arm_publishes_no_verdict(self):
+        # One requested arm, and two requested arms of which one produced no timing.
+        for rows in ([self._res("hipblaslt", ms=1.0, correct=True)],
+                     [self._res("hipblaslt", ms=1.0, correct=True), self._res("tunableop")]):
+            summary, text = self._run_main({"op_kind": "gemm"}, results=rows, capture_stdout=True)
+            self.assertTrue(summary["smoke_only"])
+            self.assertIsNone(summary["winner_backend"])
+            self.assertIsNone(summary["isolated_speedup"])
+            self.assertIsNone(summary["deployable_note"])
+            self.assertIn("only hipblaslt produced a timing", summary["verdict_withheld_reason"])
+            self.assertIn("OPBENCH smoke_only=True NO_VERDICT", text)
+            self.assertNotIn("OPBENCH winner=", text)
+            self.assertEqual(summary["results"][0]["ms"], 1.0)
+
     def test_ck_winner_is_flagged_for_deployability_verification(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("ck", ms=1.0, correct=True)])
+                                    results=[self._res("ck", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         self.assertEqual(summary["winner_kind"], "flag")
         self.assertEqual(summary["apply_env"], "")
         self.assertIn("verify deployability at the e2e gate", summary["deployable_note"])
@@ -1650,20 +1668,23 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
     def test_editable_winner_is_routed_to_a_kernel_rewrite(self):
         for backend in ("triton", "hip"):
             summary, _ = self._run_main({"op_kind": "gemm"},
-                                        results=[self._res(backend, ms=1.0, correct=True)])
+                                        results=[self._res(backend, ms=1.0, correct=True),
+                                                 self._res("flydsl", ms=9.0, correct=True)])
             self.assertTrue(summary["winner_editable"])
             self.assertEqual(summary["winner_kind"], "patch_candidate")
 
     def test_hipblaslt_winner_has_nothing_to_deploy(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("hipblaslt", ms=1.0, correct=True)])
+                                    results=[self._res("hipblaslt", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         self.assertEqual(summary["winner_kind"], "none")
         self.assertEqual(summary["isolated_speedup"], 1.0)      # it is its own baseline
         self.assertIn("nothing to deploy", summary["deployable_note"])
 
     def test_library_winner_without_a_baseline_reports_a_neutral_speedup(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("flydsl", ms=1.0, correct=True)])
+                                    results=[self._res("flydsl", ms=1.0, correct=True),
+                                             self._res("ck", ms=9.0, correct=True)])
         self.assertEqual(summary["winner_backend"], "flydsl")
         self.assertIsNone(summary["baseline_backend"])
         self.assertEqual(summary["isolated_speedup"], 1.0)
@@ -1750,7 +1771,8 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_summary_is_printed_when_no_out_file_is_requested(self):
         summary, text = self._run_main({"op_kind": "gemm"},
-                                       results=[self._res("hipblaslt", ms=1.25, correct=True)],
+                                       results=[self._res("hipblaslt", ms=1.25, correct=True),
+                                                self._res("flydsl", ms=9.0, correct=True)],
                                        capture_stdout=True)
         self.assertEqual(summary["winner_ms"], 1.25)
         self.assertIn("OPBENCH winner=hipblaslt", text)
@@ -1758,7 +1780,8 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_out_file_carries_the_task_dir_and_full_result_list(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("hipblaslt", ms=1.0, correct=True)])
+                                    results=[self._res("hipblaslt", ms=1.0, correct=True),
+                                             self._res("flydsl", ms=9.0, correct=True)])
         args, _ = self.seen
         self.assertEqual(summary["task"], args.task)
         self.assertEqual(summary["results"][0]["backend"], "hipblaslt")

@@ -207,7 +207,8 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
    Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
-   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
+   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, `smoke_only`
+   (true when only one arm produced a timing: no verdict; rerun with >=2 `--backends`), and
    > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
    > winner and `isolated_speedup` are scored on `ms`, timed with one eviction pass over the L2/Infinity
    > cache before each sample so the number is not read off lines the previous sample left resident. The

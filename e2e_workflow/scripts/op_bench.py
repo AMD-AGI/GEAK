@@ -878,11 +878,27 @@ def main():
                             "hipblaslt default already in use; nothing to deploy" if wb == "hipblaslt" else
                             "verify deployability at the e2e gate"),
     }
+    # One timed arm is a harness smoke test, not a bake-off: its "winner" is whatever ran, and
+    # "1.0x, nothing to deploy" would read as a verdict. The blockscale path benches its own plan.
+    timed = [r for r in results if r.get("ms") is not None]
+    summary["smoke_only"] = (op_kind == "gemm" and len(timed) == 1 and winner is not None
+                             and not _is_blockscale_gemm(meta))
+    if summary["smoke_only"]:
+        summary["verdict_withheld_reason"] = (
+            f"only {timed[0]['backend']} produced a timing: no bake-off -- rerun with >=2 --backends "
+            "that time here")
+        for k in ("winner_backend", "winner_ms", "baseline_backend", "baseline_ms",
+                  "isolated_speedup", "amdahl_ceiling_e2e_pct", "winner_editable", "winner_kind",
+                  "tuning_artifact", "apply_env", "apply_flags", "deployable_note"):
+            summary[k] = None
     out = json.dumps(summary, indent=2, default=str)
     if a.out:
         with open(a.out, "w") as fh:
             fh.write(out)
     print(out)
+    if summary["smoke_only"]:
+        print(f"OPBENCH smoke_only=True NO_VERDICT reason={summary['verdict_withheld_reason']!r}")
+        return
     print(f"OPBENCH winner={summary['winner_backend']} speedup={summary['isolated_speedup']}x "
           f"editable={summary['winner_editable']} kind={summary['winner_kind']} "
           f"harness_suspect={summary['harness_suspect']}"
