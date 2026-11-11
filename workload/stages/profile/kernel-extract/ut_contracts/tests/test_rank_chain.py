@@ -256,5 +256,33 @@ class TimingResume(unittest.TestCase):
         self.assertEqual(driver._timing_resume(self.T, SimpleNamespace(max_reps=3, reuse=False), {"reuse_key": "k"})[0], {})
 
 
+
+class InterleaveReplayCase(unittest.TestCase):
+    """DESIGN 1.5: a replay bundle's optional `interleave` sequence (several widths' graphs and
+    eager steps on one runner) is reported as one more replay case and fails the gate unless it
+    returns a boolean ok."""
+
+    def test_absent_adds_nothing(self):
+        self.assertIsNone(driver._interleave_row({"fill": None}))
+
+    def test_pass_and_fail_are_carried(self):
+        steps = [{"step": 0, "rows": 8, "mode": "g", "ok": True}]
+        row = driver._interleave_row({"interleave": lambda: {"ok": True, "steps": steps}})
+        self.assertEqual((row["case"], row["ok"], row["steps"]), ("interleave", True, steps))
+        row = driver._interleave_row({"interleave": lambda: {"ok": False, "steps": [], "case": "x"}})
+        self.assertEqual((row["case"], row["ok"]), ("interleave", False))
+
+    def test_raise_or_malformed_result_fails(self):
+        def boom():
+            raise RuntimeError("graph of 16 rows replayed into the 8-row buffers")
+        for fn, why in ((boom, "raised"), (lambda: {"steps": []}, "must return"),
+                        (lambda: {"ok": 1}, "must return"), (lambda: None, "must return")):
+            row = driver._interleave_row({"interleave": fn})
+            self.assertFalse(row["ok"])
+            self.assertIn(why, row["why"])
+        row = driver._interleave_row({"interleave": "not callable"})
+        self.assertFalse(row["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

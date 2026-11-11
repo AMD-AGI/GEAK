@@ -1348,7 +1348,32 @@ def inproc_replay(T, a):
         except Exception as e:
             rows.append({"case": c["sig"], "ok": False, "why": "replay raised (OOB/stale under replay): %r" % e})
             ok = False
+    extra = _interleave_row(b)
+    if extra is not None:
+        rows.append(extra)
+        ok = ok and extra["ok"]
     return {"status": "pass" if ok else "fail", "replay_tol": tol, "cases": rows}
+
+
+def _interleave_row(b):
+    """The bundle's optional `interleave` check as one more replay case (DESIGN 1.5): a stateful
+    multi-width kernel (a monokernel runner) replays graphs of several widths and eager steps on
+    ONE instance in alternation, each step against its own eager reference. The harness runs and
+    judges the sequence (it alone holds the per-width graphs); `interleave()` returns
+    {"ok": bool, "steps": [...]}. Anything else -- not callable, raised, no boolean ok -- fails."""
+    if "interleave" not in b:
+        return None
+    fn = b["interleave"]
+    if not callable(fn):
+        return {"case": "interleave", "ok": False, "why": "replay_bundle's interleave is not callable"}
+    try:
+        r = fn()
+    except Exception as e:
+        return {"case": "interleave", "ok": False, "why": "interleave raised: %r" % e}
+    if not isinstance(r, dict) or not isinstance(r.get("ok"), bool):
+        return {"case": "interleave", "ok": False,
+                "why": "interleave must return {'ok': bool, ...}, got %r" % (type(r).__name__,)}
+    return {**r, "case": "interleave"}
 
 
 def _replay_doc(T, tol):
