@@ -241,6 +241,25 @@ def _register_watch(state, path):
         state.setdefault("watch_files", []).append(path)
 
 
+def group_multi_rank(T, gpus):
+    """A task whose every leg runs `world` ranks (meta.timing.world, e.g. a mono_layer monokernel
+    driving its peers from call()) cannot have its legs spread one GPU each: two 8-rank groups on
+    the same devices both lose co-residency of their persistent kernels and fail their in-kernel
+    waits (correctness and negative controls failed that way on the Muse Spark target layer,
+    2026-11-11). Such a task gets ONE slot holding the whole set, so its legs run one at a time,
+    each leased every device; timing gets the device list itself (measure_legs)."""
+    if not gpus:
+        return gpus
+    world = T.h.rank_chain_world(T.meta)
+    if not world or world <= 1:
+        return gpus
+    flat = [g for item in gpus for g in str(item).split(",") if g.strip()]
+    if len(flat) < world:
+        raise SystemExit("task runs %d ranks a leg; --gpus gives %s" % (world, flat))
+    T.rank_group = flat[:world]
+    return [",".join(T.rank_group)]
+
+
 def _parallel(items, gpus, fn):
     """Run fn(item, gpu) for every item, at most one item per GPU at a time; re-raise the
     first failure only after every item has finished, so no leg is left running."""
@@ -983,7 +1002,7 @@ def timing_basis_defects(T, per):
 
 
 def gate_timing(T, a, state):
-    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=T.gpus)
+    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=getattr(T, "rank_group", None) or T.gpus)
     w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
     defects = timing_basis_defects(T, per)
@@ -1292,6 +1311,8 @@ def main(task=None, argv=None):
     T = Task(a.task)
     spec = a.gpus if a.gpus is not None else (os.environ.get("UT_GPUS") or os.environ.get("GPU_IDS"))
     T.gpus = [g.strip() for g in str(spec).split(",") if g.strip()] if spec else None
+    T.rank_group = None
+    T.gpus = group_multi_rank(T, T.gpus)
     if a.inproc:
         for mod in T.meta.get("server_preimports") or []:
             importlib.import_module(mod)

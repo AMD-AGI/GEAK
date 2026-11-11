@@ -152,5 +152,33 @@ class TimingBasis(unittest.TestCase):
         self.assertNotIn("GEAK_WEIGHTED_SPEEDUP", out.getvalue())
 
 
+class MultiRankLegs(unittest.TestCase):
+    """Correctness / control legs of a multi-rank task must not be spread one GPU each."""
+
+    def _T(self, meta):
+        h = SimpleNamespace(rank_chain_world=lambda m: (int((m.get("timing") or {}).get("world", 8))
+                                                        if (m.get("timing") or {}).get("kind") == "rank_chain" else None))
+        return SimpleNamespace(h=h, meta=meta, rank_group=None)
+
+    def test_rank_chain_task_gets_one_slot_with_the_whole_set(self):
+        T = self._T({"timing": {"kind": "rank_chain", "world": 8}})
+        got = driver.group_multi_rank(T, [str(i) for i in range(8)])
+        self.assertEqual(got, ["0,1,2,3,4,5,6,7"])
+        self.assertEqual(T.rank_group, [str(i) for i in range(8)])
+        seen = []
+        driver._parallel(["a", "b", "c"], got, lambda it, g: seen.append((it, g)))
+        self.assertEqual([g for _, g in seen], ["0,1,2,3,4,5,6,7"] * 3)   # one at a time, every device
+
+    def test_single_rank_tasks_keep_spreading(self):
+        T = self._T({})
+        self.assertEqual(driver.group_multi_rank(T, ["0", "1"]), ["0", "1"])
+        self.assertIsNone(T.rank_group)
+        self.assertIsNone(driver.group_multi_rank(self._T({"timing": {"kind": "rank_chain"}}), None))
+
+    def test_too_few_devices_is_refused(self):
+        with self.assertRaises(SystemExit):
+            driver.group_multi_rank(self._T({"timing": {"kind": "rank_chain", "world": 8}}), ["0", "1"])
+
+
 if __name__ == "__main__":
     unittest.main()
