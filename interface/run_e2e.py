@@ -7768,7 +7768,7 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     ]))
 
     parts.append("\n\n## Accepted work\n")
-    if not kernels and not heads:
+    if not kernels and not heads and not (config.get("flags") or config.get("env")):
         parts.append("\nNothing was accepted — the run is a do-no-harm no-gain.\n")
     for label, entries in (("kernels", kernels), ("heads", heads)):
         if not entries:

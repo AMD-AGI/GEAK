@@ -1782,5 +1782,14 @@ def test_synthesized_report_states_why_the_call_failed():
     assert "failed after 1098s of 14400s: `timeout`" in body
 
 
+def test_config_only_win_is_not_reported_as_nothing_accepted():
+    body = rx._render_synthesized_final_report({
+        "status": "ok", "throughput_speedup": 1.1408,
+        "accepted_config": {"env": {"PYTORCH_TUNABLEOP_ENABLED": "1"}, "flags": ""},
+    }, None)
+    assert "Nothing was accepted" not in body and "### Accepted config" in body
+    assert "Nothing was accepted" in rx._render_synthesized_final_report({"status": "no_gain"}, None)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
