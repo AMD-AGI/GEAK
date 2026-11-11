@@ -36,6 +36,7 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
                     adapter_health() { return 0; }
                     adapter_bench() {
                       local nump="$1" maxc="$2"
+                      : > "$PROFILE_DIR/.probe" || return 7  # adapters/vllm.sh writes here at PROFILE=0 too
                       printf '{"event":"bench","replica":%s,"attempt":%s,"nump":%s,"conc":%s}\n' \
                         "${REPLICA_INDEX:-0}" "${REPLICA_ATTEMPT:-0}" "$nump" "$maxc" >> "$EVENT_LOG"
                       case ",${FAIL_ATTEMPTS:-}," in
@@ -179,6 +180,12 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(summary["observed_median"], 100.0)
         self.assertEqual(sum(e["event"] == "launch" for e in events), 3)
         self.assertIn("without same-server fallback", proc.stderr)
+
+    def test_a_reused_server_gets_a_profile_dir(self):
+        proc, _summary, _ = self.run_bench(GEAK_REPEAT_MODE="warm_server", REUSE_SERVER="1",
+                                           REPLICA_INDEX="1")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertNotIn("timed round failed", proc.stdout + proc.stderr)
 
     def test_isolated_mode_rejects_server_reuse(self):
         env = dict(os.environ)
