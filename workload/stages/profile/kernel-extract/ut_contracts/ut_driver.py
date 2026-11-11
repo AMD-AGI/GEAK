@@ -1143,8 +1143,12 @@ def gate_negative_controls(T, a, state):
                      and "why" not in row)
         if not row["ok"] and "why" not in row:
             row["why"] = "mutation not detected at the required numerical margin"
-    return {"status": "pass" if all(r["ok"] for r in rows) else "fail",
-            "min_margin": margin_needed, "controls": rows}
+    out = {"status": "pass" if all(r["ok"] for r in rows) else "fail",
+           "min_margin": margin_needed, "controls": rows}
+    if T.mc.get("leaf_control_waivers"):
+        # leaves with no control of their own (lint checked each has a why): visible in the report
+        out["leaf_control_waivers"] = T.mc["leaf_control_waivers"]
+    return out
 
 
 def gate_restore(T, a, state):

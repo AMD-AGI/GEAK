@@ -29,7 +29,12 @@ A module bind whose `file` is a package's `__init__.py` (for example
 `{kind:"module", module:"sgl_amd_mono", file:"kernel_src/sgl_amd_mono/__init__.py"}`)
 binds the whole package directory: the candidate overlay copies it, and the package's
 `__file__` and `__path__` both point at that copy. Keep that `__init__.py` byte-identical to
-the installed one; it needs no path-redirecting adapter.
+the installed one; it needs no path-redirecting adapter. A candidate delivered as a whole package
+tree (another revision of it) replaces all of `kernel_src/<package>/`, its `__init__.py` included.
+`editable_leaves` stays a list of concrete files (the campaign engine reads each one as a file;
+expand a scope such as `<model>/gfx950/**` yourself); a leaf no single numerical mutation isolates
+(a layout, a config, the device runtime) goes in `leaf_control_waivers: [{leaf, why}]` instead of
+going without a control silently.
 A value the harness must set per leg (a JIT cache directory keyed by the bytes of the source the
 leg resolved, e.g. FlyDSL's `FLYDSL_RUNTIME_CACHE_DIR`, which FlyDSL only reads from
 `os.environ`) goes in `meta.leg_env = "<task file>:<function>"` returning `{name: value}`:

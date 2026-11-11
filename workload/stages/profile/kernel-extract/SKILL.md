@@ -215,7 +215,8 @@ Never nest the old lock wrappers inside it. `GPU_IDS` is populated only in GPU c
 
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input
-refresh, each editable leaf's numerical negative control, restored-source
+refresh, each editable leaf's numerical negative control (or a
+`leaf_control_waivers` entry with its why, for a whole-package bind's helpers), restored-source
 integrity. UT extraction does not measure timing: use the explicit correctness
 validation mode, retain every weighted signature, and report performance as unmeasured.
 Optimization later measures both timing legs for every positive-mass signature. Compilation

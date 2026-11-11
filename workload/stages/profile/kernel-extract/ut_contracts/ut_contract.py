@@ -519,6 +519,36 @@ def _lint_leg_env(task_dir, meta):
     return errors
 
 
+def _leaf_control_waivers(mc, leaves, controls):
+    """`meta.ut_contract.leaf_control_waivers: [{leaf, why}]`: editable leaves that carry no
+    negative control of their own. A whole-package candidate (a monokernel bound at its package,
+    DESIGN 6.0) edits helpers -- layouts, configs, the device runtime -- that no single numerical
+    mutation isolates; each such leaf is named with the reason, never left out silently. Returns
+    ({waived leaf}, [errors])."""
+    raw = mc.get("leaf_control_waivers") or []
+    if not isinstance(raw, list):
+        return set(), ["meta.ut_contract.leaf_control_waivers must be a list of {leaf, why}"]
+    waived, errors = set(), []
+    controlled = {c.get("leaf") for c in controls}
+    for w in raw:
+        if not (isinstance(w, dict) and w.get("leaf") and str(w.get("why") or "").strip()):
+            errors.append("leaf_control_waivers entries need leaf and why: %r" % (w,))
+            continue
+        leaf = w["leaf"]
+        if leaf not in leaves:
+            errors.append("leaf_control_waivers names %s, which is not an editable leaf" % leaf)
+        elif leaf in controlled:
+            errors.append("leaf_control_waivers names %s, which has a negative control: drop the "
+                          "waiver" % leaf)
+        elif leaf in waived:
+            errors.append("leaf_control_waivers names %s twice" % leaf)
+        else:
+            waived.add(leaf)
+    if leaves and not controlled & set(leaves):
+        errors.append("every editable leaf is waived: at least one needs a negative control")
+    return waived, errors
+
+
 def lint_task(task_dir):
     """Check a task directory against its frozen contract without importing torch.
 
@@ -634,13 +664,15 @@ def lint_task(task_dir):
     if not leaves:
         errors.append("meta.ut_contract.editable_leaves is empty: name every kernel_src file "
                       "this task claims to deliver")
+    waived, waiver_errors = _leaf_control_waivers(mc, leaves, controls)
+    errors.extend(waiver_errors)
     for leaf in leaves:
         path = os.path.join(task_dir, leaf)
         if not os.path.exists(path):
             errors.append("editable leaf %s does not exist" % leaf)
             continue
         mine = [c for c in controls if c.get("leaf") == leaf]
-        if not mine:
+        if not mine and leaf not in waived:
             errors.append("editable leaf %s has no negative control" % leaf)
         with open(path, errors="replace") as f:
             text = f.read()
