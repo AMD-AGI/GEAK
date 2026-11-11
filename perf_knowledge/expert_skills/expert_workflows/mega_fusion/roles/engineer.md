@@ -57,7 +57,7 @@ unified G1/G2 scheduler → Combine+generation → full contract.
 HARD RULES for a resumed Mega lane (fail-closed — these override any softer
 guidance above):
 1. NEVER open, read, grep or reason from the verifier/checker implementation to
-   shape source: `expert_skills/_contribute/expert_skill_contract.py`, the contract's AST/check
+   shape source: `MEGA_DIR/tools/expert_skill_contract.py`, the contract's AST/check
    code, PlanIR checker fields, or any oracle/reference tree are OFF LIMITS as
    authoring input. The authoritative feedback is the candidate's own RUNTIME
    behavior (compile result, on-card smoke, relL2, launch count, path marker);

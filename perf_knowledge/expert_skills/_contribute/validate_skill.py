@@ -27,6 +27,8 @@ import yaml
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SKILLS_DIR = os.path.join(ROOT, "skills")
+# Skill contract checker and runtime validator, owned by the mega_fusion expert workflow.
+MEGA_TOOLS_DIR = os.path.join(ROOT, "expert_workflows", "mega_fusion", "tools")
 CAP_INDEX = os.path.normpath(os.path.join(ROOT, "..", "index", "capability_index.yaml"))
 GEAK = os.path.normpath(os.path.join(ROOT, "..", ".."))
 REQUIRED_SECTIONS = ["When to use", "Mechanism", "Procedure", "Do-no-harm notes", "Sources"]
@@ -777,7 +779,7 @@ def static_check(skill_path, fm, body):
                         f"v2 constraint subject {evidence_key} must match current component"
                     )
             checker_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "expert_skill_contract.py"
+                MEGA_TOOLS_DIR, "expert_skill_contract.py"
             )
             if str(constraint_subject.get("checker_sha256") or "") != (
                 _canonical_component_sha256(checker_path)
@@ -850,7 +852,7 @@ def emit_plan(skill_path, skill_id, fm, args):
             extras.append(
                 "graph_contract_tool="
                 + os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "expert_skill_runtime.py"
+                    MEGA_TOOLS_DIR, "expert_skill_runtime.py"
                 )
             )
         if identity["planner_extension_sha256"]:

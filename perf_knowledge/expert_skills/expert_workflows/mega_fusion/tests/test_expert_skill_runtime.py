@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 
 
-TOOL = Path(__file__).resolve().parent / "expert_skill_runtime.py"
+TOOL = Path(__file__).resolve().parents[1] / "tools" / "expert_skill_runtime.py"
 MEGAMOE_SKILL = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[5]
     / "perf_knowledge"
     / "expert_skills"
     / "skills"

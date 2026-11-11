@@ -64,8 +64,9 @@ Analyze embeds the first two in MegaPlanIR, structural Verify binds all three
 to the exact candidate HEAD/tree digest, and resumed evidence is invalidated
 on any mismatch even when the human revision string was not bumped.
 
-`contract.yaml` is data, not operator-specific verifier code. The shared
-`perf_knowledge/expert_skills/_contribute/expert_skill_contract.py` supports AST-normalized regex
+`contract.yaml` is data, not operator-specific verifier code. The checker
+`expert_workflows/mega_fusion/tools/expert_skill_contract.py` (kept with mega_fusion, which runs it on
+every candidate; `validate_skill.py` calls it too) supports AST-normalized regex
 rules, call-keyword identity, forbidden host mutations, runtime-value
 consumption, PlanIR assertions, provenance seals and optional reference-copy
 calibration. If a new invariant cannot be expressed safely, extend this shared

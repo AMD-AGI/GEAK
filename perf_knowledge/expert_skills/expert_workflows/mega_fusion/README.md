@@ -63,11 +63,12 @@ knowledge/    distributed_fusion, fusion_preconditions, tile_task_graph, overlap
               mega_* (measurement, regimes, generic lessons, self-monitoring), *_mega.md (additions to the
               shared amd_instinct.md / hip_optimization.md), collectors/, analysis_skills/
 tools/        mega_graph_ab, mega_regime, generic_graph_contract, ab_retry, fast_test_key,
-              rebase_commandment, seed_fast_test_cache
+              rebase_commandment, seed_fast_test_cache, expert_skill_contract / expert_skill_runtime
 scripts/      multi_rank_analysis/ (per-rank trace/counter aggregation), replay_runs.js (re-decide
               finished runs with today's gates, no GPU), reference_leak_sweep.sh, skill_address_scan.sh
 tests/        regression tests: `for t in tests/test_*.js; do node "$t"; done`, `python -m pytest tests/`
 ```
 
-The Expert Skill contract checker it uses (`expert_skill_contract.py`, `expert_skill_runtime.py`)
-lives with the skill tooling in `perf_knowledge/expert_skills/_contribute/`.
+`tools/expert_skill_contract.py` (static checker for a skill's `contract.yaml`) and
+`tools/expert_skill_runtime.py` (runs a skill's `runtime_validation.py`) back the pinned-skill path;
+`_contribute/validate_skill.py` uses the same files for a skill's constraint evidence and run args.

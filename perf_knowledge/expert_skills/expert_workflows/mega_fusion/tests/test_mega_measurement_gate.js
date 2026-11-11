@@ -72,7 +72,7 @@ const tool = (MODE, USE_EXPERT_SKILLS, PINNED_MEGA_SKILL, A = {}) =>
   // eslint-disable-next-line no-new-func
   new Function('MODE', 'USE_EXPERT_SKILLS', 'PINNED_MEGA_SKILL', 'A', 'MEGA_DIR', 'EXPERT_SKILLS_DIR',
     `return ${gct[1]};`)(MODE, USE_EXPERT_SKILLS, PINNED_MEGA_SKILL, A, '/wf', '/skills');
-ok(tool('mega', true, true) === '/skills/_contribute/expert_skill_runtime.py', 'pinned skill keeps its runtime');
+ok(tool('mega', true, true) === '/wf/tools/expert_skill_runtime.py', 'pinned skill keeps its runtime');
 ok(tool('mega', true, false) === '', 'unpinned skill-on mega keeps an empty tool');
 ok(tool('optimize', false, false) === '', 'non-mega keeps an empty tool');
 ok(tool('mega', false, false) === '/wf/tools/generic_graph_contract.py', 'generic mega gets the runner');

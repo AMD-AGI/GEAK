@@ -264,8 +264,8 @@ if (REQUIRE_EXPERT_SKILL_BUNDLE_IDENTITY &&
   );
 }
 const EXPERT_SKILL_CONTRACT_TOOL = PINNED_MEGA_SKILL
-  ? `${EXPERT_SKILLS_DIR}/_contribute/expert_skill_contract.py`
-  : String(A.expert_skill_contract_tool || `${EXPERT_SKILLS_DIR}/_contribute/expert_skill_contract.py`);
+  ? `${MEGA_DIR}/tools/expert_skill_contract.py`
+  : String(A.expert_skill_contract_tool || `${MEGA_DIR}/tools/expert_skill_contract.py`);
 const EXPERT_SKILL_REFERENCE_PATH = String(A.expert_skill_reference_path || '').replace(/\/+$/, '');
 const CHECK_EXPERT_SKILL_CONTRACT = MODE === 'mega' && USE_EXPERT_SKILLS &&
   !!EXPERT_SKILL_ID && !!EXPERT_SKILL_CONTRACT_FILE &&
@@ -319,7 +319,7 @@ if (USE_EXPERT_SKILLS && PINNED_MEGA_SKILL) {
   }
 }
 const GRAPH_CONTRACT_TOOL = PINNED_MEGA_SKILL
-  ? `${EXPERT_SKILLS_DIR}/_contribute/expert_skill_runtime.py` : String(A.graph_contract_tool ||
+  ? `${MEGA_DIR}/tools/expert_skill_runtime.py` : String(A.graph_contract_tool ||
     (MODE === 'mega' && !USE_EXPERT_SKILLS ? `${MEGA_DIR}/tools/generic_graph_contract.py` : ''));
 const FAST_TEST_KEY_TOOL = `${MEGA_DIR}/tools/fast_test_key.py`;
 const BENCH_HARNESS = String(A.benchmark_harness || '');

@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 
-TOOL = Path(__file__).resolve().parent / "expert_skill_contract.py"
+TOOL = Path(__file__).resolve().parents[1] / "tools" / "expert_skill_contract.py"
 SPEC = importlib.util.spec_from_file_location("expert_skill_contract", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -56,7 +56,7 @@ MEGAMOE_REQUIRED_IMPLEMENTATION_CHECKS = {
 }
 
 MEGAMOE_CONTRACT = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[5]
     / "perf_knowledge"
     / "expert_skills"
     / "skills"
@@ -166,7 +166,7 @@ def test_source_collection_honors_declarative_exclusions(tmp_path):
 
 def test_repository_megamoe_contract_is_declarative_and_generic():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -217,7 +217,7 @@ def test_repository_megamoe_contract_is_declarative_and_generic():
 
 def test_repository_megamoe_contract_requires_selected_implementation_semantics():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -247,7 +247,7 @@ def test_repository_megamoe_contract_requires_selected_implementation_semantics(
 
 def test_missing_selected_megamoe_implementation_fails_structural_checkpoint(tmp_path):
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -304,7 +304,7 @@ def test_false_pass_fixture_matches_current_contract_identity():
         ).read_text()
     )
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -345,7 +345,7 @@ def test_false_pass_fixture_matches_current_contract_identity():
 
 def test_compact_skill_contains_no_private_evidence_identifiers():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -361,7 +361,7 @@ def test_compact_skill_contains_no_private_evidence_identifiers():
 
 def test_megamoe_skill_exposes_dependency_ordered_implementation_recipe():
     skill_dir = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -388,7 +388,7 @@ def test_megamoe_skill_exposes_dependency_ordered_implementation_recipe():
 
 def test_repository_fusion_contract_accepts_operator_neutral_plan_ir_v2():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -504,7 +504,7 @@ def test_repository_fusion_contract_accepts_operator_neutral_plan_ir_v2():
 
 def test_repository_plan_contract_rejects_missing_combine_transition():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
@@ -1915,7 +1915,7 @@ def test_per_row_address_def_use_rejects_uniform_arrival_address():
 
 def test_group_segment_plan_relation_rejects_limit_overflow():
     path = (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "perf_knowledge"
         / "expert_skills"
         / "skills"
