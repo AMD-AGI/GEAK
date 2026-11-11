@@ -123,6 +123,7 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+BENCH_SUMMARIZE_SCRIPT = E2E_DIR / "scripts" / "bench_summarize.py"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
@@ -1189,19 +1190,6 @@ def apply_bench_client(h: dict) -> str:
 _E2E_METRIC_FOR_BASIS = {
     "aggregate_output_tok_s": "output",
     "aggregate_total_token_tok_s": "total",
-}
-# E2E_METRIC token -> the metric_basis bench_summarize.py records under it: its _BASES flattened,
-# as e2e_workflow.js METRIC_BASIS_OF_AXIS is. test_run_e2e_measurement_basis.py pins this copy.
-_METRIC_BASIS_OF_E2E_METRIC = {
-    "output": "aggregate_output_tok_s",
-    "total": "aggregate_total_token_tok_s",
-    "total_token": "aggregate_total_token_tok_s",
-    "total_throughput": "aggregate_total_token_tok_s",
-    "intvty": "e2e_norm_intvty_p90",
-    "interactivity": "e2e_norm_intvty_p90",
-    "e2e_norm_intvty_p50": "e2e_norm_intvty_p50",
-    "e2e_norm_intvty_p90": "e2e_norm_intvty_p90",
-    "p90_intvty_inferencex": "p90_intvty_inferencex",
 }
 
 
@@ -3998,35 +3986,38 @@ def handoff_acceptance(h: dict) -> dict | None:
 #: The axis an AgentX run is graded on when nothing else is declared (e2e_workflow.js
 #: AGENTX_DEFAULTS.metric_basis): the median Hyperloom keeps AgentX candidates on.
 DEFAULT_AGENTX_OBJECTIVE = "e2e_norm_intvty_p50"
-#: metric_basis -> the guards GEAK's own rule holds beside it: the ones bench_summarize.py
-#: summarizes beside it on a trace replay (_guard_table), i.e. Hyperloom's KEEP guards for that
-#: axis plus total token throughput. Total itself has none. test_run_e2e_measurement_basis.py
-#: pins this copy.
-DEFAULT_AGENTX_GUARDS = {
-    "e2e_norm_intvty_p50": (
-        "e2e_norm_intvty_p90", "aggregate_output_tok_s", "aggregate_total_token_tok_s"),
-    "e2e_norm_intvty_p90": ("aggregate_output_tok_s", "aggregate_total_token_tok_s"),
-    "p90_intvty_inferencex": ("aggregate_output_tok_s", "aggregate_total_token_tok_s"),
-    "aggregate_output_tok_s": ("aggregate_total_token_tok_s",),
-}
 #: The bars Hyperloom's AgentX KEEP rule holds an orchestrated run to (its 3% median gain and
 #: default 5% noise band), so a run that states no rule is judged alike. The guard band is also
 #: e2e_workflow.js AGENTX_GUARD_DROP_PCT.
 DEFAULT_AGENTX_MIN_GAIN_PCT = 3.0
 DEFAULT_AGENTX_GUARD_DROP_PCT = 5.0
 
+_BENCH_SUMMARIZE: Any = None
+
+
+def _bench_summarize() -> Any:
+    """``e2e_workflow/scripts/bench_summarize.py``, loaded once: the bench runs it as a script,
+    GEAK's own KEEP rule reads its axis and guard tables."""
+    global _BENCH_SUMMARIZE
+    if _BENCH_SUMMARIZE is None:
+        spec = importlib.util.spec_from_file_location("geak_bench_summarize", BENCH_SUMMARIZE_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BENCH_SUMMARIZE = module
+    return _BENCH_SUMMARIZE
+
 
 def default_acceptance(h: dict) -> dict | None:
     """GEAK's own KEEP rule for an AgentX handoff that states none; None leaves GEAK's verdict.
 
     A trace replay graded on any axis but total token throughput, with no rule from the caller,
-    is kept only when that axis gains at least 3% and each guard summarized beside it falls no
-    more than 5% below the reference. On the default P50 axis that is Hyperloom's own rule (the
-    P90 tail and output tok/s) plus total token throughput. The corpus fixes the work each
-    request asks for, so every other axis can rise while the server completes less of it: the
-    decode-only axis by shedding prefill, any of them by finishing short requests in place of
-    long ones. A declared ``acceptance`` block, even one handoff_acceptance ignores, is the
-    caller's own rule and keeps this one out.
+    is kept only when that axis gains at least 3% and each guard bench_summarize.py summarizes
+    beside it (``_guard_table``) falls no more than 5% below the reference. On the default P50
+    axis that is Hyperloom's own rule (the P90 tail and output tok/s) plus total token
+    throughput. The corpus fixes the work each request asks for, so every other axis can rise
+    while the server completes less of it: the decode-only axis by shedding prefill, any of them
+    by finishing short requests in place of long ones. A declared ``acceptance`` block, even one
+    handoff_acceptance ignores, is the caller's own rule and keeps this one out.
 
     Only this interface applies it. A direct ``Workflow`` call never reaches it: its Director is
     given the guards as a Validate instruction (e2e_workflow.js agentxAxisNote), and the run's
@@ -4037,18 +4028,20 @@ def default_acceptance(h: dict) -> dict | None:
         return None
     if spec.get("acceptance") is not None:
         return None
+    summarize = _bench_summarize()
+    basis_of_token = {token: entry[1] for token, entry in summarize._BASES.items()}
     # The axis e2e_workflow.js resolveAgentxMetric grades: the declared basis or its token, else
     # an exported E2E_METRIC token, else the default. One it cannot resolve fails the run there.
     declared = str(spec.get("metric_basis") or "").strip().lower()
     inherited = str(os.environ.get("E2E_METRIC") or "").strip().lower()
     if declared:
-        objective = (declared if declared in _METRIC_BASIS_OF_E2E_METRIC.values()
-                     else _METRIC_BASIS_OF_E2E_METRIC.get(declared))
+        objective = (declared if declared in basis_of_token.values()
+                     else basis_of_token.get(declared))
     elif inherited:
-        objective = _METRIC_BASIS_OF_E2E_METRIC.get(inherited)
+        objective = basis_of_token.get(inherited)
     else:
         objective = DEFAULT_AGENTX_OBJECTIVE
-    guards = DEFAULT_AGENTX_GUARDS.get(objective or "")
+    guards = summarize._guard_table(objective, True)
     if not guards:
         return None
     return {

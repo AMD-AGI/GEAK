@@ -1109,26 +1109,28 @@ def test_a_synthetic_run_has_no_rule_of_geaks(monkeypatch) -> None:
     assert rx.default_acceptance({"workload_spec": "agentx_trace_replay"}) is None
 
 
-def test_the_rule_reads_the_axes_the_workflow_and_the_summary_use() -> None:
-    """The token table, default axis, guards and band are copies: a drift would hold the rule
-    on another axis than the one graded, or on a guard the summary never writes."""
+def test_the_rule_reads_the_summarys_own_axis_and_guard_tables(monkeypatch) -> None:
+    """A token or a guard bench_summarize.py adds is one the rule follows, with no copy to update."""
+    summarize = rx._bench_summarize()
+    monkeypatch.setitem(summarize._BASES, "p50", summarize._BASES["e2e_norm_intvty_p50"])
+    monkeypatch.setitem(summarize._GUARDS, OUTPUT, {P90: summarize.INTVTY_KEYS})
+
+    by_token = rx.default_acceptance(
+        {"workload_spec": {"kind": "agentx_trace_replay", "metric_basis": "p50"}})
+    on_output = rx.default_acceptance(
+        {"workload_spec": {"kind": "agentx_trace_replay", "metric_basis": OUTPUT}})
+
+    assert Path(summarize.__file__) == _HERE.parent / "e2e_workflow" / "scripts" / "bench_summarize.py"
+    assert by_token["objective"] == P50
+    assert on_output["guard_max_drop_pct"] == {P90: 5.0, TOTAL: 5.0}
+
+
+def test_the_default_axis_and_band_match_the_workflow() -> None:
+    """e2e_workflow.js cannot import them, so these two values are compared instead."""
     workflow = (_HERE.parent / "e2e_workflow" / "e2e_workflow.js").read_text(encoding="utf-8")
     default = re.search(r"^  metric_basis: '([^']+)',", workflow, re.MULTILINE).group(1)
     guard_pct = re.search(r"^const AGENTX_GUARD_DROP_PCT = ([0-9.]+);",
                           workflow, re.MULTILINE).group(1)
-    spec = importlib.util.spec_from_file_location(
-        "bench_summarize_for_default_rule",
-        _HERE.parent / "e2e_workflow" / "scripts" / "bench_summarize.py")
-    summarize = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(summarize)
-    bases = {entry[1] for entry in summarize._BASES.values()}
 
-    assert rx._METRIC_BASIS_OF_E2E_METRIC == {
-        token: entry[1] for token, entry in summarize._BASES.items()}
-    assert default == rx.DEFAULT_AGENTX_OBJECTIVE == summarize.INTVTY_P50_BASIS
+    assert default == rx.DEFAULT_AGENTX_OBJECTIVE == rx._bench_summarize().INTVTY_P50_BASIS
     assert float(guard_pct) == rx.DEFAULT_AGENTX_GUARD_DROP_PCT
-    assert {basis: set(guards) for basis, guards in rx.DEFAULT_AGENTX_GUARDS.items()} == {
-        basis: set(summarize._guard_table(basis, True))
-        for basis in bases if summarize._guard_table(basis, True)}
-    for basis in bases:
-        assert summarize.TOTAL_BASIS not in summarize._guard_table(basis, False)
