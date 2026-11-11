@@ -385,21 +385,34 @@ def _save_man(man, m):
         json.dump(m, fh, indent=2)
 
 
-def _try_apply(patch, target_file=None, cwd=None):
-    """Apply a unified diff. If target_file given, try patching that exact file directly first."""
-    attempts = []
-    if target_file:
-        attempts += [["patch", target_file, "-i", patch],
-                     ["git", "apply", "--unsafe-paths", f"--directory={os.path.dirname(target_file)}", patch]]
-    if cwd:
-        attempts += [["git", "apply", patch], ["patch", "-p1", "-i", patch]]
-    for args in attempts:
+def _try_apply(patch, target_file=None, errors=None):
+    """Apply a unified diff to target_file: GNU patch, then git apply. Why each attempt failed goes
+    to `errors`.
+
+    A failed attempt is undone: GNU patch writes the hunks that apply and exits 1. One that exits 0
+    counts only if it changed the file: from inside a git work tree, git apply can skip a path outside
+    it and exit 0."""
+    errors = [] if errors is None else errors
+    if not target_file:
+        return False
+    before = _read(target_file)
+    for args in (["patch", target_file, "-i", patch],
+                 ["git", "apply", "--unsafe-paths", f"--directory={os.path.dirname(target_file)}", patch]):
         try:
-            r = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
-            if r.returncode == 0:
-                return True
+            r = subprocess.run(args, capture_output=True, text=True)
         except FileNotFoundError:
+            errors.append(f"{args[0]}: not installed")
             continue
+        for leftover in (target_file + ".orig", target_file + ".rej"):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+        if r.returncode == 0 and _read(target_file) != before:
+            return True
+        output = (r.stdout + r.stderr).replace("saving rejects to file", "rejects removed:")
+        errors.append(f"{args[0]} exited 0 but left the file unchanged" if r.returncode == 0 else
+                      f"{args[0]} exit {r.returncode}: " + " ".join(output.split())[-300:])
+        with open(target_file, "wb") as fh:
+            fh.write(before)
     return False
 
 
@@ -452,8 +465,9 @@ def cmd_add_module(a):
     else:
         if not accepted:
             shutil.copy2(a.src_file or module_file(a.module), dst)
-        if a.patch and not _try_apply(a.patch, target_file=dst):
-            raise SystemExit(f"failed to apply patch {a.patch} to {dst}")
+        errors = []
+        if a.patch and not _try_apply(a.patch, target_file=dst, errors=errors):
+            raise SystemExit(f"failed to apply patch {a.patch} to {dst}: " + "; ".join(errors))
     m["modules"] = [e for e in m.get("modules", []) if e["module"] != a.module]
     m["modules"].append({"module": a.module, "file": os.path.join("_patched", a.module + ".py")})
     _save_man(man, m)

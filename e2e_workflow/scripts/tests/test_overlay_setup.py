@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import types
@@ -68,18 +69,23 @@ class _RecordingRun:
 
     succeed_at -- index of the attempt that should report returncode 0 (None: all fail).
     missing    -- argv[0] values that should raise FileNotFoundError, i.e. tool not installed.
+    writes     -- file the succeeding attempt appends to, as a real apply changes its target.
     """
 
-    def __init__(self, succeed_at=None, missing=()):
+    def __init__(self, succeed_at=None, missing=(), writes=None):
         self.calls = []
         self.succeed_at = succeed_at
         self.missing = tuple(missing)
+        self.writes = writes
 
     def __call__(self, args, cwd=None, capture_output=False, text=False):
         self.calls.append((list(args), cwd))
         if args[0] in self.missing:
             raise FileNotFoundError(2, "No such file or directory", args[0])
         rc = 0 if self.succeed_at == len(self.calls) - 1 else 1
+        if rc == 0 and self.writes:
+            with open(self.writes, "a") as fh:
+                fh.write("# applied\n")
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 
     @property
@@ -344,7 +350,7 @@ class TestTryApply(_OverlayCase):
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
 
-    def test_no_target_and_no_cwd_runs_nothing_and_fails(self):
+    def test_no_target_runs_nothing_and_fails(self):
         run = _RecordingRun()
         with mock.patch.object(ov.subprocess, "run", run):
             self.assertFalse(ov._try_apply(self.patch))
@@ -361,42 +367,49 @@ class TestTryApply(_OverlayCase):
         ])
         self.assertEqual(run.cwds, [None, None])
 
-    def test_cwd_ladder_is_git_apply_then_patch_p1(self):
-        run = _RecordingRun()
-        with mock.patch.object(ov.subprocess, "run", run):
-            self.assertFalse(ov._try_apply(self.patch, cwd=self.repo))
-        self.assertEqual(run.argvs, [["git", "apply", self.patch],
-                                     ["patch", "-p1", "-i", self.patch]])
-        self.assertEqual(run.cwds, [self.repo, self.repo])
-
-    def test_target_attempts_precede_cwd_attempts(self):
-        run = _RecordingRun()
-        with mock.patch.object(ov.subprocess, "run", run):
-            self.assertFalse(ov._try_apply(self.patch, target_file=self.target, cwd=self.repo))
-        self.assertEqual([argv[0] for argv in run.argvs], ["patch", "git", "git", "patch"])
-        # cwd is handed to every attempt, including the two targeted ones. Harmless only because
-        # target_file and patch are absolute by the time cmd_add_module builds them.
-        self.assertEqual(run.cwds, [self.repo] * 4)
-        self.assertTrue(os.path.isabs(self.target) and os.path.isabs(self.patch))
-
     def test_first_zero_exit_short_circuits_the_ladder(self):
-        run = _RecordingRun(succeed_at=0)
+        run = _RecordingRun(succeed_at=0, writes=self.target)
         with mock.patch.object(ov.subprocess, "run", run):
-            self.assertTrue(ov._try_apply(self.patch, target_file=self.target, cwd=self.repo))
+            self.assertTrue(ov._try_apply(self.patch, target_file=self.target))
         self.assertEqual(run.argvs, [["patch", self.target, "-i", self.patch]])
 
     def test_missing_tool_falls_through_to_the_next_attempt(self):
         # A container without patch(1) must still land the diff via git apply.
-        run = _RecordingRun(succeed_at=1, missing=("patch",))
+        run = _RecordingRun(succeed_at=1, missing=("patch",), writes=self.target)
         with mock.patch.object(ov.subprocess, "run", run):
             self.assertTrue(ov._try_apply(self.patch, target_file=self.target))
         self.assertEqual([argv[0] for argv in run.argvs], ["patch", "git"])
 
     def test_every_tool_missing_is_a_clean_false(self):
-        run = _RecordingRun(missing=("patch", "git"))
+        run, errors = _RecordingRun(missing=("patch", "git")), []
         with mock.patch.object(ov.subprocess, "run", run):
-            self.assertFalse(ov._try_apply(self.patch, target_file=self.target, cwd=self.repo))
-        self.assertEqual(len(run.calls), 4)
+            self.assertFalse(ov._try_apply(self.patch, target_file=self.target, errors=errors))
+        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(errors, ["patch: not installed", "git: not installed"])
+
+    @unittest.skipUnless(shutil.which("patch") and shutil.which("git"), "needs patch(1) and git")
+    def test_a_patch_that_does_not_fully_apply_leaves_the_target_as_found(self):
+        # GNU patch writes hunk 1 of this diff and rejects hunk 2. Run from a subdirectory of a git
+        # work tree, `git apply --directory=<abs>` then skips the path and exits 0.
+        diff = self._write("two_hunks.diff", "--- a/m.py\n+++ b/m.py\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+                                             "@@ -8,3 +8,3 @@\n NOPE\n-ALSO_NOPE\n+X\n STILL_NOPE\n")
+        before = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n"
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        os.makedirs(os.path.join(self.repo, "sub"))
+        self.addCleanup(os.chdir, os.getcwd())
+        for cwd in (self.tmp, os.path.join(self.repo, "sub")):
+            with self.subTest(cwd=cwd):
+                os.chdir(cwd)
+                target, errors = self._write(os.path.join("ov", "_patched", "m.py"), before), []
+                self.assertFalse(ov._try_apply(diff, target_file=target, errors=errors))
+                self.assertEqual(self._read(target), before)
+                self.assertEqual(os.listdir(os.path.dirname(target)), ["m.py"])
+                # Each attempt says why: patch's own output, and git's "exit 0, nothing changed".
+                self.assertIn("patch exit 1", errors[0])
+                self.assertIn("hunk", errors[0].lower())
+                self.assertNotIn("saving rejects", errors[0])    # the .rej is gone with the rollback
+                if cwd != self.tmp:
+                    self.assertIn("exited 0 but left the file unchanged", errors[1])
 
 
 class TestMergeOnto(_OverlayCase):
@@ -474,7 +487,7 @@ class TestAddModule(_OverlayCase):
         # The whole point of the overlay: site-packages must come out of this untouched.
         src = self._write("installed_activation.py", "ORIGINAL = True\n")
         diff = self._write("kernel.diff", "--- a\n+++ b\n")
-        run = _RecordingRun(succeed_at=0)
+        run = _RecordingRun(succeed_at=0, writes=self._patched_path())
         with mock.patch.object(ov.subprocess, "run", run):
             self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=src, patch=diff))
 
@@ -512,9 +525,9 @@ class TestAddModule(_OverlayCase):
         with mock.patch.object(ov.subprocess, "run", _RecordingRun()):
             with self.assertRaises(SystemExit):
                 self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=wrong, patch=diff))
-        with mock.patch.object(ov.subprocess, "run", _RecordingRun(succeed_at=0)):
+        with mock.patch.object(ov.subprocess, "run", _RecordingRun(succeed_at=0, writes=self._patched_path())):
             self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, src_file=right, patch=diff))
-        self.assertEqual(self._read(self._patched_path()), "RIGHT = True\n")
+        self.assertEqual(self._read(self._patched_path()), "RIGHT = True\n# applied\n")
         self.assertEqual(len(self._manifest()["modules"]), 1)
 
     def test_a_patched_file_is_taken_verbatim_and_never_patched(self):
