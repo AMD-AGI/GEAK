@@ -652,6 +652,15 @@ if [ "$PROFILE" = "1" ]; then
     echo ">>> adapters/profile_env/sitecustomize.py not found; the trace may have no GPU events on ROCm." >&2
   fi
 fi
+# AgentX extraction needs iteration geometry, which vLLM's throughput logger omits.
+if [ "$BACKEND" = "vllm" ] && [ "${GEAK_WORKLOAD_KIND:-}" = "agentx_trace_replay" ]; then
+  if _iteration_env="$(_stage_lookup adapters/iteration_env/sitecustomize.py)"; then
+    PROFILE_PYTHONPATH="$(dirname "$_iteration_env")${PROFILE_PYTHONPATH:+:$PROFILE_PYTHONPATH}"
+    export GEAK_ITERATION_LOG_DIR="${GEAK_ITERATION_LOG_DIR:-$OUT_DIR/iterations}"
+  else
+    echo "!!! vLLM iteration observer missing; extraction cannot derive batch shapes from server.log" >&2
+  fi
+fi
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"

@@ -1257,7 +1257,9 @@ def apply_workload_spec(h: dict) -> dict:
         ("corpus", "AGENTX_DATASET"),
         ("canonical_corpus", "AGENTX_CANONICAL_DATASET"),
         ("num_entries", "AGENTX_NUM_ENTRIES"),
+        ("canonical_num_entries", "AGENTX_CANONICAL_NUM_ENTRIES"),
         ("duration_s", "GEAK_AGENTX_DURATION_S"),
+        ("canonical_duration_s", "AGENTX_CANONICAL_DURATION"),
         ("geak_loop_duration_s", "GEAK_AGENTX_LOOP_DURATION_S"),
         ("warmup_requests_per_lane", "AGENTX_WARMUP_REQUESTS_PER_LANE"),
         ("warmup_grace_period_s", "AGENTX_WARMUP_GRACE_PERIOD"),
@@ -1305,24 +1307,16 @@ def agentx_preflight(h: dict) -> list[str]:
     this model is a ~20 minute detour to reach a one-line error. This states the
     gap at dispatch instead.
 
-    Returns human-readable problem strings (empty when the run can proceed).
-    Deliberately NON-fatal: PATH inside the bench subprocess is not always the
-    PATH here, so a hard abort could refuse a run that would have worked.
+    Returns human-readable problem strings (empty when the run can proceed). It
+    only reports; agentx_refusal decides which problem stops the run.
     """
     spec = h.get("workload_spec")
     if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
         return []
     problems: list[str] = []
-    aiperf_bin = os.environ.get("AIPERF_BIN", "").strip() or "aiperf"
-    if not (
-        shutil.which(aiperf_bin)
-        or (os.path.isabs(aiperf_bin) and os.access(aiperf_bin, os.X_OK))
-    ):
-        problems.append(
-            f"aiperf not found on PATH (looked for {aiperf_bin!r}); the AgentX "
-            "client cannot replay traces. Install the AgentX-capable aiperf "
-            "into this environment, or set AIPERF_BIN to its path."
-        )
+    client_problem = _agentx_client_problem(spec)
+    if client_problem:
+        problems.append(client_problem[0])
     # The mapper is only a real gap when the vendored fallback is missing too.
     # GEAK ships a copy beside the client adapter precisely so a run without an
     # InferenceX checkout is not a failure; reporting its absence as a problem
@@ -1343,6 +1337,72 @@ def agentx_preflight(h: dict) -> list[str]:
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
     return problems
+
+
+def agentx_refusal(h: dict) -> str | None:
+    """Why an AgentX run must stop before its first server launch, or None.
+
+    A client named by an absolute path that cannot start is refused: no PATH can
+    change that. A bare name that does not resolve only warns, since PATH inside
+    the bench subprocess is not always the PATH here; GEAK_STRICT_AGENTX_PREFLIGHT=1
+    refuses it too.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    problem = _agentx_client_problem(spec)
+    if problem and (problem[1] or _env_flag("GEAK_STRICT_AGENTX_PREFLIGHT")):
+        return problem[0]
+    return None
+
+
+def _agentx_client_problem(spec: dict) -> tuple[str, bool] | None:
+    """Why the AgentX client cannot start here, and whether that holds on any PATH.
+
+    Resolved in the bench's order: AIPERF_BIN from the environment, else the
+    declaration's aiperf_bin (bench_env.sh assigns it only when the environment
+    left it unset), else aiperf on PATH.
+    """
+    client = (
+        os.environ.get("AIPERF_BIN", "").strip()
+        or str(spec.get("aiperf_bin") or "").strip()
+        or "aiperf"
+    )
+    if os.path.isabs(client):
+        why = _client_start_problem(client)
+        return (f"the AgentX client {client} {why}", True) if why else None
+    found = shutil.which(client)
+    if not found:
+        missing = (
+            f"aiperf not found on PATH (looked for {client!r}); the AgentX "
+            "client cannot replay traces. Install the AgentX-capable aiperf "
+            "into this environment, or set AIPERF_BIN to its path."
+        )
+        return missing, False
+    why = _client_start_problem(found)
+    return (f"the AgentX client {client!r} resolves to {found}, which {why}", False) if why else None
+
+
+def _client_start_problem(path: str) -> str | None:
+    """Why exec() of ``path`` fails here, or None when nothing says it would.
+
+    X_OK alone passes a venv's console script whose interpreter is gone. The venv's
+    python links to the interpreter that built it, outside the venv (uv installs its
+    own), so a container without that interpreter cannot start the script.
+    """
+    if not os.path.isfile(path):
+        return "does not exist"
+    if not os.access(path, os.X_OK):
+        return "is not executable"
+    bin_dir = os.path.dirname(os.path.realpath(path))
+    venv_python = os.path.join(bin_dir, "python")
+    if (
+        os.path.isfile(os.path.join(os.path.dirname(bin_dir), "pyvenv.cfg"))
+        and os.path.islink(venv_python)
+        and not os.path.exists(venv_python)
+    ):
+        return f"is in a venv whose interpreter is gone ({venv_python} -> {os.readlink(venv_python)})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -7914,6 +7974,7 @@ def main(argv: list[str]) -> int:
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
+    workload_refusal = agentx_refusal(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
@@ -7923,6 +7984,7 @@ def main(argv: list[str]) -> int:
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,
                           "agentx_preflight_problems": workload_preflight,
+                          "agentx_refusal": workload_refusal,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
@@ -8150,6 +8212,14 @@ def main(argv: list[str]) -> int:
                           "result_json": str(result_path),
                           "speedup": cached_out.get("throughput_speedup")}))
         return 0 if cached_out.get("status") != "error" else 1
+
+    if workload_refusal:
+        sys.stderr.write(f"GEAK e2e: refusing before any server launch: {workload_refusal}\n")
+        refused = _emit(error=workload_refusal, error_class="agentx_client_unavailable")
+        print(json.dumps({"status": refused.get("status"),
+                          "result_json": str(result_path),
+                          "speedup": refused.get("throughput_speedup")}))
+        return 0 if refused.get("status") != "error" else 1
 
     out: dict = {}
     wf: dict | None = None

@@ -912,10 +912,12 @@ const _agentxEnvPairs = () => {
     ['CONC', String(CONC)],
     ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
     ['AGENTX_DATASET', AGENTX.corpus],
-    // The reference the run is compared against; overriding the corpus or window doesn't move it
-    // (so such a replay is non-canonical). Declare canonical_corpus / canonical_duration_s to move it.
+    // The reference the run is compared against; overriding the corpus, entry count or window
+    // doesn't move it (so such a replay is non-canonical). Declare canonical_corpus /
+    // canonical_num_entries / canonical_duration_s to move it.
     ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
     ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
+    ['AGENTX_CANONICAL_NUM_ENTRIES', AGENTX.canonical_num_entries || AGENTX_DEFAULTS.num_entries],
     ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
     ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX_DEFAULTS.duration_s],
     ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
@@ -3427,6 +3429,7 @@ async function prepareAgentXKernels(round, throughput) {
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
     BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    BASELINE_ITERATION_DIR: `${EVAL_DIR}/baseline/iterations`,
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
     BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
     CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
