@@ -1,7 +1,5 @@
 # GEAK-evo in a full workload optimization loop
 
-The intended Level 4 system autonomously investigates a workload, develops better
-computational organizations, integrates them, and measures the resulting workload.
 GEAK-evo supplies the persistent engineering search inside Hyperloom or GEAK's
 end-to-end workflow. The outer workflow retains responsibility for the workload
 objective, serving configuration, task boundaries and final acceptance.
@@ -17,7 +15,7 @@ flowchart TD
     P[Measure workload and inspect its computational dependencies]
     B[Check applicable resource bounds and competing bottleneck explanations]
     T[Define an editable region with correctness, state and timing contracts]
-    E[GEAK-evo: persistent parallel engineering trajectories]
+    E[GEAK-evo: develop retained implementations]
     M[(Retained source, design, measurements and unresolved questions)]
     V[Verify the realized computation and measure the complete region]
     I[Integrate candidate and verify the serving path uses it]
@@ -42,34 +40,38 @@ Any wider task needs an explicit executable contract and appropriate resources.
 The current single-GPU extraction lane does not establish arbitrary multi-rank
 region support.
 
-Public source inspected on 29 October 2026 identifies the following integration
-points at the linked revisions.
+The integration preserves GEAK's task/result interface. The GEAK links below
+refer to this checkout; the Hyperloom links pin the inspected integration at
+`5fd780a4ef04d9b432ebd2e27602a156db4f7720`.
 
-| Boundary | Current implementation | Manual comparison |
+| Boundary | Implementation | Source |
 |---|---|---|
-| Hyperloom to GEAK | The kernel-agent phase invokes `interface/run_e2e.py` with `handoff.json` and reads `result.json`. The handoff includes the workload, accepted launch/environment configuration, metric and GPU identity. | [Runner](https://github.com/AMD-AGI/Hyperloom/blob/e4a45c99545a6393afabc430bac79244d78e704d/src/hyperloom/orchestrator/kernel/geak_runner.py#L62-L79), [handoff](https://github.com/AMD-AGI/Hyperloom/blob/e4a45c99545a6393afabc430bac79244d78e704d/src/hyperloom/orchestrator/phases/kernel_geak_dispatch.py#L541-L613) |
-| GEAK e2e to kernel worker | The workflow calls `kernel_workflow/kernel_lane.js` directly. It supplies an immutable task, budget and devices, and consumes a patch, evaluation location, score and validation status. | [Worker selection](https://github.com/AMD-AGI/GEAK/blob/f020270d66e9d0be4a486b3bdd2e968be2bac71a/e2e_workflow/e2e_workflow.js#L111-L118), [call and result](https://github.com/AMD-AGI/GEAK/blob/f020270d66e9d0be4a486b3bdd2e968be2bac71a/e2e_workflow/e2e_workflow.js#L6275-L6292) |
-| Kernel result to workload result | Parallel engineering feeds serial patch integration and workload A/B measurements. Hyperloom subsequently revalidates returned candidates through the applicable workload harness. | [Integration](https://github.com/AMD-AGI/GEAK/blob/f020270d66e9d0be4a486b3bdd2e968be2bac71a/e2e_workflow/e2e_workflow.js#L6299-L6339), [Hyperloom revalidation](https://github.com/AMD-AGI/Hyperloom/blob/e4a45c99545a6393afabc430bac79244d78e704d/src/hyperloom/orchestrator/phases/kernel_geak_promotion.py#L146-L218) |
+| Hyperloom installation | `GEAK_REF` selects a branch or commit; the installer resolves the checkout and exports `GEAK_E2E_RUNNER`. | [Installer](https://github.com/AMD-AGI/Hyperloom/blob/5fd780a4ef04d9b432ebd2e27602a156db4f7720/src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh#L161), [installation contract](../../interface/run_e2e.md#hyperloom-checkout-compatibility) |
+| Hyperloom to GEAK | The kernel-agent phase invokes `interface/run_e2e.py handoff.json result.json`. The handoff carries the workload protocol and client, accepted server configuration, metric and GPU identity. | [Runner](https://github.com/AMD-AGI/Hyperloom/blob/5fd780a4ef04d9b432ebd2e27602a156db4f7720/src/hyperloom/orchestrator/kernel/geak_runner.py#L33), [handoff](https://github.com/AMD-AGI/Hyperloom/blob/5fd780a4ef04d9b432ebd2e27602a156db4f7720/src/hyperloom/orchestrator/phases/kernel_geak_dispatch.py#L595), [GEAK mapping](../../interface/run_e2e.py) |
+| GEAK e2e to kernel worker | The workflow calls `kernel_workflow/kernel_lane.js` directly. It supplies the task, search options, budget and devices; the result carries a patch, evaluation location, score and validation status. Omitted optimizer selects EVO. | [Single-kernel route](../../e2e_workflow/src/e2e_workflow/10_single_kernel_passthrough.js), [head-kernel route](../../e2e_workflow/src/e2e_workflow/16_head_kernel.js), [kernel result](../../kernel_workflow/src/kernel_lane/17_writeback_return.js) |
+| Kernel result to workload result | Parallel engineering feeds serial patch integration and workload A/B measurements. Hyperloom revalidates returned candidates through the applicable workload harness. | [Integration](../../e2e_workflow/src/e2e_workflow/16_head_kernel.js), [GEAK finalization](../../e2e_workflow/src/e2e_workflow/18_finalize.js), [Hyperloom revalidation](https://github.com/AMD-AGI/Hyperloom/blob/5fd780a4ef04d9b432ebd2e27602a156db4f7720/src/hyperloom/orchestrator/phases/kernel_geak_promotion.py#L146) |
 
-The smallest proposed replacement preserves the inner task/result boundary and
-uses EVO for its search. Replacing Hyperloom's outer runner instead would require
-implementing the entire e2e contract. A separate serving controller or a duplicate
-engineering engine is unnecessary.
+The installed entrypoint uses the shared Node runtime and forwards EVO options to
+the kernel lane. The Python package remains `geak`, and callers retain the same
+two-JSON command. Explicit `optimizer: "greedy"` selects the incumbent-focused
+policy through the same engineers, tools and evaluator. See the
+[architecture](architecture.md) and [external contract](../../interface/run_e2e.md).
 
-The e2e path calls one kernel workflow directly; its runtime does not allow a
-further `e2e → dispatcher → worker` nesting level. The population dispatcher
-launches workers and therefore cannot replace that direct call unchanged.
-A single-lineage EVO configuration binds its engine and option forwarding
-through the task interface.
+The e2e path calls a kernel lane directly. The public standalone kernel entrypoint
+also provides language dispatch; it is not a population launcher. For checkpoint
+migration, the caller launches compatible peer lineages and supplies their shared
+directory and identities with `evolution_start: "search_start"`. The default
+first-stall continuation uses a local archive. See
+[migration configuration](configuration.md#checkpoint-migration).
 
 There are two relevant limits in the inspected code. First, isolated speedup above
 one gates an integration attempt in the cited path. An individually slower
 operation that enables a faster enclosing schedule therefore needs evaluation as
 part of the appropriate larger region. Second, GEAK can
-[carry an earlier accepted A/B result](https://github.com/AMD-AGI/GEAK/blob/f020270d66e9d0be4a486b3bdd2e968be2bac71a/e2e_workflow/e2e_workflow.js#L6702-L6712)
+[carry an earlier accepted A/B result](../../e2e_workflow/src/e2e_workflow/18_finalize.js)
 when its final Director measurement is unavailable. A returned speedup alone does
 not prove that fresh final validation completed. The canonical AgentX path
-[cannot substitute a GEAK proxy result](https://github.com/AMD-AGI/Hyperloom/blob/e4a45c99545a6393afabc430bac79244d78e704d/src/hyperloom/orchestrator/phases/geak_rebench.py#L39-L51)
+[cannot substitute a GEAK proxy result](https://github.com/AMD-AGI/Hyperloom/blob/5fd780a4ef04d9b432ebd2e27602a156db4f7720/src/hyperloom/orchestrator/phases/geak_rebench.py#L39)
 for workload validation.
 
 The [Cohere megakernel article](https://cohere.com/blog/megakernels) illustrates

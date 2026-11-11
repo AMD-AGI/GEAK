@@ -34,11 +34,12 @@ hard-coded handle.
 
 ### Hyperloom checkout compatibility
 
-Hyperloom's existing installer selects this release through `GEAK_REF`. From
-the Hyperloom checkout, pass the branch to the usual installation step:
+Hyperloom's existing installer selects the GEAK checkout through `GEAK_REF`,
+which defaults to `main`. From the Hyperloom checkout, pass the desired branch
+or commit to the usual installation step:
 
 ```bash
-GEAK_REF=feature/evo-reviewed-release-20261110 \
+GEAK_REF=main \
   bash src/hyperloom/inference_optimizer/assets/install.sh
 ```
 
@@ -49,6 +50,10 @@ files relative to its own location. Retain the complete checkout alongside the
 installed Python package. The package remains named `geak`, and the entrypoint
 remains `interface/run_e2e.py`. The handoff/result schemas keep their existing
 interface.
+
+For a change under review, replace `main` with the PR branch or an immutable
+commit. The [integration source map](../docs/evo/workload-discovery.md) records
+the inspected Hyperloom installer and handoff implementation.
 
 The standard two-JSON invocation uses the standalone runtime. It selects Claude
 unless an explicit backend/profile or the existing unambiguous provider

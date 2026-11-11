@@ -22,7 +22,7 @@ budget for reasoning and implementation as well as evaluation and delivery.
 ## Get started
 
 ```sh
-git clone --branch feature/evo-reviewed-release-20261110 https://github.com/AMD-AGI/GEAK.git
+git clone https://github.com/AMD-AGI/GEAK.git
 cd GEAK
 GEAK_HOME="$PWD" pip install .
 ```
@@ -44,7 +44,7 @@ an authenticated agent backend, and the task's compiler and library dependencies
 Set this in the environment used by Hyperloom's GEAK installation step:
 
 ```sh
-export GEAK_REF=feature/evo-reviewed-release-20261110
+export GEAK_REF=main
 ```
 
 Run the existing Hyperloom installation and workflow commands. Its GEAK installer
@@ -59,6 +59,10 @@ and measurement-process ownership, while the configured Claude or Codex backend
 runs the agents. Existing backend/model settings and the two-JSON interface are
 preserved. See [the interface guide](interface/run_e2e.md) for configuration and
 CPU-only handoff validation with `--dry-run`.
+
+To evaluate an unmerged change, set `GEAK_REF` to its branch or commit before
+installation. The [integration source map](docs/evo/workload-discovery.md)
+links the installer, handoff producer, kernel worker and workload acceptance path.
 
 The repository, Python package `geak`, `GEAK_*` environment variables and artifact
 paths retain their names so existing integrations can use this branch. A kernel

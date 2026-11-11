@@ -27,11 +27,10 @@ unchanged for compatibility.
 
 ## Install the release checkout
 
-Clone the release branch, then install from that checkout:
+Clone GEAK, then install from that checkout:
 
 ```bash
-git clone --single-branch --branch feature/evo-reviewed-release-20261110 \
-  https://github.com/AMD-AGI/GEAK.git
+git clone https://github.com/AMD-AGI/GEAK.git
 cd GEAK
 GEAK_HOME="$PWD" pip install .
 ```
@@ -40,6 +39,9 @@ GEAK_HOME="$PWD" pip install .
 branch. Keep using this directory for launches. The install attempts to install or
 update Claude Code and prints any remaining setup steps; Node.js and the serving
 stack must already be available separately.
+
+To review an unmerged change, check out its PR branch or immutable commit before
+installation. Hyperloom callers select that same revision through `GEAK_REF`.
 
 Follow the printed PATH instructions for `~/.local/bin`, and configure your agent
 credentials. For Claude API access, set `ANTHROPIC_API_KEY` in your environment;
@@ -57,7 +59,7 @@ rocminfo | grep -E "Name:|gfx"
 command -v rocprof-compute || command -v rocprofv3 || command -v rocprof
 ```
 
-Check that the branch is `feature/evo-reviewed-release-20261110`, Node is at least
+Check that the checkout is at the intended branch or commit, Node is at least
 18, the chosen agent CLI is available, and ROCm reports the intended GPU. If
 `rocminfo` fails, check the ROCm installation and PATH. If no profiler resolves,
 install `rocprof-compute` or `rocprofv3`.
