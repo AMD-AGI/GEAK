@@ -107,6 +107,13 @@ Validate compile, correctness, benchmark and profile modes before freezing.
 
 Run FULL_BENCHMARK three times through gpu_lock, retaining all per-case results.
 Investigate variance above about 5%; do not claim reliable:true while unresolved.
+Distinguish numerical correctness, stability of the primary objective across
+repetitions, per-case latency stability, and within-invocation paired-ratio spread.
+For each, state the sampling unit, estimator, repetition count and source/measurement
+context. Keep zero-weight cases in correctness checks and stability diagnostics;
+small objective scatter does not resolve uncertain per-case reliability. Use the
+supplied complete runner to investigate; preserve all observations and its fixed
+repetition policy. Timing scatter alone does not establish its physical cause.
 Save EVAL_DIR/baseline_timing.json in this shape (omit workload-only fields when
 unweighted). baseline_weighted_total_ms is sum(weight) only when weights have time
 units; equivalently sum(count * latency_ms) when actual counts define those weights.
