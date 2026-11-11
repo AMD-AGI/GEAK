@@ -979,6 +979,20 @@ def test_single_gpu_holder_blocks_group_until_released(tmp_path):
     assert elapsed >= 0.25
 
 
+@pytest.mark.parametrize("gpu_spec", ["0", "0,1"])
+def test_a_descendant_that_outlives_the_command_does_not_keep_the_lane(tmp_path, gpu_spec):
+    pid_file = tmp_path / "kid.pid"
+    run_wrapper(tmp_path, gpu_spec, "bash", "-c",
+                f"sleep 120 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}")
+    kid = int(pid_file.read_text())
+    try:
+        assert process_is_live(kid)
+        with open(tmp_path / "locks" / "gpu_0.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)   # raises if the descendant holds it
+    finally:
+        os.kill(kid, signal.SIGKILL)
+
+
 def test_pool_wrapper_selects_available_n_gpu_group(tmp_path):
     holder = start_holder(tmp_path, "group:0", tmp_path / "ready", 0.5)
     selected = tmp_path / "selected"

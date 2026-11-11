@@ -277,7 +277,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
-    "$@"
+    "$@" {POOL_FD}>&-   # this shell's copy holds the lane; see `200>&-` below
 else
     # Single-GPU mode BLOCKS TOO, and its wait must be measured for the same reason the pool's is.
     # Pinning does not mean "no contention": with 4 engineers over 2 pinned GPUs, two engineers share
@@ -309,6 +309,8 @@ else
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
-        "$@"
+        # Not inherited by the command: bash sets no close-on-exec here, so any descendant that
+        # outlived it would keep the lock held. This subshell's fd 200 holds it while "$@" runs.
+        "$@" 200>&-
     ) 200>"$LOCK_FILE"
 fi
