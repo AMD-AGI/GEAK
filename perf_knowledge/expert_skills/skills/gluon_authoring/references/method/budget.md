@@ -155,7 +155,7 @@ the champion's recorded depth or as the depth of the LDS ring you plan to **auth
 | --- | --- |
 | chosen layouts (`#blocked`/`#mma`/`#shared`) + `num_stages` | plain `.ttgir` (`kernel_workflow/scripts/kernel_tools/dump_ir.sh`) |
 | actual VGPR / AGPR / spill | `.amdgcn` / compile stats (`probe.py`, `asm_loop_audit.py`) |
-| MFMA efficiency, `ds_read` interval, in-flight behavior | ATT (`kernel_workflow/scripts/profile_kernel.sh` with the ATT mode, or `kernel_tools/capture.sh`; rollups via `mfma_efficiency.py` / `calc_perf.py`) — see [`profile.md`](profile.md) |
+| MFMA efficiency, `ds_read` interval, in-flight behavior | ATT (`kernel_tools/capture.sh`, or `kernel_tools/rocprofv3_safe.sh --att`; rollups via `mfma_efficiency.py` / `calc_perf.py`) — see [`profile.md`](profile.md) |
 | achieved DRAM/fabric bytes and rate | `rocprofv3 --pmc` → `kernel_tools/parse_pmc.py` memory block |
 
 On **plain Triton you can only observe aggregates** (total VGPR, total LDS, MFMA eff, `ds_read`

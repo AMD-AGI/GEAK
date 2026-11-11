@@ -4,7 +4,7 @@
     "arch": "gfx ISA target (hw_constants.json key)",
     "family": "CDNA3|CDNA4|RDNA3|RDNA3.5|RDNA4",
     "product": "marketing name",
-    "identity_target": "scripts/gpu_identity.py `sku` value that selects this row (`r9700` / `r9600d` are also that identity's `target`; Instinct rows are reached through `sku` only -- `target` stays r9700 | r9600d | unknown). null = no product identity; reached only through the arch default or --sku",
+    "identity_target": "scripts/hardware_context.py `sku` value that selects this row (`r9700` / `r9600d` are also that identity's `target`; Instinct rows are reached through `sku` only -- `target` stays r9700 | r9600d | unknown). null = no product identity; reached only through the arch default or --sku",
     "geak_support": "supported | unsupported (kept for reference; never an arch default)",
     "roofline_default_for_arch": "true on exactly one supported row per arch that may be used when only the gfx is known (gfx950->MI355X, gfx942->MI300X, gfx1151->AI_MAX_395); gfx1201 has none ON PURPOSE (R9700 peaks are product-scoped)",
     "cus": "physical CUs (rocminfo Compute Unit, full device, unpartitioned)",

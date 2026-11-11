@@ -55,8 +55,8 @@ supersedes: []
 
 ## When to use
 
-**GEAK discovery:** on gfx942/gfx950, Triton/Gluon lanes automatically receive this method as a
-language reference (`use_gluon_skill=auto`, default). Disable with `use_gluon_skill=false`.
+**GEAK discovery:** with `use_gluon_skill=auto` (default `false`), Triton/Gluon lanes on gfx942/gfx950
+receive this method as a language reference.
 This does not promote `validation.status: draft` to a validated recipe. Triton lanes keep Triton
 unless a Gluon migration direction is explicitly chosen. Read
 [`references/method/geak-integration.md`](references/method/geak-integration.md) for the Claude Code
@@ -86,7 +86,7 @@ Neither a bundle nor a measured incumbent is a **return to the front end** — t
 
 **How it runs in GEAK — existing roles, no extra agents**
 ([`references/method/orchestration.md`](references/method/orchestration.md)). GEAK's `kernel_workflow`
-provides this method to its existing roles (`use_gluon_skill=auto`); validated expert recipes remain
+provides this method to its existing roles when `use_gluon_skill=auto`; validated expert recipes remain
 separately opt-in (`use_expert_skills=true`); GEAK owns the round loop, the GPU lock,
 timing (`harness_lib`) and acceptance (`verify_engineer`, Director, `MIN_IMPROVE`). The skill is an
 **advisory prior**: follow its stages and evidence rules inside GEAK's rounds; it never overrides an on-box
@@ -424,7 +424,7 @@ is reported missing, never as a zero.
 | **D** timing & correctness | correctness gating before timing; same-window interleaved A/B; a default-off knob must not move the shipped instruction stream | GEAK frozen task runner (acceptance), `$KT/ab_bench.py` (screening) |
 
 **Profiler entry is GEAK's** `kernel_workflow/scripts/profile_kernel.sh <gpu_id> <cmd> <out>` under
-`gpu_lock.sh` (optional PMC / ATT modes; parsers in `$KT`); never pin `HIP_VISIBLE_DEVICES` inline.
+`gpu_lock.sh` (extra PMC / ATT passes via `$KT/capture.sh` / `$KT/rocprofv3_safe.sh`; parsers in `$KT`); never pin `HIP_VISIBLE_DEVICES` inline.
 **Interpretation** follows `kernel_workflow/knowledge/profiling_guide.md`: ratios over Total; dependency
 wait is a latency chain (C1), not memory-bound; issue wait is too few resident waves (C2); read the busy
 counters `VALUBusy` / `MfmaUtil`, not duty-cycle `VALUUtilization`. A PMC-blind box (RDNA4) degrades — it is

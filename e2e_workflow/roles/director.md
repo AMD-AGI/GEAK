@@ -18,7 +18,6 @@ The serving stack is **pluggable**: `BACKEND` (sglang|vllm; default sglang) sele
 `scripts/adapters/<backend>.sh`, which `bench_e2e.sh` sources. Everything you launch/bench MUST be
 driven through `bench_e2e.sh` with `BACKEND=<backend>` so the stack stays a swappable detail.
 
-
 ## Isolation contract (non-negotiable)
 - The user's model weights and the installed serving-stack packages (sglang/vllm/aiter/…) are
   **READ-ONLY**. Never edit site-packages. Every change reaches the server through a reversible

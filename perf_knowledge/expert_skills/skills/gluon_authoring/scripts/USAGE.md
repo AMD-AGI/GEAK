@@ -257,14 +257,13 @@ visible peeled prologue.
 **Profiler entry is GEAK's**, under its GPU lock — never pin `HIP_VISIBLE_DEVICES` inline:
 
 ```bash
-bash kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<harness cmd> --profile" <out_dir> \
-     [--pmc | --derived] [--att] [--spi] [--kernel <regex>]
+bash kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<harness cmd> --profile" <out_dir>
 ```
 
-The default run is unchanged (arch-aware profiler order from `profile_policy.sh`, raw output in
-`profile_report.txt` ending with `Profiler used:`). The optional layers write `pmc/`, `att/`, `spi/` beside it,
-append a section each, record their state in `profile_layers.json`, and **degrade** (never fail the run) when
-the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowledge/profiling_guide.md` and
+It uses the arch-aware profiler order from `profile_policy.sh` and writes raw output to
+`profile_report.txt` ending with `Profiler used:`. Counter groups, ATT and SPI are separate passes through
+`$KT/capture.sh` or `$KT/rocprofv3_safe.sh` (below); they record their state in `capture.json` /
+`rocprofv3_safe.json` and **degrade** rather than fail when the tool, arch or ATT decoder is missing. Interpretation: `kernel_workflow/knowledge/profiling_guide.md` and
 `references/method/profile.md`.
 
 | `$KT` tool | gives you |

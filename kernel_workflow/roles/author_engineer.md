@@ -65,8 +65,8 @@ Read, as reference, before writing:
   For **gluon** the dir is facts-only (`overview.md`, `programming_model.md`, `gemm_cookbook.md`); the
   full Gluon method — API surface, TTGIR→Gluon transcription, the stage spine (entry → budget →
   transcribe → recover → climb → close), hand-written pipeline first, gfx950-first with gfx942 as the
-  downgrade — lives in the `gluon_authoring` skill, automatically supplied as a language reference
-  on gfx942/gfx950 Triton/Gluon lanes (`use_gluon_skill=auto`; false disables it). Draft status remains
+  downgrade — lives in the `gluon_authoring` skill, supplied as a language reference on gfx942/gfx950
+  Triton/Gluon lanes only when the run sets `use_gluon_skill=auto` (default false). Draft status remains
   visible; this does not claim a validated speedup. Follow applicable stages and evidence
   rules within your rounds, but this workflow still owns the loop, the GPU lock, timing and acceptance.
 - **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus

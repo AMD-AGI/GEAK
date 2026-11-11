@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// Deterministic kernel-lane harness shared by hardware-context regression tests.
+// Deterministic kernel-lane harness: runs kernel_lane.js with synthetic role responses (no agents/GPU).
 'use strict';
 
 const fs = require('fs');
@@ -31,9 +31,6 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
   const globals = {
     args: {
       kernel_path: '/tmp/kernel',
-      hardware_context: extras.hardwareContext,
-      use_hardware_context: extras.useHardwareContext,
-      expected_sku: extras.expectedSku,
       state: extras.state,
       mode: extras.mode || 'optimize',
       workflow_dir: wfDir,
@@ -73,9 +70,6 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
           baseline_dir: '/tmp/eval/baseline',
           kernel_name: 'kernel',
           device_name: deviceName || 'fixture',
-          hardware_context: extras.setupContext || extras.hardwareContext,
-          device_sku: extras.setupSku,
-          hardware_context_path: '/tmp/eval/hardware_context.json',
           baseline_frozen: true,
           source_files: ['kernel.py'],
         };
@@ -107,7 +101,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
         };
       }
       if (options.label === 'profile_engineer:baseline') {
-        return { bottleneck: 'unknown', device: deviceGfx, summary_path: '', profile_roofline_json: '/tmp/native-evidence.json' };
+        return { bottleneck: 'unknown', device: deviceGfx, summary_path: '' };
       }
       if (options.label.startsWith('tech_lead:plan')) {
         return { stop: false, directions: planDirections || [] };
@@ -125,6 +119,4 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
   return { result: await fn(...Object.values(globals)), prompts, logs, phases };
 }
 
-
-const assert = require('assert');
 module.exports = {run};

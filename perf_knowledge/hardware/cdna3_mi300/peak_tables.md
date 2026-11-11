@@ -85,8 +85,8 @@ benchmark; record `value @ MI300X gfx942, ROCm <ver>, <lib>@<ver>, <date>`.
 ## MI325X delta
 Same compute/peak-FLOPS (304 CU @ 2.1 GHz); memory is **256 GB HBM3E @ 6.0 TB/s** (vs 192 GB / 5.3 TB/s),
 TDP 1000 W. FP16 ridge shifts to ≈ 218 FLOP/B. A roofline for an MI325X must use the 6.0 TB/s row —
-`scripts/gpu_identity.py` reports `sku: mi325x` and the e2e roofline / `hw_budget.py --sku MI325X` select it;
-a bare gfx942 falls back to the MI300X row (5.3 TB/s), which under-states the MI325X memory roof.
+`scripts/hardware_context.py` reports `sku: mi325x` and `hw_budget.py --sku MI325X` selects it;
+a bare gfx942 (including the e2e roofline's gfx942 row) uses the MI300X 5.3 TB/s, which under-states the MI325X memory roof.
 
 ## Sources
 - GEAK per-SKU table (single source for these numbers): `perf_knowledge/hardware/data/sku.json`

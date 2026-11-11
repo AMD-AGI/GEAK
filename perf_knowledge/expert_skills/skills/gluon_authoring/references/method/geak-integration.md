@@ -15,8 +15,8 @@ including the inline Optimize prompt. Each role reads the entry and only the cur
 
 | Condition | Behavior |
 | --- | --- |
-| `use_gluon_skill=auto` (default), gfx942/gfx950, Triton/Gluon target | Automatically load the method as language guidance |
-| `use_gluon_skill=false` | No method injection, including nested/bakeoff lanes |
+| `use_gluon_skill=auto` (or `true`), gfx942/gfx950, Triton/Gluon target | Load the method as language guidance |
+| `use_gluon_skill=false` (default) | No method injection, including nested/bakeoff lanes |
 | Other backend or architecture | No Gluon method injection |
 | Triton target | Keep Triton; inspect champion/config and applicable diagnostic guidance; migrate only when explicitly selected |
 | Gluon target with Triton source | Port admission, tuned champion, transcription, recovery, climb |
@@ -169,7 +169,7 @@ python3 -m pytest -q perf_knowledge/expert_skills/_contribute/test_gluon_flow_sm
 The JavaScript smoke executes the real workflow with synthetic role responses:
 Setup, optional Author, Analyze, Benchmark, Profile, Engineer, Verify, Commit,
 Reprofile, Report and Director validation. Author/verification failures stop
-adoption; only `committed=true` updates the incumbent and triggers reprofile.
+adoption; a verified, committed winner updates the incumbent and triggers reprofile.
 The Python smoke runs real stage/context/tool CLIs and payload capture with CPU
 fixtures. These checks establish control flow and artifact handoff, not model
 behavior, numerical correctness, GPU speedup or promotion of this draft method.

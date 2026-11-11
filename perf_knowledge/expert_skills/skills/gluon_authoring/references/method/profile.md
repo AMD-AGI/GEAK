@@ -24,7 +24,7 @@ round. When the kernel under test lives in a separate container, the pack's exec
 Read [`geak-integration.md`](geak-integration.md) for analysis ownership. The external native
 `kernel-roofline` runner, when installed, owns its own models and full-counter passes; it is not
 shipped in this checkout. Existing e2e roofline analysis and imported TraceLens priors remain separate. `capture.sh` supplies supplementary trace/ATT/ISA
-artifacts and no longer starts rocprof-compute automatically. `profile_kernel.sh --pmc` remains an
+artifacts and no longer starts rocprof-compute automatically. `rocprofv3_safe.sh --pmc` remains an
 explicit diagnostic collection; its whole-process kernel selection does not implement the native
 measured-window contract. A local diagnostic cannot fill missing native model coverage.
 
@@ -37,7 +37,7 @@ Set `GEAK_ROOT` to the absolute checkout root before running examples from a tas
 
 | what | where | notes |
 | --- | --- | --- |
-| profiler entry | `kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<benchmark_cmd>" <output_dir>` (+ `profile_policy.sh`) | warms up, takes `kernel_workflow/scripts/gpu_lock.sh` for every run, picks the best available profiler by arch, dumps **raw** output to `<output_dir>/profile_report.txt` (+ native artifacts). Optional modes: **`--pmc`** (memory counters + derived compute/occupancy metrics + optional SPI pass — `## Derived metrics (direct \`rocprofv3 --pmc\` read)`) and **`--att`** (thread trace — `## rocprofv3 ATT (optional \`--att\`)`), merged from the pack's former profiler |
+| profiler entry | `kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<benchmark_cmd>" <output_dir>` (+ `profile_policy.sh`) | warms up, takes `kernel_workflow/scripts/gpu_lock.sh` for every run, picks the best available profiler by arch, dumps **raw** output to `<output_dir>/profile_report.txt` (+ native artifacts). Counter groups (`## Derived metrics (direct \`rocprofv3 --pmc\` read)`) and thread trace (`## rocprofv3 ATT (optional \`--att\`)`) are separate passes through `kernel_tools/rocprofv3_safe.sh` / `capture.sh` |
 | GPU lock | `kernel_workflow/scripts/gpu_lock.sh <gpu_id\|pool> <command...>` (lock dir `/tmp/team_gpu_locks`) | every other wrapper below runs under it: `bash kernel_workflow/scripts/gpu_lock.sh <gpu> bash kernel_workflow/scripts/kernel_tools/capture.sh …` |
 | one-command evidence capture | `kernel_workflow/scripts/kernel_tools/capture.sh` | ATT rollup + static ISA audit + IR in one go (preflight → validated trace / optional decoded ATT, with per-layer status); per-joint scripts + degrade table: `scripts/USAGE.md` |
 | safe rocprofv3 | `kernel_workflow/scripts/kernel_tools/rocprofv3_safe.sh --kernel <regex> --out <dir> [--pmc "A B C"] [--timeout 150] -- <cmd...>` | never call `rocprofv3` bare (`### Wrapper conventions`) |
@@ -357,8 +357,8 @@ degraded/no-PMC mode).
 ## Derived metrics (direct `rocprofv3 --pmc` read)
 
 When no rocprof-compute / omniperf report is available, read the binding compute sub-resource and
-occupancy **directly** with `rocprofv3 --pmc` (the `--pmc` mode of `profile_kernel.sh` runs this as
-one extra pass alongside the memory counters; or `rocprofv3_safe.sh --pmc "…"`):
+occupancy **directly** with `rocprofv3 --pmc`, as one extra pass beside the memory counters through
+`rocprofv3_safe.sh --pmc "…"`:
 
 ```text
 MfmaUtil          matrix-core BUSY/throughput (fraction of ALL cycles MFMA worked)
@@ -699,14 +699,15 @@ cross-check before acting on them:
 
 For "how well do MFMA/VALU/LDS overlap, and what steals the MFMA cycles" — the question the PMC
 aggregate cannot answer — use rocprofv3 **ATT** (advanced thread trace), a separate pass from the
-PMC counter pass. Run it through the `--att` mode of `profile_kernel.sh` (or `capture.sh`, which
-auto-widens CU/SE and retries on `code:null`). When ATT completes, `hotspot_analyzer.py` runs on the
+PMC counter pass. Run it through `capture.sh` (which auto-widens CU/SE and retries on `code:null`)
+or `rocprofv3_safe.sh --att`. When ATT completes, run `hotspot_analyzer.py` on the
 `ui_output_agent_*` directory under `$OUTPUT_DIR/att/` (same rocprof ATT input format as
 tile-programming-flydsl; **not** the ncu CSV `hotspot_analyzer.py` in tile-programming-cutedsl):
 
 ```bash
 cd <workspace>    # the GEAK workspace (KERNEL_PATH)
-bash "$GEAK_ROOT/kernel_workflow/scripts/profile_kernel.sh" <gpu_id> "python3 harness.py --profile" /tmp/gluon_prof --att
+bash "$GEAK_ROOT/kernel_workflow/scripts/kernel_tools/capture.sh" gluon_prof /tmp/gluon_prof \
+    --kernel <kernel substr> --source kernel.py --dev <gpu_id> --cmd "python3 harness.py --profile"
 python3 "$GEAK_ROOT/kernel_workflow/scripts/kernel_tools/hotspot_analyzer.py" /tmp/gluon_prof/att/ui_output_agent_* --topk 15 --mode both
 ```
 
@@ -1228,8 +1229,8 @@ Rewritten / demoted (GEAK infrastructure and the conflict rules win):
 
 - Profiler entry: the pack's `scripts/profile_kernel.sh <harness> <out> [gpu] [warmups] [--att]`
   (which exported `HIP_VISIBLE_DEVICES` inline) → GEAK `kernel_workflow/scripts/profile_kernel.sh
-  <gpu_id> <cmd> <out>` with optional `--pmc` / `--att` modes, under `gpu_lock.sh`; the pack's
-  counter/derived/SPI defaults are kept as the `--pmc` content. Parsers/wrappers cited at
+  <gpu_id> <cmd> <out>` under `gpu_lock.sh`, plus `kernel_tools/capture.sh` / `rocprofv3_safe.sh` for
+  ATT and counter passes; the pack's counter/derived/SPI defaults are kept as `parse_pmc.PMC_GROUPS`. Parsers/wrappers cited at
   `kernel_workflow/scripts/kernel_tools/`.
 - Report-reading heuristics: "Dependency Wait (memory) vs Issue Wait (compute)" and "Dependency Wait /
   Active > 3x => memory-bound" → DROPPED as written; replaced by `kernel_workflow/knowledge/profiling_guide.md`: ratios over

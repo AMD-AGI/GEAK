@@ -1018,7 +1018,7 @@ graded against. Reserve the coupled direction's rounds in the brief, before the 
 
 ## 7. How the entry modes map onto GEAK's launch
 
-GEAK `kernel_workflow` injects this skill (`use_gluon_skill: "auto"`, `target_language: "gluon"`) into its
+GEAK `kernel_workflow` injects this skill (with `use_gluon_skill: "auto"`, `target_language: "gluon"`) into its
 existing roles; GEAK owns the round loop, the commit gate (`MIN_IMPROVE` 2%) and acceptance, and the skill
 is advisory (`orchestration.md`). Entry differs by mode only in how the round loop is told about it:
 
@@ -1085,7 +1085,7 @@ Workflow({
     workflow_dir: "<REPO>/kernel_workflow",
     mode: "optimize",              // NOT author — author would overwrite the source being transcribed
     target_language: "gluon",
-    use_gluon_skill: "auto",      // default language reference; false disables it
+    use_gluon_skill: "auto",      // opt in to the language reference (default false)
     budget: 20,
     max_no_improve: 6,             // measured on pa_decode; 4 ends one round before the payoff
     candidate_floor: 0.5,          // opening guess — reset from the debt parity_gate.py reports

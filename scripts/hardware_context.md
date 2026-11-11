@@ -1,22 +1,15 @@
-# Hardware context across GEAK workflows
+# Hardware context for GEAK tools
 
 The shared CLI `scripts/hardware_context.py` reads product specifications from
 `perf_knowledge/hardware/data/sku.json`. It separates observations from product
 specifications and keeps the legacy `device_target` policy field unchanged.
 The identity allowlist now comes from the registry instead of a second CU table.
 
-Entry points: [shared CLI](hardware_context.py), [workflow contract](hardware_context_workflow.js),
+Entry points: [shared CLI](hardware_context.py),
 [SKU registry](../perf_knowledge/hardware/data/sku.json).
 
-Automatic workflow integration is **off by default**. Set
-`use_hardware_context: true` in workflow arguments or the interface handoff JSON
-to enable it. This option is independent of expert-skill selection. When disabled,
-workflows do not add hardware prompts/schema fields, validate saved contexts, or
-request a context artifact. Direct CLI calls remain available without this option.
-
-When enabled, Setup and Freeze run the probe in the workload environment, after
-the run directory exists, and return its complete JSON as `hardware_context`, its
-`sku` as `device_sku`, and the absolute filename as `hardware_context_path`:
+The GEAK workflows do not call this CLI or forward a context; run it directly when a
+tool needs a run-scoped hardware context:
 
 ```bash
 python3 "$GEAK_ROOT/scripts/hardware_context.py" --output "$EVAL_DIR/hardware_context.json"
@@ -24,15 +17,8 @@ export GEAK_HARDWARE_CONTEXT="$EVAL_DIR/hardware_context.json"
 python3 "$GEAK_ROOT/scripts/hardware_context.py" --check "$GEAK_HARDWARE_CONTEXT"
 ```
 
-The workflow validates the returned identity against Setup/Freeze and any supplied
-expectations, forwards the object to hardware-relevant planning/profiling/engineering
-roles and child lanes, and retains the opt-in and context in e2e resume state.
-Clock, file-writing, report and final validation calls receive no hardware prelude.
-Explicit `use_hardware_context: false` overrides a saved opt-in; a saved context
-alone never enables it. Enabled integration applies to HIP, Triton, Gluon,
-backend tuning and serving configuration, including with expert skills disabled. The JS runtime cannot access
-files, so the existing roles perform the CLI/file work; Python consumers validate
-the catalog hash and content again before using numeric specifications.
+The local calculators below read `GEAK_HARDWARE_CONTEXT` when it is set and
+validate the catalog hash and content again before using numeric specifications.
 
 `observed.physical_cu_count` is the resource count visible to one rocminfo agent.
 `observed.memory_bytes`, when present, is that agent's GLOBAL pool capacity, not
@@ -54,27 +40,8 @@ Conflicts, unknown names and reference-only products cannot supply legacy e2e
 numeric peaks. MI308X uses its own historical/derived row with low confidence;
 matching its name does not certify those rates. R9600D cache stays unknown.
 
-The old `resolve_peaks(path, gfx, ...)` call signature remains available. New
-callers pass `hardware_context=FILE_OR_OBJECT` (or export `GEAK_HARDWARE_CONTEXT`),
-or pass `identity=GPU_IDENTITY_JSON`. Bare gfx942/gfx950 retain the generated
-architecture reference with `sku=unknown`, `reference_sku`, and low confidence.
-For other non-client targets with no table, the legacy device-property derivation
-remains available. Neither fallback establishes product identity. Supplied CU
-counts constrain the reference; invalid, conflicting or named unknown contexts
-never fall back. Explicit legacy product-only lookups are low-confidence references. All local
-specification estimates remain planning-only and cannot establish acceptance.
-
-The legacy API also accepts `cu=` (or CLI `--cu`) for compatibility with physical-CU
-gated gfx115x callers. `roofline_tools.py --peaks gfx1151 --cu 40` reads the generated
-AI Max 395 reference: 59.4 BF16 TFLOPS / 256 GB/s. It retains `sku=unknown`, records
-`reference_sku=AI_MAX_395`, and sets `scope=arch_cu_reference_only`,
-`confidence=low`, `may_gate=false`. It does not identify an unnamed GPU as that
-product: the 495 also has 40 CUs and different reference values. The count must
-come from rocminfo; 32/16-CU devices, Torch's 20 WGPs and invalid counts are refused.
-This explicit query can use an unnamed, non-conflicting run context; the context
-itself stays unknown. Matched contexts retain their own SKU values, and a supplied
-CU count must agree with the observation. Conflicts never fall back to a reference.
-No serving, profiler-order or automatic-routing policy is changed by this API.
+The e2e roofline engine (`e2e_workflow/knowledge/analysis_skills/roofline/`) keeps
+its own `peaks.md` and does not read this context.
 
 `kernel_tools/calc_perf.py`, `hw_budget.py`, `mem_bw_probe.py` and `amd_occupancy.py` accept `--hardware-context FILE` or the same environment
 variable. Product-based tools select the matched SKU and reject a conflicting `--sku`;
@@ -126,17 +93,13 @@ recapture references rather than silently relabelling an archived calibration.
 On the separate upstream `tl-roofline` branch, the old e2e `roofline/` engine and
 its tests are removed and the generated product table moves to
 `perf_knowledge/hardware/product_peaks.md`. Keep that retirement when integrating;
-the shared context and local calculators do not depend on the old engine. Until that branch lands, the legacy resolver uses the same shared context.
+the shared context and local calculators do not depend on the old engine.
 
 ## Maintaining the contract
 
 Edit sourced specifications in the public JSON, then regenerate its Markdown
-views. Update identity fixtures when adding a product. Changes to the pure JS
-contract go in `scripts/hardware_context_workflow.js`, then run
-`python3 scripts/sync_hardware_context_workflow.py`; the embedded copies support
-both Claude Code's native sandbox and GEAK's interface runtime without imports.
-Run `python3 -m pytest -q scripts/tests/test_hardware_context.py` and
-`node kernel_workflow/scripts/test_hardware_context_routing.js` for regression
+views. Update identity fixtures when adding a product.
+Run `python3 -m pytest -q scripts/tests/test_hardware_context.py` for regression
 coverage. A changed catalog requires regenerating run contexts; archived contexts
 remain provenance and must not silently select new numerical references.
 

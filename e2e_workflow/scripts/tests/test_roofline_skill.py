@@ -18,7 +18,6 @@ import importlib.util
 import os
 import sys
 import unittest
-from unittest.mock import patch
 
 E2E_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(E2E_DIR, "knowledge", "analysis_skills", "roofline"))
@@ -94,7 +93,7 @@ class TestPeaks(unittest.TestCase):
             "torch.half": 2.5e15,
             "bfloat16": 2.5e15,
             "float16": 2.5e15,
-            "float32": 1.573e14,
+            "float32": 1.57e14,
         }
         for dtype, peak in expected.items():
             with self.subTest(dtype=dtype):
@@ -116,8 +115,8 @@ class TestPeaks(unittest.TestCase):
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 256.0e9, delta=1e9)
         self.assertEqual(p["cu"], 40)
         self.assertEqual(p["source"], "table")
-        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 59.4e12, delta=1e11)
-        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 29.7e12, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 60.0e12, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 30.0e12, delta=1e11)
 
     def test_gfx1151_metrics_see_both_axes(self):
         """Both roofs must be live, not just the memory one. A high-AI kernel at 67% of the WMMA
@@ -128,7 +127,7 @@ class TestPeaks(unittest.TestCase):
         m = rt.roofline_metrics(2.56e6, 4e9, 100e-6, p["hbm_bw_bytes_s"],
                                 rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=20.0)
         self.assertEqual(m["bound_type"], "compute")
-        self.assertAlmostEqual(m["compute_util"], 40.0 / 59.4, places=3)
+        self.assertAlmostEqual(m["compute_util"], 2.0 / 3.0, places=3)
         self.assertAlmostEqual(m["hbm_util"], 0.1, places=3)
         self.assertIsNotNone(m["ridge_point"])
         self.assertLess(m["attainable_speedup"], 2.0)
@@ -158,7 +157,7 @@ class TestPeaks(unittest.TestCase):
         p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")
         self.assertIsNotNone(p)
         self.assertEqual(p["source"], "table")
-        self.assertEqual(p["confidence"], "low")
+        self.assertEqual(p["confidence"], "high")
         self.assertEqual(p.get("product"), "r9700")
         self.assertEqual(p["cu"], 64)
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 6.4e11, delta=1e8)
@@ -180,8 +179,9 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNone(rt.peak_flops_for(p, "fp4"))
         self.assertNotIn("fp4", p["flops"])
 
-    def test_instinct_prefers_observed_identity_over_arch_reference(self):
-        """Legacy arch references survive, but never claim product identity."""
+    def test_unknown_product_identity_keeps_instinct_tables(self):
+        """gpu_identity reports target=unknown for every card except an exact R9700. Passing that
+        straight through as `product` must still find the ISA-keyed CDNA tables, not derive."""
         original = rt.derive_peaks_from_props
 
         def no_derive(device=0):
@@ -195,33 +195,11 @@ class TestPeaks(unittest.TestCase):
                     identity = _identity(gfx, name, cu)
                     self.assertEqual(identity["target"], "unknown")
                     p = rt.resolve_peaks(PEAKS_MD, identity["gfx"], product=identity["target"])
-                    self.assertEqual(p['sku'], 'unknown')
-                    self.assertEqual(p['scope'], 'arch_reference_only')
-                    self.assertFalse(p['may_gate'])
-                    p = rt.resolve_peaks(PEAKS_MD, gfx, identity=identity)
-                    self.assertEqual(p["cu"], cu)
-                    self.assertEqual(p["source"], "sku_specification")
-                    self.assertFalse(p["may_gate"])
+                    self.assertEqual(p, rt.load_peaks(PEAKS_MD, gfx))
+                    self.assertEqual(p["source"], "table")
+                    self.assertEqual(p["confidence"], "high")
         finally:
             rt.derive_peaks_from_props = original
-
-    def test_shared_context_cannot_select_another_full_device(self):
-        import hardware_context as hc
-        for name, cu, expected in [('MI300X',304,1307.4), ('MI308X',80,344),
-                                   ('MI300X',80,None), ('MI300X',38,None), ('MI300X VF',304,None)]:
-            with self.subTest(name=name, cu=cu):
-                c = hc.build(_identity('gfx942', 'AMD Instinct ' + name, cu))
-                p = rt.resolve_peaks(PEAKS_MD, 'gfx942', hardware_context=c)
-                if expected is None:
-                    self.assertIsNone(p)
-                else:
-                    self.assertEqual(p['flops']['fp16'] / 1e12, expected)
-                    self.assertEqual(p['cu'], cu)
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx950', hardware_context=c))
-                c['catalog_sha256'] = '0' * 64
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx942', hardware_context=c))
-        c = hc.build(_identity('gfx942', 'AMD Instinct MI308X', 80))
-        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, 'gfx942', product='mi300x', hardware_context=c))
 
     def test_identity_product_still_scopes_the_r9700_table(self):
         r9700 = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
@@ -246,7 +224,7 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
-    def test_arch_only_lookup_does_not_invent_device_scope(self):
+    def test_gfx1250_missing_table_may_derive(self):
         called = []
         original = rt.derive_peaks_from_props
 
@@ -270,124 +248,6 @@ class TestPeaks(unittest.TestCase):
 
     def test_L5_missing_peaks_file_does_not_raise(self):
         self.assertIsNone(rt.load_peaks("/nonexistent/peaks.md", "gfx950"))
-
-
-class TestPlanningCompatibility(unittest.TestCase):
-    def setUp(self):
-        clean = {k: v for k, v in os.environ.items()
-                 if k not in ("GEAK_HARDWARE_CONTEXT", "GEAK_HW_DATA_DIR")}
-        self.environment = patch.dict(os.environ, clean, clear=True)
-        self.environment.start()
-        self.addCleanup(self.environment.stop)
-
-    def test_existing_product_priors_are_preserved(self):
-        for product in (None, "unknown", "r9700", "r9600d", "mi355x"):
-            with self.subTest(product=product):
-                self.assertEqual(rt.target_eff_for("moe", product), 0.76 if product == "r9700" else 0.90)
-                self.assertEqual(rt.target_eff_for("elementwise", product), 0.76 if product == "r9700" else 0.875)
-                self.assertEqual(rt.target_eff_for(" GEMM ", product), 0.90)
-                self.assertEqual(rt.target_eff_for("attn", product), 0.50)
-                self.assertIsNone(rt.target_eff_for("unknown", product))
-
-    def test_legacy_arch_fallback_and_derived_device_properties(self):
-        for gfx, sku, bw in [('gfx942', 'MI300X', 5.3e12), ('gfx950', 'MI355X', 8e12)]:
-            with self.subTest(gfx=gfx):
-                p = rt.resolve_peaks(PEAKS_MD, gfx)
-                self.assertEqual(p['reference_sku'], sku)
-                self.assertEqual(p['sku'], 'unknown')
-                self.assertEqual(p['confidence'], 'low')
-                self.assertFalse(p['may_gate'])
-                self.assertEqual(p['hbm_bw_bytes_s'], bw)
-        from types import SimpleNamespace
-        props = SimpleNamespace(memory_clock_rate=1000000, memory_bus_width=4096,
-                                multi_processor_count=120)
-        fake_torch = SimpleNamespace(cuda=SimpleNamespace(get_device_properties=lambda device: props))
-        with patch.dict('sys.modules', {'torch': fake_torch}):
-            p = rt.resolve_peaks('/missing/table', 'gfx999', device=2)
-            self.assertEqual(p['scope'], 'derived_reference_only')
-            self.assertEqual(p['hbm_bw_bytes_s'], 1.024e12)
-            self.assertEqual(p['source'], 'derived')
-            self.assertEqual(p['sku'], 'unknown')
-            self.assertIsNone(rt.resolve_peaks('/missing/table', 'gfx999', cu=80))
-            self.assertIsNone(rt.resolve_peaks('/missing/table', 'gfx999', product='unknown-product'))
-            self.assertIsNone(rt.resolve_peaks('/missing/table', 'gfx1201'))
-            self.assertIsNone(rt.resolve_peaks('/missing/table', 'gfx1151'))
-
-    def test_r9700_prior_preserves_headroom_classification(self):
-        for op in ('moe', 'elementwise'):
-            self.assertEqual(rt.classify_headroom(.70, rt.target_eff_for(op, 'r9700')), 'saturated')
-            self.assertEqual(rt.classify_headroom(.70, rt.target_eff_for(op, 'r9600d')), 'moderate')
-
-    def test_gfx1151_cu_reference_uses_shared_values_without_claiming_identity(self):
-        for cu in (40, "40", 40.0, " 40 "):
-            with self.subTest(cu=cu):
-                # Positional compatibility with resolve_peaks(path, gfx, device, product, cu).
-                p = rt.resolve_peaks(PEAKS_MD, "gfx1151", 0, None, cu)
-                self.assertEqual(p["flops"]["bf16"], 59.4e12)
-                self.assertEqual(p["hbm_bw_bytes_s"], 256e9)
-                self.assertEqual(p["reference_sku"], "AI_MAX_395")
-                self.assertEqual((p["sku"], p["product"]), ("unknown", "unknown"))
-                self.assertEqual(p["scope"], "arch_cu_reference_only")
-                self.assertEqual(p["confidence"], "low")
-                self.assertEqual(p["memory_basis"], "datasheet")
-                self.assertEqual(p["analysis_role"], "planning")
-                self.assertFalse(p["may_gate"])
-                self.assertIsNone(rt.peak_flops_for(p, "fp8"))
-
-    def test_cu_gate_rejects_other_skus_wgps_and_invalid_counts(self):
-        for cu in (32, 16, 20, 0, -40, 40.5, float("inf"), float("nan"), True,
-                   None, "", "abc", [], {}, 10 ** 400):
-            with self.subTest(cu=cu):
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=cu))
-        for gfx in ("gfx1150", "gfx1152", "gfx1153", "gfx1100", "gfx1201", "gfx1250", "gfx950"):
-            with self.subTest(gfx=gfx):
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, gfx, cu=40))
-        self.assertIsNone(rt.resolve_peaks("/missing/peaks.md", "gfx1151", cu=40))
-
-    def test_explicit_cu_cannot_override_product_or_observed_scope(self):
-        identity = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
-        p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="R9700", cu=64, identity=identity)
-        self.assertEqual(p["sku"], "r9700")
-        self.assertEqual(p["flops"]["bf16"], 191e12)
-        for cu in (32, 40, True, 64.5):
-            with self.subTest(cu=cu):
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700", cu=cu))
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201", cu=cu, identity=identity))
-
-    def test_unnamed_context_reference_does_not_promote_product_or_calibration(self):
-        import hardware_context as hc
-        c = hc.build(_identity("gfx1151", "", 40))
-        self.assertEqual(rt.resolve_peaks(PEAKS_MD, "gfx1151", hardware_context=c)["sku"], "unknown")
-        p = rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40, hardware_context=c)
-        self.assertEqual(p["reference_sku"], "AI_MAX_395")
-        self.assertEqual((c["status"], c["sku"]), ("unknown", "unknown"))
-        self.assertIsNone(hc.planning_peaks(c))
-        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=32, hardware_context=c))
-        c["catalog_sha256"] = "0" * 64
-        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40, hardware_context=c))
-        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40, hardware_context={}))
-
-    def test_context_conflicts_never_fall_back_to_cu_reference(self):
-        import hardware_context as hc
-        for name, cu, partition in (("", 32, None),
-                                     ("AMD Ryzen AI Max+ 395 (Radeon 8060S)", 32, None),
-                                     ("", 40, "CPX")):
-            with self.subTest(name=name, cu=cu, partition=partition):
-                identity = _identity("gfx1151", name, cu)
-                if partition:
-                    identity["compute_partition"] = partition
-                c = hc.build(identity)
-                self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40, hardware_context=c))
-
-    def test_matched_495_keeps_its_own_reference(self):
-        import hardware_context as hc
-        row = hc.catalog()[0]["AI_MAX_495"]
-        c = hc.build(_identity(row["arch"], row["product"], row["cus"]))
-        p = rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=40, hardware_context=c)
-        self.assertEqual(p["sku"], "ai_max_495")
-        self.assertEqual(p["flops"]["bf16"], 61.4e12)
-        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 273e9, delta=1)
-        self.assertNotIn("reference_sku", p)
 
 
 class TestCalibrationMoE(unittest.TestCase):

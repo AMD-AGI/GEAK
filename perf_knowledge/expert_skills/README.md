@@ -70,8 +70,8 @@ the on-box A/B picks the winner.
 
 ### Language method references
 
-Triton/Gluon lanes on gfx942/gfx950 also receive the in-tree `gluon_authoring` method as a language
-reference by default (`use_gluon_skill=auto`; `false` disables it). This is independent of registry
+With `use_gluon_skill=auto` (default `false`), Triton/Gluon lanes on gfx942/gfx950 also receive the
+in-tree `gluon_authoring` method as a language reference. This is independent of registry
 selection and does not promote a draft to a validated recipe. Triton tasks keep their requested
 backend; Gluon migration requires a selected direction. See the
 [integration contract](skills/gluon_authoring/references/method/geak-integration.md).

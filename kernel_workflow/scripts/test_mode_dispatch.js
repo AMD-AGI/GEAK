@@ -93,8 +93,7 @@ const healthy = (liveBackend, authorPlan, identity = {
 
 const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().join(', ');
 
-module.exports = {build, healthy};
-if (require.main === module) (async () => {
+(async () => {
   // -------------------------------------------------------------------------
   console.log('\n# A. mode -> route (worker pass-through vs bake-off)');
   const ROUTES = [

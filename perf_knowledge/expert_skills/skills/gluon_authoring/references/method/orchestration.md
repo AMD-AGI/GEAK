@@ -21,8 +21,8 @@ a run mode ([`## Optional bookkeeping tools`](#optional-bookkeeping-tools)).
 
 ## Who does which stage
 
-**Injection.** On gfx942/gfx950, Triton/Gluon lanes receive this method by default as language
-reference (`use_gluon_skill=auto`); `false` disables it. The declared draft status remains visible.
+**Injection.** With `use_gluon_skill=auto` (default `false`), Triton/Gluon lanes on gfx942/gfx950
+receive this method as language reference. The declared draft status remains visible.
 Validated expert recipes remain separately opt-in with `use_expert_skills=true`. See
 [geak-integration.md](geak-integration.md) for the role and backend routing contract.
 

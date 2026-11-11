@@ -7,16 +7,16 @@ const {run} = require('./test_gluon_skill_routing');
 const marker = '## Triton/Gluon method (automatic language reference)';
 const direction = {id:'smoke', title:'Synthetic candidate', specialty:'compute', prompt:'offline smoke'};
 
-function response(accept = true, commit = true) {
+function response(accept = true) {
   return (label) => {
     if (label === 'author:gluon') return {authored:true, correctness:'pass'};
     if (/^eng /.test(label)) return {status:'success', measurement_valid:true, speedup_geomean:1.2};
     if (/^verify /.test(label)) return {status:'verified', correctness:accept ? 'pass' : 'fail', verified_geomean:1.2};
-    if (/^commit /.test(label)) return {committed:commit};
-    if (/^reprofile /.test(label)) return {summary_path:'/tmp/reprofile.json', profile_roofline_json:'/tmp/new-native.json'};
+    if (/^commit /.test(label)) return {committed:true};
+    if (/^reprofile /.test(label)) return {summary_path:'/tmp/reprofile.json'};
     if (label === 'tech_lead:report') return {final_speedup_geomean:1.2, report_path:'/tmp/report.md', final_patch:'/tmp/final.diff'};
-    if (label === 'director:validate') return {validation_status:accept && commit ? 'accepted' : 'rejected',
-      director_verified_speedup_geomean:accept && commit ? 1.2 : 1, timing_basis:'synthetic-fixture'};
+    if (label === 'director:validate') return {validation_status:accept ? 'accepted' : 'rejected',
+      director_verified_speedup_geomean:accept ? 1.2 : 1, timing_basis:'synthetic-fixture'};
   };
 }
 
@@ -42,7 +42,6 @@ function response(accept = true, commit = true) {
       for (const label of ['benchmark_engineer', 'verify smoke', 'director:validate']) {
         assert(!x.prompts.find(p => p.label === label).prompt.includes(marker), `method unexpectedly controls ${label}`);
       }
-      assert(x.prompts.find(p => p.label === 'eng smoke:compute').prompt.includes('/tmp/native-evidence.json'));
       assert.strictEqual(x.result.validation_status, 'accepted');
       assert.strictEqual(x.result.timing_basis, 'synthetic-fixture');
       rows.push({mode, useGluon, sequence, result:x.result.validation_status});
@@ -54,13 +53,10 @@ function response(accept = true, commit = true) {
   assert(!badAuthor.prompts.some(p => p.label === 'benchmark_engineer'));
   const rejected = await run('gfx950', '', {language:'gluon', budget:1, planDirections:[direction], agentResponse:response(false)});
   assert(!rejected.prompts.some(p => /^commit |^reprofile /.test(p.label)));
-  const failedCommit = await run('gfx950', '', {language:'gluon', budget:1, planDirections:[direction], agentResponse:response(true, false)});
-  assert(!failedCommit.prompts.some(p => /^reprofile /.test(p.label)), 'a failed commit cannot become the new best');
-  assert(!failedCommit.prompts.some(p => p.label === 'update_experience'), 'a rejected result cannot become learned guidance');
-  const incumbent = await run('gfx950', '', {sourceLanguage:'gluon'});
+  const incumbent = await run('gfx950', '', {sourceLanguage:'gluon', useGluon:'auto'});
   assert(incumbent.prompts.find(p => p.label === 'profile_engineer:baseline').prompt.includes('skips transcription/parity'));
   await assert.rejects(run('gfx950', '', {useGluon:'typo'}), /use_gluon_skill/);
   console.log(JSON.stringify({status:'PASS', synthetic_role_responses:true, flows:rows,
-    negative_cases:['author_failed','verification_failed','commit_failed','invalid_switch'],
+    negative_cases:['author_failed','verification_failed','invalid_switch'],
     incumbent:'skip transcription/parity'}, null, 2));
 })().catch(error => {console.error(error); process.exit(1);});

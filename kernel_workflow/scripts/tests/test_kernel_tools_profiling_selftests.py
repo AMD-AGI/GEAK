@@ -66,12 +66,3 @@ def test_profiler_wrappers_follow_geak_conventions():
         assert "--cmd" in joined, f"{name}: no bash -c command-string form"
 
 
-def test_pmc_counter_names_match_the_parser():
-    sys.path.insert(0, str(KT))
-    import parse_pmc
-    names = {c for g in parse_pmc.PMC_GROUPS.values() for c in g}
-    assert {"TCC_EA0_RDREQ_sum", "TCC_EA0_WRREQ_sum"} <= names
-    assert "TCC_EA0_RDREQ_DRAM_sum" not in names
-    # profile_kernel.sh --pmc takes its groups from parse_pmc (single source), never a literal list
-    pk = (SCRIPTS / "profile_kernel.sh").read_text()
-    assert "parse_pmc.py\" --print-groups" in pk and "TCC_EA0_RDREQ_DRAM" not in pk
