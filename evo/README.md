@@ -5,6 +5,11 @@ and donor references to GEAK main. It does not replace the workflow host, role
 files, knowledge, skills, engineer allowances, objective, ORIGINAL measurement,
 independent verifier, promotion gate, or final validation.
 
+See [design diagrams](DESIGN.md) for the implemented single-lane comparison and
+the **proposed, not implemented** persistent multi-lineage extension. Current EVO
+uses one canonical incumbent with archive-backed source selection; it does not
+yet maintain a population of independently developing incumbents.
+
 Omitted, null, empty, and `greedy` optimizer settings use the existing main behavior.
 Other supplied values must be strings; booleans, numbers, arrays and objects are
 rejected consistently by the JavaScript entries and Python interface.
