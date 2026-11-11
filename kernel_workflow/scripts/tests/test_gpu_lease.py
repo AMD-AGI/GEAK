@@ -993,6 +993,30 @@ def test_a_descendant_that_outlives_the_command_does_not_keep_the_lane(tmp_path,
         os.kill(kid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize("gpu_spec", ["0", "0,1"])
+def test_a_blocked_waiter_names_the_process_holding_the_lock(tmp_path, gpu_spec):
+    (tmp_path / "locks").mkdir()
+    lanes = [str(tmp_path / "locks" / f"gpu_{g}.lock") for g in gpu_spec.split(",")]
+    script = (f"import fcntl, time\nfs = [open(p, 'a') for p in {lanes!r}]\n"
+              "[fcntl.flock(f, fcntl.LOCK_EX) for f in fs]\nprint(flush=True); time.sleep(60)")
+    holder = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    holder.stdout.readline()                                    # every lane is held
+    waiter = subprocess.Popen(["bash", str(GPU_LOCK_WRAPPER), gpu_spec, "true"], cwd=tmp_path,
+                              env=wrapper_env(tmp_path, GEAK_GPU_POOL_WAIT="30"),
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        lines = [waiter.stderr.readline() for _ in range(1 + len(lanes))]
+    finally:
+        holder.kill()
+        holder.wait()
+    _, err = waiter.communicate(timeout=30)
+    assert waiter.returncode == 0, err                          # the wait ends once the lock frees
+    held = [line for line in lines + err.splitlines() if "lock is open in pid" in line]
+    assert lines[0].startswith("NOTE: ") and len(held) == len(lanes), lines + [err]
+    for g, line in enumerate(held):                             # the holder, never the waiter
+        assert line.startswith(f"  GPU {g} lock is open in pid {holder.pid} (ppid {os.getpid()}): ")
+
+
 def test_pool_wrapper_selects_available_n_gpu_group(tmp_path):
     holder = start_holder(tmp_path, "group:0", tmp_path / "ready", 0.5)
     selected = tmp_path / "selected"
