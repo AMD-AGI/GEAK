@@ -132,6 +132,25 @@ _gpu_settle_idle() {
     done
 }
 
+# Name the processes that have GPU $1's lock file open: the holder and any other waiter. flock is
+# held by an open file description, which children inherit, so this finds the holder even after the
+# process that took the lock is gone. Builtins only, and the caller is skipped: a pinned waiter has
+# the file open on fd 200 itself.
+_gpu_lock_holders() {   # $1 = gpu id -> lines on stdout
+    local target="${LOCK_DIR}/gpu_${1}.lock" p f k v argv
+    for p in /proc/[0-9]*; do
+        [ "${p#/proc/}" = "$BASHPID" ] && continue
+        for f in "$p"/fd/*; do
+            [ "$f" -ef "$target" ] || continue
+            v=""; while read -r k v; do [ "$k" = PPid: ] && break; done < "$p/status"
+            mapfile -d '' -t argv < "$p/cmdline"
+            f="${argv[*]//$'\n'/ }"
+            echo "  GPU $1 lock is open in pid ${p#/proc/} (ppid $v): ${f:0:200}"
+            break
+        done
+    done 2>/dev/null
+}
+
 case "$GPU_SPEC" in
   group:*|pool:*:*)
     # Multi-GPU lease: gpu_lease.py acquires the whole group or nothing, after compile setup below.
@@ -149,6 +168,7 @@ case "$GPU_SPEC" in
     _deadline=$(( _wait_t0 + ${GEAK_GPU_POOL_WAIT:-1200} ))
     GPU_ID=""
     while [ -z "$GPU_ID" ]; do
+        _locked=""
         for _g in $POOL; do
             # (1) flock: exclusive lane. Held until this process exits.
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
@@ -175,10 +195,16 @@ case "$GPU_SPEC" in
                         >> "$GEAK_GPU_USE_LOG" 2>/dev/null
                 break
             fi
+            _locked="$_locked $_g"
             exec {_fd}>&-
         done
         if [ -z "$GPU_ID" ]; then
             [ "$SECONDS" -ge "$_deadline" ] && { echo "ERROR: no free+idle GPU in pool [$GPU_SPEC] after ${GEAK_GPU_POOL_WAIT:-1200}s" >&2; exit 1; }
+            if [ -z "${_announced:-}" ]; then
+                _announced=1
+                echo "NOTE: no free+idle GPU in pool [$GPU_SPEC]; waiting up to ${GEAK_GPU_POOL_WAIT:-1200}s" >&2
+                for _g in $_locked; do _gpu_lock_holders "$_g" >&2 || true; done
+            fi
             sleep 0.2
         fi
     done
@@ -287,7 +313,11 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        if ! flock -n -x 200; then
+            echo "NOTE: GPU $GPU_ID lock is busy; waiting up to 1200s" >&2
+            _gpu_lock_holders "$GPU_ID" >&2 || true
+            flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        fi
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
