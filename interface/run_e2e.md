@@ -3,7 +3,7 @@
 `interface/` is the **only** surface an external orchestrator (e.g. Hyperloom)
 touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
 names, the Claude Code `Workflow` invocation, the `--effort ultracode`
-requirement, the SDK-vs-CLI choice) is hidden behind one command and two JSON
+requirement, SDK preparation) is hidden behind one command and two JSON
 files. The result schema is versioned so callers can distinguish contract
 changes while the workflow evolves internally.
 
@@ -22,6 +22,33 @@ python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
+
+### Native Claude SDK preparation
+
+Before launching a native Claude workflow, the runner reuses an importable
+`claude_agent_sdk` with `ClaudeSDKClient` and `ClaudeAgentOptions`. If missing or
+obsolete, it installs `claude-agent-sdk==0.2.180` and its dependencies into a
+GEAK-owned cache, validates the installation, then opens the persistent session.
+This applies to all native Claude handoffs, including AgentX and fixed ISL/OSL.
+`--dry-run` and the standalone Node runtime do not install or import the SDK.
+
+The cache defaults to `${XDG_CACHE_HOME:-~/.cache}/geak/sdk`; set
+`GEAK_SDK_CACHE_DIR` to override it. Entries are separated by SDK version, Python
+ABI and platform. Installation uses the controller's Python and `pip --target`;
+if pip is absent, the runner downloads the official standalone pip archive from
+`https://bootstrap.pypa.io/pip/pip.pyz`. A first installation needs package-network
+access and a writable cache. Existing compatible SDKs and valid cached installs
+need no download. Packages are added only to the controller's `sys.path`, with no
+system/serving package changes and no `PYTHONPATH` export to serving subprocesses.
+
+Preparation (including concurrent-install lock waits) has a 300-second cap and
+counts against the workflow timeout. Failure produces `sdk_import_failed` before any workflow starts; `result.json`
+includes the private installer-log path when the cache was writable. There is
+no automatic one-shot `claude -p` or SDK `query()` fallback: these can terminate
+background workflows when the main agent turn ends. The configured Claude CLI,
+model and authentication still need to be available (`GEAK_CLAUDE_BIN` pins the
+native CLI executable); installing the Python SDK
+does not validate credentials or grant access to the native Workflow tool.
 
 ### E2E KB recall policy
 
@@ -62,7 +89,7 @@ includes nested installer/kernel files in those consumers' overlay fingerprints.
 ### Agent backend (swappable: Claude Code ↔ codex)
 
 By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
-tool** (SDK preferred, `claude -p` CLI fallback). The SAME workflow can run on the
+tool** using a persistent Python SDK session. The SAME workflow can run on the
 **standalone Node runtime** (`interface/runtime/engine/run_workflow.mjs`) against the
 codex CLI instead — the runtime re-implements the Workflow globals
 (`agent/parallel/pipeline/phase/workflow`) and dispatches each `agent()` to a
@@ -77,7 +104,7 @@ parallel/nested subagents.
 
 | Selection (flag or env) | Effect |
 | --- | --- |
-| *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
+| *(none, no provider key)* | Native Claude Code `Workflow` tool with SDK preparation |
 | *(none, only `GEAK_AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
 | `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
 | `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |

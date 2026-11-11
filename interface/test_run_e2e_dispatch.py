@@ -2241,20 +2241,11 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertNotIn("cli_path", kwargs)
         self.assertIn("enableWorkflows", kwargs["settings"])
 
-    def test_legacy_sdk_without_streaming_client_uses_one_shot_query(self):
-        """An old SDK has no ClaudeSDKClient; the runner must still drive the
-        synchronous in-turn path rather than failing to import."""
-        query_script = [
-            AssistantMessage(text='{"eval_dir": "/run/legacy"}'),
-            ResultMessage(result="ok"),
-        ]
-        anyio, sdk = self._install(
-            None, with_client=False, query_script=query_script
-        )
-        raw = rx._invoke_via_sdk("LEGACY-PROMPT", 45, None)
-        self.assertEqual(raw, '{"eval_dir": "/run/legacy"}\nok')
-        self.assertEqual(sdk.state["prompts"], ["LEGACY-PROMPT"])
-        self.assertEqual(anyio.calls["fail_after"], [45])
+    def test_legacy_sdk_cannot_silently_use_one_shot_query(self):
+        _anyio, sdk = self._install(None, with_client=False, query_script=[])
+        with self.assertRaises(ImportError):
+            rx._invoke_via_sdk("P", 45, None)
+        self.assertEqual(sdk.state["prompts"], [])
 
 
 class TestWorkflowDoneOnDisk(_RunE2ECase):
@@ -2366,28 +2357,63 @@ class TestInvokeViaCli(_RunE2ECase):
 
 
 class TestInvokeWorkflow(_RunE2ECase):
-    def test_sdk_path_is_preferred_and_receives_the_pinned_eval_dir(self):
-        self.install_module("claude_agent_sdk", _make_fake_sdk([]))
+    def setUp(self):
+        super().setUp()
+        self.patch_rx("ensure_claude_sdk", lambda **kw: None)
+        self.patch_rx("_invoke_via_cli", lambda *a: self.fail("CLI must not run"))
+        self.patch_rx("time", types.SimpleNamespace(monotonic=lambda: 0))
+
+    def test_sdk_path_receives_the_pinned_eval_dir(self):
         seen = []
         self.patch_rx("_invoke_via_sdk", lambda p, t, ed: (
-            seen.append((p, t, ed)) or '{"eval_dir": "/run/sdk", "throughput_speedup": 1.3}'
+            seen.append((p, t, ed)) or '{"eval_dir": "/run/sdk"}'
         ))
-        self.patch_rx("_invoke_via_cli", lambda p, t: self.fail("CLI must not run"))
-        wf = rx.invoke_workflow("P", 100, "/pinned/e2e")
-        self.assertEqual(wf["eval_dir"], "/run/sdk")
+        self.assertEqual(rx.invoke_workflow("P", 100, "/pinned/e2e")["eval_dir"], "/run/sdk")
         self.assertEqual(seen, [("P", 100, "/pinned/e2e")])
 
-    def test_missing_sdk_falls_back_to_the_cli(self):
-        # ``None`` in sys.modules is the documented way to make an import raise.
+    def test_missing_sdk_is_prepared_before_invocation_and_uses_the_same_budget(self):
         self.install_module("claude_agent_sdk", None)
-        self.patch_rx("_invoke_via_cli", lambda p, t: '{"eval_dir": "/run/cli"}')
-        self.assertEqual(rx.invoke_workflow("P", 100, None)["eval_dir"], "/run/cli")
+        events = []
+        clock = iter([10, 35])
+        self.patch_rx("time", types.SimpleNamespace(monotonic=lambda: next(clock)))
+        self.patch_rx("ensure_claude_sdk", lambda **kw: events.append(("prepare", kw)))
+        self.patch_rx("_invoke_via_sdk", lambda p, t, ed: (
+            events.append(("invoke", t)) or '{"eval_dir": "/run/sdk"}'
+        ))
+        self.assertEqual(rx.invoke_workflow("P", 100)["eval_dir"], "/run/sdk")
+        self.assertEqual(events, [("prepare", {"timeout_s": 100}), ("invoke", 75)])
+
+    def test_bootstrap_failure_does_not_start_the_workflow(self):
+        from interface.sdk_bootstrap import SdkBootstrapError
+        def fail(**kw):
+            raise SdkBootstrapError("installation failed")
+        self.patch_rx("ensure_claude_sdk", fail)
+        self.patch_rx("_invoke_via_sdk", lambda *a: self.fail("must not start"))
+        with self.assertRaises(SdkBootstrapError) as caught:
+            rx.invoke_workflow("P", 100)
+        self.assertEqual(rx._classify_error(caught.exception), "sdk_import_failed")
+
+    def test_execution_import_error_does_not_retry_or_fall_back(self):
+        calls = []
+        self.patch_rx("ensure_claude_sdk", lambda **kw: calls.append("prepare"))
+        def fail(*a):
+            raise ImportError("inside running SDK")
+        self.patch_rx("_invoke_via_sdk", fail)
+        with self.assertRaisesRegex(ImportError, "inside running SDK"):
+            rx.invoke_workflow("P", 100)
+        self.assertEqual(calls, ["prepare"])
+
+    def test_no_workflow_launch_after_preparation_uses_the_budget(self):
+        clock = iter([10, 110])
+        self.patch_rx("time", types.SimpleNamespace(monotonic=lambda: next(clock)))
+        self.patch_rx("_invoke_via_sdk", lambda *a: self.fail("must not start"))
+        with self.assertRaises(TimeoutError):
+            rx.invoke_workflow("P", 100)
 
     def test_unparseable_agent_output_raises_workflow_parse_error(self):
-        self.install_module("claude_agent_sdk", None)
-        self.patch_rx("_invoke_via_cli", lambda p, t: "no json at all")
+        self.patch_rx("_invoke_via_sdk", lambda *a: "no json at all")
         with self.assertRaises(rx.WorkflowParseError):
-            rx.invoke_workflow("P", 100, None)
+            rx.invoke_workflow("P", 100)
 
 
 # =========================================================================== #
@@ -3120,6 +3146,7 @@ class TestMain(_RunE2ECase):
         launch; it must show the mapped args AND every measurement export."""
         self.patch_rx("invoke_workflow",
                       lambda *a, **k: self.fail("dry-run must not invoke"))
+        self.patch_rx("ensure_claude_sdk", lambda **kw: self.fail("dry-run must not install"))
         handoff = self._handoff(
             bench_client="native",
             bench_launcher="magpie",

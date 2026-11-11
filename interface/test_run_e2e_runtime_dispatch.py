@@ -238,8 +238,12 @@ def test_invoke_workflow_routes_to_the_runtime_only_with_ps_args(monkeypatch):
         return {"ok": 1}
 
     monkeypatch.setattr(rx, "_invoke_via_runtime", fake_runtime)
-    monkeypatch.setattr(rx, "_invoke_via_cli", lambda p, t: '{"eval_dir": "/native"}')
+    prepared = []
+    monkeypatch.setattr(rx, "ensure_claude_sdk", lambda **kw: prepared.append(kw))
+    monkeypatch.setattr(rx, "_invoke_via_sdk", lambda *a: '{"eval_dir": "/native"}')
 
     assert rx.invoke_workflow("prompt", 60, "/e", ps_args={"a": 1}) == {"ok": 1}
     assert seen["runtime"] == ({"a": 1}, 60, "/e")
+    assert prepared == []
     assert rx.invoke_workflow("prompt", 60, "/e")["eval_dir"] == "/native"
+    assert prepared == [{"timeout_s": 60}]

@@ -13,8 +13,8 @@ Contract (stable, see interface/run_e2e.md):
 * Invokes the JS workflow through the Claude Code ``Workflow`` tool (the JS
   workflow CANNOT be run with ``node`` directly — it needs the agent runtime's
   Workflow/agent/parallel/phase primitives, which are only exposed under
-  ``--effort ultracode``). Prefers the Python ``claude_agent_sdk``; falls back
-  to the ``claude -p`` CLI.
+  ``--effort ultracode``). Uses a persistent Python ``claude_agent_sdk``
+  session, installing the SDK in a private cache when needed.
 * Normalizes the workflow artifacts (``director_e2e_validation.json`` +
   ``baseline/bench_summary.json`` + ``final/``) into the stable ``result.json``.
 
@@ -64,6 +64,11 @@ try:
     from interface import geak_outcome_report
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     import geak_outcome_report
+
+try:
+    from interface.sdk_bootstrap import ensure_claude_sdk
+except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+    from sdk_bootstrap import ensure_claude_sdk
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
@@ -2271,7 +2276,7 @@ def apply_bench_protocol(h: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Invocation: SDK preferred, CLI fallback.
+# Native invocation: prepare the SDK, then keep a persistent client open.
 # ---------------------------------------------------------------------------
 # Everything the agent says is CAPTURED for the life of the run: the SDK path
 # accumulates fragments and joins them at the end, and the CLI path asks for
@@ -2400,12 +2405,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
     the scrape-independent on-disk recovery against the same pinned eval_dir.
     """
     import anyio
-    from claude_agent_sdk import ClaudeAgentOptions
-
-    try:
-        from claude_agent_sdk import ClaudeSDKClient
-    except ImportError:  # very old SDK without the streaming client
-        ClaudeSDKClient = None  # type: ignore[assignment]
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     def _opts() -> "ClaudeAgentOptions":
         extra: dict = {}
@@ -2522,18 +2522,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                         await anyio.sleep(DONE_POLL_S)
         return "\n".join(chunks)
 
-    async def _run_query() -> str:
-        # Legacy fallback for SDKs lacking ClaudeSDKClient. Behaves like the
-        # original one-shot query (works for the synchronous in-turn path).
-        from claude_agent_sdk import query
-        chunks: list[str] = []
-        with anyio.fail_after(timeout_s):
-            async for msg in query(prompt=prompt, options=_opts()):
-                chunks.extend(_iter_message_text(msg))
-                _note_session_id(msg)
-        return "\n".join(chunks)
-
-    return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
+    return anyio.run(_run_client)
 
 
 def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
@@ -2674,16 +2663,17 @@ def invoke_workflow(
 
     Dispatches on GEAK_AGENT_BACKEND / GEAK_AGENT_PROFILE: when either is set
     (and ps_args available), runs on the standalone Node runtime with the selected
-    agent/model; otherwise the original Claude/Workflow path (SDK preferred, CLI
-    fallback).
+    agent/model; otherwise the native Claude/Workflow path with a persistent SDK
+    session. Missing or obsolete SDKs are installed before starting the workflow.
     """
     if USE_RUNTIME and ps_args is not None:
         return _invoke_via_runtime(ps_args, timeout_s, eval_dir)
-    try:
-        import claude_agent_sdk  # noqa: F401
-        raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
-    except ImportError:
-        raw = _invoke_via_cli(prompt, timeout_s)
+    started = time.monotonic()
+    ensure_claude_sdk(timeout_s=timeout_s)
+    remaining = timeout_s - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError("SDK preparation exhausted the workflow timeout")
+    raw = _invoke_via_sdk(prompt, remaining, eval_dir)
     return _parse_last_json_line(raw)
 
 
