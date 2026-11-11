@@ -201,10 +201,15 @@ freeze an out-of-regime oracle nobody should trust.
    merges all calls for each PID, isolates External ids between trace files, and requires every capture
    PID to pass. Installation proof is distinct from execution: a marked mutually exclusive branch may
    stay inactive, while a selected outer target fails if a deeper marked candidate launches the same
-   device kernel in any call/rank. Require `deepest_verified:true`. On success `kernel_selection.py`
-   **promotes** the selected process's `meta.json` + `reference_io.pt` into the task root and **reclaims**
-   every `capture.pid-*` directory (issue #429 — do NOT leave per-rank oracles around). On failure or
-   before a capture retry, reclaim without promote:
+   device kernel in any call/rank. A non-target candidate in `compiled_passthrough_candidates` ran inside
+   a torch.compile region, where no marker fires, so nothing shows whether it is deeper: selection fails
+   with `candidate_compiled_unobservable` (`capture_compiled_unobservable` is the target's own case).
+   Re-capture where that seam runs eagerly (a short enforce-eager window); selecting it instead
+   fails as `capture_compiled_unobservable`, and never drop it from `--candidate-target` to pass.
+   Require `deepest_verified:true`. On success
+   `kernel_selection.py` **promotes** the selected process's `meta.json` + `reference_io.pt` into the
+   task root and **reclaims** every `capture.pid-*` directory (issue #429 — do NOT leave per-rank
+   oracles around). On failure or before a capture retry, reclaim without promote:
 
    ```bash
    python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote

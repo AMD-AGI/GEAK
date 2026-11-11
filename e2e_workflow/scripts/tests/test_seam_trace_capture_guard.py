@@ -17,17 +17,21 @@ capture path specifically, and each one checks that the guard is what produces t
 "neutralised" variants monkeypatch _capturing() back to False and assert the fatal operation
 reappears, so a test cannot quietly stop covering its fix.
 
-torch is replaced by a stub whose capture flag is flippable, so this needs no GPU and no torch.
+Also here: a seam traced by torch.compile is named in the trace, and `from X import f` copies are marked.
+
+torch is replaced by a stub whose capture and compile flags are flippable, so this needs no GPU and no torch.
 Every test loads its own copy of the module, because _PROFILE is process-global state.
 """
 import contextlib
 import importlib.util
+import io
 import os
 import shutil
 import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEAM_TRACE = os.path.join(SCRIPTS, "seam_trace.py")
@@ -79,7 +83,8 @@ class _FakeTorch(types.ModuleType):
         if has_capture_query:
             self.cuda.is_current_stream_capturing = self._capture_query
         if compiling is not None:
-            self.compiler = types.SimpleNamespace(is_compiling=lambda: compiling)
+            self.compiling = compiling
+            self.compiler = types.SimpleNamespace(is_compiling=lambda: self.compiling)
 
     def _capture_query(self):
         self.capture_queries += 1
@@ -107,10 +112,12 @@ def fake_torch(**kwargs):
 
 
 def load_seam():
-    """A fresh module object per test, so the global _PROFILE never leaks between tests."""
+    """A fresh module object per test, so the global _PROFILE never leaks between tests. Its atexit
+    hook is never registered: it would run after the test's fake torch is gone."""
     spec = importlib.util.spec_from_file_location("seam_trace_under_test", SEAM_TRACE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.atexit = types.SimpleNamespace(register=lambda fn: None)
     return mod
 
 
@@ -305,6 +312,104 @@ class TestProfileLifecycleGuards(unittest.TestCase):
             self.assertTrue(os.listdir(self.tmp),
                             "the profile deferred during capture was never exported afterwards, "
                             "so the trace is lost")
+
+    def test_a_seam_traced_by_torch_compile_forwards_and_the_next_trace_names_it(self):
+        with fake_torch(compiling=True) as torch:
+            seam = load_seam()
+            inner, calls, inner_target = make_target()
+            outer, _calls, outer_target = make_target()
+            seam.install(inner_target)
+            seam.install(outer_target)
+            self.assertEqual(inner.work(1, 2), 3)
+            self.assertEqual(calls, [(1, 2)])
+            self.assertEqual(torch.entered, [], "the marker body ran while Dynamo was tracing")
+            torch.compiling = False
+            outer.work(1)                     # an eager root call opens the process-local trace
+        self.assertIn(seam.COMPILED_PREFIX + inner_target, torch.entered)
+        self.assertNotIn(seam.COMPILED_PREFIX + outer_target, torch.entered)
+
+    def test_a_seam_compiled_while_a_trace_is_open_is_named_in_that_trace(self):
+        with fake_torch(compiling=False) as torch:
+            seam = load_seam()
+            inner, _calls, target = make_target()
+            seam.install(target)
+            self.assertTrue(seam._start_profile())
+            torch.compiling = True
+            inner.work(1)
+            torch.compiling = False
+            seam._finish_profile()
+        self.assertIn(seam.COMPILED_PREFIX + target, torch.entered)
+
+
+class TestCompiledSeamRecord(unittest.TestCase):
+    def test_a_failed_compiled_seam_record_is_reported(self):
+        with fake_torch():
+            seam = load_seam()
+            _mod, _calls, target = make_target()
+            seam.install(target)
+            seam._COMPILED[target].seen = True
+            tmp = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, tmp, True)
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"GEAK_SELECTION_TRACE": os.path.join(tmp, "s.json")}), \
+                    contextlib.redirect_stderr(err):
+                self.assertTrue(seam._start_profile())
+                with mock.patch.object(seam, "_record_install_markers", side_effect=RuntimeError("boom")):
+                    seam._finish_profile()
+        self.assertIn("boom", err.getvalue())
+
+
+class TestFromImportCopies(unittest.TestCase):
+    def test_a_from_import_copy_is_marked_too(self):
+        with fake_torch() as torch:
+            seam = load_seam()
+            mod, _calls, target = make_target()
+            importer = types.ModuleType(mod.__name__ + "_importer")
+            importer.work, importer.other = mod.work, lambda x: x    # `from mod import work`
+            other = importer.other
+            sys.modules[importer.__name__] = importer
+            self.addCleanup(sys.modules.pop, importer.__name__, None)
+            seam.install(target)
+            importer.work(2)
+        self.assertIs(importer.work, mod.work)
+        self.assertIs(importer.other, other)
+        self.assertIn(seam.MARKER_PREFIX + target, torch.entered)
+
+    def test_a_seam_declared_under_two_import_paths_leaves_one_span_per_call(self):
+        # The caller did `from defining import work`, and both names are candidates. Installing the
+        # defining name first rebinds the caller's alias to its marker; installing the caller's name
+        # must not wrap that marker, or one call leaves both spans, nested, read as a deeper candidate.
+        with fake_torch() as torch:
+            seam = load_seam()
+            mod, _calls, target = make_target()
+            caller = types.ModuleType(mod.__name__ + "_caller")
+            caller.work = mod.work
+            sys.modules[caller.__name__] = caller
+            self.addCleanup(sys.modules.pop, caller.__name__, None)
+            seam.install(target)
+            seam.install(caller.__name__ + ":work")
+            caller.work(1)
+        spans = [label for label in torch.entered if label.startswith(seam.MARKER_PREFIX)]
+        self.assertEqual(spans, [seam.MARKER_PREFIX + caller.__name__ + ":work"])
+
+    def test_an_alias_that_cannot_be_rebound_is_reported_and_the_marker_still_installs(self):
+        class _ReadOnly(types.ModuleType):
+            def __setattr__(self, name, value):
+                raise AttributeError(name)
+
+        with fake_torch() as torch:
+            seam = load_seam()
+            mod, _calls, target = make_target()
+            frozen = _ReadOnly(mod.__name__ + "_frozen")
+            frozen.__dict__["work"] = mod.work
+            sys.modules[frozen.__name__] = frozen
+            self.addCleanup(sys.modules.pop, frozen.__name__, None)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                seam.install(target)
+            mod.work(1)
+        self.assertIn(frozen.__name__ + ".work (NOT rebound)", err.getvalue())
+        self.assertIn(seam.MARKER_PREFIX + target, torch.entered)
 
 
 if __name__ == "__main__":
