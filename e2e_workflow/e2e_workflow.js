@@ -240,6 +240,12 @@ if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
     `${RDNA4_SERVING_PRODUCTS.join('/')}; refusing the product-scoped serving ` +
     'policy for an unknown gfx1201 product.');
 }
+// Any other isolated family has no validated E2E serving or prompt policy yet, so model mode refuses
+// it instead of starting with the global backend and MI-series fp8 advice. A pass-through is fine.
+if (MODEL_PATH && GPU_FAMILY.isolate && !RDNA4_ISA) {
+  throw new Error(`${EXPECTED_GFX} E2E is not supported yet: no serving policy is validated for ` +
+    `${GPU_FAMILY.name}; use the kernel workflow (args.kernel_path) for single-kernel work`);
+}
 
 const LAUNCH_SCRIPT = A.launch_script || '';
 const BACKEND = String(A.backend != null ? A.backend : (RDNA4_PRODUCT_E2E ? 'vllm' : 'sglang')).trim()
