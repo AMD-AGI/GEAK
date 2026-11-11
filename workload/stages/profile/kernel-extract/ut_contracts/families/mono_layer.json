@@ -3,7 +3,7 @@
   "family": "mono_layer",
   "op_kind": "collective",
   "description": "Whole-layer persistent monokernel with in-kernel peer exchanges (sgl-amd-mono: Muse Spark target / draft layer, GLM flash, Kimi ...): ONE launch a layer runs attention over the paged KV cache, o_proj + TP all-reduce, router / top-k, the experts + EP exchange and the next layer's QKV / KV write, pairing with its peer ranks through IPC peer buffers and epoch-tagged mailboxes. Correctness runs through call() and the rank harness; timing is rank_chain (shared/rank_timing.py): every rank times CUDA-graph replays of a chain of distinct layers.",
-  "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_draft_layer|_mono_layer|monokernel"], "op": ["MonoRunner|MuseMonoRunner|mono_layer"]},
+  "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer|_mono_layer|monokernel"], "op": ["MonoRunner|MuseMonoRunner|DraftRunner|mono_layer"]},
   "reference": null,
   "axes": {
     "rows": {"var": true, "lo": 1, "hi": 512, "doc": "tokens of the step (verify rows: requests x draft tokens)"},
