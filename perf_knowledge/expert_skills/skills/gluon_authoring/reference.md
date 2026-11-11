@@ -15,13 +15,13 @@ trusting a figure or asserting a digest across generations**, and take the value
 ## Start above this skill, not in it
 
 Onboarding is **not** duplicated here. If you have not written Gluon before, read GEAK's language layer
-first — it is the canonical home for the concepts and for the measured GEMM ceilings:
+first — it is the canonical home for the concepts and for the published GEMM examples:
 
 | | |
 | --- | --- |
 | what Gluon is vs Triton, when to reach for it | [`languages/gluon/overview.md`](../../../languages/gluon/overview.md) |
 | the abstraction: explicit layouts / pipeline stages / register budget / MFMA intrinsics, ping-pong vs interleave, MXFP4 numerics | [`languages/gluon/programming_model.md`](../../../languages/gluon/programming_model.md) |
-| the near-peak GEMM recipe v0→v9 and the measured ceilings | [`languages/gluon/gemm_cookbook.md`](../../../languages/gluon/gemm_cookbook.md) |
+| the v0→v9 tutorial progression and its measurement scope | [`languages/gluon/gemm_cookbook.md`](../../../languages/gluon/gemm_cookbook.md) |
 
 The division of labour: **that layer teaches Gluon; this skill is the API-page detail behind it plus the
 two mechanics for migrating an existing Triton kernel.** If you find yourself explaining what a layout is,

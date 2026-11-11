@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import time
 
-from kb.retract import existing_files
+from kb.retract import existing_files, retraction_ok
 from kb.store_local import KBStoreError
 
 # The four things that can happen when a record is taken off the shelf and run. They are counted
@@ -321,10 +321,7 @@ def attestation_ok(reports, applied: bool) -> bool:
     not a failure, but finding it nowhere at all means the session id is wrong and the caller's
     verdict was recorded against nothing.
     """
-    if not applied:
-        return True
-    found = [r for r in reports if r.get("found")]
-    return bool(found) and all(r.get("rewritten") for r in found)
+    return retraction_ok(reports, applied)
 
 
 __all__ = ["BUCKETS", "FAILED", "HISTORY_LIMIT", "INAPPLICABLE", "NOT_REPRODUCED",

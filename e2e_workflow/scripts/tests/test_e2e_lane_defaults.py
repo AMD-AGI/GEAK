@@ -14,8 +14,10 @@ file rather than checking a list, and requires each one to route through `laneAr
 
     python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
 """
+import json
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +77,123 @@ for m in re.finditer(r"workflow\(\{ scriptPath: KERNEL_WF_SCRIPT \}, (.{0,12})",
 
 check("every raw lane invocation wraps its args in laneArgs",
       not raw, f"unwrapped `workflow({{scriptPath: KERNEL_WF_SCRIPT}}, ...)` at line(s) {raw}")
+
+# Execute the actual argument boundary without starting a workflow. A dropped
+# selector silently runs ordinary GEAK, so check behavior as well as call routing.
+boundary = s[s.index("const RDNA4_ISA ="):s.index("// EXP_ROOT =")]
+worker_src = os.path.join(os.path.dirname(E2E), "kernel_workflow", "src", "kernel_lane")
+worker_args = open(os.path.join(worker_src, "01b_args.js")).read().split("const BUDGET =")[0]
+dispatch = open(os.path.join(worker_src, "14b_optimize_dispatch.js")).read()
+cases = [{}, {"optimizer": "greedy"}, {"optimizer": "evo"}]
+cases += [{"optimizer": None}, {"optimizer": ""}]
+cases += [{"optimizer": value} for value in ("population", "EVO", True, 1, [], {})]
+probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundary, worker_args, dispatch, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+Promise.all(cases.map(async A => {
+  try {
+    const child = vm.runInNewContext(boundary + '\\nlaneArgs({kernel_path: "/task"})', {
+      A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '',
+      EXPECTED_PHYSICAL_CU_COUNT: 0,
+    });
+    const calls = [];
+    // Real worker parsing/dispatch, with engineering and evolution creation stubbed.
+    await vm.runInNewContext('(async () => {\\n' + worker_args + dispatch + '\\n})()', {
+      A: child, cumulative: 1, bestSeen: 1, bestPerCase: {}, finalWinner: null,
+      profileSummary: '', history: {},
+      createEvolution: async () => { calls.push('createEvolution'); return 'evolution'; },
+      greedyOptimize: async (_start, plan) => { calls.push(plan.archive
+        || (plan.start ? 'evolution_after_first_stall' : 'ordinary')); },
+      nativeDeliveryBoundary: async work => work(),
+      applyOptimizeResult: () => {},
+    });
+    return {...child, policy_calls: calls};
+  } catch (error) { return {error: error.message}; }
+})).then(results => console.log(JSON.stringify(results)));
+"""], input=json.dumps({"boundary": boundary, "worker_args": worker_args,
+                        "dispatch": dispatch, "cases": cases}),
+    text=True, capture_output=True, check=True)
+results = json.loads(probe.stdout)
+check("omitted optimizer selects EVO", results[0].get("optimizer") == "evo")
+for i, optimizer in enumerate(("greedy", "evo"), 1):
+    check(f"{optimizer} reaches the existing nested worker",
+          results[i].get("optimizer") == optimizer and results[i].get("kernel_path") == "/task")
+check("explicit greedy enters the ordinary worker policy",
+      results[1].get("policy_calls") == ["ordinary"])
+check("omitted optimizer enters EVO after first stall",
+      results[0].get("policy_calls") == ["evolution_after_first_stall"])
+check("evo selector runs the shared loop and roots evolution after its first non-improving round",
+      results[2].get("policy_calls") == ["evolution_after_first_stall"])
+check("invalid optimizer is rejected before workflow dispatch",
+      all(result.get("error") == "optimizer must be greedy or evo" for result in results[5:]))
+check("null and empty selectors use EVO",
+      all(result.get("optimizer") == "evo" and result.get("policy_calls") == ["evolution_after_first_stall"]
+          for result in results[3:5]))
+
+# Exercise the source argument boundary directly so this check also works before
+# assembled workflows are regenerated. The generated call-site checks above remain.
+source_args = open(os.path.join(E2E, "src", "e2e_workflow", "01b_args.js")).read()
+source_boundary = source_args[:source_args.index("// EXP_ROOT =")]
+evidence_flags = ("evolution_case_evidence_view", "evolution_planner_case_view",
+                  "evolution_evidence_handoff",
+                  "evolution_preserve_founder_attempts", "evolution_start",
+                  "evolution_return_development", "evolution_import_stall_sources",
+                  "record_planner_inputs", "case_measurement_view")
+evidence_cases = [{"optimizer": "evo"}]
+evidence_cases += [{"optimizer": "evo", flag: value}
+                  for flag in evidence_flags for value in (False, True, "true", "false", None, 0, 1)]
+evidence_probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundaries, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+const results = boundaries.map(boundary => cases.map(args => vm.runInNewContext(boundary + `
+({inherited: laneArgs({kernel_path: "/task"}),
+  overridden: laneArgs({evolution_case_evidence_view: false, evolution_planner_case_view: false,
+    evolution_evidence_handoff: false,
+    evolution_preserve_founder_attempts: false, evolution_start: false,
+    evolution_return_development: false, evolution_import_stall_sources: false,
+    record_planner_inputs: false, case_measurement_view: false})})`, {
+  A: args, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '', EXPECTED_PHYSICAL_CU_COUNT: 0,
+})));
+console.log(JSON.stringify(results));
+"""], input=json.dumps({"boundaries": [source_boundary, boundary], "cases": evidence_cases}),
+    text=True, capture_output=True, check=True)
+evidence_results = json.loads(evidence_probe.stdout)
+for boundary_name, boundary_results in zip(("source", "generated"), evidence_results):
+    for case, result in zip(evidence_cases, boundary_results):
+        inherited = result["inherited"]
+        for flag in evidence_flags:
+            label = f"{boundary_name} {flag}={case.get(flag, '<omitted>')!r}"
+            check(f"lane preserves {label} without coercion",
+                  (flag not in inherited if flag not in case else
+                   flag in inherited and inherited[flag] == case[flag]
+                   and type(inherited[flag]) is type(case[flag])))
+            check(f"per-call false overrides {label}", result["overridden"][flag] is False)
+
+budget_declaration = re.search(r"^const KERNEL_BUDGET =.*$", s, re.MULTILINE).group(0)
+budget_cases = [{}, {"kernel_budget": 1}, {"kernel_budget": 12}, {"kernel_budget": "12"}, {"kernel_budget": " +012 "}]
+budget_cases += [{"kernel_budget": value} for value in (None, "12.0", "12x", "1e3", True, False, 0, -1, 1.5, [], {}, 2**53)]
+budget_probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundary, budget_declaration, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+const results = [false, true].map(FAST_MODE => cases.map(A => {
+  try {
+    return vm.runInNewContext(boundary + '\\n' + budget_declaration + '\\nlaneArgs({budget: KERNEL_BUDGET})', {
+      A, FAST_MODE, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '',
+      EXPECTED_PHYSICAL_CU_COUNT: 0,
+    });
+  } catch (error) { return {error: error.message}; }
+}));
+console.log(JSON.stringify(results));
+"""], input=json.dumps({"boundary": boundary, "budget_declaration": budget_declaration, "cases": budget_cases}),
+    text=True, capture_output=True, check=True)
+budgets = json.loads(budget_probe.stdout)
+check("omitted kernel budget keeps full/fast defaults", budgets[0][0].get("budget") == 6 and budgets[1][0].get("budget") == 3)
+check("explicit kernel budgets reach the existing lane unchanged",
+      all(row[1].get("budget") == 1 and row[2].get("budget") == 12 for row in budgets))
+check("direct e2e integer strings remain accepted without truncation",
+      all(row[3].get("budget") == 12 and row[4].get("budget") == 12 for row in budgets))
+check("invalid kernel budgets are rejected without coercion",
+      all(result.get("error") == "kernel_budget must be a positive safe integer" for row in budgets for result in row[5:]))
 
 # The kernel side must still default ON — this test would otherwise pass just as well on a tree where
 # somebody turned the KB off everywhere.

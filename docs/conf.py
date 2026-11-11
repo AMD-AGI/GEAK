@@ -23,7 +23,7 @@ all_article_info_os = ["linux"]
 all_article_info_author = ""
 
 # for PDF output on Read the Docs
-project = "GEAK"
+project = "GEAK-evo"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
 version = version_number

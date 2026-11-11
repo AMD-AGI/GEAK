@@ -85,9 +85,13 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
       // sealed sandbox with no filesystem (see e2e_workflow.js "RUNTIME SANDBOX CONTRACT"), so a
       // path it cannot open is not evidence it can act on. This object is the one this function
       // just validated through checkPreparedUT, so carrying it forward hands the optimization
-      // lanes exactly what passed the gate instead of a promise to re-read it later.
+      // lanes exactly what passed the gate instead of a promise to re-read it later. A weighted UT
+      // carries its resolved workload file, which the lanes receive as op_spec.workload_path.
+      const binding = checked.checks.workload_binding;
       candidate.prepared_ut = { phase: task.phase, result_path: resultPath,
-        sha256: sha256(bytes), result };
+        sha256: sha256(bytes),
+        result: binding.weighted ? { ...result, workload_path: binding.workload_path } : result,
+        ...(binding.weighted ? { weighted: true } : {}) };
       // Existing optimization lanes lease one GPU. A validated multi-rank UT
       // remains a deliverable, but cannot be dispatched to that single-card lane.
       const gpuCount = kernel.required_gpu_count ?? result.required_gpu_count ??

@@ -1,85 +1,38 @@
 ---
-title: CDNA4 / MI350X / MI355X (gfx950) — peak throughput tables
+title: MI350X and MI355X specification peaks
 kind: hardware
 gens: [gfx950]
-dtypes: [fp64, fp32, bf16, fp16, fp8_e4m3, fp8_e5m2, fp6_e2m3, fp6_e3m2, fp4_e2m1, mxfp8, mxfp6, mxfp4, int8]
+dtypes: [fp64, fp32, bf16, fp16, fp8_e4m3, fp8_e5m2, fp4_e2m1]
 regimes: [both]
-updated: 2026-06-09
-sources:
-  - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
-  - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
-  - https://arxiv.org/pdf/2510.27583
-  - https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inference-v6.0/README.html
+updated: 2026-10-16
 ---
 
-# CDNA4 / MI350X / MI355X (gfx950) — peak throughput tables
+# MI350X and MI355X specification peaks
 
-> **All numbers are theoretical peak.** Sustained is well below (MI300X-class kernels see ~45%; expect
-> similar fractions on CDNA4 pending broad measurement, arXiv 2510.27583). Quote *achieved*.
+Use the product-specific YAML blocks in the [canonical peak table](../../../e2e_workflow/knowledge/analysis_skills/roofline/peaks.md).
+Both products use gfx950, but their published per-GPU compute peaks differ.
+Identify the physical product before choosing a denominator.
 
-## TL;DR
-> MI355X (256 CU, 1024 matrix cores): **FP16/BF16 2.5 PF**, **FP8 5 PF**, **FP6/FP4 10 PF**,
-> FP32 157 TF, FP64 vector 78.6 TF. HBM3E **288 GB / 8 TB/s**. **2× FP16/FP8 vs CDNA3**; **TF32
-> removed**; FP64 **matrix** halved.
+| Dense specification per GPU | MI350X | MI355X |
+|---|---:|---:|
+| FP64 matrix/vector | 72.1 TFLOP/s | 78.6 TFLOP/s |
+| FP32 matrix/vector | 144.2 TFLOP/s | 157.3 TFLOP/s |
+| FP16/BF16 matrix | 2.3 PFLOP/s | 2.5 PFLOP/s |
+| OCP FP8 matrix | 4.6 PFLOP/s | 5.0 PFLOP/s |
+| MXFP4 matrix | 9.2 PFLOP/s | 10.1 PFLOP/s |
+| HBM3E capacity / pin bandwidth | 288 GB / 8 TB/s | 288 GB / 8 TB/s |
+| Peak engine clock | 2200 MHz | 2400 MHz |
 
-## Matrix / vector peaks (per OAM, vendor-reported)
-| Computation | MI355X peak | vs FP32 | vs CDNA3 (MI325X) |
-|---|---|---|---|
-| FP64 vector | 78.6 TFLOP/s | 0.5× | ~same vector / matrix halved |
-| FP32 matrix | 157.3 TFLOP/s | 1× | ~same |
-| FP16 / BF16 matrix | **2.5 PFLOP/s** | 16× | **2×** (1307→2500) |
-| FP8 (OCP) matrix | **5 PFLOP/s** | 32× | **2×** (2615→5000) |
-| FP6 matrix | **10 PFLOP/s** | 64× | new |
-| FP4 matrix | **10 PFLOP/s** | 64× | new |
-| MXFP8/6/4 | matches element rate | — | new |
-| INT8 | ~5 POPS | 32× | 2× |
-| TF32 | **removed** | — | gone |
-
-FP6 and FP4 share the **10 PF** rate (FP6 effectively at FP4 rate). MI350X has the same per-CU peaks;
-realized throughput differs by sustained clock (1000 W vs 1400 W) — see
-[clocks_power.md](clocks_power.md).
-
-## Memory & cache peaks
-| Resource | Value |
-|---|---|
-| HBM3E capacity | **288 GB** (8 × 36 GB, 12-Hi) |
-| HBM3E bandwidth | **8.0 TB/s** |
-| Infinity Cache (L3/MALL) | 256 MiB |
-| L2 | per-XCD |
-| LDS | **160 KiB/CU**, **64 banks**, **256 B/clk** |
-| L1 vector | 32 KiB/CU, 128 B line |
-| Infinity Fabric (per card) | 1075 GB/s bidirectional aggregate (4th gen) |
-
-FP16 roofline ridge ≈ 2.5 PF / 8 TB/s ≈ **312 FLOP/byte** (vs ~247 on MI300X) → relatively more
-kernels are bandwidth-bound; byte-cutting matters even more.
-
-## Peak formula cross-check
-`peak = 2·M·N·K · 1024 cores · (clock / cycles)`. With 256 CU × 4 = 1024 cores and the **2× per-CU**
-matrix rate, the FP16/FP8/FP6/FP4 peaks above follow from the CDNA4 cycle counts in
-[matrix_core_blockscale.md](matrix_core_blockscale.md) (FP6/FP4 use the lower cycle count when neither
-operand is FP8 → 2× the FP8 rate → 10 PF).
-
-## Sustained reality
-No large public sustained-of-peak dataset for CDNA4 yet (as of 2026-06). On MI300X the sustained
-fraction is **~45%** across FP8/BF16/FP16 (arXiv 2510.27583); treat CDNA4 similarly until measured.
-Record any measured number as `value @ MI355X gfx950, ROCm <ver>, <lib>@<ver>, <date>`.
-
-## MLPerf Inference v6.0 (the achieved-throughput anchor)
-The strongest public end-to-end CDNA4 numbers. **MI355X 1-node Llama2-70B**: offline **103,480** / server
-**100,282** / interactive **73,608** tok/s; **gpt-oss-120b** server up to **115%** of OEM B200. Versus
-**NVIDIA B300**: **92%** offline, **93%** server, **104% interactive** — AMD **wins interactive**. Llama2-70B
-improved **4.4–4.8× over v5.1**, driven by **FP4**. Stack: **vLLM + AITER + Quark + GEAK + QuickReduce**.
-Note: NVIDIA **GB300 still leads raw reasoning per-GPU** (DeepSeek-R1). Use these as the achieved-throughput
-reference against the theoretical peaks above.
+These are AMD's rounded dense specifications, excluding structured sparsity.
+Match dtype, instruction mode, memory interface and measurement boundary; an
+arbitrary FP4 implementation does not inherit the MXFP4 rate. The conditional
+FP16/BF16 ridge is 287.5 FLOP/byte for MI350X and 312.5 for MI355X.
+A specification ratio is not measured utilization or guaranteed headroom. Do not
+transfer a sustained fraction from another product or use an end-to-end benchmark
+as a kernel compute ceiling. See [clocks and power](clocks_power.md).
 
 ## Sources
-- AMD CDNA4 Architecture White Paper (FP16 2.5 PF, FP8 5 PF, FP6/FP4 10 PF, 288 GB/8 TB/s):
-  https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
-- Matrix Core blog (CDNA4 peaks, FP6=FP4 rate, FP64 0.5×, peak formula):
-  https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
-- AMD Instinct MI355X platform brief (per-OAM/platform peaks):
-  https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/product-briefs/amd-instinct-miI355x-platform-brochure.pdf
-- MI300X ≈45% of peak (sustained reference): https://arxiv.org/pdf/2510.27583
-- MLPerf Inference v6.0 (MI355X Llama2-70B 103480/100282/73608; 92/93/104% vs B300; gpt-oss-120b 115% server;
-  4.4–4.8× over v5.1; vLLM+AITER+Quark+GEAK+QuickReduce; GB300 leads raw reasoning):
-  https://rocm.blogs.amd.com/artificial-intelligence/mlperf-inference-v6.0/README.html
+
+- [Canonical product YAML and source-check dates](../../../e2e_workflow/knowledge/analysis_skills/roofline/peaks.md)
+- [AMD MI350X](https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html)
+- [AMD MI355X](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html)

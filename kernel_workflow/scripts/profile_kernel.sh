@@ -53,7 +53,7 @@ RPV3_TRACE_ARGS_DEFAULT="--kernel-trace --stats --output-format csv"
 # Multi-GPU jobs are multi-rank: rocprofv3's own SIGABRT handler can deadlock a launcher whose
 # teardown aborts, so leave signal handling to the application.
 case "$GPU_ID" in
-    group:*|pool:*:*) RPV3_TRACE_ARGS_DEFAULT="$RPV3_TRACE_ARGS_DEFAULT --disable-signal-handlers true" ;;
+    group:*|pool:*:*|set:*,*) RPV3_TRACE_ARGS_DEFAULT="$RPV3_TRACE_ARGS_DEFAULT --disable-signal-handlers true" ;;
 esac
 RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:-$RPV3_TRACE_ARGS_DEFAULT}"
 RPROF_ARGS="${RPROF_ARGS:---stats}"
@@ -110,7 +110,9 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
 
 profiler_artifacts_ok() {  # true when the tool left a non-empty csv/json (not just the report)
     local dir="${1:-$OUTPUT_DIR}"
-    find "$dir" -type f \( -name '*.csv' -o -name '*.json' \) -size +0 2>/dev/null | grep -q .
+    local artifact
+    artifact=$(find "$dir" -type f \( -name '*.csv' -o -name '*.json' \) -size +0 -print -quit 2>/dev/null) || return 1
+    [[ -n "$artifact" ]]
 }
 
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.

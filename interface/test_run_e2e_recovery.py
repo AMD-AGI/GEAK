@@ -258,18 +258,60 @@ def test_a_stack_only_salvage_is_reported_as_provisional(tmp_path):
     assert out["validation_evidence"]["recovery"]["selected"] == "gemm1"
 
 
-def test_a_surprising_speedup_without_confirmation_stays_pending_on_recovery(tmp_path):
-    """Recovery cannot run the independent review; it must preserve a pending win
-    rather than bypass the live review or classify it as incorrect output."""
+@pytest.mark.parametrize("parity_kind", ["accuracy", "byte_exact", "none", None])
+def test_sum_gpu_share_does_not_veto_accepted_wall_time_improvement(
+    tmp_path, monkeypatch, parity_kind
+):
+    """A correct fixed-work DAG can exceed the SUM-share model without losing work.
+
+    A takes 40 ms on one GPU, then B takes 60 ms concurrently on eight GPUs.
+    A's SUM share is 40/520; speeding A up 2x gives 100/80 = 1.25x throughput.
+    The conditional model predicts 4%, but that is not the elapsed-time bound.
+    """
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 1.0)
+    eval_dir = tmp_path / "e2e_sum_share"
+    _candidate(eval_dir, "critical_path", parity_kind=parity_kind,
+               pct_gpu_time=100 * 40 / (40 + 8 * 60), isolated_speedup=2.0,
+               e2e_delta_pct=25.0, ref_med=1000.0, cand_med=1250.0,
+               e2e_throughput_tok_s=1250.0)
+
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf is not None
+    assert wf["throughput_speedup"] == pytest.approx(1.25)
+    evidence = wf["recovery_evidence"]
+    assert evidence["candidates_eligible"] == 1
+    assert evidence["amdahl_ceiling_pct"] == pytest.approx(4.0)
+    assert evidence["delta_over_amdahl_ceiling"] == pytest.approx(6.25)
+    assert evidence["amdahl_model_discrepancies"] == ["critical_path"]
+    assert "conditional" in evidence["amdahl_model_note"]
+    assert "excluded_as_implausible" not in evidence
+
+    # The compatible margin changes only the diagnostic, not the accepted result.
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 100.0)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["throughput_speedup"] == pytest.approx(1.25)
+    assert wf["recovery_evidence"]["amdahl_model_discrepancies"] is None
+
+
+def test_a_surprising_speedup_without_confirmation_is_recovered_as_awaiting_review(tmp_path):
+    """Recovery cannot run the independent review. An unreviewed gain past the
+    estimate stays eligible and is reported as awaiting review; it is never
+    classified as incorrect output. Only a review that measured a rejection
+    withholds a candidate."""
     eval_dir = tmp_path / "e2e_implausible"
-    # 25.5% GPU time at 1.0338x isolated caps the e2e gain at ~0.84%.
-    _candidate(eval_dir, "corrupt", parity_kind="accuracy", pct_gpu_time=25.5,
+    # 25.5% GPU time at 1.0338x isolated gives a head estimate of ~0.84%.
+    _candidate(eval_dir, "surprising", parity_kind="accuracy", pct_gpu_time=25.5,
                isolated_speedup=1.0338, e2e_delta_pct=1.95,
                ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
 
-    assert rx._recover_best_intermediate_win(eval_dir) is None
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf is not None
+    assert wf["final_throughput_tok_s"] == pytest.approx(9395.961)
+    assert wf["recovery_evidence"]["awaiting_speedup_review"] == ["surprising"]
+    assert wf["recovery_evidence"]["rejected_by_speedup_review"] is None
     record = rx._integrate_candidates(eval_dir)[0]
     assert record["speedup_review_pending"] is True
+    assert record["speedup_review_rejected"] is False
     assert record["output_parity"] == "pass"
 
 
@@ -361,34 +403,62 @@ def test_confirmed_speedup_is_recovered_above_the_head_estimate(tmp_path):
     {"fresh_pair": False}, {"configs_matched": False}, {"workload_matched": False},
 ])
 def test_recovery_cannot_confirm_changed_or_cached_evidence(tmp_path, changed):
+    """Changed or reused evidence does not confirm the gain, so it stays reported
+    as awaiting review; an unconfirmed review is advisory and does not withhold it."""
     eval_dir = tmp_path / "e2e_unconfirmed"
     _issue522_candidate(eval_dir, measurement_evidence=_measurement("confirmation", **changed),
                         speedup_review={"status": "confirmed", "original_measurement": _measurement("original")})
-    assert rx._recover_best_intermediate_win(eval_dir) is None
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf is not None
+    assert wf["recovery_evidence"]["awaiting_speedup_review"] == ["h1"]
 
 
-@pytest.mark.parametrize("status,measurement_id,recover", [
-    ("confirmed", "original", True), ("inconclusive", "original", False),
-    ("rejected", "original", False), ("confirmed", "other-candidate", False),
-])
-def test_recovery_reads_workflow_review_checkpoint_only_for_the_same_measurement(tmp_path, status, measurement_id, recover):
-    eval_dir = tmp_path / "e2e_review_checkpoint"
-    cand = _issue522_candidate(eval_dir)
+def _write_review_checkpoint(eval_dir, cand, status, measurement_id):
     raw = json.loads((cand / "integrate_result.json").read_text())
     reviewed = {**raw, "measurement_evidence": _measurement("confirmation"),
                 "speedup_review": {"status": status, "original_measurement": _measurement(measurement_id)}}
     checkpoint = eval_dir / "overlay" / "candidate_h1" / "e2e_validation.json"
     checkpoint.parent.mkdir()
     checkpoint.write_text(json.dumps({"integration_result": reviewed}))
+
+
+@pytest.mark.parametrize("status,measurement_id,recover,awaiting", [
+    ("confirmed", "original", True, None), ("inconclusive", "original", True, ["h1"]),
+    ("rejected", "original", False, None),
+    # A review recorded for another measurement neither confirms nor rejects this one.
+    ("confirmed", "other-candidate", True, ["h1"]), ("rejected", "other-candidate", True, ["h1"]),
+])
+def test_recovery_reads_workflow_review_checkpoint_only_for_the_same_measurement(
+        tmp_path, status, measurement_id, recover, awaiting):
+    eval_dir = tmp_path / "e2e_review_checkpoint"
+    cand = _issue522_candidate(eval_dir)
+    _write_review_checkpoint(eval_dir, cand, status, measurement_id)
     wf = rx._recover_best_intermediate_win(eval_dir)
     assert (wf is not None) is recover
     if recover:
         assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
+        assert wf["recovery_evidence"]["awaiting_speedup_review"] == awaiting
+    else:
+        assert rx._integrate_candidates(eval_dir)[0]["speedup_review_rejected"] is True
 
 
-def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
-    """The ceiling comes from an imperfect profile, so a hard correctness
-    guarantee outranks it — the guard only applies where parity was waived."""
+def test_a_measured_review_rejection_withholds_only_its_candidate(tmp_path):
+    eval_dir = tmp_path / "e2e_review_rejected"
+    cand = _issue522_candidate(eval_dir)
+    _write_review_checkpoint(eval_dir, cand, "rejected", "original")
+    _candidate(eval_dir, "clean", e2e_delta_pct=4.0, ref_med=1000.0, cand_med=1040.0,
+               e2e_throughput_tok_s=1040.0)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    evidence = wf["recovery_evidence"]
+    assert evidence["selected"] == "clean"
+    assert evidence["candidates_eligible"] == 1
+    assert evidence["rejected_by_speedup_review"] == ["h1"]
+    assert [k["short_name"] for k in wf["accepted_kernels"]] == ["clean"]
+
+
+def test_byte_exact_accept_keeps_conditional_model_diagnostic(tmp_path, monkeypatch):
+    """The sampled parity label does not establish the model's applicability."""
+    monkeypatch.setattr(rx, "IMPLAUSIBLE_SPEEDUP_MARGIN", 1.0)
     eval_dir = tmp_path / "e2e_byte_exact"
     _candidate(eval_dir, "real", parity_kind="byte_exact", pct_gpu_time=5.09,
                isolated_speedup=1.1362, e2e_delta_pct=2.935,
@@ -398,18 +468,30 @@ def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
     wf = rx._recover_best_intermediate_win(eval_dir)
     assert wf is not None
     assert wf["recovery_evidence"]["delta_over_amdahl_ceiling"] == pytest.approx(4.78, abs=0.02)
+    assert wf["recovery_evidence"]["amdahl_model_discrepancies"] == ["real"]
+
+
+@pytest.mark.parametrize("gate", ["rejected", "incomplete"])
+def test_model_discrepancy_does_not_override_actual_gate(tmp_path, gate):
+    eval_dir = tmp_path / "e2e_quality_gate"
+    _candidate(eval_dir, "failed_quality", gate=gate, reason="accuracy_regression",
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0,
+               e2e_delta_pct=25.0)
+    assert rx._recover_best_intermediate_win(eval_dir) is None
 
 
 def test_a_parity_failure_is_never_salvaged(tmp_path):
     eval_dir = tmp_path / "e2e_parity"
-    _candidate(eval_dir, "broken", output_parity="fail", e2e_delta_pct=12.0)
+    _candidate(eval_dir, "broken", output_parity="fail", e2e_delta_pct=25.0,
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0)
     assert rx._recover_best_intermediate_win(eval_dir) is None
 
 
 def test_an_incomplete_ab_is_never_salvaged(tmp_path):
     """Only one leg was measured, so there is no ratio to report."""
     eval_dir = tmp_path / "e2e_incomplete"
-    _candidate(eval_dir, "half_measured", ab_complete=False, e2e_delta_pct=12.0)
+    _candidate(eval_dir, "half_measured", ab_complete=False, e2e_delta_pct=25.0,
+               parity_kind="accuracy", pct_gpu_time=5.0, isolated_speedup=2.0)
     assert rx._recover_best_intermediate_win(eval_dir) is None
 
 

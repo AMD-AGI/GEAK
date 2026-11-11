@@ -10,7 +10,7 @@ import { sourceSnapshot, fileRef } from './kernel_source_delivery.mjs';
 
 const cli = fileURLToPath(new URL('./kernel_extraction_delivery.mjs', import.meta.url));
 
-async function fixture(t) {
+async function fixture(t, {meta = {target_callable: 'pkg:leaf'}, workload_path} = {}) {
   const evalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'standalone handoff fixture '));
   t.after(() => fs.rm(evalDir, {recursive: true, force: true}));
   const task = path.join(evalDir, 'tasks', 'leaf');
@@ -21,7 +21,7 @@ async function fixture(t) {
     await fs.writeFile(path.join(task, name), JSON.stringify(value));
     return fileRef(task, name);
   };
-  await write('meta.json', {target_callable: 'pkg:leaf'});
+  await write('meta.json', meta);
   for (const name of ['cases.py', 'unittest.py', 'kernel_src/leaf.cu'])
     await fs.writeFile(path.join(task, name), '// CPU-only source fixture\n');
   const snapshot = await sourceSnapshot(task);
@@ -52,7 +52,8 @@ async function fixture(t) {
     target_callable:'pkg:leaf', ...snapshot, ut_result_ref:ut, kernels:[leaf]});
   const result = {editable:true, task_dir:task, target_callable:'pkg:leaf',
     unittest_smoke:'pass', baseline_frozen:true,
-    selection_validation_ref:selection, source_delivery_ref:source};
+    selection_validation_ref:selection, source_delivery_ref:source,
+    ...(workload_path ? {workload_path} : {})};
   await write('run/requested_kernel.json',kernel);
   await write('run/draft.json',result);
   const args=[cli,'--kernel',path.join(task,'run/requested_kernel.json'),'--result',path.join(task,'run/draft.json'),
@@ -65,8 +66,8 @@ async function fixture(t) {
 import { packStandaloneTasks, readPreparedKernels } from './agentx_kernel_preparation.mjs';
 const adapter = fileURLToPath(new URL('./agentx_kernel_preparation.mjs', import.meta.url));
 
-async function delivered(t) {
-  const f = await fixture(t);
+async function delivered(t, options) {
+  const f = await fixture(t, options);
   // Execute the actual shared preflight used by the skill before exercising the workflow adapter.
   const checked = f.run();
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
@@ -228,8 +229,58 @@ test('a forged or degraded envelope is refused at intake, not taken on trust', a
     ['no task_dir', (c) => { delete c.prepared_ut.result.task_dir; }],
     ['an invented GPU share', (c) => { c.pct_gpu_time = 420; }],
     ['an op_kind that contradicts its own result', (c) => { c.op_kind = 'moe'; c.prepared_ut.result.op_kind = 'gemm'; }],
+    ['a weighted UT without its workload binding', (c) => { c.prepared_ut.weighted = true; delete c.prepared_ut.result.workload_path; }],
+    ['a weighted UT with a relative workload binding', (c) => { c.prepared_ut.weighted = true; c.prepared_ut.result.workload_path = 'meta.json'; }],
   ]) assert.throws(() => read(mutate(fn)), /failed re-validation/, why);
   assert.throws(() => read({delivery_path: '/eval/delivery.json'}), /no prepared envelope/);
+});
+
+// meta.workload with observed call mass makes the UT's primary the weighted aggregate. The lane ranks
+// on it only through op_spec.workload_path, so preparation must hand that binding over or refuse.
+const WEIGHTED_META = {target_callable: 'pkg:leaf', workload: {kind: 'agentx_trace_replay', weighting: 'observed',
+  serving_weight_model: {source: 'observed_workload', evidence_path: 'run/observed.json'},
+  cases: [{sig: 'decode_m32', regime: 'decode', effective_calls: 3}]}};
+
+test('a weighted prepared UT without a workload binding is refused at preflight and packing', async t => {
+  const f = await fixture(t, {meta: WEIGHTED_META});
+  const preflight = f.run();
+  assert.equal(preflight.status, 1, 'the skill preflight refuses the weighted draft');
+  assert.equal(JSON.parse(preflight.stdout).checks.workload_binding.ok, false);
+  for (const workload_path of ['missing.json', 'run/ut.json']) {
+    await f.write('run/draft.json', {...f.result, workload_path});
+    const wrongBinding = f.run();
+    assert.equal(wrongBinding.status, 1, 'a missing or unrelated file cannot bind the workload');
+    assert.equal(JSON.parse(wrongBinding.stdout).checks.workload_binding.ok, false);
+  }
+  const writeEval = (file, data) => fs.writeFile(path.join(f.evalDir, file), JSON.stringify(data));
+  await f.write('run/RETURN.json', f.result);
+  await writeEval('workload.json', {kind: 'agentx_trace_replay'});
+  await writeEval('ranking.json', {ranking: [{name: 'leaf_kernel', selection_pct_gpu_time: 7.5}]});
+  await writeEval('manifest.json', {workload_json: 'workload.json', ranking_json: 'ranking.json',
+    tasks: [{task_dir: 'tasks/leaf', phase: 'extract'}]});
+  await assert.rejects(packStandaloneTasks(f.evalDir, 'manifest.json', 'delivery.json'),
+    /invalid evidence.*workload_path/);
+});
+
+test('a weighted prepared UT carries its resolved workload binding to every optimization lane', async t => {
+  const f = await delivered(t, {meta: WEIGHTED_META, workload_path: 'meta.json'});
+  await f.pack();
+  const prepared = (await readPreparedKernels(f.evalDir, 'delivery.json')).kernel_candidates[0];
+  const bound = await fs.realpath(path.join(f.task, 'meta.json'));
+  assert.equal(prepared.prepared_ut.weighted, true);
+  assert.equal(prepared.prepared_ut.result.workload_path, bound, 'the binding is the resolved task-local file');
+  const src = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
+  const helper = src.slice(src.indexOf('function preparedUtDefect('), src.indexOf('\n// AgentX reuses its prepared UT.'));
+  const reuse = new Function(`${helper}\nreturn reusePreparedUT;`)();
+  // Every head and milestone site gets its ext from reusePreparedUT and forwards ext.workload_path
+  // as op_spec.workload_path (test_milestone_primary_contract.js executes those literals).
+  assert.equal(reuse(prepared).workload_path, bound);
+  assert.equal(reuse(prepared).smoke, 'pass');
+  const g = await delivered(t);
+  await g.pack();
+  const unweighted = (await readPreparedKernels(g.evalDir, 'delivery.json')).kernel_candidates[0];
+  assert.equal(Object.hasOwn(unweighted.prepared_ut, 'weighted'), false, 'unweighted envelopes are unchanged');
+  assert.equal(Object.hasOwn(reuse(unweighted), 'workload_path'), false, 'unweighted lanes stay unbound');
 });
 
 test('whole-op metadata routes attention aliases to head and preserves the consumer op kind', async t => {

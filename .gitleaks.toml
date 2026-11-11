@@ -5,7 +5,7 @@
 useDefault = true
 
 # The `generic-api-key` rule fires on the literal word "API" followed by a
-# high-entropy-looking token. Line 75 of the file below is a citation — "... 3-level
+# high-entropy-looking token. The matching passage in the file below is a citation — "... 3-level
 # API, MI300X-vs-Hopper ..." — not a credential.
 #
 # Scoped to that single file. Rule-level scoping (`targetRules`) is NOT honored by
@@ -23,3 +23,9 @@ paths = ['''perf_knowledge/languages/tilelang/overview\.md''']
 [[allowlists]]
 description = "torch dtype literals trip generic-api-key near KeyError/token_ prose"
 regexes = ['''^torch\.(bfloat16|float8_e4m3fn|float8_e4m3fnuz)$''']
+
+# Canonical JSON output hashes in the EVO compatibility fixtures, not credentials.
+# Only these exact digests are excluded; the test files remain scanned.
+[[allowlists]]
+description = "Two SHA-256 compatibility fixtures next to field names containing key"
+regexes = ['''^(?:2f0f21f470ecfe8aa7930b569c489be4ad1750236d3931f1c3131103b7b9f1ca|e7d890c9a8d1f2f89cd8efa26c5a7a032a75c6a07d493bfb5877428e0139a192)$''']

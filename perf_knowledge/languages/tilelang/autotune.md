@@ -5,7 +5,7 @@ gens: [gfx90a, gfx942]
 dtypes: [fp16, bf16]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
@@ -13,12 +13,9 @@ sources:
 
 # TileLang autotuning
 
-## TL;DR
-TileLang couples `@tilelang.autotune` with `@tilelang.jit`: you define a candidate config space with
-`itertools.product`, and the tuner JIT-compiles and times each, caching inputs. For the MI300X
-FlashAttention kernel this is **108 candidate configs** searched in **~1 second**, landing on
-`block_M=128, block_N=32, threads=512, enable_rasterization=True`. This is the main reason TileLang beats
-Triton ~1.53× on FA without hand tuning. See [primitives.md](primitives.md) for the knobs being swept.
+TileLang combines `@tilelang.autotune` with `@tilelang.jit` to compile and compare
+candidate configurations. The example below defines a finite attention search;
+its size, cost and winner are specific to that example and toolchain.
 
 ## Core concepts — the decorators
 ```python

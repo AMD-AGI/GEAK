@@ -20,6 +20,7 @@ export const meta = {
   ],
 };
 
+// GENERATED from e2e_workflow/src/e2e_workflow/ by scripts/build_workflows.mjs. Edit the parts there, then rebuild.
 // RUNTIME SANDBOX CONTRACT -- read before adding any Node API to this file.
 // The script runs on two runtimes with different globals:
 //                                             process   require   import()
@@ -44,31 +45,11 @@ if (typeof _rawArgs === 'string') {
   }
 }
 const A = _rawArgs || {};
-// LLM accounting (args.llm_stats="false" disables): records each agent call's role/phase/attempt.
-// No timestamps (no Date.now() here); scripts/llm_ledger.py takes durations from the transcripts.
-const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
-const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
-const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-// Called at dispatch (before the await): events stay in dispatch order, which the ledger's
-// positional join relies on, and hung or throwing attempts are still recorded. Returns the event
-// (null when off); the caller sets `ok` once the attempt resolves.
-function tlAgent(prompt, o, attempt) {
-  if (!LLM_STATS) return null;
-  // Identity comes from the prompt's `You are the <role>. PHASE=<sub_phase>.` line (also in the
-  // transcript), not from opts.label, which is free-form display text.
-  const m = TL_ROLE_RE.exec(String(prompt || ''));
-  const e = {
-    seq: LLM_TL.events.length,
-    phase: (o && o.phase) || '',
-    label: (o && o.label) || 'agent',
-    role: m ? m[1] : '',
-    sub_phase: m ? m[2] : '',
-    attempt: attempt,
-    ok: false,
-  };
-  LLM_TL.events.push(e);
-  return e;
+if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
+  throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }
+// Agent timeline for the LLM ledger (LLM_STATS + tlAgent: src/shared/tl_agent.js).
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
   let _preview;
@@ -92,12 +73,44 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
 // would nest e2e -> dispatcher -> worker (3 levels), which the runtime forbids.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+// Each workflow declares its own LLM_TL (it names the workflow).
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
+// order. Two same-key agents that finish out of order no longer swap identities under the parser's
+// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
+// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
+  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
+  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
 if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
+}
+if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
@@ -116,15 +129,39 @@ const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 // extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
 // unwanted prior. Override with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+// Select the policy inside the existing worker, without another workflow level.
+const LANE_OPTIMIZER = A.optimizer == null || A.optimizer === '' ? 'evo' : A.optimizer;
+if (!['greedy', 'evo'].includes(LANE_OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
+const EXPLICIT_KERNEL_BUDGET = typeof A.kernel_budget === 'string' && /^\+?\d+$/.test(A.kernel_budget.trim())
+  ? Number(A.kernel_budget) : A.kernel_budget;
+if (A.kernel_budget !== undefined && (!Number.isSafeInteger(EXPLICIT_KERNEL_BUDGET) || EXPLICIT_KERNEL_BUDGET < 1)) {
+  throw new Error('kernel_budget must be a positive safe integer');
+}
 
 // Every nested lane call builds its args here, so none silently takes the lane's own defaults;
 // test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
-// ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
-// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
+// llm_stats is forwarded only when the parent got one explicitly. wfArgs spreads last so a
+// per-call value wins (RDNA4 isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
-    ...ablLaneArgs(),
+    optimizer: LANE_OPTIMIZER,
+    // The worker enables these only for boolean true; do not coerce caller values.
+    ...(A.evolution_case_evidence_view !== undefined
+      ? { evolution_case_evidence_view: A.evolution_case_evidence_view } : {}),
+    ...(A.evolution_planner_case_view !== undefined
+      ? { evolution_planner_case_view: A.evolution_planner_case_view } : {}),
+    ...(A.evolution_evidence_handoff !== undefined
+      ? { evolution_evidence_handoff: A.evolution_evidence_handoff } : {}),
+    ...(A.evolution_preserve_founder_attempts !== undefined
+      ? { evolution_preserve_founder_attempts: A.evolution_preserve_founder_attempts } : {}),
+    // The worker validates the EVO schedule selector itself.
+    ...(A.evolution_start !== undefined ? { evolution_start: A.evolution_start } : {}),
+    ...Object.fromEntries(['evolution_return_development', 'evolution_import_stall_sources',
+      'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
+      .map(key => [key, A[key]])),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
@@ -366,7 +403,7 @@ const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_ke
 // Milestone skips editable kernels below this pct_gpu_time (Amdahl: a few % can't beat the e2e noise
 // band). Overrides MIN_KERNEL_TASKS: if no candidate clears it, Milestone stops.
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
-const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
+const KERNEL_BUDGET = EXPLICIT_KERNEL_BUDGET !== undefined ? EXPLICIT_KERNEL_BUDGET : (FAST_MODE ? 3 : 6); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // ---- TUNING SKILLSET phase (default ON) ----
 // The vendored tuning skillset (hash-pinned whole by scripts/tuning_skillset_sync.py) is run by one
@@ -416,8 +453,8 @@ function amdahlCeilingPct(pct_gpu_time, isolated) {
   if (p <= 0 || s <= 1) return Infinity;   // unknown inputs -> never flag (fail-open)
   return (1 / (1 - p * (1 - 1 / s)) - 1) * 100;
 }
-// Only accuracy-gated accepts can need an independent A/B confirmation; exceeding the estimate alone
-// never triggers a kernel correctness rewrite.
+// Only accuracy-gated accepts get an independent A/B review. The estimate is advisory: exceeding it
+// never rejects a candidate by itself and never triggers a kernel correctness rewrite.
 function parityIsSoft(integ) {
   const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
   if (pk === 'accuracy') return true;
@@ -464,6 +501,15 @@ function speedupNeedsReview(pct_gpu_time, isolated, integ) {
   if (!Number.isFinite(ceilPct)) return false;
   return ((integ && integ.e2e_delta_pct) || 0) > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9;
 }
+function logAmdahlDiagnostic(pct_gpu_time, isolated, integ) {
+  const ceilPct = speedupEstimate(pct_gpu_time, isolated, integ).estimate_pct;
+  const deltaPct = integ && integ.e2e_delta_pct;
+  if (Number.isFinite(ceilPct) && Number.isFinite(deltaPct)
+      && deltaPct > ceilPct * (1 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9) {
+    log(`  [amdahl diagnostic] measured +${deltaPct.toFixed(1)}% exceeds conditional +${ceilPct.toFixed(1)}% estimate. ` +
+      'Check timing boundary, overlap, work completeness and quality evidence; model discrepancy alone does not change the gate.');
+  }
+}
 function confirmationEvidenceMatches(integ) {
   const review = integ && integ.speedup_review;
   const before = review && review.original_measurement;
@@ -499,19 +545,23 @@ function rejectClass(reason) {
   if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
-// runIntegrateBothLegs resolves the review before any caller can bank the candidate. A confirmed
-// measurement can exceed the estimate by any amount; actual parity failures still reject.
-function integAccepted(integ, pct_gpu_time, isolated) {
+// Measured eligibility: a complete accepted/stack A/B without a parity failure. A speedup review
+// withholds it only when it ran and returned 'rejected'; pending, unreviewed or inconclusive
+// reviews are recorded evidence. The estimate itself is advisory for every parity kind.
+function integEligible(integ) {
   return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
     && integ.ab_complete !== false && integ.output_parity !== 'fail'
-    && !(integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status))
-    && (!speedupNeedsReview(pct_gpu_time, isolated, integ) || confirmedSpeedup(integ)));
+    && !(integ.speedup_review && integ.speedup_review.status === 'rejected'));
 }
+// integEligible, logging the advisory estimate discrepancy of an eligible result.
+function integAccepted(integ, pct_gpu_time, isolated) {
+  const accepted = integEligible(integ);
+  if (accepted) logAmdahlDiagnostic(pct_gpu_time, isolated, integ);
+  return accepted;
+}
+// The integrator's evidence-backed reason; neither the estimate nor a review fabricates a failure.
 function gateRejectReason(integ, pct_gpu_time, isolated) {
   if (integ && integ.output_parity === 'fail') return 'parity_regression';
-  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
-      && !integAccepted(integ, pct_gpu_time, isolated))
-    return 'speedup_review_pending: independent A/B confirmation required';
   return integ ? (integ.reason || integ.gate || '') : '';
 }
 // ---- DEEP MODE (opt-in, default OFF) ----
@@ -596,14 +646,12 @@ const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim
 // this and the kernel layer:
 //   on (default)      | read the ladder, validate the top candidate on this box, ADOPT if it wins.
 //   reference         | read only; never bench, never adopt — the offer is prose for later agents.
-//   return_after_read | resolve + validate, then return before the optimization flow runs.
 //   off/false/none    | nothing: no phase, no agent, no log.
 const E2E_WARM_START = KB_ARGS.warm_start.trim().toLowerCase() || 'on';
 const E2E_WARM_START_ON = !WARM_START_OFF;
 // Fast mode forces reference-only: it skips config work, so it won't spend a 20-40min server launch
 // benching a stored config.
 const E2E_WARM_START_REF_ONLY = E2E_WARM_START === 'reference' || FAST_MODE;
-const E2E_WARM_START_RETURN_AFTER = E2E_WARM_START === 'return_after_read';
 // Deployment-store plane, derived from kb_mode once here so reader and writer agree:
 //   local   on-disk store only (offline rehearsal; no network, nothing permanent).
 //   remote  the KB Store service only.
@@ -678,7 +726,6 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
-const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
 // The caller's declared ISL/OSL, kept apart from the resolved target shape (they differ on a trace
 // replay); the resolved ISL/OSL/CONC are defined after the workload kind is parsed.
 const ISL_DECLARED = A.isl != null ? parseInt(A.isl, 10) : null;
@@ -1049,11 +1096,18 @@ const ST = A.state || {};   // carried state from a prior phase invocation
 let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
-// Schema fragments.
+// ---------------------------------------------------------------------------
+// Small helpers every workflow uses: the "## Inputs" list in role prompts and
+// JSON-schema builders for structured agent output.
+// ---------------------------------------------------------------------------
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
-const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
-
+const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
+// ---------------------------------------------------------------------------
+// Schemas (obj/arrStr/arrObj: src/shared/helpers.js).
+// ---------------------------------------------------------------------------
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
   baseline_throughput_tok_s: { type: 'number' }, baseline_spread_pct: { type: 'number' },
@@ -1279,8 +1333,9 @@ const INTEGRATE_SCHEMA = obj({
   ref_med: { type: 'number' }, cand_med: { type: 'number' },
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
-  // How an accept's correctness was established: 'byte_exact' (greedy byte parity vs the true
-  // baseline), 'accuracy' (sampled task-accuracy probe) or 'none'.
+  // How an accept's correctness was established: 'byte_exact' (sampled greedy byte parity vs the
+  // original baseline), 'accuracy' (sampled task-accuracy probe) or 'none'. Neither sampled check
+  // proves correctness for every input.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' },
@@ -1318,10 +1373,7 @@ const VALIDATE_SCHEMA = obj({
 const CHECKPOINT_WRITE_SCHEMA = obj({
   written: { type: 'boolean' }, path: { type: 'string' }, checkpoint_sha256: { type: 'string' },
 }, ['written', 'path', 'checkpoint_sha256']);
-
 // Prompt helpers (mirror the single-kernel workflow).
-const cfg = (o) => Object.entries(o).map(([k, v]) =>
-  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
 // No filesystem here, so a writer agent snapshots mutable replay assets atomically while the
 // measured stack still exists, from a structured schema-v2 intent shared by every phase.
@@ -1391,7 +1443,6 @@ function expertSkillsBlock(role) {
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
 let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
-let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
 let KB_READ_PLANE = '';    // which plane answered the read (not implied by `both`)
 // Everything this run recalled, report-ready: the address asked, what came back, what re-measuring
 // it here produced, and whether it was accepted (fed to the Report role). `asked` is filled even
@@ -1565,10 +1616,10 @@ function agentxClaimNote(claimed, baseline) {
   if (!IS_AGENTX || !(claimed > 0) || claimed === baseline) return '';
   return ` On this trace replay CLAIMED_THROUGHPUT comes from ${AGENTX.geak_loop_duration_s}s search legs, ` +
     `which replay a different, shorter slice of the corpus than your ${AGENTX.duration_s}s legs, so it is ` +
-    'not comparable with your numbers. In step 4 drop both claim conditions (validated_win\'s "within the ' +
-    'noise band of the claim" and flagged\'s "lower than the claim by more than the band") and arbitrate on ' +
-    'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
-    'arbitration_note that it is a search-window number.';
+    'not comparable with your numbers. When you set validation_status, drop both claim conditions ' +
+    '(validated_win\'s "within the noise band of the claim" and flagged\'s "lower than the claim by ' +
+    'more than the band") and arbitrate on your same-session A/B, the baseline and parity. Still ' +
+    'report claimed_throughput_tok_s, and say in arbitration_note that it is a search-window number.';
 }
 // Every signal must agree, so no single adoption path can pass a changed bundle off as Setup's.
 function agentxAdoptedNothing(s) {
@@ -1738,95 +1789,9 @@ function checkpointTimeoutFor() {
   return Math.max(agentTimeoutFor(), Math.min(AGENT_TIMEOUT_MS, CHECKPOINT_COMMIT_TIMEOUT_MS));
 }
 
-// ABLATION ARMS — phase-resumed cost ablations (research/ablations/README.md).
-// Inert unless args.ablation_arm names an arm; `''` and `A1` are the control (every helper returns
-// its off-value). The audit draw is a seeded hash of (seed, head), reproducible across arms
-// (Math.random()/Date.now() throw here). B4-TIME caps wall-clock (the runtime never sees prices);
-// B5-EFFORT routes to a lower effort tier of the same model. B4/B5/B45 are accepted aliases.
-const ABL_RAW_ARM = String(A.ablation_arm || '').trim().toUpperCase();
-const ABL_ALIASES = { B4: 'B4-TIME', B5: 'B5-EFFORT', B45: 'B45-TIME-EFFORT' };
-const ABLATION_ARM = ABL_ALIASES[ABL_RAW_ARM] || ABL_RAW_ARM;
-const ABL_ACTIVE = ABLATION_ARM !== '' && ABLATION_ARM !== 'A1';
-const ABL = (arm) => ABLATION_ARM === arm || ABLATION_ARM === ABL_ALIASES[arm] ||
-  (ABLATION_ARM === 'B45-TIME-EFFORT' && (arm === 'B4' || arm === 'B5'));
-// The kernel lane is a separate workflow with its own args; B6 lives there, so forward the arm.
-function ablLaneArgs() {
-  // The control (A1 / unset) forwards nothing.
-  if (!ABL_ACTIVE) return {};
-  return { ablation_arm: ABL_RAW_ARM, ablation_seed: String(A.ablation_seed || '') };
-}
-const ABL_SEED = String(A.ablation_seed || 'geak-ablation-2026');
-// Pilot wall-clock limits, not calibrated thresholds (see study.json): preparation, the
-// implementation trial and an audited continuation each have their own cap. Validation is never
-// cut; it is the run's FINAL_RESERVE.
-const ABL_IMPL_MS = parseInt(A.ablation_head_trial_ms != null ? A.ablation_head_trial_ms : 1200000, 10);
-const ABL_PREP_MS = parseInt(A.ablation_prep_ms != null ? A.ablation_prep_ms : 1200000, 10);
-const ABL_AUDIT_MS = parseInt(A.ablation_audit_ms != null ? A.ablation_audit_ms : ABL_IMPL_MS, 10);
-const ABL_HEAD_TRIAL_MS = ABL_IMPL_MS;                 // alias used by the event log
-const ABL_AUDIT_P = Number(A.ablation_audit_probability != null ? A.ablation_audit_probability : 0.1);
-const ABL_EVENTS = [];
-function ablEvent(o) { if (ABLATION_ARM) ABL_EVENTS.push(o); }
-// B4 needs the elapsed clock, which only time_budget_s arms; without it B4 would silently
-// match A1, so refuse to run.
-if (ABL('B4') && TIME_BUDGET_MS == null) {
-  throw new Error('ablation_arm=' + ABLATION_ARM + ' requires time_budget_s: without it the ' +
-    'elapsed clock is never armed and the head trial gate can never fire.');
-}
-function ablDraw(key) {
-  let h = 2166136261; const s = ABL_SEED + ':' + key;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return ((h >>> 0) % 1000000) / 1000000;
-}
-// B4 readiness (not a gain claim; adoption still needs the A/B): an exact candidate identity hash
-// that differs from the frozen incumbent, plus the compile/correctness records the authoring layer
-// produced. Integration is reported, never inferred.
-function ablCandId(c) {
-  const body = [c && c.final_patch, c && c.code_patch, c && c.apply_env, c && c.apply_flags,
-    c && c.tuning_artifact, c && c.kernel_eval_dir].map((x) => String(x || '')).join('\u0000');
-  let h1 = 2166136261, h2 = 2246822519;
-  for (let i = 0; i < body.length; i++) {
-    h1 ^= body.charCodeAt(i); h1 = Math.imul(h1, 16777619);
-    h2 ^= body.charCodeAt(body.length - 1 - i); h2 = Math.imul(h2, 2654435761);
-  }
-  return body.trim() ? ((h1 >>> 0).toString(16) + (h2 >>> 0).toString(16)) : '';
-}
-function ablCandEvidence(c, incumbentId) {
-  const id = ablCandId(c);
-  return {
-    candidate_id: id,
-    has_identity: !!id,
-    non_incumbent: !!id && id !== incumbentId,
-    // final_patch exists only after the kernel layer's oracle passed, and a bake-off winner only
-    // after it ran: the only compile/correctness records available here.
-    compile_ok: !!(c && (c.final_patch || c.code_patch || c.tuning_artifact || c.apply_env || c.apply_flags)),
-    correctness_ok: !!(c && (c.kind === 'authored' ? c.final_patch : c.isolated > 0)),
-    integration_ok: !!(c && c.integration_ok),      // only the e2e A/B can set this
-    isolated: (c && c.isolated) || 0,
-  };
-}
-function ablHeadReady(cands, ext, incumbentId) {
-  if (!(ext && ext.task_dir)) return false;
-  return (cands || []).some((c) => {
-    const e = ablCandEvidence(c, incumbentId);
-    return e.has_identity && e.non_incumbent && e.compile_ok && e.correctness_ok;
-  });
-}
-// B5 router: low effort only for bounded tasks with an objective validator (never authoring,
-// oracles or adjudication) and never on a retry, which escalates with the failure attached.
-const ABL_CHEAP_LABELS = /^(storage:reclaim|bakeoff |extract_op |roofline )/;
-function ablEffortFor(opts, attempt) {
-  if (!ABL('B5') || attempt > 0) return null;
-  const label = String((opts && opts.label) || '');
-  return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
-}
-
-function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
+// Agent calls, extraction, integration and workflow deadlines.
+function agentBounded(rawPrompt, opts, onHung, timeoutFor = agentTimeoutFor) {
   const prompt = withProcessSafety(rawPrompt);
-  const ablEffort = ablEffortFor(opts, ablAttempt || 0);
-  if (ablEffort) {
-    opts = { ...(opts || {}), effort: ablEffort };
-    ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
-  }
   const timeoutMs = timeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
@@ -1852,14 +1817,9 @@ async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) 
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      // B5-EFFORT is a cascade: the escalated retry sees the cheap attempt's failure (both are
-      // charged to the task). Inert for every other arm.
-      const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
-        ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
-        : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       let hung = null;
-      const r = await agentBounded(p2, opts, i, (run) => { hung = run; }, timeoutFor);
+      const r = await agentBounded(prompt, opts, (run) => { hung = run; }, timeoutFor);
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
@@ -2289,6 +2249,10 @@ function preparedUtDefect(kernel, result, phase) {
   const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
   if (requested && returned && requested !== returned)
     return `op_kind differs between declaration and result: ${requested} / ${returned}`;
+  // A weighted UT reaches its lanes' weighted primary only through the packed workload binding.
+  if (kernel.prepared_ut && kernel.prepared_ut.weighted === true &&
+      !(typeof result.workload_path === 'string' && result.workload_path.startsWith('/')))
+    return 'weighted prepared UT carries no absolute workload_path binding';
   return '';
 }
 
@@ -2476,9 +2440,6 @@ async function adoptAbandonedVerdict(integ, label) {
   return late;
 }
 
-// Run ONE integrate A/B and GUARANTEE both legs complete: if the integrator returns incomplete,
-// re-invoke it in resume mode for the missing leg (up to AB_FINISH_RETRIES). Every integrate site
-// uses this, so an A/B never ends after the reference leg alone.
 const SPEEDUP_REVIEW_RESULTS = new Map();
 async function reviewSpeedup(integ, inputs, label, phaseName) {
   const kr = inputs.KERNEL_RESULT || {};
@@ -2536,18 +2497,22 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
   SPEEDUP_REVIEW_RESULTS.set(key, result);
   return result;
 }
+// Run ONE integrate A/B: an incomplete result is re-invoked in resume mode for the missing leg (up
+// to AB_FINISH_RETRIES) within the remaining budget. Acceptance requires both legs; a leg still
+// missing at the deadline stays incomplete. Every integrate site uses this.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   // Incomplete, so callers keep it PENDING, not rejected.
   if (abWindowShort(abLegs(inputs), label)) {
     return { gate: 'incomplete', ab_complete: false,
       reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
   }
-  // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
-  // off / when no tuning was banked).
+  // Caller inputs win for the candidate (the accuracy gate and the tuning carve-out only ADD keys);
+  // correctness always uses the retained original seed.
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
     PROFILE_TOPN_JSON: (profile && profile.profile_topN_json) || '',
     ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
+    BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
   };
   let integ = await adoptAbandonedVerdict(await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, withTuning),
@@ -2564,9 +2529,9 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
       roleAgent('e2e_integrator', 'integrate',
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
-        'accepted/stack/rejected with ab_complete:true. Do NOT return gate:"incomplete" unless a hard ' +
-        'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
-        'replica per leg so BOTH legs still run.',
+        'accepted/stack/rejected with ab_complete:true only after both legs satisfy the declared ' +
+        'measurement protocol. Keep the required cases, samples, replicas and lifecycle. If time ' +
+        'or execution fails before completion, return gate:"incomplete" with the saved evidence.',
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
@@ -2575,12 +2540,11 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
     // Preserve every candidate's review when several backends share one head short_name.
     const measurementId = (integ.measurement_evidence && integ.measurement_evidence.measurement_id) || withTuning.CAND_TAG || '';
     const candidateId = [integ.short_name, measurementId].filter(Boolean).join('_').replace(/[^A-Za-z0-9_.-]+/g, '_');
-    const kr = withTuning.KERNEL_RESULT || {};
-    const accepted = integAccepted(integ, kr.pct_gpu_time, kr.verified_isolated_speedup);
-    const reviewPending = integ.speedup_review && ['pending', 'inconclusive'].includes(integ.speedup_review.status);
+    const accepted = integEligible(integ);
+    // integration_result keeps any speedup review as evidence; only a rejected one blocks.
     await persistE2EValidationCheckpoint(`overlay/candidate_${candidateId}/e2e_validation.json`, {
-      phase: 'Overlay', validation_level: 'integrator', gate: reviewPending ? 'incomplete' : (integ.gate || 'incomplete'),
-      committed: accepted, validation_status: accepted ? 'accepted_intermediate' : (reviewPending ? 'speedup_review_pending' : 'incomplete'),
+      phase: 'Overlay', validation_level: 'integrator', gate: integ.gate || 'incomplete',
+      committed: accepted, validation_status: accepted ? 'accepted_intermediate' : 'incomplete',
       integration_result: integ,
       baseline_throughput_tok_s: integ.ref_med || 0,
       final_throughput_tok_s: integ.cand_med || integ.e2e_throughput_tok_s || 0,
@@ -2604,6 +2568,13 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   return integ;
 }
 
+// The lane's accepted primary metric; geomean only for an explicitly unweighted legacy result.
+function isolatedPrimary(result, workloadPath) {
+  if (!result) return null;
+  return result.final_speedup === undefined && !workloadPath && result.workload_aligned === false
+    ? result.final_geomean : result.final_speedup;
+}
+
 // Lightweight SURGICAL FIX (Tier 1 of the corrective): one kernel_surgeon agent makes the smallest
 // fix that keeps the isolated win, self-verifies on the immutable unittest, and returns a
 // kernel_workflow-shaped result, or null to escalate to the heavy re-author.
@@ -2612,7 +2583,7 @@ const SURGEON_SCHEMA = obj({
   eval_dir: { type: 'string' }, root_cause: { type: 'string' }, note: { type: 'string' },
 }, ['fixed']);
 async function trySurgicalFix(spec, reason, fixClass, attempt) {
-  if (!SURGICAL_FIX) return null;
+  if (!SURGICAL_FIX || spec.workload_path || spec.workload_aligned !== false) return null;
   const intro = `A verified-isolated ${spec.language || 'triton'} kernel winner for op "${spec.short_name}" ` +
     `(${(spec.isolated || 0).toFixed(2)}x isolated) ENGAGED live but was REJECTED at the e2e gate. ` +
     `Reject class = ${fixClass}. Reject reason: "${reason}". Make the SMALLEST possible fix that clears it ` +
@@ -2628,7 +2599,7 @@ async function trySurgicalFix(spec, reason, fixClass, attempt) {
     }),
     { phase: spec.phase_name || 'HeadKernel', label: `surgeon ${spec.short_name} (${attempt})`, schema: SURGEON_SCHEMA });
   if (s && s.fixed && s.final_patch && (s.final_geomean || 0) > 1.0) {
-    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean,
+    return { authored: true, final_patch: s.final_patch, final_geomean: s.final_geomean, workload_aligned: false,
       eval_dir: s.eval_dir || spec.kernel_eval_dir || '', reason: s.root_cause || 'surgical fix' };
   }
   log(`  ${spec.short_name}: surgical fix did not produce a verified patch (${s ? (s.note || s.root_cause || 'not fixed') : 'null'}) — escalating to re-author.`);
@@ -2649,7 +2620,7 @@ async function tryCorrectiveReauthor(spec) {
   if (!eligible) return { banked: false };
   const curTput = (spec.cur && spec.cur.tput) || 0;
   // Class-specific, generic instructions: `integration` = wrong posture (JIT/capture/host-sync);
-  // `correctness` = wrong live output. Both keep the algorithm and isolated win.
+  // `correctness` = wrong live output (parity/accuracy failure). Both keep the algorithm and isolated win.
   const INTEGRATION_FIX_TASK =
     `Fix ONLY the integration posture per knowledge/learned/method-cudagraph-safe-integration: ` +
     `precompile/register EVERY (shape-bucket × config) the LIVE workload hits — PREFILL buckets AND decode buckets, ` +
@@ -2674,7 +2645,8 @@ async function tryCorrectiveReauthor(spec) {
     `state across calls or assume the previous call's indices/mask still apply. (3) If you use atomics/scatter-add ` +
     `into a reused output, zero it each call inside the captured region. VALIDATE your fix adversarially: call the ` +
     `kernel on TWO different routing snapshots back-to-back REUSING the same input buffers, and on repeated calls ` +
-    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this.`;
+    `with fresh contents, asserting bit/tol correctness on EACH — a data_ptr cache or stale reuse must fail this. ` +
+    `A gain above the conditional Amdahl projection alone does not establish wrong output; preserve actual correctness evidence.`;
   for (let cAttempt = 1; cAttempt <= HEAD_CORRECTIVE_MAX; cAttempt++) {
     log(`  ${spec.short_name}: ${fixClass.toUpperCase()} reject (${reason}) — corrective ${cAttempt}/${HEAD_CORRECTIVE_MAX} (fix-and-retry the iso winner; NOT a new head, NOT charged to head_budget).`);
     // TIER 1: lightweight surgical patch (one agent, minutes).
@@ -2700,11 +2672,14 @@ async function tryCorrectiveReauthor(spec) {
         }, `${spec.short_name}:corrective`);
       } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
     }
-    if (!fix || fix.authored === false || !(fix.final_geomean > 1.0) || !fix.final_patch) {
+    const fixedIsolated = isolatedPrimary(fix, spec.workload_path);
+    if (!fix || fix.authored === false || !Number.isFinite(fixedIsolated) || !(fixedIsolated > 1.0)
+        || (!viaSurgical && fix.validation_status !== 'accepted')
+        || typeof fix.final_patch !== 'string' || !fix.final_patch.trim()) {
       log(`  ${spec.short_name}: corrective produced no usable kernel (${fix ? fix.reason || fix.validation_status : 'null'}).`);
       return { banked: false };
     }
-    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; iso geomean ${(fix.final_geomean || 0).toFixed(2)}. Re-gating e2e.`);
+    log(`  ${spec.short_name}: fix via ${viaSurgical ? 'SURGICAL patch (light)' : 'kernel_workflow re-author (heavy)'}; isolated primary ${fixedIsolated.toFixed(2)}. Re-gating e2e.`);
     // Re-gate the fixed kernel in the caller's KERNEL_RESULT shape, swapping in the corrected patch,
     // eval_dir and speedup. Both patch fields get the new patch; a stale one would re-apply the bug.
     const base = spec.base_inputs || {};
@@ -2712,7 +2687,7 @@ async function tryCorrectiveReauthor(spec) {
       KERNEL_RESULT: { ...(base.KERNEL_RESULT || {}),
         code_patch: fix.final_patch, final_patch: fix.final_patch,
         authored_kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || (base.KERNEL_RESULT && base.KERNEL_RESULT.authored_kernel_eval_dir) || '',
-        verified_isolated_speedup: fix.final_geomean,
+        verified_isolated_speedup: fixedIsolated, isolated_geomean: fix.final_geomean ?? null,
         pct_gpu_time: spec.pct_gpu_time || (base.KERNEL_RESULT && base.KERNEL_RESULT.pct_gpu_time) || 0,
         corrective_fix_of: reason } };
     if (spec.cur) {
@@ -2723,14 +2698,14 @@ async function tryCorrectiveReauthor(spec) {
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
-    const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && integ2.e2e_throughput_tok_s > curTput) {
+    const pctForDiagnostic = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
+    if (ab2 && integAccepted(integ2, pctForDiagnostic, fixedIsolated) && integ2.e2e_throughput_tok_s > curTput) {
       // Carry the corrected patch out to bankAccepted: the call site's KERNEL_RESULT still holds the
       // rejected one.
-      return { banked: true, integ: integ2, isolated: fix.final_geomean, patch: fix.final_patch,
+      return { banked: true, integ: integ2, isolated: fixedIsolated, isolated_geomean: fix.final_geomean ?? null, patch: fix.final_patch,
         kernel_eval_dir: fix.eval_dir || spec.kernel_eval_dir || '' };
     }
-    reason = gateRejectReason(integ2, pctForGuard, fix.final_geomean) || reason;
+    reason = gateRejectReason(integ2, pctForDiagnostic, fixedIsolated) || reason;
     // Structured stop, not a re-classification of the prose reason: once parity no longer fails, a
     // throughput or review issue cannot justify another correctness rewrite.
     if (ab2 && integ2.output_parity !== 'fail') {
@@ -2756,26 +2731,20 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// A nested kernel workflow raced against the tightest of the fast-mode cap, B4's remaining
-// implementation cap (ABL_NESTED_CAP_MS, set by the head loop; null = none) and the trace-replay
+// A nested kernel workflow raced against the tighter of the fast-mode cap and the trace-replay
 // reserve bound. On expiry it resolves null, which callers treat as "no kernel".
-let ABL_NESTED_CAP_MS = null;
 async function fastBoundedWorkflow(ref, wfArgs, label) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
   wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
-  const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
   const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
   const resCap = laneReserveCapMs();
-  const capMs = [ablCap, fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
+  const capMs = [fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
   return raceLaneCap(p, capMs, () => {
     if (capMs === resCap) return logLaneAtReserve(label);
-    log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-    if (ablCap != null && capMs === ablCap) {
-      ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
-    }
+    log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
   });
 }
 // Milestone lanes: the trace-replay reserve bound alone.
@@ -2955,6 +2924,8 @@ if (!MODEL_PATH && KERNEL_PATH) {
   try {
     const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
       kernel_path: KERNEL_PATH, workflow_dir: KERNEL_WF_DIR,
+      ...Object.fromEntries(['op_spec', 'workload_spec_path', 'workload']
+        .filter(key => A[key] !== undefined).map(key => [key, A[key]])),
       // The lane defaults to triton; a pass-through caller naming another backend must reach that
       // backend's own warm-start page (the slug is per-language), not triton's.
       ...(A.target_language ? { target_language: String(A.target_language) } : {}),
@@ -3127,6 +3098,8 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+// Keep the original measured seed separate from the evolving timing reference.
+let BASELINE_FLAGS = null, BASELINE_ENV = null, BASELINE_OVERLAY = null;
 let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
 // The envelope arrives in the reply: this script cannot read EVAL_DIR (RUNTIME SANDBOX CONTRACT).
@@ -3240,7 +3213,7 @@ if (want('setup')) {
   if (EXPECTED_GFX && detectedGfx !== EXPECTED_GFX) {
     throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${detectedGfx}`);
   }
-  if (EXPECTED_TARGET && detectedTarget !== EXPECTED_TARGET) {
+  if (EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' && detectedTarget !== EXPECTED_TARGET) {
     throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${detectedTarget}`);
   }
   const normalizeDeviceName = (name) =>
@@ -3268,6 +3241,11 @@ if (want('setup')) {
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
   SETUP_CONFIG = { flags: curFlags, env: curEnv, overlay: curOverlay };
+  // The Director may resolve launch defaults beyond INIT_*; retain its complete measured config.
+  BASELINE_FLAGS = typeof (setup.server_flags && setup.server_flags.extra) === 'string'
+    ? setup.server_flags.extra : (INIT_FLAGS || null);
+  BASELINE_ENV = typeof setup.server_env === 'string' ? setup.server_env : (INIT_ENV || null);
+  BASELINE_OVERLAY = curOverlay;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
   if (IS_AGENTX) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
@@ -4125,6 +4103,10 @@ print(json.dumps(res))
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
+  // Older states did not retain the seed. Missing evidence must not mean an empty/pristine seed.
+  BASELINE_FLAGS = typeof ST.baseline_flags === 'string' ? ST.baseline_flags : null;
+  BASELINE_ENV = typeof ST.baseline_env === 'string' ? ST.baseline_env : null;
+  BASELINE_OVERLAY = typeof ST.baseline_overlay === 'string' ? ST.baseline_overlay : null;
   profile = { profile_topN_json: ST.profile_topn_json || '',
     ...(KERNEL_EXTRACT_ON ? { profile_workload_json: ST.profile_workload_json || '',
       kernel_ranking_json: ST.kernel_ranking_json || '',
@@ -4800,6 +4782,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput,
+          BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
           MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
           SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
           ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
@@ -4817,11 +4800,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
-          // Only actual correctness/integration failures enter the corrective helper.
-          // An inconclusive speedup review stops without re-authoring the candidate.
+          // Only actual correctness/integration failures enter the corrective helper; neither the
+          // profile estimate nor an inconclusive speedup review re-authors the candidate.
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
+            workload_path: c.ext.workload_path,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
             isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
             base_inputs: {
@@ -5081,14 +5065,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (!r || !r.al) continue;
       const j = r.j, al = r.al, lang = j.ap.language || 'triton';
       const st = headState.get(j.short_name); if (!st) continue;
-      // Rank on the WORKLOAD-WEIGHTED speedup (the kernel layer's primary metric, comparable with
-      // bake.isolated_speedup), not the geomean, which low-weight prefill buckets dominate.
-      const alIso = KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
-        : (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      // Rank on the lane's accepted primary metric, the one it optimized and validated (weighted when
+      // its op_spec carries the workload binding); never on a different field.
+      const alIso = isolatedPrimary(al, j.ext.workload_path);
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
-        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
+        log(`  ${j.short_name}: authored ${lang} ${alIso.toFixed(2)}x primary (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${j.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${j.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -5138,11 +5121,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
-        // A measurement review never routes to the correctness corrective.
+        // Neither the profile estimate nor a measurement review routes to the correctness corrective.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
+              workload_path: st.ext.workload_path,
               gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
               isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
@@ -5180,8 +5164,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
     headDispatched++;
     if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
-    // B4 measures THIS head's trial against its own start, not the run clock.
-    const ablHeadStart = ELAPSED_MS;
     // (h1) Extract the op into a standalone immutable unittest (fused heads stay fused: gemmSynthFor).
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
@@ -5246,58 +5228,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // Author/rewrite route per planned language via the kernel layer: mode=author writes from scratch
     // then optimizes, mode=optimize rewrites an existing impl; the oracle in ext.task_dir judges both.
     let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
-    // ---- B4 gate ----
-    // One bounded trial for the author route (the expensive part of a head): at the deadline it
-    // continues only if the head already holds a non-incumbent candidate, else it pauses, with a
-    // seeded audit continuation (ABL_AUDIT_P, default 10%) so late winners stay estimable.
-    // The incumbent's identity: a candidate equal to it is not a candidate.
-    const ablIncumbentId = ablCandId({ apply_env: curEnv, apply_flags: curFlags, code_patch: curOverlay });
-    let ablImplStart = ELAPSED_MS;      // the implementation clock starts AFTER preparation
-    let ablImplCap = ABL_IMPL_MS;
-    let ablAudited = false;
-    if (ABL('B4')) {
-      const prepMs = ELAPSED_MS - ablHeadStart;
-      const ready = ablHeadReady(headCands, ext, ablIncumbentId);
-      // GATE 1 -- preparation: extraction + bake-off past ABL_PREP_MS with no candidate stops the
-      // head (charged to preparation, not to the implementation trial).
-      if (!ready && prepMs >= ABL_PREP_MS) {
-        const draw = ablDraw(h.short_name);
-        ablAudited = draw < ABL_AUDIT_P;
-        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
-          action: ablAudited ? 'audit_continue' : 'pause', ready: false, draw,
-          audit_probability: ABL_AUDIT_P, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
-          candidates: headCands.length,
-          reason: 'preparation budget exhausted with no evidence-bearing non-incumbent candidate' });
-        log(`  [${ABLATION_ARM}] ${h.short_name}: PREP budget spent (${Math.round(prepMs / 60000)}min), no candidate -> ${ablAudited ? 'AUDIT-CONTINUE' : 'PAUSE'} (draw ${draw.toFixed(4)} vs p=${ABL_AUDIT_P}).`);
-        if (!ablAudited) {
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: preparation budget expired before any candidate existed` });
-          plan = [];
-        } else {
-          ablImplCap = ABL_AUDIT_MS;    // the audit continuation is a SEPARATE budget line
-        }
-      } else {
-        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
-          action: 'admit', ready, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
-          candidates: headCands.length, impl_cap_ms: ablImplCap });
-      }
-    }
     for (const ap of plan) {
-      // GATE 2 -- implementation: the cap is checked before every language AND handed to the
-      // nested workflow, the only boundary that can contain work already in flight.
-      if (ABL('B4')) {
-        const implMs = ELAPSED_MS - ablImplStart;
-        if (implMs >= ablImplCap) {
-          ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
-            impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
-            remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
-          log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: implementation trial budget expired` });
-          break;
-        }
-        ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
-      }
       const lang = ap.language || 'triton';
       if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
@@ -5336,14 +5267,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
-      // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
-      // geomean; only fixed-load runs fall back to the geomean.
-      const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
-        : (al.final_weighted != null ? al.final_weighted : al.final_geomean));
+      // Rank on the lane's accepted primary metric (see the fast-mode author fan-out above).
+      const alIso = al && isolatedPrimary(al, ext.workload_path);
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
-        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x weighted (vs the frozen online kernel, not the seed).`);
+        log(`  ${h.short_name}: authored ${lang} ${alIso.toFixed(2)}x primary (vs the frozen online kernel, not the seed).`);
       } else {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
@@ -5433,6 +5362,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              workload_path: ext.workload_path,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
@@ -5453,12 +5383,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
         }
       } else {
-        // Route actual parity/accuracy failures to correctness fixes and JIT/capture failures
-        // to integration fixes; an inconclusive speedup review is not a kernel defect.
+        // Route actual parity/accuracy failures to correctness fixes and JIT/capture failures to
+        // integration fixes; neither the estimate nor an inconclusive speedup review is a kernel defect.
         const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
+              workload_path: ext.workload_path,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
@@ -5494,7 +5425,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       `. These carry the most headroom — see the report's FLAGGED section.`);
   }
 }
-
 // ===========================================================================
 // PHASE: Milestone loop — extract -> recursive kernel optimize -> overlay -> e2e gate
 // ===========================================================================
@@ -5570,6 +5500,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     try {
       const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        ...(ext.workload_path ? { op_spec: { workload_path: ext.workload_path } } : {}),
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
@@ -5581,12 +5512,13 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
       }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
-        final_geomean: r.final_geomean,
-        isolated_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0) : r.final_geomean,
-        validation_status: r.validation_status,
+        // The lane's accepted primary; a weighted prepared UT's binding made it the weighted one.
+        final_speedup: isolatedPrimary(r, ext.workload_path),
+        final_validation: r.final_validation ?? null, workload_aligned: r.workload_aligned,
+        final_geomean: r.final_geomean, validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
     } catch (e) {
-      kl = { ran: false, final_patch: '', final_geomean: 0, isolated_speedup: 0, validation_status: 'error', note: String(e) };
+      kl = { ran: false, final_patch: '', final_geomean: 0, validation_status: 'error', note: String(e) };
     }
     return { c, ext, kl };
   }));
@@ -5602,18 +5534,31 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       continue;
     }
     const { ext, kl } = o;
-    if (!kl || !kl.ran || !(kl.isolated_speedup > 1.0) || !kl.final_patch) {
-      log(`  ${c.short_name}: kernel layer produced no speedup (${kl ? kl.isolated_speedup : '?'}x); skipping integrate.`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl ? kl.isolated_speedup : 0, verdict: 'dead_end', lesson: 'no isolated speedup' });
+    const isolatedSpeedup = kl?.final_speedup;
+    if (!kl?.ran || kl.validation_status !== 'accepted' || !Number.isFinite(isolatedSpeedup)
+        || !(isolatedSpeedup > 0)
+        || (isolatedSpeedup > 1 && (typeof kl.final_patch !== 'string' || !kl.final_patch.trim()))) {
+      log(`  ${c.short_name}: kernel qualification incomplete (${kl?.validation_status || 'unavailable'}); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: Number.isFinite(isolatedSpeedup) ? isolatedSpeedup : null,
+        isolated_geomean: kl?.final_geomean ?? null, validation_status: kl?.validation_status ?? 'unavailable',
+        final_validation: kl?.final_validation ?? null, kernel_eval_dir: kl?.kernel_eval_dir ?? null,
+        verdict: 'incomplete', lesson: kl?.note || 'isolated qualification or promotable patch unavailable' });
       continue;
     }
-    log(`  ${c.short_name}: kernel layer ${kl.isolated_speedup.toFixed(2)}x isolated. Integrating to e2e.`);
+    if (!(isolatedSpeedup > 1.0)) {
+      log(`  ${c.short_name}: kernel layer produced no primary speedup (${isolatedSpeedup}x); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, verdict: 'dead_end', lesson: 'no isolated primary speedup' });
+      continue;
+    }
+    log(`  ${c.short_name}: kernel layer ${isolatedSpeedup.toFixed(2)}x isolated primary. Integrating to e2e.`);
     // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
     const mileIntegrateInputs = {
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-        final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time },
+        final_patch: kl.final_patch, verified_isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
@@ -5623,22 +5568,25 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
     // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, isolatedSpeedup) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
-      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
+      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: isolatedSpeedup }, krOf(mileIntegrateInputs));
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
       // As in the head track: a fixable reject or warmup crash earns a corrective re-author (not
       // charged to HEAD_BUDGET); a non-fixable incomplete A/B stays PENDING.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.isolated_speedup);
+      const reason = gateRejectReason(integ, c.pct_gpu_time, isolatedSpeedup);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
+            workload_path: ext.workload_path,
+            workload_aligned: kl.workload_aligned,
             gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
-            isolated: kl.isolated_speedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
+            isolated: isolatedSpeedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -5647,16 +5595,19 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
         milestoneImproved = true;
         log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated,
+          isolated_geomean: corr.isolated_geomean ?? null, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
       } else if (!abDone) {
-        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.isolated_speedup,
+        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: isolatedSpeedup,
           pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
           partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
         log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
       } else {
         log(`  ${c.short_name}: REJECTED at e2e gate (${reason}).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
       }
     }
   }
@@ -5695,7 +5646,6 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   history.milestones.push({ milestone, accepted: acceptedKernels.length, throughput: curTput, improved: milestoneImproved });
   log(`Milestone ${milestone} done. throughput=${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x), noImprove=${noImprove}`);
 }
-
 // ===========================================================================
 // PHASE: Finalize + Report + Validate  (gated)
 // ===========================================================================
@@ -5940,8 +5890,8 @@ if (want('final')) {
   phase('Report');
   report = await safeAgent(
     roleAgent('system_architect', 'report',
-      'Write architect_report.md AND the full final_report.md in English (with the Phases tree + ' +
-      'artifacts tree modules). final_report.md MUST contain a "## Knowledge-base recall" section ' +
+      'Write concise architect_report.md and final_report.md in English: measured results, ' +
+      'accepted changes, limits and artifact links. Include a "## Knowledge-base recall" section ' +
       'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
       'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
       'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
@@ -5973,7 +5923,7 @@ if (want('final')) {
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
       agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
-      BASELINE_OVERLAY: INIT_BASE_OVERLAY,
+      BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
@@ -6043,6 +5993,7 @@ const carryState = {
         } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
+  baseline_flags: BASELINE_FLAGS, baseline_env: BASELINE_ENV, baseline_overlay: BASELINE_OVERLAY,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
   // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
@@ -6132,11 +6083,6 @@ const wfReturn = {
   deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler
   backend: BACKEND,
   phases_run: PHASES,
-  ablation: { arm: ABLATION_ARM || 'A1', requested_arm: ABL_RAW_ARM || 'A1',
-    active: ABL_ACTIVE, seed: ABL_SEED, patch_version: 'GEAK-ABLATION-ARMS-v2',
-    budgets_ms: { prep: ABL_PREP_MS, implementation: ABL_IMPL_MS, audit_continuation: ABL_AUDIT_MS,
-      validation_reserve: FINAL_RESERVE_MS, total_time_budget: TIME_BUDGET_MS },
-    head_trial_ms: ABL_HEAD_TRIAL_MS, audit_probability: ABL_AUDIT_P, events: ABL_EVENTS },
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
@@ -6205,6 +6151,22 @@ if (EVAL_DIR) {
   }
 }
 
+
+// Prompt for the file_writer agent that persists the agent timeline and renders the run report.
+// A function DECLARATION so it is hoisted above every caller (kernel_workflow's pass-through branch
+// runs before most definitions).
+function persistLlmStatsPrompt(evalDir, tlJson) {
+  const tlPath = `${evalDir}/reports/trace/agent_timeline.json`;
+  return `You are the file_writer. PHASE=persist_llm_stats.\n` +
+    `Do exactly two things, in order:\n` +
+    `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+    `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+    '```json\n' + tlJson + '\n```\n\n' +
+    `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+    `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+    `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${evalDir}"\n\n` +
+    `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`;
+}
 // ===========================================================================
 // MODULE B — record this run in the deployment knowledge base.
 // Strictly after the workflow_return.json persist (Module B can be SIGKILLed while on the network);
@@ -6273,17 +6235,7 @@ if (EVAL_DIR && LLM_STATS) {
     // `instance` (this run's eval dir) lets the parser dedupe a nested timeline reached twice
     // without collapsing distinct lanes of the same shape; needs no Date/random.
     const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
-    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
-    await safeAgent(
-      `You are the file_writer. PHASE=persist_llm_stats.\n` +
-      `Do exactly two things, in order:\n` +
-      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-      '```json\n' + tlJson + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
-      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+    await safeAgent(persistLlmStatsPrompt(EVAL_DIR, tlJson),
       { phase: 'Validate', label: 'file_writer:persist_llm_stats',
         schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) },
       2);

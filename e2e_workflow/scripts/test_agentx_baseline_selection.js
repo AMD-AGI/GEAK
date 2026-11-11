@@ -57,6 +57,7 @@ async function run(body, overrides = {}, reply = selection()) {
   const calls = [], phases = [];
   const env = {
     KERNEL_EXTRACT_ON: true, EVAL_DIR: '/eval', EVAL_DIR_OVERRIDE: '/eval',
+    BASELINE_FLAGS: null, BASELINE_ENV: null, BASELINE_OVERLAY: null,
     MODEL_PATH: '/models/model', MODEL_NAME: 'model', MODEL_NAME_HINT: 'model',
     TASK: 'Review extraction coverage using /references/ut_delivery; preserve all observed families.',
     GPU_LIST: ['0'], SERVING_GPU: '0,1,2,3,4,5,6,7', WORKFLOW_DIR: '/wf',
@@ -107,6 +108,7 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(first.calls[0].phase, 'prepare');
   assert.equal(input.BASELINE_LOG, '/eval/baseline/server.log');
   assert.equal(input.BASELINE_BENCH_DIR, '/eval/baseline');
+  assert.equal(input.BASELINE_ITERATION_DIR, '/eval/baseline/iterations');
   assert.equal(input.CURRENT_FLAGS, '--tp 8');
   assert.equal(input.CURRENT_OVERLAY, '/accepted-overlay');
   assert.equal(input.PREVIOUS_RANKING_JSON, '/old/ranking.json');
@@ -211,10 +213,14 @@ async function run(body, overrides = {}, reply = selection()) {
       mode === 'normal' ? ['setup', 'head', 'kernel', 'final'] : ['setup', 'head', 'final']);
   }
 
-  // Execute the actual optimization + integration block with disagreeing metrics.
+  // Execute the actual optimization + integration block with disagreeing metrics. The lane model
+  // follows kernel_lane: HAS_WORKLOAD comes only from the binding it receives, final_speedup is its
+  // accepted primary (weighted only when bound), and final_weighted is reported either way.
   const optimizeAndIntegrate = between('  const optimized = await parallel(cands.map', '  // --- (c) If improved:');
-  async function metricDispatch(enabled, weighted, geomean) {
-    const integrated = [];
+  const isolatedPrimary = new Function(`${between('function isolatedPrimary(', '\n// Lightweight SURGICAL FIX')}
+    return isolatedPrimary;`)();
+  async function metricDispatch(enabled, weighted, geomean, bound = enabled) {
+    const integrated = [], lanes = [];
     const env = {KERNEL_EXTRACT_ON: enabled, cands: [candidate('weighted')],
       EVAL_DIR: '/eval', MODEL_PATH: '/model', WORKLOAD: {}, WORKFLOW_DIR: '/wf', profile: {},
       curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
@@ -222,21 +228,37 @@ async function run(body, overrides = {}, reply = selection()) {
       EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
       laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
-      extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
-      reserveBoundedWorkflow: async () => ({final_patch: '/patch', final_geomean: geomean, final_weighted: weighted}),
+      extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf',
+        ...(bound ? {workload_path: '/task/meta.json'} : {})}),
+      reserveBoundedWorkflow: async (_reference, args) => {
+        lanes.push(args);
+        const hasWorkload = !!(args.workload_spec_path || args.op_spec?.workload_path);
+        return {final_patch: '/patch', final_geomean: geomean, final_weighted: weighted,
+          final_speedup: hasWorkload ? weighted ?? null : geomean, workload_aligned: hasWorkload,
+          validation_status: 'accepted'};
+      },
       runIntegrateBothLegs: async (_intro, inputs) => {
         integrated.push(inputs);
         return {e2e_throughput_tok_s: 110};
       },
-      integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
+      integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}), isolatedPrimary,
     };
     await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
-    return integrated;
+    return {integrated, lanes};
   }
-  assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
-  assert.deepEqual(await metricDispatch(true, 0.8, 1.4), [], 'unweighted wins cannot override an AgentX regression');
-  assert.deepEqual(await metricDispatch(false, 1.4, 0.8), [], 'fixed-load metric choice stays unchanged');
-  assert.deepEqual(await metricDispatch(true, undefined, 1.4), [], 'missing primary metrics cannot fall back to unweighted wins');
+  const weightedRun = await metricDispatch(true, 1.4, 0.8);
+  assert.equal(weightedRun.lanes[0].op_spec.workload_path, '/task/meta.json', 'the milestone lane receives the binding');
+  assert.equal(weightedRun.integrated[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
+  assert.deepEqual((await metricDispatch(true, 0.8, 1.4)).integrated, [], 'unweighted wins cannot override an AgentX regression');
+  assert.deepEqual((await metricDispatch(false, 1.4, 0.8)).integrated, [], 'fixed-load metric choice stays unchanged');
+  assert.deepEqual((await metricDispatch(true, undefined, 1.4)).integrated, [], 'missing primary metrics cannot fall back to unweighted wins');
+  // The parent ranks on the primary the lane optimized: an unbound lane's reported weighted number
+  // is not its objective, and an unweighted prepared UT keeps ranking on its geomean primary.
+  const unbound = await metricDispatch(true, 1.4, 0.8, false);
+  assert.equal(Object.hasOwn(unbound.lanes[0], 'op_spec'), false);
+  assert.deepEqual(unbound.integrated, [], 'a weighted field the lane did not optimize never ranks the candidate');
+  assert.equal((await metricDispatch(true, null, 1.4, false)).integrated[0].KERNEL_RESULT.verified_isolated_speedup, 1.4,
+    'an unweighted prepared UT ranks on the lane geomean primary as before');
 
   const baselineOnly = { eval_dir: '/saved', baseline_throughput_tok_s: 400 };
   const resumed = await run(resume, { ST: baselineOnly });

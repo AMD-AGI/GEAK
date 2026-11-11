@@ -103,7 +103,8 @@ ok(/setup\.gpu_requirement\)\);\n  if \(GPU_RESOURCE\.warning\) log\(/.test(lane
 ok(lane.indexOf('applyGpuResource(resolveGpuRequest(A, GPU_LIST, setup.gpu_requirement))') <
    lane.indexOf("phase('Author')"), 'resizing happens before the first GPU phase');
 ok(/GPU_MODE === 'pin' && !GPU_JOB/.test(lane), 'pinned placement does not split a group');
-ok(/return base \+ expertSkillsBlock\(role\) \+ multiGpuBlock\(role\);/.test(lane), 'role prompts get the multi-GPU block');
+ok(/return base \+ expertSkillsBlock\(role\)\n    \+ \(typeof multiGpuBlock === 'function' \? multiGpuBlock\(role\) : ''\)/.test(lane),
+  'role prompts get the multi-GPU block');
 ok(/function multiGpuBlock\(role\) \{\n  if \(!GPU_JOB\) return '';/.test(lane), 'single-GPU prompts are unchanged');
 ok(/mode=bakeoff does not support gpus_per_job/.test(dispatcher), 'bakeoff rejects multi-GPU jobs');
 ok(/gpus_per_job: A\.gpus_per_job, job_gpu_ids: A\.job_gpu_ids/.test(e2e),

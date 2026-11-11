@@ -1,0 +1,418 @@
+#!/usr/bin/env node
+// Parity guard for the greedy Optimize loop in kernel_lane.js (no GPU, no agent, no network).
+//
+// Six deterministic scenarios run kernel_lane.js under stubbed Workflow runtime globals. Each records
+//   - every agent call in dispatch order: label, phase, sha256(prompt), sha256(opts)
+//   - the phase() and log() sequences and the lane's return value
+//   - the loop-state variables the Report/Validate postlude reads, captured twice: on loop entry and
+//     right before phase('Report') (round, dispatched, cumulative, bestPerCase, finalWinner,
+//     roundsCommitted, history, citations, profileSummary, deadlineHit, forcedReplans, kbCapBound)
+// and compares its SHA256 digest with test_greedy_parity.golden.json, derived from records produced by
+// the ordinary loop of the reviewed lane (its source_lane_sha256). Reviewed instruction and product-status
+// changes update prompt hashes; reviewed schema changes update option hashes. Calls, state and
+// results remain checked.
+// The two captures are a read-only __probe() call
+// inserted before the loop's `while` line and before `phase('Report');`; nothing else is changed.
+//
+//   (a) improve_then_budget        integrate + three commits (incl. a deep_explore round), storage reclaim, budget end
+//   (b) warmstart_then_no_improve  warm-start adopt feeds the loop's start state; two stalls -> no_improve
+//   (c) planner_filter_stop        gfx1201/unknown peaks: roofline directions are still dispatched -> tech_lead_stop
+//   (d) deadline_mid_loop          a committed round, then the clock passes the deadline before round 2
+//   (e) forced_replan_failures     refused stops, failed/missing/invalid candidates, replan cap -> tech_lead_stop
+//   (f) citations_kb_cap           learned-card citations, KB cap strip + forced cold direction, kb:cite
+//
+// Run:            node kernel_workflow/scripts/test_greedy_parity.js [--lane <kernel_lane.js>]
+// Learned sink:   node kernel_workflow/scripts/test_greedy_parity.js --learned-sink-only
+// Review candidate: node kernel_workflow/scripts/test_greedy_parity.js --lane <reviewed kernel_lane.js> --write-golden
+// Candidates and observed mismatch records go to a temporary directory; tracked goldens are never overwritten.
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const assert = require('assert/strict');
+const { spawnSync } = require('child_process');
+
+const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
+const GOLDEN = path.join(__dirname, 'test_greedy_parity.golden.json');
+
+const argv = process.argv.slice(2);
+const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
+const LANE = path.resolve(opt('--lane') || path.join(ROOT, 'kernel_workflow', 'kernel_lane.js'));
+const WRITE = argv.includes('--write-golden');
+
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+const clone = (v) => (v === undefined ? null : JSON.parse(JSON.stringify(v)));
+
+// --- instrumentation: read-only probes at loop entry and right before the Report phase -------------
+const PROBE_KEYS = ['round', 'dispatched', 'cumulative', 'bestPerCase', 'finalWinner', 'roundsCommitted',
+  'history', 'citations', 'profileSummary', 'deadlineHit', 'forcedReplans', 'kbCapBound'];
+const LOOP_LINE = 'while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {';
+const REPORT_LINE = "phase('Report');";
+function instrument(src) {
+  let body = src.replace(/^export const meta/m, 'const meta');
+  for (const marker of [LOOP_LINE, REPORT_LINE]) {
+    const n = body.split(marker).length - 1;
+    if (n !== 1) throw new Error(`expected exactly one '${marker}' in ${LANE}, found ${n}`);
+  }
+  const probe = (tag) => `__probe(${JSON.stringify(tag)}, { ${PROBE_KEYS.join(', ')} });\n`;
+  return body.replace(LOOP_LINE, () => probe('loop_entry') + LOOP_LINE)
+    .replace(REPORT_LINE, () => probe('after_loop') + REPORT_LINE);
+}
+
+function build(body, argsObj, answer, observeCall, host = {}) {
+  const rec = { calls: [], phases: [], logs: [], loop_entry: null, after_loop: null };
+  const norm = host.normalize || (v => v);
+  const g = {
+    ...(host.runProcess ? {runProcess: host.runProcess} : {}),
+    args: argsObj,
+    phase: (t) => rec.phases.push(t),
+    log: (m) => rec.logs.push(norm(String(m))),
+    workflow: async () => { throw new Error('kernel_lane must not nest workflows'); },
+    agent: async (p, o) => {
+      const label = (o && o.label) || '';
+      rec.calls.push({ label, phase: (o && o.phase) || '', prompt_sha256: sha(norm(String(p))), opts_sha256: sha(JSON.stringify(norm(o))) });
+      if (observeCall) observeCall(label, norm(String(p)), norm(clone(o)));
+      return clone(await answer(label, String(p)));
+    },
+    parallel: async (thunks) => Promise.all(thunks.map((t) => t().catch(() => null))),
+    pipeline: async (items, ...stages) => Promise.all(items.map(async (it, i) => {
+      let v = it;
+      for (const st of stages) v = await st(v, it, i);
+      return v;
+    })),
+    budget: { total: null, spent: () => 0, remaining: () => Infinity },
+    __probe: (tag, state) => {
+      if (rec[tag]) throw new Error(`probe ${tag} hit twice`);
+      rec[tag] = norm(clone(state));
+    },
+  };
+  const fn = new Function(...Object.keys(g), `return (async () => { ${body} })();`);
+  return { run: () => fn(...Object.values(g)), rec };
+}
+
+// --- fixture --------------------------------------------------------------------------------------
+// Public fixture paths are normalized names. Each scenario now has a real temporary Git workspace
+// and host runtime because native delivery requires custody and an independently exported patch.
+const EVAL = '/cpu-fixture/eval';
+const BASE_ARGS = { optimizer: 'greedy', kernel_path: '/cpu-fixture/task', workflow_dir: '/cpu-fixture/kernel_workflow',
+  editable_source_paths: ['k.py'], agent_timeout_ms: 0, agent_retries: 1 };
+const perCase = (s) => [{ name: 'c1', baseline_ms: 2, optimized_ms: +(2 / s).toFixed(4), speedup: s },
+                        { name: 'c2', baseline_ms: 4, optimized_ms: +(4 / s).toFixed(4), speedup: s }];
+const verified = (v) => ({ status: 'verified', correctness: 'pass', verified_geomean: v,
+  verified_arithmetic: +(v + 0.01).toFixed(4), per_case: perCase(v) });
+const ENG_OK = { status: 'ok', speedup_geomean: 1.5, measurement_valid: true };
+const ENG_BELOW = { status: 'ok', speedup_geomean: 0.95, measurement_valid: true };   // trusted, no verify
+const dir = (id, specialty, extra = {}) => ({ id, title: `T ${id}`, specialty, prompt: `do ${id}`, ...extra });
+const STOP = { stop: true, directions: [], reasoning: 'converged' };
+// `- KEY: value` line of a cfg() block, parsed back (numbers are JSON, strings raw).
+const field = (prompt, key) => {
+  const line = prompt.split('\n').find((l) => l.startsWith(`- ${key}: `));
+  if (!line) return undefined;
+  const raw = line.slice(key.length + 4);
+  try { return JSON.parse(raw); } catch (e) { return raw; }
+};
+
+function answers(sc) {
+  const idOf = (label) => label.split(' ')[1].split(':')[0];
+  return (label, prompt) => {
+    if (label === 'director:setup') return {
+      eval_dir: EVAL, workspace: EVAL + '/workspace', kernel_name: 'fix_kernel',
+      device_gfx: sc.gfx || 'gfx950', device_target: 'unknown', physical_cu_count: 256,
+      baseline_frozen: true, source_files: ['k.py'],
+    };
+    if (label === 'tech_lead:analyze') return { kernel_type: 'gemm', roadmap_summary: 'r', modifiable_files: ['k.py'] };
+    if (label === 'benchmark_engineer') return {
+      commandment_path: EVAL + '/COMMANDMENT.md', baseline_per_case: perCase(1), baseline_geomean_ms: 2.83, reliable: true,
+      correctness_cmd: 'python3 t.py --correctness', benchmark_cmd: 'python3 t.py --benchmark',
+    };
+    if (label === 'profile_engineer:baseline') return { bottleneck: 'memory', top_opportunities: [], summary_path: EVAL + '/p0.md' };
+    if (label === 'warm_start:resolve') return sc.resolve || { read_reason: 'empty', candidates: [] };
+    if (label.startsWith('warm_start:verify')) return sc.warmVerify;
+    if (label.startsWith('warm_start:adopt')) return { committed: true };
+    if (label === 'warm_start:reprofile') return { bottleneck: 'compute', summary_path: EVAL + '/pws.md', shift_note: 'ws' };
+    if (label === 'kb:attest') return { ran: 1 };
+    if (label.startsWith('clock ')) return { epoch: sc.clock ? sc.clock(label.slice(6)) : 0 };
+    if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
+      const key = label.split(' ')[1];
+      return key in (sc.plans || {}) ? sc.plans[key] : STOP;
+    }
+    if (label.startsWith('eng ') || label.startsWith('deep ')) {
+      const id = idOf(label);
+      return id in (sc.eng || {}) ? sc.eng[id] : ENG_OK;
+    }
+    if (label.startsWith('verify ')) {
+      const key = label.slice(7);
+      const v = (sc.verify || {})[key];
+      return typeof v === 'number' ? verified(v) : (v === undefined ? { status: 'failed', verified_geomean: 0 } : v);
+    }
+    if (label.startsWith('integrate ')) {
+      return (sc.integrate || {})[label.slice(10)] || { attempted: true, conclusion: 'no_gain' };
+    }
+    if (label.startsWith('commit ')) return { committed: true };
+    if (label.startsWith('reprofile ')) {
+      const r = label.slice(10);
+      return { bottleneck: `after_${r}`, top_opportunities: [], summary_path: `${EVAL}/p_${r}.md`, shift_note: `shift_${r}` };
+    }
+    if (label.startsWith('tech_lead:memory ')) {
+      const r = label.slice(17);
+      return { insights: [`insight_${r}`], ledger: [{ h: `h_${r}` }], bottleneck_now: `bn_${r}`, suggest_next: `next_${r}` };
+    }
+    if (label.startsWith('storage:reclaim')) return { ok: true, note: 'reclaimed' };
+    // Postlude: echo what the loop handed over, so the downstream numbers depend on it.
+    if (label === 'tech_lead:report') return { final_speedup_geomean: field(prompt, 'CUMULATIVE_SPEEDUP'),
+      report_path: EVAL + '/report.md', final_patch: EVAL + '/final_patch.diff', rounds: field(prompt, 'HISTORY').rounds.length };
+    if (label === 'director:validate') return { director_verified_speedup_geomean: field(prompt, 'TECH_LEAD_REPORTED_GEOMEAN'),
+      validation_status: 'accepted', timing_basis: 'clean' };
+    if (label === 'update_experience') return { action: 'created', card_path: '/learned/c.md' };
+    if (label === 'kb:cite') return { filed: 1 };
+    if (label === 'kb:write') return { written: true, slug: 's', dir: '/d' };
+    throw new Error(`unanswered agent label: ${label}`);
+  };
+}
+
+const SCENARIOS = [
+  { name: 'a_improve_then_budget', args: { budget: 4 },
+    plans: {
+      r1: { stop: false, directions: [dir('a1', 'memory', { focus_files: ['k.py'] }), dir('b1', 'compute')] },
+      r2: { stop: false, directions: [dir('a2', 'algorithm')] },
+      r3: { stop: false, directions: [dir('a3', 'deep_explore', { expected_speedup: 2.5 })] },
+    },
+    // An integrated source is admitted only after its own independent verification.
+    verify: { a1: 1.3, b1: 1.2, a2: 1.8, a3: 2.2, r1_integrated: 1.5 },
+    integrate: { r1: { attempted: true, conclusion: 'improved',
+      best: { geomean: 1.5, arithmetic: 1.52, per_case: perCase(1.5), patch_file: EVAL + '/round_1/integrate/best.diff' } } } },
+
+  // The adopt sets cumulative/bestSeen/bestPerCase/finalWinner/profileSummary before the loop. Round 2's
+  // 1.15 clears round 1's 1.1 by more than PROGRESS_DELTA, so only a carried-over bestSeen=1.3 keeps it a stall.
+  { name: 'b_warmstart_then_no_improve', args: {},
+    resolve: { read_reason: 'read', slug: 'fix_kernel', candidates: [{ rank: 1, slug: 'ws-slug', speedup: 1.35,
+      direction: 'tile', patch_path: '/kb/p.diff', session_id: 'sess1', exp_dir: '/kb/exp1' }] },
+    warmVerify: verified(1.3),
+    plans: { r1: { stop: false, directions: [dir('a1', 'memory')] },
+             r2: { stop: false, directions: [dir('a2', 'compute')] } },
+    verify: { a1: 1.1, a2: 1.15 } },
+
+  { name: 'c_planner_filter_stop', args: {}, gfx: 'gfx1201',
+    plans: {
+      r1: { stop: false, directions: [dir('a1', 'memory'), dir('b1', 'memory', { title: 'reach the bandwidth roofline' })] },
+      r2: { stop: false, directions: [dir('a2', 'compute', { prompt: 'hit 90% of peak flops' })] },
+    },
+    verify: { a1: 1.25 } },
+
+  { name: 'd_deadline_mid_loop', args: { deadline_epoch: 10000, budget: 6 },
+    clock: (tag) => (tag === 'pre-r1' ? 5000 : 10050),
+    plans: { r1: { stop: false, directions: [dir('a1', 'memory'), dir('b1', 'compute')] } },
+    eng: { b1: ENG_BELOW },
+    verify: { a1: 1.4 } },
+
+  { name: 'e_forced_replan_failures', args: { deadline_epoch: 100000, max_forced_replans: 2 },
+    clock: () => 1000,
+    plans: {
+      r1: STOP,
+      'r1#1': { stop: false, directions: [dir('a1', 'memory'), dir('b1', 'compute'), dir('c1', 'algorithm'), dir('d1', 'host_runtime')] },
+      r2: STOP, 'r2#2': STOP,
+    },
+    eng: { a1: { status: 'failed', notes: 'crashed' }, b1: null,
+           c1: { status: 'invalid_measurement', speedup_geomean: 1.6, measurement_valid: false } },
+    verify: { 'a1 (recovered)': { status: 'failed', correctness: 'fail', verified_geomean: 0 },
+              'b1 (recovered)': { status: 'apply_failed', notes: 'empty patch' },
+              c1: { status: 'invalid_measurement', correctness: 'pass', verified_geomean: 1.6 },
+              d1: 1.2 } },
+
+  { name: 'f_citations_kb_cap', args: { budget: 8 },
+    plans: {
+      r1: { stop: false, directions: [dir('a1', 'memory', { learned_refs: ['card1.md'] }),
+        dir('b1', 'compute', { learned_refs: ['card2.md', 'card3.md'] }), dir('c1', 'algorithm')] },
+      r2: { stop: false, directions: [dir('a2', 'memory', { learned_refs: ['card4.md'] }), dir('b2', 'compute')] },
+      r3: { stop: false, directions: [dir('a3', 'algorithm', { learned_refs: ['card5.md'] })] },
+    },
+    eng: { c1: ENG_BELOW, a2: ENG_BELOW },
+    verify: { a1: 1.4, b1: 1.2, b2: 1.3, a3: 1.5 } },
+];
+
+async function runScenario(body, sc, observeCall) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-parity-host-'));
+  const task = path.join(temp, 'task'), evalDir = path.join(temp, 'eval');
+  const canonical = path.join(evalDir, 'workspace'), workflow = path.join(ROOT, 'kernel_workflow');
+  const mapStrings = (value, transform) => typeof value === 'string' ? transform(value)
+    : Array.isArray(value) ? value.map(v => mapStrings(v, transform))
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, transform)])) : value;
+  // Paths derived from the checkout (exp/, perf_knowledge/, kb stores) must not enter the digests.
+  const normalize = value => mapStrings(value, s => s.split(workflow).join(BASE_ARGS.workflow_dir)
+    .split(temp).join('/cpu-fixture').split(ROOT).join('/cpu-fixture'));
+  const actual = value => mapStrings(value, s => s.split(BASE_ARGS.workflow_dir).join(workflow)
+    .split('/cpu-fixture').join(temp));
+  // Git objects and receipts are reproducible; normalization only removes scratch/check-out paths.
+  const env = {...process.env, GIT_AUTHOR_NAME: 'Saptarshi Majumder',
+    GIT_COMMITTER_NAME: 'Saptarshi Majumder',
+    GIT_AUTHOR_EMAIL: '32464366+iraj465@users.noreply.github.com',
+    GIT_COMMITTER_EMAIL: '32464366+iraj465@users.noreply.github.com',
+    GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z'};
+  const command = (cmd, args, opts = {}) => {
+    const r = spawnSync(cmd, args, {encoding: 'utf8', timeout: 10000, env, ...opts});
+    assert.equal(r.status, 0, `${cmd} failed: ${r.error || r.stderr}`);
+    return r.stdout;
+  };
+  const git = (cwd, ...args) => command('git', ['-C', cwd, ...args]);
+  const commit = (cwd, label) => { git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', label); };
+  fs.mkdirSync(task); fs.mkdirSync(evalDir);
+  fs.writeFileSync(path.join(task, 'k.py'), 'VALUE = "ORIGINAL"\n');
+  git(task, 'init', '-q'); commit(task, 'parity ORIGINAL');
+  command('git', ['clone', '-q', task, canonical]);
+  const originalCommit = git(task, 'rev-parse', 'HEAD').trim();
+  const candidatePatch = (workspace, patch, label) => {
+    fs.mkdirSync(path.dirname(workspace), {recursive: true});
+    command('git', ['clone', '-q', canonical, workspace]);
+    fs.writeFileSync(path.join(workspace, 'k.py'), `VALUE = ${JSON.stringify(label)}\n`);
+    fs.mkdirSync(path.dirname(patch), {recursive: true});
+    fs.writeFileSync(patch, git(workspace, 'diff', '--binary'));
+  };
+  const fallback = answers(sc);
+  const answer = (label, prompt) => {
+    const response = actual(fallback(label, normalize(prompt)));
+    if (label.startsWith('eng ') || label.startsWith('deep ')) {
+      candidatePatch(field(prompt, 'KERNEL_PATH'), path.join(field(prompt, 'OUTPUT_DIR'), 'best_patch.diff'), label);
+    } else if (label.startsWith('integrate ') && response.best) {
+      candidatePatch(path.join(field(prompt, 'INTEGRATE_DIR'), 'workspace'), response.best.patch_file, label);
+    } else if (label.startsWith('warm_start:adopt')) {
+      fs.writeFileSync(path.join(canonical, 'k.py'), 'VALUE = "warm_start"\n');
+      commit(canonical, 'parity warm start');
+    } else if (label.startsWith('verify ') && response?.status === 'verified') {
+      const patch = field(prompt, 'PATCH');
+      if (body.includes('async function verificationCopy('))
+        assert.equal(path.basename(patch), 'verification_input.diff', 'verifier receives a disposable copy');
+      git(canonical, 'apply', '--check', '--', patch);
+    } else if (label.startsWith('commit ')) {
+      const block = prompt.match(/```bash\n([\s\S]*?)\n```/);
+      assert.ok(block, 'commit role supplies real Git commands');
+      command('bash', ['-e', '-c', block[1]]);
+    } else if (label === 'tech_lead:report') {
+      fs.writeFileSync(response.final_patch, git(canonical, 'diff', '--binary', originalCommit, 'HEAD', '--', '.'));
+    } else if (label === 'director:validate') {
+      const patch = field(prompt, 'FINAL_PATCH');
+      assert.equal(fs.readFileSync(patch, 'utf8'), git(canonical, 'diff', '--binary', originalCommit, 'HEAD', '--', '.'),
+        'Director receives the host export of the actual canonical tree');
+    }
+    return response;
+  };
+  let passed = false;
+  try {
+    const { run, rec } = build(body, {...actual(BASE_ARGS), ...sc.args}, answer, observeCall, {
+      normalize,
+      runProcess: async request => {
+        assert.ok(Number.isFinite(request.timeoutMs) && request.timeoutMs > 0, 'host command is bounded');
+        const r = spawnSync(request.cmd, request.args, {encoding: 'utf8', timeout: 10000,
+          cwd: request.cwd, input: request.input, env: {...env, ...(request.env || {})}});
+        return {status: r.error ? 'failed' : 'completed', code: r.status, stdout: r.stdout || '',
+          stderr: r.stderr || '', group_cleared: true, strays_killed: false, stdio_held: false};
+      },
+    });
+    const ret = normalize(await run());
+    if (!rec.loop_entry || !rec.after_loop) throw new Error(`${sc.name}: a probe was not reached`);
+    assert.equal(fs.readFileSync(path.join(task, 'k.py'), 'utf8'), 'VALUE = "ORIGINAL"\n', 'ORIGINAL stays immutable');
+    const result = { ...ret, llm_timeline: ret.llm_timeline ? sha(JSON.stringify(ret.llm_timeline)) : null };
+    const changed = PROBE_KEYS.filter((k) => JSON.stringify(rec.loop_entry[k]) !== JSON.stringify(rec.after_loop[k]));
+    passed = true;
+    return { stop_reason: ret.stopped_by, globals_changed_by_loop: changed, ...rec, result };
+  } finally {
+    if (passed) fs.rmSync(temp, {recursive: true, force: true});
+    else console.error(`retained failed parity fixture: ${temp}`);
+  }
+}
+
+// Reuse the citation scenario without changing its golden record. These are prompt-contract checks:
+// agent replies remain scripted, and neither kb.py nor the proposal role is executed here.
+async function checkLearnedSinks(body) {
+  const sc = SCENARIOS.find((s) => s.name === 'f_citations_kb_cap');
+  const defaultSink = `${BASE_ARGS.workflow_dir}/knowledge/learned`;
+  const privateSink = "/cpu-fixture/member's learned/$((2+3));cards";
+  const observations = [];
+  for (const [name, extra, sink] of [
+    ['default', {}, defaultSink], ['override', { learned_dir: privateSink }, privateSink],
+  ]) {
+    const calls = [];
+    const record = await runScenario(body, { ...sc, args: { ...sc.args, ...extra } },
+      (label, prompt, opts) => calls.push({ label, prompt, opts }));
+    const only = (label) => {
+      const matches = calls.filter((c) => c.label === label);
+      assert.equal(matches.length, 1, `${name}: exactly one ${label} call`);
+      return matches[0].prompt;
+    };
+    const proposal = only('update_experience');
+    assert.equal(field(proposal, 'LEARNED_DIR'), sink, `${name}: proposal sink`);
+    assert.equal(field(proposal, 'SKILL_DIR'), BASE_ARGS.workflow_dir, `${name}: shared helper directory`);
+    assert.ok(proposal.includes(`First Read ${BASE_ARGS.workflow_dir}/roles/update_experience.md`),
+      `${name}: proposal role remains under workflow_dir`);
+    const citation = only('kb:cite');
+    const command = citation.match(/^cat <<'CITEJSON' \| python3 (.+) \\\n/m);
+    assert.ok(command, `${name}: citation command found`);
+    // Parse the emitted arguments with the real shell using only set/printf builtins; do not run kb.py.
+    const parsed = spawnSync('/bin/sh', ['-c', `set -- ${command[1]}\nprintf '%s\\0' "$@"`],
+      { encoding: 'utf8', env: {}, timeout: 1000 });
+    assert.equal(parsed.status, 0, `${name}: shell argument parsing failed: ${parsed.error || parsed.stderr}`);
+    assert.deepEqual(parsed.stdout.split('\0'),
+      [`${BASE_ARGS.workflow_dir}/scripts/kb.py`, '--kb-dir', sink, 'cite', ''],
+      `${name}: citation helper stays shared and shell preserves the selected sink as one argument`);
+    assert.ok(record.after_loop.citations.length > 0, `${name}: fixture must produce nonempty citation rows`);
+    assert.ok(citation.includes(`--citations -\n${JSON.stringify(record.after_loop.citations)}\nCITEJSON`),
+      `${name}: citation command carries the loop's full ledger`);
+    observations.push({ calls, record });
+  }
+  const [base, overridden] = observations;
+  assert.equal(sha(JSON.stringify(base.record)), JSON.parse(fs.readFileSync(GOLDEN, 'utf8')).scenarios[sc.name],
+    'default learned sink retains the reviewed full-record digest');
+  assert.deepEqual(overridden.calls.map(({ label, opts }) => ({ label, opts })),
+    base.calls.map(({ label, opts }) => ({ label, opts })), 'override preserves dispatch order and options');
+  assert.deepEqual(overridden.calls.filter((c, i) => c.prompt !== base.calls[i].prompt).map((c) => c.label),
+    ['update_experience', 'kb:cite'], 'only proposal and citation prompts change');
+  assert.deepEqual(overridden.record.after_loop, base.record.after_loop, 'override preserves search state');
+  assert.deepEqual(overridden.record.result, base.record.result, 'override preserves the scripted lane result');
+  console.log('  ok: learned sink default + override: proposal and citation route to the selected sink; helpers stay shared');
+}
+
+(async () => {
+  const src = fs.readFileSync(LANE, 'utf8');
+  const body = instrument(src);
+  console.log(`lane: ${LANE} (sha256 ${sha(src).slice(0, 16)})`);
+  if (argv.includes('--learned-sink-only')) {
+    await checkLearnedSinks(body);
+    return;
+  }
+  const got = {};
+  for (const sc of SCENARIOS) got[sc.name] = await runScenario(body, sc);
+
+  const digests = Object.fromEntries(Object.entries(got).map(([name, record]) => [name, sha(JSON.stringify(record))]));
+  let artifactDir;
+  const save = (name, value) => {
+    artifactDir ||= fs.mkdtempSync(path.join(os.tmpdir(), 'geak-greedy-parity-'));
+    const file = path.join(artifactDir, name);
+    fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
+    return file;
+  };
+  if (WRITE) {
+    const candidate = { comment: 'SHA256 of JSON.stringify(record) for each reviewed greedy scenario; includes calls, prompts, options, phases, logs, loop state and result.',
+      source_lane_sha256: sha(src), scenarios: digests };
+    console.log(`Review candidate: ${save('test_greedy_parity.golden.json', candidate)}`);
+    console.log(`Full observed records: ${save('observed.json', got)}`);
+    return;
+  }
+
+  const golden = JSON.parse(fs.readFileSync(GOLDEN, 'utf8')).scenarios;
+  let failures = 0;
+  for (const name of new Set([...Object.keys(golden), ...Object.keys(got)])) {
+    const r = got[name];
+    if (golden[name] && digests[name] === golden[name]) {
+      console.log(`  ok: ${name}: ${r.calls.length} calls, stopped_by=${r.stop_reason}, full record digest matches`);
+      continue;
+    }
+    failures++;
+    console.error(`  FAIL: ${name}: expected ${golden[name] || '(no golden)'}, observed ${digests[name] || '(scenario missing)'}`);
+    if (r) console.error(`    Full observed record: ${save(name + '.json', r)}`);
+  }
+  await checkLearnedSinks(body);
+  console.log(failures === 0 ? '\nPASS: greedy loop matches the reviewed workflow snapshots.'
+    : `\nFAILED: ${failures} scenario(s) differ from the golden.`);
+  process.exit(failures === 0 ? 0 : 1);
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });

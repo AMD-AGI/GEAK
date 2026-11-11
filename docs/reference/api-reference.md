@@ -1,27 +1,40 @@
 ---
 myst:
     html_meta:
-        "description": "GEAK v4 reference: the Workflow tool, e2e_workflow and kernel_workflow arguments, helper scripts, the external-orchestrator contract, and run artifacts."
-        "keywords": "GEAK, reference, Workflow, e2e_workflow, kernel_workflow, run_e2e, arguments, helper scripts, artifacts"
+        "description": "GEAK-evo reference: bundled runtime, workflow arguments, helper scripts, the external orchestrator contract, and run artifacts."
+        "keywords": "GEAK-evo, reference, Node, e2e_workflow, kernel_workflow, run_e2e, arguments, artifacts"
 ---
 
-# GEAK API reference
+# GEAK-evo API reference
 
-GEAK v4's public surface is not a CLI or a Python package. It is: the Workflow scripts
-(`e2e_workflow.js`, `kernel_workflow.js`), the helper scripts they call, and a stable
-external-orchestrator contract (`interface/run_e2e.py`). For walkthroughs see
-[Run a workflow](../how-to/run-agent.md).
+GEAK-evo exposes workflow scripts, the bundled Node runtime and the stable
+external orchestrator contract at `interface/run_e2e.py`. Repository paths,
+the `geak` package and `GEAK_*` settings retain their names. See
+[Run a workflow](../how-to/run-agent.md) for walkthroughs.
 
-## The `Workflow` tool
+## Runtime invocation
 
-Claude Code runs a workflow by calling:
+Save workflow arguments as JSON and invoke the bundled runtime from the repository root:
 
-```js
-Workflow({ scriptPath: "<absolute path to *.js>", args: { /* see below */ } })
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  kernel_workflow/kernel_workflow.js \
+  --agent claude --args-file kernel-args.json \
+  --result-file kernel-workflow-result.json
 ```
 
-`workflow_dir` is always required (a JS workflow can't read its own path). Natural-language prompts
-are mapped onto `args`; there is no config file for workflow parameters.
+`workflow_dir` is required. The runtime supplies the workflow primitives and
+measurement subprocess ownership; agents use the configured Claude or Codex
+backend. The native Claude `Workflow` tool lacks the required `runProcess`
+primitive. For Hyperloom, keep the existing two-file Python invocation:
+
+```bash
+python interface/run_e2e.py handoff.json result.json
+```
+
+Omitting `optimizer` selects `evo` for standalone and nested kernel runs.
+Explicit `"optimizer": "greedy"` selects the original search policy. See the
+[configuration reference](../evo/configuration.md) for optional EVO controls.
 
 | Workflow | scriptPath | Purpose |
 |---|---|---|
@@ -30,11 +43,15 @@ are mapped onto `args`; there is no config file for workflow parameters.
 
 ## `e2e_workflow.js`
 
-`meta.name = "e2e-workflow"`. Phases:
+`meta.name = "e2e-workflow"`. Fixed-load phases:
 `Setup → Profile → Strategize → ConfigSweep → HeadKernel → Milestone → Finalize → Report → Validate`.
 
 Owns the server, throughput metric, profiling, Amdahl triage, config/backend tuning, hot-kernel
 extraction, and reversible reintegration; recursively calls `kernel_workflow.js` per kernel.
+
+AgentX trace replay uses baseline → extraction and standalone task validation →
+head/kernel optimization → E2E validation. It skips the outer Profile/Strategize,
+ConfigSweep and Tune phases. See the [AgentX route](../../e2e_workflow/README.md#agentx-kernel-extraction-and-ut-delivery).
 
 ### Core args
 
@@ -43,14 +60,15 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `model_path` | — (**required** for e2e) | Model weights directory. |
 | `kernel_path` | — | Single-kernel pass-through (mutually exclusive with `model_path`); delegates straight to the kernel layer. |
 | `workflow_dir` | — (**required**) | This folder (`e2e_workflow/`). |
-| `kernel_workflow_dir` | Sibling `kernel_workflow/` | Recursive kernel layer location. |
-| `exp_root` | Sibling `exp/` | Output root. |
-| `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` (selects `scripts/adapters/<backend>.sh`). |
+| `kernel_workflow_dir` | sibling `kernel_workflow/` | Recursive kernel layer location. |
+| `optimizer` | `evo` | Kernel search policy: `evo` or `greedy`. |
+| `exp_root` | sibling `exp/` | Output root. |
+| `backend` | `sglang` | Serving adapter: `sglang` \| `vllm` \| `atom` (selects `scripts/adapters/<backend>.sh`). |
 | `launch_script` | `""` | Optional custom launch script; else the stack default. |
 | `gpu_ids` | `0` | CSV optimization-parallelism pool. |
 | `tp` / `serving_tp` | `1` | Serving tensor-parallel size. |
-| `serving_gpu` | First `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
-| `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Workload; profiling and benchmarking share these. |
+| `serving_gpu` | first `tp` ids | Serving GPU set (distinct from `gpu_ids`). |
+| `isl`, `osl`, `conc` | `1024`, `1024`, `64` | Synthetic workload fields; AgentX takes its actual request mix from the declared replay. |
 | `task` | `""` | Natural-language steer. |
 | `apply_to_original` | `false` | If `true`, emit an apply bundle (overlay + launch); never edits site-packages. |
 | `phases` | `all` | Run a subset: `{setup, config, head, kernel, final}`. `state` carries cross-phase state. |
@@ -62,8 +80,8 @@ extraction, and reversible reintegration; recursively calls `kernel_workflow.js`
 | `budget` | `6` | Max kernel-optimization tasks (config sweep is free). |
 | `kernel_budget` | `6` (`3` in fast) | Budget passed down to each recursive single-kernel run. |
 | `min_kernel_tasks` | `4` (capped by `budget`) | Milestone floor. |
-| `milestone_min_pct` | `5` | Skip editable kernels below this %GPU time (Amdahl). |
-| `config_tune` | `true` | Tier-0 flag, env, and backend sweep on/off (runs FIRST). |
+| `milestone_min_pct` | `5` | Fixed-load milestone GPU-time threshold; AgentX uses its extraction inventory. |
+| `config_tune` | `true` | Fixed-load flag/env/backend sweep; AgentX skips it. |
 | `head_threshold_pct` | `5` | Head-kernel selection threshold. |
 | `head_budget` | `3` (≥ GPU count in fast) | Max head bake-offs. |
 | `head_author_max` | `2` | Author languages per head (FlyDSL + Triton). |
@@ -119,25 +137,36 @@ Related timing/tuning args: `fast_head_deadline_ms`, `fast_head_workflow_ms`, `d
 
 ### Example
 
-```js
-Workflow({
-  scriptPath: "<REPO>/e2e_workflow/e2e_workflow.js",
-  args: {
-    model_path: "/models/Qwen3.5-27B-FP8",
-    workflow_dir: "<REPO>/e2e_workflow",
-    backend: "sglang", tp: 4, gpu_ids: "0,1,2,3",
-    expected_gfx: "gfx950", expected_target: "unknown",
-    expected_device_name: "AMD Instinct MI355X",
-    expected_physical_cu_count: 256,
-    isl: 1024, osl: 1024, conc: 64,
-    budget: 6, config_tune: "true"
-  }
-})
+Save as `e2e-args.json`, replacing paths and hardware settings:
+
+```json
+{
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "workflow_dir": "/absolute/path/GEAK/e2e_workflow",
+  "eval_dir": "/absolute/path/runs/qwen-001",
+  "backend": "sglang",
+  "tp": 4,
+  "gpu_ids": "0,1,2,3",
+  "expected_gfx": "gfx950",
+  "expected_target": "mi355x",
+  "isl": 1024,
+  "osl": 1024,
+  "conc": 64,
+  "budget": 6,
+  "config_tune": "true"
+}
+```
+
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  e2e_workflow/e2e_workflow.js \
+  --agent claude --args-file e2e-args.json \
+  --result-file e2e-workflow-result.json
 ```
 
 For normal launches, prefer `interface/run_e2e.py`; it runs the structured GPU
 identity probe and supplies these `expected_*` fields before backend or
-architecture policy is selected. Direct `Workflow(...)` model-mode calls must
+architecture policy is selected. Direct Node model-mode calls must
 supply `expected_gfx` and `expected_target` themselves.
 
 ## `kernel_workflow.js`
@@ -152,6 +181,7 @@ budget-controlled, each patch independently verified.
 |---|---|---|
 | `kernel_path` | — (**required**) | Kernel task directory (or a kernel source to wrap). |
 | `workflow_dir` | — (**required**) | This folder (`kernel_workflow/`). |
+| `optimizer` | `evo` | Kernel search policy: `evo` or `greedy`. |
 | `budget` | `6` | Optimization-task budget. |
 | `min_improve` | `0.02` | Minimum accepted improvement (2%). |
 | `deep_cost` | `2` | Budget cost of a deep-explore engineer. |
@@ -167,7 +197,7 @@ budget-controlled, each patch independently verified.
 | `op_spec` | `{}` | Op specification (author mode). |
 | `perf_knowledge_dir` | Sibling `perf_knowledge/` | Knowledge base. |
 | `update_experience` | `on` | Curate ONE distilled card into `kernel_workflow/knowledge/learned/` after a measured win (every lane run; once centrally per bake-off). `off` skips it. The sink is always this workflow's own `learned/` — an e2e-opened lane never writes into `e2e_workflow/knowledge/learned/`. Cards carry a skill-style discovery header (`name`/`description`/`keywords`/`kernels`/`platforms`/`kernel_class`/`regime`) and `learned/INDEX.md` is regenerated from it by `kernel_workflow/scripts/kb.py ... index` (`--check` = fail-if-stale). Numbers on a card are relative only (ratios, % of achievable peak) — never wall-clock. |
-| `warm_start` | `on` | Experience reuse from the KB (see `kb_mode` for which plane). `on` = read the top same-arch patches (one per optimization `direction`) through the verify gate; `reference` = prose only, no patch apply; `return_after_read` = apply+validate a candidate then return; `off` = cold start (byte-equivalent to pre-warm-start). |
+| `warm_start` | `on` | Experience reuse from the KB (see `kb_mode` for which plane). `on` = read the top same-arch patches (one per optimization `direction`) through the verify gate; `reference` = prose only, no patch apply; `return_after_read` = apply+validate a candidate then return in the kernel lane (E2E continues optimization); `off` = cold start (byte-equivalent to pre-warm-start). |
 | `kb_artifacts_dir` | Sibling `kb_artifacts/` | Lossless best-patch sink (machine-produced, code-carrying; gitignored, runtime-accumulated). Still written on every run and still the surface a curation pass edits; it is no longer what the default read addresses (see `kb_mode`), and `sync-local` carries it into the store. |
 | `warm_start_match` | `fuzzy` | How a kernel name reaches a stored page: `exact` (canonicalized name only) \| `normalized` \| `fuzzy` (closest containing page; refuses when two pages fit equally well). Names are canonicalized first, so `fused_moe_kernel_task`, `triton_fused_moe_kernel.py` and a full task path all reach the same page. `kb_mode=local` only — a canonical id is an exact address, so there is nothing to match fuzzily on the default plane. |
 | `warm_start_min_speedup` | `1.05` | Floor on a stored entry's recorded speedup before it is worth a verify slot. |
@@ -182,15 +212,16 @@ budget-controlled, each patch independently verified.
 time-weighted ratio-of-sums. Author mode writes a fresh baseline against an immutable oracle, then runs
 the same optimize loop.
 
-```js
-Workflow({
-  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
-  args: {
-    kernel_path: "<REPO>/examples/tasks/knn",
-    workflow_dir: "<REPO>/kernel_workflow",
-    budget: 8, gpu_ids: "0"
-  }
-})
+Save as `kernel-args.json` and use the runtime command above:
+
+```json
+{
+  "kernel_path": "/absolute/path/GEAK/examples/tasks/knn",
+  "workflow_dir": "/absolute/path/GEAK/kernel_workflow",
+  "eval_dir": "/absolute/path/runs/knn-001",
+  "budget": 8,
+  "gpu_ids": "0"
+}
 ```
 
 ## Helper scripts

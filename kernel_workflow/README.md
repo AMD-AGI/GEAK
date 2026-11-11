@@ -1,4 +1,4 @@
-# kernel_workflow — Dynamic Workflow for Kernel / Model Inference Optimization
+# GEAK-evo kernel workflow
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
@@ -9,6 +9,10 @@ The card is detected on-box (`rocminfo`), not assumed. On gfx1201, agents must f
 (wave32, WMMA) rather than Instinct MFMA/wave64 tables. The
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
+
+GEAK-evo defaults to `optimizer: "evo"` to retain and develop
+earlier candidates. See [Run GEAK-evo](../docs/evo/stock-workflow.md) for options
+and [architecture](../docs/evo/architecture.md) for its current scope.
 
 ## Key properties
 1. **Deterministic orchestration** — the budget loop / parallelism / verification live in
@@ -55,16 +59,23 @@ remaining budget; the TechLead may also stop early (`stop=true`) when further di
 Example (budget=6): round 1 = 3 directions, round 2 = 3; or 4 then 2; or stop after 4.
 
 ## Invocation
-This is a Workflow, run via the `Workflow` tool with `scriptPath` and `args`. **No paths are
-hard-coded in the script** — it is portable to any install location. Set `scriptPath` to wherever
-this folder lives and pass that same folder as `args.workflow_dir`:
+Run the bundled Node runtime; it provides the host subprocess ownership required
+for kernel measurement and delivery. The default backend is Claude; use the
+existing `--agent` / `--profile` options for another configured backend.
 
-> **IMPORTANT:** pass `args` as a real JSON **object** (a mapping), **not** as a JSON-encoded
-> string. Do not wrap it in quotes or `json.dumps()` it. If `args` arrives as a string the
-> workflow cannot read `args.workflow_dir` / `args.kernel_path` and aborts immediately.
+```sh
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+  --args-file /absolute/path/run-args.json --result-file /absolute/path/result.json
+```
+
+Use the JSON example in [Run GEAK-evo](../docs/evo/stock-workflow.md). The annotated
+argument reference below uses JavaScript notation; save only its `args` object
+as valid JSON (remove comments) for `--args-file`. Set `optimizer: "greedy"`
+explicitly for the original policy.
 
 ```
-Workflow({
+// Runtime invocation and argument reference:
+({
   scriptPath: "<WF_DIR>/kernel_workflow.js",   // <WF_DIR> = absolute path to THIS kernel_workflow/ folder
   args: {
     kernel_path: "/abs/path/to/kernel_or_model_dir",  // REQUIRED

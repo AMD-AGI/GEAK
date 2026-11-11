@@ -1,34 +1,37 @@
-# e2e_workflow — End-to-End LLM Inference-Throughput Optimizer (AMD Instinct + R9700)
+# GEAK-evo end-to-end serving workflow
 
-A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm/ATOM
-serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
-(gfx1201, vLLM only). Generic gfx1201 is an ISA identity, not a supported serving product.
-It is a *system layer* built on top of — and recursively
-calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
-quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
-server, Amdahl triage, config/backend tuning, extracting hot kernels into standalone unittests,
-optimizing them with the kernel layer, overlaying them back, and re-validating end-to-end throughput.
+This JavaScript workflow profiles and optimizes sglang/vLLM/ATOM serving on AMD
+Instinct GPUs and provides product-specific gfx1201 support for Radeon AI PRO
+R9700 and R9600D (vLLM only).
+It runs through the bundled Node runtime and delegates extracted kernel tasks
+through the shared `kernel_workflow`. Generic gfx1201 identifies an ISA, not a
+supported serving product.
 
-## Design: fractal two-altitude
-- **System layer** (this dir): owns the server, the throughput metric, profiling, triage, config, and
-  reintegration. Roles: e2e Director, System Architect, Profiler, Config Tuner, Kernel Extractor,
-  e2e Integrator/Validator.
-- **Kernel layer** (`../kernel_workflow/`, UNCHANGED): given a kernel task dir, does the real multi-backend
-  optimization with independent verification. The system layer hands it an extracted task dir and
-  consumes its verified `final_patch.diff` + geomean. Same contract as a hand-written kernel task.
+## System and kernel layers
 
-Because the kernel layer is called as-is, single-kernel optimization effect cannot regress — and the
-workflow is **backward compatible**: pass `args.kernel_path` (no `model_path`) and it delegates
-straight to the kernel layer (single-kernel pass-through).
+- **System layer** (this directory): owns server setup, profiling, configuration,
+  kernel extraction, reversible integration and end-to-end measurement.
+- **Kernel layer** (`../kernel_workflow/`): optimizes each extracted task with its
+  correctness and performance checks, then returns the final patch and result.
+  Omitted `optimizer` selects `evo`; `"optimizer": "greedy"` selects the original
+  search policy. The same selection applies to nested kernel workers.
 
-## Why a system layer at all (the doctrine)
-e2e throughput is **Amdahl-dominated**: only a speedup on a kernel that is a large share of GPU time,
-times how often that path runs, moves the headline number. A 5× on a 2%-of-time kernel is invisible.
-So the system layer always reasons in `pct_gpu_time × achievable_speedup`, tunes the cheap
-landscape-reshaping config knobs FIRST, and gates every kernel change on a measured end-to-end
-throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md`.
+Passing `kernel_path` without `model_path` delegates directly to the kernel layer.
+Existing repository paths, the `geak` package and `GEAK_*` settings are retained.
+
+## Selecting useful workload changes
+
+Profiled GPU-time share helps prioritize kernel work. Converting a kernel speedup
+into a workload estimate also requires the timing boundary, call distribution and
+overlap assumptions. Configuration, cache and scheduling changes can alter those
+costs. Integration measures the full serving workload under the same request and
+correctness contract. See `knowledge/e2e_optimization.md`.
 
 ## Roles → workflow mapping
+
+These roles describe the fixed-load workflow. AgentX uses the extraction route
+[described below](#agentx-kernel-extraction-and-ut-delivery).
+
 - **e2e Director** = setup (isolated eval dir + TRUE baseline throughput) + final independent
   throughput validation/arbitration + output-parity gate.
 - **System Architect** = strategy: read the standardized Top-N, route by Amdahl into config/kernel/
@@ -40,15 +43,22 @@ throughput delta that exceeds the noise band. See `knowledge/e2e_optimization.md
 - **Kernel Extractor** = capture real shapes + a reference I/O oracle → an IMMUTABLE standalone
   unittest task dir the kernel layer consumes (anti-cheating).
 - **e2e Integrator/Validator** = reversible overlay reintegration + e2e throughput gate + final bundle.
-- **Kernel squad** = the UNCHANGED `../kernel_workflow/kernel_workflow.js`, invoked recursively.
+- **Kernel squad** = the shared `../kernel_workflow/kernel_workflow.js`, invoked recursively.
 
 ## Pipeline
+
+Fixed ISL/OSL workloads:
+
 ```
 Setup(preflight env-check + baseline throughput) → Baseline Profile(Top-N) → Strategize(Amdahl routing) →
 ConfigSweep(flags/env/backends, FIRST) → Re-profile →
 LOOP milestone[ plan → per kernel: Extract → recursive kernel_workflow.js → Overlay+e2e gate → ] → Re-profile → grow playbook →
 Finalize(overlay+patch+launch bundle) → Architect Report → Director Validation
 ```
+AgentX trace replay instead uses baseline measurement → extraction and UT
+validation → head/kernel optimization → E2E validation. It skips the outer
+Profile/Strategize, ConfigSweep and Tune phases.
+
 Setup runs a **preflight** (see `knowledge/preflight.md`) — a judgment-guided env self-check (not a
 rigid script): it confirms the chosen `backend` stack, the model, GPU visibility; verifies the
 caller-established structured product/ISA/CU identity, detects trace
@@ -92,71 +102,75 @@ reference only; verify every switch by measuring):
    step). HIP/CK when the headroom justifies them (`head_author_max`, default 2 = FlyDSL+Triton).
 
 ## Invocation
-Production callers should use `interface/run_e2e.py`, which performs structured
-on-box identity detection before backend and knowledge policy are selected. A
-direct model-mode `Workflow` call must supply both `expected_gfx` and
-`expected_target`; this entry fails closed when either is missing.
-`workflow_dir` must be this folder (a JS workflow can't read its own path); the
-kernel layer defaults to the sibling `kernel_workflow/`.
 
-### The workflow scripts run in a sealed sandbox
-`e2e_workflow.js`, `kernel_workflow.js` and `kernel_lane.js` are evaluated as async
-function bodies in a realm whose entire global surface is the JS built-ins plus
-`agent` / `parallel` / `pipeline` / `phase` / `log` / `workflow` / `args` / `budget` /
-`console` / `setTimeout`. In particular:
+External callers such as Hyperloom keep the standard handoff and result files:
 
-| | `process` | `require` | dynamic `import` |
-|---|---|---|---|
-| Claude Code's native `Workflow` tool (the default path) | no | no | **refused at launch** |
-| `interface/runtime/engine/run_workflow.mjs` (`--agent codex`, …) | yes | no | yes |
-
-A dynamic `import` anywhere in one of those three files is a **static** rejection of the
-whole script — not one line runs, on any phase. `require` is simply undefined on both
-runtimes, so a `require` site must never be load-bearing. Anything that needs the
-filesystem belongs in a vendored CLI under `scripts/` that an **agent** runs, which is how
-every other datum in the workflow (the profile, the strategy, every A/B number) already
-arrives. `scripts/tests/test_llm_ledger.py` enforces this in CI; `node --check` does not
-catch it, because plain Node accepts both.
+```bash
+python interface/run_e2e.py /path/to/handoff.json /path/to/result.json
 ```
-Workflow({
-  scriptPath: "<E2E_DIR>/e2e_workflow.js",
-  args: {
-    model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
-    workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
-    expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
-    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|unknown; gfx1201 never implies a product
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm-only (default vllm)
-    launch_script: "<...>/launch.sh",                // optional; else the stack's default config
-    kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
-    budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
-    kernel_budget: 6,     // budget passed DOWN to each recursive single-kernel run
-    milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
-                          //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
-    config_tune: "true",  // Tier-0 sweep on/off (default ON)
-    tuning_skillset: "true", // standalone TuningSkillset phase on/off (default ON). Runs the VENDORED
-                          //   tuning skillset (<repo>/perf_knowledge/expert_skills/tuning) WHOLE, as its own phase, AFTER
-                          //   ConfigSweep and BEFORE HeadKernel, with its own pre/post A/B so its share
-                          //   of the gain is attributable. "false" injects nothing -> byte-identical.
-    tuning_kb: "true",    // consult tuning-kb/ (the per-model ANSWER KEY). Set "false" for blind evals.
-                          //   No op budget: the tuning loop is uncapped (tuning ops are cheap and their
-                          //   value is cumulative). See "Tuning skillset" below +
-                          //   knowledge/tuning_skillset_integration.md.
-    analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
-                          //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
-                          //   expected e2e gain, so budget goes to the kernel with HEADROOM, not merely
-                          //   the biggest one. ADVISORY: annotates + reorders, never prunes a candidate
-                          //   and never overrides the measured pct_gpu_time. See "Roofline" below.
-    use_expert_skills: "false", // consult perf_knowledge/expert_skills (advisory priors) on/off (default OFF, opt-in);
-                          //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
-                          //   byte-identical to a run without the feature. Threaded down to the kernel layer too.
-    gpu_ids: "0",         // comma-separated
-    isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
-    task: "focus on ...", // optional steer
-    apply_to_original: "false"       // if "true", emit an apply bundle (overlay + launch), never edits site-packages
-  }
-})
-// Single-kernel pass-through (backward compatible): pass kernel_path instead of model_path.
+
+The wrapper performs structured on-box identity detection and invokes the bundled
+Node runtime. See the [integration contract](../interface/run_e2e.md) for handoff
+fields and result normalization. Omitting `optimizer` selects `evo` without adding
+new fields to an existing handoff.
+
+For a direct run, save the following as `e2e-args.json` and replace the paths and
+hardware settings. This example targets one MI355X GPU:
+
+```json
+{
+  "model_path": "/path/to/model",
+  "workflow_dir": "/absolute/path/GEAK/e2e_workflow",
+  "eval_dir": "/absolute/path/runs/e2e-001",
+  "expected_gfx": "gfx950",
+  "expected_target": "mi355x",
+  "backend": "sglang",
+  "gpu_ids": "0",
+  "tp": 1,
+  "isl": 1024,
+  "osl": 1024,
+  "conc": 64,
+  "budget": 4,
+  "kernel_budget": 6
+}
 ```
+
+From the repository root:
+
+```bash
+node interface/runtime/engine/run_workflow.mjs \
+  e2e_workflow/e2e_workflow.js \
+  --agent claude --args-file e2e-args.json \
+  --result-file e2e-workflow-result.json
+```
+
+The Node result is the raw workflow return; the Python wrapper produces the
+normalized integration result. Use a fresh `eval_dir` for each run. See
+[runtime setup](../interface/runtime/SETUP.md) for agent/model selection. The
+bundled runtime is required even with Claude: kernel delivery uses `runProcess`,
+which the native Claude `Workflow` tool does not provide.
+
+Direct model-mode runs require both `expected_gfx` and `expected_target`.
+At Setup/Freeze, `expected_target: "unknown"` leaves the product unconstrained;
+pin `r9700`, `r9600d`, `mi350x` or `mi355x` to require that product. The gfx1201
+serving entry requires an explicit R9700 or R9600D identity before setup. `workflow_dir` must name this
+folder; `kernel_workflow_dir` defaults to its sibling `kernel_workflow/`.
+
+Common optional fields in the JSON arguments:
+
+| Field | Purpose |
+|---|---|
+| `optimizer` | `"evo"` by default; `"greedy"` selects the original kernel search policy. |
+| `launch_script` | Use a supplied serving launch script. |
+| `budget`, `kernel_budget` | Maximum kernel tasks and the direction budget for each nested task. |
+| `milestone_min_pct` | Fixed-load Milestone GPU-time threshold; default 5. AgentX uses its extraction inventory. |
+| `config_tune` | Fixed-load configuration sweep; default `"true"`. AgentX skips it. |
+| `tuning_skillset` | Fixed-load tuning phase; default `"true"`. AgentX skips it. See below. |
+| `tuning_kb` | Consult the per-model tuning KB; default `"true"`. Use `"false"` for blind evaluation. |
+| `analysis_skill` | Profile analysis, default `"roofline"`; `"none"` disables it. |
+| `use_expert_skills` | Advisory expert priors, default `"false"`; forwarded to kernel workers. |
+| `task` | Additional optimization focus. |
+| `apply_to_original` | `"true"` requests an apply bundle; integration uses reversible overlays. |
 
 ## Standalone AgentX (trace replay, no orchestrator)
 
@@ -168,19 +182,25 @@ Standalone it is graded on **InferenceX P90 interactivity** — `p90_intvty_infe
 (input+output) tok/s carried beside it as `guard_total_tok_s_median`. The output-only axis a sweep
 uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large change in work.
 
-Under Hyperloom this arrives as environment variables that `interface/run_e2e.py` exports. Standalone,
-declare it in the args instead — one line is enough, and it fills the canonical setup:
+Under Hyperloom this arrives as environment variables that `interface/run_e2e.py` exports.
+For a standalone run, `"workload_kind": "agentx_trace_replay"` fills the canonical setup.
 
-```
-Workflow({
-  scriptPath: "<E2E_DIR>/e2e_workflow.js",
-  args: {
-    model_path: "/models/Kimi-K3", workflow_dir: "<E2E_DIR>", backend: "vllm",
-    gpu_ids: "0,1,2,3,4,5,6,7", tp: 8,
-    workload_kind: "agentx_trace_replay",   // <- the whole declaration
-    conc: 8,
-  }
-})
+Save an `agentx-args.json` with the full argument object, then use the same Node
+command with `--args-file agentx-args.json`. For an MI355X TP8 example:
+
+```json
+{
+  "model_path": "/models/Kimi-K3",
+  "workflow_dir": "/absolute/path/GEAK/e2e_workflow",
+  "eval_dir": "/absolute/path/runs/agentx-001",
+  "expected_gfx": "gfx950",
+  "expected_target": "mi355x",
+  "backend": "vllm",
+  "gpu_ids": "0,1,2,3,4,5,6,7",
+  "tp": 8,
+  "workload_kind": "agentx_trace_replay",
+  "conc": 8
+}
 ```
 
 Note there is no `isl`/`osl` here. Nothing is measured at them on a trace replay — aiperf owns the
@@ -199,38 +219,55 @@ Until the baseline lands the shape is openly `1024/1024` with
 used for kernel sizing. If the baseline reports no shape at all (a client that never returned token
 totals), the run continues on that placeholder and says so loudly rather than inventing a number.
 
-To pin the shape yourself instead — targeting a regime deliberately, or feeding in a figure you
-measured elsewhere — declare it, and the measurement will not override you:
+To pin a shape measured elsewhere or deliberately target a regime, merge this field
+into the argument object. The baseline measurement will not override it:
 
+```json
+{
+  "workload_spec": {
+    "kind": "agentx_trace_replay",
+    "corpus": "<yours>",
+    "observed_isl": 120000,
+    "observed_osl": 800
+  }
+}
 ```
-    workload_spec: { kind: "agentx_trace_replay", corpus: "<yours>",
-                     observed_isl: 120000, observed_osl: 800 },   // -> shape_provenance=agentx_observed
-```
+
+This records `shape_provenance=agentx_observed`.
 
 `workload_kind` expands to the graded setup: scenario `inferencex-agentx-mvp`, corpus
 `semianalysis_cc_traces_weka_062126`, 393 entries, a 3600s canonical window with 900s inner search
 legs, and `p90_intvty_inferencex` as the metric basis. Override any part with the long spelling,
 which is the same object Hyperloom puts on its handoff:
 
+```json
+{
+  "workload_spec": {
+    "kind": "agentx_trace_replay",
+    "corpus": "semianalysis_cc_traces_weka_062126",
+    "num_entries": 393,
+    "duration_s": 3600,
+    "geak_loop_duration_s": 900,
+    "concurrency": 8,
+    "metric_basis": "p90_intvty_inferencex",
+    "canonical_corpus": "semianalysis_cc_traces_weka_062126",
+    "canonical_num_entries": 393,
+    "canonical_duration_s": 3600,
+    "warmup_requests_per_lane": 10,
+    "warmup_grace_period_s": 1800,
+    "failed_request_threshold": 0.10,
+    "inferencex_path": "/opt/InferenceX",
+    "aiperf_bin": "aiperf",
+    "profile_warmup_s": 2700,
+    "profile_window_s": 20
+  }
+}
 ```
-    workload_spec: {
-      kind: "agentx_trace_replay",
-      corpus: "semianalysis_cc_traces_weka_062126", num_entries: 393,
-      duration_s: 3600,            // canonical/parity window
-      geak_loop_duration_s: 900,   // inner search legs (the scenario's own floor)
-      concurrency: 8,              // also what every bench line passes as CONC; wins over args.conc
-      metric_basis: "p90_intvty_inferencex",   // or aggregate_total_token_tok_s,
-                                               // aggregate_output_tok_s, e2e_norm_intvty_p90
-      canonical_corpus: "semianalysis_cc_traces_weka_062126",   // optional; what results are
-      canonical_num_entries: 393, canonical_duration_s: 3600,   // stamped canonical against
-      warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
-      failed_request_threshold: 0.10,
-      observed_isl: 0, observed_osl: 0,  // optional; omit to measure it off the baseline
-      inferencex_path: "/opt/InferenceX",  // optional; GEAK vendors map_aiperf.py
-      aiperf_bin: "aiperf",                // optional
-      profile_warmup_s: 2700, profile_window_s: 20,   // optional window placement
-    },
-```
+
+Merge `workload_spec` into the full argument object. Its `concurrency` overrides
+`conc`; `duration_s` is the canonical validation window and `geak_loop_duration_s`
+is the inner search window. Omit `inferencex_path` to use the vendored mapper and
+omit observed shape fields to measure them from the baseline.
 
 Three parts of that object do more than they look:
 
@@ -302,7 +339,8 @@ than substituting a synthetic one that would look authentic.
 One pipeline, three depths — selected by the `fast_mode` / `deep_mode` args (both default `false` =
 **default** mode; they are mutually exclusive, **deep takes precedence**). Only the HeadKernel depth and
 which phases run change; the throughput metric, the e2e gate, and the reversible-overlay contract are
-identical. With both off, the run is **byte-identical** to the original (every mode knob is gated).
+the same. With both off, the standard phase sequence runs. The kernel `optimizer`
+is a separate choice and defaults to `evo`.
 
 | Mode | arg | Phases | HeadKernel | Budget (default) | Use when |
 |---|---|---|---|---|---|
@@ -310,14 +348,10 @@ identical. With both off, the run is **byte-identical** to the original (every m
 | **fast** | `fast_mode:true` | HeadKernel only (skips ConfigSweep + Milestone) | **parallel** head track (extract/bake/author fan out across GPUs), time-capped | `fast_budget_ms` = 5h | a quick HeadKernel-only win under a wall-clock cap |
 | **deep** | `deep_mode:true` | ConfigSweep + HeadKernel (skips Milestone) | **global cross-kernel×backend lane pool** — every (head op × backend) optimizes in parallel, many rounds via STATE_DIR + reseed, cross-pollination (per-op SHARED_KB + run-global GLOBAL_KB), convergence-stop + agent-budget backstop, finalize banks a **combined cross-kernel overlay** | `deep_head_budget_ms` = 24h | the deepest/broadest result: most backends, most rounds, hours available |
 
-```
-# default — full pipeline
-args: { model_path, workflow_dir, backend:"vllm", tp:4, gpu_ids:"0,1,2,3", isl:1024, osl:1024, conc:64 }
-# fast — HeadKernel-only, parallel, time-boxed
-args: { ...same..., fast_mode:true, fast_budget_ms: 18000000 }
-# deep — exhaustive, multi-backend, parallel (give it all GPUs + hours)
-args: { ...same..., deep_mode:true, gpu_ids:"0,1,2,3,4,5,6,7", deep_head_budget_ms: 64800000 }
-```
+To select a depth, add `"fast_mode": true` or `"deep_mode": true` to the JSON
+argument object. Optional `fast_budget_ms` and `deep_head_budget_ms` values are
+milliseconds; for example, `"deep_head_budget_ms": 64800000` sets an 18-hour cap.
+
 Pick **fast** for a bounded quick pass, **default** for the standard run, **deep** to chase the best
 achievable number (it is broader = more backends, deeper = more/faster rounds, parallel = lanes co-opt
 spare GPUs while the e2e gate runs on the serving slot, with matched in-window A/B so parallelism never
@@ -428,46 +462,60 @@ existing UT and E2E A/B gate; a UT pass alone does not establish an E2E improvem
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
-`pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is
-*recoverable*. A kernel already running at the memory or compute ceiling has nothing left to give no
-matter how much of the profile it owns. So after the Profiler emits the Top-N it runs one pluggable
-**analysis skill** (`knowledge/analysis_skills/<name>/SKILL.md`) which estimates, per kernel:
-`roofline_pct` → `attainable_speedup` → `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable)`.
-The Architect then reports **both** orderings — by `%GPU` and by expected gain — and says which it
-followed; a disagreement between them is the useful signal, so it is never blended into one number.
+`pct_gpu_time` locates cost. The pluggable [roofline skill](knowledge/analysis_skills/roofline/SKILL.md)
+adds conditional work/traffic models and a second ordering for choosing experiments. Its historical
+`attainable_speedup` field is a scenario based on an efficiency prior, not a measured limit.
+`expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)` estimates a reduction in summed
+profiled GPU time. It predicts workload latency only if that fraction matches the critical elapsed
+interval and other costs and overlap remain unchanged. Measure the workload result separately.
+The Architect reports both orderings and states which it followed.
 
-**Roofline is advisory and can never prune a candidate.** Same doctrine as the TraceLens prior: the
-measured `pct_gpu_time` is the judge. Confidence is staged — profile-time shape estimates are `low`
-(display only, not ranked on), real extracted shapes are `medium`, rocprofv3 counter measurements
-(`FETCH_SIZE`/`WRITE_SIZE`/`MfmaFlops*`) are `high`. Five degradation levels end in "emit nothing and
-behave exactly as before", so a missing peak table, an unmodellable op or a bad number cannot fail a run.
+Integration and recovery treat Amdahl projections as diagnostics. The legacy
+`implausible_speedup_margin` controls discrepancy reporting and the independent
+A/B review for an accuracy-gated gain. The projection alone cannot reject a
+candidate or establish a correctness failure. Actual quality, parity, engagement
+and complete-measurement requirements still apply. A review that ran and measured
+a rejection withholds its candidate; a pending or inconclusive review leaves the
+original measured verdict in effect. Investigate model discrepancies using work
+completeness, timing scope and quality evidence.
 
-**A saturated head is rerouted, not dropped** — the point that matters most for the *largest* kernel.
-Being at the wall means it is done with micro-tuning, not done being optimized; it routes to a
-**byte-reduction track** (fuse an adjacent op away, stop reading unrouted experts, layout/packing,
-lower-precision weights). Those levers must preserve the measurement contract: the user-supplied
-workload (`isl`/`osl`/`conc`/batch) is fixed and speculative decoding is not an optimization.
+**Roofline is advisory and never prunes a candidate.** Estimated shapes are low-confidence and
+display-only; captured shapes with supported models can guide secondary prioritization. Matched
+counters raise confidence only for quantities with validated definitions, units and capacities.
+Unsupported quantities remain unknown, and missing tools or models do not fail the run.
 
-Calibrated on a real run (Qwen3.5-35B-A3B-FP8, gfx950, vLLM TP1, 1k/1k, conc 64) — see
-`scripts/tests/test_roofline_skill.py`:
+A high model fraction can motivate hypotheses in `byte_reduction_levers`: avoiding intermediates,
+reusing weights/KV, skipping unused experts or changing packing. It does not establish that local
+tuning is exhausted or the current work is necessary. Keep the supplied workload and numerical
+contract; broader fusion needs the surrounding computation and full-operation measurement.
 
-| kernel | %GPU | of roofline | attainable | predicted e2e | measured |
+The test fixture retains this historical example (Qwen3.5-35B-A3B-FP8, gfx950, vLLM TP1,
+1k/1k, conc 64). These calculations illustrate ranking behavior; they do not calibrate a universal
+roof or establish the model's predictive accuracy. See `scripts/tests/test_roofline_skill.py`.
+
+| kernel | %GPU | model fraction | scenario speedup | modeled GPU-time reduction | measured |
 |---|---|---|---|---|---|
-| `fused_moe_kernel` | **26.45%** | 88% (memory-bound) | 1.02× | +0.6% | 1.047× iso, **−0.064% e2e** |
+| `fused_moe_kernel` | **26.45%** | 88% (memory model) | 1.02× | +0.6% | 1.047× iso, **−0.064% e2e** |
 | `kernel_paged_attention_2d` | 8.86% | 18% | 2.8× | +5.7% | **1.56× iso** |
 
-Ranking by `%GPU` sends the budget to the MoE, where it was in fact wasted; ranking by headroom sends
-it to attention, where the win was. Add a skill by dropping a directory into
+The scenario ranks attention first; `%GPU` ranks MoE first. Isolated speedups and end-to-end deltas
+need their own repeat variability before drawing conclusions about workload benefit. Add a skill in
 `knowledge/analysis_skills/`; swap with `analysis_skill=<name>`; disable with `analysis_skill=none`.
 
 ## Accuracy gate (gsm8k) — OFF by default
 By default the e2e gate accepts a kernel on **throughput delta + greedy output parity**
 (`accuracy_gate:"none"`). For QUANTIZED kernels (MXFP8/fp8) byte-parity is too strict — a within-tolerance
 kernel rounds differently and flips a few borderline greedy argmaxes — so you can switch the bar to
-**task accuracy**:
+**task accuracy** by adding these fields to the full JSON argument object:
+
+```json
+{
+  "accuracy_gate": "gsm8k",
+  "accuracy_limit": 200,
+  "accuracy_tol": 0.01
+}
 ```
-args: { ...same..., accuracy_gate:"gsm8k", accuracy_limit:200, accuracy_tol:0.01 }
-```
+
 - `accuracy_gate:"gsm8k"` → the Integrator serves a fresh TRUE baseline vs the candidate, runs sampled
   gsm8k (5-shot, greedy, fixed seed), and accepts iff `cand_em >= baseline_em - accuracy_tol`.
 - `accuracy_limit` = #questions (default **200**; deep uses a larger sample at finalize to de-noise the
@@ -483,10 +531,12 @@ same correctness and engagement gates. If the gain reproduces, it is accepted ev
 Already confirmed evidence is reused only for the same candidate, reference, workload and measurement
 protocol identities. The workload identity covers only what decides the served requests, so a profile
 and an A/B of the same workload share it; bench/protocol details go in the separate protocol digest.
-Missing provenance, a timeout or repeated old A/B artifacts leaves the candidate unconfirmed without
-starting another kernel rewrite. On a timed AgentX trace replay, a confirmation that would not finish
-before the final reserve (every timed replica counted as a leg) is not started, with the same result.
-Final Validate still performs the normal combined-stack check.
+Missing provenance, a timeout or repeated old A/B artifacts leaves the review
+inconclusive. A confirmation that cannot finish before the final reserve is not
+started; each timed replica counts as a leg. These outcomes are recorded with the
+candidate and leave its original measured verdict in effect. Only a review that
+ran and measured a rejection withholds the candidate. No review outcome starts a
+kernel rewrite. Final Validate still checks the combined stack.
 
 The estimate uses the candidate's `affected_gpu_time` coverage when its profile matches the current
 reference and workload: all affected shapes/phases and removed auxiliary kernels, counted once.

@@ -59,7 +59,7 @@ backward). See [[languages/hipkittens]] and arXiv 2511.08083 Table 1.
   dQ/dK/dV against torch SDPA backward; **pinned tiles can silently corrupt** if mis-pinned — gate parity.
 
 ## Integration (how it gets used at serving time)
-- HK is positioned as **an aiter backend** per the landscape. Authoring path: build with HIPCC for
+- An authored HK kernel can be integrated through a supported call site. Authoring path: build with HIPCC for
   gfx950/gfx942 (pinned HK commit), ISA-check that pinned tiles actually feed AGPRs to MFMA (no spurious
   `v_accvgpr_read`), wire via the aiter attention seam / call-site rebind, then **e2e-gate** against
   [[operators/gqa_mqa_attention/backends/aiter]] — and only adopt where HK actually wins (GQA bwd, d=64),
@@ -88,4 +88,4 @@ AMDGCN dump: confirm pinned tiles feed AGPRs to MFMA (no spurious v_accvgpr_read
 ## Sources
 - HipKittens — arXiv 2511.08083 (Hazy Research, Nov 2025): https://arxiv.org/abs/2511.08083 ; HTML (Table 1) https://arxiv.org/html/2511.08083v1
 - HazyResearch blog: https://hazyresearch.stanford.edu/blog/2025-11-09-hk ; code https://github.com/HazyResearch/HipKittens
-- AMD SOTA landscape §2 attention (GQA bwd 1.8×/2.3×; AITER GQA bwd 30%; MHA bwd seq8192 AITER 1169 > HK 1091): [[landscape/amd_sota_2026]]
+- Historical measured comparisons: [HipKittens results](../../../languages/hipkittens/perf_findings.md); use the cited paper for exact configurations.

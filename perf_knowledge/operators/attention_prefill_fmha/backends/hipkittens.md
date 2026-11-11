@@ -48,7 +48,7 @@ arXiv 2511.08083 (forward results).
   reference; verify against torch SDPA / AITER on (B,H,N,D) with a max-abs/rel tolerance.
 
 ## Integration (how it gets used at serving time)
-- HK is now positioned as **an aiter backend** per the landscape. Authoring path: build with HIPCC for
+- An authored HK kernel can be integrated through a supported call site. Authoring path: build with HIPCC for
   gfx950/gfx942 from a pinned HK commit, wire the fwd kernel via the aiter attention dispatch seam (the same
   seam ROCM_AITER_FA dispatches through) or a model-level call-site rebind, then **e2e-gate** against
   [[operators/attention_prefill_fmha/backends/aiter]] (the isolated win must hold at e2e TTFT).
@@ -80,4 +80,4 @@ hipcc --offload-arch=gfx950 ...   # pinned HK commit, FMHA fwd micro-bench
 - HipKittens — arXiv 2511.08083 (Hazy Research, Nov 2025): https://arxiv.org/abs/2511.08083 ; HTML https://arxiv.org/html/2511.08083v1
 - HazyResearch blog: https://hazyresearch.stanford.edu/blog/2025-11-09-hk ; code https://github.com/HazyResearch/HipKittens
 - Beyond Porting: vLLM attention backends on AMD ROCm (AITER FA 2.7–4.4×, Feb 27 2026): https://vllm.ai/blog/2026-02-27-rocm-attention-backend
-- AMD SOTA landscape §2 attention (HK fwd beats AITER 1.0–2.1× etc.): [[landscape/amd_sota_2026]]
+- Historical measured comparisons: [HipKittens results](../../../languages/hipkittens/perf_findings.md); use the cited paper for exact configurations.

@@ -23,7 +23,7 @@ set -euo pipefail
 # literal string "0,1,2,3" turned up in 15 invocations from runs that had been allocated neither
 # GPU 2 nor 3. An example in a usage line gets read as a default; here the value is never
 # defaultable, so it names no ids.
-GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool|group:<ids>|pool:<n>:<ids>> <command...>   (ids = comma list of the GPUs THIS run was allocated)}"
+GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool|group:<ids>|pool:<n>:<ids>|set:<ids>> <command...>   (ids = comma list of the GPUs THIS run was allocated)}"
 shift
 
 # Multi-GPU forms (see "Multi-GPU leases" below): group:<ids> holds exactly those GPUs,
@@ -39,6 +39,12 @@ esac
 if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
     echo "ERROR: nested gpu_lock.sh call inside a GPU lease (GPUs ${GEAK_GPU_LEASE_IDS:-?}); run the command directly" >&2
     exit 2
+fi
+
+# Explicit whole-set lease; comma-only specs retain the historical one-from-pool
+# meaning. Only the lock wrapper sees this token, never HIP/ROCR or a harness.
+if [[ "$GPU_SPEC" == set:* ]]; then
+    exec python3 "$(dirname "${BASH_SOURCE[0]}")/../../e2e_workflow/scripts/gpu_lock_set.py" "${GPU_SPEC#set:}" -- "$@"
 fi
 
 # Source provenance is checked before executing any command and again on exit:
@@ -112,13 +118,28 @@ fi
 # process holds the GPU, i.e. it fails exactly when we need it. Set GEAK_GPU_REQUIRE_IDLE=0 to skip
 # (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
 # another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
+# Resolve once per requested lane using the same eventual HIP mask as the command.
+# Container ordinals and ROCR remapping are not host DRM minor numbers.
+GPU_DEVICE_RESOLVER="$(dirname "${BASH_SOURCE[0]}")/gpu_device_path.py"
+declare -A _GPU_DEVICE_PATHS
+_gpu_resolve_device() {
+    local id="$1" dev
+    [ -n "${_GPU_DEVICE_PATHS[$id]:-}" ] && return 0
+    if ! dev="$(HIP_VISIBLE_DEVICES="$id" timeout 30s python3 "$GPU_DEVICE_RESOLVER")"; then
+        echo "ERROR: cannot resolve selected GPU $id to its exposed DRM device; refusing idle qualification." >&2
+        return 1
+    fi
+    _GPU_DEVICE_PATHS[$id]="$dev"
+}
 _gpu_is_idle() {
     local id="$1" dev busy vram
-    dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
-    [ -r "$dev/gpu_busy_percent" ] || return 0   # cannot tell -> do not block the run
-    busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null || echo 0)"
-    vram="$(( $(cat "$dev/mem_info_vram_used" 2>/dev/null || echo 0) / 1048576 ))"
-    [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
+    dev="${_GPU_DEVICE_PATHS[$id]:-}"
+    [ -n "$dev" ] || return 1
+    busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null)" || return 1
+    vram="$(cat "$dev/mem_info_vram_used" 2>/dev/null)" || return 1
+    [[ "$busy" =~ ^[0-9]+$ && "$vram" =~ ^[0-9]+$ ]] || return 1
+    [ "$busy" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && \
+        [ "$(( vram / 1048576 ))" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
 }
 
 # gpu_busy_percent is a decaying average: our own previous job's tail clears in a few seconds,
@@ -154,6 +175,9 @@ case "$GPU_SPEC" in
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
+                if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ]; then
+                    _gpu_resolve_device "$_g" || exit 1
+                fi
                 if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
                    && ! _gpu_settle_idle "$_g" "${GEAK_GPU_SETTLE_S:-5}"; then
                     flock -u "$_fd"; exec {_fd}>&-   # foreign job on this GPU: try the next lane
@@ -287,7 +311,9 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        # Preserve the default; a caller can bind a different wait within its outer deadline.
+        _single_wait_s="${GEAK_GPU_LOCK_WAIT:-1200}"
+        flock -x -w "$_single_wait_s" 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after ${_single_wait_s}s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
@@ -296,12 +322,15 @@ else
         # was that a single GPU has no alternative to step to, which is true -- but it argues for a
         # loud failure, not for measuring on a contaminated card. Set GEAK_GPU_REQUIRE_IDLE=0 to
         # restore the old behavior for deliberately co-tenanted runs.
+        if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ]; then
+            _gpu_resolve_device "$GPU_ID" || exit 1
+        fi
         if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
            && ! _gpu_settle_idle "$GPU_ID" "${GEAK_GPU_SETTLE_S:-30}"; then
-            echo "ERROR: GPU $GPU_ID still shows foreign work after ${GEAK_GPU_SETTLE_S:-30}s" \
+            echo "ERROR: GPU $GPU_ID did not pass idle qualification after ${GEAK_GPU_SETTLE_S:-30}s" \
                  "(busy>${GEAK_GPU_MAX_BUSY_PCT:-5}% or VRAM>${GEAK_GPU_MAX_VRAM_MB:-1024}MB); refusing to measure on it." >&2
-            echo "       This is a real co-tenant, not our own decaying tail -- that clears in ~3s." >&2
-            echo "       Raise GEAK_GPU_SETTLE_S, or set GEAK_GPU_REQUIRE_IDLE=0 to measure anyway." >&2
+            echo "       Selected sysfs device: ${_GPU_DEVICE_PATHS[$GPU_ID]:-unresolved}; unavailable counters also fail qualification." >&2
+            echo "       Our own decaying tail clears in ~3s. Raise GEAK_GPU_SETTLE_S, or set GEAK_GPU_REQUIRE_IDLE=0 to measure anyway." >&2
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \

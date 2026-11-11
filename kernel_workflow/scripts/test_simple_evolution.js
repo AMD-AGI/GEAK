@@ -1,0 +1,1212 @@
+#!/usr/bin/env node
+// Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// CPU-only integration checks: the real lane, archive, materializer and Git patches.
+// Agent answers are scripted; no model, GPU, network or installed workflow is used.
+// Run after scripts/build_workflows.mjs: node kernel_workflow/scripts/test_simple_evolution.js
+'use strict';
+const assert = require('assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const {spawnSync} = require('child_process');
+const ROOT = path.resolve(__dirname, '../..');
+const lanePath = process.argv.includes('--lane')
+  ? path.resolve(process.argv[process.argv.indexOf('--lane') + 1])
+  : path.join(ROOT, 'kernel_workflow/kernel_lane.js');
+const laneSource = fs.readFileSync(lanePath, 'utf8');
+const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+const original = {'k.py': 'A = 0\nB = 0\n'};
+const source = (a, b, extra = {}) => ({'k.py': `A = ${a}\nB = ${b}\n`, ...extra});
+
+function command(cmd, args, options = {}) {
+  const r = spawnSync(cmd, args, {encoding: 'utf8', timeout: 10000, ...options});
+  assert.equal(r.status, 0, `${cmd} ${args.join(' ')}: ${r.error || r.stderr}`);
+  return r.stdout;
+}
+const git = (dir, ...args) => command('git', ['-C', dir, ...args]);
+function writeSources(dir, files) {
+  fs.mkdirSync(dir, {recursive: true});
+  for (const [name, contents] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), contents);
+}
+function readSources(dir) {
+  return Object.fromEntries(fs.readdirSync(dir).filter(name => /\.(py|bin)$/.test(name)).sort()
+    .map(name => [name, fs.readFileSync(path.join(dir, name), name.endsWith('.bin') ? null : 'utf8')]));
+}
+function initRepo(dir) {
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.name', 'Saptarshi Majumder');
+  git(dir, 'config', 'user.email', '32464366+iraj465@users.noreply.github.com');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-qm', 'CPU fixture baseline');
+}
+
+// Reuse the existing greedy harness without editing it or its golden. Inject only
+// host runtime dependencies; its agent call/probe/phase recording remains unchanged.
+function harness(hostGlobals) {
+  const file = path.join(__dirname, 'test_greedy_parity.js');
+  const src = fs.readFileSync(file, 'utf8');
+  const marker = '\n(async () => {\n  const src = fs.readFileSync(LANE';
+  assert.equal(src.split(marker).length, 2, 'greedy harness entrypoint changed');
+  const prefix = src.split(marker)[0].replace(/^#![^\n]*\n/, '')
+    .replace('    args: argsObj,', '    ...hostGlobals, args: argsObj,')
+    .replace('  const fn = new Function',
+      '  g.agent.processDeadlineActive = !!hostGlobals.setProcessDeadline;\n  const fn = new Function');
+  return new Function('require', '__dirname', 'process', 'hostGlobals',
+    `${prefix}\nreturn {instrument, build, answers, field, perCase, verified, BASE_ARGS, dir};`)
+    (require, __dirname, {argv: []}, hostGlobals);
+}
+
+async function runCase(sc) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-evolution-test-'));
+  const task = path.join(temp, 'task'), evalDir = path.join(temp, 'eval');
+  const canonical = path.join(evalDir, 'workspace');
+  const hostFinalPatch = path.join(evalDir, 'host_final_patch.diff');
+  const finalFiles = sc.finalFiles || sc.expected;
+  const finalSpeed = sc.finalSpeed ?? sc.best;
+  writeSources(task, original);
+  initRepo(task);
+  fs.mkdirSync(evalDir);
+  command('git', ['clone', '-q', task, canonical]);
+  git(canonical, 'config', 'user.name', 'Saptarshi Majumder');
+  git(canonical, 'config', 'user.email', '32464366+iraj465@users.noreply.github.com');
+  const originalCommit = git(canonical, 'rev-parse', 'HEAD').trim();
+  let now = 1000, deadline = Infinity;
+  const cutoff = epoch => { deadline = epoch; };
+  cutoff.secondsLeft = () => deadline - now;
+  const hostCalls = [], events = [], errors = [];
+  const externalRecords = new Map(), externalReads = [];
+  const objective = {kind: 'external_primary', primary_regime: 'cpu_fixture'};
+  const sourceIdentity = files => hash(JSON.stringify(Object.entries(files).sort()));
+  let finalMeasured = false;
+  const registerExternal = (id, workspace, speed, development) => {
+    const files = readSources(workspace), candidate = sourceIdentity(files);
+    const ref = {candidate_id: candidate, evaluation_id: id};
+    externalRecords.set(id, {files, value: {...h.verified(development), objective,
+      external_evaluation: ref, external_measurement_valid: true,
+      primary_regime: objective.primary_regime, primary_speedup: speed,
+      development_geomean_speedup: development, native_reproducible_gain: speed > 1,
+      native_reproducible_regression: speed < 1, timing_basis: 'cpu_fixture',
+      status: speed <= 1 ? 'regression' : 'verified', validation_status: 'accepted'}});
+    if (id === 'integrated' && sc.integration?.readerMissing)
+      delete externalRecords.get(id).value[sc.integration.readerMissing];
+    return ref;
+  };
+  const hostEnv = {...process.env,
+    GIT_AUTHOR_NAME: 'Saptarshi Majumder', GIT_COMMITTER_NAME: 'Saptarshi Majumder',
+    GIT_AUTHOR_EMAIL: '32464366+iraj465@users.noreply.github.com',
+    GIT_COMMITTER_EMAIL: '32464366+iraj465@users.noreply.github.com'};
+  const h = harness({
+    runProcess: async request => {
+      hostCalls.push([request.cmd, ...request.args]);
+      if (sc.external && request.cmd.startsWith('/cpu-fixture/external-')) {
+        try {
+          const field = key => request.args[request.args.indexOf(key) + 1];
+          const workspace = field('--workspace');
+          const completed = value => ({status: 'completed', code: 0, group_cleared: true,
+            strays_killed: false, stdio_held: false, stdout: JSON.stringify(value)});
+          if (request.args.includes('--capture-only')) {
+            assert.equal(request.cmd, '/cpu-fixture/external-evaluate');
+            if (sc.finalFiles) {
+              // Model the last edit already present when native capture takes its snapshot.
+              writeSources(workspace, sc.finalFiles);
+              if (sc.stagedBinary) {
+                git(workspace, 'add', '--', sc.stagedBinary);
+                assert.match(git(workspace, 'diff', '--cached', '--binary'), /GIT binary patch/,
+                  'final capture includes a newly staged binary source');
+              }
+              assert.equal(git(workspace, 'show', 'HEAD:k.py'), sc.expected['k.py'],
+                'final edit is uncommitted and differs from the retained winner HEAD');
+              assert.notEqual(git(workspace, 'diff', '--binary', 'HEAD'), '');
+            }
+            assert.deepEqual(readSources(workspace), finalFiles, 'capture exact final worktree source');
+            const ref = registerExternal('final', workspace, finalSpeed, sc.finalDev ?? sc.bestDev);
+            // A race after source capture can change the following Git diff. The final
+            // reader must reject that patch even if the captured source is later restored.
+            if (sc.patchSourceMismatch) writeSources(workspace, sc.patchSourceMismatch);
+            return completed({schema: 'geak-native-measurement-identity-v1', capture_only: true,
+              ...ref, source_id: ref.candidate_id, source_paths: Object.keys(finalFiles)});
+          }
+          const id = field('--evaluation-id'), record = externalRecords.get(id);
+          assert.ok(record, 'reader/evaluator requires an independently retained measurement');
+          assert.equal(field('--candidate-id'), sourceIdentity(record.files), 'identity binds measured bytes');
+          const patch = request.args.includes('--patch') ? field('--patch') : null;
+          if (patch) assert.deepEqual(readSources(workspace), original, 'trusted patch reader starts at ORIGINAL');
+          const files = patch ? copyAndApply(workspace, patch,
+            path.join(temp, `external-replay-${externalReads.length}`)) : readSources(workspace);
+          if (id === 'final' && patch) {
+            assert.equal(patch, hostFinalPatch, 'final trusted reader always receives the host patch');
+            if (sc.patchSourceMismatch) {
+              assert.equal(finalMeasured, true, 'mismatch is checked after host measurement');
+              assert.deepEqual(files, sc.patchSourceMismatch);
+              assert.notDeepEqual(files, record.files, 'replayed patch differs from captured source');
+              externalReads.push({id, workspace, patch, source_id: sourceIdentity(files), rejected: true});
+              return {status: 'completed', code: 1, group_cleared: true,
+                stdout: '', stderr: 'patch does not reconstruct the captured source'};
+            }
+          }
+          assert.deepEqual(files, record.files, 'trusted reader reconstructs exact measured source bytes');
+          assert.equal(sourceIdentity(files), record.value.external_evaluation.candidate_id);
+          if (request.cmd === '/cpu-fixture/external-evaluate') {
+            assert.equal(id, 'final');
+            assert.equal(events.filter(e => e.label === 'director:validate').length, 0,
+              'final host evaluation precedes Director review');
+            finalMeasured = true;
+            return completed({completed: true});
+          }
+          assert.equal(request.cmd, '/cpu-fixture/external-read');
+          if (id === 'final') assert.equal(finalMeasured, true, 'final read requires completed host evaluation');
+          externalReads.push({id, workspace, patch, source_id: sourceIdentity(files)});
+          return completed({...record.value, patch_sha256: patch ? hash(fs.readFileSync(patch)) : null});
+        } catch (error) { errors.push(error); throw error; }
+      }
+      // run_workflow.mjs also bounds host commands, not just agent processes.
+      const cleanupMs = (request.graceMs ?? 5000) + (request.settleMs ?? 2000);
+      if (sc.bounded && (deadline - now) * 1000 <= cleanupMs) {
+        throw Object.assign(new Error('CPU fixture host cutoff'), {code: 'GEAK_PROCESS_DEADLINE'});
+      }
+      const r = spawnSync(request.cmd, request.args, {
+        encoding: 'utf8', timeout: 10000, input: request.input,
+        cwd: request.cwd, env: {...hostEnv, ...(request.env || {})},
+      });
+      return {status: r.error ? 'failed' : 'completed', code: r.status,
+        stdout: r.stdout || '', stderr: r.stderr || '', group_cleared: true,
+        strays_killed: false, stdio_held: false};
+    },
+    ...(sc.bounded ? {setProcessDeadline: cutoff} : {}),
+  });
+  const fallback = h.answers(sc);
+  const copyAndApply = (base, patch, destination) => {
+    fs.mkdirSync(destination, {recursive: true});
+    for (const [name, contents] of Object.entries(readSources(base))) {
+      fs.writeFileSync(path.join(destination, name), contents);
+    }
+    initRepo(destination);
+    git(destination, 'apply', '--', patch);
+    return readSources(destination);
+  };
+  const bashBlock = prompt => {
+    const block = prompt.match(/```bash\n([\s\S]*?)\n```/);
+    assert.ok(block, 'actual agent prompt must contain setup/commit commands');
+    command('bash', ['-e', '-c', block[1]]);
+  };
+  const answer = (label, prompt) => {
+    try {
+      if (sc.bounded && deadline - now <= 7) {
+        throw Object.assign(new Error('CPU fixture process cutoff'), {code: 'GEAK_PROCESS_DEADLINE'});
+      }
+      events.push({label, prompt}); // Calls admitted by the modeled runtime cutoff.
+      if (label === 'director:setup') return {...fallback(label, prompt),
+        eval_dir: evalDir, workspace: canonical, source_files: ['k.py']};
+      if (label === 'tech_lead:analyze') return {...fallback(label, prompt),
+        modifiable_files: sc.modifiableFiles || ['k.py', 'inherited.py']};
+      if (label === 'benchmark_engineer') return {...fallback(label, prompt),
+        commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
+        ...(sc.external ? {external_evaluation: registerExternal('original', canonical, 1, 1)} : {})};
+      if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
+        const round = label.split(' ')[1];
+        if (sc.expireAfterPlan === round) now = deadline;
+        assert.deepEqual(h.field(prompt, 'EVALUATION_SERVICE').assigned_gpu_ids, String(sc.args?.gpu_ids ?? h.BASE_ARGS.gpu_ids ?? '0').split(','));
+        if (sc.inspectPlan) sc.inspectPlan({label, prompt, h});
+        return fallback(label, prompt);
+      }
+      if (sc.mutateRetainedAfterCapture && label === 'tech_lead:memory r2') {
+        // A path the loop wrote earlier changes after the retained source was captured.
+        const replacement = path.join(temp, 'changed-retained-promotion');
+        writeSources(replacement, original); initRepo(replacement);
+        writeSources(replacement, source(9, 9));
+        fs.writeFileSync(path.join(evalDir, 'evolution/promotion-1.diff'), git(replacement, 'diff', '--binary'));
+      }
+      if (label.startsWith('tech_lead:memory ') && sc.memory) return sc.memory({label, prompt, h});
+      if (label.startsWith('eng ') || label.startsWith('deep ')) {
+        const id = label.split(' ')[1].split(':')[0], spec = sc.candidates[id];
+        assert.ok(spec, `unexpected engineer ${id}`);
+        const base = h.field(prompt, 'CANONICAL');
+        assert.deepEqual(readSources(base), original, 'engineer base stays ORIGINAL');
+        assert.deepEqual(h.field(prompt, 'baseline_per_case'), h.perCase(1));
+        // Deliberately execute no bootstrap instructions: the host must already
+        // have materialized the selected source before this model call starts.
+        const workspace = h.field(prompt, 'KERNEL_PATH');
+        assert.deepEqual(readSources(workspace), spec.inherited || original, `${id} inherited source`);
+        // Before any archive source exists, engineers get the greedy rules and no evolution context;
+        // the save command still carries the fixed cumulative-patch anchor.
+        const evolution = h.field(prompt, 'EVOLUTION');
+        if (evolution) {
+          assert.match(prompt, /retain useful slower approaches/);
+          assert.equal(Object.hasOwn(evolution, 'selected_evidence'),
+            sc.args?.evolution_evidence_handoff === true,
+            'explicit handoff preserves a bounded view even on overflow');
+          if (evolution.selected_evidence?.context_omitted) {
+            assert.ok(evolution.selected_evidence.full_context_ref.path.endsWith('/evolution/archive.json'));
+            assert.ok(Buffer.byteLength(JSON.stringify(evolution.selected_evidence)) <= 16384);
+          }
+        } else {
+          if (sc.args?.evolution_preserve_founder_attempts === true) {
+            assert.match(prompt, /retain useful slower approaches/);
+            assert.match(prompt, /Return the best correct implementation of the requested realization even when it is slower/);
+            assert.match(prompt, /does not qualify or promote the source/);
+            assert.match(prompt, /Preserve failed or unfinished attempts separately under OUTPUT_DIR/);
+          } else {
+            assert.match(prompt, /never go below baseline/);
+            assert.doesNotMatch(prompt, /retain useful slower approaches/);
+          }
+          assert.doesNotMatch(prompt, /roles\/evolution\.md/);
+          assert.equal(h.field(prompt, 'EVOLUTION_ARCHIVE'), undefined);
+        }
+        const anchor = evolution ? evolution.workspace_base_commit
+          : prompt.match(/save_candidate_patch\.sh <KERNEL_PATH> \S+ ([0-9a-f]{40,64}) /)[1];
+        if (evolution) assert.equal(prompt.match(/save_candidate_patch\.sh <KERNEL_PATH> \S+ ([0-9a-f]{40,64}) /)[1], anchor);
+        assert.match(anchor, /^[0-9a-f]{40,64}$/, 'host supplies the fixed cumulative-patch anchor');
+        assert.equal(git(workspace, 'show', `${anchor}:k.py`), original['k.py'], 'patch anchor stays ORIGINAL');
+        assert.equal(git(workspace, 'show', 'HEAD:k.py'), (spec.inherited || original)['k.py'],
+          'selected parent is the committed starting HEAD');
+        if (spec.inspect) spec.inspect({h, prompt, canonical,
+          replay: patch => copyAndApply(task, patch, path.join(temp, `donor-replay-${id}`))});
+        if (spec.commitDuringEngineering) {
+          writeSources(workspace, spec.commitDuringEngineering);
+          git(workspace, 'add', '-A');
+          command('git', ['-C', workspace, 'commit', '-qm', 'CPU fixture intermediate engineering commit'],
+            {env: hostEnv});
+          assert.notEqual(git(workspace, 'rev-parse', 'HEAD').trim(), anchor);
+        }
+        writeSources(workspace, spec.files);
+        if (!spec.noPatch || spec.separateAttempt) {
+          // The ordinary engineer's save instruction includes new editable sources.
+          git(workspace, 'add', '-N', '--', ...Object.keys(spec.files));
+          fs.writeFileSync(path.join(h.field(prompt, 'OUTPUT_DIR'),
+            spec.separateAttempt ? 'unfinished_attempt.diff' : 'best_patch.diff'),
+            git(workspace, 'diff', '--binary', anchor, '--', '.'));
+        }
+        if (sc.expireAfterEngineer === id) now = deadline;
+        return spec.engineer || {status: 'ok', measurement_valid: true, speedup_geomean: spec.speed,
+          ...(sc.external ? {external_evaluation: registerExternal(`eng-${id}`, workspace,
+            spec.speed, spec.development)} : {})};
+      }
+      if (label.startsWith('verify ')) {
+        const id = label.split(' ')[1];
+        const spec = sc.candidates[id] || (/^r\d+_integrated$/.test(id) ? sc.integration : null);
+        assert.ok(spec, `unexpected verifier ${id}`);
+        assert.deepEqual(readSources(h.field(prompt, 'CANONICAL')), original, 'verifier uses ORIGINAL');
+        assert.deepEqual(h.field(prompt, 'BASELINE_PER_CASE'), h.perCase(1));
+        if (spec.noPatch) return {status: 'apply_failed', notes: 'patch absent'};
+        if (!sc.external) {
+          assert.ok(!h.field(prompt, 'PATCH').includes('/evolution/patches/'),
+            'verification never receives the archive custody file');
+          if (!label.endsWith('(delivery)')) assert.equal(path.basename(h.field(prompt, 'PATCH')),
+            'verification_input.diff', 'ordinary verification receives a disposable input');
+        }
+        if (spec.deliveryTimeout && label.endsWith('(delivery)')) {
+          now = deadline; // The declared delivery reserve ends during this verification.
+          throw Object.assign(new Error('CPU fixture delivery cutoff'), {code: 'GEAK_PROCESS_DEADLINE'});
+        }
+        assert.deepEqual(copyAndApply(h.field(prompt, 'CANONICAL'), h.field(prompt, 'PATCH'),
+          h.field(prompt, 'VERIFY_DIR')), spec.files, `${id} cumulative patch reconstructs exact source`);
+        if (spec.mutateAfterVerification) {
+          const saved = JSON.parse(fs.readFileSync(path.join(evalDir, 'evolution/archive.json'), 'utf8'));
+          const custody = saved.entries.find(row => row.id === id).patch_ref;
+          const retainedBytes = fs.readFileSync(custody.path);
+          const replacement = path.join(temp, `replaced-patch-${id}`);
+          writeSources(replacement, original);
+          initRepo(replacement);
+          writeSources(replacement, spec.mutateAfterVerification);
+          fs.writeFileSync(h.field(prompt, 'PATCH'), git(replacement, 'diff', '--binary'));
+          assert.deepEqual(fs.readFileSync(custody.path), retainedBytes,
+            'verifier mutation leaves the archive bytes intact');
+          assert.equal(hash(retainedBytes), custody.sha256, 'original archive digest remains true');
+        }
+        return spec.verifier || {...h.verified(spec.speed), status: spec.speed <= 1 ? 'regression' : 'verified',
+          ...(sc.external ? {external_evaluation: registerExternal(`verify-${id}`,
+            h.field(prompt, 'VERIFY_DIR'), spec.speed, spec.development)} : {})};
+      }
+      if (label.startsWith('commit ')) {
+        const round = label.split(' ')[1];
+        if (sc.badCommit === round) {
+          writeSources(canonical, source(999, 999, {'unfinished.py': 'WRONG = True\n'}));
+          git(canonical, 'add', '-A');
+          git(canonical, 'commit', '-qm', 'Deliberately wrong CPU fixture commit');
+          return {committed: true}; // Real tree check must reject the false receipt.
+        }
+        bashBlock(prompt);
+        return {committed: true};
+      }
+      if (label.startsWith('integrate ') && sc.integration) {
+        if (sc.inspectIntegration) sc.inspectIntegration({prompt, h});
+        assert.ok(h.field(prompt, 'PATCHES').every(p => p.reported_context.authority === 'author_reported_interpretation_only'));
+        const base = h.field(prompt, 'CANONICAL');
+        assert.deepEqual(readSources(base), original, 'integrator uses the frozen base');
+        const workspace = path.join(h.field(prompt, 'INTEGRATE_DIR'), 'workspace');
+        writeSources(workspace, original);
+        initRepo(workspace);
+        writeSources(workspace, sc.integration.files);
+        git(workspace, 'add', '-N', '--', ...Object.keys(sc.integration.files));
+        const patch = path.join(h.field(prompt, 'INTEGRATE_DIR'), 'best.diff');
+        fs.writeFileSync(patch, git(workspace, 'diff', '--binary'));
+        return {attempted: true, conclusion: 'improved', best: {
+          evidence_context: {tested_applicability: 'integrated fixture source', unresolved: ['integration rival']},
+           geomean: sc.integration.speed, arithmetic: sc.integration.speed,
+          ...(sc.integration.measurement_valid === undefined ? {} : {measurement_valid: sc.integration.measurement_valid}),
+          ...(sc.external ? {external_evaluation: registerExternal('integrated', workspace,
+            sc.integration.speed, sc.integration.speed)} : {}),
+          per_case: h.perCase(sc.integration.speed), patch_file: patch}};
+      }
+      if (label.startsWith('storage:reclaim')) {
+        const keep = Number(label.match(/r(\d+)$/)[1]);
+        if (sc.nativeReclaim) {
+          command('bash', [path.join(ROOT, 'kernel_workflow/scripts/reclaim_eval_artifacts.sh'),
+            '--eval-dir', evalDir, '--keep-round', String(keep)]);
+          return {ok: true, note: 'ordinary source-preserving cleanup'};
+        }
+        for (let round = 1; round < keep; round++) {
+          fs.rmSync(path.join(evalDir, `round_${round}`), {recursive: true, force: true});
+        }
+        return {ok: true, note: 'old fixture rounds removed'};
+      }
+      if (label === 'tech_lead:report') {
+        if (sc.external) assert.ok(fs.existsSync(hostFinalPatch), 'host saves final patch before Report');
+        if (sc.patchSourceMismatch) writeSources(canonical, finalFiles);
+        if (sc.report === 'null') return null;
+        const patch = path.join(evalDir, 'final_patch.diff');
+        if (sc.report !== 'missing') fs.writeFileSync(patch,
+          sc.report === 'wrong' ? 'not a patch\n' : git(canonical, 'diff', '--binary', originalCommit, 'HEAD'));
+        if (sc.report === 'wrong') fs.writeFileSync(hostFinalPatch, 'Report overwrote the host patch\n');
+        const stale = sc.report === 'stale' ? JSON.parse(fs.readFileSync(
+          path.join(evalDir, 'evolution/archive.json'), 'utf8')).entries[0].patch_ref.path : null;
+        return {final_speedup_geomean: h.field(prompt, 'CUMULATIVE_SPEEDUP'),
+          ...(sc.workload ? {final_speedup_weighted: h.field(prompt, 'CUMULATIVE_SPEEDUP')} : {}),
+          ...(sc.report === 'missing' ? {} : {final_patch: stale || patch}),
+          report_path: path.join(evalDir, 'report.md'),
+          rounds: h.field(prompt, 'HISTORY').rounds.length};
+      }
+      if (label === 'director:validate') {
+        if (sc.external) assert.equal(h.field(prompt, 'FINAL_PATCH'), hostFinalPatch,
+          'Director reviews the host path independently of the Report return');
+        assert.deepEqual(copyAndApply(task, h.field(prompt, 'FINAL_PATCH'), path.join(temp, 'final-replay')),
+          sc.patchSourceMismatch || finalFiles, 'Director receives the patch frozen before Report');
+        if (sc.director === 'tamper') fs.writeFileSync(hostFinalPatch, 'Director overwrote the host patch\n');
+        if (sc.director === 'null') return null;
+        if (sc.director === 'flagged') return {validation_status: 'flagged',
+          director_verified_speedup_geomean: finalSpeed, timing_basis: 'cpu_fixture'};
+        if (sc.workload && h.field(prompt, 'TECH_LEAD_REPORTED_WEIGHTED') === undefined) {
+          return {director_verified_speedup_geomean: h.field(prompt, 'TECH_LEAD_REPORTED_GEOMEAN'),
+            validation_status: 'flagged', timing_basis: 'cpu_fixture'}; // No primary claim to arbitrate.
+        }
+        return {director_verified_speedup_geomean: h.field(prompt, 'TECH_LEAD_REPORTED_GEOMEAN'),
+          ...(sc.workload ? {director_verified_speedup_weighted: h.field(prompt, 'TECH_LEAD_REPORTED_WEIGHTED')} : {}),
+          ...(sc.director === 'invalid_measurement' ? {correctness: 'pass', measurement_valid: false} : {}),
+          validation_status: 'accepted', timing_basis: 'cpu_fixture'};
+      }
+      return fallback(label, prompt);
+    } catch (error) {
+      if (error.code !== 'GEAK_PROCESS_DEADLINE') errors.push(error);
+      throw error;
+    }
+  };
+  let observed, passed = false;
+  try {
+    const body = h.instrument(laneSource);
+    const args = {...h.BASE_ARGS, optimizer: 'evo', evolution_start: 'search_start', kernel_path: task,
+      editable_source_paths: [...new Set([...Object.keys(original), ...Object.keys(finalFiles)])],
+      workflow_dir: path.join(ROOT, 'kernel_workflow'), ...sc.args,
+      ...(sc.external ? {objective, external_measurement_command: ['/cpu-fixture/external-evaluate'],
+        external_result_command: ['/cpu-fixture/external-read']} : {}),
+      ...(sc.bounded ? {deadline_epoch: 10000, search_reserve_s: 200,
+        final_validation_reserve_s: 100, final_cleanup_reserve_s: 0} : {})};
+    const {run, rec} = h.build(body, args, answer);
+    observed = rec;
+    let result;
+    try { result = await run(); } catch (error) { throw errors[0] || error; }
+    if (errors.length) throw errors[0];
+    const archive = JSON.parse(fs.readFileSync(path.join(evalDir, 'evolution/archive.json'), 'utf8'));
+    if (sc.external) for (const row of archive.entries) {
+      for (const report of [row.engineer, row.verifier]) {
+        if (report?.external_measurement_valid !== true) continue;
+        assert.equal(report.observed_evidence.authority, 'host_result_reader');
+        assert.deepEqual(report.observed_evidence.per_case, report.per_case);
+        assert.deepEqual(report.observed_evidence.external_evaluation, report.external_evaluation);
+        assert.equal(report.observed_evidence.timing_basis, 'cpu_fixture');
+        assert.deepEqual(report.observed_evidence.objective, objective);
+      }
+    }
+    assert.deepEqual(readSources(task), original, 'task source unchanged');
+    assert.deepEqual(readSources(archive.base), original, 'archive base unchanged');
+    assert.deepEqual(readSources(canonical), finalFiles, 'canonical holds the final captured source');
+    assert.equal(result.final_speedup, sc.patchSourceMismatch || sc.director ? null : finalSpeed,
+      'final score is bound to the captured source relative to ORIGINAL');
+    assert.equal(rec.after_loop.cumulative, sc.best);
+    assert.deepEqual(rec.after_loop.bestPerCase, h.perCase(sc.bestDev || sc.best));
+    assert.equal(events.filter(e => e.label === 'tech_lead:report').length, 1, 'one report owner');
+    assert.equal(events.filter(e => e.label === 'director:validate').length, 1, 'one validation owner');
+    assert.equal(archive.best_id, sc.bestId);
+    assert.equal(rec.after_loop.finalWinner.id, archive.best_id, 'result and archive select the same source');
+    const bestRow = archive.entries.find(row => row.id === archive.best_id);
+    assert.deepEqual(copyAndApply(task, bestRow.patch_ref.path, path.join(temp, 'selected-source-replay')),
+      sc.expected, 'selected archive identity reconstructs the final best independently of Report');
+    for (const row of archive.entries) if (row.patch_ref) {
+      assert.equal(hash(fs.readFileSync(row.patch_ref.path)), row.patch_ref.sha256, 'retained patch identity');
+      assert.equal(row.patch_ref.base_commit, originalCommit, 'all patches share immutable commit');
+    }
+    assert.ok(archive.entries.every(row => !row.evolution_context ||
+      !Object.keys(row.evolution_context).some(key => key.startsWith('selected_evidence'))),
+      'prompt evidence never becomes recursive archive context');
+    assert.ok(events.filter(e => e.label.startsWith('tech_lead:plan '))
+      .every(e => !e.prompt.includes('"selected_evidence"')), 'planner inputs remain unchanged');
+    sc.check({archive, result, rec, events, hostCalls, h, temp, externalReads, finalMeasured, scenario: sc});
+    passed = true;
+    console.log(`  ok: ${sc.name}`);
+  } finally {
+    if (passed) fs.rmSync(temp, {recursive: true, force: true});
+    else console.error(JSON.stringify({fixture: temp, logs: observed && observed.logs}, null, 2));
+  }
+}
+
+const direction = (id, extra = {}) => ({id, title: id, specialty: 'memory', prompt: `Develop ${id}`, ...extra});
+const plan = (...directions) => ({stop: false, directions});
+const slow = source(1, 0, {'inherited.py': 'P = 1\n'}), fast = source(0, 2);
+const child = source(1, 1, {'inherited.py': 'P = 1\n'});
+const approachMemoryCase =
+  {name: 'approach evidence reaches memory, forced replanning and the next planner',
+    args: {budget: 3, deadline_epoch: 100000}, clock: () => 1000,
+    best: 1.8, bestId: 'r2_d0', expected: child,
+    plans: {r1: {stop: true, directions: []},
+      'r1#1': plan(direction('a', {approach: 'approach-a'}), direction('b', {approach: 'approach-b'})),
+      r2: plan(direction('continue-a', {parent_id: 'r1_d0', donor_ids: ['r1_d1'], approach: 'approach-a',
+        prompt: 'Resolve question-a using the retained source and report.'}))},
+    candidates: {
+      r1_d0: {files: slow, speed: 0.8, engineer: {status: 'ok', measurement_valid: true,
+        speedup_geomean: 0.8, strategies_tried: ['realized-a', 'unresolved-a']}},
+      r1_d1: {files: fast, speed: 1.4},
+      r2_d0: {files: child, inherited: slow, speed: 1.8, inspect: ({h, prompt}) => {
+        assert.match(h.field(prompt, 'DIRECTION').prompt, /question-a/,
+          'the planner carries the continuation question in the existing engineer assignment');
+      }},
+    },
+    memory: ({label, prompt, h}) => {
+      const saved = JSON.parse(fs.readFileSync(h.field(prompt, 'EVOLUTION_ARCHIVE'), 'utf8'));
+      const attempted = h.field(prompt, 'EVOLUTION_ROUND');
+      const round = Number(label.match(/r(\d+)$/)[1]);
+      assert.deepEqual(attempted.map(row => row.id), round === 1 ? ['r1_d0', 'r1_d1'] : ['r2_d0']);
+      for (const item of attempted) {
+        const retained = saved.entries.find(row => row.id === item.id);
+        for (const key of ['parent_id', 'donor_ids', 'approach', 'patch_ref', 'status', 'verified',
+          'retention_error']) assert.deepEqual(item[key], retained[key]);
+        assert.equal(item.last_record_error, retained.last_record_error || null);
+        assert.equal(item.report_path, path.join(h.field(prompt, 'EVAL_DIR'),
+          `round_${round}`, `engineer_${item.id.split('_d')[1]}`, 'report.md'));
+      }
+      if (round !== 1) return {insights: [], ledger: []};
+      assert.deepEqual(saved.entries[0].engineer.strategies_tried, ['realized-a', 'unresolved-a']);
+      return {insights: ['question-a remains open'], ledger: [{approach: 'approach-a',
+        direction: 'r1_d0', patch_ref: attempted[0].patch_ref, report_path: attempted[0].report_path,
+        next_question: 'question-a', verdict: 'partial'}]};
+    },
+    inspectPlan: ({label, prompt, h}) => {
+      if (label !== 'tech_lead:plan r2') return;
+      const ledger = h.field(prompt, 'HISTORY').ledger;
+      assert.equal(ledger.length, 1, 'existing memory ledger reaches the next planning call');
+      assert.equal(ledger[0].approach, 'approach-a');
+      assert.equal(ledger[0].next_question, 'question-a');
+      assert.equal(hash(fs.readFileSync(ledger[0].patch_ref.path)), ledger[0].patch_ref.sha256);
+      assert.deepEqual(h.field(prompt, 'HISTORY').insights, ['question-a remains open']);
+    },
+    check: ({events, archive}) => {
+      assert.ok(events.some(event => event.label === 'tech_lead:replan r1#1'));
+      // Before any source is retained the first plan (and its forced replan) uses greedy's inputs;
+      // every later planning and memory call receives the same EVO policy.
+      const policy = `Read ${path.join(ROOT, 'kernel_workflow/roles/evolution.md')} for the retained-approach policy.`;
+      for (const event of events.filter(event => /^tech_lead:(?:plan|replan|memory) /.test(event.label))) {
+        const emptyArchive = /^tech_lead:(?:plan r1|replan r1#)/.test(event.label);
+        assert.equal(event.prompt.includes(policy), !emptyArchive,
+          `${event.label} ${emptyArchive ? 'plans from greedy inputs' : 'receives the same EVO policy'}`);
+      }
+      assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+    }};
+const cases = [
+  {name: 'slower-parent, donor identity, failures, cumulative new-file patch and retained source',
+    args: {budget: 6, max_no_improve: 6}, best: 1.8, bestId: 'r4_d0', expected: child,
+    plans: {r1: plan(direction('slow'), direction('fast')),
+      r2: plan(direction('missing')), r3: plan(direction('unverified')),
+      r4: plan(direction('child', {parent_id: 'r1_d0', donor_ids: ['r1_d1']})),
+      r5: plan(direction('incorrect'))},
+    candidates: {
+      r1_d0: {files: slow, speed: 0.8, engineer: {status: 'ok', measurement_valid: true,
+        speedup_geomean: 0.8, notes: 'Failed premise; corrected next question. é😀\nRaw: /cpu-fixture/evidence.json'}},
+      r1_d1: {files: fast, speed: 1.4},
+      r2_d0: {files: source(5, 5), inherited: fast, noPatch: true, engineer: {status: 'failed'}},
+      r3_d0: {files: source(6, 6), inherited: fast, speed: 50,
+        verifier: {status: 'invalid_measurement', correctness: 'pass', verified_geomean: 50}},
+      r4_d0: {files: child, inherited: slow, speed: 1.8, inspect: ({h, prompt, canonical, replay}) => {
+        assert.deepEqual(readSources(canonical), fast, 'child develops a nonbest, nonlatest parent');
+        const context = h.field(prompt, 'EVOLUTION');
+        assert.equal(context.requested_parent_id, 'r1_d0');
+        assert.equal(context.donors[0].id, 'r1_d1');
+        const saved = JSON.parse(fs.readFileSync(h.field(prompt, 'EVOLUTION_ARCHIVE'), 'utf8'));
+        if (context.selected_evidence && !context.selected_evidence.context_omitted) {
+          const {parent, donors} = context.selected_evidence;
+          assert.equal(parent.id, 'r1_d0');
+          assert.deepEqual(donors.map(row => row.id), ['r1_d1']);
+          for (const evidence of [parent, ...donors]) {
+            const row = saved.entries.find(entry => entry.id === evidence.id);
+            assert.deepEqual(Object.keys(evidence).sort(), ['id', 'patch_ref', 'status', 'verified',
+              'retention_error', 'last_record_error', 'engineer', 'verifier', 'reported_context',
+               'reported_context_ref', 'peer_checkpoint'].sort());
+            for (const key of Object.keys(evidence).filter(k => k !== 'reported_context_ref')) {
+              const expected = ['engineer', 'verifier'].includes(key) && row[key]
+                ? Object.fromEntries(Object.entries(row[key]).filter(([name]) =>
+                  !['per_case', 'reported_per_case', 'observed_evidence'].includes(name))) : row[key] ?? null;
+              assert.deepEqual(evidence[key], expected);
+            }
+             assert.equal(evidence.reported_context_ref.entry_id, row.id);
+          }
+          assert.match(parent.engineer.notes, /\nRaw: \/cpu-fixture\/evidence\.json$/);
+        }
+        assert.deepEqual(context.donors[0].patch_ref, saved.entries.find(row => row.id === 'r1_d1').patch_ref,
+          'donor ID is joined to that retained source');
+        assert.deepEqual(replay(context.donors[0].patch_ref.path), fast, 'donor bytes match the fast lineage');
+      }},
+      r5_d0: {files: source(7, 7, {'inherited.py': 'P = 1\n'}), inherited: child, speed: 90,
+        verifier: {status: 'correctness_failed', correctness: 'fail', verified_geomean: 90}},
+    },
+    check: ({archive, result, events, h}) => {
+      const rows = Object.fromEntries(archive.entries.map(row => [row.id, row]));
+      assert.equal(archive.entries.length, 6, 'one retained record per attempt');
+      // A trusted below-floor result is retained with its exact source and engineer evidence but is
+      // not independently qualified: it stays selectable as a parent and is never advertised as verified.
+      assert.equal(rows.r1_d0.status, 'unverified');
+      assert.equal(rows.r1_d0.verified, false);
+      assert.equal(rows.r1_d0.speedup, null, 'engineer evidence alone does not qualify a source');
+      assert.ok(rows.r1_d0.patch_ref && rows.r1_d0.engineer, 'slower source and engineer evidence are retained');
+      assert.equal(rows.r2_d0.status, 'unverified');
+      assert.ok(rows.r2_d0.retention_error);
+      assert.equal(rows.r3_d0.status, 'unverified');
+      assert.equal(rows.r3_d0.speedup, null, 'engineer claim cannot validate a source');
+      assert.equal(rows.r5_d0.status, 'incorrect');
+      assert.equal(rows.r4_d0.parent_id, 'r1_d0');
+      assert.deepEqual(rows.r4_d0.donor_ids, ['r1_d1']);
+      assert.equal(result.stopped_by, 'budget');
+      assert.ok(!events.some(e => e.label === 'verify r1_d0'), 'trusted below-floor source is not sent to Verify');
+      const lastPlan = events.find(e => e.label === 'tech_lead:plan r4');
+      assert.ok(h.field(lastPlan.prompt, 'EVOLUTION_ENTRIES').some(row => row.id === 'r1_d0'));
+      const missing = h.field(events.find(e => e.label === 'tech_lead:memory r2').prompt, 'EVOLUTION_ROUND')[0];
+      assert.equal(missing.patch_ref, null, 'memory must not imply that a missing patch was retained');
+      assert.equal(missing.verified, false);
+      assert.ok(missing.retention_error);
+      const unverified = h.field(events.find(e => e.label === 'tech_lead:memory r3').prompt, 'EVOLUTION_ROUND')[0];
+      assert.ok(unverified.patch_ref, 'retained source remains available despite invalid measurement');
+      assert.equal(unverified.verified, false, 'retention is not verification');
+    }},
+  {name: 'false successful commit rolls back, then host delivery recovers the verified source',
+    args: {budget: 2}, best: 1.9, bestId: 'r2_d0', expected: source(2, 2), badCommit: 'r2',
+    plans: {r1: plan(direction('best')), r2: plan(direction('bad-commit'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4},
+      r2_d0: {files: source(2, 2), inherited: fast, speed: 1.9}},
+    check: ({archive, rec}) => {
+      assert.equal(archive.entries[1].verified, true, 'failed promotion keeps verified candidate');
+      assert.equal(rec.after_loop.roundsCommitted, 2);
+      assert.equal(rec.after_loop.finalWinner.id, 'r2_d0');
+      assert.equal(rec.after_loop.history.rounds[1].status, 'commit_failed');
+      assert.equal(rec.after_loop.history.rounds[1].cumulative, 1.4, 'false commit retained the prior score');
+      assert.equal(rec.after_loop.history.delivery.delivered, 'round_2_engineer_0');
+    }},
+  {name: 'deadline after committed round exports best without another engineer',
+    args: {budget: 5, deadline_epoch: 10000}, best: 1.4, bestId: 'r1_d0', expected: fast,
+    clock: tag => tag === 'pre-r1' ? 1000 : 10001,
+    plans: {r1: plan(direction('best')), r2: plan(direction('late'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4}},
+    check: ({result, events}) => {
+      assert.equal(result.stopped_by, 'deadline');
+      assert.equal(events.filter(e => e.label.startsWith('eng ')).length, 1);
+      assert.ok(!events.some(e => e.label === 'tech_lead:plan r2'));
+    }},
+  {name: 'process cutoff after planning admits no further engineer and exports best',
+    bounded: true, expireAfterPlan: 'r2', args: {budget: 5},
+    best: 1.4, bestId: 'r1_d0', expected: fast,
+    plans: {r1: plan(direction('best')), r2: plan(direction('late'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4}},
+    check: ({result, events}) => {
+      assert.equal(result.stopped_by, 'deadline');
+      assert.equal(events.filter(e => e.label.startsWith('eng ')).length, 1);
+      assert.equal(events.filter(e => e.label.startsWith('verify ')).length, 1);
+    }},
+  {name: 'cutoff leaves a saved unverified attempt distinct from the validated best',
+    bounded: true, expireAfterEngineer: 'r2_d0', args: {budget: 5},
+    best: 1.4, bestId: 'r1_d0', expected: fast,
+    plans: {r1: plan(direction('best')), r2: plan(direction('unfinished'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4},
+      r2_d0: {files: source(4, 4), inherited: fast, speed: 50}},
+    check: ({archive, result, events}) => {
+      const unfinished = archive.entries.find(row => row.id === 'r2_d0');
+      assert.ok(unfinished, 'saved attempt must remain in the archive after the host cutoff');
+      assert.equal(unfinished.status, 'unverified');
+      assert.equal(unfinished.verified, false);
+      assert.equal(unfinished.speedup, null);
+      assert.ok(unfinished.patch_ref, 'unfinished source retained for later investigation');
+      assert.ok(!events.some(e => e.label === 'verify r2_d0'));
+      assert.equal(result.stopped_by, 'deadline');
+    }},
+  {name: 'integrated candidate retains contributor IDs and remains a selectable source',
+    args: {budget: 3}, best: 1.8, bestId: 'r1_integrated', expected: source(1, 2),
+    plans: {r1: plan(direction('a'), direction('b')),
+      r2: plan(direction('continued', {parent_id: 'r1_integrated'}))},
+    integration: {files: source(1, 2), speed: 1.8},
+    candidates: {r1_d0: {files: source(1, 0), speed: 1.2},
+      r1_d1: {files: fast, speed: 1.4},
+      r2_d0: {files: source(1, 3), inherited: source(1, 2), speed: 1.6}},
+    check: ({archive}) => {
+      const integrated = archive.entries.find(row => row.id === 'r1_integrated');
+      assert.equal(integrated.verified, true);
+      assert.deepEqual(integrated.reported_context.contributors.map(c => c.source_binding.candidate_id), ['r1_d0', 'r1_d1']);
+      assert.match(integrated.reported_context.contributor_scope, /do not verify/);
+      assert.deepEqual(integrated.donor_ids, ['r1_d0', 'r1_d1']);
+      assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_integrated');
+    }},
+  {name: 'source changed after measurement cannot validate or promote the wrong patch',
+    args: {budget: 2}, best: 1.4, bestId: 'r1_d0', expected: fast,
+    plans: {r1: plan(direction('best')), r2: plan(direction('changed-source'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4},
+      r2_d0: {files: source(2, 2), inherited: fast, speed: 1.9,
+        mutateAfterVerification: source(3, 3)}},
+    check: ({archive, rec}) => {
+      const changed = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(changed.verified, false, 'measurement cannot be joined to a replaced source');
+      assert.equal(changed.speedup, null);
+      assert.equal(changed.verifier.status, 'source_changed', 'changed verification input remains explicit');
+      assert.equal(rec.after_loop.roundsCommitted, 1);
+    }},
+  {name: 'parallel deep proposals charge their real cost without exceeding the remaining budget',
+    args: {budget: 3, deep_cost: 2}, best: 1.4, bestId: 'r1_d0', expected: fast,
+    plans: {r1: plan(...['deep-a', 'deep-b', 'deep-c'].map(id =>
+      direction(id, {specialty: 'deep_explore'})))},
+    candidates: {r1_d0: {files: fast, speed: 1.4}},
+    check: ({result, events, h}) => {
+      assert.equal(events.filter(e => e.label.startsWith('deep ')).length, 1,
+        'only one cost-two direction fits the budget of three');
+      assert.equal(result.budget_used, 2);
+      assert.ok(result.budget_used <= result.budget_total);
+      // With an empty archive the first plan uses greedy's inputs; deep cost is charged, not advertised.
+      assert.equal(h.field(events.find(e => e.label === 'tech_lead:plan r1').prompt, 'DEEP_COST'), undefined);
+    }},
+  {name: 'empty analyzer file list and intermediate commits do not break valid cumulative promotion',
+    args: {budget: 2}, modifiableFiles: [], best: 1.8, bestId: 'r2_d0', expected: source(3, 2),
+    plans: {r1: plan(direction('best')), r2: plan(direction('committing-engineer'))},
+    candidates: {r1_d0: {files: fast, speed: 1.4},
+      r2_d0: {files: source(3, 2), inherited: fast, speed: 1.8,
+        commitDuringEngineering: source(2, 2)}},
+    check: ({archive, rec}) => {
+      assert.equal(rec.after_loop.roundsCommitted, 2, 'analyzer output cannot veto measured promotion');
+      assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+    }},
+  {name: 'external primary accepts exact cumulative child source from a retained non-ORIGINAL parent',
+    external: true, args: {budget: 2}, best: 1.8, bestDev: 1.2, bestId: 'r2_d0', expected: child,
+    plans: {r1: plan(direction('retained-parent')),
+      r2: plan(direction('child', {parent_id: 'r1_d0'}))},
+    candidates: {r1_d0: {files: slow, speed: 0.8, development: 1.5},
+      r2_d0: {files: child, inherited: slow, speed: 1.8, development: 1.2,
+        inspect: ({canonical}) => assert.deepEqual(readSources(canonical), original,
+          'native regression is retained without promoting its better diagnostic geomean')}},
+    check: ({archive, result, rec, externalReads, finalMeasured, scenario}) => {
+      const parent = archive.entries.find(row => row.id === 'r1_d0');
+      const retainedChild = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(parent.verified, true);
+      assert.equal(parent.status, 'slower');
+      assert.equal(parent.speedup, 0.8);
+      assert.equal(retainedChild.parent_id, parent.id);
+      assert.equal(retainedChild.verified, true);
+      assert.equal(retainedChild.speedup, 1.8);
+      assert.equal(rec.after_loop.roundsCommitted, 1);
+      assert.ok(externalReads.some(row => row.id === 'verify-r2_d0' && row.patch),
+        'trusted reader checked child cumulative patch against the fixed base');
+      assert.equal(finalMeasured, true);
+      assert.equal(externalReads.filter(row => row.id === 'final' && row.patch).length, 1,
+        'final trusted reader checks host patch against ORIGINAL after host evaluation');
+      assert.equal(result.validation_status, scenario.patchSourceMismatch ? 'invalid_measurement' : 'accepted');
+      assert.equal(result.final_speedup, scenario.patchSourceMismatch ? null : scenario.finalSpeed ?? 1.8);
+      if (scenario.patchSourceMismatch) {
+        assert.equal(result.outcome, 'invalid_measurement');
+        assert.equal(result.final_patch, '', 'wrong captured-source patch is never exported');
+        assert.equal(externalReads.filter(row => row.rejected).length, 1);
+      } else {
+        assert.equal(path.basename(result.final_patch), 'host_final_patch.diff');
+        assert.equal(externalReads.find(row => row.id === 'final').patch, result.final_patch,
+          'export uses exactly the patch checked by the trusted reader');
+      }
+    }},
+];
+const externalLineage = cases[cases.length - 1];
+cases.push(approachMemoryCase);
+cases.push(...[undefined, false, true, 'true'].map(evolution_preserve_founder_attempts => ({...cases[0],
+  name: `founder-preservation policy ${JSON.stringify(evolution_preserve_founder_attempts)}`,
+  args: {...cases[0].args, ...(evolution_preserve_founder_attempts !== undefined
+    ? {evolution_preserve_founder_attempts} : {})},
+  check: info => {
+    cases[0].check(info);
+    const founder = info.events.find(event => event.label.startsWith('eng '));
+    assert.equal(info.h.field(founder.prompt, 'EVOLUTION'), undefined,
+      'preserving source does not enable founder evolution context');
+    const firstPlan = info.events.find(event => event.label === 'tech_lead:plan r1');
+    assert.equal(info.h.field(firstPlan.prompt, 'EVOLUTION_ENTRIES'), undefined,
+      'preserving source does not change initial planner context');
+    assert.doesNotMatch(firstPlan.prompt, /roles\/evolution\.md/);
+  },
+})));
+cases.push({name: 'founder-preservation keeps failed attempt evidence separate from the accepted program',
+  nativeReclaim: true,
+  args: {budget: 2, evolution_preserve_founder_attempts: true},
+  best: 1.4, bestId: 'r2_d0', expected: fast,
+  plans: {r1: plan(direction('unfinished')), r2: plan(direction('correct'))},
+  candidates: {
+    r1_d0: {files: slow, noPatch: true, separateAttempt: true,
+      engineer: {status: 'failed', measurement_valid: false,
+        notes: 'Unfinished source: round_1/engineer_0/unfinished_attempt.diff; no correctness or timing established.'}},
+    r2_d0: {files: fast, speed: 1.4},
+  },
+  check: ({archive, events, temp}) => {
+    const failed = archive.entries.find(row => row.id === 'r1_d0');
+    assert.equal(failed.verified, false);
+    assert.equal(failed.status, 'unverified');
+    assert.equal(failed.patch_ref, null, 'unfinished files are not a qualified returned patch');
+    assert.equal(failed.engineer.measurement_valid, false);
+    assert.match(failed.engineer.notes, /Unfinished source:/);
+    const replay = path.join(temp, 'unfinished-source-replay');
+    writeSources(replay, original);
+    initRepo(replay);
+    git(replay, 'apply', '--', path.join(temp, 'eval/round_1/engineer_0/unfinished_attempt.diff'));
+    assert.deepEqual(readSources(replay), slow,
+      'the actual failed implementation survives cleanup as separate source evidence');
+    assert.ok(!events.some(event => event.label === 'commit r1'), 'a failed founder is never promoted');
+  },
+});
+cases.push(...[true, false, 'true'].map(evolution_evidence_handoff => ({...cases[0],
+  name: `selected evidence handoff with ${JSON.stringify(evolution_evidence_handoff)}`,
+  args: {...cases[0].args, evolution_evidence_handoff}})));
+const unicodeNotes = '😀'.repeat(4096);
+// Retained delivery: a declared reserve after the search cutoff, the ordinary verifier and commit gate.
+const cutRetained = {bounded: true, expireAfterEngineer: 'r2_d0', args: {budget: 5, delivery_reserve_s: 50},
+  plans: {r1: plan(direction('best')), r2: plan(direction('unfinished'))},
+  candidates: {r1_d0: {files: fast, speed: 1.4}, r2_d0: {files: source(4, 4), inherited: fast, speed: 50}}};
+const delivery = rec => rec.after_loop.history.delivery;
+const verifiedAt = speed => ({status: 'verified', correctness: 'pass', verified_geomean: speed,
+  verified_arithmetic: +(speed + 0.01).toFixed(4), per_case: [{name: 'c1', baseline_ms: 2,
+    optimized_ms: +(2 / speed).toFixed(4), speedup: speed}, {name: 'c2', baseline_ms: 4,
+    optimized_ms: +(4 / speed).toFixed(4), speedup: speed}]});
+const weighted = speed => ({engineer: {status: 'ok', measurement_valid: true, speedup_geomean: speed,
+  speedup_weighted: speed}, verifier: {...verifiedAt(speed), verified_weighted: speed}});
+const deliveredFinal = expected => ({result, temp}) => {
+  // The returned final patch is the host's canonical diff, whatever Report or Director wrote.
+  assert.equal(result.final_patch, path.join(temp, 'eval', 'host_final_patch.diff'));
+  const replay = path.join(temp, 'returned-final-replay');
+  fs.mkdirSync(replay); writeSources(replay, original); initRepo(replay);
+  git(replay, 'apply', '--', result.final_patch);
+  assert.deepEqual(readSources(replay), expected, 'returned final patch holds the delivered bytes');
+};
+const keptIncumbent = (name, r2, status) => ({...cutRetained, name, best: 1.4, bestId: 'r1_d0', expected: fast,
+  candidates: {...cutRetained.candidates, r2_d0: {...cutRetained.candidates.r2_d0, ...r2}},
+  check: ({rec, archive, events}) => {
+    assert.equal(events.filter(e => e.label === 'verify r2_d0 (delivery)').length, 1, 'qualified once');
+    assert.equal(delivery(rec).delivered, null, 'incumbent bytes stay committed');
+    assert.equal(delivery(rec).candidates[0].status, status);
+    assert.equal(rec.after_loop.roundsCommitted, 1);
+    assert.ok(archive.entries.find(row => row.id === 'r2_d0').patch_ref, 'retained source is preserved');
+  }});
+cases.push({
+  name: 'explicit invalid native verifier cannot qualify, select or deliver a gain',
+  args: {budget: 2}, best: 1.4, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('valid'), direction('invalid'))},
+  candidates: {r1_d0: {files: fast, speed: 1.4},
+    r1_d1: {files: source(4, 4), speed: 50, verifier: {...verifiedAt(50), measurement_valid: false}}},
+  check: ({archive, rec, events}) => {
+    const invalid = archive.entries.find(row => row.id === 'r1_d1');
+    assert.equal(invalid.verified, false);
+    assert.equal(invalid.status, 'unverified');
+    assert.equal(invalid.speedup, null);
+    assert.equal(invalid.verifier.correctness, 'pass');
+    assert.equal(invalid.verifier.verified_geomean, 50);
+    assert.equal(invalid.verifier.measurement_valid, false);
+    assert.equal(invalid.verifier.reported_status, 'verified');
+    assert.equal(invalid.verifier.reported_validation_status, null);
+    assert.ok(invalid.patch_ref, 'retain the source without accepting invalid timing');
+    assert.ok(!events.some(event => event.label.startsWith('integrate ')), 'invalid source is not a verified donor');
+    assert.equal(delivery(rec).delivered, null);
+    assert.equal(rec.after_loop.roundsCommitted, 1, 'the missing-flag valid verifier remains compatible');
+  },
+}, keptIncumbent('explicit invalid native delivery verification keeps the incumbent',
+  {verifier: {...verifiedAt(50), measurement_valid: false}}, 'invalid_measurement'), {
+  name: 'explicit invalid native director return withholds accepted final gain',
+  args: {budget: 1}, director: 'invalid_measurement', best: 1.4, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('valid'))}, candidates: {r1_d0: {files: fast, speed: 1.4}},
+  check: ({result}) => {
+    assert.equal(result.validation_status, 'invalid_measurement');
+    assert.equal(result.reported_validation_status, 'accepted');
+    assert.equal(result.reported_status, null);
+    assert.equal(result.process_validated, false);
+    assert.equal(result.final_speedup, null);
+    assert.equal(result.final_patch, '');
+    assert.ok(result.delivered_patch, 'source remains available even when final timing is invalid');
+  },
+});
+const retainedMain = {...cutRetained, name: 'retained delivery verifies a cut EVO source and commits it over a committed incumbent',
+  best: 50, bestId: 'r2_d0', expected: source(4, 4),
+  check: ({rec, archive, events, result, temp}) => {
+    assert.equal(events.filter(e => e.label === 'verify r2_d0 (delivery)').length, 1, 'qualified once');
+    assert.equal(delivery(rec).delivered, 'round_2_engineer_0');
+    assert.equal(delivery(rec).candidates[0].basis, 'engineer_local');
+    assert.equal(rec.after_loop.roundsCommitted, 2, 'delivery is an ordinary commit');
+    assert.equal(archive.entries.find(row => row.id === 'r2_d0').verified, true);
+    assert.equal(result.stopped_by, 'deadline');
+    deliveredFinal(source(4, 4))({result, temp});
+  }};
+const failedIntegratedCommit = {name: 'a qualified integrated winner whose commit failed is delivered over a later incumbent',
+  bounded: true, badCommit: 'r1', args: {budget: 3, delivery_reserve_s: 50},
+  best: 1.8, bestId: 'r1_integrated', expected: source(1, 2),
+  plans: {r1: plan(direction('a'), direction('b')),
+    r2: plan(direction('continued', {parent_id: 'r1_integrated'}))},
+  integration: {files: source(1, 2), speed: 1.8,
+    verifier: {...verifiedAt(1.8), variance_note: 'complete settled verifier report', graph_safe: 'not checked',
+      observed_evidence: {authority: 'role-authored claim'}, reported_per_case: [{name: 'not trusted'}]}},
+  candidates: {r1_d0: {files: source(1, 0), speed: 1.2}, r1_d1: {files: fast, speed: 1.4},
+    r2_d0: {files: source(1, 3), inherited: source(1, 2), speed: 1.6}},
+  check: ({rec, events, result, temp}) => {
+    assert.equal(rec.after_loop.history.rounds[0].status, 'commit_failed');
+    assert.equal(delivery(rec).delivered, 'round_1_integrate');
+    assert.equal(delivery(rec).candidates[0].basis, 'verifier', 'no second qualification');
+    assert.ok(!events.some(e => e.label.endsWith('(delivery)')));
+    assert.equal(rec.after_loop.roundsCommitted, 2);
+    assert.equal(rec.after_loop.finalWinner.reported_context.contributors.length, 2);
+    assert.deepEqual(rec.after_loop.finalWinner.reported_context.integrator.evidence_context.unresolved, ['integration rival']);
+    assert.equal(rec.after_loop.finalWinner.reported_context.verifier, null);
+    assert.deepEqual(rec.after_loop.finalWinner.verifier_report, {...verifiedAt(1.8),
+      variance_note: 'complete settled verifier report', graph_safe: 'not checked'},
+    'failed-commit delivery keeps the complete settled report without role-authored host provenance');
+    deliveredFinal(source(1, 2))({result, temp});
+  }};
+cases.push({name: 'final delivery preserves a verified gain below the search promotion threshold',
+  args: {budget: 1, min_improve: 0.02}, best: 1.01, bestId: 'r1_d0', expected: fast,
+  plans: {r1: plan(direction('small-gain'))},
+  candidates: {r1_d0: {files: fast, speed: 1.01}},
+  check: ({rec, events, result, temp}) => {
+    assert.equal(rec.after_loop.history.rounds[0].improved, false, 'search promotion keeps its threshold');
+    assert.equal(rec.after_loop.history.rounds[0].cumulative, 1, 'search leaves ORIGINAL committed');
+    assert.equal(delivery(rec).delivered, 'round_1_engineer_0');
+    assert.equal(delivery(rec).candidates[0].basis, 'verifier');
+    assert.ok(!events.some(e => e.label.endsWith('(delivery)')), 'reuse the exact existing qualification');
+    deliveredFinal(fast)({result, temp});
+  }}, retainedMain,
+  ...['null', 'flagged', 'tamper'].map(director => ({...retainedMain, director,
+    name: `Director ${director}: validation is withheld while host custody stays available`,
+    check: ({result, temp, archive}) => {
+      assert.equal(result.process_validated, false, 'unsuccessful final validation remains local and explicit');
+      assert.equal(result.final_patch, '', 'an unvalidated lane supplies no accepted final patch');
+      assert.equal(result.delivered_patch, path.join(temp, 'eval/host_final_patch.diff'));
+      assert.equal(archive.best_id, 'r2_d0', 'retained verified source remains selected');
+      const replay = path.join(temp, 'unvalidated-delivery-replay');
+      writeSources(replay, original); initRepo(replay);
+      git(replay, 'apply', '--', result.delivered_patch);
+      assert.deepEqual(readSources(replay), source(4, 4), 'host restores and retains exact delivered bytes');
+      if (director === 'tamper') assert.equal(result.validation_status, 'source_changed');
+    }})),
+  {...retainedMain, name: 'retained delivery uses the declared workload-weighted primary end to end',
+    workload: true, args: {...cutRetained.args, op_spec: {workload: [{name: 'c1'}, {name: 'c2'}]}},
+    candidates: {r1_d0: {files: fast, speed: 1.4, ...weighted(1.4)},
+      r2_d0: {files: source(4, 4), inherited: fast, speed: 50, ...weighted(50)}},
+    check: ({rec, result}) => {
+      assert.equal(delivery(rec).delivered, 'round_2_engineer_0');
+      assert.equal(result.final_weighted, 50, 'final validation reports the delivered weighted primary');
+    }},
+  failedIntegratedCommit,
+  {...failedIntegratedCommit, mutateRetainedAfterCapture: true,
+    name: 'custody: a retained winner is delivered from its pinned bytes after its promotion file changes'},
+  ...['null', 'missing', 'stale', 'wrong'].map(report => ({...retainedMain, report,
+    name: `report ${report}: the host canonical diff, not Report, is the delivered final patch`})),
+  {...retainedMain, workload: true, report: 'null', args: {...cutRetained.args, op_spec: {workload: [{name: 'c1'}, {name: 'c2'}]}},
+    candidates: {r1_d0: {files: fast, speed: 1.4, ...weighted(1.4)},
+      r2_d0: {files: source(4, 4), inherited: fast, speed: 50, ...weighted(50)}},
+    name: 'report null: the weighted primary claim falls back to the measured cumulative result'},
+  keptIncumbent('retained delivery keeps the incumbent when qualification rejects the source',
+    {verifier: {status: 'correctness_failed', correctness: 'fail', verified_geomean: 50}}, 'correctness_failed'),
+  keptIncumbent('retained delivery reports an unfinished qualification as unmeasured', {deliveryTimeout: true},
+    'unmeasured'),
+  keptIncumbent('retained delivery refuses bytes that change during qualification',
+    {mutateAfterVerification: source(9, 9)}, 'source_changed'));
+const retainedRegression = keptIncumbent('retained delivery preserves a reverified regression without delivering it',
+  {verifier: {...verifiedAt(0.8), status: 'regression', variance_note: 'fixture repeat spread'}}, 'regression');
+const checkRetainedRegression = retainedRegression.check;
+retainedRegression.check = observed => {
+  checkRetainedRegression(observed);
+  const {rec, archive, events, h: harness, temp} = observed;
+  const row = delivery(rec).candidates[0], kept = archive.entries.find(entry => entry.id === 'r2_d0');
+  assert.deepEqual(delivery(rec).incomplete, []);
+  assert.equal(row.basis, 'engineer_local');
+  assert.equal(row.evidence, 50, 'admission keeps the engineer claim distinct from remeasurement');
+  assert.equal(row.primary, 0.8);
+  assert.deepEqual(row.verifier_report, retainedRegression.candidates.r2_d0.verifier);
+  assert.equal(kept.verified, true);
+  assert.equal(kept.status, 'slower');
+  assert.equal(kept.speedup, 0.8);
+  assert.deepEqual(kept.verifier, row.verifier_report);
+  const verification = events.find(event => event.label === 'verify r2_d0 (delivery)');
+  assert.equal(hash(fs.readFileSync(harness.field(verification.prompt, 'PATCH'))), kept.patch_ref.sha256);
+  assert.equal(row.source_sha256, kept.patch_ref.sha256);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, 'eval/delivery/outcome.json'), 'utf8')).candidates[0], row);
+};
+cases.push(retainedRegression);
+cases.push({...cases[0], name: 'UTF-8 budget preserves bounded context and exact archive access',
+  args: {...cases[0].args, evolution_evidence_handoff: true}, candidates: {...cases[0].candidates,
+    r1_d0: {...cases[0].candidates.r1_d0,
+      engineer: {...cases[0].candidates.r1_d0.engineer, notes: unicodeNotes,
+        evidence_context: {tested_applicability: 'fixture source only', unresolved: ['rival remains'],
+          rival_explanations: ['queue delay', 'different executed path'], next_separating_observation: 'inspect executed path'}}},
+    r4_d0: {...cases[0].candidates.r4_d0, handoffOverLimit: true, inspect: info => {
+      cases[0].candidates.r4_d0.inspect(info);
+      const context = info.h.field(info.prompt, 'EVOLUTION');
+      assert.match(context.selected_evidence.context_omitted, /over_utf8_budget/);
+       assert.ok(context.selected_evidence.summary.parent.engineer.notes.length > 0);
+       assert.equal(context.selected_evidence.full_context_ref.parent_id, 'r1_d0');
+      const saved = JSON.parse(fs.readFileSync(info.h.field(info.prompt, 'EVOLUTION_ARCHIVE'), 'utf8'));
+      const kept = saved.entries.find(row => row.id === 'r1_d0');
+       assert.equal(kept.engineer.notes, unicodeNotes);
+       assert.deepEqual(kept.reported_context.engineer.evidence_context.unresolved, ['rival remains']);
+       assert.equal(kept.speedup, null, 'interpretation cannot create an official score for an unqualified source');
+      assert.ok(unicodeNotes.length < 16384 && Buffer.byteLength(unicodeNotes, 'utf8') === 16384,
+        'payload overhead crosses the byte limit despite fewer UTF-16 code units');
+    }}}});
+cases.push({name: 'zero-byte retained parent initializes and dispatches its child',
+    args: {budget: 2}, best: 1.4, bestId: 'r2_d0', expected: fast,
+    plans: {r1: plan(direction('unchanged')),
+      r2: plan(direction('develop-unchanged', {parent_id: 'r1_d0'}))},
+    candidates: {r1_d0: {files: original, speed: 1},
+      r2_d0: {files: fast, inherited: original, speed: 1.4}},
+    check: ({archive, events}) => {
+      const parent = archive.entries.find(row => row.id === 'r1_d0');
+      const child = archive.entries.find(row => row.id === 'r2_d0');
+      assert.equal(fs.statSync(parent.patch_ref.path).size, 0);
+      assert.equal(parent.verified, false, 'unchanged source retention is not qualification');
+      assert.equal(child.parent_id, parent.id);
+      assert.equal(child.evolution_context.initialization.status, 'ready');
+      assert.ok(events.some(event => event.label === 'eng r2_d0:memory'),
+        'an explicitly selected unchanged parent must reach its engineer');
+    }});
+cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalLineage, report,
+  name: `external cumulative parent and child survive ${report} Report patch`})),
+  {...externalLineage, name: 'host patch binds unstaged final edit and staged binary instead of HEAD',
+    finalFiles: source(2, 1, {'inherited.py': 'P = 1\n',
+      'payload.bin': Buffer.from([0, 255, 128, 10, 0, 1])}),
+    stagedBinary: 'payload.bin', finalSpeed: 2, finalDev: 1.3},
+  {...externalLineage, name: 'final trusted reader rejects source drift between native capture and Git diff',
+    patchSourceMismatch: source(99, 99, {'inherited.py': 'P = 1\n'})});
+
+const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, speedup: 0.8,
+  baseline_ms: 2, optimized_ms: 2.5, count: i + 1, weight: 2 * (i + 1),
+  reps: 3, speedup_spread: 0.01}));
+const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
+const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+for (const sharedView of [false, true]) for (const handoff of [false, true]) {
+  for (const plannerView of [undefined, false, true, 'true']) {
+    const plannerEnabled = plannerView === undefined ? sharedView : plannerView === true;
+    cases.push({...integrationFixture,
+      name: `planner recipient override ${JSON.stringify(plannerView)} shared=${sharedView} handoff=${handoff}`,
+      args: {...integrationFixture.args, evolution_case_evidence_view: sharedView,
+        evolution_evidence_handoff: handoff,
+        ...(plannerView !== undefined ? {evolution_planner_case_view: plannerView} : {})},
+      plans: {...integrationFixture.plans,
+        r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+      candidates: {...integrationFixture.candidates,
+        r1_d0: {...integrationFixture.candidates.r1_d0,
+          verifier: {...verifiedAt(1.2), per_case: caseViewRows}},
+        r1_d1: {...integrationFixture.candidates.r1_d1,
+          verifier: {...verifiedAt(1.4), per_case: caseViewRows}},
+        r2_d0: {...integrationFixture.candidates.r2_d0, inherited: source(1, 0)}},
+      check: ({archive, events, h: harnessApi}) => {
+        const requireEvent = label => {
+          const matches = events.filter(event => event.label === label);
+          assert.equal(matches.length, 1, `recipient was actually called: ${label}`);
+          return matches[0];
+        };
+        const assertCases = entries => {
+          assert.ok(Array.isArray(entries) && entries.length > 0, 'nonempty evidence entries');
+          for (const entry of entries) {
+            const saved = archive.entries.find(row => row.id === entry.archive_ref.entry_id);
+            assert.ok(saved, 'evidence resolves to an actual retained source');
+            assert.deepEqual(entry.patch_ref, saved.patch_ref);
+            assert.equal(entry.entry_verified, saved.verified);
+            assert.deepEqual(entry.verifier?.per_case, saved.verifier?.per_case ?? null);
+          }
+        };
+        const planner = requireEvent('tech_lead:plan r2');
+        const plannerEntries = harnessApi.field(planner.prompt, 'EVOLUTION_ENTRIES');
+        assert.ok(plannerEntries.length >= 3, 'planner sees both donors and the integrated source');
+        assert.ok(plannerEntries.every(row => Object.hasOwn(row, 'case_evidence') === plannerEnabled));
+        assert.match(harnessApi.field(planner.prompt, 'EVOLUTION_ARCHIVE'), /\/evolution\/archive\.json$/);
+        if (plannerEnabled) assertCases(plannerEntries.map(row => row.case_evidence));
+        for (const round of ['r1', 'r2']) {
+          const memory = requireEvent(`tech_lead:memory ${round}`);
+          const memoryEntries = harnessApi.field(memory.prompt, 'EVOLUTION_ROUND');
+          assert.ok(memoryEntries.length > 0, 'memory receives the completed round');
+          assert.ok(memoryEntries.every(row => Object.hasOwn(row, 'case_evidence') === sharedView));
+          if (sharedView) assertCases(memoryEntries.map(row => row.case_evidence));
+        }
+        const integrator = requireEvent('integrate r1');
+        const integrationCases = harnessApi.field(integrator.prompt, 'CANDIDATE_CASE_EVIDENCE');
+        assert.equal(integrationCases !== undefined, sharedView);
+        if (sharedView) {
+          assertCases(integrationCases.entries);
+          assert.deepEqual(integrationCases.entries.map(row => row.archive_ref.entry_id), ['r1_d0', 'r1_d1']);
+        }
+        const engineer = requireEvent('eng r2_d0:memory');
+        const evolution = harnessApi.field(engineer.prompt, 'EVOLUTION');
+        assert.equal(Object.hasOwn(evolution, 'selected_case_evidence'), handoff);
+        assert.equal(Object.hasOwn(evolution, 'selected_evidence'), handoff);
+        if (handoff) {
+          assertCases(evolution.selected_case_evidence.entries);
+          assert.deepEqual(evolution.selected_case_evidence.entries.map(row => row.archive_ref.entry_id),
+            ['r1_d0', 'r1_d1']);
+        }
+        assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+        assert.equal(archive.entries.find(row => row.id === 'r1_integrated').verified, true);
+      },
+    });
+  }
+}
+cases.push({...integrationFixture,
+  name: 'explicit invalid native integrator primary stays unavailable through adapters',
+  args: {budget: 2}, best: 1.4, bestId: 'r1_d1', expected: fast,
+  integration: {...integrationFixture.integration, measurement_valid: false},
+  check: ({archive, rec, events}) => {
+    const integrated = archive.entries.find(row => row.id === 'r1_integrated');
+    assert.ok(integrated.patch_ref, 'retain the implementation without invalid fitness');
+    assert.equal(integrated.verified, false);
+    assert.equal(integrated.speedup, null);
+    assert.equal(rec.after_loop.history.rounds[0].integrate.claimed_primary, null);
+    assert.ok(!events.some(event => event.label === 'verify r1_integrated'),
+      'the invalid provisional score cannot trigger a claimed-improvement verification');
+  },
+});
+for (const readerMissing of [null, 'status', 'correctness']) {
+  cases.push({...integrationFixture, name: `native integrated reader authority with missing ${readerMissing}`,
+    external: true, args: {budget: 2},
+    best: readerMissing ? 1.4 : 1.8, bestId: readerMissing ? 'r1_d1' : 'r1_integrated',
+    bestDev: readerMissing ? 1.4 : 1.8,
+    expected: readerMissing ? fast : source(1, 2),
+    plans: {r1: integrationFixture.plans.r1},
+    candidates: {r1_d0: {files: source(1, 0), speed: 1.2, development: 1.2},
+      r1_d1: {files: fast, speed: 1.4, development: 1.4}},
+    integration: {...integrationFixture.integration, readerMissing},
+    check: ({archive}) => assert.equal(archive.entries.some(row => row.id === 'r1_integrated'), !readerMissing),
+  });
+}
+for (const count of [6, 400]) {
+  const rows = Array.from({length: count}, (_, i) => ({...caseViewRows[i % 6], name: `case-${i}`}));
+  cases.push({...integrationFixture, name: `complete or explicit-reference case handoffs with ${count} rows`,
+    args: {...integrationFixture.args, evolution_case_evidence_view: true, evolution_evidence_handoff: true},
+    plans: {...integrationFixture.plans, r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+    candidates: {...integrationFixture.candidates,
+      r1_d0: {...integrationFixture.candidates.r1_d0,
+        verifier: {...verifiedAt(1.2), per_case: rows}},
+      r1_d1: {...integrationFixture.candidates.r1_d1,
+        verifier: {...verifiedAt(1.4), per_case: rows}},
+      r2_d0: {...integrationFixture.candidates.r2_d0, inherited: source(1, 0), inspect: ({prompt, h}) => {
+        const view = h.field(prompt, 'EVOLUTION').selected_case_evidence;
+        if (count === 6) assert.ok(view.entries.every(entry => entry.verifier.case_rows === 6));
+        else {
+          assert.equal(view.entries, null, 'no first-four numeric preview on overflow');
+          assert.match(view.case_evidence_omitted, /read complete cases/);
+          assert.deepEqual(view.full_context_ref.entry_ids, ['r1_d0', 'r1_d1']);
+          assert.ok(view.row_counts.every(entry => entry.verifier === count));
+        }
+      }}},
+    inspectIntegration: ({prompt, h}) => {
+      const view = h.field(prompt, 'CANDIDATE_CASE_EVIDENCE');
+      if (count === 6) assert.ok(view.entries.every(entry => entry.verifier.per_case.length === 6));
+      else {
+        assert.equal(view.entries, null);
+        assert.deepEqual(view.full_context_ref.entry_ids, ['r1_d0', 'r1_d1']);
+        assert.ok(view.row_counts.every(entry => entry.verifier === count));
+      }
+    },
+    check: ({archive}) => assert.equal(archive.entries.find(row => row.id === 'r1_integrated').verified, true),
+  });
+}
+cases.push(...[undefined, false, true, 'true'].map(evolution_case_evidence_view => ({
+  name: `case evidence view ${JSON.stringify(evolution_case_evidence_view)}`,
+  args: {budget: 3, max_no_improve: 3,
+    ...(evolution_case_evidence_view !== undefined ? {evolution_case_evidence_view} : {})},
+  best: 1.4, bestId: 'r2_d0', expected: fast,
+  plans: {r1: plan(direction('slower')), r2: plan(direction('best')), r3: plan(direction('missing'))},
+  candidates: {
+    // The engineer's claim clears the floor, so the source is independently verified and the
+    // verifier finds the slower regression whose case evidence this view must carry.
+    r1_d0: {files: slow, speed: 0.8,
+      engineer: {status: 'ok', measurement_valid: true, speedup_geomean: 1.05,
+        speedup_weighted: 0.81, speedup_arithmetic: 0.82, per_case: caseViewRows,
+        evidence_context: {evidence_refs: caseViewRefs}},
+      verifier: {status: 'regression', correctness: 'pass', verified_geomean: 0.8,
+        variance_note: 'reported repeat spread', graph_safe: 'not checked', per_case: caseViewRows,
+        evidence_context: {evidence_refs: caseViewRefs}}},
+    r2_d0: {files: fast, speed: 1.4},
+    r3_d0: {files: source(5, 5), inherited: fast, noPatch: true,
+      engineer: {status: 'failed', per_case: []}},
+  },
+  check: ({archive, events, h}) => {
+    const slowRow = archive.entries.find(row => row.id === 'r1_d0');
+    assert.equal(slowRow.engineer.speedup_weighted, 0.81);
+    assert.equal(slowRow.engineer.speedup_arithmetic, 0.82);
+    assert.equal(slowRow.verifier.variance_note, 'reported repeat spread');
+    assert.equal(slowRow.verifier.graph_safe, 'not checked');
+    assert.deepEqual(slowRow.verifier.per_case, caseViewRows);
+    assert.deepEqual(slowRow.verifier.evidence_context.evidence_refs, caseViewRefs);
+    for (const event of events.filter(e => /^tech_lead:(?:plan|memory) /.test(e.label))) {
+      const rows = h.field(event.prompt, event.label.startsWith('tech_lead:plan')
+        ? 'EVOLUTION_ENTRIES' : 'EVOLUTION_ROUND');
+      if (event.label === 'tech_lead:plan r1') {
+        assert.equal(rows, undefined, 'the first plan has no archive inputs before any retained source');
+        continue;
+      }
+      for (const row of rows) {
+        assert.equal(Object.hasOwn(row, 'case_evidence'), evolution_case_evidence_view === true);
+        if (!row.case_evidence) continue;
+        const saved = archive.entries.find(entry => entry.id === row.id), view = row.case_evidence;
+        assert.equal(view.archive_ref.entry_id, row.id);
+        assert.deepEqual(view.patch_ref, saved.patch_ref);
+        assert.equal(view.entry_verified, saved.verified);
+        assert.deepEqual(view.metric, {kind: 'geomean'});
+        assert.match(view.authority, /no new verification/);
+        for (const role of ['engineer', 'verifier']) {
+          if (!saved[role]) {
+            assert.equal(view[role], null);
+            continue;
+          }
+          assert.deepEqual(view[role].per_case, saved[role].per_case ?? null);
+          assert.equal(view[role].case_rows, saved[role].per_case?.length ?? null);
+          assert.deepEqual(view[role].evidence_refs, saved[role].evidence_context?.evidence_refs ?? null);
+          for (const key of ['status', 'correctness', 'measurement_valid', 'speedup_weighted',
+            'speedup_arithmetic', 'variance_note', 'graph_safe'])
+            assert.equal(view[role][key], saved[role][key]);
+        }
+      }
+    }
+  },
+})));
+
+(async () => {
+  console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
+  const h = harness({});
+  const invalidArgs = [
+    [{optimizer: 'external'}, /unknown optimizer: external; use greedy or evo/],
+    [{optimizer: 'evo', optimizer_command: ['python3', 'retired.py']}, /optimizer_command is retired/],
+    [{optimizer: 'greedy', optimizer_command: null}, /optimizer_command is retired/],
+    [{optimizer: 'evo', optimizer_task_ref: {path: '/old/task.json', sha256: '0'.repeat(64)}},
+      /optimizer_task_ref is retired/],
+    [{optimizer_reserve_s: 0}, /optimizer_reserve_s is retired/],
+  ];
+  for (const [args, message] of invalidArgs) {
+    const unsupported = h.build(h.instrument(laneSource), {...h.BASE_ARGS, ...args},
+      () => assert.fail('unsupported optimizer arguments must not start an agent'));
+    await assert.rejects(unsupported.run(), message);
+    assert.equal(unsupported.rec.calls.length, 0);
+  }
+  const filters = process.argv.flatMap((arg, i) => arg === '--case' ? [process.argv[i + 1]] : []);
+  const selected = cases.filter(sc => !filters.length || filters.some(name => sc.name.includes(name)));
+  assert.ok(selected.length, 'case filter selected no fixtures');
+  for (const sc of selected) await runCase(sc);
+  console.log('PASS: real EVO workflow CPU integration checks. No performance claim.');
+})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

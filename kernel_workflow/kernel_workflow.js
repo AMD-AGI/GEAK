@@ -10,6 +10,7 @@ export const meta = {
   ],
 };
 
+// GENERATED from kernel_workflow/src/kernel_workflow/ by scripts/build_workflows.mjs. Edit the parts there, then rebuild.
 // ---------------------------------------------------------------------------
 // Args. This is a DISPATCHER: on mode=optimize/author it forwards straight to the
 // single-language worker (kernel_lane.js) unchanged; on mode=bakeoff it acts
@@ -18,6 +19,12 @@ export const meta = {
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.preparation_allowance_s != null || A.search_duration_s != null) {
+  throw new Error('preparation_allowance_s/search_duration_s are supported only by direct kernel_lane.js; dispatcher clock semantics are not supported');
+}
+if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
+  throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
+}
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
@@ -74,6 +81,21 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
   }
 })();
 
+// Prompt for the file_writer agent that persists the agent timeline and renders the run report.
+// A function DECLARATION so it is hoisted above every caller (kernel_workflow's pass-through branch
+// runs before most definitions).
+function persistLlmStatsPrompt(evalDir, tlJson) {
+  const tlPath = `${evalDir}/reports/trace/agent_timeline.json`;
+  return `You are the file_writer. PHASE=persist_llm_stats.\n` +
+    `Do exactly two things, in order:\n` +
+    `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+    `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+    '```json\n' + tlJson + '\n```\n\n' +
+    `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+    `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+    `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${evalDir}"\n\n` +
+    `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`;
+}
 // ===========================================================================
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
 // the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
@@ -94,17 +116,7 @@ if (MODE === 'optimize' || MODE === 'author') {
   if (llmStatsOn && r && r.eval_dir && r.llm_timeline) {
     try {
       const tlJson = JSON.stringify({ ...r.llm_timeline, instance: r.eval_dir });
-      const tlPath = `${r.eval_dir}/reports/trace/agent_timeline.json`;
-      await agent(
-        `You are the file_writer. PHASE=persist_llm_stats.\n` +
-        `Do exactly two things, in order:\n` +
-        `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-        `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-        '```json\n' + tlJson + '\n```\n\n' +
-        `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-        `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-        `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${r.eval_dir}"\n\n` +
-        `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+      await agent(persistLlmStatsPrompt(r.eval_dir, tlJson),
         { phase: 'Bakeoff', label: 'file_writer:persist_llm_stats',
           schema: { type: 'object',
             properties: { written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } },
@@ -142,11 +154,14 @@ if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
   throw new Error('expected_gfx and expected_target must be supplied together');
 }
 if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
-    (EXPECTED_TARGET && !['r9700', 'r9600d', 'unknown'].includes(EXPECTED_TARGET))) {
-  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|unknown');
+    (EXPECTED_TARGET && !['r9700', 'r9600d', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET))) {
+  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|mi350x|mi355x|unknown');
 }
 if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
+}
+if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
@@ -193,12 +208,17 @@ const KB_PLANE_ARGS = {
 };
 
 // ---------------------------------------------------------------------------
-// Schema helpers.
+// Small helpers every workflow uses: the "## Inputs" list in role prompts and
+// JSON-schema builders for structured agent output.
 // ---------------------------------------------------------------------------
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrStr = { type: 'array', items: { type: 'string' } };
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
-
+// ---------------------------------------------------------------------------
+// Schemas (obj/arrStr/arrObj: src/shared/helpers.js).
+// ---------------------------------------------------------------------------
 // oracle_freezer output — the standalone counterpart of e2e's kernel_extractor.extract_op, built from a
 // kernel dir instead of a live server. Same op-task-dir contract; also creates the run dir (EVAL_DIR).
 const FREEZE_SCHEMA = obj({
@@ -254,25 +274,28 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
 }, []);
 
 // ---------------------------------------------------------------------------
-// Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
+// Agent-call limits + timeline (cfg, tlAgent and roleAgent are in src/shared/).
 // ---------------------------------------------------------------------------
-const cfg = (o) => Object.entries(o).map(([k, v]) =>
-  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-
 // Hung-agent + API-fault guard (same contract as kernel_lane.js:agentT).
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
 // LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
 // DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
 // duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
 // role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+// Each workflow declares its own LLM_TL (it names the workflow).
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
-const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
-// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
+// order. Two same-key agents that finish out of order no longer swap identities under the parser's
+// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
+// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
 function tlAgent(prompt, o, attempt) {
   if (!LLM_STATS) return null;
+  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
+  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
+  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
   const m = TL_ROLE_RE.exec(String(prompt || ''));
   const e = {
     seq: LLM_TL.events.length,
@@ -286,21 +309,55 @@ function tlAgent(prompt, o, attempt) {
   LLM_TL.events.push(e);
   return e;
 }
+
+// Role prompt: the agent reads its role file and knowledge itself; the script passes only inputs.
+// roleAgentFrom reads the role from any roles/ dir (kernel_workflow uses it for e2e's op_benchmarker,
+// referenced in place). expertSkillsBlock is declared by each workflow (its text differs per workflow);
+// multiGpuBlock only by kernel_lane, the one workflow that runs multi-GPU jobs.
+function roleAgentFrom(dir, role, phase, intro, inputs) {
+  const base = `You are the ${role}. PHASE=${phase}.
+First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phase}.
+Read any knowledge files it points you to under ${dir}/knowledge/.
+Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
+
+## Inputs
+${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
+
+Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role)
+    + (typeof multiGpuBlock === 'function' ? multiGpuBlock(role) : '')
+    + (typeof externalMetricInstructions === 'function'
+      ? externalMetricInstructions(role === 'director' && phase === 'validate')
+      : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
+}
+// This workflow's own roles live under WORKFLOW_DIR/roles/.
+function roleAgent(role, phase, intro, inputs) {
+  return roleAgentFrom(WORKFLOW_DIR, role, phase, intro, inputs);
+}
+// Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  const groupTask = typeof GPU_PROCESS_SETTLEMENT !== 'undefined' && GPU_PROCESS_SETTLEMENT;
+  if (groupTask) p += GPU_GROUP_INSTRUCTIONS;
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      // The standalone runtime's bounded mode terminates and settles the actual
+      // subprocess. Never race it with a Promise that abandons a live role.
+      if (groupTask || agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = groupTask ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS,  // keep an earlier per-call deadline
+          processDeadlineEpoch: Math.min(o?.processDeadlineEpoch ?? Infinity, Number(A.settlement_deadline_epoch)) }
+          : agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+        const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
-          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null.`);
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
+      // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
       const r = await Promise.race([
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
@@ -308,18 +365,22 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
+      if ((groupTask || agent.processDeadlineActive) && e
+          && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
+        log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
+        return null;
+      }
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
-        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} error (${msg}) — retrying.`);
+        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
         continue;
       }
-      log(`  [api-fault guard] ${label} failed after ${AGENT_RETRIES} attempts (${msg}) — resolving null.`);
+      log(`  [api-fault guard] ${label} still failing after ${AGENT_RETRIES} attempts (${msg}) — resolving null so the workflow degrades gracefully instead of exiting.`);
       return null;
     }
   }
   return null;
 }
-
 function expertSkillsBlock(role) {
   if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
@@ -328,22 +389,6 @@ function expertSkillsBlock(role) {
     `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate — advisory only, never ` +
     `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
-
-// Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).
-function roleAgentFrom(dir, role, phaseName, intro, inputs) {
-  const base = `You are the ${role}. PHASE=${phaseName}.
-First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phaseName}.
-Read any knowledge files it points you to under ${dir}/knowledge/.
-Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-
-## Inputs
-${cfg(inputs)}
-
-Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role);
-}
-// This dispatcher's own roles (oracle_freezer) live under WORKFLOW_DIR/roles/.
-const roleAgent = (role, phaseName, intro, inputs) => roleAgentFrom(WORKFLOW_DIR, role, phaseName, intro, inputs);
 
 // GPU semaphore: 1 GPU per lane, EXCLUSIVE. size==1 serializes lanes. (Lifted from e2e_workflow.js.)
 function makeSem(ids) {
@@ -360,9 +405,12 @@ function makeSem(ids) {
 }
 
 // PRIMARY metric of a worker (kernel_lane.js) result: its final_speedup is already the weighted number
-// when the run was workload-aligned, else the geomean. Fall back defensively.
+// when the run was workload-aligned, else the geomean. Declared weighting must remain available.
 const primSpeedup = (r) => {
   if (!r) return 0;
+  if (r.workload_aligned === true) {
+    return Number.isFinite(r.final_weighted) && r.final_weighted > 0 ? r.final_weighted : null;
+  }
   const g = r.final_speedup != null ? r.final_speedup
           : (r.final_weighted != null ? r.final_weighted
              : (r.final_geomean != null ? r.final_geomean : 0));
@@ -407,7 +455,7 @@ if (DETECTED_GFX === 'gfx1200') {
 if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
 }
-if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && DETECTED_TARGET !== EXPECTED_TARGET) {
+if (EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' && DETECTED_TARGET !== EXPECTED_TARGET) {
   throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DETECTED_TARGET}`);
 }
 if (!Number.isFinite(DETECTED_PHYSICAL_CU_COUNT) || DETECTED_PHYSICAL_CU_COUNT <= 0) {
@@ -424,7 +472,7 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
     `detected ${DETECTED_PHYSICAL_CU_COUNT}`);
 }
 const LANE_GFX = EXPECTED_GFX || DETECTED_GFX;
-const LANE_TARGET = EXPECTED_TARGET || DETECTED_TARGET;
+const LANE_TARGET = EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' ? EXPECTED_TARGET : DETECTED_TARGET;
 const LANE_DEVICE_NAME = EXPECTED_DEVICE_NAME || DETECTED_DEVICE_NAME;
 const LANE_PHYSICAL_CU_COUNT =
   EXPECTED_PHYSICAL_CU_COUNT || DETECTED_PHYSICAL_CU_COUNT;
@@ -564,6 +612,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
     const r = await workflow({ scriptPath: WORKER }, {
       kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
+      // Preserve explicit search policy and evidence controls in every language lane.
+      ...Object.fromEntries(['optimizer', 'evolution_start', 'evolution_return_development',
+        'evolution_import_stall_sources', 'evolution_case_evidence_view',
+        'evolution_planner_case_view', 'evolution_evidence_handoff',
+        'evolution_preserve_founder_attempts',
+        'record_planner_inputs', 'case_measurement_view'].filter(key => A[key] !== undefined)
+        .map(key => [key, A[key]])),
       // This lane runs on an oracle_freezer-frozen task dir, so a GEAK_TIMING_RECEIPT is EXPECTED and
       // its absence is a real fault. The optimize/author path spreads {...A} and never sets this, so a
       // pass-through lane (and e2e, which calls this worker directly) correctly defaults to false —
@@ -585,6 +640,8 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
       // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+      // The explicit bakeoff argument object must preserve the caller's role allowance too.
+      ...(A.agent_timeout_ms != null ? { agent_timeout_ms: A.agent_timeout_ms } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
@@ -598,10 +655,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
     return { lane: l, r, speedup };
   } catch (e) {
     log(`lane ${l.key} failed: ${e && e.message ? e.message : e}`);
-    return { lane: l, r: null, speedup: 0 };
+    const failure = {lane: l.key, eval_dir: `${EVAL_DIR}/bakeoff/${l.key}`,
+      code: e && e.code || 'lane_execution_failed', message: String(e && e.message || e)};
+    return {lane: l, r: {eval_dir: failure.eval_dir, validation_status: 'unavailable', process_validated: false,
+      final_speedup: null, final_patch: '', delivery_incomplete: [failure]}, speedup: null,
+      failure};
   }
 })));
-
 // ===========================================================================
 // PHASE: Report — rank ALL candidates on the SAME frozen baseline; write table + winner.
 // Candidates are THREE classes, all scored against the one frozen input-kernel baseline:
@@ -613,6 +673,8 @@ phase('Report');
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
+  delivery_incomplete: x.r && x.r.delivery_incomplete || [],
+  ...(x.failure ? {failure: x.failure} : {}),
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
@@ -645,7 +707,8 @@ if (rejectedByGate.length) {
 }
 const winner = ranked[0] || null;
 const laneRows = cands;
-const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
+const bestSpeedup = cands.reduce((m, c) => Number.isFinite(c.speedup)
+  ? (m === null ? c.speedup : Math.max(m, c.speedup)) : m, null);
 
 // Apply instruction depends on the winner class: a lane winner is a source patch (git apply); an
 // env-tune winner is a config/env deploy (no source change — record apply_env + tuning_artifact).
@@ -672,10 +735,10 @@ const rep = await agentT(
    - The WINNER (fastest verified) and a one-paragraph rationale. All speedups are directly comparable
      because every candidate — the input-language optimize lane, each authored language, AND the tuned
      env backend — was scored against the SAME frozen input kernel.
-     NOTE: WINNER may be null — this means NO candidate beat the frozen baseline (every speedup <= 1.0x,
-     e.g. all lanes failed or were slower than the original). In that case state clearly that no
-     candidate beat the baseline and the ORIGINAL kernel is RETAINED (do not present a slower-than-1.0x
-     candidate as a "winner by default"); still list every candidate in the table for transparency.
+     WINNER may be null because results are unavailable, validation rejected a candidate, or no
+     measured candidate improved the baseline. Report the actual reason from the candidate records;
+     unavailable speedup is not a measured loss. The ORIGINAL kernel is retained when no candidate
+     is eligible; still list every candidate, including unavailable results.
 2. ${applyStep}
 
 ## Inputs
@@ -693,8 +756,7 @@ Return ONLY {report_path, applied_to_original, note} as StructuredOutput.`,
 
 log(winner
   ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
-  : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
-
+  : `Bake-off COMPLETE. No eligible measured win (best reported ${bestSpeedup === null ? "unavailable" : bestSpeedup.toFixed(2) + "x"} across ${cands.length} candidate(s)); keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
 // ---------------------------------------------------------------------------
 // PHASE: UpdateExperience — bake-off curates CENTRALLY here (its lanes run with
 // update_experience=off): the reusable lesson is the cross-language routing outcome, which
@@ -731,17 +793,7 @@ if (winner && winner.speedup > 1.0) {
 if (EVAL_DIR && LLM_STATS) {
   try {
     const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
-    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
-    await agentT(
-      `You are the file_writer. PHASE=persist_llm_stats.\n` +
-      `Do exactly two things, in order:\n` +
-      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-      '```json\n' + tlJson + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
-      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+    await agentT(persistLlmStatsPrompt(EVAL_DIR, tlJson),
       { phase: 'Report', label: 'file_writer:persist_llm_stats',
         schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) });
     const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested lane(s)' : '';

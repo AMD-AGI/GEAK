@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3]
 regimes: [both]
 status: experimental
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://www.modular.com/blog/achieving-state-of-the-art-performance-on-amd-mi355----in-just-14-days
   - https://arxiv.org/html/2511.08083v1
@@ -14,15 +14,9 @@ sources:
 
 # Mojo
 
-## TL;DR
-Mojo is **Modular's Python-superset systems language** for writing portable GPU kernels, paired with the
-**MAX** inference framework and **Mammoth** serving system. Its differentiator is **portability by
-design**: it does *not* hardcode GPU knowledge — hardware specifics live in libraries as **parameterized
-kernels** (no "magic constants" for SIMD width / tile shape), so Modular claims ~99.9% of the stack is
-architecture-agnostic and a new GPU is "a few kernels." On AMD this paid off: Modular brought MI355X
-(CDNA4) up and reached a **matmul kernel 3% faster than hipBLASLt in ~1 day / 14 days total** (vendor-
-reported, Oct 2025). The open question for AMD is *attention*: independent measurement (HipKittens paper)
-found Mojo's MHA at **~50% of peak** from LDS bank conflicts. See [status_amd.md](status_amd.md).
+Mojo is Modular's systems language with GPU programming support. Adopting it adds
+a compiler/runtime dependency that needs qualification for the target and public
+callable. See [AMD status](status_amd.md) for published examples and their scope.
 
 ## Concepts
 - **Python-superset, MLIR-backed.** Mojo compiles through MLIR; kernels are written in a Pythonic syntax
@@ -57,8 +51,7 @@ found Mojo's MHA at **~50% of peak** from LDS bank conflicts. See [status_amd.md
 ## Verify
 - Mojo docs / MAX: https://docs.modular.com/ ; reproduce the M=N=K=8192 GEMM benchmark on your MI3xx vs
   hipBLASLt before trusting the 3% claim on your stack.
-- For attention, bench Mojo MHA vs AITER/CK/Triton FA at your shapes; expect the ~50% gap unless the LDS
-  swizzle has since been fixed.
+- For attention, compare current implementations at matching shapes and numerical contracts.
 
 ## Sources
 - Modular blog "Achieving SOTA on AMD MI355 in 14 days" (matmul 3% > hipBLASLt; library-directed design;

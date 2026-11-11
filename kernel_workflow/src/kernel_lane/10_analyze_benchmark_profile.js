@@ -1,0 +1,82 @@
+// ===========================================================================
+// PHASE: Analyze + Roadmap (TechLead)
+// ===========================================================================
+// Optional immutable, caller-supplied evidence reference; the existing roles
+// check its bytes/applicability and return their normal schemas. No phase bypass.
+const PREPARED_INPUT = A.prepared_original_ref === undefined ? {}
+  : { PREPARED_ORIGINAL_REF: A.prepared_original_ref };
+phase('Analyze');
+const analysis = await agentT(
+  roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
+    WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
+    KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...RESUME_INPUT, ...PREPARED_INPUT,
+  }),
+  { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
+log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
+
+// perf_knowledge pointers resolved by the TechLead in analyze (REFERENCE ONLY; threaded to the
+// planner + engineers so they read focused op/language cards instead of the whole base). Empty when
+// no operator card applies (e.g. point-cloud HIP ops) or KERNEL_KNOWLEDGE_DIR is unset → no change.
+const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
+const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
+const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
+
+// ===========================================================================
+// PHASE: Benchmark setup (Benchmark Engineer)
+// ===========================================================================
+phase('Benchmark');
+let bench = await agentT(
+  roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
+    ANALYSIS: analysis, ...PREPARED_INPUT,
+    ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+    ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
+    ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
+  }),
+  { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
+if (EXTERNAL_OBJECTIVE) {
+  bench = await checkedExternalMeasurement(bench, CANONICAL);
+  if (!bench || !bench.external_measurement_valid) throw new Error('Original external evaluation is missing or invalid');
+  bench.baseline_per_case = bench.per_case;
+  bench.baseline_geomean_ms = null;
+}
+if (!bench || !bench.baseline_per_case || (!EXTERNAL_OBJECTIVE && (bench.reliable !== true
+    || !Array.isArray(bench.baseline_per_case) || !bench.baseline_per_case.length))) {
+  throw new Error('Benchmark setup failed: no reliable non-empty baseline recorded');
+}
+const BASELINE_PER_CASE = bench.baseline_per_case;
+const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
+log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
+
+// ===========================================================================
+// PHASE: Baseline profile (Profile Engineer)
+// ===========================================================================
+phase('Profile');
+let profileSummary = await agentT(
+  roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
+    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
+    COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...RESUME_INPUT, ...PREPARED_INPUT,
+  }),
+  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
+log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+
+// The existing runtime persists this native return and separate metrics/backend events.
+// These are completed role returns, not independent qualification or optimization results.
+if (A.prepare_only === true) {
+  if (!analysis || !bench || !profileSummary || bench.reliable !== true
+      || !Array.isArray(bench.baseline_per_case) || !bench.baseline_per_case.length)
+    throw new Error('GEAK_PREPARATION_INCOMPLETE: missing role return or reliable baseline');
+  return {
+    schema: 'geak.prepared_original/1', status: 'preparation_roles_returned', prepare_only: true,
+    optimization_started: false, search_performed: false, final_validation_performed: false,
+    roles: { setup, analysis, benchmark: bench, profile: profileSummary },
+    paths: { input: KERNEL_PATH_ORIG, workflow: WORKFLOW_DIR, eval: EVAL_DIR,
+      workspace: CANONICAL, commandment: COMMANDMENT },
+    device: { gfx: GFX, target: DEVICE_TARGET, name: SETUP_DEVICE_NAME,
+      physical_cu_count: PHYSICAL_CU_COUNT, assigned_gpu_ids: GPU_IDS },
+    scope: 'ORIGINAL preparation role returns only; caller must qualify raw source/state/device ' +
+      'evidence and successful runtime metrics/backend trace before supplying this reference.',
+  };
+}

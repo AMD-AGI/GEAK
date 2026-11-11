@@ -21,26 +21,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRuntime, selectBackend } from './run_workflow.mjs';
+import { parseArgv } from './config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GEAK_ROOT = resolvePath(HERE, '..', '..', '..');   // interface/runtime/engine -> repo root
-
-// ---------------------------------------------------------------------------
-// CLI parsing (same convention as run_workflow.mjs)
-// ---------------------------------------------------------------------------
-function parseArgv(argv) {
-  const out = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[key] = true;
-      else { out[key] = next; i++; }
-    } else out._.push(a);
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // A perfectly-conformant FAKE backend for --fake: it performs the real tool

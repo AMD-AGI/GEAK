@@ -40,6 +40,7 @@ import math
 import os
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -161,6 +162,20 @@ class _T:
     def data_ptr(self):
         return self._ptr
 
+    def untyped_storage(self):
+        return types.SimpleNamespace(data_ptr=self.data_ptr)
+
+    def contiguous(self):
+        return self  # Fake tensors have only contiguous layouts.
+
+    def view(self, dtype):
+        if dtype is not UINT8:
+            raise TypeError("fake dtype view only supports byte snapshots")
+        # The fake stores Python floats, regardless of dtype metadata. Snapshot
+        # those exact bytes; this does not model FP8/BF16 encoding or arithmetic.
+        raw = b"".join(struct.pack("<d", value) for value in self.tolist())
+        return _T((len(raw),), raw, dtype=UINT8, device=self.device)
+
     def element_size(self):
         return self.dtype.itemsize
 
@@ -189,6 +204,13 @@ class _T:
     def reshape(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
+        if -1 in shape:
+            if shape.count(-1) != 1:
+                raise ValueError("only one inferred dimension is allowed")
+            known = math.prod(s for s in shape if s != -1)
+            if not known or self.numel() % known:
+                raise ValueError("invalid inferred shape")
+            shape = tuple(self.numel() // known if s == -1 else s for s in shape)
         return _T(tuple(int(s) for s in shape), self.tolist(),
                   dtype=self.dtype, device=self.device)
 

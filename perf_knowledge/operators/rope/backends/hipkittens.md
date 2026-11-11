@@ -32,7 +32,7 @@ bandwidth. See [[languages/hipkittens]] and arXiv 2511.08083 (memory-bound "rota
 | impl | source | gens / dtypes / shapes | measured perf | when it's best |
 |---|---|---|---|---|
 | HK rotary (RoPE) | arXiv 2511.08083v1; `github.com/HazyResearch/HipKittens` | gfx950 (gfx942 validated); bf16/fp16 | **beats AITER & torch.compile 1.1–2.2× @ MI355X, Hazy Nov 2025 (academic/author-reported)** — same mem-bound class as norm | mem-bound rotary / custom fused RoPE |
-| (ref) AITER RoPE + KV-cache fusion | landscape §4; vLLM fusions | gfx942/gfx950; bf16/fp16 | production default; ROCm RoPE+KV-cache fusion pass (O1+, auto) | shipping RoPE path |
+| (ref) AITER RoPE + KV-cache fusion | [vLLM fusion passes](https://docs.vllm.ai/en/latest/design/fusions/) | gfx942/gfx950; bf16/fp16 | production default; ROCm RoPE+KV-cache fusion pass (O1+, auto) | shipping RoPE path |
 
 ## Config space / knobs (backend-specific)
 - **Vectorized load width** + **HBM-address swizzle** for conflict-free loads (the lever for a mem-bound op).
@@ -44,7 +44,7 @@ bandwidth. See [[languages/hipkittens]] and arXiv 2511.08083 (memory-bound "rota
   half-rotated (GPT-NeoX vs GPT-J) layout — must match the model's convention; validate against reference.
 
 ## Integration (how it gets used at serving time)
-- HK is positioned as **an aiter backend** per the landscape. Authoring path: build with HIPCC for
+- An authored HK kernel can be integrated through a supported call site. Authoring path: build with HIPCC for
   gfx950/gfx942 (pinned HK commit), wire the RoPE (or fused RoPE+KV) kernel via the aiter dispatch seam or a
   model call-site rebind, then **e2e-gate** against [[operators/rope/backends/aiter]] — mem-bound, so the
   e2e win is small; confirm it survives end-to-end.
@@ -72,4 +72,4 @@ hipcc --offload-arch=gfx950 ...   # pinned HK commit, RoPE micro-bench
 ## Sources
 - HipKittens — arXiv 2511.08083 (Hazy Research, Nov 2025): https://arxiv.org/abs/2511.08083 ; HTML https://arxiv.org/html/2511.08083v1
 - HazyResearch blog: https://hazyresearch.stanford.edu/blog/2025-11-09-hk ; code https://github.com/HazyResearch/HipKittens
-- AMD SOTA landscape §4 norm/rope (HK beats AITER/PyTorch 1.1–2.2× mem-bound): [[landscape/amd_sota_2026]]
+- Historical measured comparisons: [HipKittens results](../../../languages/hipkittens/perf_findings.md); use the cited paper for exact configurations.

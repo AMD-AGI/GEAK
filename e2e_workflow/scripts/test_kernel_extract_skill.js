@@ -24,6 +24,7 @@ const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
   const profile = null, strategy = null, tuning = null, history = {};
   const headQueue = [], kernelQueue = [], acceptedHeads = [], flaggedHeads = [];
   const acceptedKernels = [], pendingIntegrations = [];
+  const BASELINE_FLAGS = null, BASELINE_ENV = null, BASELINE_OVERLAY = null;
   ${carry}
   return carryState;
 `);

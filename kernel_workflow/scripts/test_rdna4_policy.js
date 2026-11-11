@@ -3,15 +3,34 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
 
+const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const wfDir = path.resolve(__dirname, '..');
 const geakRoot = path.resolve(wfDir, '..');
 const body = fs.readFileSync(path.join(wfDir, 'kernel_lane.js'), 'utf8')
   .replace(/^export const meta/m, 'const meta');
+// Native delivery exports from a real canonical repository through the host runProcess.
+const hostEnv = { ...process.env, GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@localhost',
+  GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@localhost' };
+const spawn = (cmd, args, options = {}) =>
+  spawnSync(cmd, args, { encoding: 'utf8', timeout: 10000, env: hostEnv, ...options });
 
 async function run(deviceGfx, expectedGfx = '', extras = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-rdna4-policy-'));
+  try { return await runIn(path.join(temp, 'eval'), deviceGfx, expectedGfx, extras); }
+  finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+
+async function runIn(evalDir, deviceGfx, expectedGfx, extras) {
+  fs.mkdirSync(path.join(evalDir, 'workspace'), { recursive: true });
+  fs.writeFileSync(path.join(evalDir, 'workspace', 'kernel.py'), 'VALUE = 0\n');
+  for (const args of [['init', '-q'], ['add', '-A'], ['commit', '-qm', 'ORIGINAL']]) {
+    assert.strictEqual(spawn('git', ['-C', path.join(evalDir, 'workspace'), ...args]).status, 0);
+  }
   const prompts = [];
   const logs = [];
   const {
@@ -35,8 +54,17 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       expected_target: expectedTarget,
       expected_device_name: expectedDeviceName,
       expected_physical_cu_count: expectedPhysicalCuCount,
+      ...(Object.prototype.hasOwnProperty.call(extras, 'gpuIdentityCaptureRef')
+        ? { gpu_identity_capture_ref: extras.gpuIdentityCaptureRef } : {}),
       use_expert_skills: 'true',
       use_learned_kb: 'true',
+      editable_source_paths: ['kernel.py'],
+    },
+    runProcess: async (request) => {
+      const r = spawn(request.cmd, request.args, { cwd: request.cwd, input: request.input,
+        env: { ...hostEnv, ...(request.env || {}) } });
+      return { status: r.error ? 'failed' : 'completed', code: r.status, stdout: r.stdout || '',
+        stderr: r.stderr || '', group_cleared: true, strays_killed: false, stdio_held: false };
     },
     phase: () => {},
     log: (message) => logs.push(String(message)),
@@ -48,9 +76,9 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       prompts.push({ label: options.label, prompt });
       if (options.label === 'director:setup') {
         const setup = {
-          eval_dir: '/tmp/eval',
-          workspace: '/tmp/eval/workspace',
-          baseline_dir: '/tmp/eval/baseline',
+          eval_dir: evalDir,
+          workspace: path.join(evalDir, 'workspace'),
+          baseline_dir: path.join(evalDir, 'baseline'),
           kernel_name: 'kernel',
           device_name: deviceName || 'fixture',
           baseline_frozen: true,
@@ -78,8 +106,8 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       }
       if (options.label === 'benchmark_engineer') {
         return {
-          commandment_path: '/tmp/eval/COMMANDMENT.md',
-          baseline_per_case: [{ name: 'x', latency_ms: 1 }],
+          commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
+          baseline_per_case: [{ name: 'x', latency_ms: 1 }], reliable: true,
           baseline_geomean_ms: 1,
         };
       }
@@ -107,6 +135,14 @@ function mustInclude(hay, needle, msg) {
 }
 
 (async () => {
+  for (const target of ['mi350x', 'mi355x']) {
+    const detected = await run('gfx950', 'gfx950', {
+      expectedTarget: 'unknown', deviceTarget: target,
+      deviceName: `AMD Instinct ${target.toUpperCase()}`, physicalCuCount: 256,
+    });
+    const prompt = detected.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(prompt, `- DEVICE_TARGET: ${target}`);
+  }
   const { prompts } = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', deviceName: 'AMD Radeon AI PRO R9700',
     physicalCuCount: 64, expectedTarget: 'r9700',
@@ -134,6 +170,21 @@ function mustInclude(hay, needle, msg) {
   }
   if (unknownAnalyze.includes('calibrated-r9700')) {
     throw new Error('gfx1201 architecture alone was promoted to calibrated R9700');
+  }
+  const unpinnedR9700 = await run('gfx1201', 'gfx1201', {
+    expectedTarget: 'unknown', deviceTarget: 'r9700',
+  });
+  mustInclude(unpinnedR9700.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt,
+    '- DEVICE_TARGET: r9700');
+  const unknownInstinct = await run('gfx950', 'gfx950', {
+    deviceTarget: 'unknown', budget: 1,
+    planDirections: [{ id: 'roof', title: 'Use roofline peak bandwidth', prompt: 'Reach 90% of peak' }],
+  });
+  mustInclude(unknownInstinct.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt,
+    '- ROOFLINE_STATUS: unknown_peaks');
+  // Unknown peaks stay explicit in prompts; a direction that names roofline peaks is still dispatched.
+  if (unknownInstinct.result.stopped_by !== 'budget') {
+    throw new Error(`unidentified gfx950 dropped a roofline direction: ${unknownInstinct.result.stopped_by}`);
   }
 
   const r9600d = await run('gfx1201', 'gfx1201', {
@@ -210,6 +261,8 @@ function mustInclude(hay, needle, msg) {
   if (identityDrift.logs.filter((line) => /identity telemetry differs/.test(line)).length !== 2) {
     throw new Error(`Director name/CU drift was not logged as telemetry: ${identityDrift.logs.join(' | ')}`);
   }
+  assert(!identityDrift.prompts.some((entry) => entry.prompt.includes('GPU_IDENTITY_CAPTURE_REF')),
+    'live identity path unexpectedly received a capture reference');
   await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 0, expectedTarget: 'r9700',
   }).then(
@@ -219,7 +272,90 @@ function mustInclude(hay, needle, msg) {
     },
   );
 
-  const allFiltered = await run('gfx1201', 'gfx1201', {
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-rdna4-capture-'));
+  const writeCapture = (name, gfx, marketingName, computeUnits) => {
+    const file = path.join(captureDir, name);
+    fs.writeFileSync(file, ['*******', 'Agent 1', '*******', '  Name:                    AMD EPYC',
+      '  Marketing Name:          AMD EPYC', '  Device Type:             CPU', '*******', 'Agent 2',
+      '*******', `  Name:                    ${gfx}`, `  Marketing Name:          ${marketingName}`,
+      `  Compute Unit:            ${computeUnits}`, '  Device Type:             GPU', ''].join('\n'));
+    return { path: file, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
+  };
+  const captureRef = writeCapture('mi350x.txt', 'gfx950', 'AMD Instinct MI350X', 256);
+  const captureIdentity = {
+    deviceTarget: 'mi350x', deviceName: 'AMD Instinct MI350X', physicalCuCount: 256,
+    expectedTarget: 'mi350x', expectedDeviceName: 'AMD Instinct MI350X',
+    expectedPhysicalCuCount: 256, gpuIdentityCaptureRef: captureRef,
+  };
+  const captured = await run('gfx950', 'gfx950', {
+    ...captureIdentity, deviceName: '  amd  Instinct MI350X  ',
+  });
+  const capturedSetup = captured.prompts.find((entry) => entry.label === 'director:setup').prompt;
+  mustInclude(capturedSetup, `- GPU_IDENTITY_CAPTURE_REF: ${JSON.stringify(captureRef)}`);
+  assert(!captured.logs.some((line) => /identity telemetry differs/.test(line)),
+    'equivalent captured identity was treated as drift');
+  for (const entry of captured.prompts.filter((item) => item.label !== 'director:setup')) {
+    for (const value of ['GPU_IDENTITY_CAPTURE_REF', captureRef.path, captureRef.sha256]) {
+      assert(!entry.prompt.includes(value), `capture reference leaked into ${entry.label}`);
+    }
+  }
+  for (const invalidRef of [
+    null, [], captureRef.path, {},
+    { path: captureRef.path }, { sha256: captureRef.sha256 },
+    { ...captureRef, extra: true },
+    { ...captureRef, path: 'captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp/../captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp//captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp/./captured-gpu-identity.json' },
+    { ...captureRef, sha256: captureRef.sha256.toUpperCase() },
+    { ...captureRef, sha256: 'ab'.repeat(31) },
+    { ...captureRef, sha256: 'z'.repeat(64) },
+  ]) {
+    await assert.rejects(run('gfx950', 'gfx950', {
+      ...captureIdentity, gpuIdentityCaptureRef: invalidRef,
+    }), /^Error: invalid GPU identity capture reference/,
+    `malformed capture reference was accepted: ${JSON.stringify(invalidRef)}`);
+  }
+  for (const [expectedGfx, incompleteIdentity] of [
+    ['', { expectedTarget: 'unknown' }],
+    ['not-a-gfx', { expectedTarget: 'unknown' }],
+    ['gfx950', { expectedTarget: '' }],
+    ['gfx950', { expectedTarget: 'not-a-target' }],
+    ['gfx950', { expectedDeviceName: '  ' }],
+    ['gfx950', { expectedPhysicalCuCount: 0 }],
+    ['gfx950', { expectedPhysicalCuCount: 1.5 }],
+    ['gfx950', { expectedPhysicalCuCount: '256' }],
+    ['gfx950', { expectedPhysicalCuCount: Number.MAX_SAFE_INTEGER + 1 }],
+  ]) {
+    await assert.rejects(run('gfx950', expectedGfx, {
+      ...captureIdentity, ...incompleteIdentity,
+    }), /^Error: captured GPU identity requires complete expected identity/);
+  }
+  for (const [directorGfx, directorIdentity] of [
+    ['gfx942', {}],
+    ['gfx950', { deviceTarget: 'mi355x', deviceName: 'AMD Instinct MI355X', physicalCuCount: 128 }],
+    ['gfx950', { physicalCuCount: 0 }],
+    ['gfx950', { omitGfx: true, omitTarget: true }],
+  ]) {
+    const verified = await run(directorGfx, 'gfx950', { ...captureIdentity, ...directorIdentity });
+    const analyze = verified.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(analyze, '- GFX: gfx950', 'verified capture ISA was not used');
+    mustInclude(analyze, '- PHYSICAL_CU_COUNT: 256', 'verified capture CU count was not used');
+  }
+  for (const [badRef, message] of [
+    [{ ...captureRef, sha256: 'cd'.repeat(32) }, /native captured GPU identity verification failed/],
+    [{ path: path.join(captureDir, 'absent.txt'), sha256: captureRef.sha256 }, /native captured GPU identity verification failed/],
+    [writeCapture('cu0.txt', 'gfx950', 'AMD Instinct MI350X', 0), /native captured GPU identity verification failed/],
+    [writeCapture('mi355x.txt', 'gfx950', 'AMD Instinct MI355X', 256), /native captured GPU identity differs from expected identity/],
+    [writeCapture('cu128.txt', 'gfx950', 'AMD Instinct MI350X', 128), /native captured GPU identity differs from expected identity/],
+    [writeCapture('gfx942.txt', 'gfx942', 'AMD Instinct MI300X', 304), /native captured GPU identity differs from expected identity/],
+  ]) {
+    await assert.rejects(run('gfx950', 'gfx950', { ...captureIdentity, gpuIdentityCaptureRef: badRef }), message,
+      `unverifiable or different capture was accepted: ${badRef.path}`);
+  }
+  fs.rmSync(captureDir, { recursive: true, force: true });
+
+  const rooflineOnly = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'unknown',
     budget: 1,
     planDirections: [{
@@ -227,11 +363,9 @@ function mustInclude(hay, needle, msg) {
       specialty: 'memory', focus_files: ['kernel.py'],
     }],
   });
-  if (allFiltered.result.stopped_by !== 'all_directions_filtered_unknown_peaks') {
-    throw new Error(`all-filtered plan reported ${allFiltered.result.stopped_by}`);
-  }
-  if (allFiltered.logs.some((line) => /TechLead chose to stop/.test(line))) {
-    throw new Error('harness filtering was still attributed to the TechLead');
+  if (rooflineOnly.result.stopped_by !== 'budget'
+      || rooflineOnly.logs.some((line) => /unknown peaks/.test(line))) {
+    throw new Error(`uncalibrated gfx1201 filtered its roofline direction: ${rooflineOnly.result.stopped_by}`);
   }
 
   const partlyFiltered = await run('gfx1201', 'gfx1201', {
@@ -330,8 +464,10 @@ function mustInclude(hay, needle, msg) {
   }
   const apiReference = fs.readFileSync(
     path.join(geakRoot, 'docs/reference/api-reference.md'), 'utf8');
-  mustInclude(apiReference, 'expected_gfx: \"gfx950\"');
-  mustInclude(apiReference, 'expected_target: \"unknown\"');
+  const examples = [...apiReference.matchAll(/^```json\s*\n([\s\S]*?)^```/gm)]
+    .map(match => JSON.parse(match[1]));
+  assert.ok(examples.some(example => example.expected_gfx === 'gfx950'
+    && example.expected_target === 'mi355x'), 'the serving example pins both ISA and product');
   const runE2eDocs = fs.readFileSync(
     path.join(geakRoot, 'interface/run_e2e.md'), 'utf8');
   mustInclude(runE2eDocs, 'GEAK_GPU_IDENTITY_JSON');

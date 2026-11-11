@@ -1,0 +1,4 @@
+# Built from src/ parts by scripts/build_workflows.mjs; edit the parts, not these files.
+kernel_workflow/kernel_lane.js linguist-generated=true
+kernel_workflow/kernel_workflow.js linguist-generated=true
+e2e_workflow/e2e_workflow.js linguist-generated=true

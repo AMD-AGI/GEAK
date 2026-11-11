@@ -18,8 +18,7 @@
 #
 #   sbatch — the original submit-and-wait path (ci/dispatch/slurm_submit.sh),
 #            kept verbatim as a fallback for when the cluster is drainable.
-#            A pristine copy of all three original scripts also lives in
-#            ci/dispatch/legacy_sbatch/.
+#            The original three scripts are in git history (upstream bf067427).
 #
 # Selection:
 #   ci/dispatch/run_matrix.sh smoke            # tier==smoke models (the L1 smoke set)

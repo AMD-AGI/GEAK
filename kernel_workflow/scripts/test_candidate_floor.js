@@ -84,14 +84,15 @@ ok(knobs({ progress_delta: 'nonsense' }).PROGRESS_DELTA === o.MIN_IMPROVE,
 console.log('\n# nothing was left behind on a hard-coded 1.0');
 // A missed site means a lowered floor applies to only part of the pipeline -- e.g. the engineer saves
 // a 0.7x patch that the `verified` filter then drops, which looks exactly like the stall it removes.
-ok(/Save best_patch\.diff[^\n]*geomean>\$\{CANDIDATE_FLOOR_TXT\}/.test(src),
+ok(/Save best_patch\.diff[^\n]*: "when COMMANDMENT's primary speedup exceeds " \+ CANDIDATE_FLOOR_TXT\}/.test(src),
    'the Optimize prompt tells the engineer to save above CANDIDATE_FLOOR');
 ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup\(eng\) > CANDIDATE_FLOOR\)/.test(src),
    'the harvest shortcut suppresses against CANDIDATE_FLOOR');
 // Exercise the real shortcut: invalid or unconfirmed experiments must reach Verify
 // even when an engineer returned zero speedup and an empty patch (#480).
 const shortcut = src.match(/const trustworthyBelowBaseline = ([\s\S]*?);/)[1];
-const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', `return ${shortcut};`);
+const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', 'EXTERNAL_OBJECTIVE = null', 'HAS_WORKLOAD = false',
+  `return ${shortcut};`);
 for (const eng of [
   { status: 'invalid_measurement', measurement_valid: false, speedup_geomean: 0 },
   { status: 'invalid_measurement', measurement_valid: true, speedup_geomean: 0 },
@@ -102,8 +103,32 @@ for (const eng of [
 }
 ok(maySkip({ status: 'partial', measurement_valid: true, speedup_geomean: 1 }, 1,
            e => e.speedup_geomean), 'a valid measured no-op can still skip Verify');
-ok(/says\(r\.ver\.correctness, 'pass'\) && primSpeedup\(r\.ver\) > CANDIDATE_FLOOR/.test(src),
-   'the verified filter admits against CANDIDATE_FLOOR');
+const external = { kind: 'external_primary', primary_regime: 'extend' };
+ok(!maySkip({ status: 'partial', measurement_valid: true, development_geomean_speedup: 1 }, 1,
+            () => null, external), 'external mode: an unchecked reading is sent to Verify');
+ok(maySkip({ status: 'partial', measurement_valid: true, external_measurement_valid: true }, 1,
+           () => 1, external), 'external mode: a checked measured no-op can still skip Verify');
+const verifiedFilter = src.match(/const verified = clean\.filter\(([\s\S]*?)\);/);
+// The filter applies the round's named qualification predicate; replay both real statements.
+const qualifiedPredicate = src.match(/const isQualified = [\s\S]*?;\n/);
+ok(!!verifiedFilter && !!qualifiedPredicate, 'the complete verified filter is available for a behavioral check');
+if (verifiedFilter && qualifiedPredicate) {
+  const filter = new Function('clean', 'evo', 'CANDIDATE_FLOOR', 'primSpeedup', 'says', 'EXTERNAL_OBJECTIVE = null',
+    `${qualifiedPredicate[0]}${verifiedFilter[0]} return verified;`);
+  const candidate = speed => ({ver: {status: speed <= 1 ? 'regression' : 'verified', correctness: 'pass', verified_geomean: speed}});
+  const candidates = [candidate(0.8), candidate(1), candidate(1.2),
+    {ver: {status: 'regression', correctness: 'pass', verified_geomean: 1.4}}];
+  const admitted = (evo, floor) => filter(candidates, evo, floor,
+    v => v.verified_geomean, (a, b) => a === b).map(r => r.ver.verified_geomean);
+  ok(JSON.stringify(admitted(null, 1)) === '[1.2]', 'ordinary verified filter keeps the exact floor boundary');
+  ok(JSON.stringify(admitted(null, 0.5)) === '[0.8,1,1.2]', 'ordinary filter honors a lowered floor');
+  ok(JSON.stringify(admitted({}, 1)) === '[1.2]', 'EVO qualifies candidates with the same floor as greedy');
+  ok(JSON.stringify(admitted({}, 0.5)) === '[0.8,1,1.2]', 'EVO tracks valid regressions at a lower floor, never a mislabeled gain');
+  ok(filter(candidates, {}, 0.5, v => v.verified_geomean, (a, b) => a === b, external).length === 1,
+    'external regression qualification is unchanged');
+}
+ok(/if \(trustworthyBelowBaseline\) \{/.test(src) && !/trustworthyBelowBaseline && !evo/.test(src),
+   'the trusted below-floor shortcut applies in both modes');
 
 // `${1.0}` stringifies to "1", which would silently reword a prompt that has always said
 // "geomean>1.0". The default run must render byte-identically.
@@ -112,7 +137,7 @@ ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfu
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
 console.log('\n# the commit gate is NOT loosened by any of this');
-ok(/const improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
+ok(/(?:const|let) improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
    'banking still requires beating cumulative by MIN_IMPROVE');
 ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');

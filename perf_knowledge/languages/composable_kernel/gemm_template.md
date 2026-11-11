@@ -69,7 +69,8 @@ Interwave, 16×16 MFMA.
 ## Pitfalls
 - **`mfma_16x16` often beats `32x32`** on MI300X even at large sizes (power-limited clock — see
   [../asm_mfma/mfma_intrinsics.md](../asm_mfma/mfma_intrinsics.md)). Test both; don't default to 32×32.
-- Sub-128-bit `AK1/BK1` silently halves bandwidth. Always size to ≥128 bit/load.
+- `AK1/BK1` affects vectorization and packing. Check alignment and supported shapes;
+  narrower loads do not imply a universal bandwidth penalty.
 - Non-divisible M/N/K → add `GemmSpecialization::MNKPadding` (small perf cost) or `IsSupportedArgument`
   fails.
 - Growing the tile past VGPR/AGPR headroom → spills / `v_accvgpr` spam → throughput collapses to a

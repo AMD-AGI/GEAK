@@ -1,216 +1,225 @@
-# Setup — running GEAK on the codex CLI
+# Set up the GEAK runtime
 
-> The runtime in this directory is **self-contained and has zero npm dependencies** (Node built-ins
-> only). After a `git pull` you only need the CLI installed and a couple of environment variables.
+GEAK's standalone Node runtime in `interface/runtime/engine/` runs the JavaScript
+workflows and dispatches each agent call to the configured Claude or Codex CLI.
+The runtime uses Node built-ins and has no npm dependencies of its own.
 
-The orchestration engine that runs GEAK's `.js` workflows lives in `interface/runtime/engine/`.
-There is nothing to install or configure beyond the CLI and one key — no `config.toml`, no
-`CODEX_HOME`, no setup script. All commands below assume you are at the **repo root**.
+The standard external command is unchanged:
 
----
+```bash
+python3 interface/run_e2e.py handoff.json result.json
+```
 
-## How a key selects codex and configures its provider
+This two-JSON entrypoint always uses the standalone runtime. Claude is the default
+agent unless an explicit profile/backend or unambiguous provider configuration
+selects another agent. An omitted `optimizer` selects `evo`; a handoff containing
+`"optimizer": "greedy"` selects the greedy policy in the same kernel worker.
+See [the external contract](../run_e2e.md) for handoff and result fields.
 
-codex's provider is configured **automatically** — no hand-written `config.toml`, no `CODEX_HOME`,
-no provider to pick. Setting the key also **selects codex as the backend**, so you do not even need
-`GEAK_AGENT_BACKEND=codex`. When launching codex the runtime resolves, first match wins, and emits
-`-c model_providers.geak_auto.*` overrides:
+For EVO, `evolution_return_development` defaults to `true`: after normal
+engineering and evaluation, one concrete unmeasured development attempt can be
+retained when there is no measured development source to return. This is source
+retention, with correctness and promotion still decided by verification.
+Explicit `false` disables the fallback. The E2E handoff also forwards
+`evolution_import_stall_sources`, `record_planner_inputs`, and
+`case_measurement_view`; the nested worker validates their task requirements.
 
-1. An explicit **`OPENAI_BASE_URL`** (or the selected model's `base_url`) → use it as-is (any
-   OpenAI-compatible gateway).
-2. Otherwise **pick by which key is non-empty**: `GEAK_AMDKEY` → AMD gateway, `OPENAI_API_KEY` → official
-   OpenAI.
+## Select the release checkout
 
-The auto-selected provider carries its own **`default_model`** (used when `GEAK_CODEX_MODEL` is
-unset); both are currently `gpt-5.6-sol`. Endpoint and model id live in the same entry on purpose: an
-id is only valid on its own endpoint.
+For an installation managed by Hyperloom, select the release through its existing
+GEAK checkout configuration:
 
-The AMD gateway authenticates with the `Ocp-Apim-Subscription-Key` header — **only** that header; a
-bare Bearer token gets a 401. The runtime attaches it for you.
+```bash
+export GEAK_REF=feature/evo-reviewed-release-20261110
+```
 
-### Why the AMD key is `GEAK_AMDKEY` and the OpenAI ones are not prefixed
+Run the existing installer/update path with that setting. For a manually managed
+checkout, check out the same branch before installing it. The Python package is
+still named `geak`, and the entrypoint remains `interface/run_e2e.py`; no separate
+EVO package or new command-line flags are required.
 
-GEAK's usual caller is hyperloom, whose standard way to configure a deployment is a `.env` file — and
-that file is filtered. `common/env_safety.py` admits a name only if it is in `DOTENV_EXACT_ALLOWLIST`
-or starts with a `DOTENV_PREFIX_ALLOWLIST` prefix. `"GEAK_"` is one of those prefixes, so any name
-GEAK invents for itself gets through without asking hyperloom to change anything. A bare `AMDKEY` is
-in neither list: it is dropped with a single line of stderr (`Preflight: WARNING — ignoring
-unsupported .env key AMDKEY`), while `GEAK_AGENT_BACKEND=codex` beside it *is* admitted. The result
-is the worst shape available — codex selected, no key, no provider overrides emitted, and a failure
-that only surfaces at the first agent call.
+Keep the full checkout and point `GEAK_ROOT` and `GEAK_E2E_RUNNER` at the same
+build. The runner resolves its workflow files relative to its own location, so a
+stale runner path still uses the old checkout even if `GEAK_ROOT` changes.
+GEAK's package bootstrap leaves a nonempty `GEAK_HOME` untouched; setting
+`GEAK_REF` alone does not switch such a directory.
 
-`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_CUSTOM_HEADERS` are left alone on purpose. They are
-already in that exact allowlist, so a prefix buys nothing; they are ecosystem-standard names; and
-renaming them would silently move every environment that already exports `OPENAI_API_KEY` back onto
-claude.
+All commands below assume the selected repository root is the working directory.
 
-None of this applies to a plain `export` in the launching shell. Both of hyperloom's file-based
-loaders only fill a name that is *absent* from `os.environ`, so an ambient variable is never filtered
-— the allowlist governs the `.env` route alone.
+## Install prerequisites
 
-### The selection rule is about the shape of the whole credential environment
+Install GEAK's Python dependencies from the selected checkout with the existing
+`pip install .` path. No EVO extra is needed. The Python distribution does not
+replace the full checkout or install every agent CLI and workload dependency.
+If the checkout and agent CLI are already provisioned, `GEAK_SKIP_BOOTSTRAP=1`
+disables GEAK's best-effort clone/Claude installation hook during installation.
 
-Not "is this key present". A key selects its backend only while **no other backend's credentials are
-also set**:
+The runtime requires Node 18 or later. For the Codex setup below, use Node 20 or
+later and install the CLI separately:
 
-| Environment | Runs |
+```bash
+node --version
+npm install -g @openai/codex@0.146.1
+codex --version
+```
+
+For Claude, install the Claude Code CLI and make `claude` available on `PATH`, or
+set `GEAK_CLAUDE_BIN` to its executable. Configure authentication for the selected
+CLI and endpoint. GPU, serving-backend, model, profiler, and benchmark-client
+requirements remain those of the workload; see the
+[installation guide](../../docs/install/install.md).
+
+## Select the agent and model
+
+For the Python entrypoint, use environment variables. It does not accept Node's
+`--agent`, `--profile`, or `--model` flags.
+
+| Environment setting | Effect |
 | --- | --- |
-| only `GEAK_AMDKEY` or `OPENAI_API_KEY` | **codex** |
-| only Anthropic-side (any of `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`) | claude |
-| **both sides set** | claude (`default_profile`) |
-| nothing set | claude |
+| `GEAK_AGENT_PROFILE` | Select a registry profile containing an agent and optional model. |
+| `GEAK_AGENT_BACKEND` | Select an agent explicitly; overrides a profile's agent. |
+| `GEAK_MODEL` | Select a registry model; overrides a profile's model. |
+| `GEAK_AGENT_AUTO=0` | Disable credential-based agent selection. Explicit selections still apply. |
 
-Declining to guess when both are set protects a running claude deployment: otherwise anyone who
-exports `GEAK_AMDKEY` silently replaces the existing claude path, which is painful to diagnose. Falling
-back to claude when nothing is set is deliberate too — in that environment the claude CLI is probably
-authenticated some other way (an already-logged-in CLI, Bedrock). This matches hyperloom
-`common/llm_config.py`'s `is_openai_only()` / `is_anthropic_only()`.
+When no profile or backend is selected, the shipped registry uses this rule:
 
-To force codex in an environment that has both, pass `--agent codex` explicitly or set
-`GEAK_AGENT_BACKEND=codex`. `GEAK_AGENT_AUTO=0` switches key-based selection off entirely (falling
-back to the registry's `default_profile`, i.e. claude).
-
----
-
-## Install the codex CLI
-
-Do not assume it is already present.
-
-```bash
-# 1) Node.js v20+ (codex needs it)
-node -v        # no node, or < 20: install Node 20+ (nvm / system package manager / nodejs.org)
-
-# 2) install the codex CLI -- pin 0.146.1 (0.147 is incompatible with gateways)
-npm i -g @openai/codex@0.146.1
-#   no write access to /usr/local? use a user-level prefix:
-#   npm config set prefix "$HOME/.npm-global"
-#   export PATH="$HOME/.npm-global/bin:$PATH"      # worth persisting in ~/.bashrc
-#   npm i -g @openai/codex@0.146.1
-
-# 3) verify
-codex --version        # expect 0.146.1
-```
-
-## Step 1 — pick a provider by setting its key
-
-```bash
-# AMD gateway (adds the Ocp-Apim-Subscription-Key header + llm-api.amd.com/Unified)
-export GEAK_AMDKEY="<32-hex subscription key>"
-# its certificate is publicly trusted -- no SSL_CERT_FILE needed
-
-# or -- official OpenAI (public CA; no SSL_CERT_FILE needed)
-# export OPENAI_API_KEY="sk-....."
-```
-
-`GEAK_CODEX_MODEL` is **optional**: unset, the provider's `default_model` is used (`gpt-5.6-sol` on
-both). When overriding it, remember an id is only valid on its own endpoint — the AMD gateway serves
-`gpt-5.6-sol` / `-terra` / `-luna` but **not** the suffixless `gpt-5.6`, and which ids an official
-account can use depends on its entitlement.
-
-To use official OpenAI's **suffixless `gpt-5.6`** (which exists only on that endpoint), pin the
-profile: `--profile codex-gpt56` for a single kernel, `GEAK_AGENT_PROFILE=codex-gpt56` for e2e. A
-pinned model brings its own `base_url` and `OPENAI_API_KEY` and outranks key-based auto-selection, so
-a stray `GEAK_AMDKEY` in the environment will not move the run onto the gateway. This combination is
-**untested here** (no official key on hand); if your account returns 404/400, fall back to
-`--profile codex-openai` with `GEAK_CODEX_MODEL=<an id you can use>`.
-
-> On the AMD gateway the **gpt family works over both protocols** (`/v1/responses` including
-> streaming, and `/v1/chat/completions` — both measured 200), but the **claude family does not answer
-> over the OpenAI protocol**: `claude-opus-4-8` / `-4-1` / `Claude-Sonnet-4.5` / `claude-sonnet-5` all
-> return 500 on `/v1/chat/completions` and fail to complete on `/v1/responses` (re-measured
-> 2026-09-15). That is why the registry pins no claude model.
->
-> This is a *protocol* limit, not a model one, and the asymmetry is worth knowing: the same
-> `claude-opus-4-8` answers 200 over the gateway's native **Anthropic** `/v1/messages` endpoint. So a
-> claude model on this gateway is reachable from GEAK's baseline path (Claude Code, configured with
-> `ANTHROPIC_BASE_URL` + `ANTHROPIC_CUSTOM_HEADERS`) but not from this runtime, which drives codex
-> over the OpenAI protocol. Use gpt ids here.
-
-## Step 2 — run
-
-The key from step 1 has already selected codex, so just run it.
-
-```bash
-# only needed to override auto-selection, e.g. to go back to claude:
-# export GEAK_AGENT_BACKEND=claude
-
-# e2e (whole-model throughput): a JSON describes the run. run_e2e.py takes the path as its first
-# argument and never hardcodes a name -- its usage string calls it a handoff.
-# Fields and a full example: interface/run_e2e.md
-python3 interface/run_e2e.py run_spec.json result.json
-
-# single kernel:
-node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
-  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
-```
-
-## Knobs
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `GEAK_CODEX_MODEL` | the provider's `default_model` (`gpt-5.6-sol`) | Model id. Endpoint-specific — see step 1. |
-| `GEAK_CODEX_EFFORT` | `xhigh` | Thinking level. |
-| `GEAK_AGENT_PROFILE` / `--profile` | — | Pin an `(agent, model)` combo including its endpoint. |
-| `GEAK_AGENT_BACKEND` / `--agent` | — | Pin the agent only; the model still resolves by key. |
-| `GEAK_AGENT_AUTO` | `1` | `0` disables key-based backend selection. |
-| `GEAK_CODEX_AUTOCONFIG` | `1` | `0` disables provider auto-config (codex then falls back to its own `~/.codex/config.toml`). |
-| `GEAK_CODEX_EXTRA_ARGS` | — | Raw `-c key=value` overrides passed to codex; wins over auto-config. |
-| `OPENAI_BASE_URL` | — | Any OpenAI-compatible gateway; wins over key-based selection. |
-
-**Thinking level is maxed out by default.** codex's own scale is `none` / `low` / `medium` / `high` /
-`xhigh` and has **no `max`** — `xhigh` *is* its top setting, so the runtime emits
-`-c model_reasoning_effort=xhigh`. `GEAK_CODEX_EFFORT=max` is still accepted and translates to
-`xhigh` (the same mapping as hyperloom's `resolve_codex_reasoning_effort`); any other off-scale value
-is rejected up front rather than passed through to codex. To pin it explicitly instead, use
-`GEAK_CODEX_EXTRA_ARGS="-c model_reasoning_effort=high"`.
-
-## Troubleshooting
-
-| Symptom | Cause |
+| Credential environment | Agent |
 | --- | --- |
-| `401` | key empty or invalid |
-| `404` on the model | `GEAK_CODEX_MODEL` not served by that endpoint, or not Responses-API-capable |
-| TLS error | a private intranet gateway needs `SSL_CERT_FILE` (neither official OpenAI nor the AMD gateway does) |
+| `GEAK_AMDKEY` or `OPENAI_API_KEY`, with no Anthropic-side configuration | Codex |
+| Anthropic-side configuration only | Claude |
+| Both sides configured | Claude |
+| Neither side configured | Claude |
 
-## Verifying
+Anthropic-side configuration includes `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN`. Selecting a CLI does not
+establish that its authentication or endpoint is usable.
+
+`GEAK_MODEL` names an entry in `engine/registry.json`. To specify a raw model ID,
+use `GEAK_CLAUDE_MODEL` or `GEAK_CODEX_MODEL` with the corresponding agent. A model
+pinned by a registry selection takes precedence over the backend-specific model
+variable. `GEAK_REGISTRY` can select a custom registry.
+
+For example, to keep an E2E run on Claude even when another provider key is present:
 
 ```bash
-# is the runtime itself sound? no network, no GPU, no key required
-node interface/runtime/engine/selftest.mjs                          # expect 105/105
+export GEAK_AGENT_BACKEND=claude
+python3 interface/run_e2e.py handoff.json result.json
+```
 
-# can codex actually drive GEAK, and has GEAK stayed inside the contract?
+## Preserve Claude configuration
+
+The standalone Claude backend honors the existing GEAK environment knobs:
+
+| Variable | Effect |
+| --- | --- |
+| `GEAK_CLAUDE_BIN` | Claude executable. |
+| `GEAK_CLAUDE_MODEL` | Claude model ID. |
+| `GEAK_CLAUDE_SETTINGS` | Settings JSON or settings-file path passed as one `--settings` argument. |
+| `GEAK_CLAUDE_EFFORT` | Forward `low`, `medium`, `high`, `xhigh`, or `max` through `--effort`. |
+| `GEAK_CLAUDE_CONFIG_DIR` | Seeded Claude configuration directory; when nonempty, overrides the child's `CLAUDE_CONFIG_DIR`. Otherwise the inherited `CLAUDE_CONFIG_DIR` or CLI default applies. |
+
+The legacy `ultracode` effort value is not passed as a CLI effort. Workflow
+orchestration is provided by GEAK's Node runtime. Existing provider environment
+variables remain available to the child CLI; use values supported by that CLI
+build and endpoint.
+
+## Configure the Codex provider
+
+The shipped registry can configure Codex with command-line provider overrides.
+With auto-configuration enabled, provider resolution uses:
+
+1. An explicit `OPENAI_BASE_URL`, or the selected registry model's `base_url`.
+2. Otherwise, the first configured provider key in registry order:
+   `GEAK_AMDKEY` for the AMD gateway, then `OPENAI_API_KEY` for OpenAI.
+
+For example, configure one provider in the launching environment:
+
+```bash
+export OPENAI_API_KEY="<provider key>"
+# Or, for the AMD gateway configured in the registry:
+# export GEAK_AMDKEY="<subscription key>"
+```
+
+The AMD entry adds the `Ocp-Apim-Subscription-Key` header using `GEAK_AMDKEY`.
+`OPENAI_CUSTOM_HEADERS` can supply a JSON map from header names to environment
+variable names. Endpoint, authentication, model availability, and certificate
+trust must match the deployment; the registry is configuration, not a service
+availability guarantee.
+
+The `GEAK_` prefix lets `GEAK_AMDKEY` use Hyperloom's GEAK environment namespace.
+Keep the established `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and
+`OPENAI_CUSTOM_HEADERS` names when using that provider configuration. Ensure the
+chosen variables reach the process that launches GEAK.
+
+| Variable | Default or effect |
+| --- | --- |
+| `GEAK_CODEX_BIN` | Codex executable; defaults to `codex`. |
+| `GEAK_CODEX_MODEL` | Raw model ID. If unset, an automatically selected provider supplies its registry default. |
+| `GEAK_CODEX_EFFORT` | Defaults to `xhigh`; accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max` as an alias for `xhigh`. |
+| `GEAK_CODEX_AUTOCONFIG` | Defaults to `1`; `0` leaves provider selection to Codex's own configuration. |
+| `GEAK_CODEX_EXTRA_ARGS` | Whitespace-separated CLI arguments appended after generated overrides. Shell quoting is not parsed. |
+| `OPENAI_BASE_URL` | Explicit endpoint, taking precedence over provider-key lookup. |
+
+A `model_provider=` override in `GEAK_CODEX_EXTRA_ARGS` suppresses generated
+provider configuration. A `model_reasoning_effort=` override there takes
+precedence over `GEAK_CODEX_EFFORT`. Use a custom registry when arguments need
+embedded whitespace. Choose a model ID supported by the selected endpoint's
+Responses API.
+
+## Run a standalone kernel workflow
+
+The Node CLI retains its existing flags. They select the runtime backend and are
+separate from the workflow arguments in the JSON file:
+
+```bash
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+  --agent codex --args-file /absolute/path/run-args.json \
+  --result-file /absolute/path/result.json
+```
+
+Node's `--agent`, `--profile`, `--model`, and `--registry` options override their
+corresponding environment settings. For E2E integration, keep using
+`run_e2e.py handoff.json result.json` with environment configuration. See the
+[EVO run guide](../../docs/evo/stock-workflow.md) for kernel arguments, budgets,
+and archive behavior.
+
+## Troubleshoot and verify
+
+| Symptom | Check |
+| --- | --- |
+| Agent executable cannot be found | `PATH` and the selected `GEAK_CLAUDE_BIN` or `GEAK_CODEX_BIN`. |
+| Authentication error | Provider key, header mapping, and selected endpoint. |
+| Model rejected | Raw model ID, registry model selection, and endpoint support. |
+| TLS error | Certificate trust required by the deployment. |
+| Unexpected agent | Explicit profile/backend settings and both sides of the credential environment. |
+| Old workflow behavior after an update | Actual checkout revision and the invoked `GEAK_E2E_RUNNER` path. |
+
+The runtime self-test does not need an agent CLI, credentials, network, or GPU:
+
+```bash
+node interface/runtime/engine/selftest.mjs
+```
+
+The conformance tool checks backend behavior and workflow compatibility:
+
+```bash
 node interface/runtime/engine/conformance.mjs --profile codex
-#   --fake         self-check the harness with no CLI at all
-#   --audit-only   run only the static contract-drift audit (no CLI needed)
-#   --quick        skip the concurrency probe
-#   --geak-root D  point the audit at another tree
 ```
 
-A failing *probe* names the requirement it violated. The **R-items** are what the backend contract
-asks of any CLI — the probes and `registry.json` refer to them by name:
+Use `--fake` to check the conformance harness without an agent CLI, or
+`--audit-only` for its static workflow-contract audit. A live probe requires the
+selected CLI and provider configuration. The backend requirements are:
 
-| # | Requirement |
-|---|---|
-| R1 | **Structured output.** Nearly every `agent()` call carries a schema. A *native* JSON/schema mode is used where it exists; otherwise `schema.mjs` extract + retry, whose failure rate has to be measured. |
-| R2 | **Headless one-shot.** One command runs the full agentic loop, exits, and leaves the final answer cleanly on stdout. |
-| R3 | **Auto-approval + sandbox.** Roles write outside cwd and run `hipcc` / `rocprof` / `git`; codex's default sandbox blocks both. |
-| R4 | **Per-command timeout.** A build or bench runs minutes to hours, so any built-in cap must be raisable. |
-| R5 | **Context window.** Largest single prompt is role + knowledge + source, ≈16K tokens and up (63KB `kernel_extractor` is the worst case). |
-| R6 | **Provider auth / endpoint.** Env-nameable base_url and key — a same-model-different-CLI comparison needs both pointed at one endpoint. |
-| R7 | **cwd / absolute paths.** The CLI honours cwd and can do FS work on absolute paths outside it (tied to R3). |
+| Requirement | Purpose |
+| --- | --- |
+| R1: Structured output | Return results that GEAK can extract and validate against each agent schema. |
+| R2: Headless invocation | Complete a one-shot agent call and return its answer on stdout. |
+| R3: Execution permissions | Permit the source edits and build/profiling commands required by the workload. |
+| R4: Command timeouts | Support the build and benchmark durations required by the workload. |
+| R5: Context capacity | Accommodate role instructions, knowledge, source, and task context. |
+| R6: Provider configuration | Accept the selected endpoint and authentication. |
+| R7: Working directory and paths | Honor the requested working directory and absolute task paths. |
 
-R1 and R3 are the blocking pair: unsolved, no CLI finishes a single round.
-
-A failing *audit* is the drift detector, not a backend problem: GEAK has grown past what this runtime
-supports. Implement the missing capability first, *then* move the baseline constant in
-`conformance.mjs` — never the other way round, or parity silently stops meaning anything.
-
-## What each file is
-
-Two files, then a directory:
-
-- **`SETUP.md`** — this file: how to get codex running.
-- **`../run_e2e.py`** — the programmatic entry point; picks native Claude Code vs this runtime from
-  the environment.
-- **`engine/`** — the orchestration engine. See [`engine/README.md`](engine/README.md) for what each
-  file in it does.
+A failed static audit indicates a mismatch between workflow requirements and
+runtime capabilities. Resolve that mismatch before updating the audit baseline.
+See [the engine guide](engine/README.md) for the runtime's component files.

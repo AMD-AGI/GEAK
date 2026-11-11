@@ -31,8 +31,9 @@ dedicated **scale pipeline (GR → LW → LR)** and the 16-cycle scaled MFMA (ci
 |---|---|---|---|---|
 | Gluon `a4w4` | `ROCm/gfx950-gluon-tutorials:kernels/gemm/a4w4`; Gluon GEMM tutorial | gfx950; MXFP4 (a4w4); 256×256×256 tile; 4096×4096×32768 | **5255 TFLOPS @ 92.41% MFMA eff** @ MI355X gfx950, ROCm 7.0, AMD-measured, 2026 | peak MXFP4 GEMM on CDNA4 with manual scheduling |
 
-MXFP4 GEMMs are ~62% of Llama2-70B e2e cost, so this ceiling matters for FP4 inference; it is the SOTA MXFP4
-GEMM cell in [[landscape/amd_sota_2026]].
+For the tutorial progression and measurement scope, see the
+[Gluon GEMM guide](../../../languages/gluon/gemm_cookbook.md). Its MFMA-efficiency
+percentage is not a datasheet-peak fraction or a universal workload cost share.
 
 ## Config space / knobs
 - **Tile**: `256×256×256` (M×N×K) for a4w4 — same skeleton, larger `BLOCK_K`.

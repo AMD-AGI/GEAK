@@ -4,72 +4,43 @@ kind: technique
 gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
 regimes: [prefill, decode, training, both]
-updated: 2026-06-05
+updated: 2026-10-16
 sources:
   - https://rocm.github.io/rocprofiler-compute/performance_model.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
 ---
 
-# roofline and bottleneck classification
+# Roofline and bottlenecks
 
-## TL;DR
-Before optimizing, **classify the kernel**: compute-bound vs bandwidth-bound, decided by **arithmetic
-intensity** (FLOP per byte of HBM traffic) against the machine balance. Optimizing a bandwidth-bound
-kernel for MFMA occupancy (or a compute-bound kernel for coalescing) wastes effort. Reality check:
-MI300X sustains only **~45–55% of theoretical peak** matrix throughput across fp8/bf16/fp16 — a
-software-maturity ceiling, not hardware — so the bar is the **best tuned library kernel**, never peak.
-Use Omniperf's roofline (`[[profiling/]]`). See `[[hardware/cdna3_mi300/peak_tables.md]]`,
-`[[hardware/cdna4_mi350/peak_tables.md]]`, `[[hardware/shared/hbm_infinity_fabric.md]]`.
+Use a roofline as a hypothesis about resource cost. For work `W`, traffic `Q`,
+compute capacity `P` and bandwidth `B`, the optimistic service time is
+`max(W/P, Q/B)`. Use compatible units, dtype, memory level and measurement
+boundary. `W/Q` versus `P/B` identifies the tighter modeled resource; it does
+not establish the observed bottleneck.
 
-## Concepts
-- **Arithmetic intensity (AI)** = FLOPs / HBM bytes moved. Compare to **machine balance** =
-  peak FLOP/s ÷ peak HBM BW (the roofline ridge point). `AI > balance` ⇒ compute-bound; `AI < balance`
-  ⇒ bandwidth-bound.
-- **Roofline**: achievable = `min(peak_compute, AI × peak_BW)`. The kernel's measured point sits under
-  one of the two roofs — that roof is your bottleneck.
-- **The ~45% reality**: MI300X delivers ~45–55% of theoretical matrix peak in practice (third-party
-  bf16 ceiling ~890 TFLOP/s ≈ 68% of 1.3 PFLOP/s, power-limited at 750 W). Treat measured
-  best-library throughput as the practical roof (`[[operators/dense_gemm/tuning.md]]`,
-  `[[hardware/cdna3_mi300/clocks_power.md]]`).
+Start with accepted full-operation timing and the actual source/shape/device.
+For GEMM, `2*M*N*K` useful FLOPs and input/output bytes read or written once are
+a logical model, not measured instruction work or HBM traffic. Padding, repeated
+loads, cache reuse, metadata and workspace may change implementation cost.
+See [roofline collection and interpretation](../profiling/roofline_on_mi.md).
 
-## How to classify a kernel (procedure)
-1. **Estimate AI analytically**: GEMM `M·N·K·2` FLOPs over `(M·K + K·N + M·N)·sizeof(dtype)` bytes
-   (if it streams from HBM once). Large square GEMM ⇒ high AI ⇒ compute-bound; GEMV/decode, norm,
-   elementwise, copy ⇒ low AI ⇒ bandwidth-bound.
-2. **Measure**: Omniperf roofline / counters — `VALUBusy` & MFMA-busy vs HBM read+write BW. If MFMA
-   busy is high and HBM far from peak ⇒ compute-bound; if HBM near peak and MFMA idle ⇒ bandwidth-bound;
-   if both low ⇒ **latency/occupancy-bound** (stalls).
-3. **Pick the lever set** from the table below.
+| Evidence suggesting a cost | Experiment to consider |
+|---|---|
+| Arithmetic resources near an applicable comparator | Tile/instruction scheduling, or less executed work; see [MFMA scheduling](mfma_scheduling.md) |
+| High traffic at the relevant memory interface | Coalescing, reuse or fewer materialized passes; see [fusion](kernel_fusion_strategy.md) |
+| Low compute and memory rates with stall/parallelism evidence | Test dependencies, pipelining or workgroup geometry; see [memory pipelining](memory_pipelining.md) |
+| LDS movement or allocation pressure | Test layout and ownership; see [LDS and bank conflicts](lds_and_bank_conflicts.md) |
 
-## Bottleneck → lever map
-| classification | symptom (counters) | levers |
-|---|---|---|
-| compute-bound | MFMA busy high, HBM low | `[[optimization/mfma_scheduling.md]]`, `[[optimization/occupancy_and_registers.md]]`, tile/MFMA shape (`[[operators/dense_gemm/tuning.md]]`) |
-| bandwidth-bound | HBM near peak, MFMA idle | `[[optimization/vectorization_and_coalescing.md]]`, `[[optimization/xcd_l2_locality.md]]` (L2 reuse), `[[optimization/kernel_fusion_strategy.md]]` (cut traffic) |
-| latency/occupancy-bound | both low, high stall cycles | `[[optimization/memory_pipelining.md]]`, more waves/EU, more workgroups (`[[optimization/wave_and_grid_sizing.md]]`) |
-| LDS-bound | high `ds_*` stalls | `[[optimization/lds_and_bank_conflicts.md]]` (swizzle/padding) |
+These are candidate explanations. Occupancy alone does not explain latency, and
+memory efficiency alone does not prove traffic is necessary. Check that the
+proposed change occurred in the measured path and that competing costs did not
+move elsewhere. Preserve the numerical/state contract, then measure unprofiled
+full-operation and relevant workload results.
 
-## Typical LLM classifications
-- **Prefill GEMM / attention scores**: compute-bound (keep 304/256 CUs at high MFMA occupancy).
-- **Decode GEMV / KV read / sampling**: bandwidth/latency-bound (coalesce, split-K to fill CUs).
-- **RMSNorm / LayerNorm / elementwise / cast**: bandwidth-bound (fuse to cut passes,
-  `[[optimization/kernel_fusion_strategy.md]]`).
-
-## Pitfalls
-- Optimizing the wrong roof (MFMA tuning a bandwidth-bound norm).
-- Using theoretical peak as the denominator for "efficiency" — use measured best-library or the ~45–55%
-  practical roof.
-- Ignoring the third roof: many real kernels are **latency-bound** (under-occupied / stalled), not
-  cleanly compute- or BW-bound.
-- Forgetting fusion *changes AI* — fusing two BW-bound kernels can push the result toward compute-bound.
-
-## Verify
-- Omniperf roofline plot: kernel point vs HBM and compute roofs (`[[profiling/]]`).
-- Counters: MFMA/`VALUBusy` vs HBM BW; stall-cycle breakdown for the latency case.
-- Recompute AI after any fusion and re-classify.
-
-## Sources
-- Roofline / performance model, busy & BW counters: Omniperf performance-model docs.
-- ~45–55% sustained-of-peak, ~890 TFLOP/s bf16 ceiling, 750 W power limit: ROCm workload guide + cited bench (see `[[operators/dense_gemm/tuning.md]]`).
-- AI/operand-feed framing: ROCm matrix-cores-CDNA blog.
+Label specification roofs and empirical/library comparators separately. There
+is no universal 45–55% software ceiling or fixed efficiency target across shapes,
+dtypes and products. A matched library baseline is useful evidence of an attained
+rate under its conditions. Report conditional model percentages alongside latency
+and speedup; do not turn the gap into guaranteed headroom or prune an idea because
+its current implementation appears saturated.

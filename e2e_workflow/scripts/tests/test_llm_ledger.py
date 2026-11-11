@@ -23,9 +23,9 @@ quotes. So the tests pin the four places it could quietly lie:
                                  with a stated reason, never an exception -- this runs at the end of
                                  a multi-hour GPU run.
 
-Plus a syntax guard on the three instrumented workflow JS files. When Node is available, it parses
-them with the same async-function-body semantics used by the workflow runtime; otherwise a
-structural bracket check still catches the class of mistake that wrapping a call in a helper
+Plus a syntax guard on the three instrumented workflow JS files. When Node is available, it compiles
+them with the workflow engine's own async-function-body compiler (`compileWorkflowBody`); otherwise
+a structural bracket check still catches the class of mistake that wrapping a call in a helper
 introduces.
 
 Stdlib only, no GPU, no network -- everything is driven from synthetic transcripts in tempdirs.
@@ -851,8 +851,8 @@ class TestOutputs(LedgerTestBase):
 # --------------------------------------------------------------------------- #
 # Syntax guard on the instrumented JS. These files are workflow function bodies,
 # not standalone scripts: top-level `await` and `return` are valid at runtime.
-# Node is the syntax authority when available; the structural scanner is the
-# explicit no-Node fallback.
+# The engine's compiler is the syntax authority when Node is available; the
+# structural scanner is the explicit no-Node fallback.
 # --------------------------------------------------------------------------- #
 # A '/' starts a regex only where a value cannot already stand -- i.e. right after an
 # operator, an opener, a separator, or nothing at all. After a name, ')' , ']' or a
@@ -860,7 +860,7 @@ class TestOutputs(LedgerTestBase):
 _REGEX_OK = set("([{,;=:!?&|+-*%^~<>") | {None}
 # ...and after a keyword that expects a value, e.g. `return /re/`, the char before '/' is a
 # letter yet it is still a regex. This lookbehind is why the fallback handles the common
-# keyword-context case; it is NOT a general parser (node --check is the authority above).
+# keyword-context case; it is NOT a general parser (Node's parser is the authority).
 _VALUE_KEYWORDS = frozenset((
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "do", "else", "yield", "await", "case", "throw"))
@@ -887,40 +887,22 @@ def _find_node():
     return cands[0] if cands else None
 
 
-_META_EXPORT_RE = re.compile(r"(?m)^([ \t]*)export[ \t]+const[ \t]+meta\b")
-_NODE_WORKFLOW_BODY_CHECKER = """\
-const fs = require('fs');
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const source = fs.readFileSync(0, 'utf8');
-new AsyncFunction('args', source);
+# Compile through the engine without executing a workflow or selecting a backend. The native
+# Workflow tool also requires exactly one `export const meta` declaration.
+_WORKFLOW_SYNTAX_CHECK = r"""
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { compileWorkflowBody } = await import(pathToFileURL(process.argv[2]).href);
+assert.equal(typeof compileWorkflowBody(
+  '\uFEFFexport const meta = {}; await 0; throw new Error("must not execute"); return {};'
+), 'function');
+assert.throws(() => compileWorkflowBody('const broken = ;'), SyntaxError);
+const source = readFileSync(process.argv[1], 'utf8');
+assert.equal((source.match(/^[ \t]*export[ \t]+const[ \t]+meta\b/gm) || []).length, 1,
+  'expected exactly one export const meta declaration');
+compileWorkflowBody(source);
 """
-
-
-def _workflow_function_body(src):
-    """Convert one workflow module's metadata export into valid function-body syntax."""
-    matches = list(_META_EXPORT_RE.finditer(src))
-    if len(matches) != 1:
-        raise ValueError("expected exactly one 'export const meta' declaration, found %d"
-                         % len(matches))
-    match = matches[0]
-    replacement = match.group(1) + "const meta"
-    return src[:match.start()] + replacement + src[match.end():]
-
-
-def _node_check_workflow_body(node, path):
-    """Ask Node to parse a workflow using its actual async-function-body semantics."""
-    with open(path, encoding="utf-8") as fh:
-        src = fh.read()
-    try:
-        body = _workflow_function_body(src)
-    except ValueError as exc:
-        raise ValueError("%s: %s" % (path, exc)) from exc
-    return subprocess.run(
-        [node, "-e", _NODE_WORKFLOW_BODY_CHECKER],
-        input=body,
-        capture_output=True,
-        text=True,
-    )
 
 
 def js_balanced(src):
@@ -1027,8 +1009,11 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
             if node:
                 # The workflow runtime evaluates these files as async function bodies, so a
                 # standalone `node --check` is wrong: it rejects their valid top-level return.
-                # AsyncFunction construction parses without executing the workflow.
-                r = _node_check_workflow_body(node, path)
+                # The engine's compiler parses them without executing the workflow.
+                r = subprocess.run(
+                    [node, "--input-type=module", "-e", _WORKFLOW_SYNTAX_CHECK, path,
+                     os.path.join(GEAK_ROOT, "interface/runtime/engine/run_workflow.mjs")],
+                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, "%s: %s" % (rel, r.stderr.strip()))
             else:
                 with open(path, encoding="utf-8") as fh:
@@ -1066,7 +1051,7 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
         script -- "SyntaxError: import() is not available in workflow scripts" -- so not one
         line runs, on any phase, for any workload.
 
-        No parser catches it. Node accepts it, and so does the AsyncFunction check above; that
+        No parser catches it. Node accepts it, and so does the engine compile check above; that
         is exactly how PR #520 shipped four dynamic imports and took the e2e workflow down
         while CI stayed green. The restriction is the host's, not JavaScript's, so the guard
         has to be a source-level one. Work that needs a file belongs in a vendored CLI under
@@ -1083,6 +1068,10 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
                     "script at launch. Move the work into a vendored CLI under "
                     "e2e_workflow/scripts/ that an agent runs." % (rel, number))
 
+    # A CommonJS module load: `require('<module>')`. Prompt strings embed Python helpers that
+    # are also named require (`require(condition, reason)`); those never reach Node's loader.
+    _JS_REQUIRE_RE = re.compile(r"\brequire\s*\(\s*['\"`]")
+
     def test_no_new_require_sites(self):
         """`require` is undefined on both workflow runtimes. The existing sites are pinned in
         KNOWN_REQUIRE_SITES; anything else -- a new spelling, or one more of an existing one --
@@ -1093,7 +1082,7 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
                 continue      # NOT skipTest: that aborts the loop and drops the guard for the rest
             seen = {}
             for number, line in self._code_lines(path):
-                if "require(" not in line:
+                if not self._JS_REQUIRE_RE.search(line):
                     continue
                 stripped = line.strip()
                 allowed = self.KNOWN_REQUIRE_SITES.get(rel, {}).get(stripped, 0)
@@ -1255,27 +1244,12 @@ class TestInstanceDedup(LedgerTestBase):
         self.assertEqual(self._count_kernel_setup(), 1)
 
 
-class TestWorkflowFunctionBodyAdapter(unittest.TestCase):
-    def test_workflow_adapter_preserves_top_level_await_and_return(self):
-        src = "export const meta = {};\nawait run();\nreturn result;\n"
-        self.assertEqual(
-            _workflow_function_body(src),
-            "const meta = {};\nawait run();\nreturn result;\n",
-        )
-
-    def test_workflow_adapter_requires_exactly_one_metadata_export(self):
-        with self.assertRaisesRegex(ValueError, "found 0"):
-            _workflow_function_body("return result;\n")
-        with self.assertRaisesRegex(ValueError, "found 2"):
-            _workflow_function_body(
-                "export const meta = {};\nexport const meta = {};\nreturn result;\n")
-
-
 class TestJsBalancedFallbackLimits(unittest.TestCase):
     """Pin the limits of the heuristic used only when no Node runtime is discoverable.
 
-    AsyncFunction parsing is authoritative when Node is present. These fixtures document what the
-    fallback does and does NOT handle so nobody mistakes it for a sound JavaScript parser.
+    The engine's function-body compiler is authoritative when Node is present. These fixtures
+    document what the fallback does and does NOT handle so nobody mistakes it for a sound
+    JavaScript parser.
     """
 
     def test_regex_after_a_value_keyword_is_not_read_as_division(self):
@@ -1293,7 +1267,7 @@ class TestJsBalancedFallbackLimits(unittest.TestCase):
         # The lookbehind covers keyword contexts, not the full grammar. A regex opened right
         # after a `)` that closes an `if (...)` head is valid JS but the heuristic reads the
         # '/' as division -- documented here so the limit is explicit, not a surprise.
-        # AsyncFunction parsing does not share this blind spot.
+        # The engine's function-body compiler does not share this blind spot.
         ok, _ = js_balanced("if (x) /[)]/.test(y);")
         self.assertFalse(ok)
 

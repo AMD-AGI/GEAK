@@ -529,6 +529,8 @@ def test_dynamic_pool_allows_partial_mapping_when_enough_candidates_remain(
             "--count",
             "2",
             "--require-idle",
+            "--sysfs-root",
+            str(tmp_path),
             "--",
             "true",
         ]

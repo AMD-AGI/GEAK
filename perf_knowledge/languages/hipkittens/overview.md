@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3, fp8_e5m2, fp6]
 regimes: [both]
 status: experimental
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://arxiv.org/abs/2511.08083
   - https://arxiv.org/html/2511.08083v1
@@ -15,16 +15,10 @@ sources:
 
 # HipKittens (HK)
 
-## TL;DR
-HipKittens is a **minimal C++ embedded tile-primitive library** for writing fast AMD Matrix-Core kernels
-without dropping to raw assembly — the AMD entry in Stanford HazyResearch's "Kittens" family
-(ThunderKittens/NVIDIA, ThunderMittens/Apple). Its thesis: the **tile abstraction is portable** but the
-**backend (swizzling, register scheduling, wave scheduling) must be AMD-specific**. On MI355X (CDNA4) HK
-reports SOTA or near-SOTA across GEMM, attention fwd/bwd, and memory-bound kernels — beating AMD's own
-hand-tuned **AITER assembly** and hipBLASLt on several shapes — while keeping kernels short (attention fwd
-~500 LoC, GEMM hot loop <100 LoC). It is a **research artifact** (arXiv 2511.08083v1, Nov 2025), not a
-shipping production dependency, but it is the strongest public evidence that competing DSLs leave perf on
-the table on AMD (see [perf_findings.md](perf_findings.md)).
+HipKittens is a C++ tile-primitive library for AMD kernels. It provides examples
+of register/shared tiles, data movement and explicit scheduling. Pin the source
+and target branch; [reported performance](perf_findings.md) applies to the paper's
+configurations, not every shape or current competing implementation.
 
 ## Concepts
 - **Tile = the unit of data and compute.** Register or shared tiles parametrized by `dtype` (FP32, BF16,

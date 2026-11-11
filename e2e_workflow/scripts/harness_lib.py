@@ -32,11 +32,10 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       the earlier comparison fails. It also asserts distinct output storage + no cross-call mutation
       (`assert_independent_outputs`). A launcher whose contract is "callable(args) -> fresh out" must
       not alias.
-    - `amdahl_ceiling` / `amdahl_check` bound the e2e delta a kernel at `pct_gpu` GPU-time can produce
-      given its isolated speedup. `amdahl_ceiling` is surfaced by op_bench as `amdahl_ceiling_e2e_pct`
-      so the isolated bake-off already reports the MAX plausible e2e win. `amdahl_check` is the verdict
-      form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
-      the ceiling is box drift / measurement error, not the kernel.
+    - `amdahl_ceiling` / `amdahl_check` provide conditional GPU-time projections, surfaced by op_bench
+      as the legacy `amdahl_ceiling_e2e_pct` field. Summed GPU time need not be the critical elapsed
+      fraction, so this is not an E2E bound. A discrepancy motivates checking timing scope, overlap,
+      work completeness and quality; it does not establish corruption, drift or causal attribution.
 """
 import json
 import math
@@ -792,40 +791,47 @@ def _correct_one_nonfinite(out, ref, tol):
 
 
 def assert_independent_outputs(call, args_a, args_b):
-    """Catch a candidate that returns a shared/persistent buffer (the graph-replay `static_out`
-    shortcut). Call with two DIFFERENT inputs and verify:
-      1. the first output is NOT mutated by the second call (snapshot compare), and
-      2. the two outputs do not share storage (distinct data_ptr).
-    A correct `fn(args) -> fresh out` launcher passes both. Returns (ok, reason).
+    """Verify fresh tensor outputs, including every leaf of tuple/list/dict returns.
 
-    A MULTI-TENSOR return (attention's `(out, lse)`, a dict) is flattened and every component is
-    checked — the contract applies to each of them, and treating the return as a bare tensor used to
-    raise AttributeError here and fail an otherwise-correct multi-output op."""
+    Keep the first result live across the second call. No nonempty tensor from
+    either result may share storage across calls, even through disjoint views.
+    The first result's tensor leaves and values must remain unchanged. Aliases
+    within a single result are allowed. Returns (ok, reason).
+    """
     torch = _torch()
     try:
-        parts_a = flatten_outputs(call(args_a))
+        out_a = call(args_a)
+        parts_a = flatten_outputs(out_a)
         if not parts_a:
             return False, "no_tensor_output: the launcher returned no tensor to check"
-        snap = [t.detach().clone() for t in parts_a]
-        parts_b = flatten_outputs(call(args_b))
-        for out_a, out_b in zip(parts_a, parts_b):
-            if out_a.data_ptr() == out_b.data_ptr():
-                return False, ("shared_output_buffer: two calls returned the SAME storage "
-                               f"(data_ptr={out_a.data_ptr():#x}) — a persistent/static return "
-                               "buffer. The launcher contract is fn(args) -> FRESH out; a shared "
-                               "buffer is a tight-loop cheat that is incorrect for any real "
-                               "(batched) caller.")
-        unchanged = all(torch.equal(a, s) for a, s in zip(parts_a, snap))
-        if not unchanged:
-            try:    # NaN-safe retry: torch.equal reports a NaN-carrying (unmutated) output as changed
-                unchanged = all(bool(((a == s) | (a.ne(a) & s.ne(s))).all())
-                                for a, s in zip(parts_a, snap))
-            except Exception:
-                pass
-        if not unchanged:
-            return False, ("mutated_prior_output: the second call overwrote the first call's returned "
-                           "tensor — the launcher aliases a persistent buffer instead of allocating a "
-                           "fresh output. Incorrect for real callers.")
+        snapshots = [
+            (tuple(t.shape), t.dtype,
+             t.detach().contiguous().reshape(-1).view(torch.uint8).clone())
+            for t in parts_a
+        ]
+        out_b = call(args_b)
+        parts_after = flatten_outputs(out_a)
+        parts_b = flatten_outputs(out_b)
+        if len(parts_after) != len(snapshots) or len(parts_b) != len(snapshots):
+            return False, "output_independence: tensor output count changed"
+        if any(before is not after for before, after in zip(parts_a, parts_after)):
+            return False, "mutated_prior_output: second call replaced first result tensor leaves"
+        for i, a in enumerate(parts_after):
+            for j, b in enumerate(parts_b):
+                if (a.numel() and b.numel() and a.device == b.device
+                        and a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()):
+                    return False, (
+                        f"shared_output_buffer: first output tensor {i} and second output tensor {j} "
+                        f"share storage (data_ptr={a.untyped_storage().data_ptr():#x}); "
+                        "the launcher contract is fn(args) -> FRESH out")
+        for i, (a, (shape, dtype, snapshot)) in enumerate(zip(parts_after, snapshots)):
+            if tuple(a.shape) != shape or a.dtype != dtype:
+                return False, f"mutated_prior_output: tensor {i} shape or dtype changed"
+            # Byte equality also supports FP8 and UE8M0 leaves without asking
+            # torch.equal to implement arithmetic for those storage dtypes.
+            current = a.detach().contiguous().reshape(-1).view(torch.uint8)
+            if not torch.equal(current, snapshot):
+                return False, f"mutated_prior_output: second call changed first output tensor {i}"
         return True, ""
     except Exception as e:
         return False, f"independence_check_raised: {e!r}"
@@ -1013,24 +1019,26 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
     return all_ok, per_case
 
 
-# --------------------------------------------------------------------------- (b) Amdahl gate
+# --------------------------------------------------------------------------- (b) Conditional Amdahl diagnostic
 def amdahl_ceiling(pct_gpu, isolated_speedup):
-    """Max end-to-end THROUGHPUT delta (%) attributable to speeding up a kernel that is `pct_gpu` of
-    GPU time by `isolated_speedup`x, assuming GPU time is the throughput bottleneck (an OPTIMISTIC
-    upper bound — comm/overlap make the real ceiling lower).
+    """Conditional throughput-change estimate from a share and isolated speedup.
+
+    The share must represent the affected serial elapsed fraction, with other work and overlap
+    unchanged, to predict an E2E gain. A summed-device-time share does not establish those assumptions.
 
         time_saved_fraction = pct_gpu * (1 - 1/speedup)
         throughput_ceiling  = 1 / (1 - time_saved_fraction)
         delta%              = (throughput_ceiling - 1) * 100
 
-    `pct_gpu` accepts either a fraction (0.14) or a percent (14.0) — values > 1 are treated as percent.
-    Returns the ceiling delta in PERCENT (e.g. 5.4 means "at most +5.4% e2e")."""
+    Legacy unit convention: values > 1 are interpreted as percent; values <= 1 as fractions.
+    Thus 0.5 means 50%, not 0.5%. Callers must resolve this ambiguity before supplying a value.
+    Returns the conditional estimate in PERCENT; its legacy name does not make it an E2E bound."""
     p = float(pct_gpu)
     if p > 1.0:
         p /= 100.0
     p = min(max(p, 0.0), 1.0)
     if isolated_speedup is None:
-        return 0.0        # no measurement -> no attributable ceiling; same answer as a non-win
+        return 0.0        # legacy arithmetic fallback, not evidence of a measured zero opportunity
     s = float(isolated_speedup)
     if s <= 0:
         return 0.0
@@ -1040,28 +1048,27 @@ def amdahl_ceiling(pct_gpu, isolated_speedup):
 
 
 def amdahl_check(e2e_delta_pct, pct_gpu, isolated_speedup, noise_band_pct=0.5, slack=1.5):
-    """Is an OBSERVED e2e delta physically attributable to this kernel? An observed delta far above
-    the Amdahl ceiling is box drift / measurement error, not the kernel.
+    """Compare a measured gain with a conditional model, without deciding acceptance or attribution.
 
-    `slack` (default 1.5) allows the observed delta to exceed the optimistic ceiling by up to 50%
-    before we call it implausible, because the ceiling model ignores second-order fusion/scheduling
-    effects and the ceiling itself is only as good as the pct_gpu estimate. Returns a dict:
+    `slack` (default 1.5) and the noise band set a diagnostic threshold. Returns a dict:
       {ceiling_pct, allowed_pct, plausible, verdict, note}
-    verdict ∈ {ok, implausible} — 'implausible' means a downstream e2e comparison must NOT credit this
-    delta to the kernel and should re-measure with an interleaved A/B (and re-check pct_gpu) before
-    accepting. (Helper only: op_bench surfaces the ceiling via `amdahl_ceiling`; this verdict form is
-    available for any e2e check that wants it.)"""
+    Legacy `ok`/`implausible` labels mean only within/above that modeled threshold. Neither establishes
+    physical plausibility, correctness, drift or attribution. Keep actual quality and matched
+    measurement gates authoritative; inspect the model's share, units and timing scope separately.
+    This optional helper is not an acceptance gate."""
     ceiling = amdahl_ceiling(pct_gpu, isolated_speedup)
     allowed = ceiling * float(slack) + float(noise_band_pct)
     plausible = float(e2e_delta_pct) <= allowed
     if plausible:
         note = (f"observed +{float(e2e_delta_pct):.2f}% within Amdahl ceiling "
-                f"(≤ +{ceiling:.2f}% × {slack} slack + {noise_band_pct}% band = {allowed:.2f}%).")
+                f"(conditional model: ≤ +{ceiling:.2f}% × {slack} slack + {noise_band_pct}% band = {allowed:.2f}%). "
+                f"Diagnostic only; this does not establish E2E attribution or correctness.")
     else:
         note = (f"observed +{float(e2e_delta_pct):.2f}% EXCEEDS the Amdahl ceiling for a "
                 f"{float(pct_gpu)} GPU-time kernel at {float(isolated_speedup):.3f}x "
-                f"(ceiling +{ceiling:.2f}%, allowed +{allowed:.2f}%). Not attributable to this kernel — "
-                f"treat as box drift/measurement error: re-measure interleaved and re-verify pct_gpu.")
+                f"(conditional estimate +{ceiling:.2f}%, threshold +{allowed:.2f}%). "
+                f"Diagnostic only, not evidence of corruption or drift: check timing scope and work/quality evidence; "
+                f"re-measure interleaved if needed and re-verify pct_gpu.")
     return {"ceiling_pct": round(ceiling, 3), "allowed_pct": round(allowed, 3),
             "plausible": bool(plausible), "verdict": "ok" if plausible else "implausible",
             "note": note}

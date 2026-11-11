@@ -1,27 +1,69 @@
 # `interface/run_e2e.py` — external integration contract
 
-`interface/` is the **only** surface an external orchestrator (e.g. Hyperloom)
-touches. Everything volatile about the e2e workflow (the `e2e_workflow.js` arg
-names, the Claude Code `Workflow` invocation, the `--effort ultracode`
-requirement, the SDK-vs-CLI choice) is hidden behind one command and two JSON
-files. The result schema is versioned so callers can distinguish contract
-changes while the workflow evolves internally.
+External orchestrators such as Hyperloom use one command and two JSON files.
+`run_e2e.py` maps the handoff to the standalone workflow runtime and returns a
+versioned result. Runtime dispatch, agent selection, and nested kernel optimizer
+defaults are owned by GEAK, so callers can keep the same invocation as the
+workflow evolves.
+
+The Python implementation is split by responsibility. `run_e2e.py` owns CLI
+handling, environment settings, launch configuration, runtime dispatch and disk
+recovery. `e2e/normalization.py` interprets measurement artifacts and builds the
+result, while `e2e/reports.py` renders and writes reports from that result. The
+entrypoint retains its existing helper imports; it passes recovery, workload
+classification and the current alignment threshold to normalization explicitly.
 
 ## Command
 
 ```bash
-python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
+python interface/run_e2e.py <handoff.json> <result.json> [--timeout-s SECONDS] [--dry-run]
 ```
 
 * Exit code `0` → `result.json.status` is `ok`, `no_gain` or `timeout`.
 * Exit code `1` → a crash; `result.json.status == "error"` with an `error` field.
 * Exit code `2` → bad usage / unreadable handoff.
+* `--timeout-s` → state a time budget. When `GEAK_E2E_TIMEOUT_S` also supplies
+  a valid budget, the smaller value applies. The default applies when neither
+  supplies one.
 * `--dry-run` → print the mapped `e2e_workflow.js` args + the prompt and
   exit `0` (no GPU work). Use this to validate the mapping in CI.
 
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
+
+### Hyperloom checkout compatibility
+
+Hyperloom's existing installer selects the GEAK checkout through `GEAK_REF`,
+which defaults to `main`. From the Hyperloom checkout, pass the desired branch
+or commit to the usual installation step:
+
+```bash
+GEAK_REF=main \
+  bash src/hyperloom/inference_optimizer/assets/install.sh
+```
+
+The installer resolves and installs the selected GEAK checkout and exports
+`GEAK_ROOT` and `GEAK_E2E_RUNNER`. An explicitly configured runner must point to
+`interface/run_e2e.py` in that same checkout: the script resolves its workflow
+files relative to its own location. Retain the complete checkout alongside the
+installed Python package. The package remains named `geak`, and the entrypoint
+remains `interface/run_e2e.py`. The handoff/result schemas keep their existing
+interface.
+
+For a change under review, replace `main` with the PR branch or an immutable
+commit. The [integration source map](../docs/evo/workload-discovery.md) records
+the inspected Hyperloom installer and handoff implementation.
+
+The standard two-JSON invocation uses the standalone runtime. It selects Claude
+unless an explicit backend/profile or the existing unambiguous provider
+selection chooses another agent. Omitting `handoff.optimizer` selects `evo` for
+the nested kernel worker; `"optimizer": "greedy"` explicitly selects greedy.
+This needs no additional Python CLI flags or Hyperloom handoff fields.
+
+Existing workload, benchmark-client, server-configuration, and GPU-placement
+inputs still govern the run. Selecting this branch does not establish workload
+equivalence or replace Hyperloom's own validation of a returned candidate.
 
 ### E2E KB recall policy
 
@@ -59,15 +101,13 @@ created by GEAK also expose their real imports through `modules`, so consumers
 of the original overlay manifest can load them. A source-tree hash in the manifest
 includes nested installer/kernel files in those consumers' overlay fingerprints.
 
-### Agent backend (swappable: Claude Code ↔ codex)
+### Agent backend (Claude Code or Codex)
 
-By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
-tool** (SDK preferred, `claude -p` CLI fallback). The SAME workflow can run on the
-**standalone Node runtime** (`interface/runtime/engine/run_workflow.mjs`) against the
-codex CLI instead — the runtime re-implements the Workflow globals
-(`agent/parallel/pipeline/phase/workflow`) and dispatches each `agent()` to a
-one-shot backend process, so the agent CLI itself does NOT need to support
-parallel/nested subagents.
+`run_e2e.py` runs the JS workflow through the standalone Node runtime at
+`interface/runtime/engine/run_workflow.mjs`. The runtime implements
+`agent/parallel/pipeline/phase/workflow` and the host `runProcess` primitive used
+by kernel delivery. It dispatches each `agent()` call to the selected CLI.
+Claude is the default agent; it uses this same runtime path.
 
 **Two orthogonal axes**, defined in `interface/runtime/engine/registry.json`:
 `agents` (how to drive a CLI: `claude` / `codex`) × `models` (an endpoint). A
@@ -75,44 +115,50 @@ parallel/nested subagents.
 — a new `agents` entry plus a passing `conformance.mjs --agent <name>`; see
 `runtime/SETUP.md` for the R1–R7 bring-up checklist.
 
-| Selection (flag or env) | Effect |
+| Selection for `run_e2e.py` | Effect |
 | --- | --- |
-| *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
-| *(none, only `GEAK_AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
+| No explicit selection and no unambiguous provider selection | Runtime with Claude |
+| Only `GEAK_AMDKEY` or `OPENAI_API_KEY` credentials configured | Runtime with Codex through provider auto-selection |
 | `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
-| `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
+| `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` |
 | `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
 
-Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > key-based
-auto-selection > `registry.default_profile`. A key only selects codex while no
-`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set, so exporting a gateway key
-next to an existing Claude setup does not hijack it; `GEAK_AGENT_AUTO=0` turns
-key-based selection off entirely.
+For the Python entrypoint, explicit profile/backend environment settings take
+precedence over provider auto-selection. A key only selects Codex while none of
+`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or
+`CLAUDE_CODE_OAUTH_TOKEN` is set, so exporting a gateway key
+next to an existing Claude setup retains Claude. `GEAK_AGENT_AUTO=0` disables
+provider auto-selection. The existing `--profile`, `--agent`, and `--model`
+flags belong to the Node runner; they are not flags for `run_e2e.py`.
 
 Env knobs (all optional):
 
 | Env | Meaning | Default |
 | --- | --- | --- |
-| `GEAK_AGENT_PROFILE` | registry profile = (agent, model) | unset (native) |
-| `GEAK_AGENT_BACKEND` | agent name (alias for `--agent`) | unset |
+| `GEAK_AGENT_PROFILE` | registry profile = (agent, model) | unset |
+| `GEAK_AGENT_BACKEND` | agent name | Claude when no other selection applies |
 | `GEAK_MODEL` | model name (registry `models` key) | unset |
 | `GEAK_REGISTRY` | path to a custom registry.json | shipped one |
 | `GEAK_NODE_BIN` | node binary for the runtime | `node` |
 | `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
-| `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `14400000` (4 hours) |
 | `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
-| `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
-| `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
+| `GEAK_CLAUDE_BIN` / `GEAK_CLAUDE_MODEL` | Claude binary / raw model ID; forwarded through the registry | runner/registry default |
+| `GEAK_CLAUDE_SETTINGS` | Claude settings JSON or settings-file path accepted by the CLI | CLI defaults when unset |
+| `GEAK_CLAUDE_EFFORT` | Claude effort; valid `low`, `medium`, `high`, `xhigh`, or `max` values are forwarded | CLI default when unset or not a valid effort |
+| `GEAK_CLAUDE_CONFIG_DIR` | seeded Claude configuration directory; when nonempty, overrides the child's `CLAUDE_CONFIG_DIR` | inherited `CLAUDE_CONFIG_DIR` or CLI default |
+| `GEAK_CODEX_BIN` / `GEAK_CODEX_MODEL` | Codex binary / raw model ID | registry/provider default |
+| `GEAK_CODEX_APPROVE` / `GEAK_CODEX_EXTRA_ARGS` | Codex approval argument / extra CLI arguments | registry |
 | `GEAK_AMDKEY` | AMD gateway key; also selects codex. `GEAK_`-prefixed so it survives hyperloom's `.env` allowlist — see SETUP.md | inherited |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (codex); the key also selects codex | inherited |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
 | `GEAK_AGENT_AUTO` | `0` disables key-based backend selection | `1` |
 
-Prereqs for the non-native backend: Node 20+ on `PATH` (the runtime itself needs
-only 18; the codex CLI needs 20), plus `npm i -g @openai/codex@0.146.1` and a
-reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
-`scripts/` are used **unmodified** on every backend. Full setup, knobs and
-troubleshooting: `runtime/SETUP.md`.
+All real runs require Node on `PATH` and the selected agent CLI with its
+credentials. The runtime requires Node 18 or newer; the documented Codex setup
+uses Node 20 or newer. Install GEAK's existing Python dependencies and retain
+the workflow, role, knowledge, and script directories in the checkout. See
+[`runtime/SETUP.md`](runtime/SETUP.md) for installation and agent configuration.
 
 The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
 runtime directly:
@@ -146,12 +192,13 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
-  "gpu_type": "MI300X",
+  "gpu_type": "MI355X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|r9600d|unknown; supply with expected_gfx
+  "expected_target": "mi355x",           // r9700|r9600d|mi350x|mi355x|unknown; pair with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
+  "optimizer": "evo",                    // optional; default evo, explicit greedy remains supported
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
   "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
   "accepted_flags": "--attention-backend triton",  // best config from the caller's search
@@ -164,10 +211,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
     "server_args": { "model_path": "/models/Qwen-Qwen3.5-27B", "tp_size": 8 }
   },
   "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
-  "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
+  "bench_client": "auto",                // auto|inferencex|native|agentx — see measurement alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
-  "bench_protocol": {                    // optional; caller's measurement 口径 (see below)
-    "random_range_ratio": 0,             //   fixed(0) vs variable(>0) sequence lengths
+  "bench_protocol": {                    // optional; measurement settings, with schema-specific overrides below
+    "random_range_ratio": 1,
     "num_prompts": 192,
     "num_warmups": 8,
     "seed": 0
@@ -176,6 +223,28 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 ```
 
 Required: `model_path`, `exp_root`. Everything else has a default.
+
+`optimizer` accepts `evo` or `greedy`; omission selects `evo`. An optional
+positive integer `kernel_budget` controls the ordinary nested kernel budget.
+Optimizer selection does not select an agent, change the benchmark client, or
+implicitly enable every EVO configuration option. See
+[`docs/evo/configuration.md`](../docs/evo/configuration.md) for explicit worker
+configuration.
+
+With EVO, `evolution_return_development` defaults to `true`. After normal
+engineering and evaluation, it permits retaining one concrete unmeasured
+development attempt when there is no measured development source to return.
+The attempt remains partial and unqualified; correctness, fitness, and promotion
+still require the ordinary verifier. Explicit `false` disables this fallback.
+
+The handoff also forwards `evolution_import_stall_sources`,
+`record_planner_inputs`, and `case_measurement_view` to the nested kernel worker,
+along with `evolution_start`, `evolution_case_evidence_view`,
+`evolution_evidence_handoff`, and `evolution_preserve_founder_attempts`. Values
+are preserved for worker validation; boolean controls use JSON booleans.
+`case_measurement_view` accepts `current_mixed` or `native_consistent` only for
+an ordinary workload-weighted task. Importing stall sources requires EVO with
+`evolution_start="first_stall"`.
 
 Before a real run selects a backend or architecture policy, `run_e2e.py`
 requires structured GPU identity. It uses the explicit `expected_gfx` /
@@ -201,21 +270,28 @@ holds its own datasheet peaks, not R9700's. The default backend is `vllm` for bo
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.
 
+Exact `AMD Instinct MI350X` and `AMD Instinct MI355X` names produce `mi350x`
+and `mi355x`, which require `gfx950`. A supplied `expected_device_name`, or a
+detected `marketing_name`, that names a different supported product than the
+target, or a supported product on a different ISA, is refused.
+
 `--dry-run` is host-only: when neither explicit nor environment identity is
 provided it skips rocminfo and reports `gpu_identity_status:
 unavailable_dry_run`. A real run never uses that placeholder and still fails
 closed.
 
-`bench_protocol` is optional and **partial-friendly**: only the keys present are
-applied. Omit it entirely (standalone GEAK, no external orchestrator) and
-`bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
-supplies it, those values are the EXACT knobs the caller's official baseline was
-measured with — forwarding them is what makes the workflow's numbers
-cross-harness comparable. The `random_range_ratio` convention is `0`=fixed-length,
-`>0`=variable-length (lengths sampled in `[(1-ratio)*len, (1+ratio)*len]`); a
-silent mismatch between the caller's value and the standalone default is otherwise
-a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarded
-口径 agree unless the caller explicitly requests variable lengths.
+`bench_protocol` accepts a partial set of measurement settings. For handoffs
+without the schema-specific alignment below, supplied keys override the bench
+script defaults and omitted keys retain those defaults.
+
+A handoff with `schema_version >= 2` and a `baseline_env_spec` uses warm-server
+measurement and validation with `REPLICA_RETRIES=1`. For a synthetic workload,
+the adapter additionally sets `NUM_WARMUPS=2*conc`, `SEED=0`, and
+`RANDOM_RANGE_RATIO=1`, overriding those individual protocol fields. It retains
+an explicit `num_prompts`; otherwise it enables the adaptive prompt-count rule.
+AgentX replay keeps its own corpus and warmup settings rather than receiving
+these synthetic prompt overrides. The resolved protocol and workload identity
+must be checked before comparing results with another harness.
 
 ### How handoff maps to the workflow (owned by `run_e2e.py:map_args`)
 
@@ -226,17 +302,24 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `tp` | `tp` | serving tensor-parallel (threaded to bench `TP`) |
 | `gpu_ids` / `tp` | `gpu_ids` | defaults to `0..tp-1` |
 | `expected_gfx` / `expected_target` | matching `expected_*` args | optional explicit structured identity pair; otherwise probe/env identity |
+| `optimizer` | `optimizer` | `evo` when omitted; explicit `greedy` is honored |
+| `kernel_budget` | `kernel_budget` | optional positive integer for ordinary nested kernel work |
+| `evolution_return_development` | same nested kernel argument | defaults to `true` with EVO; explicit `false` disables the unmeasured-source fallback |
+| `evolution_import_stall_sources` / `record_planner_inputs` / `case_measurement_view` | same nested kernel arguments | forwarded for worker validation |
 | `workload.{isl,osl,conc}` | `isl` / `osl` / `conc` | profile + bench workload |
+| `workload_spec` | AgentX workflow arguments and client environment | `kind: agentx_trace_replay` supplies replay settings and optional observed shape |
 | `accepted_flags` | `initial_extra_server_args` | seeds the baseline = caller best config |
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
 | `launch_recipe` | `launch_script` | optional |
+| `baseline_env_spec` | resolved launch configuration/environment | preserves accepted settings, removals, and argument replacement mode |
+| `launch_server_script` / `bench_launcher` | server-launcher adapter inputs | explicit launcher/script selection |
 | `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
 | `same_config_observed_identity` | result identity metadata | optional upstream observed server facts; compared to GEAK's Setup `ServerArgs` / Magpie launch evidence |
 | `exp_root` | `exp_root` | run dir root |
 | (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
-| `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | `run_e2e.py:apply_bench_protocol` exports ONLY the provided keys, overriding `bench_e2e.sh` standalone defaults; absent ⇒ defaults kept (not a JS arg) |
+| `bench_protocol.{random_range_ratio,num_prompts,num_warmups,seed}` | env `RANDOM_RANGE_RATIO` / `NUM_PROMPTS` / `NUM_WARMUPS` / `SEED` | partial settings, subject to the schema-specific alignment above (not a JS arg) |
 | — | `config_tune="false"` | caller already did config search; never double-run |
 | — | `apply_to_original="true"` | so `final/final_launch.sh` + overlay are emitted for sweep reuse |
 
@@ -291,7 +374,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
   "final_patch": ".../final/final_patch.diff",   // "" when the run produced no applicable hunk
   "final_overlay": ".../final/overlay",          // "" when the run produced no loadable overlay
   "metric_basis": "aggregate_output_tok_s",   // NOT per-GPU; matches Magpie output_throughput
-  "bench_client": "inferencex",               // inferencex => identical client to caller; else native
+  "bench_client": "inferencex",               // resolved measurement client; also native or agentx
   "validated_regimes": [ { "isl": 1024, "osl": 1024, "conc": 64 } ],  // redo parity outside these
   "accepted_kernels": [ /* what was optimized + how (per-kernel) */ ],
   "accepted_heads": [ /* head GEMM/attn winners */ ],
@@ -459,15 +542,25 @@ mirror what `e2e_workflow.js` requires before it banks a candidate live:
 * Candidates are ranked by their own `e2e_delta_pct`, never by absolute
   throughput, which is not comparable across candidates measured at different
   points in the session.
-* A soft-gated (sampled-accuracy) candidate whose delta exceeds twice its
-  Amdahl ceiling is excluded, exactly as `integAccepted()` excludes it live.
-  Byte-exact parity outranks the ceiling and is trusted.
+* The Amdahl estimate is advisory (the legacy `amdahl_ceiling_pct` field is a
+  conditional GPU-time estimate, not an e2e bound). It uses the candidate's
+  `affected_gpu_time` coverage when that profile matches the measurement's
+  candidate, reference and workload digests, otherwise the head's GPU-time share
+  and isolated speedup. A soft-gated (sampled-accuracy) candidate whose delta
+  exceeds the estimate by `GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN` (default: twice the
+  estimate) gets one independent A/B speedup review on the live path; recovery
+  cannot run that review. Until a review confirms the gain, the candidate stays
+  eligible and is listed under `awaiting_speedup_review`. Only a review that ran
+  and measured a rejection excludes it (`rejected_by_speedup_review`), as
+  `integAccepted()` does live. A review result is applied only to the candidate
+  whose original `measurement_id` it names.
 * Parity failures and incomplete A/Bs are skipped.
 * Every distinct kernel in the stack is credited, and competing backends of one
   kernel are counted once.
 
 `validation_evidence.recovery` records the pool size, the pick, its gate, its
-delta-over-ceiling ratio, and anything excluded, so the choice is auditable.
+delta-over-estimate ratio, the estimate and its source, candidates awaiting
+review, and any candidate a measured review rejected, so the choice is auditable.
 
 ### `tuning_skillset` (additive)
 
@@ -561,11 +654,10 @@ the Setup-derived handoff verdict.
 Both harnesses can apply the identical flags and environment and still serve
 different engines, because the orchestrator launches its server through its own
 script and that script — not the transferred config — owns the platform kernel
-preset, `--trust-remote-code`, and the gpu-memory-utilization default. When GEAK
-launches through its native backend adapter instead, the accelerated kernel
-stack can silently fail to come up and the same configuration serves around ten
-percent slower. The divergence metric then measures the launch recipe, not the
-box or the bench client.
+preset, `--trust-remote-code`, and the gpu-memory-utilization default. GEAK's
+native backend adapter may resolve those settings differently. Matching flags
+alone therefore does not establish that both measurements used the same serving
+stack.
 
 `serving_stack` makes that legible without reading a server log. `launcher`
 says who launched (`magpie` = the orchestrator's own script, `native` = GEAK's
@@ -575,9 +667,9 @@ negative divergence is the signature of an unaligned recipe, and
 `baseline_alignment.status` reports `warning_recipe_unaligned` for exactly that
 case so the number is not read as a measurement problem.
 
-Set `BENCH_LAUNCHER=native` in the environment to force the adapter launch; it
-outranks every other resolution path and is the escape hatch when the
-orchestrator's script cannot run.
+Set `handoff.bench_launcher="native"` to select the backend adapter explicitly.
+`BENCH_LAUNCHER=native` supplies that selection when the handoff does not specify
+a launcher.
 
 ### When there is no result to report
 
@@ -605,43 +697,33 @@ resilience below), `result.json` reports the failure instead:
   (`.final_phase_fence`), then the fenced stage. Absent when the eval dir does
   not exist.
 
-## Handoff resilience (the workflow return is never the single point of failure)
+## Handoff recovery
 
-The workflow return (the JSON object carrying `eval_dir` + `accepted_*`) is the
-only value scraped from the agent transcript. A failed scrape used to discard
-the **entire** run as `workflow_parse_error` even though every artifact
-(`director_e2e_validation.json`, the `final/` bundle, the measured gain) is on
-disk. `run_e2e.py` now removes that fragility, layered:
+The standalone runtime writes its top-level return to
+`<eval_dir>/runtime_result.json`. The Python runner reads that file first, then
+tries the runtime's `WORKFLOW_RESULT` output, then the workflow's persisted
+`<eval_dir>/workflow_return.json`.
 
-1. **Robust capture** — the SDK path accumulates the *full* transcript (every
-   text fragment from every message, incl. tool-result blocks), not just the
-   last assistant text.
-2. **Robust extraction** — the parser scans the whole transcript for the last
-   JSON object carrying `eval_dir` (tolerates compact single-line, ```json```
-   fences, pretty-printed multi-line, and trailing prose).
-3. **On-disk sentinel** — on success the parsed return is persisted to
-   `<eval_dir>/workflow_return.json`, so any later read never re-scrapes.
-4. **Disk recovery** — if capture/extraction still fails (or the run timed out
-   after the measured leg), the return is **rebuilt from on-disk artifacts**:
-   `workflow_return.json` if present, else reconstructed from
-   `director_e2e_validation.json` (throughput/speedup/parity/overlay/launch +
-   `accepted_config` from `serving_config`) with accepted-kernel names recovered
-   from the stable `overlay/cand_*` layout. A real win is therefore never lost
-   to a lost handoff line. Recovery returns nothing only when no completed
-   `eval_dir` exists (the run genuinely produced nothing). Recovered runs set
-   `result.recovered_from_disk = true`.
+When invocation fails or times out, recovery can also reconstruct the return
+from this run's retained `director_e2e_validation.json`, serving configuration,
+and overlay artifacts. Recovery requires usable artifacts and does not invent
+missing measurements. Recovered results set `recovered_from_disk=true`; a
+completed final measurement remains authoritative even when it shows no gain.
 
-These are general (no model/run-specific assumptions) and key only off the
-stable artifact layout the workflow always writes.
+## Agent call telemetry
 
-## Claude call telemetry (mirrored into the run)
+The standard runtime writes `<eval_dir>/runtime_metrics.json` alongside its
+result. Runtime metrics and backend traces are described in
+[`runtime/engine/README.md`](runtime/engine/README.md).
 
-GEAK issues almost no LLM calls itself: `run_e2e.py` hands one prompt to Claude
-Code, which runs `e2e_workflow.js` and tags every `agent()` call with its phase
-and label. The token, cost and tool-call record of the entire run therefore
-lives in **Claude Code's** config home — `$CLAUDE_CONFIG_DIR` if set, else
-`~/.claude` — as `projects/<slug>/<session>/workflows/wf_*.json` plus the
-per-agent transcripts under `subagents/workflows/<runId>/`.
+The Claude-home mirroring described below applies when native Claude Workflow
+records are available, including legacy prompt-only invocations. Standard
+runtime dispatch does not depend on those records. Their absence does not mean
+that the runtime made no agent calls.
+
+Native Claude Workflow records live in `$CLAUDE_CONFIG_DIR` when set, otherwise
+`~/.claude`, as `projects/<slug>/<session>/workflows/wf_*.json` plus per-agent
+transcripts under `subagents/workflows/<runId>/`.
 
 That home is a directory the run does not own and whose lifetime it does not
 control. When it is a container overlay, an 18-hour run's entire cost record
@@ -775,44 +857,43 @@ the overlay:
 3. For any point outside `validated_regimes`, redo a greedy/temp=0 parity probe
    (the kernels were only validated at the single handoff workload point).
 
-## Measurement-口径 alignment (vs Hyperloom Magpie)
+## Measurement alignment with the caller
 
-The workflow must measure on the **same口径** as the caller's official baseline so
-`final` and sweep curves are comparable to the caller's raw baseline:
+Comparability depends on the resolved workload, launch configuration, metric,
+client, and measurement protocol. A shared branch or matching client name alone
+does not establish it.
 
-| knob | aligned value |
+| Setting | Source |
 |---|---|
-| primary metric | aggregate `output_throughput` (output tok/s, **not** per-GPU) |
+| primary metric | `E2E_METRIC`; an AgentX `workload_spec.metric_basis` supplies the corresponding metric when the environment has no selection |
 | latency | `ttft_ms` / `tpot_ms` median |
-| dataset | `random`; `random-range-ratio` from `handoff.bench_protocol.random_range_ratio` (caller-driven: `0`=fixed, `>0`=variable), else standalone default `0` (fixed) |
-| workload | same `ISL/OSL/CONC`; `NUM_PROMPTS` from `bench_protocol.num_prompts`, else `max(CONC*factor, CONC)` |
-| warmups | `NUM_WARMUPS` from `bench_protocol.num_warmups`, else `min(CONC, 8)` (the materialize default) |
-| seed | `SEED` from `bench_protocol.seed`, else fixed `0` |
+| dataset/workload | synthetic `workload.isl/osl/conc`, or the corpus/scenario in an AgentX `workload_spec` |
+| synthetic prompt count | explicit `bench_protocol.num_prompts`; otherwise the schema-specific adaptive rule or standalone default |
+| warmups, seed, range ratio | `bench_protocol`, subject to the schema-specific overrides documented above |
 | TP | same tensor-parallel as the caller (no TP=1 lock) |
-| parity | greedy / temp=0 fixed-seed output diff vs baseline |
-| **bench client** | `BENCH_CLIENT=inferencex` → the **exact same** `benchmark_serving.py` as Hyperloom |
+| parity | deterministic decoding / temp=0 fixed-seed output comparison with baseline; independent of the kernel optimizer policy |
+| bench client | `handoff.bench_client`, resolved and exported as `BENCH_CLIENT` |
 
-### Bench-CLIENT adapter (closes the last口径 residual)
+### Benchmark client adapter
 
 The serving stack is launched through the selected backend adapter
 (`adapters/sglang.sh`, `vllm.sh`, or `atom.sh`). The **client** that drives the timed bench is
-selected independently by `BENCH_CLIENT`:
+selected independently:
 
-* `native` (default standalone) — each backend's built-in bench
-  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
-* `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
-  call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
-  (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
-  --num-warmups $NUM_WARMUPS --percentile-metrics ttft,tpot,itl,e2el`). This is
-  byte-for-byte the same client Hyperloom uses, so the only remaining difference
-  is `REPEATS`-median vs single-run — not the client.
+* `native` uses the selected serving backend's built-in benchmark client.
+* `inferencex` uses `InferenceX/utils/bench_serving/benchmark_serving.py` through
+  `adapters/clients/inferencex.sh`. The selected checkout and resolved settings
+  still determine comparability with the caller.
+* `agentx` replays the declared AgentX workload through its separately installed
+  `aiperf` client.
 
-`run_e2e.py` resolves `handoff.bench_client` (`auto` → `inferencex` when an
-InferenceX checkout is discoverable via `INFERENCEX_PATH`, else `native`) and
-exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents run
-inherits it. The profile round (server-side trace) always delegates back to the
-backend's native bench. The chosen client is echoed in `result.bench_client`, and
-the sweep reuse path carries it forward so sweep points use the same client.
+`handoff.bench_client="auto"` selects `agentx` for
+`workload_spec.kind="agentx_trace_replay"`; otherwise it selects `inferencex`
+when an InferenceX path is available, or `native`. The handoff selection is
+resolved before exporting `BENCH_CLIENT`, so an inherited `BENCH_CLIENT` does
+not override `auto`. AgentX workload settings carry the corpus, scenario,
+durations, concurrency, and warmups; synthetic shape placeholders do not replace
+that replay contract. The resolved client is recorded in `result.bench_client`.
 
 ### Server-LAUNCHER adapter (closes the launch-recipe residual)
 
@@ -828,13 +909,11 @@ by the Magpie script. ATOM's multiprocessing leader can exit before its rank wor
 on SIGTERM; the supervisor drains that external group through SIGKILL when necessary,
 preserving the native ATOM adapter's worker-safe teardown behavior.
 
-The script itself is resolved most-explicit-first: `handoff.bench_launcher` /
-`$BENCH_LAUNCHER` decide the launcher, then the script comes from
-`handoff.launch_server_script`, `$MAGPIE_LAUNCH_SCRIPT`,
-`$MAGPIE_<BACKEND>_SCRIPT`, or — the case that actually fires — is derived from
-`handoff.launch_recipe`. No handoff has ever named the launch script, but every
-one names the recipe, and the recipe names both the InferenceX checkout and the
-script filename inside its `benchmarks/` directory.
+`handoff.bench_launcher` selects the launcher first, falling back to
+`BENCH_LAUNCHER` and then automatic selection. The script is resolved from
+`handoff.launch_server_script`, `MAGPIE_LAUNCH_SCRIPT`,
+`MAGPIE_<BACKEND>_SCRIPT`, or finally `handoff.launch_recipe`. A recipe can name
+both the InferenceX checkout and the script inside its `benchmarks/` directory.
 `serving_stack.launch_script_source` records which of those sources won.
 
 Resolution degrades to `native` rather than failing whenever the script cannot
@@ -870,3 +949,21 @@ the ambient process `PATH` stands. GEAK's own CI entrypoint
 and pins the same value into the patched handoff, so a shipped
 `baseline_config.with_envs.yaml` cannot silently flip the CI server start path
 to magpie.
+
+### Retained measurement evidence
+
+A completed final remeasurement takes precedence over an intermediate claimed win,
+including when it shows no gain. A low final is not a missing result and must not
+trigger recovery of an earlier higher number. Cold baseline/final diagnostics need
+a matched same-session pair; otherwise their pairing limitation stays visible.
+
+The optional `correctness_baseline` result identifies the original serving flags,
+environment and overlay retained by the workflow. Empty strings are known empty
+settings; `null` means the old state did not retain that value. `known` describes
+those stored settings, not proof that correctness passed. The seed flags/environment
+are the Director-reported launch settings (or explicit initial inputs); this field
+does not independently reconstruct the running server configuration. It does not replace
+`baseline_config`, which records the caller's configuration.
+
+The retired `ablation_*` study controls now fail at startup. Remove these keys
+from new handoffs; do not reinterpret or resume old study records on the new branch.

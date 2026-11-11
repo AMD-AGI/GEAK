@@ -516,7 +516,3 @@ def lds_per_cu(arch):
             kib = table[name].get("lds_per_cu_kib")
             return int(kib) * 1024 if kib else None
     return None
-    for k in sorted(LDS_PER_CU_BY_ARCH, key=len, reverse=True):
-        if str(arch).startswith(k):
-            return LDS_PER_CU_BY_ARCH[k]
-    return None

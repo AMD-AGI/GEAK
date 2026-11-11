@@ -5,13 +5,11 @@
 // any role prompt, so roleAgent's output is byte-identical to a build without the feature. We prove this
 // behaviorally by extracting the ACTUAL `expertSkillsBlock` function source from each workflow script and
 // asserting it returns '' (a) whenever the flag is off, and (b) for any non-consumer role even when on;
-// and that roleAgent's return is `base` plus ONLY additive `<name>Block(role)` terms.
+// and that roleAgent adds the skill block without changing its other prompt content.
 //
-// roleAgent grew a second injector (warmStartBlock) after this guard was written. The invariant was
-// never "expert skills is the only block" — it is "base is never rewritten, and every block that hangs
-// off it is inert when its own gate is off". So the tail of the return is matched generically and each
-// extra block found there is held to the SAME off-is-empty proof, which is what actually keeps a
-// feature-off run byte-identical. A new injector is covered the day it is added, with no edit here.
+// The E2E prompt has additional gated blocks, which are each checked for off-is-empty behavior.
+// The shared kernel helper also carries phase-dependent native measurement instructions; its
+// rendered prompts prove that switching expert skills off preserves those instructions.
 //
 // Run:  node e2e_workflow/scripts/test_expert_skills_off_identical.js
 'use strict';
@@ -60,6 +58,29 @@ for (const t of TARGETS) {
   // 3) The default must be OFF (opt-in): use_expert_skills defaults to 'false'.
   ok(/A\.use_expert_skills != null \? A\.use_expert_skills : 'false'/.test(src),
     "use_expert_skills defaults to 'false' (opt-in)");
+
+  // The shared kernel helper also carries the native measurement instructions, whose
+  // final-validation text depends on phase. Exercise its actual output with skills off
+  // and on, including that independent instruction block.
+  const roleFrom = src.match(/function roleAgentFrom\(dir, role, phase, intro, inputs\) \{[\s\S]*?\n\}/);
+  if (roleFrom) {
+    const render = (skills, metric) => new Function(
+      'expertSkillsBlock', 'externalMetricInstructions', 'TASK', 'cfg',
+      roleFrom[0] + '\nreturn roleAgentFrom;')(
+        skills, metric, 'fixture task', JSON.stringify);
+    for (const [role, phase] of [[t.consumer, 'analyze'], [t.nonConsumer, 'validate']]) {
+      const args = ['/wf', role, phase, 'fixture intro', { fixture: 'input' }];
+      const base = render(() => '', () => '')(...args);
+      ok(render(off, () => '')(...args) === base,
+        `OFF role prompt is byte-identical without the feature (${role})`);
+      ok(render(on, () => '')(...args) === base + on(role),
+        `ON role prompt adds only its expert skill block (${role})`);
+      const metric = final => final ? '\nfixture final measurement' : '\nfixture search measurement';
+      ok(render(off, metric)(...args) === base + metric(role === 'director' && phase === 'validate'),
+        `OFF preserves native measurement instructions (${role}/${phase})`);
+    }
+    continue;
+  }
 
   // 4) roleAgent must be purely additive: `base + expertSkillsBlock(role)` optionally followed by
   //    further `+ <name>Block(role)` terms, and nothing else.

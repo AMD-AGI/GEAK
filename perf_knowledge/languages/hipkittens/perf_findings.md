@@ -5,7 +5,7 @@ gens: [gfx950, gfx942]
 dtypes: [bf16, fp8_e4m3]
 regimes: [both]
 status: experimental
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://arxiv.org/html/2511.08083v1
   - https://hazyresearch.stanford.edu/blog/2025-11-09-hk
@@ -13,14 +13,9 @@ sources:
 
 # HipKittens perf findings
 
-## TL;DR
-On **MI355X (CDNA4, gfx950)** HK reports SOTA or near-SOTA: it **matches AITER/hipBLASLt on BF16/FP8
-GEMM**, **beats AITER assembly** on several attention forward/backward shapes, and is **1.2–10×** over
-baselines on underserved workloads (some attention shapes, GQA backward, memory-bound). The paper's most
-useful contribution to perf_knowledge is its **honest, measured indictment of the competing AMD DSLs**: Triton
-underperforms even a vanilla BF16 GEMM, Mojo MHA ~50% of peak from bank conflicts, TileLang is CDNA3-only
-and only "competitive with PyTorch." **All numbers below are vendor/author-reported** (Stanford HazyResearch,
-Nov 2025) on MI355X unless noted — not independently re-measured in perf_knowledge.
+The HipKittens paper reports measurements of specific implementations on MI355X.
+The figures below are author-reported historical results, not independent
+measurements in this repository or rankings of current DSL/toolchain versions.
 
 ## HK measured numbers (author-reported, MI355X gfx950, arXiv 2511.08083v1, 2025-11)
 | workload | config | HK | best baseline | note |

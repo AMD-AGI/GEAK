@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp8_e4m3]
 regimes: [both]
 status: experimental
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://www.modular.com/blog/achieving-state-of-the-art-performance-on-amd-mi355----in-just-14-days
   - https://arxiv.org/html/2511.08083v1
@@ -13,13 +13,9 @@ sources:
 
 # Mojo on AMD — status
 
-## TL;DR
-Mojo/MAX **runs on MI300, MI325, MI355** (CDNA3/CDNA4). Modular reports a **day-1 matmul kernel 3% faster
-than hipBLASLt** on MI355X and **MAX up to 2.2× vs AMD's optimized vLLM fork** — both vendor-reported (Oct
-2025). The honest caveat: **attention is not yet at peak** — the HipKittens paper independently measured
-Mojo MHA at **~50% of peak (≈430 TFLOPs at B16/H16/N2048/D128)** from LDS bank conflicts. So as of mid-2026
-Mojo is "GEMM-strong, attention-developing" on AMD, and still an *experimental* authoring option vs the
-production aiter/CK/hipBLASLt path.
+Modular has published AMD enablement and benchmark results. The records below
+are dated evidence for their configurations; current support, numerical behavior
+and performance require checking the selected toolchain and task.
 
 ## Enablement timeline (vendor-reported)
 | date | event |

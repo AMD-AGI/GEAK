@@ -56,9 +56,8 @@ mismatch; and `s_waitcnt` off-by-ones. Most are diagnosable from the disassembly
    DGL is free on MI300X (iree #23765 — DGL/XOR-swizzle/pad tradeoffs).
 9. **Wrong MFMA fragment placement.** Lanes pack A/B/C with no guaranteed element order. Guessing the
    layout → silent wrong answer. Use the calculator.
-10. **Wave specialization** (producer/consumer waves) **underperforms on CDNA3/4** — AMD's static register
-    allocation means producer waves hold registers without computing (HipKittens: ~80% of peak BF16 GEMM
-    on MI355X). Use ping-pong / interleave scheduling instead.
+10. Wave specialization and ping-pong/interleaving trade resource allocation
+    against overlap. Compare the actual target and implementation.
 
 ## Verify
 ```bash

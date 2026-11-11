@@ -1115,7 +1115,7 @@ Full lists: `references/gluon-negative-patterns.md`, `references/platform-known-
   and [`perf_knowledge/languages/gluon/`](../../../languages/gluon/).
 - Onboarding and concepts are **not duplicated here**; they live in
   [`languages/gluon/`](../../../languages/gluon/) (`overview.md`, `programming_model.md`,
-  `gemm_cookbook.md`), which is also where the AMD-measured Gluon GEMM ceilings belong. This skill adds
+  `gemm_cookbook.md`), which is also where the published Gluon GEMM examples belong. This skill adds
   the API-page detail, the do-not-write list, and the two migration mechanics.
 - Gluon language surface upstream: ROCm Gluon GEMM tutorial
   (https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html), gfx950 Gluon

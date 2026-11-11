@@ -53,8 +53,7 @@ mapping on the 8-XCD MI355X) adds **+3–19%** at large M by lifting L2 hit-rate
   scaling here; block-scaled FP8/FP4 is the separate [[operators/scaled_quant_gemm/backends/hipkittens]] path.
 
 ## Integration (how it gets used at serving time)
-- HK is now positioned as **an aiter backend** per the landscape (it is the origin of aiter's 8-wave
-  ping-pong / 4-wave interleave schedules). Authoring path: build the HK kernel with HIPCC
+- An authored HK kernel can be integrated through a supported call site. Authoring path: build the HK kernel with HIPCC
   `--offload-arch=gfx950` (or gfx942) from a pinned `HazyResearch/HipKittens` commit, then wire it the same
   way an authored kernel is engaged for dense GEMM — via the aiter dispatch seam or a call-site rebind in the
   model `LinearMethod` — and **e2e-gate** through [[operators/dense_gemm/backends/aiter]]'s verification flow
@@ -87,4 +86,4 @@ wave-specialization fails on CDNA).
 - HipKittens: Fast and Furious AMD Kernels — arXiv 2511.08083 (Hazy Research, Nov 2025): https://arxiv.org/abs/2511.08083 ; HTML (Tables 2, 4) https://arxiv.org/html/2511.08083v1
 - HazyResearch blog "AMD GPUs go brrr": https://hazyresearch.stanford.edu/blog/2025-11-09-hk
 - Code: https://github.com/HazyResearch/HipKittens
-- AMD SOTA landscape §1 GEMM (HK 1610 BF16; TK-B200 1538 / CUTLASS-B200 1570; XCD +3–19%): [[landscape/amd_sota_2026]]
+- Historical measured comparisons: [HipKittens results](../../../languages/hipkittens/perf_findings.md); use the cited paper for exact configurations.

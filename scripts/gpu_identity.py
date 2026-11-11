@@ -3,15 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detect AMD GPU ISA and product identity from one structured rocminfo agent.
 
-`gfx1201` is an ISA shared by multiple products.  This helper returns target
-`r9700` or `r9600d` only when the same GPU agent reports the corresponding
-exact marketing name; every other product remains `unknown`. Product identity
-does not establish serving-policy or performance-calibration qualification.
+Shared ISAs do not identify a product. This helper reports a known target only
+when the same GPU agent's ISA and exact marketing name match a supported product:
+`r9700` or `r9600d` on gfx1201, `mi350x` or `mi355x` on gfx950. Every other
+product remains `unknown`, and an exact gfx1201 product name on another ISA
+fails closed. Product identity does not establish serving-policy or
+performance-calibration qualification.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -23,8 +26,10 @@ from typing import Any
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
 R9600D_MARKETING_NAME = "AMD Radeon AI PRO R9600D"
 PRODUCT_TARGETS = {
-    R9700_MARKETING_NAME: "r9700",
-    R9600D_MARKETING_NAME: "r9600d",
+    ("gfx1201", R9700_MARKETING_NAME): "r9700",
+    ("gfx1201", R9600D_MARKETING_NAME): "r9600d",
+    ("gfx950", "AMD Instinct MI350X"): "mi350x",
+    ("gfx950", "AMD Instinct MI355X"): "mi355x",
 }
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
@@ -72,9 +77,14 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
         if not _GFX_RE.fullmatch(gfx) or gfx == "gfx000":
             continue
         marketing_name = fields.get("marketing name", "").strip()
-        target = PRODUCT_TARGETS.get(marketing_name, "unknown")
-        if target != "unknown" and gfx != "gfx1201":
-            raise IdentityError(f"GPU agent {target} requires gfx1201, observed {gfx}")
+        # An exact gfx1201 product name on another ISA is an inconsistent agent
+        # and fails closed; any other unmatched (ISA, name) pair stays `unknown`.
+        gfx1201_target = PRODUCT_TARGETS.get(("gfx1201", marketing_name))
+        if gfx1201_target is not None and gfx != "gfx1201":
+            raise IdentityError(
+                f"GPU agent {gfx1201_target} requires gfx1201, observed {gfx}"
+            )
+        target = PRODUCT_TARGETS.get((gfx, marketing_name), "unknown")
         raw_cu = fields.get("compute unit", "")
         try:
             physical_cu_count = int(raw_cu)
@@ -156,10 +166,18 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--input", help="read captured rocminfo output from this file")
     source.add_argument("--rocminfo-bin", help="execute this rocminfo binary")
     source.add_argument("--stdin", action="store_true", help="read rocminfo output from stdin")
+    parser.add_argument("--input-sha256", help="verify captured raw bytes before parsing; requires --input")
     args = parser.parse_args(argv)
+    if args.input_sha256 is not None and (
+        not args.input or not re.fullmatch(r"[a-f0-9]{64}", args.input_sha256)
+    ):
+        parser.error("--input-sha256 requires --input and a lowercase 64-digit SHA-256")
     try:
         if args.input:
-            text = Path(args.input).read_text(encoding="utf-8")
+            raw = Path(args.input).read_bytes()
+            if args.input_sha256 is not None and hashlib.sha256(raw).hexdigest() != args.input_sha256:
+                raise IdentityError("captured rocminfo SHA-256 differs")
+            text = raw.decode("utf-8")
         elif args.stdin:
             text = sys.stdin.read()
         else:

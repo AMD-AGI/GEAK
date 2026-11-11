@@ -1165,8 +1165,9 @@ def test_language_model_only_changes_the_verdict(tmp_path: Path) -> None:
 
 
 def test_vllm_log_read_error_returns_no_identity(tmp_path: Path) -> None:
+    # The reader resolves _open_server_log in its own module, not in the entrypoint's re-export.
     with patch.object(
-        rx,
+        rx._normalization,
         "_open_server_log",
         side_effect=[
             io.StringIO("INFO server ready\n"),

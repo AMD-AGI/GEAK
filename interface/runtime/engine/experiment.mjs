@@ -33,6 +33,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, writeFile, appendFile, readFile } from 'node:fs/promises';
 import { resolve as resolvePath, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgv } from './config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RUN_WORKFLOW = resolvePath(HERE, 'run_workflow.mjs');
@@ -42,20 +43,6 @@ const SPEEDUP_KEYS = [
   'throughput_speedup', 'final_speedup', 'final_weighted', 'final_geomean',
   'speedup', 'director_verified_speedup',
 ];
-
-function parseArgv(argv) {
-  const out = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) out[key] = true;
-      else { out[key] = next; i++; }
-    } else out._.push(a);
-  }
-  return out;
-}
 
 const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
 
@@ -84,11 +71,10 @@ function runOne({ script, argsJson, agent, model, rep, outDir, timeoutMs }) {
 
     const started = Date.now();
     const child = spawn('node', cliArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
     let err = '';
     let killer = null;
     if (timeoutMs > 0) killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
-    child.stdout.on('data', (d) => { out += d.toString(); process.stdout.write(`[${tag}] ${d}`); });
+    child.stdout.on('data', (d) => { process.stdout.write(`[${tag}] ${d}`); });
     child.stderr.on('data', (d) => { err += d.toString(); });
     // Without this an ENOENT (no `node` on PATH) is an unhandled 'error' event,
     // i.e. an uncaught exception that takes the whole sweep down. Record it as

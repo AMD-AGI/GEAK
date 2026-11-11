@@ -5,7 +5,7 @@ gens: [gfx908, gfx90a, gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp8_e4m3, int8, fp32]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://rocm.docs.amd.com/projects/rocWMMA/en/develop/api-reference/api-reference-guide.html
   - ROCm/rocWMMA@develop:samples/simple_hgemm.cpp
@@ -14,14 +14,10 @@ sources:
 
 # rocWMMA
 
-## TL;DR
-rocWMMA is AMD's **header-only C++ library** that exposes the Matrix Cores through a typed
-`fragment`/`mma_sync` API deliberately **mirroring NVIDIA's `nvcuda::wmma`**. It is the *portable*
-authoring middle ground: more ergonomic than raw `__builtin_amdgcn_mfma_*` intrinsics, but you still own
-LDS staging and pipelining, so it rarely beats CK/ck_tile on a turnkey dense GEMM. Reach for it when you
-need a **custom fused kernel** with a matmul inside that must also port to CUDA via WMMA, not to ship a
-production GEMM. Min ROCm 6.4; header at `/opt/rocm/include/rocwmma/rocwmma.hpp`. The standalone
-`ROCm/rocWMMA` repo is deprecated — it now lives in `ROCm/rocm-libraries`.
+rocWMMA is a header-only C++ matrix-fragment API for HIP. It provides matrix
+operations while leaving surrounding data movement and pipelining to the author.
+Check supported type/shape triples in the selected release; similarity to CUDA
+WMMA does not make fragment layouts interchangeable.
 
 ## Concepts
 - **Fragment = typed view of MFMA lane registers.** A `rocwmma::fragment<...>` is a small object held in
@@ -33,7 +29,8 @@ production GEMM. Min ROCm 6.4; header at `/opt/rocm/include/rocwmma/rocwmma.hpp`
 - **Wave-cooperative.** `mma_sync`/`load`/`store` are warp-synchronous: all **64 lanes** of the wavefront
   (WaveSize = 64 on CDNA) execute them together. With LDS source/dest you may need an explicit
   `synchronize_workgroup()` between produce and consume.
-- **fp32 accumulate always.** On CDNA the matrix unit accumulates in 32-bit and converts to the output
+- Use the accumulator type required by the numerical contract and supported fragment triple;
+  the common low-precision path accumulates in FP32 and converts to the output
   type — so for bf16/fp8 inputs the `accumulator` fragment is `float` even if you store bf16.
 - **Maps 1:1 to MFMA.** `fragment<...,16,16,16,bf16>` + `mma_sync` lowers to `v_mfma_f32_16x16x16_bf16`;
   `<32,32,8>` lowers to `v_mfma_f32_32x32x8_*`. Verify with `ROCm/amd_matrix_instruction_calculator`.

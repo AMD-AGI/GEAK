@@ -1,0 +1,221 @@
+// ===========================================================================
+// PHASE: Milestone loop — extract -> recursive kernel optimize -> overlay -> e2e gate
+// ===========================================================================
+// Floor: below MIN_KERNEL_TASKS dispatched tasks the noImprove early-stop is off (an empty plan still
+// stops). TIME_DEADLINE_HIT (set only with time_budget_s) stops new milestones, even below the floor.
+while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatched < MIN_KERNEL_TASKS || noImprove < 2)) {
+  milestone++;
+  const remaining = BUDGET - dispatched;
+  const belowFloor = dispatched < MIN_KERNEL_TASKS;
+
+  // --- (a) Plan this milestone (Architect): below the floor it MUST nominate, never re-using a
+  // confirmed e2e-null direction verbatim.
+  phase('Milestone');
+  let plan;
+  if (KERNEL_EXTRACT_ON) {
+    plan = { stop: !kernelQueue.length, kernel_candidates: kernelQueue };
+    kernelQueue = [];
+  } else {
+    plan = (milestone === 1 && kernelQueue.length)
+      ? { stop: false, kernel_candidates: kernelQueue }
+      : await safeAgent(
+        roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
+          EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
+          BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
+          MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
+          PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
+
+  }
+
+  const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
+  // AgentX keeps the skill-selected inventory; only execution budgets apply here.
+  // Fixed-load pct_gpu_time gate (overrides the floor): only kernels at or above MILESTONE_MIN_PCT;
+  // a missing pct is kept.
+  const planCands = KERNEL_EXTRACT_ON ? planCandsRaw : planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
+  const skipped = KERNEL_EXTRACT_ON ? [] : planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
+  if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
+  if (!planCands.length) {
+    if (KERNEL_EXTRACT_ON) log(`Milestone ${milestone}: prepared UT queue exhausted; stopping.`);
+    else if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
+    else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
+    break;
+  }
+
+  const cands = planCands.slice(0, remaining).map((c, i) => ({
+    ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
+    short_name: c.short_name || `k${milestone}_${i}`,
+  }));
+  // AgentX selection inventories more work than this execution budget can run.
+  // Preserve undispatched eligible candidates in carried state for resume.
+  if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
+  dispatched += cands.length;
+  log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
+
+  // --- (b) PARALLEL optimize (extract + kernel layer per candidate, on distinct GPUs), then SERIAL
+  // integrate: e2e A/Bs must not overlap, and accepted overlays compound in order.
+  const optimized = await parallel(cands.map((c) => async () => {
+    const ext = await extractWithBaseline(
+      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
+        CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+      },
+      { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
+    if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
+      return { c, skip: true, reason: `extraction failed/non-editable (${extractFailWhy(ext)})` };
+    }
+    // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
+    let kl;
+    try {
+      const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+        kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
+        ...(ext.workload_path ? { op_spec: { workload_path: ext.workload_path } } : {}),
+        use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+        ...KB_ARGS,
+        budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+        task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
+          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
+        apply_to_original: 'false',
+      }, String(c.short_name || ext.op_kind || 'milestone'));
+      if (r == null && IS_AGENTX) {
+        return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
+      }
+      kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
+        // The lane's accepted primary; a weighted prepared UT's binding made it the weighted one.
+        final_speedup: isolatedPrimary(r, ext.workload_path),
+        final_validation: r.final_validation ?? null, workload_aligned: r.workload_aligned,
+        final_geomean: r.final_geomean, validation_status: r.validation_status,
+        note: (r.winner && r.winner.source) || '' };
+    } catch (e) {
+      kl = { ran: false, final_patch: '', final_geomean: 0, validation_status: 'error', note: String(e) };
+    }
+    return { c, ext, kl };
+  }));
+
+  // --- serial integrate (compounding overlay, isolated measurement) ---
+  let milestoneImproved = false;
+  for (const o of optimized) {
+    if (!o) continue;
+    const c = o.c;
+    if (o.skip) {
+      log(`  ${c.short_name}: ${o.reason}; skipping.`);
+      history.ledger.push({ direction: c.short_name, verdict: o.paused ? 'paused' : 'dead_end', lesson: o.reason });
+      continue;
+    }
+    const { ext, kl } = o;
+    const isolatedSpeedup = kl?.final_speedup;
+    if (!kl?.ran || kl.validation_status !== 'accepted' || !Number.isFinite(isolatedSpeedup)
+        || !(isolatedSpeedup > 0)
+        || (isolatedSpeedup > 1 && (typeof kl.final_patch !== 'string' || !kl.final_patch.trim()))) {
+      log(`  ${c.short_name}: kernel qualification incomplete (${kl?.validation_status || 'unavailable'}); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: Number.isFinite(isolatedSpeedup) ? isolatedSpeedup : null,
+        isolated_geomean: kl?.final_geomean ?? null, validation_status: kl?.validation_status ?? 'unavailable',
+        final_validation: kl?.final_validation ?? null, kernel_eval_dir: kl?.kernel_eval_dir ?? null,
+        verdict: 'incomplete', lesson: kl?.note || 'isolated qualification or promotable patch unavailable' });
+      continue;
+    }
+    if (!(isolatedSpeedup > 1.0)) {
+      log(`  ${c.short_name}: kernel layer produced no primary speedup (${isolatedSpeedup}x); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, verdict: 'dead_end', lesson: 'no isolated primary speedup' });
+      continue;
+    }
+    log(`  ${c.short_name}: kernel layer ${isolatedSpeedup.toFixed(2)}x isolated primary. Integrating to e2e.`);
+    // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
+    const mileIntegrateInputs = {
+      EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
+      KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
+        source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
+        final_patch: kl.final_patch, verified_isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
+      CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+    };
+    const integ = await runIntegrateBothLegs(
+      'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
+      `integrate ${c.short_name}`, 'Milestone');
+
+    // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
+    const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
+    if (abDone && integAccepted(integ, c.pct_gpu_time, isolatedSpeedup) && integ.e2e_throughput_tok_s > curTput) {
+      curOverlay = integ.accepted_overlay || curOverlay;
+      curTput = integ.e2e_throughput_tok_s;
+      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: isolatedSpeedup }, krOf(mileIntegrateInputs));
+      milestoneImproved = true;
+      log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+        isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+    } else {
+      // As in the head track: a fixable reject or warmup crash earns a corrective re-author (not
+      // charged to HEAD_BUDGET); a non-fixable incomplete A/B stays PENDING.
+      const reason = gateRejectReason(integ, c.pct_gpu_time, isolatedSpeedup);
+      const corr = (rejectClass(reason) !== '')
+        ? await tryCorrectiveReauthor({
+            short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
+            workload_path: ext.workload_path,
+            workload_aligned: kl.workload_aligned,
+            gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
+            isolated: isolatedSpeedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
+            cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+          })
+        : { banked: false };
+      if (corr.banked) {
+        curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+        bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
+        milestoneImproved = true;
+        log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated,
+          isolated_geomean: corr.isolated_geomean ?? null, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
+      } else if (!abDone) {
+        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: isolatedSpeedup,
+          pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
+          partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
+        log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+      } else {
+        log(`  ${c.short_name}: REJECTED at e2e gate (${reason}).`);
+        history.ledger.push({ direction: c.short_name, isolated_speedup: isolatedSpeedup,
+          isolated_geomean: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+      }
+    }
+  }
+
+  // --- (c) If improved: re-profile
+  if (milestoneImproved) {
+    noImprove = 0;
+    if (!KERNEL_EXTRACT_ON) {
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    }
+  } else {
+    noImprove++;
+  }
+
+  // --- (d) Update the persistent experience library + in-run memory
+  const exp = E2E_LEARNED_KB_ENABLED ? await safeAgent(
+    roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
+      ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
+      MILESTONE_RESULTS: history.ledger.slice(-cands.length),
+      REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
+      ...ANALYSIS_SKILL_INPUTS,
+    }),
+    { phase: 'Milestone', label: `architect:experience m${milestone}`, schema: EXPERIENCE_SCHEMA })
+    : null;
+  if (exp) {
+    if (exp.insights) history.insights = exp.insights;
+    if (exp.bottleneck_now) history.bottleneck_now = exp.bottleneck_now;
+    if (exp.suggest_next) history.suggest_next = exp.suggest_next;
+  }
+  history.milestones.push({ milestone, accepted: acceptedKernels.length, throughput: curTput, improved: milestoneImproved });
+  log(`Milestone ${milestone} done. throughput=${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x), noImprove=${noImprove}`);
+}

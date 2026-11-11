@@ -122,6 +122,26 @@ detect_from_rocminfo() {
   PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET="$expected" GEAK_GPU_ARCH= detect_gpu_arch
 }
 
+for product in mi350x mi355x; do
+  got="$(detect_from_rocminfo gfx950 "$product" "AMD Instinct ${product^^}" 256)" \
+    || fail "exact $product identity should succeed"
+  [ "$got" = MI355 ] || fail "$product should select the shared MI355 runtime family"
+  got="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET="$product" GEAK_GPU_ARCH=gfx950 detect_gpu_arch)" \
+    || fail "gfx950 override should preserve exact $product validation"
+  if err="$(detect_from_rocminfo gfx950 "$product" 'AMD GPU' 256 2>&1)"; then
+    fail "$product must not accept unidentified gfx950"
+  fi
+  [[ "$err" == *E_TARGET_EXPECTED_MISMATCH* ]] || fail "missing product mismatch: $err"
+  if err="$(GEAK_EXPECTED_TARGET="$product" GEAK_GPU_ARCH=gfx942 detect_gpu_arch 2>&1)"; then
+    fail "$product must reject a gfx942 override"
+  fi
+  [[ "$err" == *E_ARCH_EXPECTED_MISMATCH* ]] || fail "missing ISA mismatch: $err"
+done
+if err="$(detect_from_rocminfo gfx950 mi355x 'AMD Instinct MI350X' 256 2>&1)"; then
+  fail "MI350X must not satisfy an MI355X pin"
+fi
+[[ "$err" == *E_TARGET_EXPECTED_MISMATCH* ]] || fail "missing product mismatch: $err"
+
 got="$(detect_from_rocminfo gfx1201)" || fail "rocminfo gfx1201"
 [ "$got" = "gfx1201" ] || fail "generic rocminfo gfx1201 must stay architecture-only (got $got)"
 

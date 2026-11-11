@@ -40,9 +40,9 @@ ok(gate !== -1 && gate < src.indexOf('EVAL_DIR = setup.eval_dir;'), 'setup refus
 
 console.log('\n# the Director prompt keeps the suffix rule to generated paths');
 const director = fs.readFileSync(path.join(ROOT, 'roles', 'director.md'), 'utf8');
-ok(/EVAL_DIR_OVERRIDE` is set, `EVAL_DIR` is exactly that path/.test(director),
+ok(/use `EVAL_DIR_OVERRIDE` EXACTLY, including an existing caller-populated directory/.test(director),
   'step 2 says the override is used exactly');
-ok(/if that generated path exists/.test(director), 'the _${RANDOM} rule applies only to the generated path');
+ok(/Otherwise create[^\n]+with a fresh suffix on collision/.test(director), 'collision suffixes apply only to the generated path');
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall passed');
 process.exit(failures ? 1 : 0);

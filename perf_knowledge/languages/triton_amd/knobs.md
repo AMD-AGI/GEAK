@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -28,7 +28,7 @@ Setting them as Python variables does nothing.
 | `num_stages` | standard | **1**,2,(3) | 2 | stream-pipeliner depth |
 | `matrix_instr_nonkdim` | **AMD** | 0,**16**,32 | 0 (auto) | MFMA tile size |
 | `kpack` | **AMD** | 1,**2** | 1 | LDS read width (gfx942 only) |
-| `waves_per_eu` | **AMD** | 0–8 | 0 | force occupancy by trimming VGPRs |
+| `waves_per_eu` | **AMD** | 0–8 | 0 | compiler wave-count hint |
 | `schedule_hint` | **AMD** | none/attention/memory-bound-attention | none | attention sched |
 | `OPTIMIZE_EPILOGUE` | env | 0/1 | 0 | drop epilogue convert (GEMM → 1) |
 | `maxnreg` | standard | int | None | hard VGPR cap (rarely needed) |
@@ -39,19 +39,16 @@ more AGPR/VGPR pressure, coarser scheduling). `nonkdim=32` requires `BLOCK_M,BLO
 Prefer 16 unless 32 measurably wins.
 
 ## 2. `waves_per_eu` — occupancy via register trimming
-Emits `amdgpu-waves-per-eu`. Hardware: **512 VGPR/EU**, allocated in **16-granules**. Achievable iff
-`round_up_16(vgpr_used) · waves_per_eu ≤ 512`.
+Emits the compiler's `amdgpu-waves-per-eu` hint. It can change register allocation,
+scheduling or spills; it does not force measured residency. Use the selected
+target, wave mode and compiler resource metadata to identify a possible occupancy
+boundary. Do not assume one VGPR total or an 8-/16-register rounding rule across
+architectures and register classes.
 
-| vgpr_used | rounds to | max waves/EU |
-|---|---|---|
-| ≤64 | 64 | 8 |
-| 128 | 128 | 4 |
-| 170 | 176 | 2 (176×3 = 528 > 512) |
-| 256 | 256 | 2 |
-
-Use when you're **just over an occupancy boundary** (VGPR=176 → set `waves_per_eu=3`; LLVM may shave
-under 170 to fit 3 waves). Too aggressive → spills (counterproductive). Typical tuned: **2–3** GEMM,
-**3–4** memory-bound. Verify: `AMDGCN_ENABLE_DUMP=1 | grep .vgpr_count`; `occ.sh` (ROCm/triton).
+Try a nearby supported value, then compare allocation, actual scratch accesses
+and accepted latency. Compiler occupancy estimates also depend on LDS, workgroup
+placement and other limits. See [ISA inspection](isa_verify.md) and the
+[LLVM AMDGPU resource definitions](https://llvm.org/docs/AMDGPUUsage.html).
 
 ## 3. `kpack` — K-packing for LDS reads
 `2` packs 2 K-slices → emits 128-bit `ds_read_b128` (vs two `b64`), halving LDS instruction count.
@@ -59,9 +56,10 @@ Win for fp16/bf16 GEMM with `BLOCK_K≥64` on **gfx942**. Costs VGPRs (holds 2 s
 `waves_per_eu`. **Deprecated/forced to 1 on gfx950** (backend warns).
 
 ## 4. `num_warps` — wave64 & spill avoidance
-Warp = 64 lanes; `num_warps=N` → `N·64` threads. **The #1 AMD perf bug** is carrying `num_warps=8`
-from NVIDIA: 8 warps → 2 waves share a SIMD → ~256 VGPR each → spill to scratch (HBM) → **3–5×
-slower**. Start GEMM at `4`; go to `8` only if VGPR-light and occupancy-bound. Memory-bound: `2`/`4`.
+On the targeted CDNA wave64 path, `num_warps=N` requests `N*64` threads.
+Changing the wave count changes per-wave work, live values and scheduling. Compare
+candidate counts such as 4 and 8 on the actual source; neither implies a fixed
+register allocation, spill penalty or universal winner.
 
 ## 5. `num_stages` — stream-pipeliner depth
 Single GEMM **2**; fused two-GEMM (FA) **1**; no-GEMM **1**. Higher stages buffer more in-flight loads

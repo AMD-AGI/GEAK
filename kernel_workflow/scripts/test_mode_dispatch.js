@@ -43,6 +43,11 @@ function build(argsObj, stubs) {
     workflow: async (ref, a) => {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
+      if (s.laneError && s.laneError[a.target_language]) {
+        throw Object.assign(new Error('GEAK_NATIVE_DELIVERY_INCOMPLETE: scripted export failure'),
+          {code: 'GEAK_NATIVE_DELIVERY_INCOMPLETE'});
+      }
+      if (s.laneResult && s.laneResult[a.target_language]) return s.laneResult[a.target_language];
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
       return { validation_status: 'accepted', final_speedup: sp };
     },
@@ -130,15 +135,18 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
 
   // -------------------------------------------------------------------------
   console.log('\n# C. pass-through forwards every arg to the worker unchanged');
-  {
-    const a = { ...BASE, mode: 'author', target_language: 'triton', budget: 3,
-                gpu_ids: '2,3', task: 'make it fast', backends: ['hip', 'ck'] };
+  for (const mode of ['optimize', 'author']) for (const handoff of [undefined, false, true, 'true']) {
+    const a = { ...BASE, mode, target_language: 'triton', budget: 3,
+                gpu_ids: '2,3', task: 'make it fast', backends: ['hip', 'ck'],
+                ...(handoff !== undefined ? {evolution_evidence_handoff: handoff,
+                  evolution_preserve_founder_attempts: handoff} : {}) };
     const { run, trace } = build(a, {});
     await run();
     const c = trace.workflowCalls[0];
     ok(trace.workflowCalls.length === 1, 'exactly one workflow() call', `n=${trace.workflowCalls.length}`);
     ok(String(c.scriptPath).endsWith(path.sep + 'kernel_lane.js'), 'scriptPath = kernel_lane.js', c.scriptPath);
-    for (const k of ['mode', 'target_language', 'budget', 'gpu_ids', 'task', 'kernel_path']) {
+    for (const k of ['mode', 'target_language', 'budget', 'gpu_ids', 'task', 'kernel_path',
+      'evolution_evidence_handoff', 'evolution_preserve_founder_attempts']) {
       ok(JSON.stringify(c.args[k]) === JSON.stringify(a[k]), `forwards ${k}`, JSON.stringify(c.args[k]));
     }
     ok(trace.agentLabels.length === 0, 'no agent spawned on pass-through', `n=${trace.agentLabels.length}`);
@@ -176,6 +184,23 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(trace.lanes.some((l) => l.lang === 'hip' && l.mode === 'author'), 'route=author -> hip:author', lanesOf(trace));
     ok(trace.lanes.some((l) => l.lang === 'ck' && l.mode === 'optimize'), 'route=rewrite -> ck:optimize', lanesOf(trace));
     ok(trace.lanes.some((l) => l.lang === 'flydsl' && l.mode === 'author'), 'flydsl:author', lanesOf(trace));
+  }
+
+  for (const optimizer of ['greedy', 'evo']) for (const plannerView of [undefined, false, true, 'true']) {
+    const controls = {optimizer, evolution_return_development: false,
+      evolution_start: 'search_start', evolution_import_stall_sources: false,
+      evolution_case_evidence_view: true, evolution_evidence_handoff: false,
+      ...(plannerView !== undefined ? {evolution_planner_case_view: plannerView} : {}),
+      evolution_preserve_founder_attempts: false, record_planner_inputs: true,
+      case_measurement_view: 'native_consistent'};
+    const {run, trace} = build({...BASE, mode: 'bakeoff', backends: ['hip'], ...controls}, {
+      agent: healthy('triton', []),
+    });
+    await run();
+    ok(trace.workflowCalls.length > 0 && trace.workflowCalls.every(({args}) =>
+      Object.entries(controls).every(([key, value]) => args[key] === value)
+      && Object.hasOwn(args, 'evolution_planner_case_view') === (plannerView !== undefined)),
+      `bakeoff forwards ${optimizer} and planner view ${JSON.stringify(plannerView)} without coercion`);
   }
 
   // -------------------------------------------------------------------------
@@ -275,6 +300,18 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   }
 
   console.log('\n# L. bakeoff forwards expected identity and fail-closes R9700 knowledge before Discover');
+  for (const target of ['mi350x', 'mi355x']) {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx950', expected_target: target,
+      backends: ['hip'], gpu_ids: '0',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx950', device_target: target,
+      device_name: `AMD Instinct ${target.toUpperCase()}`, physical_cu_count: 256,
+    }) });
+    await run();
+    ok(trace.workflowCalls[0]?.args.expected_target === target,
+      `${target} survives bakeoff dispatch`);
+  }
   {
     const { run, trace } = build({
       ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'r9700',
@@ -397,6 +434,29 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
     ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
       JSON.stringify(trace.agentLabels));
+  }
+
+  console.log('\n# N. one failed native delivery preserves accepted siblings and env candidates');
+  for (const environmentWins of [false, true]) {
+    const answer = healthy('triton', [{language: 'hip', route: 'author'}]);
+    const {run, trace} = build({...BASE, mode: 'bakeoff', gpu_ids: '0,1'}, {
+      laneError: {hip: true},
+      laneResult: {triton: {validation_status: environmentWins ? 'flagged' : 'accepted',
+        final_speedup: 1.7, final_patch: '/tmp/accepted.diff', eval_dir: '/tmp/triton'}},
+      agent: label => label.startsWith('op_benchmarker') && environmentWins
+        ? {...answer(label), tuned_speedup: 1.2, winner_backend: 'aiter', apply_env: 'TUNED=1'}
+        : answer(label),
+    });
+    const result = await run();
+    ok(trace.lanes.length === 2, 'both sibling lanes settle after a delivery failure');
+    ok(result.winner && result.winner.kind === (environmentWins ? 'env' : 'lane'),
+      environmentWins ? 'env winner survives failed and flagged lanes' : 'accepted source winner survives failed sibling');
+    const failed = result.candidates.find(c => c.lang === 'hip');
+    ok(failed && failed.speedup === null, 'failed delivery has unavailable speedup');
+    ok(failed && failed.failure && failed.failure.code === 'GEAK_NATIVE_DELIVERY_INCOMPLETE',
+      'returned candidate keeps exact lane failure');
+    ok(failed && failed.delivery_incomplete.length === 1 && failed.delivery_incomplete[0].lane,
+      'returned candidate keeps its incomplete evidence and lane identity');
   }
 
   console.log(failures === 0

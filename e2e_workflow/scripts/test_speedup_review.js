@@ -48,6 +48,7 @@ function harness(original = candidate(), fresh = candidate({ measurement_evidenc
     const SEARCH_REPLICAS = 1, ACCURACY_INPUTS = {}, MEASUREMENT_MODE = 'warm_server';
     const EVAL_DIR = '/eval', WORKLOAD = {}, INTEGRATE_SCHEMA = {}, profile = {profile_topN_json:'/profile/h0.json'};
     const AB_FINISH_RETRIES = 3, log = () => {}, tuningIntegrateInputs = () => ({});
+    const BASELINE_FLAGS = null, BASELINE_ENV = null, BASELINE_OVERLAY = null;
     const roleAgent = (role, phase, intro, inputs) => ({role, phase, intro, inputs});
     const adoptAbandonedVerdict = async r => r;
     ${core}\n${abDone}\n${abLegs}\n${wrapper}
@@ -160,10 +161,12 @@ test('equal performance numbers from independent artifacts confirm; repeating th
   assert.equal(first.speedup_review.status, 'inconclusive');
   assert.deepEqual(second, first);
   assert.equal(h.calls.filter(c => c.inputs.FORCE_FRESH_AB).length, 1);
-  assert.equal(h.integAccepted(first, 7.18, 1.4596), false);
+  // An inconclusive review is recorded evidence; the original measured verdict stands.
+  assert.equal(h.integAccepted(first, 7.18, 1.4596), true);
   assert.equal(h.rejectClass(h.gateRejectReason(first, 7.18, 1.4596)), '');
-  assert.equal(h.checkpoints[0].committed, false);
-  assert.equal(h.checkpoints[0].validation_status, 'speedup_review_pending');
+  assert.equal(h.checkpoints[0].committed, true);
+  assert.equal(h.checkpoints[0].validation_status, 'accepted_intermediate');
+  assert.equal(h.checkpoints[0].integration_result.speedup_review.status, 'inconclusive');
 });
 
 test('changed candidate/baseline/workload, reused legs and insufficient samples cannot confirm', async () => {
@@ -176,7 +179,7 @@ test('changed candidate/baseline/workload, reused legs and insufficient samples 
     const h = harness(candidate(), candidate({ measurement_evidence: measurement('confirmation', extra) }));
     const result = await h.runIntegrateBothLegs('test', inputs, 'h1', 'HeadKernel');
     assert.equal(result.speedup_review.status, 'inconclusive', JSON.stringify(extra));
-    assert.equal(h.integAccepted(result, 7.18, 1.4596), false);
+    assert.equal(h.integAccepted(result, 7.18, 1.4596), true, 'an unconfirmed review does not veto');
   }
 });
 
@@ -244,10 +247,11 @@ test('a confirmation that cannot finish before the final reserve is deferred, no
   assert.equal(h.calls.length, 1);
   assert.equal(result.speedup_review.status, 'inconclusive');
   assert.match(result.reason, /^speedup_review_inconclusive: deferred/);
-  assert.equal(h.integAccepted(result, 7.18, 1.4596), false);
+  assert.equal(h.integAccepted(result, 7.18, 1.4596), true);
   assert.equal(h.rejectClass(h.gateRejectReason(result, 7.18, 1.4596)), '');
-  assert.equal(h.checkpoints[0].committed, false);
-  assert.equal(h.checkpoints[0].validation_status, 'speedup_review_pending');
+  assert.equal(h.checkpoints[0].committed, true);
+  assert.equal(h.checkpoints[0].validation_status, 'accepted_intermediate');
+  assert.equal(h.checkpoints[0].integration_result.speedup_review.status, 'inconclusive');
 });
 
 test('a claimed confirmation still requires an explicit completed correctness gate', () => {

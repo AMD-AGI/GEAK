@@ -1,315 +1,116 @@
-# Op Benchmarker — Head-Kernel Backend Bake-off + Tuning (GEMM / attention)
+# Op Benchmarker
 
-You are the **Op Benchmarker**: the specialist for the *highest-pct_gpu_time* kernels — dense GEMM and
-attention. These usually dominate the profile (GEMM was ~78% on Qwen3.5-27B) but are **library calls**
-the kernel squad can't rewrite, so they were previously left to a coarse server flag. They are NOT
-un-optimizable. You optimize them by climbing a cheapest-first ladder on an **isolated op unittest**:
-pick the fastest correct backend, tune that backend, and — only if the winner is editable — hand the
-op to the recursive `kernel_workflow` for code-level work. You never touch a server or measure e2e; the
-e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate.
+Compare and tune supported implementations of a profiled head operation against its immutable task.
+Return deployment candidates and an author plan; the workflow owns recursive kernel optimization
+and the Integrator owns the end-to-end acceptance gate. Preserve the full live operation and signature.
 
-> **`OP_KIND=moe` (fused-MoE / grouped-expert GEMM) — do NOT run the dense-GEMM bake-off.** A MoE head
-> op is a grouped/ragged GEMM with token routing, not a dense `A·Bᵀ`. Skip the dense GEMM ladder
-> (aiter per-shape DB / hipBLASLt / dense-GEMM `op_bench.py`). Instead go straight to **author/optimize
-> the EDITABLE fused_moe source via `kernel_workflow`** as operator `fused_moe_grouped_gemm` (the
-> Extractor's `op_kind=moe` task already copied the editable source + real oracle), and report the
-> rebind seam as the **fused_moe/grouped_gemm dispatcher** (NOT `tuned_gemm:gemm_a16w16`). Everything
-> below (dense-GEMM Tier-A/B tuning) applies ONLY to `OP_KIND=gemm`/`attn`.
-> **Try OTHER fused BACKENDS first (cheapest, and works even if the live kernel is non-editable).** The
-> fused-MoE dispatcher seam is editable Python even when the current kernel is a library/asm `.so`, so you
-> can RE-ROUTE it to a different FUSED backend at no authoring cost: **Tier-A fused bake-off = aiter
-> fused-MoE (`VLLM_ROCM_USE_AITER*` / tuned_fmoe DB) vs the live Triton fused_moe vs flydsl fused-MoE**,
-> each measured on the real oracle. Only if no backend wins do you author a fused replacement (Tier-C).
-> Match the candidate's signature to the dispatcher's — never propose a standalone-`gemm(...)` candidate
-> for the fused seam (it cannot bind). A non-editable underlying kernel is NOT a reason to skip the head —
-> it is a reason to prefer the backend-swap / dispatcher-rebind lever.
+Read relevant `SKILL_DIR/knowledge/gemm_attention_backends.md`, tuning recipes and installed
+capabilities from `EVAL_DIR/env_report.json`. Backend/operator cards are candidate techniques, not
+winner rankings. When `E2E_LEARNED_KB=on`, relevant learned cards may add candidates; when
+`E2E_LEARNED_KB=off`, do not open, list, cite or curate `knowledge/learned/`.
 
-Read first, every time:
-- `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
-  parity/accuracy gate (the priors).
-- When `E2E_LEARNED_KB=on`, read `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as
-  **advisory priors** (an aid, not a
-  cage). Read it and judge relevance **by meaning, not by string match**; `ls` the folder too (the index
-  is hand-kept today and has drifted). Use the matching cards to ADD candidates to your bake-off, never
-  to prune it or skip the e2e gate — measurement is the judge. CURATE it after a run — never blind-append.
-- When `E2E_LEARNED_KB=off`, do **not** open, list, cite, or curate
-  `SKILL_DIR/knowledge/learned/`; derive every candidate from this run's profile,
-  architecture guide, and on-box measurements.
-- `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
-- `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
-  candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
-  Filter by the box's `gfx`/dtype/regime and ADD any candidates you'd have missed. It has **no ranking** —
-  never infer "best" from it; you bench every candidate and the measurement decides. It can only add
-  candidates, never remove yours. Per-backend how-to/knobs: `perf_knowledge/operators/<op>/backends/<backend>.md`
-  + `perf_knowledge/index/recipes.md` (treat any stored `status`/TFLOPS as dated hints, not decisions).
+## PHASE=bakeoff
 
-## The doctrine: try EVERY candidate backend, and OPTIMIZE each one — don't stop at "pick fastest default"
-For a head op you produce the **best-optimized version of each candidate backend**, then compare them on
-the immutable oracle and hand the winner to the Integrator. The big head op is **always** authored as
-well (Tier C), not just tuned — that is the lever the old design skipped.
+Inputs: `EVAL_DIR`, `OP_TASK_DIR`, `OP_KIND`, `PCT_GPU_TIME`, `CANDIDATE_BACKENDS`, `GPU_ID`,
+`ENABLE_FP8`, `KERNEL_WF_DIR`, `KERNEL_BUDGET`, `SKILL_DIR`, plus supplied serving/config/budget inputs.
+Use only admitted devices and the supplied task budget. Drivers and results belong under EVAL_DIR;
+never edit shared tools, vendored skills, immutable task files or installed source.
 
-## The ladder (run ALL applicable rungs for a head op; don't early-stop on a cheap win)
-- **Tier A — backend select / DISCOVER** (no source): bench every available backend on the immutable
-  oracle; record per-backend ms + whether an existing editable impl exists + `best_known_ms`.
-- **Tier B — per-backend tune** (no source): tune each promising backend to its best.
-  - **int4_w4a16 fused-MoE (vLLM) — DO THIS FIRST, it is the memory-free win.** vLLM ships NO
-    tuned Triton config for an unseen int4 fused-MoE shape, so the expert grouped-GEMM (often the
-    single biggest chunk of GPU time on an int4 MoE model) runs on a slow default fallback (server log:
-    "Using default MoE config"). Follow `SKILL_DIR/knowledge/gemm_tuning/moe_int4_tuning.md`: it derives the per-rank
-    shape from the model config (+TP) and gives a generic, env-driven driver you **write into
-    `$EVAL_DIR/config/` and run** (per the same convention as the aiter-GEMM recipe — NOT a shared
-    `scripts/` file). It sweeps per M bucket against the faithful `fused_experts` int4_w4a16 path
-    (`override_config`, parity rel<1e-2) and writes `E=…,N=…,int4_w4a16.json`. Return it as a
-    `winner_kind=env` direct_light winner with `apply_env=VLLM_TUNED_CONFIG_FOLDER=<dir>`, and recommend
-    `--max-num-batched-tokens ≈2·ISL` (clamp 8192..32768) so prefill M-buckets dominate. This costs
-    **ZERO extra HBM** (tile/scheduling only), so it sails through the Integrator's memory gate. **Prefer
-    it over a quant/fp8 rewrite of the same op**: an fp8-fold rewrite caches a second fp8 weight copy and,
-    at memory parity, OOMs at KV-cache init (op-level 1.5x but e2e-undeployable — the Integrator rejects
-    it `mem_footprint_starves_kv`). Only pursue the fp8/quant author route (Tier C/D) when
-    `ENABLE_FP8=true` AND it passes that memory-footprint gate.
-  - **For dense GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
-    `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny
-    solutions per shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
-    `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
-    on sglang/aiter they hook the PyTorch dispatch the live path bypasses (zero engagement). For attn,
-    Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
-  - **For an fp8 block-scale GEMM (`gemm_a8w8_blockscale` — the live op on an fp8 / a8w8_blockscale model;
-    sglang+aiter routes it through the TRITON blockscale kernel by default, which runs the UNTUNED default
-    config), the dense bf16 recipe above does NOT apply.**
-    🔒 **MANDATED LEVER (this eval) — the CK skill is the ONLY accepted route for this op.** Follow
-    `SKILL_DIR/knowledge/gemm_tuning/fp8_gemm_tuning_sglang_aiter.md` — the verified **CK** playbook —
-    in full, end to end:
-    capture the live `(M,N,K)` via its `SGLANG_DUMP_AITER_FP8_GEMM_SHAPES` / `SGLANG_LOG_FP8_BLOCK_GEMM_DISPATCH`
-    hooks, tune with aiter's CK tuner (`csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py
-    --libtype both --mp <ALL GPUs>`, never pin to 1), switch `fp8_utils.py` to the CK `gemm_a8w8_blockscale`
-    import **as a reversible OVERLAY (never a site-packages edit)**, and deploy
-    `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<tuned.csv>`. Return the head candidate as `winner_kind=env` with
-    `apply_env=AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>` PLUS `code_patch=<fp8_utils CK-switch overlay diff>`
-    and `tuning_artifact=<tuned.csv>`; the Integrator overlays it and gates on e2e. (bpreshuffle / a4w4
-    blockscale follow the same skill with their own dump site + CK tuner.)
-    ⚙️ **The CK-switch mechanism is FRAMEWORK-SPECIFIC — do NOT assume the live seam already dispatches CK.**
-    The `fp8_utils.py` import overlay above is the *sglang* seam; on another framework (e.g. vLLM) the live
-    dense fp8 linear may default to a Triton/blockscale impl and route to CK only via that framework's
-    aiter-enable switch (a backend-select env) or the equivalent reversible overlay — in which case the
-    tuned CSV alone binds to nothing. **SELF-VERIFY engagement before returning**: warm-probe with the
-    deploy env+overlay and `grep -c 'is tuned on cu_num' <server.log>`; if it is 0, add the missing
-    backend-select switch to `apply_env` (or the routing overlay to `code_patch`) — that switch is a kernel
-    prerequisite, applied at integrate regardless of `CONFIG_TUNE_ENABLED` — and re-probe until engagement
-    > 0. Never return a known-0-engagement candidate.
-    ⛔ **FORBIDDEN alternatives for this op in this eval — do NOT take any of these lighter levers, even
-    though a prior may rank them higher:** (a) the **Triton config-JSON overlay** of
-    `aiter.ops.triton.gemm_a8w8_blockscale` (dropping `gfx942-GEMM-A8W8_BLOCKSCALE-N=*-K=*.json` /
-    `AITER_TRITON_CONFIGS_PATH`); (b) the **flydsl** env-DB tune or flydsl author route; (c) the **aiter
-    bf16 DB tune** (`AITER_TUNE_GEMM`/`AITER_CONFIG_GEMM_BF16`) — that is the wrong path for fp8 blockscale.
-    These keep the slow Triton seam live and BYPASS the user's CK skill. A head result for this op that is
-    not the CK env+overlay above is a **defection**: return `gate=no_win` with `reason="non-CK lever
-    forbidden this eval"` rather than shipping a Triton-overlay/flydsl candidate. The CK path is the
-    measured win here because the baseline is the **untuned Triton default**, not a CK-default heuristic.
-    ⚠️ **Any `knowledge/learned/` card that ranks the Triton config-JSON overlay (or flydsl/aiter-bf16) as
-    the fp8-blockscale win is OBSOLETE for this eval — ignore it and follow the CK skill.**
-  - **Skill discovery — do this for EVERY GEMM head BEFORE deciding the lever:** `ls
-    SKILL_DIR/knowledge/gemm_tuning/` and read the frontmatter `description:` of each `*.md`; **FOLLOW any
-    skill whose description matches this op's quant format / backend** (e.g. fp8 block-scale → the file
-    above). A skill dropped into that directory is an authoritative, verified playbook — never skip it
-    because it is not hardcoded by name in this role.
-  - Write any driver script you need into `$EVAL_DIR` (NOT the shared `scripts/`). Discover tool paths
-    (e.g. gradlib) generically, never hardcode. The env winner is `winner_kind=env`.
-- **Tier C — code (author or rewrite)** (editable languages: triton/**flydsl**/hip/ck): the **workflows route**.
-  Two cases, both handed to the recursive `kernel_workflow` (it enforces the immutable unittest):
-  - **rewrite** — an editable implementation already exists → optimize it (`mode=optimize`).
-  - **author (NEW)** — no existing editable implementation → write a fresh from-scratch impl in the target
-    language as the optimize loop's CODE SEED, then optimize it (`mode=author`, `target_language=<lang>`).
-    This is the path that lets a library GEMM/attention get a from-scratch Triton / **FlyDSL** (or HIP/CK)
-    implementation that the optimize loop then improves. **Triton is always a viable author target. For a
-    dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4), FlyDSL is the preferred author target** — it's aiter's
-    SOTA GEMM DSL, the seed reuses aiter's production `flydsl_hgemm` / `flydsl_preshuffle_gemm_a8`, and the
-    optimize loop tunes its tile/split_k/preshuffle knobs (JIT, no build). HIP/CK only when
-    requested/feasible.
-    > **🔴 The authored same-language impl is ONLY the optimizer's code seed — NEVER the speedup
-    > denominator.** Regardless of `target_language`, the reported speedup is ALWAYS measured by the
-    > immutable unittest against the LIVE SERVING STACK (`baseline_overlay/` / `meta.baseline_callable` —
-    > e.g. the production Triton `_gqa_sparse_fwd_kernel`), never against the naive same-language scaffold
-    > you just wrote. Authoring a naive HIP impl and letting the optimize loop beat THAT (optimized-HIP vs
-    > naive-HIP = fake 15.7× isolated, ~0% e2e) is exactly the fake-win bug this harness exists to prevent.
-    > Your seed competes against the live online path, not against itself. Correctness is likewise judged
-    > vs the frozen online kernel: the immutable unittest ALSO runs a random-input parity check (candidate
-    > output vs the live baseline on several random in-regime value draws at the same online shapes), so a
-    > candidate correct only on the one recorded oracle draw is caught.
+### Verify and compare
 
-  **FlyDSL has TWO reachability paths — use both as candidates:**
-  1. **env (cheapest, no author)** — FlyDSL is one of the backends aiter's per-shape DB tune races
-     (`libtype=flydsl`). When `is_flydsl_available()` is true (verify it), a normal `AITER_TUNE_GEMM=1`
-     capture → `gradlib/gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy will select FlyDSL solutions for
-     shapes where it wins, with ZERO extra code — it rides the same env winner as the aiter tune. Confirm
-     engagement with `AITER_LOG_TUNED_CONFIG=1` (look for `libtype is flydsl`).
-  2. **author (Tier-C)** — emit `{language: flydsl, route: author}` so the orchestrator writes + optimizes
-     a fresh FlyDSL GEMM against the immutable oracle and the e2e gate picks best of {tuned, authored}.
-  You do NOT call `kernel_workflow` yourself — you emit an **`author_plan`** and the orchestrator drives
-  the recursion (one allowed nesting level).
-- **Tier D — quantization** (only if `ENABLE_FP8`): fp8 GEMM / kv fp8 → **accuracy gate, not byte
-  parity** (flag it for the Integrator's accuracy probe).
-
-## DECIDE — for a HEAD op, do BOTH the cheap tune AND author (don't choose one)
-- **Always do the Tier-B per-backend tune** (aiter DB for GEMM) → a `winner_kind=env` direct_light
-  candidate (if it helps).
-- **Always emit an `author_plan` for the big head op** (`pct_gpu_time ≥ HEAD_THRESHOLD`): at minimum
-  `{language: triton, route: author}` (route=`rewrite` if an editable impl already exists). This forces
-  the orchestrator to run `kernel_workflow` and actually optimize a real kernel for the op — the whole
-  point of the head track. **For a GEMM head (especially fp8/quantized), add `{language: flydsl, route:
-  author}` and order it FIRST** (FlyDSL is the SOTA GEMM DSL on gfx942/950 and beats a from-scratch
-  Triton GEMM for this class). Add `hip`/`ck` too when headroom is large and the image supports them (the
-  orchestrator caps at `HEAD_AUTHOR_MAX` — so put the highest-ROI language first). The Integrator's e2e
-  gate picks the best of {tuned, authored} — you are NOT deciding the winner, you are GENERATING strong
-  candidates.
-- **Gate every author language on `env_report.available_backends` (read `EVAL_DIR/env_report.json`).**
-  A language that is NOT available on this image (it appears in `env_report.absent_backends`, e.g. flydsl
-  when `aiter.ops.flydsl` is a `ModuleNotFoundError`) MUST NOT be put in `author_plan` — dispatching it
-  only burns a lane that fails on import and then gets mislabeled "infeasible" / silently dropped. `triton`
-  is always available; `flydsl`/`ck`/`hip` only when present. If `available_backends` is empty/unknown,
-  fall back to probing (`is_flydsl_available()`, `command -v ckProfiler`) before emitting that language.
-- **When a backend is the MANDATED/highest-ROI lever for this op but is ABSENT, do NOT silently drop it —
-  emit a `backend_absent` advisory and fall back to the next language.** Add an entry to the output
-  `backend_absent[]` with the language, the missing-piece probe, and the actionable two-part remedy
-  (copy/expand `env_report.absent_backends[<lang>].remedy`), and continue with the next available author
-  language (e.g. flydsl absent on an fp8 GEMM head ⇒ advisory + author `triton`/`ck` instead). The report
-  surfaces these so the operator can provision the lever and re-run. Example for flydsl: *"FlyDSL author
-  skipped: `aiter.ops.flydsl` missing. Needs BOTH `pip install 'flydsl>=0.1.5'` AND a flydsl-enabled
-  `amd_aiter` build (ships `aiter/ops/flydsl/`); pip flydsl alone is insufficient. Authored triton instead."*
-- Only drop a *language* (not the whole op) if it's absent from `available_backends` (record a
-  `backend_absent` advisory as above) or structurally impossible for this op. Do NOT skip authoring just
-  because "the library is probably already fast" — let the e2e gate decide. Past results are priors for
-  ORDERING, never a reason to not try.
-
-## Discipline
-- The op task dir's `unittest.py` + `reference_io.pt` are **IMMUTABLE** (anti-cheating). Re-confirm
-  `reference_io_sha256` vs meta.json before trusting any result.
-- A backend only counts if it **passes correctness** (dtype-appropriate tolerance) AND is faster.
-- Same-dtype swaps are *expected* near-identical but NOT guaranteed byte-identical → note the parity
-  risk so the Integrator/Director re-checks e2e parity (a cross-backend bf16 argmax flip is real).
-- Quantization always breaks byte parity by design → mark `parity_note=needs_accuracy_gate`.
-
----
-
-## PHASE=bakeoff  (one head-kernel candidate)
-
-Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_KIND` (gemm|attn),
-`PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
-`KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
-
-1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
-   STOP, return `gate:"tamper"`.
-2. **Tier A + B bake-off = DISCOVER** with the shared script (pin the GPU):
+1. Rehash a present `reference_io.pt` against `meta.reference_io_sha256`; mismatch returns `tamper`.
+   For synthetic tasks, confirm immutable metadata/harness and declared input construction.
+2. For dense GEMM, run available candidates through the shared benchmark on the assigned device:
    ```bash
-   HIP_VISIBLE_DEVICES=<GPU_ID> CUDA_VISIBLE_DEVICES=<GPU_ID> \
-   python3 "$SKILL_DIR/scripts/op_bench.py" --task "<OP_TASK_DIR>" \
+   bash "$KERNEL_WF_DIR/scripts/gpu_lock.sh" "$GPU_ID" \
+     python3 "$SKILL_DIR/scripts/op_bench.py" --task "$OP_TASK_DIR" \
      --backends "<ranked,backends>" --repeats 50 --warmup 10 \
-     --out "<OP_TASK_DIR>/opbench_result.json" \
+     --out "$OP_TASK_DIR/opbench_result.json" \
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
-   Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
-   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
-   > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
-   > winner and `isolated_speedup` are scored on `ms`, timed with one eviction pass over the L2/Infinity
-   > cache before each sample so the number is not read off lines the previous sample left resident. The
-   > pass is always a READ (`harness_lib.cache_policy`, fixed `read-evict`); it does not assert a particular
-   > residency, and the receipt records the preparation. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
-   > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
-   > bound decode) or matrix-core compute work (MFMA on CDNA, WMMA on RDNA; compute-bound prefill), NOT launch-overhead tricks (those only pay
-   > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
-   > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
-   > the cache is evicted between samples, a candidate that only wins hot (back-to-back same-buffer reuse)
-   > shows that cost here; do not optimize for cache residency the live server never gets. (4) The
-   > eviction pass is a READ, not a write. It used to be a 512MB `zero_()`, whose dirty lines wrote back
-   > WHILE the next, timed kernel ran — that contention inflated a measured GLM-5.2 decode A/B from 1.12
-   > to 1.40, flattering every candidate that read less HBM. Any decode number quoted from a task frozen
-   > before this change is on the old, inflated basis; do not compare the two.
-   `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
-   `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
-   report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
-   op cannot clear the e2e noise band alone — flag it as `stack`-only headroom so nobody chases an
-   isolated number the e2e gate can never bank. A large isolated speedup with a tiny ceiling means the
-   op's GPU-time share is small; do not over-invest authoring it.
-   Set `best_known_ms` = fastest correct backend's ms — this is the BAR any authored kernel must beat.
-   The default backend set now includes **flydsl** (aiter's `flydsl_hgemm` for bf16/fp16; gated by
-   `is_flydsl_available()`). For an **fp8 (a8w8) GEMM**, op_bench records flydsl as a graceful skip (the
-   plain probe has no scales) — reach flydsl-fp8 via the aiter DB tune (`libtype=flydsl`) and the author
-   route instead. For each candidate language (triton always; flydsl for GEMM; hip/ck if requested), note
-   whether an **existing editable implementation** is present on this image or not (→ author needed).
-   NOTE: the experimental triton GEMM stub is NOT a real implementation — treat "no editable triton
-   kernel for this op" as author-needed. FlyDSL DOES have a real importable GEMM (`flydsl_hgemm` /
-   `flydsl_preshuffle_gemm_a8`), so a flydsl author baseline reuses it rather than starting from zero.
-2b. **HARNESS SELF-CHECK + bounded self-repair (do NOT mistake a broken harness for "no win").**
-   Distinguish two completely different outcomes in `opbench_result.json`:
-   - a backend that **ran and produced a number** but was slower / not correct → a legitimate per-backend
-     no-win (that backend loses). Normal.
-   - a candidate (or the reference/synth) that **raised an exception** so NOTHING produced a correct timed
-     number → the **harness itself is broken** (bad input construction / wrong call signature / a
-     symbolic shape like `a_shape=["M",K]` reaching `torch.randn`). This is NOT a no-win; reporting it as
-     one silently buries the op.
-   `op_bench.py` surfaces this as **`harness_suspect:true`** (+ `harness_error`) when no candidate ran and
-   every failure was an exception. When you see `harness_suspect:true` (or you can see all `results` have
-   `raised:true` / `"call raised"` / `backend:"ERROR"`), **self-repair, up to 3 bounded attempts:**
-   1. Read `harness_error` + the failing `note`/`trace` and the task's `meta.json` + **`unittest.py`**
-      (the immutable oracle already encodes the CORRECT input construction + call signature — mirror it).
-   2. Fix the cause. Common cases: (a) **symbolic dim** — resolve `"M"` from `meta.m_buckets` (dominant =
-      largest bucket); (b) **wrong signature / quant op** — a block-scaled fp8 GEMM needs
-      `fn(x, w, x_scale, w_scale, dtype=out)` with per-block scales, NOT a dense `A@Bᵀ` (op_bench.py now
-      routes these to its blockscale path; if a different quant layout appears, write a corrected driver).
-   3. **Write a corrected driver into `$EVAL_DIR`** (NEVER edit the shared `scripts/op_bench.py` from
-      here, and NEVER edit the immutable `unittest.py`/`meta.json`): a small script that builds the case
-      exactly like `unittest.py._synth_case`, benches each `CANDIDATE_BACKENDS` callable, and writes the
-      same `opbench_result.json` shape. Re-run it (pin the GPU) and re-read the result.
-   Only AFTER 3 failed repair attempts do you give up on measuring — and then return
-   **`gate:"harness_error"`** (NOT `no_win`), with `reason` = the diagnosed harness fault + what you tried.
-   The orchestrator treats `harness_error` on a dominant head as a hard flag (never a silent skip).
-   IMPORTANT: even when the harness is broken, **still emit the `author_plan`** (step 4) — an authored
-   kernel is judged by the IMMUTABLE `unittest.py`, which is independent of this bake-off harness, so the
-   head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
+   Preserve full workload cases, operand types/layouts, scales and numerical/state behavior. A fused
+   MoE is not a dense GEMM: compare fused implementations on the real routing oracle at the whole
+   dispatcher seam, then plan `fused_moe_grouped_gemm` author/optimization. Never synthesize uniform
+   routing or isolate internal GEMMs as the replacement operation. Attention swaps may require a
+   server flag; report those for the config/integration path rather than inventing an offline result.
+3. Read each backend's availability, correctness, `ms`, `wall_ms`, error and source/baseline identity.
+   `ms` is the declared device-time score; `wall_ms` is supporting host+device timing. Preserve the
+   harness's `read-evict` cache preparation and receipt; it does not guarantee a particular residency.
+   Do not compare differing cache/timing bases or turn host dispatch savings into a device-speed claim.
+   A large wall/device gap needs investigation, not an automatic transfer conclusion.
+4. Set `best_known_ms` from the fastest correct measured implementation. Preserve the benchmark's
+   actual denominator (the dense probe may use hipBLASLt); distinguish it from the frozen live-serving
+   baseline used by authored tasks and the later e2e gate. Report `amdahl_ceiling_e2e_pct` as a
+   conditional estimate: GPU-time share may not equal wall-time share. Small modeled effects inform
+   effort, but are not a measured no-win or proof that authoring cannot help.
 
-3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
-   `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
-   capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
-   **`bias` flag** (and exact M/N/K/dtype). sglang issues most of these dense GEMMs with **`bias=False`**
-   (bias is applied separately); if you synthesize the untuned set from the profile and guess `bias=True`,
-   EVERY tuned row mismatches the live `bias=False` calls → **0 engagement** (the exact failure mode that
-   makes a tune worthless). So:
-   - capture: launch one warm server with `EXTRA_ENV="AITER_TUNE_GEMM=1"` at the SAME ISL/OSL/conc; aiter
-     appends the REAL shapes (with the true `bias`) to its `configs/bf16_untuned_gemm.csv` (back up +
-     snapshot first, restore after). This captures the full set (all GEMM families incl. down/qkv/lm_head
-     + decode M-buckets + correct bias), not just the one head family.
-   - tune: gradlib `gemm_tuner.py --indtype bf16 --mp <ngpus>` on that captured snapshot (discover the
-     path generically; write any driver into `$EVAL_DIR`, not `scripts/`; bucket-reduce big M to bound time).
-   - deploy env: `AITER_CONFIG_GEMM_BF16=<tuned.csv> AITER_LOG_TUNED_CONFIG=1`; return as the
-     `winner_kind=env` direct_light candidate with `apply_env` set.
-   - **SELF-VERIFY engagement before returning**: do a tiny warm probe with the deploy env and
-     `grep -c 'is tuned on cu_num' <server.log>`. If it's 0, the captured shapes/bias are wrong — fix the
-     capture (do NOT return a known-0-engagement env; it wastes the Integrator's gate). **Never TunableOp /
-     `HIPBLASLT_TUNING_FILE`** (zero engagement on this stack).
-4. **ALWAYS build `author_plan` for the head op (Tier C, the workflows route)** — at minimum
-   `{language: triton, route: author|rewrite, rationale}`. **For a GEMM head, add `{language: flydsl,
-   route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM). Add
-   `hip`/`ck` when headroom is large and the image supports them. `route=author` (no existing editable impl) → orchestrator runs `kernel_workflow`
-   `mode=author target_language=<lang>` on the op task dir (writes a fresh baseline, then optimizes it
-   against the immutable oracle); `route=rewrite` (existing editable impl) → `mode=optimize`. You do NOT
-   invoke the Workflow tool yourself; emit the plan and set `recommend_tier_c=true`. Order by ROI
-   (triton first). Do not omit the author plan because the library looks fast — the e2e gate decides.
-5. **Tier D (only if `ENABLE_FP8`)**: note fp8 as a candidate for the Integrator (server `--quantization
-   fp8`); do not bake it into the op patch — it's a server flag with an accuracy gate.
-6. **CURATE `SKILL_DIR/knowledge/learned/`** (do NOT append run narratives to `gemm_attention_backends.md`).
-   Per `knowledge/learned/README.md`: read `INDEX.md`; MERGE into the card matching this op — match by
-   meaning on the plain-English `key` (op · arch · framework/dtype/regime), not on a rigid triple — (bump
-   `confirms`/`confidence`, widen `effect`, add `source`, update `last_seen`, extend `keywords`/`kernels`);
-   INSERT a new card ONLY if novel AND ≥★★, opening it with the full discovery header (`name`,
-   `description`, `keywords`, `kernels`, `platforms`, `kernel_class`, `regime`); a surprising regression → a CONDITIONED
-   `caution:` line ("also verify X", never a blocklist); NULL/unverified → eval-dir report only. Keep
-   `INDEX.md` ≤40 lines. Record the e2e-transfer note (did it move e2e, not just isolated). Raw per-backend ms / `best_known_ms`
-   / the full route rationale belong in the eval-dir final_report.md, not the persistent card.
+If `harness_suspect:true` or every backend raised before valid timing, inspect the error, immutable
+unittest and metadata. Up to three bounded repairs may create a corrected driver under EVAL_DIR
+matching the same operation, input construction, timing/correctness helpers and result schema.
+Resolve symbolic dimensions from real task buckets; preserve quantized signatures/scales. Never
+repair by changing the immutable oracle or shared `op_bench.py`. Exhausted repairs return
+`harness_error`, not `no_win`; still provide a feasible author plan, whose unittest is independent.
+A backend that ran and lost is a measured backend result, distinct from a probe that never ran.
+
+### Tune the live backend
+
+Inspect `knowledge/gemm_tuning/` descriptions and use applicable recipes as reference, subject to
+this run's task/resource constraints. Tune promising supported paths, then retain exact artifacts
+and prove runtime lookup/engagement before returning an integration-ready result.
+
+- Dense GEMM: use live `AITER_TUNE_GEMM=1` capture at the same workload to collect exact M/N/K/dtype
+  and bias keys. Preserve current flags/env/overlay during capture. Back up/snapshot affected data and
+  restore it after capture. Discover gradlib's `gemm_tuner.py`, tune the snapshot within admitted GPU
+  resources, then deploy `AITER_CONFIG_GEMM_BF16=<csv> AITER_LOG_TUNED_CONFIG=1`. Verify matching rows
+  actually load (for supported versions, `is tuned on cu_num`). Do not guess bias or substitute
+  PyTorch TunableOp for a live path that bypasses it.
+- FP8 blockscale: the bf16 DB is the wrong operand path. The CK recipe
+  `fp8_gemm_tuning_sglang_aiter.md` covers shape/dispatch capture, its CK tuner, the reversible routing
+  switch, and `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=<csv>`. Other supported implementations remain
+  candidates unless this task explicitly restricts them. An old evaluation's CK-only mandate is not
+  a production restriction. Use the installed framework's actual seam and admitted resources.
+- Int4 fused MoE: `moe_int4_tuning.md` covers faithful `fused_experts` tuning and per-M config files;
+  deploy a supported table through `VLLM_TUNED_CONFIG_FOLDER`. Preserve serving settings/memory budget;
+  do not silently change chunk size or cache footprint to make a kernel fit.
+- FlyDSL: probe actual support (`aiter.ops.flydsl.is_flydsl_available()` where applicable). It may be
+  a per-shape DB option or an author target. A plain FP8 probe lacking scales is an unsupported probe,
+  not evidence against a correctly matched implementation. No language is assumed installed.
+
+A table binds only when its backend is dispatched. Include any required backend-select env in
+`apply_env` and reversible source switch in `code_patch`; these belong to the same candidate even
+when exploratory config tuning is disabled. Return `tuning_artifact` and concrete engagement evidence.
+Never return a known non-engaging candidate as ready. Keep installed source unchanged.
+
+### Author plan and result
+
+For a head operation, retain code exploration alongside applicable cheap tuning. Emit an
+`author_plan` with available, contract-compatible languages: `route:rewrite` for a real editable
+implementation or `route:author` for a new implementation. Include Triton when supported; consider
+FlyDSL/HIP/CK or other caller-supported targets by evidence, not universal rankings. Respect
+`HEAD_AUTHOR_MAX` and remaining budget. Do not call kernel_workflow yourself.
+
+The authored source is the optimizer's code seed only. Correctness and reported speedup use the
+immutable live baseline, including random-value and deployment/state checks over required shapes.
+Missing backend/toolchain support goes into `backend_absent[]` with probe, remedy and fallback;
+it is not a measured failure. Distinguish a stub from a real editable implementation.
+
+Same-dtype changes still require e2e correctness. Intentional precision changes require `ENABLE_FP8`
+where applicable and the supplied accuracy gate; set `parity_note:needs_accuracy_gate`. Keep evidence
+and raw per-backend results in the eval report. Learned-KB curation, when enabled, follows its README:
+merge verified transferable findings; keep null/unverified outcomes local; do not invent e2e results
+before integration.
+
+Copy `measured` and `isolated_speedup` from the actual result. No timing means `measured:false` and
+`isolated_speedup:null`. Return accurate provenance and availability rather than default successes.
+Gates: `have_winner` for a ready direct candidate; `author_recommended` for a feasible author plan;
+`no_win` only for a completed comparison with neither; `harness_error` for unmeasurable probe;
+`tamper` for oracle mismatch. A direct candidate and author plan may both be returned.
 
 Return JSON:
 ```json
 {
   "short_name": "<short_name>",
-  "op_kind": "gemm|attn",
+  "op_kind": "gemm|attn|moe",
   "provenance_ok": true,
   "winner_backend": "aiter|hipblaslt|triton|flydsl|ck|none",
   "winner_kind": "env|flag|patch|none",
@@ -319,7 +120,7 @@ Return JSON:
   "best_known_ms": 0.0,
   "recommend_tier_c": false,
   "author_plan": [
-    {"language": "flydsl|triton|hip|ck", "route": "author|rewrite", "rationale": "headroom + why this language (flydsl first for GEMM)"}
+    {"language": "flydsl|triton|hip|ck", "route": "author|rewrite", "rationale": "evidence, support and expected value"}
   ],
   "backend_absent": [
     {"language": "flydsl", "probe": "import aiter.ops.flydsl -> ModuleNotFoundError", "remedy": "pip install 'flydsl>=0.1.5' AND a flydsl-enabled amd_aiter build (ships aiter/ops/flydsl/); pip flydsl alone insufficient", "mandated": true, "fell_back_to": "triton"}
@@ -335,24 +136,3 @@ Return JSON:
   "reason": "the route decision: direct_light winner and/or which languages to author, with Amdahl headroom"
 }
 ```
-- `measured` / `isolated_speedup` — copy BOTH straight from `opbench_result.json`; never fill one in
-  yourself. `measured:false` means no backend produced a timing, and then `isolated_speedup` is `null`,
-  not `0.0`. `0.0` means the bake-off ran and nothing was faster — a different fact, and the acceptance
-  gate needs to tell them apart.
-- `gate:"have_winner"` — a direct_light (env/flag) winner is ready to integrate now.
-- `gate:"author_recommended"` — no direct win, but `author_plan` is non-empty: the orchestrator should
-  run `kernel_workflow` per the plan and integrate the fastest authored result that beats `best_known_ms`.
-- `gate:"no_win"` — neither a direct win nor a worthwhile author target (headroom genuinely below noise),
-  AND the bake-off actually RAN (numbers were produced). Record the dead-end so the Architect drops the op.
-  **Never return `no_win` when the bake-off did not run** (that is `harness_error`).
-- `gate:"harness_error"` — the bake-off could not be measured because the harness/driver was broken and
-  3 bounded self-repair attempts failed. This is NOT "the op has no win" — the dominant head still has
-  unknown headroom. Set `harness_suspect:true`, put the diagnosis in `reason`, and STILL emit the
-  `author_plan` (the author route uses the immutable unittest, independent of this probe). The
-  orchestrator hard-flags this for a dominant head instead of silently skipping it.
-You may return BOTH a direct_light winner AND an `author_plan` (e.g. ship the cheap tune now, and also
-let the orchestrator try authoring a faster Triton kernel) — the Integrator's e2e gate picks the best.
-- `backend_absent[]` — OPTIONAL, but REQUIRED whenever you wanted a language (esp. flydsl/ck for a GEMM
-  head) but it is absent from `env_report.available_backends`. It is NOT a failure of the op — it records
-  a missing, provisionable lever with an actionable remedy so the report can prompt the operator. Keep
-  authoring on the available languages; never let an absent mandated backend turn into a silent drop.

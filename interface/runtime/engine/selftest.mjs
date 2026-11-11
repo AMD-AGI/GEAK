@@ -6,12 +6,14 @@
 //
 // Exits non-zero on the first failed assertion.
 
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRuntime } from './run_workflow.mjs';
+import { runProcess, runtimeFault } from './backends/base.mjs';
 import { extractJson, validate } from './schema.mjs';
-import { resolveSelection, buildInvocation, neutralizeForBackend, loadRegistry, deriveAgentFromEnv, codexEffort } from './config.mjs';
+import { parseArgv, resolveSelection, buildInvocation, neutralizeForBackend, loadRegistry, deriveAgentFromEnv, codexEffort } from './config.mjs';
 
 let passed = 0;
 const fails = [];
@@ -117,6 +119,118 @@ async function testSchemaAgent() {
   eq(b.calls - before, 3, 'schema retried schemaRetries+1 = 3 times');
 }
 
+async function testBackendEvents() {
+  const dir = await mkdtemp(join(tmpdir(), 'geak-backend-events-'));
+  try {
+    const path = join(dir, 'calls.jsonl');
+    const b = makeFakeBackend();
+    const prompts = [];
+    const runAgent = b.runAgent;
+    b.runAgent = options => {
+      eq(Object.keys(options).sort(), ['cwd', 'env', 'label', 'model', 'prompt', 'timeoutMs'],
+        'backend receives only its explicit options, never planner observer metadata');
+      prompts.push(options.prompt); return runAgent(options);
+    };
+    const observation = eval_dir => ({eval_dir, round: 1, logical_attempt: 'initial', components: {
+      unicode: {state: 'present', serialized: JSON.stringify('observer-only λ🧪')},
+      missing: {state: 'absent'}, null_value: {state: 'null', serialized: 'null'},
+      empty: {state: 'empty', serialized: '[]'}, failed: {state: 'error'},
+      malformed: {state: 'present', serialized: null},
+    }});
+    const rt = createRuntime({ backend: b, concurrency: 2, schemaRetries: 2,
+      backendEventsFile: path, log: silent });
+    eq(await rt.parallel(['FAKE_TEXT:private-output λ🧪', 'FAKE_THROW', 'FAKE_TEXT:last'].map((prompt, i) =>
+      () => rt.agent(prompt, { phase: 'Optimize', label: 'tech_lead:plan r1',
+        plannerObservation: observation(`/eval/invocation-${i}`) }))),
+    ['private-output λ🧪', null, 'last'], 'recording preserves overlapping backend results and failure');
+    const rows = async () => (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse);
+    const events = await rows();
+    const active = new Set(); let peak = 0;
+    for (const e of events) {
+      if (e.event === 'start') { active.add(e.backend_call_id); peak = Math.max(peak, active.size); }
+      else { ok(active.delete(e.backend_call_id), 'backend end matches an active start'); }
+      ok(e.schema === 'geak.backend-call/1' && e.phase === 'Optimize'
+        && e.label === 'tech_lead:plan r1' && Number.isFinite(Date.parse(e.timestamp_utc))
+        && Number.isFinite(e.elapsed_ms), 'backend event has timing and existing role attribution');
+      eq([e.planner_observation.eval_dir, e.planner_observation.round, e.planner_observation.logical_attempt],
+        [`/eval/invocation-${e.backend_call_id - 1}`, 1, 'initial'], 'identical labels retain distinct eval invocation scopes');
+    }
+    eq(events.length, 6, 'three admitted backend calls have three start/end pairs');
+    eq([peak, active.size], [b.maxInFlight, 0], 'interval overlap matches actual backend concurrency');
+    eq(events.filter(e => e.outcome === 'threw').map(e => [e.error_name, e.error_code]),
+      [['Error', null]], 'backend failure records type without message');
+    ok(!(await readFile(path, 'utf8')).includes('private-output'), 'trace excludes backend content');
+    const schema = {type: 'object', required: ['ok']};
+    try { await rt.agent('FAKE_BADJSON', {schema, label: 'tech_lead:replan r1#1',
+      plannerObservation: {...observation('/eval/invocation-0'), logical_attempt: 'replan1'}}); } catch { /* expected after retries */ }
+    const retries = (await rows()).slice(6);
+    eq(retries.length, 6, 'each of three schema attempts has its own interval');
+    eq(new Set(retries.map(e => e.backend_call_id)).size, 3, 'schema attempts have distinct backend identities');
+    eq(new Set(retries.map(e => e.agent_call_id)).size, 1, 'schema attempts retain one agent identity');
+    ok(retries.every(e => e.planner_observation.eval_dir === '/eval/invocation-0'
+      && e.planner_observation.logical_attempt === 'replan1'), 'schema retries retain logical planner scope');
+    eq(retries.filter(e => e.event === 'end').map(e => [e.schema_attempt, e.outcome]),
+      [[1, 'returned'], [2, 'returned'], [3, 'returned']], 'invalid JSON is a returned backend call');
+    for (const e of await rows()) {
+      const prompt = prompts[e.backend_call_id - 1];
+      eq(e.host_prompt_state, 'present', 'successful host digest has explicit state');
+      eq(e.host_prompt_sha256, createHash('sha256').update(prompt, 'utf8').digest('hex'),
+        'start/end bind the exact dispatched prompt, including runtime additions and schema retries');
+      eq(e.host_prompt_bytes, Buffer.byteLength(prompt, 'utf8'), 'host prompt size counts UTF-8 bytes');
+      const c = e.planner_observation.components;
+      const serialized = JSON.stringify('observer-only λ🧪');
+      eq(c.unicode, {state: 'present', bytes: Buffer.byteLength(serialized, 'utf8'),
+        sha256: createHash('sha256').update(serialized, 'utf8').digest('hex')}, 'component digest binds exact serialized UTF-8');
+      eq([c.missing.state, c.null_value.state, c.empty.state, c.failed.state, c.malformed.state],
+        ['absent', 'null', 'empty', 'error', 'error'], 'component states distinguish absence, null, empty and observation errors');
+      eq([c.failed.bytes, c.failed.sha256, c.malformed.bytes, c.malformed.sha256], [null, null, null, null],
+        'observation failures carry no fabricated digest');
+    }
+    ok(!(await readFile(path, 'utf8')).includes('observer-only'), 'trace contains no serialized component contents');
+    eq([rt.state.backendTrace.open_calls, rt.state.backendTrace.write_error], [0, null], 'settled trace is complete');
+
+    const existing = createRuntime({backend: makeFakeBackend(), backendEventsFile: path, log: silent});
+    eq(await existing.agent('FAKE_TEXT:unchanged'), 'unchanged', 'trace open failure does not change backend outcome');
+    eq(existing.state.backendTrace.write_error, 'EEXIST', 'existing trace is explicitly rejected');
+    eq((await rows()).length, 12, 'existing trace was neither replaced nor appended to');
+    const byteLength = Buffer.byteLength;
+    try {
+      Buffer.byteLength = (value, ...args) => {
+        if (typeof value === 'string' && value.startsWith('FAKE_TEXT:digest-survived')) throw new Error('fixture digest failure');
+        return byteLength(value, ...args);
+      };
+      eq(await rt.agent('FAKE_TEXT:digest-survived'), 'digest-survived', 'host digest failure preserves backend result');
+    } finally { Buffer.byteLength = byteLength; }
+    eq((await rows()).slice(-2).map(e => [e.host_prompt_state, e.host_prompt_bytes, e.host_prompt_sha256]),
+      [['error', null, null], ['error', null, null]], 'failed host digest remains explicit in matching start/end events');
+    for (const field of ['eval_dir', 'round', 'logical_attempt']) {
+      eq(await rt.agent('FAKE_TEXT:scope-survived', {plannerObservation: {
+        ...observation('/eval/valid'), [field]: {private: 'scope-object-content'},
+      }}), 'scope-survived', 'invalid observer scope preserves backend result');
+      eq((await rows()).slice(-2).map(e => e.planner_observation), [{state: 'error'}, {state: 'error'}],
+        'non-primitive scope produces only observer error state');
+    }
+    ok(!(await readFile(path, 'utf8')).includes('scope-object-content'), 'invalid scope contents never enter trace');
+    const disabled = createRuntime({backend: makeFakeBackend(), log: silent});
+    ok(!Object.hasOwn(disabled.state, 'backendTrace'), 'recording is absent by default');
+    const expiredPath = join(dir, 'expired.jsonl');
+    const expiredBackend = makeFakeBackend();
+    const expired = createRuntime({backend: expiredBackend, backendEventsFile: expiredPath, log: silent});
+    try { await expired.agent('unadmitted', {processDeadlineEpoch: Date.now() / 1000 - 1}); } catch { /* expected */ }
+    eq([expiredBackend.calls, await readFile(expiredPath, 'utf8')], [0, ''], 'expired admission creates no backend interval');
+
+    const brokenPath = join(dir, 'broken.jsonl');
+    const broken = createRuntime({backendEventsFile: brokenPath, log: silent, backend: {
+      name: 'fake', async runAgent() {
+        await rm(brokenPath); await mkdir(brokenPath);
+        return {text: 'survives write failure'};
+      },
+    }});
+    eq(await broken.agent('private'), 'survives write failure', 'end append failure preserves backend result');
+    eq(broken.state.backendTrace.write_error, 'EISDIR', 'end append failure marks trace incomplete');
+  } finally { await rm(dir, {recursive: true, force: true}); }
+}
+
 async function testRunScriptAndNesting() {
   const dir = await mkdtemp(join(tmpdir(), 'geak-selftest-'));
   const child = join(dir, 'child.js');
@@ -159,6 +273,15 @@ async function testAgentCap() {
 }
 
 async function testConfig() {
+  eq(parseArgv(['workflow.js', '--args', '{"x":1}', '--fake', '--quick']),
+    { _: ['workflow.js'], args: '{"x":1}', fake: true, quick: true },
+    'all runtime CLIs share positional, string-value and bare-flag parsing');
+  eq(parseArgv(['--count', '-1', '--count', '2', '--empty', '', 'tail']),
+    { _: ['tail'], count: '2', empty: '' },
+    'negative/empty values remain strings and the last repeated option wins');
+  eq(parseArgv(['--name=value', '--', 'literal']),
+    { _: [], 'name=value': true, '': 'literal' },
+    'legacy equals-sign and double-dash token handling remains unchanged');
   const reg = {
     default_profile: 'claude',
     agents: {
@@ -268,6 +391,18 @@ async function testConfig() {
   // exactly two agents; an unknown name must fail loudly rather than fall back,
   // so a stale `--agent qwen` in someone's script cannot silently run on claude.
   const real = await loadRegistry();
+  const settings = '{"env":{"EXAMPLE":"a value with spaces"}}';
+  const claude = buildInvocation(real.agents.claude, null, 'P', {env: {
+    GEAK_CLAUDE_BIN: '/opt/agent/claude', GEAK_CLAUDE_MODEL: 'caller-model',
+    GEAK_CLAUDE_SETTINGS: settings, GEAK_CLAUDE_EFFORT: 'max',
+  }});
+  eq(claude.cmd, '/opt/agent/claude', 'Claude binary override survives runtime routing');
+  eq(claude.args[claude.args.indexOf('--model') + 1], 'caller-model', 'Claude model override survives');
+  eq(claude.args[claude.args.indexOf('--settings') + 1], settings, 'settings JSON stays one argv value');
+  eq(claude.args[claude.args.indexOf('--effort') + 1], 'max', 'valid Claude effort forwarded');
+  const legacyEffort = buildInvocation(real.agents.claude, null, 'P', {
+    env: {GEAK_CLAUDE_EFFORT: 'ultracode'}});
+  ok(!legacyEffort.args.includes('--effort'), 'legacy Workflow-only effort is not sent to the CLI');
   eq(resolveSelection(real, { profile: 'codex-gpt56' }).modelName, 'openai_gpt56', 'shipped registry: codex-gpt56 profile pins its model');
   eq(resolveSelection(real, { agent: 'codex' }).agentName, 'codex', 'shipped registry: codex agent');
   let gone = false; try { resolveSelection(real, { agent: 'qwen' }); } catch { gone = true; }
@@ -455,6 +590,58 @@ async function testProviderDefaultModel() {
     'and the pinned value is the one that survives');
 }
 
+// runProcess: the process group is gone when it returns, whether the command finished, timed out or
+// left a background child behind.
+async function testRunProcess() {
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  let r = await runProcess({ cmd: 'sh', args: ['-c', 'cat; echo err >&2; exit 3'], input: 'in' });
+  eq([r.status, r.code, r.signal, r.stdout, r.stderr, r.strays_killed, r.group_cleared],
+    ['completed', 3, null, 'in', 'err\n', false, true], 'runProcess: exit code, stdin and output');
+
+  r = await runProcess({ cmd: 'sh', args: ['-c', 'sleep 30 & echo $!; wait'], timeoutMs: 300, graceMs: 200 });
+  eq([r.status, r.group_cleared], ['timeout', true], 'runProcess: timeout ends the group');
+  ok(!alive(+r.stdout.trim()), 'runProcess: timeout kills the background grandchild too');
+
+  r = await runProcess({ cmd: 'sh', args: ['-c', 'trap "" TERM; sleep 30'], timeoutMs: 200, graceMs: 200 });
+  eq([r.status, r.signal, r.group_cleared], ['timeout', 'SIGKILL', true], 'runProcess: SIGKILL after the grace period');
+
+  for (const redirect of ['', ' >/dev/null 2>&1']) {
+    r = await runProcess({ cmd: 'sh', args: ['-c', `sleep 30${redirect} & echo $! >&2; exit 0`], graceMs: 200 });
+    eq([r.status, r.code, r.strays_killed, r.group_cleared], ['completed', 0, true, true],
+      `runProcess: a child left behind is killed and reported (${redirect ? 'own stdio' : 'shared stdio'})`);
+    ok(!alive(+r.stderr.trim()), 'runProcess: the stray is dead when it returns');
+  }
+
+  // A process that left the group but kept our stdout: bounded wait, reported, not claimed gone, no
+  // further command starts, and the run fails. Run through the CLI runner so this runtime stays usable.
+  const dir = await mkdtemp(join(tmpdir(), 'geak-selftest-'));
+  await writeFile(join(dir, 'escape.js'), `
+    const a = await runProcess({ cmd: 'sh', args: ['-c',
+      'setsid sleep 5 & p=$!; while [ "$(ps -o sid= -p $p | tr -d \\' \\')" != "$p" ]; do sleep 0.01; done; echo $p >&2'],
+      graceMs: 100, settleMs: 300 });
+    const b = await runProcess({ cmd: 'true' });
+    try { process.kill(+a.stderr.trim(), 'SIGKILL'); } catch {}
+    return { a, b };`);
+  r = await runProcess({ cmd: process.execPath, timeoutMs: 20000, args: [
+    new URL('./run_workflow.mjs', import.meta.url).pathname, join(dir, 'escape.js'),
+    '--result-file', join(dir, 'result.json'), '--metrics-file', join(dir, 'metrics.json'),
+    '--backend-events-file', join(dir, 'backend_calls.jsonl')] });
+  const read = async (f) => { try { return JSON.parse(await readFile(join(dir, f), 'utf8')); } catch { return {}; } };
+  const { a = {}, b = {} } = await read('result.json');
+  const metrics = await read('metrics.json');
+  eq([metrics.backend_call_trace?.complete_at_workflow_return, metrics.backend_call_trace?.events_written],
+    [true, 0], 'CLI reports an empty complete trace when no backend calls ran');
+  await rm(dir, { recursive: true, force: true });
+  eq([a.status, a.code, a.group_cleared, a.stdio_held], ['completed', 0, true, true], 'runProcess: escaped process holding the pipes is reported');
+  ok(a.duration_ms < 2000, `runProcess: an escaped process does not hold settlement (${a.duration_ms} ms)`);
+  eq(b.status, 'spawn_error', 'runProcess: no command starts after an escaped process held the pipes');
+  eq([r.code, metrics.ok, /escaped/.test(metrics.error)], [1, false, true], 'runner: the run fails and says why after an escape');
+  eq(runtimeFault(), null, 'runtimeFault: null in a runtime that saw no escape or survivor');
+
+  r = await runProcess({ cmd: '/nonexistent/geak-selftest' });
+  eq(r.status, 'spawn_error', 'runProcess: a missing command is a spawn_error, not a throw');
+}
+
 async function main() {
   await testSchemaUnit();
   await testConfig();
@@ -464,8 +651,10 @@ async function main() {
   await testConcurrencyCap();
   await testPipeline();
   await testSchemaAgent();
+  await testBackendEvents();
   await testRunScriptAndNesting();
   await testAgentCap();
+  await testRunProcess();
 
   console.log(`\n${passed} checks passed, ${fails.length} failed.`);
   if (fails.length) process.exit(1);

@@ -98,6 +98,11 @@ verdict or hashed reference, and `source_delivery_ref`. Keep `notes`,
 `smoke_detail` and `reference_io_sha256` strings. Use `"fail"` for incomplete or
 failed tests. The complete optional-field schemas are in `e2e_workflow.js`.
 
+When `meta.workload` declares case weights (the observed AgentX model, or analytic
+calls), also return `workload_path` naming the task's `meta.json`, the file that
+declares them. Optimization lanes rank on the weighted primary
+only through this binding, so preflight and packing refuse a weighted UT without it.
+
 Prefer `selection_validation_ref={"path":"run/selection.json","sha256":"..."}`
 over transcribing large machine verdicts. The referenced JSON must be a complete
 raw `kernel_selection.py` verdict inside the task. A changed/missing file fails;

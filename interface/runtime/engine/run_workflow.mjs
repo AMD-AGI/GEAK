@@ -5,6 +5,8 @@
 // GEAK's orchestration (kernel_workflow.js / e2e_workflow.js) is plain JS that
 // depends on globals injected ONLY by Claude Code's `Workflow` tool:
 //   agent() parallel() pipeline() phase() log() workflow() args budget
+// (plus runProcess(), which only this runtime provides: one command in its own
+// process group, see backends/base.mjs; under the Workflow tool it is undefined).
 // That runtime is Claude-Code-only, so the workflows cannot run under any other
 // agent. This module re-implements those globals as an ordinary Node process and
 // dispatches each agent() call to a PLUGGABLE backend (claude | codex | ...).
@@ -17,7 +19,7 @@
 //   node run_workflow.mjs <script.js> [--args '<json>'] [--args-file <path>]
 //        [--profile name | --agent name --model name] [--registry path]
 //        [--result-file <path>] [--metrics-file <path>] [--concurrency N]
-//        [--agent-timeout-ms N]
+//        [--agent-timeout-ms N] [--backend-events-file path]
 //   Selection also from env: GEAK_AGENT_PROFILE / GEAK_AGENT_BACKEND (=agent) /
 //   GEAK_MODEL. Agents/models/profiles are defined in registry.json.
 //   The final workflow return value is written to --result-file (if given) and
@@ -25,31 +27,14 @@
 //   "WORKFLOW_METRICS <json>" and to --metrics-file.
 
 import { readFile, writeFile } from 'node:fs/promises';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { cpus } from 'node:os';
+import { createHash } from 'node:crypto';
 import { extractJson, validate, schemaInstruction } from './schema.mjs';
-import { defaultConcurrency } from './backends/base.mjs';
-import { loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
+import { defaultConcurrency, runProcess, runtimeFault } from './backends/base.mjs';
+import { parseArgv, loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
 import { makeGenericBackend } from './backends/generic.mjs';
-
-// ---------------------------------------------------------------------------
-// CLI parsing
-// ---------------------------------------------------------------------------
-function parseArgv(argv) {
-  const out = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) { out[key] = true; }
-      else { out[key] = next; i++; }
-    } else {
-      out._.push(a);
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Counting semaphore — bounds concurrent agent subprocesses. Shared across the
@@ -85,6 +70,14 @@ function toRunnableBody(src) {
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
+export function compileWorkflowBody(src) {
+  return new AsyncFunction(
+    'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
+    'setTimeout', 'clearTimeout', 'setProcessDeadline',
+    toRunnableBody(src)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -117,13 +110,80 @@ export function createRuntime({
   concurrency = 8,
   agentTimeoutMs = DEFAULT_AGENT_TIMEOUT_MS,
   schemaRetries = 2,
+  backendEventsFile,
   log = (msg) => process.stderr.write(`[${nowStamp()}] ${msg}\n`),
 } = {}) {
   const SCHEMA_RETRIES = schemaRetries;
   const sem = new Semaphore(concurrency);
+  // Anchor epoch cutoffs once. Later wall-clock adjustments cannot extend them.
+  const epochStartedMs = Date.now();
+  const monotonicStarted = process.hrtime.bigint();
+  const elapsedMs = () => Number(process.hrtime.bigint() - monotonicStarted) / 1e6;
+  const msUntil = (epoch) => epoch * 1000 - epochStartedMs - elapsedMs();
+  const deadlineError = () => Object.assign(new Error('workflow process deadline reached'),
+    { code: 'GEAK_PROCESS_DEADLINE' });
+  const roleTimeoutError = () => Object.assign(new Error('workflow role timeout reached'),
+    { code: 'GEAK_AGENT_TIMEOUT' });
+  const boundedTimeout = (epoch, requested, cleanupMs) => {
+    if (!Number.isFinite(epoch) || epoch <= 0) throw new Error('positive process deadline required');
+    const remaining = Math.floor(msUntil(epoch) - cleanupMs);
+    // runProcess interprets zero as unlimited, so never pass an expired bound.
+    if (remaining <= 0) throw deadlineError();
+    return requested > 0 ? Math.min(requested, remaining) : remaining;
+  };
   // Metrics (no token/cost by design): agent-call count + structured-output
   // parse failures. The experiment runner aggregates these across combos.
   const state = { spawned: 0, schemaFails: 0 };
+  // Opt-in backend-call intervals, independent of role outputs and model content.
+  // Tiny synchronous appends need no timer/flush queue and still work if a backend
+  // settles after a workflow's unbounded Promise.race has already returned.
+  let backendCallSeq = 0;
+  if (backendEventsFile != null) {
+    state.backendTrace = { path: typeof backendEventsFile === 'string' ? resolvePath(backendEventsFile) : null,
+      events_written: 0, open_calls: 0, write_error: null };
+    try {
+      if (!state.backendTrace.path) throw Object.assign(new Error(), {code: 'INVALID_TRACE_PATH'});
+      writeFileSync(state.backendTrace.path, '', { flag: 'wx', mode: 0o600 });
+    } catch (error) { state.backendTrace.write_error = error.code || 'TRACE_OPEN_FAILED'; }
+  }
+  function backendEvent(event, call, extra = {}) {
+    const trace = state.backendTrace;
+    if (!trace || trace.write_error) return;
+    try {
+      const elapsed = elapsedMs();
+      const row = { schema: 'geak.backend-call/1', event, ...call,
+        timestamp_utc: new Date(epochStartedMs + elapsed).toISOString(), elapsed_ms: elapsed, ...extra };
+      appendFileSync(trace.path, JSON.stringify(row) + '\n');
+      trace.events_written++;
+    } catch (error) { trace.write_error = error.code || 'TRACE_WRITE_FAILED'; }
+  }
+  async function callBackend(options, agentCallId, schemaAttempt, ph, plannerObservation) {
+    if (!state.backendTrace) return backend.runAgent(options);
+    const call = { backend_call_id: ++backendCallSeq, agent_call_id: agentCallId,
+      schema_attempt: schemaAttempt, backend: backend.name, phase: ph, label: options.label,
+      timeout_ms: Number.isFinite(options.timeoutMs) ? options.timeoutMs : null,
+      host_prompt_state: 'present', host_prompt_sha256: null, host_prompt_bytes: null,
+      ...(plannerObservation ? {planner_observation: plannerObservation} : {}) };
+    try {
+      call.host_prompt_sha256 = createHash('sha256').update(options.prompt, 'utf8').digest('hex');
+      call.host_prompt_bytes = Buffer.byteLength(options.prompt, 'utf8');
+    } catch (_) { call.host_prompt_state = 'error'; call.host_prompt_sha256 = null; call.host_prompt_bytes = null; }
+    state.backendTrace.open_calls++;
+    backendEvent('start', call);
+    let outcome = 'returned', error_name = null, error_code = null;
+    try {
+      return await backend.runAgent(options);
+    } catch (error) {
+      outcome = 'threw';
+      // Backend messages can contain output or credentials; retain only short codes.
+      const code = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(value) ? value : null;
+      try { error_name = code(error?.name); error_code = code(error?.code); } catch { /* metadata only */ }
+      throw error;
+    } finally {
+      backendEvent('end', call, { outcome, error_name, error_code });
+      state.backendTrace.open_calls--;
+    }
+  }
 
   let currentPhase = '';
   const phase = (title) => { currentPhase = title; log(`=== PHASE: ${title} ===`); };
@@ -138,8 +198,36 @@ export function createRuntime({
     const label = agentOpts.label || 'agent';
     const ph = agentOpts.phase || currentPhase;
     const schema = agentOpts.schema;
+    // A role's existing hang limit covers queueing and all schema attempts.
+    const roleStopMs = agentOpts.processDeadlineEpoch != null && agentOpts.processTimeoutMs > 0
+      ? elapsedMs() + Number(agentOpts.processTimeoutMs) : Infinity;
 
-    if (++state.spawned > MAX_TOTAL_AGENTS) {
+    let plannerObservation;
+    if (state.backendTrace && agentOpts.plannerObservation) {
+      try {
+        const {eval_dir, round, logical_attempt, components: suppliedComponents} = agentOpts.plannerObservation;
+        if (typeof eval_dir !== 'string' || !eval_dir || !Number.isSafeInteger(round) || round < 1
+          || typeof logical_attempt !== 'string' || !/^(initial|replan[1-9]\d*)$/.test(logical_attempt)) throw new Error();
+        const components = Object.fromEntries(Object.entries(suppliedComponents).map(([name, part]) => {
+          const summary = {state: part?.state, bytes: null, sha256: null};
+          try {
+            if (!['absent', 'null', 'empty', 'present', 'error'].includes(summary.state)) throw new Error();
+            if (summary.state !== 'absent' && summary.state !== 'error') {
+              if (typeof part.serialized !== 'string') throw new Error();
+              summary.bytes = Buffer.byteLength(part.serialized, 'utf8');
+              summary.sha256 = createHash('sha256').update(part.serialized, 'utf8').digest('hex');
+            }
+          } catch (_) { summary.state = 'error'; summary.bytes = null; summary.sha256 = null; }
+          return [name, summary];
+        }));
+        plannerObservation = {eval_dir, round, logical_attempt, boundary: 'before_agentT',
+          serialization: 'JSON.stringify(value), UTF-8',
+          authority: 'supplied representation; not referenced file bytes or actual model reads', components};
+      } catch (_) { plannerObservation = {state: 'error'}; }
+    }
+
+    const agentCallId = ++state.spawned;
+    if (agentCallId > MAX_TOTAL_AGENTS) {
       throw new Error(`agent cap ${MAX_TOTAL_AGENTS} exceeded (runaway-loop backstop)`);
     }
 
@@ -155,14 +243,43 @@ export function createRuntime({
       let lastErr;
       const attempts = schema ? SCHEMA_RETRIES + 1 : 1;
       for (let i = 0; i < attempts; i++) {
-        const { text } = await backend.runAgent({
-          prompt: fullPrompt,
-          label,
-          cwd: agentOpts.cwd,
-          env: agentOpts.env,
-          model: agentOpts.model,
-          timeoutMs: agentTimeoutMs,
-        });
+        let timeoutMs = agentTimeoutMs;
+        if (agentOpts.processDeadlineEpoch != null) {
+          const roleRemaining = Math.floor(roleStopMs - elapsedMs());
+          if (roleRemaining <= 0) throw roleTimeoutError();
+          const requested = timeoutMs > 0 ? Math.min(timeoutMs, roleRemaining) : roleRemaining;
+          // Recompute after the semaphore wait and before every schema retry.
+          timeoutMs = boundedTimeout(agentOpts.processDeadlineEpoch, requested, 7000);
+        }
+        // Describe this attempt's existing bound after queue/phase/retry clipping.
+        const timeGuidance = timeoutMs > 0
+          ? `\n\nBackend call allowance at dispatch: ${timeoutMs} ms. Backend cutoff (UTC): ` +
+            `${new Date(epochStartedMs + elapsedMs() + timeoutMs).toISOString()}. ` +
+            `This cutoff applies only to this call; never record it as a workflow deadline in COMMANDMENT or other files. ` +
+            `This includes startup, tool work and your final response. Finish tool work early enough to return ` +
+            `the requested result within this bound and any earlier workflow deadline; report incomplete work if needed.`
+          : '';
+        // Shared backend boundary covers role prompts and inline engineer prompts alike.
+        const workflowGuidance = agentOpts.workflowTiming
+          ? `\n\nWORKFLOW_TIMING (authoritative Unix seconds UTC):\n` +
+            JSON.stringify({...agentOpts.workflowTiming, current_process_cutoff_epoch: agentOpts.processDeadlineEpoch}) +
+            `\nPreserve these workflow cutoffs when recording or reviewing timing in COMMANDMENT. ` +
+            `Search, report and final validation have their own cutoffs; the full deadline includes cleanup. ` +
+            `Use the applicable cutoff without relaxing correctness, source or measurement requirements.`
+          : '';
+        let text;
+        try {
+          ({ text } = await callBackend({
+            prompt: fullPrompt + timeGuidance + workflowGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
+            model: agentOpts.model, timeoutMs,
+          }, agentCallId, i + 1, ph, plannerObservation));
+        } catch (error) {
+          if (agentOpts.processDeadlineEpoch != null && msUntil(agentOpts.processDeadlineEpoch) <= 7000) {
+            throw deadlineError();
+          }
+          if (elapsedMs() >= roleStopMs - 1) throw roleTimeoutError();
+          throw error;
+        }
         if (!schema) return text;
         try {
           const obj = extractJson(text);
@@ -226,17 +343,119 @@ export function createRuntime({
 
   async function runScript(absScriptPath, scriptArgs, depth) {
     const src = await readFile(absScriptPath, 'utf8');
-    const body = toRunnableBody(src);
     let fn;
     try {
-      fn = new AsyncFunction(
-        'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget',
-        body
-      );
+      fn = compileWorkflowBody(src);
     } catch (e) {
       throw new Error(`failed to compile workflow ${absScriptPath}: ${e.message}`);
     }
-    return fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget);
+    // Deadline flags may outlive an early return or failure. Keep them active
+    // while this script runs, then clear only timers created by this invocation.
+    const timers = new Set();
+    let closed = false;
+    const scriptSetTimeout = (...args) => {
+      const timer = setTimeout(...args);
+      // Late continuations must not keep the process alive after script return.
+      if (closed) timer.unref();
+      else timers.add(timer);
+      return timer;
+    };
+    const scriptClearTimeout = (timer) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    };
+    let processDeadlineEpoch = null;
+    let maximumDeadlineEpoch = null;
+    let workflowTiming = null;
+    if (scriptArgs.search_reserve_s != null) {
+      const total = Number(scriptArgs.deadline_epoch);
+      const reserve = Number(scriptArgs.search_reserve_s);
+      const cleanup = Number(scriptArgs.final_cleanup_reserve_s || 0);
+      if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(reserve) || reserve <= 0
+          || !Number.isFinite(cleanup) || cleanup < 0 || cleanup >= reserve) {
+        throw new Error('process-bounded workflow requires a deadline and positive search reserve');
+      }
+      maximumDeadlineEpoch = total - cleanup;
+      processDeadlineEpoch = maximumDeadlineEpoch;
+      const validation = Number(scriptArgs.final_validation_reserve_s || 0);
+      workflowTiming = {
+        full_deadline_epoch: total,
+        search_cutoff_epoch: total - reserve,
+        // The kernel lane validates this optional reserve before its first role.
+        // Other scripts must not receive a fabricated report cutoff.
+        ...(scriptArgs.final_validation_reserve_s != null && Number.isFinite(validation)
+          && cleanup <= validation && validation <= reserve
+          ? {report_cutoff_epoch: total - validation} : {}),
+        validation_cutoff_epoch: maximumDeadlineEpoch,
+      };
+      if (scriptArgs.search_duration_s != null || scriptArgs.preparation_allowance_s != null) {
+        workflowTiming = {...workflowTiming, outer_deadline_epoch: total, search_window_state: 'pending',
+          search_duration_s: scriptArgs.search_duration_s,
+          preparation_allowance_s: scriptArgs.preparation_allowance_s,
+          full_deadline_epoch: null, search_cutoff_epoch: null,
+          report_cutoff_epoch: null, validation_cutoff_epoch: null};
+        state.searchTiming = workflowTiming;
+      }
+    }
+    const setProcessDeadline = (epoch, timing = null) => {
+      if (maximumDeadlineEpoch == null || !Number.isFinite(epoch) || epoch <= 0
+          || epoch > maximumDeadlineEpoch) throw new Error('process deadline exceeds original workflow allowance');
+      if (timing) {
+        const {search_started_epoch: start, search_cutoff_epoch: search, report_cutoff_epoch: report,
+          validation_cutoff_epoch: validation, full_deadline_epoch: full} = timing;
+        if (![start, search, report, validation, full].every(Number.isFinite)
+            || workflowTiming?.search_window_state !== 'pending' || timing.search_window_state !== 'started'
+            || timing.outer_deadline_epoch !== Number(scriptArgs.deadline_epoch)
+            || timing.search_duration_s !== scriptArgs.search_duration_s
+            || search !== start + scriptArgs.search_duration_s || search !== epoch
+            || timing.preparation_cutoff_epoch !== workflowTiming.preparation_cutoff_epoch
+            || !Number.isFinite(timing.preparation_started_epoch)
+            || timing.preparation_started_epoch > start || start >= timing.preparation_cutoff_epoch
+            || full !== search + Number(scriptArgs.search_reserve_s)
+            || report !== full - Number(scriptArgs.final_validation_reserve_s || 0)
+            || !(start < search && search <= report && report <= validation)
+            || validation > maximumDeadlineEpoch || full > Number(scriptArgs.deadline_epoch)
+            || validation !== full - Number(scriptArgs.final_cleanup_reserve_s || 0)) {
+          throw new Error('search timing exceeds the original workflow allowance or has unordered cutoffs');
+        }
+        // Replace, never mutate: earlier role records keep their original pending/preparation timing.
+        workflowTiming = {...workflowTiming, ...timing};
+      } else if (workflowTiming?.search_window_state === 'pending') {
+        workflowTiming = {...workflowTiming, preparation_cutoff_epoch: epoch};
+      }
+      processDeadlineEpoch = epoch;
+      if (workflowTiming?.search_window_state) state.searchTiming = workflowTiming;
+      if (timing) log('WORKFLOW_SEARCH_TIMING ' + JSON.stringify(workflowTiming));
+    };
+    setProcessDeadline.secondsLeft = () => processDeadlineEpoch == null ? Infinity : msUntil(processDeadlineEpoch) / 1000;
+    const scriptAgent = (prompt, options = {}) => agent(prompt, processDeadlineEpoch == null ? options : {
+      ...options, workflowTiming,
+      // A per-call deadline may shorten, never extend, the shared process deadline.
+      processDeadlineEpoch: Number.isFinite(options.processDeadlineEpoch)
+        ? Math.min(options.processDeadlineEpoch, processDeadlineEpoch) : processDeadlineEpoch,
+      processTimeoutMs: options.processTimeoutMs ?? Number(scriptArgs.agent_timeout_ms || 0),
+    });
+    Object.defineProperty(scriptAgent, 'processTimeoutSupported', { value: true });
+    Object.defineProperty(scriptAgent, 'processDeadlineActive', { get: () => processDeadlineEpoch != null });
+    const scriptRunProcess = (options) => {
+      if (processDeadlineEpoch == null) return runProcess(options);
+      const cleanupMs = (options.graceMs ?? 5000) + (options.settleMs ?? 2000);
+      return runProcess({ ...options,
+        timeoutMs: boundedTimeout(processDeadlineEpoch, options.timeoutMs || 0, cleanupMs) });
+    };
+    try {
+      return await fn(scriptAgent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget,
+        scriptRunProcess, scriptSetTimeout, scriptClearTimeout, setProcessDeadline);
+    } catch (error) {
+      if (workflowTiming?.search_window_state === 'pending') {
+        throw new Error(`GEAK_NATIVE_DELIVERY_INCOMPLETE: search not admitted during preparation: ${String(error)}; retained preparation ${scriptArgs.eval_dir || scriptArgs.exp_root || ''}`);
+      }
+      throw error;
+    } finally {
+      closed = true;
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+    }
   }
 
   return { agent, parallel, pipeline, phase, log, budget, makeWorkflow, runScript, state };
@@ -281,7 +500,7 @@ async function main() {
   if (!scriptPath) {
     console.error('usage: run_workflow.mjs <script.js> [--args json] [--args-file path] ' +
       '[--profile name | --agent name --model name] [--result-file path] ' +
-      '[--metrics-file path] [--concurrency N]');
+      '[--metrics-file path] [--concurrency N] [--backend-events-file path]');
     process.exit(2);
   }
 
@@ -308,7 +527,8 @@ async function main() {
   // "model retries on mismatch"); the script's agentT adds an OUTER retry layer.
   const schemaRetries = parseInt(process.env.GEAK_SCHEMA_RETRIES || '2', 10);
 
-  const rt = createRuntime({ backend, concurrency, agentTimeoutMs, schemaRetries });
+  const rt = createRuntime({ backend, concurrency, agentTimeoutMs, schemaRetries,
+    backendEventsFile: opts['backend-events-file'] });
 
   const startedMs = Date.now();
   const combo = `${backend.resolved.agentName}${backend.resolved.modelName ? '/' + backend.resolved.modelName : ''}`;
@@ -323,6 +543,15 @@ async function main() {
   } catch (e) {
     errMsg = String(e && e.message || e);
     rt.log(`runtime ERROR: ${errMsg}`);
+  }
+  const backendTraceAtReturn = rt.state.backendTrace ? { ...rt.state.backendTrace,
+    complete_at_workflow_return: !rt.state.backendTrace.write_error && rt.state.backendTrace.open_calls === 0 } : null;
+  // Agent failures degrade to null inside the workflow; this one must still fail the run.
+  const fault = runtimeFault();
+  if (fault) {
+    ok = false;
+    errMsg = errMsg ? `${errMsg}; ${fault}` : fault;
+    rt.log(`runtime ERROR: ${fault}`);
   }
   const wallMs = Date.now() - startedMs;
 
@@ -342,6 +571,8 @@ async function main() {
     agents_spawned: rt.state.spawned,
     schema_failures: rt.state.schemaFails,
     script: scriptPath,
+    ...(backendTraceAtReturn ? { backend_call_trace: backendTraceAtReturn } : {}),
+    ...(rt.state.searchTiming ? { search_timing: rt.state.searchTiming } : {}),
   };
   if (opts['metrics-file'] && opts['metrics-file'] !== true) {
     await writeFile(opts['metrics-file'], JSON.stringify(metrics, null, 2));

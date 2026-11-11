@@ -287,6 +287,51 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_kernel_optimizer_is_optional_and_forwarded(self):
+        self.assertEqual(rx.map_args(self._handoff())["optimizer"], "evo")
+        for unset in (None, ""):
+            self.assertEqual(rx.map_args(self._handoff(optimizer=unset))["optimizer"], "evo")
+        for optimizer in ("greedy", "evo"):
+            with self.subTest(optimizer=optimizer):
+                ps = rx.map_args(self._handoff(optimizer=optimizer))
+                self.assertEqual(ps["optimizer"], optimizer)
+
+    def test_kernel_evidence_flags_are_optional_and_not_coerced(self):
+        flags = ("evolution_case_evidence_view", "evolution_planner_case_view",
+                 "evolution_evidence_handoff",
+                 "evolution_preserve_founder_attempts", "evolution_start",
+                 "evolution_return_development", "evolution_import_stall_sources",
+                 "record_planner_inputs", "case_measurement_view")
+        omitted = rx.map_args(self._handoff(optimizer="evo"))
+        for flag in flags:
+            self.assertNotIn(flag, omitted)
+            for value in (False, True, "true", "false", None, 0, 1):
+                with self.subTest(flag=flag, value=value):
+                    ps = rx.map_args(self._handoff(optimizer="evo", **{flag: value}))
+                    self.assertEqual(ps[flag], value)
+                    self.assertIs(type(ps[flag]), type(value))
+                    self.assertNotIn(next(other for other in flags if other != flag), ps)
+
+    def test_invalid_kernel_optimizer_fails_before_gpu_probe(self):
+        self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
+        for optimizer in ("population", "EVO", True, 1, [], {}):
+            with self.subTest(optimizer=optimizer):
+                with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
+                    rx.map_args(self._handoff(optimizer=optimizer))
+
+    def test_kernel_budget_is_optional_and_forwarded_without_rounding(self):
+        self.assertNotIn("kernel_budget", rx.map_args(self._handoff()))
+        for budget in (1, 6, 12, 2**53 - 1):
+            with self.subTest(budget=budget):
+                self.assertEqual(rx.map_args(self._handoff(kernel_budget=budget))["kernel_budget"], budget)
+
+    def test_invalid_kernel_budget_fails_before_gpu_probe(self):
+        self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
+        for budget in (None, "", "12", "1.5", True, False, 0, -1, 1.0, 1.5, [], {}, 2**53):
+            with self.subTest(budget=budget):
+                with self.assertRaisesRegex(ValueError, "kernel_budget must be a positive safe integer"):
+                    rx.map_args(self._handoff(kernel_budget=budget))
+
     def test_structured_identity_is_forwarded_before_policy(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
         self.assertEqual(ps["expected_gfx"], "gfx950")
@@ -375,9 +420,24 @@ class TestMapArgs(_RunE2ECase):
         with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "rdna4", "expected_target": "unknown"})
-        with self.assertRaisesRegex(ValueError, "must be 'r9700', 'r9600d' or 'unknown'"):
+        with self.assertRaisesRegex(
+            ValueError, "expected_target must be 'r9700', 'r9600d', 'mi350x', 'mi355x' or 'unknown'"
+        ):
             rx._expected_gpu_identity(
                 {"expected_gfx": "gfx1201", "expected_target": "r9600"})
+
+    def test_instinct_products_survive_explicit_and_probed_handoffs(self):
+        for target in ("mi350x", "mi355x"):
+            with self.subTest(target=target):
+                ps = rx.map_args(self._handoff(expected_gfx="gfx950", expected_target=target))
+                self.assertEqual(ps["expected_target"], target)
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({"gfx": "gfx950", "target": target})
+                self.assertEqual(rx._expected_gpu_identity({})["target"], target)
+                with self.assertRaisesRegex(ValueError, "requires expected_gfx=gfx950"):
+                    rx._expected_gpu_identity({"expected_gfx": "gfx942", "expected_target": target})
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({"gfx": "gfx942", "target": target})
+                with self.assertRaisesRegex(RuntimeError, "non-gfx950 ISA"):
+                    rx._expected_gpu_identity({})
 
     def test_env_identity_must_be_valid_and_consistent(self):
         cases = [
@@ -395,6 +455,25 @@ class TestMapArgs(_RunE2ECase):
                 os.environ["GEAK_GPU_IDENTITY_JSON"] = raw
                 with self.assertRaisesRegex(exc, pattern):
                     rx._expected_gpu_identity({})
+
+    def test_supplied_product_name_cannot_contradict_target_or_isa(self):
+        for gfx, target, name in (
+            ("gfx950", "mi355x", "AMD Instinct MI350X"),
+            ("gfx950", "mi350x", "AMD Instinct MI355X"),
+            ("gfx1201", "r9700", "Another gfx1201 Product"),
+            ("gfx942", "unknown", "AMD Instinct MI355X"),
+        ):
+            with self.subTest(gfx=gfx, target=target, name=name):
+                with self.assertRaisesRegex(ValueError, "product/name contradiction"):
+                    rx._expected_gpu_identity({"expected_gfx": gfx, "expected_target": target,
+                                               "expected_device_name": name})
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(
+                    {"gfx": gfx, "target": target, "marketing_name": name})
+                with self.assertRaisesRegex(RuntimeError, "product/name contradiction"):
+                    rx._expected_gpu_identity({})
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = "[]"
+        with self.assertRaisesRegex(RuntimeError, "JSON object"):
+            rx._expected_gpu_identity({})
 
     def test_identity_probe_is_structured_and_fails_closed(self):
         """Without a pinned or env identity, the rocminfo probe is the only
