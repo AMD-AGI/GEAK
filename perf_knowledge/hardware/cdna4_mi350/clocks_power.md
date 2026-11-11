@@ -67,7 +67,7 @@ AI load. Peaks per SKU: `perf_knowledge/hardware/data/sku.json` (single source).
 - **Using peak clock in efficiency claims** — overstates utilization.
 - **Quoting MI355X peaks for an MI350X (or the reverse)** — the datasheet peaks differ by the
   2200/2400 clock ratio, and the sustained clock under the power cap differs again on top of that.
-  Take the product from `scripts/gpu_identity.py` (field `sku`: `mi350x` / `mi355x`) and use its own row.
+  Take the product from `scripts/hardware_context.py` (field `sku`: `mi350x` / `mi355x`) and use its own row.
 - **Cold-launch timing** captures pre-ramp clock.
 
 ## Verify

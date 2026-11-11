@@ -217,18 +217,6 @@ silent mismatch between the caller's value and the standalone default is otherwi
 a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarded
 口径 agree unless the caller explicitly requests variable lengths.
 
-### Optional hardware context
-
-Set `"use_hardware_context": true` in the handoff to capture and forward the
-shared SKU/resource context. Default: **false**. The option propagates to child
-lanes and resume state; an explicit false overrides a saved true. When off,
-existing GPU identity checks still run, but saved/supplied hardware contexts are
-not loaded and no context artifact or hardware prelude is requested.
-
-See [hardware context](../scripts/hardware_context.md) for the CLI contract,
-planning-only limits and independent TraceLens calibration. This flag does not
-control expert skills or change candidate acceptance criteria.
-
 ### How handoff maps to the workflow (owned by `run_e2e.py:map_args`)
 
 | handoff field | `e2e_workflow.js` arg | note |

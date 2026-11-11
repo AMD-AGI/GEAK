@@ -24,93 +24,6 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
-// BEGIN GENERATED hardware_context_workflow.js
-// Shared pure workflow contract. Embedded because GEAK workflow JS has no FS/import API.
-// Edit here, then run scripts/sync_hardware_context_workflow.py.
-// Explicit false overrides a saved opt-in; an old context alone never enables it.
-const hardwareOption = A.use_hardware_context != null ? A.use_hardware_context : (A.state || {}).use_hardware_context;
-const USE_HARDWARE_CONTEXT = ['true', '1', 'yes'].includes(String(hardwareOption || '').trim().toLowerCase());
-function parseHardwareContext(value) {
-  if (!value) return null;
-  const c = typeof value === 'string' ? JSON.parse(value) : value;
-  const o = c.observed || {};
-  if (c.schema_version !== 1 || !/^gfx[0-9a-f]+$/.test(o.gfx || '') ||
-      !Number.isInteger(o.physical_cu_count) || o.physical_cu_count <= 0 ||
-      !['matched', 'conflict', 'unknown'].includes(c.status) ||
-      !/^[a-f0-9]{64}$/.test(c.catalog_sha256 || '') ||
-      c.may_gate !== false || c.analysis_role !== 'planning') {
-    throw new Error('invalid hardware_context: use scripts/hardware_context.py');
-  }
-  if (c.status === 'matched') {
-    const s = c.specification || {};
-    if (!c.sku || c.sku === 'unknown' || c.sku !== c.candidate_sku ||
-        s.arch !== o.gfx || s.cus !== o.physical_cu_count || s.product !== o.marketing_name) {
-      throw new Error('hardware_context SKU/resource mismatch');
-    }
-  } else if (c.sku !== 'unknown' || c.specification !== null) {
-    throw new Error('unresolved hardware_context must not provide product peaks');
-  }
-  return c;
-}
-let HARDWARE_CONTEXT = USE_HARDWARE_CONTEXT ? parseHardwareContext((A.state || {}).hardware_context) : null;
-let HARDWARE_CONTEXT_PATH = USE_HARDWARE_CONTEXT ? String(A.hardware_context_path || (A.state || {}).hardware_context_path || '') : '';
-function adoptHardwareContext(value, gfx, name, cu, path, declaredSku) {
-  if (!USE_HARDWARE_CONTEXT) return;
-  const next = parseHardwareContext(value) || HARDWARE_CONTEXT;
-  if (next) {
-    const o = next.observed;
-    if (o.gfx !== gfx || o.physical_cu_count !== cu || (name && o.marketing_name !== name)) {
-      throw new Error('hardware_context disagrees with setup GPU identity');
-    }
-    if (HARDWARE_CONTEXT) {
-      const previous = HARDWARE_CONTEXT.observed;
-      for (const k of ['gfx', 'marketing_name', 'physical_cu_count', 'compute_partition', 'memory_partition', 'memory_bytes']) {
-        if (previous[k] != null && previous[k] !== o[k]) throw new Error('hardware_context changed across workflow handoff: ' + k);
-      }
-      if (HARDWARE_CONTEXT.catalog_sha256 !== next.catalog_sha256 || HARDWARE_CONTEXT.sku !== next.sku) {
-        throw new Error('hardware_context catalog or SKU changed across workflow handoff');
-      }
-    }
-  }
-  if (A.expected_sku && A.expected_sku !== 'unknown' && (!next || next.sku !== A.expected_sku)) {
-    throw new Error('expected_sku disagrees with hardware_context');
-  }
-  if (declaredSku && (!next || declaredSku !== next.sku)) {
-    throw new Error('setup device_sku disagrees with hardware_context');
-  }
-  HARDWARE_CONTEXT = next;
-  HARDWARE_CONTEXT_PATH = String(path || HARDWARE_CONTEXT_PATH);
-}
-function hardwareInputs() {
-  return { USE_HARDWARE_CONTEXT: true, DEVICE_SKU: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown',
-    HARDWARE_CONTEXT, HARDWARE_CONTEXT_PATH };
-}
-function hardwareArgs() {
-  return USE_HARDWARE_CONTEXT ? { use_hardware_context: true,
-    hardware_context: HARDWARE_CONTEXT, hardware_context_path: HARDWARE_CONTEXT_PATH,
-    expected_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : 'unknown' } : { use_hardware_context: false };
-}
-const initialHardwareContext = USE_HARDWARE_CONTEXT ? parseHardwareContext(A.hardware_context) || HARDWARE_CONTEXT : null;
-if (initialHardwareContext) {
-  const o = initialHardwareContext.observed;
-  adoptHardwareContext(initialHardwareContext, A.expected_gfx || o.gfx,
-    A.expected_device_name || o.marketing_name, Number(A.expected_physical_cu_count || o.physical_cu_count));
-}
-function hardwarePrelude(prompt) {
-  if (!USE_HARDWARE_CONTEXT) return '';
-  const role = /(?:^|\n)You are the ([\w-]+)\. PHASE=([\w-]+)\./.exec(String(prompt || ''));
-  const worker = /^You are Engineer /.test(String(prompt || ''));
-  if (!worker && (!role || /^(report|finalize|validate)$/.test(role[2]) ||
-      !/^(director|oracle_freezer|tech_lead|profiler|profile_engineer|engineer|deep_engineer|author_engineer|tuning_specialist|system_architect|op_benchmarker)$/.test(role[1]))) return '';
-  const setup = role && /^(director|oracle_freezer)$/.test(role[1]) && /^(setup|freeze)$/.test(role[2]);
-  return '\n## Shared GEAK hardware context\n' + JSON.stringify(hardwareInputs()) + '\n' +
-    'Hardware context was explicitly enabled. Read scripts/hardware_context.md under the GEAK repository root. ' +
-    (setup ? 'Run scripts/hardware_context.py in the workload environment after creating EVAL_DIR, write EVAL_DIR/hardware_context.json, and return the complete hardware_context plus hardware_context_path and device_sku. Check any supplied context against this fresh observation. ' : '') +
-    'Before numerical planning, validate that file with scripts/hardware_context.py --check FILE. ' +
-    'Use observed visible CUs for grid sizing; use verified resource scope for memory/cache planning. Missing facts stay unknown; never promote an ISA default to a product. ' +
-    'Export GEAK_HARDWARE_CONTEXT to that file for local and native roofline tools. TraceLens retains native models/calibration; local specification values are planning-only.\n\n';
-}
-// END GENERATED hardware_context_workflow.js
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/model directory)');
 
 // WORKFLOW_DIR = the directory that holds this script + roles/ + knowledge/ + scripts/.
@@ -542,9 +455,6 @@ const SETUP_SCHEMA = obj({
   device_gfx: { type: 'string' },
   device_target: { type: 'string' },
   device_name: { type: 'string' },
-  ...(USE_HARDWARE_CONTEXT ? { device_sku: { type: 'string' },
-    hardware_context: { type: 'object', additionalProperties: true },
-    hardware_context_path: { type: 'string' } } : {}),
   physical_cu_count: { type: 'number' },
   source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
@@ -878,7 +788,6 @@ function tlAgent(prompt, o, attempt) {
 }
 
 async function agentT(p, o) {
-  p = hardwarePrelude(p) + p;
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
@@ -1052,8 +961,6 @@ if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
 const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
-adoptHardwareContext(setup.hardware_context, GFX, EXPECTED_DEVICE_NAME || setup.device_name,
-  PHYSICAL_CU_COUNT, setup.hardware_context_path || `${setup.eval_dir}/hardware_context.json`, setup.device_sku);
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
@@ -2196,8 +2103,6 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
   : finalPrimary;
 
 return {
-  ...hardwareArgs(),
-  device_sku: HARDWARE_CONTEXT ? HARDWARE_CONTEXT.sku : "unknown",
   mode: MODE,
   // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
   // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.

@@ -59,7 +59,7 @@ Dense TFLOP/s (TOPS for integer types), no sparsity; `—` = no rate on record (
 FP6 and FP4 share the FP4 rate. The two columns are the same per-CU rate at the two peak engine
 clocks; on top of that, MI355X's 1400 W (liquid) envelope also *sustains* clock better than MI350X's
 1000 W (air) — see [clocks_power.md](clocks_power.md). Never quote one SKU's peak for the other: use the
-detected product (`scripts/gpu_identity.py` field `sku` → `mi355x` / `mi350x`).
+detected product (`scripts/hardware_context.py` field `sku` → `mi355x` / `mi350x`).
 
 ## Memory & cache peaks
 | Resource | Value |

@@ -53,14 +53,14 @@ TARGET_EFF = {
     "attn": 0.50,
 }
 PRODUCT_TARGET_EFF = {
-    # Preserve main's R9700 copy-based prior; changing efficiency policy is
-    # separate from selecting specifications in the shared hardware catalog.
+    # 1 GiB source + 1 GiB destination, 30 event-timed copies on R9700:
+    # median 485.8 GB/s read+write against the 640 GB/s datasheet pin rate.
     "r9700": {"moe": 0.76, "elementwise": 0.76},
 }
 
 
 def target_eff_for(op_class, product=None):
-    """Preserve the existing product override, otherwise use the op-class prior."""
+    """Return a product override when measured, otherwise the op-class prior."""
     op = str(op_class or "").strip().lower()
     prod = str(product or "").strip().lower()
     return PRODUCT_TARGET_EFF.get(prod, {}).get(op, TARGET_EFF.get(op))
@@ -125,9 +125,8 @@ def load_peaks(peaks_md_path, gfx, product=None):
 
     Product-scoped blocks (``product: r9700``) match only when `product` is that
     identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
-    ``product="unknown"`` (including legacy Instinct targets) is no product
-    constraint: ISA-keyed offline reference blocks still match. `resolve_peaks`
-    separately validates the observed scope or an explicit CU-gated request.
+    ``product="unknown"`` (what gpu_identity reports for every non-R9700 card,
+    MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
 
     Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
              "confidence": "high"} or None when the file or the section is absent.
@@ -172,14 +171,11 @@ def load_peaks(peaks_md_path, gfx, product=None):
                 out[key] = val
         block_product = str(out.get("product") or "").strip().lower()
         if block_product:
-            if want_product != block_product and not (not want_product and out.get("default_for_gfx") == "true"):
+            if want_product != block_product:
                 continue
         elif want_product:
             continue
         if out.get("hbm_bw_bytes_s"):
-            if out.get("basis") not in (None, "datasheet"):
-                out["confidence"] = "low"
-            out.update(analysis_role="planning", may_gate=False)
             return out
     return None
 
@@ -219,80 +215,21 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
-def is_client_rdna35(gfx):
-    """The gfx115x APUs; excludes discrete gfx110x and future gfx125x parts."""
-    return bool(re.fullmatch(r"gfx115\d", str(gfx or "").lower()))
+def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
+    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
 
-
-def _cu_matches(cu, table_cu):
-    """Match positive whole physical CU counts, never booleans or WGP counts."""
-    if isinstance(cu, bool):
-        return False
-    try:
-        value = float(cu)
-        return value.is_integer() and value > 0 and value == float(table_cu)
-    except (TypeError, ValueError, OverflowError):
-        return False
-
-
-def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None, *,
-                  hardware_context=None, identity=None):
-    """Prefer an observed SKU; keep legacy architecture/derived fallbacks.
-
-    Fallbacks are labelled planning references, not confirmed product identity.
-    Observed CU counts constrain table selection; invalid or conflicting context
-    never falls back. Client RDNA4 still needs a product; gfx115x needs matching
-    physical CUs (rocminfo, not Torch's WGP count). Native calibration is separate.
+    Navi 48 reports properties that are insufficient to derive WMMA throughput,
+    and its GDDR clock interpretation is toolchain-dependent. An absent table
+    entry on gfx120x is therefore a hard unknown rather than a low-confidence
+    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
+    is not in that family and may derive.
     """
-    gfx = str(gfx or "").strip().lower()
-    product = str(product or "").strip().lower()
-    context = hardware_context if hardware_context is not None else os.environ.get("GEAK_HARDWARE_CONTEXT")
-    if context is not None or identity is not None:
-        try:
-            import sys
-            from pathlib import Path
-            shared = Path(__file__).resolve().parents[4] / "scripts"
-            if str(shared) not in sys.path:
-                sys.path.insert(0, str(shared))
-            import hardware_context as hc
-            c = hc.load(context) if context is not None else hc.build(identity)
-            if c["observed"]["gfx"] != gfx:
-                return None
-            if product not in ("", "unknown", c["sku"]):
-                return None
-            if cu is not None and not _cu_matches(cu, c["observed"]["physical_cu_count"]):
-                return None
-            peaks = hc.planning_peaks(c)
-            if peaks is not None:
-                return peaks
-            if c["status"] != "unknown" or c["observed"]["marketing_name"]:
-                return None
-            cu = c["observed"]["physical_cu_count"]
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
-    explicit_product = product not in ("", "unknown")
-    rdna35 = is_client_rdna35(gfx)
-    if cu is not None and not _cu_matches(cu, cu):
-        return None
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     if peaks:
-        if (rdna35 or cu is not None) and not _cu_matches(cu, peaks.get("cu")):
-            return None
-        peaks = {**peaks, "confidence": "low", "analysis_role": "planning",
-                 "may_gate": False, "scope": "explicit_product_reference_only"}
-        if not explicit_product:
-            peaks.update(reference_sku=peaks.get("sku"), sku="unknown", product="unknown",
-                         scope="arch_cu_reference_only" if cu is not None else "arch_reference_only")
         return peaks
-    if explicit_product or is_client_rdna4(gfx) or rdna35:
+    if is_client_rdna4(gfx):
         return None
-    peaks = derive_peaks_from_props(device)
-    if peaks:
-        if cu is not None and not _cu_matches(cu, peaks.get("cu")):
-            return None
-        return {**peaks, "sku": "unknown", "product": "unknown", "confidence": "low",
-                "analysis_role": "planning", "may_gate": False, "scope": "derived_reference_only"}
-    return None
+    return derive_peaks_from_props(device)
 
 
 _FLOP_KEYS = {
@@ -522,12 +459,12 @@ def _selftest():
     print("peaks: gfx950 %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
           % (peaks["hbm_bw_bytes_s"] / 1e12, peak_flops_for(peaks, "fp8") / 1e15))
 
-    E, M, tk, H, intermediate = 256, 64, 8, 2048, 512
+    E, M, tk, H, I, L = 256, 64, 8, 2048, 512, 40
     hit = experts_hit(E, M * tk)
     assert 215 <= hit <= 225, hit
-    wbytes = hit * (2 * intermediate * H + H * intermediate) * dtype_bytes("fp8")
+    wbytes = hit * (2 * I * H + H * I) * dtype_bytes("fp8")
     t_layer = 2 * 49.471e-6                                   # 80 launches/step over 40 layers
-    moe = roofline_metrics(wbytes, 2 * M * tk * (2 * intermediate * H + H * intermediate), t_layer,
+    moe = roofline_metrics(wbytes, 2 * M * tk * (2 * I * H + H * I), t_layer,
                            peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "fp8"),
                            TARGET_EFF["moe"], pct_gpu_time=26.45)
     print("MoE   : hit %.0f/%d, %.0f MB/layer -> %.0f%% of roofline, %s, %.3fx, +%.2f%% e2e (%s)"
@@ -557,7 +494,7 @@ def _selftest():
           "Attn 1.56x isolated)  OK")
 
     # L3 sanity band: all-expert bytes overshoot the roofline -> clamped + suspect, not discarded
-    allx = roofline_metrics(E * (2 * intermediate * H + H * intermediate) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
+    allx = roofline_metrics(E * (2 * I * H + H * I) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
                             peak_flops_for(peaks, "fp8"), TARGET_EFF["moe"], pct_gpu_time=26.45)
     assert allx["suspect"] and allx["roofline_pct"] <= 1.0, allx
     print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True  OK"
@@ -581,19 +518,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="reproduce the SKILL.md worked example")
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
-    ap.add_argument("--product", help="explicit product reference; does not establish device identity")
-    ap.add_argument("--cu", type=int, help="physical CU count from rocminfo, not Torch WGPs; required for a gfx115x reference")
-    ap.add_argument("--hardware-context", help="validated run context; defaults to GEAK_HARDWARE_CONTEXT")
     a = ap.parse_args()
     if a.peaks:
         p = resolve_peaks(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
             a.peaks,
-            product=a.product, cu=a.cu, hardware_context=a.hardware_context,
         )
-        error = "no compatible planning reference for %s" % a.peaks
-        if is_client_rdna35(a.peaks) and a.cu is None:
-            error += " (supply a matched hardware context or --cu from rocminfo)"
-        print(json.dumps(p or {"error": error}, indent=2))
+        print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)
     raise SystemExit(_selftest() if a.selftest else ap.print_help())
