@@ -159,10 +159,10 @@ any drift between them.
 | `attrs` | variant selectors with their legal `values` (dtype, layout, activation...); pinned per task with `--attr`, default = first value |
 | `constraints` | expressions every case must satisfy (`"topk <= n_experts"`) |
 | `inputs.<name>` | `shape` (axis expressions, or `{"by": attr, "cases": {...}}`), `dtype` (`"attr:<name>"` allowed), `dist`, `lifetime` (`weight`/`per_call`/`state`), optional `layout` hook, `present_when`, `writable` (the live entry writes it in place: `call()` must clone) |
-| `outputs.<name>` | `shape`, `dtype`, `bound` (below), optional `max_violation_fraction`, `sort_by` (compare rows in another output's order: weights follow their ids), `present_when`, `optional_if_not_produced: {poison}` (exact outputs: the harness fills the buffer with `poison` before the call; all-poison = `not_produced`, part-poison = FAIL, an all-poison reference = FAIL) |
+| `outputs.<name>` | `shape`, `dtype`, `bound` (below), optional `max_violation_fraction`, `sort_by` (compare rows in another output's order: weights follow their ids), `present_when`, `optional_if_not_produced: {poison}` (exact outputs: the harness fills the buffer with `poison` before the call; all-poison = `not_produced`, part-poison = FAIL, any poison on the compared-against side = FAIL), `require_finite` (outputs the harness poisons with NaN: a non-finite value on either side fails, so NaN left at the same places on every leg is not agreement) |
 | `compare` | `determinism` (`bitwise` = the candidate must reproduce itself byte for byte), `max_violation_fraction`, `element_order` |
 | `layout_facts` | attributes the dispatcher reads that the built operands must carry (`b.is_shuffled`) |
-| `reference`, `reference_rows` | the float64 reference and how many rows of the token axis it computes; or `"oracle:<name>"`, a leg of `oracles` |
+| `reference`, `reference_rows` | the float64 reference and how many rows of the token axis it computes; or `"oracle:<name>"`, a leg of `oracles` (bounds that read float64 values -- `dot_product`, `baseline_relative`, `output_rounding`, `scores: "ref:..."` -- need a float64 reference) |
 | `oracles` | named legs that recompute the step another way (`{path, overlay, outputs?, bounds?, controls?, cases?: all \| per_width_smallest}`); `bounds` replace the outputs' own for that leg, `outputs` must be a subset of the contract's |
 | `required_control_categories` | kinds of injected bug the negative controls must cover: a list, or `{by: <attr>, cases: {<value>: [...]}}` |
 | `hooks`, `call` | what the task must write, and how |
@@ -186,6 +186,7 @@ baseline's output, `u` the output dtype's unit roundoff.
 | `tolerance` | `|c - y| <= atol + (rtol + u)|y|` (`against: baseline` uses `b`); `per_row: true` counts violating rows (last axis = a row) against the budget | norms, activations, rope, KV rows |
 | `noise_relative` | `|c - b| <= m max(|b2 - b|, rms_row(b2 - b)) + k u|b|`, b2 a second baseline run | quantized outputs whose last code flips at rounding boundaries |
 | `sqnr` | `20 log10(|y|/|c - y|) >= min_db` | whole-output checks when no elementwise model holds |
+| `delta` (on `tolerance` / `sqnr`) | `{minus: <output>, along?: <axis>}`: judge `out - minus` (or consecutive differences over `along`, the first against `minus`) instead of `out`; a tolerance adds `2u|y|` for storing the undifferenced value; a zero reference change fails | residual streams, where the pass-through residual would dominate a relative bound or an SQNR |
 | `exact`, `multiset_rows` | equal, or equal as per-row multisets; `value` compares to a constant instead | integer outputs, routing ids, stray-write counts |
 | `topk_equivalent` | per row: same count of valid entries, distinct, in range, and the selected `scores` equal the baseline's selected scores (within `score_atol/rtol`) | top-k indices; ties may pick either index; `scores: "ref:<name>"` for a fused score+top-k |
 | `bytes_exact` | equal bytes (up to `max_violation_fraction`) | packed FP4, caches |

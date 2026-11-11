@@ -178,12 +178,17 @@ def validate_family(doc):
                                 % (name, bound.get("kind"), BOUND_KINDS))
         if bound["kind"] == "topk_equivalent":
             src = bound.get("scores") or ""
-            if not (src in doc["inputs"] or (src.startswith("ref:") and doc.get("reference"))):
+            if not (src in doc["inputs"] or (src.startswith("ref:") and f64_reference(doc))):
                 raise ContractError("output %s: topk_equivalent scores must name an input or "
-                                    "ref:<output> of a contract with a reference" % name)
-        if bound["kind"] in BOUNDS_NEEDING_REFERENCE and not doc.get("reference"):
-            raise ContractError("output %s: bound %s needs a reference (float64 or oracle:<name>) "
-                                "and the contract names none" % (name, bound["kind"]))
+                                    "ref:<output> of a contract with a float64 reference" % name)
+        if bound["kind"] in BOUNDS_NEEDING_REFERENCE and not f64_reference(doc):
+            # an oracle leg yields outputs, not the float64 values / magnitudes these bounds read
+            raise ContractError("output %s: bound %s needs a float64 reference (an oracle:<name> "
+                                "reference does not provide one) and the contract names none"
+                                % (name, bound["kind"]))
+        _validate_delta(doc, name, bound)
+        if not isinstance(s.get("require_finite", False), bool):
+            raise ContractError("output %s: require_finite must be true or false" % name)
         opt = s.get("optional_if_not_produced")
         if opt is not None:
             if not isinstance(opt, dict) or isinstance(opt.get("poison"), bool) \
@@ -198,6 +203,28 @@ def validate_family(doc):
     if doc["compare"].get("determinism", "bounded") not in DETERMINISM:
         raise ContractError("compare.determinism %r" % doc["compare"].get("determinism"))
     return doc
+
+
+def _validate_delta(doc, name, bound, where="output"):
+    """`bound.delta: {"minus": <output>, "along"?: <axis>}` judges the step's change, not the
+    state: `out - minus`, or with `along` the consecutive differences of `out` over that axis
+    (the first against `minus`). For residual-stream outputs, whose pass-through residual
+    otherwise dominates any relative bound."""
+    d = bound.get("delta")
+    if d is None:
+        return
+    if not isinstance(d, dict) or d.get("minus") not in doc["outputs"] or d.get("minus") == name:
+        raise ContractError("%s %s: delta.minus must name another output of the contract" % (where, name))
+    if bound["kind"] not in ("tolerance", "sqnr"):
+        raise ContractError("%s %s: delta applies to tolerance or sqnr bounds" % (where, name))
+    if "along" in d:
+        shape = doc["outputs"][name].get("shape")
+        if not isinstance(shape, list) or d["along"] not in shape:
+            raise ContractError("%s %s: delta.along %r is not an axis of the output's shape"
+                                % (where, name, d["along"]))
+    if f64_reference(doc):
+        raise ContractError("%s %s: delta is for oracle-referenced contracts (no float64 "
+                            "reference of the differenced output)" % (where, name))
 
 
 def _validate_oracles(doc):
@@ -232,6 +259,14 @@ def _validate_oracles(doc):
                                     % (name, out, (bound or {}).get("kind"), BOUND_KINDS))
             if bound["kind"] == "topk_equivalent":
                 raise ContractError("oracle %s: topk_equivalent ranks scores, not an oracle leg" % name)
+            if bound["kind"] in BOUNDS_NEEDING_REFERENCE:
+                raise ContractError("oracle %s: output %s: bound %s needs float64 reference values "
+                                    "an oracle leg does not produce" % (name, out, bound["kind"]))
+            _validate_delta(doc, out, bound, where="oracle %s: output" % name)
+            minus = (bound.get("delta") or {}).get("minus")
+            if minus is not None and minus not in allowed:
+                raise ContractError("oracle %s: output %s: delta.minus %s is not an output of the oracle"
+                                    % (name, out, minus))
         if not isinstance(o.get("controls", True), bool):
             raise ContractError("oracle %s: controls must be true or false" % name)
         if o.get("cases", "all") not in ORACLE_CASES:
@@ -249,6 +284,9 @@ def _validate_control_categories(doc):
     attr = (doc.get("attrs") or {}).get(req.get("by"))
     if attr is None:
         raise ContractError("required_control_categories.by %r is not an attr" % req.get("by"))
+    if not isinstance(attr, dict) or not isinstance(attr.get("values"), list):
+        raise ContractError("required_control_categories.by %r: the attr declares no values list"
+                            % req.get("by"))
     for value, cats in req["cases"].items():
         if value not in [str(v) for v in attr["values"]]:
             raise ContractError("required_control_categories: %s=%r not in %s"
@@ -286,15 +324,21 @@ def oracle_doc(doc, name):
 
 
 def control_categories(doc, sym):
-    """The negative-control categories a task with these attrs must cover."""
+    """The negative-control categories a task with these attrs must cover. A task whose attrs do
+    not select one of the declared cases is an error, never "no categories required"."""
     req = doc.get("required_control_categories")
     if not req:
         return []
     if isinstance(req, list):
         return list(req)
-    key = sym.get(req["by"])
+    if req["by"] not in (sym or {}):
+        raise ContractError("required_control_categories: the task pins no %s" % req["by"])
+    key = sym[req["by"]]
     key = str(key).lower() if isinstance(key, bool) else str(key)
-    return list(req["cases"].get(key, []))
+    if key not in req["cases"]:
+        raise ContractError("required_control_categories: %s=%r has no case; declared: %s"
+                            % (req["by"], key, sorted(req["cases"])))
+    return list(req["cases"][key])
 
 
 def freeze_task_contract(family_doc, *, attrs, const_axes, overrides=None):
@@ -1066,13 +1110,14 @@ def _f64(t):
 
 
 def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None, scores=None,
-                out_dtype=None, max_violation_fraction=0.0, element_order="fixed"):
+                out_dtype=None, max_violation_fraction=0.0, element_order="fixed", stored=None):
     """One output under one bound. Returns a dict with `ok` and the measures behind it.
 
     `cand`/`base` are the candidate and frozen-baseline outputs of the same inputs; `ref` the
     float64 reference (or None); `base_noise` a second baseline run of the same inputs, for
-    `noise_relative`; `scores` what a `topk_equivalent` selection ranks. Every number is computed
-    on the CPU in float64."""
+    `noise_relative`; `scores` what a `topk_equivalent` selection ranks; `stored` the undifferenced
+    compared-against values when cand/base are `delta`s (a tolerance then also admits the
+    rounding of storing them, 2u|stored|). Every number is computed on the CPU in float64."""
     torch = _torch()
     kind = bound["kind"]
     cand, base = cand.detach().cpu(), base.detach().cpu()
@@ -1132,6 +1177,8 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
     if kind == "tolerance":
         y = ref if ref is not None else b
         limit = float(bound["atol"]) + (float(bound["rtol"]) + u_out) * y.abs()
+        if stored is not None:
+            limit = limit + 2 * u_out * stored.detach().cpu().to(torch.float64).abs()
     elif kind == "output_rounding":
         y = ref
         limit = _OUTPUT_ROUNDING_MULTIPLE * u_out * y.abs()
@@ -1307,11 +1354,17 @@ def compare_outputs(doc, cand_out, base_out, *, sym, refs=None, magnitudes=None,
                          .to(torch.int64).argsort(dim=-1))
         ref = None if bound.get("against") == "baseline" else (refs or {}).get(name)
         produced = _produced(spec, c, b)
+        if produced is None and spec.get("require_finite"):
+            produced = _finite(c, b, ref)
+        stored = None
+        if produced is None and bound.get("delta"):
+            stored = b if ref is None else ref
+            c, b, ref, produced = _delta(spec, bound["delta"], c, b, ref, cand, base, refs, rows)
         if produced is not None:
             results[name] = produced
             ok = ok and bool(produced["ok"])
             continue
-        r = compare_one(bound, c, b, ref=ref, magnitude=(magnitudes or {}).get(name),
+        r = compare_one(bound, c, b, ref=ref, magnitude=(magnitudes or {}).get(name), stored=stored,
                         base_noise=n, scores=scores, out_dtype=out_dtype,
                         max_violation_fraction=float(spec.get("max_violation_fraction",
                                                               cmp.get("max_violation_fraction", 0.0))),
@@ -1321,26 +1374,86 @@ def compare_outputs(doc, cand_out, base_out, *, sym, refs=None, magnitudes=None,
     return {"ok": ok, "outputs": results}
 
 
+def _finite(cand, base, ref):
+    """`require_finite`: an output the harness poisons with NaN (KV rows, residual stream) must be
+    finite on both sides. NaN on both sides at the same place is otherwise agreement, so a
+    poisoning or gather mistake common to every leg (all legs share the rank harness) would
+    pass the candidate and the oracle floor alike. None: compare normally."""
+    torch = _torch()
+    sides = [("reference" if ref is not None else "baseline", ref if ref is not None else base),
+             ("baseline", base if ref is not None else None), ("subject", cand)]
+    for side, t in sides:
+        if t is None or not t.dtype.is_floating_point:
+            continue
+        bad = int((~torch.isfinite(t.detach().cpu())).sum())
+        if bad:
+            return {"ok": False, "status": "%s_nonfinite" % side, "nonfinite": bad,
+                    "elements": int(t.numel()),
+                    "why": "the %s holds %d non-finite values (a poisoned slot never written, or a "
+                           "harness gather/poison-timing error)" % (side, bad)}
+    return None
+
+
+def _delta(spec, d, c, b, ref, cand, base, refs, rows):
+    """The step's change (`bound.delta`) of cand / base / ref: `x - minus`, or with `along` the
+    consecutive differences over that axis, the first against `minus`. Returns (c, b, ref,
+    failure-or-None); a compared-against change that is identically zero fails (the step did
+    nothing, or the harness returned the input as the output)."""
+    torch = _torch()
+    minus = d["minus"]
+    axis = spec["shape"].index(d["along"]) if "along" in d else None
+
+    def diff(x, m):
+        x, m = x.detach().cpu().to(torch.float64), m.detach().cpu().to(torch.float64)
+        if rows is not None:
+            m = m[rows]
+        if axis is None:
+            return x - m
+        prev = torch.cat([m.unsqueeze(axis), x.narrow(axis, 0, x.shape[axis] - 1)], dim=axis)
+        return x - prev
+
+    for side, outs in (("candidate", cand), ("baseline", base)):
+        if minus not in outs:
+            return c, b, ref, {"ok": False, "why": "delta.minus %s missing from the %s" % (minus, side)}
+    c2, b2 = diff(c, cand[minus]), diff(b, base[minus])
+    r2 = None
+    if ref is not None:
+        if minus not in (refs or {}):
+            raise ContractError("delta.minus %s has no reference to difference against" % minus)
+        r2 = diff(ref, refs[minus])
+    y = r2 if r2 is not None else b2
+    if y.numel() and bool((y[torch.isfinite(y)] == 0).all()):
+        return c2, b2, r2, {"ok": False, "status": "reference_delta_zero",
+                            "why": "the compared-against side's change (output - %s) is zero" % minus}
+    return c2, b2, r2, None
+
+
 def _produced(spec, cand, base):
     """`optional_if_not_produced: {"poison": v}`: the harness fills the buffer with `v` before
     the call. A subject that left all of it at `v` did not produce the output (an optimized
     kernel may legitimately stop exposing it): reported `not_produced`, neither passed against
-    stale values nor failed. A subject that wrote only part of it fails, and so does a compared-
-    against side that produced nothing (the oracle / baseline floor). None: compare normally."""
+    stale values nor failed. A subject that wrote only part of it fails. The compared-against
+    side (the oracle / baseline floor) must produce every element: any poison left there fails,
+    all of it (`reference_not_produced`) or part (`reference_partially_written`), so a subject
+    whose holes match the reference's cannot pass as -7 == -7. None: compare normally."""
     opt = spec.get("optional_if_not_produced")
     if not opt:
         return None
     v = opt["poison"]
     c_hit = cand.detach().cpu() == v
     b_hit = base.detach().cpu() == v
-    if c_hit.numel() and bool(b_hit.all()):
+    if b_hit.numel() and bool(b_hit.all()):
         return {"ok": False, "status": "reference_not_produced", "poison": v,
                 "why": "the compared-against side left every element at the poison value %r" % v}
+    if bool(b_hit.any()):
+        return {"ok": False, "status": "reference_partially_written", "poison": v,
+                "unwritten": int(b_hit.sum()), "elements": int(b_hit.numel()),
+                "why": "the compared-against side left part of the output at the poison value %r" % v}
     if c_hit.numel() and bool(c_hit.all()):
         return {"ok": True, "status": "not_produced", "poison": v}
-    if bool(c_hit.any()) and not bool((c_hit == b_hit).all()):
+    if bool(c_hit.any()):
         return {"ok": False, "status": "partially_written", "poison": v,
-                "unwritten": int((c_hit & ~b_hit).sum()), "elements": int(c_hit.numel()),
+                "unwritten": int(c_hit.sum()), "elements": int(c_hit.numel()),
                 "why": "part of the output still holds the poison value %r" % v}
     return None
 

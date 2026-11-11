@@ -50,9 +50,14 @@ class MonoLayerFamilyTest(unittest.TestCase):
 
     def test_gated_outputs_and_their_bounds(self):
         out = _family()["outputs"]
-        self.assertEqual(set(out), {"stream_out", "attn_out", "layer_out", "kv_rows", "kv_stray", "ids"})
-        for name in ("stream_out", "attn_out", "layer_out"):
-            self.assertEqual(out[name]["bound"], {"kind": "tolerance", "atol": 1 / 128, "rtol": 1 / 128})
+        self.assertEqual(set(out), {"stream_out", "attn_out", "layer_out", "stream_in", "kv_rows",
+                                    "kv_stray", "ids"})
+        tol = {"kind": "tolerance", "atol": 1 / 128, "rtol": 1 / 128}
+        self.assertEqual(out["attn_out"]["bound"], tol)
+        self.assertEqual(out["stream_out"]["bound"], dict(tol, delta={"minus": "stream_in"}))
+        self.assertEqual(out["layer_out"]["bound"], dict(tol, delta={"minus": "stream_in", "along": "launches"}))
+        for name in ("stream_in", "stream_out", "attn_out", "layer_out", "kv_rows"):
+            self.assertIs(out[name]["require_finite"], True, name)
         kv = out["kv_rows"]
         self.assertEqual((kv["bound"]["atol"], kv["bound"]["rtol"]), (1 / 64, 1 / 8))
         self.assertTrue(kv["bound"]["per_row"])
@@ -95,8 +100,12 @@ class MonoLayerFamilyTest(unittest.TestCase):
     def test_oracle_doc_narrows_outputs_and_swaps_bounds(self):
         doc = U.freeze_task_contract(_family(), attrs={}, const_axes=TASK_AXES)
         nd = U.oracle_doc(doc, "native")
-        self.assertEqual(set(nd["outputs"]), {"stream_out", "attn_out", "layer_out", "kv_rows"})
+        self.assertEqual(set(nd["outputs"]), {"stream_in", "stream_out", "attn_out", "layer_out", "kv_rows"})
         self.assertEqual(nd["outputs"]["kv_rows"]["bound"], {"kind": "sqnr", "min_db": 20})
+        # the native leg's stream checks are on the step's change, not the residual-dominated stream
+        self.assertEqual(nd["outputs"]["stream_out"]["bound"]["delta"], {"minus": "stream_in"})
+        self.assertEqual(nd["outputs"]["layer_out"]["bound"]["delta"]["along"], "launches")
+        self.assertTrue(nd["outputs"]["kv_rows"]["require_finite"])     # survives the bound swap
         sd = U.oracle_doc(doc, "split")
         self.assertEqual(sd["outputs"], doc["outputs"])
         self.assertEqual(doc["outputs"]["kv_rows"]["bound"]["kind"], "tolerance")   # not mutated
@@ -130,15 +139,33 @@ class OracleSchemaTest(unittest.TestCase):
         self.assertRejects(lambda d: d["oracles"]["native"].__setitem__("cases", "some"), "cases")
         self.assertRejects(lambda d: d["oracles"]["native"].__setitem__("controls", "no"), "controls")
 
-    def test_oracle_reference_satisfies_bounds_needing_a_reference(self):
-        def mutate(d):
-            d["outputs"]["stream_out"]["bound"] = {"kind": "output_rounding"}
-        U.validate_family(_broken(mutate))
-        def mutate_none(d):
-            mutate(d)
-            d["reference"] = None
-        with self.assertRaises(U.ContractError):
-            U.validate_family(_broken(mutate_none))
+    def test_oracle_reference_does_not_satisfy_bounds_needing_float64(self):
+        # an oracle leg gives outputs, not float64 values / magnitudes: dot_product & co. and
+        # topk_equivalent's "ref:<output>" scores need a float64 reference
+        self.assertRejects(lambda d: d["outputs"]["attn_out"].__setitem__("bound", {"kind": "output_rounding"}),
+                           "float64 reference")
+        def topk(d):
+            d["outputs"]["ids"]["bound"] = {"kind": "topk_equivalent", "scores": "ref:attn_out"}
+            d["outputs"]["ids"].pop("optional_if_not_produced")
+        self.assertRejects(topk, "float64 reference")
+        self.assertRejects(lambda d: d["oracles"]["native"]["bounds"].__setitem__(
+            "attn_out", {"kind": "baseline_relative"}), "float64 reference")
+
+    def test_delta_schema(self):
+        self.assertRejects(lambda d: d["outputs"]["stream_out"]["bound"].__setitem__(
+            "delta", {"minus": "nope"}), "delta.minus")
+        self.assertRejects(lambda d: d["outputs"]["stream_out"]["bound"].__setitem__(
+            "delta", {"minus": "stream_out"}), "delta.minus")
+        self.assertRejects(lambda d: d["outputs"]["layer_out"]["bound"]["delta"].__setitem__(
+            "along", "pools"), "not an axis")
+        self.assertRejects(lambda d: d["outputs"]["kv_stray"]["bound"].__setitem__(
+            "delta", {"minus": "stream_in"}), "tolerance or sqnr")
+        self.assertRejects(lambda d: d["oracles"]["native"]["outputs"].remove("stream_in"),
+                           "not an output of the oracle")
+
+    def test_require_finite_is_a_bool(self):
+        self.assertRejects(lambda d: d["outputs"]["kv_rows"].__setitem__("require_finite", "yes"),
+                           "require_finite")
 
     def test_optional_if_not_produced_shape(self):
         self.assertRejects(lambda d: d["outputs"]["ids"].__setitem__("optional_if_not_produced", {}),
@@ -150,6 +177,15 @@ class OracleSchemaTest(unittest.TestCase):
         self.assertRejects(lambda d: d["required_control_categories"].__setitem__("by", "nope"), "not an attr")
         self.assertRejects(lambda d: d["required_control_categories"]["cases"].__setitem__("sparse", ["x"]),
                            "not in")
+        with self.assertRaises(U.ContractError):          # a ContractError, not a KeyError
+            U.validate_family(_broken(lambda d: d["attrs"]["layer_kind"].pop("values")))
+
+    def test_control_categories_never_silently_empty(self):
+        doc = _family()
+        with self.assertRaises(U.ContractError):
+            U.control_categories(doc, {})                              # the task pins no layer_kind
+        with self.assertRaises(U.ContractError):
+            U.control_categories(doc, {"layer_kind": "sparse"})        # a value with no case
 
 
 @needs_torch
@@ -198,6 +234,7 @@ class NonFiniteSubjectTest(unittest.TestCase):
         self.assertFalse(U.compare_one({"kind": "exact"}, self.bad, self.y)["ok"])
 
     def test_nan_on_both_sides_is_agreement(self):
+        # compare_one alone; outputs marked require_finite fail it in compare_outputs (below)
         both = self.bad.clone()
         for b in ({"kind": "tolerance", "atol": 1 / 128, "rtol": 1 / 128}, {"kind": "sqnr", "min_db": 20},
                   {"kind": "exact"}):
@@ -238,6 +275,36 @@ class NoiseRelativeKeysTest(unittest.TestCase):
         self.assertTrue(floor["ok"])
 
 
+STEP_RMS = 0.05     # a layer's change to an N(0,1) residual stream
+
+
+def _mono_outputs(doc, sym, seed=0):
+    """Outputs of one step: stream_in ~ N(0,1), each launch adds a change of rms STEP_RMS,
+    stream_out = the last launch's stream."""
+    g = torch.Generator().manual_seed(seed)
+    out = {}
+    for name, s in doc["outputs"].items():
+        if not U.present(s, sym):
+            continue
+        shape = U.shape_of(s, sym)
+        dt = U.torch_dtype(U.dtype_of(s, sym))
+        if name == "ids":
+            t = torch.randint(0, 32, shape, generator=g, dtype=torch.int32)
+        elif name == "kv_stray":
+            t = torch.zeros(shape, dtype=torch.int64)
+        else:
+            t = torch.randn(shape, generator=g).to(dt)
+        out[name] = t
+    stream = out["stream_in"].to(torch.float32)
+    layers = []
+    for _ in range(out["layer_out"].shape[1]):
+        stream = stream + STEP_RMS * torch.randn(stream.shape, generator=g)
+        layers.append(stream)
+    out["layer_out"] = torch.stack(layers, dim=1)
+    out["stream_out"] = stream.to(out["stream_out"].dtype)
+    return out
+
+
 @needs_torch
 class MonoOutputsCompareTest(unittest.TestCase):
     """compare_outputs over a frozen mono_layer contract (the subject against the split oracle)."""
@@ -246,18 +313,7 @@ class MonoOutputsCompareTest(unittest.TestCase):
         self.doc = U.freeze_task_contract(_family(), attrs={"layer_kind": "routed_moe"},
                                           const_axes=TASK_AXES)
         self.sym = U.symbols_for(self.doc, {"rows": 3, "context": 8})
-        g = torch.Generator().manual_seed(0)
-        self.ref = {}
-        for name, s in self.doc["outputs"].items():
-            shape = U.shape_of(s, self.sym)
-            dt = U.dtype_of(s, self.sym)
-            if name == "ids":
-                t = torch.randint(0, 32, shape, generator=g, dtype=torch.int32)
-            elif name == "kv_stray":
-                t = torch.zeros(shape, dtype=torch.int64)
-            else:
-                t = torch.randn(shape, generator=g).to(U.torch_dtype(dt))
-            self.ref[name] = t
+        self.ref = _mono_outputs(self.doc, self.sym)
 
     def _cmp(self, **changes):
         sub = {k: v.clone() for k, v in self.ref.items()}
@@ -290,7 +346,16 @@ class MonoOutputsCompareTest(unittest.TestCase):
             t[0, 1, 0, 1, 1, :] = float("nan")
         res = self._cmp(kv_rows=poison)
         self.assertFalse(res["outputs"]["kv_rows"]["ok"])
-        self.assertEqual(res["outputs"]["kv_rows"]["violating_rows"], 1)
+        self.assertEqual(res["outputs"]["kv_rows"]["status"], "subject_nonfinite")
+        self.assertEqual(res["outputs"]["kv_rows"]["nonfinite"], 4)
+        # compare_one alone (no require_finite) judges the same row a violating row
+        r = U.compare_one(self.doc["outputs"]["kv_rows"]["bound"], self._poisoned(poison), self.ref["kv_rows"])
+        self.assertEqual(r["violating_rows"], 1)
+
+    def _poisoned(self, fn):
+        t = self.ref["kv_rows"].clone()
+        fn(t)
+        return t
 
     def test_stray_write_fails(self):
         def stray(t):
@@ -328,11 +393,76 @@ class MonoOutputsCompareTest(unittest.TestCase):
         self.assertFalse(res["outputs"]["ids"]["ok"])
         self.assertEqual(res["outputs"]["ids"]["status"], "reference_not_produced")
 
-    def test_stream_one_ulp_passes_and_nan_fails(self):
-        self.assertTrue(self._cmp(stream_out=lambda t: t.mul_(1 + 2 ** -8))["ok"])
+    def test_stream_one_ulp_of_the_change_passes_and_nan_fails(self):
+        def ulp(t):
+            t.add_((t - self.ref["stream_in"]) * 2 ** -8)
+        self.assertTrue(self._cmp(stream_out=ulp)["ok"])
         def nan(t):
             t[0, 0, 0] = float("nan")
         self.assertFalse(self._cmp(stream_out=nan)["outputs"]["stream_out"]["ok"])
+
+    def test_bf16_stream_rounding_passes(self):
+        doc = U.freeze_task_contract(_family(), attrs={"layer_kind": "routed_moe", "stream_dtype": "bfloat16"},
+                                     const_axes=TASK_AXES)
+        sym = U.symbols_for(doc, {"rows": 3, "context": 8})
+        ref = _mono_outputs(doc, sym)
+        self.assertEqual(ref["stream_out"].dtype, torch.bfloat16)
+        sub = dict(ref, stream_out=(ref["stream_out"].float() * (1 + 2 ** -9)).to(torch.bfloat16))
+        self.assertTrue(U.compare_outputs(doc, sub, ref, sym=sym, refs=ref)["ok"])
+        # the same perturbation is a real error on a float32 stream (the change is ~5% of it)
+        sub32 = dict(self.ref, stream_out=self.ref["stream_out"] * (1 + 2 ** -6))
+        self.assertFalse(U.compare_outputs(self.doc, sub32, self.ref, sym=self.sym, refs=self.ref)["ok"])
+
+    def test_a_launch_that_changes_nothing_fails(self):
+        # launch 1 skipped: its layer_out repeats launch 0's (the layer's change is lost)
+        def skip(t):
+            t[:, 1] = t[:, 0]
+        self.assertFalse(self._cmp(layer_out=skip)["outputs"]["layer_out"]["ok"])
+
+    def test_a_step_that_changes_nothing_on_the_reference_fails(self):
+        ref = dict(self.ref, stream_out=self.ref["stream_in"].clone())
+        res = U.compare_outputs(self.doc, dict(ref), ref, sym=self.sym, refs=ref)
+        self.assertEqual(res["outputs"]["stream_out"]["status"], "reference_delta_zero")
+
+    def test_nan_on_both_sides_fails_for_poisoned_outputs(self):
+        # the legs share the harness's poisoning / gather: a mistake there leaves NaN at the same
+        # place on every leg, which compare_one counts as agreement -- require_finite does not
+        for name, idx in (("kv_rows", (0, 1, 0, 1, 1)), ("stream_out", (0, 0, 0)), ("layer_out", (1, 0, 2, 3))):
+            ref = {k: v.clone() for k, v in self.ref.items()}
+            ref[name][idx] = float("nan")
+            res = U.compare_outputs(self.doc, {k: v.clone() for k, v in ref.items()}, ref, sym=self.sym, refs=ref)
+            self.assertFalse(res["ok"], name)
+            self.assertFalse(res["outputs"][name]["ok"], name)
+            self.assertEqual(res["outputs"][name]["status"], "reference_nonfinite", name)
+            # also when the oracle is passed as the baseline (no refs)
+            res = U.compare_outputs(self.doc, {k: v.clone() for k, v in ref.items()}, ref, sym=self.sym)
+            self.assertEqual(res["outputs"][name]["status"], "baseline_nonfinite", name)
+
+    def test_ids_partly_poison_on_the_reference_fails_even_where_they_match(self):
+        ref = dict(self.ref, ids=self.ref["ids"].clone())
+        ref["ids"][0, 1].fill_(-7)
+        res = U.compare_outputs(self.doc, dict(ref), ref, sym=self.sym, refs=ref)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["outputs"]["ids"]["status"], "reference_partially_written")
+
+    def test_native_sqnr_is_on_the_layer_change(self):
+        # a wholly wrong contribution (another random change of the same rms) keeps the stream at
+        # ~26 dB of itself; judged on the change it is ~-3 dB and fails
+        nd = U.oracle_doc(self.doc, "native")
+        other = _mono_outputs(self.doc, self.sym, seed=1)
+        sub = {k: v.clone() for k, v in self.ref.items()}
+        d_out = other["stream_out"] - other["stream_in"]
+        sub["stream_out"] = (self.ref["stream_in"] + d_out).to(sub["stream_out"].dtype)
+        dl = other["layer_out"] - torch.cat([other["stream_in"].unsqueeze(1), other["layer_out"][:, :-1]], dim=1)
+        sub["layer_out"] = self.ref["stream_in"].unsqueeze(1) + dl.cumsum(dim=1)
+        whole = U.compare_one({"kind": "sqnr", "min_db": 20}, sub["stream_out"], self.ref["stream_out"])
+        self.assertTrue(whole["ok"], whole)                  # the old check on the stream: passes
+        res = U.compare_outputs(nd, sub, self.ref, sym=self.sym)
+        self.assertFalse(res["outputs"]["stream_out"]["ok"])
+        self.assertFalse(res["outputs"]["layer_out"]["ok"])
+        self.assertLess(res["outputs"]["stream_out"]["sqnr_db"], 3)
+        # the right change passes the native leg
+        self.assertTrue(U.compare_outputs(nd, dict(self.ref), self.ref, sym=self.sym)["ok"])
 
     def test_dense_has_no_ids(self):
         axes = {k: v for k, v in TASK_AXES.items() if k != "topk"}
