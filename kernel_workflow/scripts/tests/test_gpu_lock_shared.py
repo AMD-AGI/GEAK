@@ -90,15 +90,6 @@ def test_two_holders_serialize_in_the_default_namespace(tmp_path):
             lock.unlink()
 
 
-def test_help_and_selftest(tmp_path):
-    r = subprocess.run(["bash", str(GEAK_LOCK), "--help"], check=False, capture_output=True, text=True, env=_env())
-    assert r.returncode == 0 and "gpu_lock.sh" in r.stdout and "GEAK_GPU_USE_LOG" in r.stdout
-    assert not (Path.cwd() / "gpu_--help.lock").exists()
-    r = subprocess.run(["bash", str(GEAK_LOCK), "--selftest"], check=False, capture_output=True, text=True,
-                       env=_env(), cwd=tmp_path, timeout=120)
-    assert r.returncode == 0 and "GPU_LOCK SELFTEST PASS" in r.stdout, r.stdout + r.stderr
-
-
 def test_use_log_mode_and_lock_env(tmp_path):
     use = tmp_path / "use.log"
     r = subprocess.run(["bash", str(GEAK_LOCK), "2", "bash", "-c",
@@ -137,28 +128,6 @@ def test_command_exit_code_is_preserved(tmp_path):
     assert r.returncode == 7
 
 
-@pytest.mark.parametrize("requested", ["2", "1", "1,3", "group:3,4", "pool:1:3,4"])
-def test_nested_single_card_requests_fail_before_deadlocking(tmp_path, requested):
-    r = subprocess.run(["bash", str(SHIM), "2", "bash", str(GEAK_LOCK), requested,
-                        "echo", "unexpected-run"], check=False, capture_output=True, text=True, cwd=tmp_path,
-                       env=_env(tmp_path / "locks"), timeout=10)
-    assert r.returncode == 2 and "nested gpu_lock.sh call" in r.stderr, r.stdout + r.stderr
-    assert "unexpected-run" not in r.stdout
-
-
-@pytest.mark.parametrize("marker", [
-    {"GEAK_GPU_LEASE_ACTIVE": "1", "GEAK_GPU_LEASE_IDS": "1,2"},
-    {"GEAK_GPU_LEASE_IDS": "1,2"},
-    {"GEAK_GPU_LOCKED_SET": "1,2"},
-])
-def test_complete_set_marker_refuses_any_new_allocation(tmp_path, marker):
-    r = subprocess.run(["bash", str(GEAK_LOCK), "3", "echo", "unexpected-run"],
-                       check=False, capture_output=True, text=True, cwd=tmp_path,
-                       env=_env(tmp_path / "locks", **marker), timeout=10)
-    assert r.returncode == 2 and "nested gpu_lock.sh call" in r.stderr
-    assert not r.stdout
-
-
 def test_ascending_nested_single_card_path_preserves_e2e_contract(tmp_path):
     r = subprocess.run(["bash", str(GEAK_LOCK), "1", "bash", str(GEAK_LOCK), "3", "bash", "-c",
                         'echo "$HIP_VISIBLE_DEVICES/$GEAK_GPU_LOCK_HELD"'],
@@ -175,9 +144,3 @@ def test_shim_honors_the_public_allocation_fence(tmp_path):
     assert not r.stdout
 
 
-def test_selftest_isolates_inherited_ownership_and_allocation(tmp_path):
-    r = subprocess.run(["bash", str(SHIM), "--selftest"], check=False, capture_output=True, text=True,
-                       cwd=tmp_path, timeout=15,
-                       env=_env(tmp_path / "locks", GEAK_GPU_ALLOWED="99",
-                                GEAK_GPU_LEASE_ACTIVE="1", GEAK_GPU_LEASE_IDS="99"))
-    assert r.returncode == 0 and "GPU_LOCK SELFTEST PASS" in r.stdout, r.stdout + r.stderr

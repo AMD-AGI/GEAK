@@ -38,8 +38,7 @@ run must use `--no-timeout`, because a long startup and finalize/flush are norma
 
 ### Collecting through GEAK
 ```bash
-# optional counter layer of the standard profiler entry (groups = parse_pmc.PMC_GROUPS)
-bash kernel_workflow/scripts/profile_kernel.sh <gpu_id> "<benchmark cmd>" <out> --pmc   # or --derived
+# counter groups = parse_pmc.PMC_GROUPS (`parse_pmc.py --print-groups`), one rocprofv3_safe.sh pass each
 python3 kernel_workflow/scripts/kernel_tools/parse_pmc.py <out>/pmc "" --arch gfx950   # busy + C1 BW
 # one ad-hoc pass, under the GPU lock (it locks itself with --gpu; never set HIP_VISIBLE_DEVICES inline)
 bash kernel_workflow/scripts/kernel_tools/rocprofv3_safe.sh --gpu <id> --kernel '<regex>' \

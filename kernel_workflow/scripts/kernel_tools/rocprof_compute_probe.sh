@@ -6,7 +6,7 @@
 # absent runner => exit 3. This does not replace e2e's existing legacy roofline skill
 # or its upstream TraceLens-prior import path.
 #
-# Ordinary profiling: use ../profile_kernel.sh <gpu> <cmd> <out> [--pmc|--att|--spi].
+# Ordinary profiling: use ../profile_kernel.sh <gpu> <cmd> <out>; counters/ATT: capture.sh or rocprofv3_safe.sh.
 # Explicit whole-process diagnostic / existing workload analysis:
 #   rocprof_compute_probe.sh NAME OUT --diagnostic [--full] [--dev N] -- CMD...
 #   rocprof_compute_probe.sh NAME OUT --workload DIR [--full]
@@ -151,7 +151,7 @@ if ! locus_have rocprof-compute; then
   # default -- so a configured container was reported as "container NAMENAME". Keep the variable in
   # exactly one arm: this message's only job is to say WHICH machine was asked, and a mangled name is
   # how you end up debugging the wrong host.
-  echo "[rocprof_compute_probe] rocprof-compute NOT found in the kernel's locus (${TILE_KERNEL_CONTAINER:+container }${TILE_KERNEL_CONTAINER:-host}) -> DEGRADE to kernel_workflow/scripts/profile_kernel.sh <gpu> <cmd> <out> --pmc [--att] (rocprofv3 counters + ATT) + static ISA." >&2
+  echo "[rocprof_compute_probe] rocprof-compute NOT found in the kernel's locus (${TILE_KERNEL_CONTAINER:+container }${TILE_KERNEL_CONTAINER:-host}) -> DEGRADE to kernel_tools/capture.sh / rocprofv3_safe.sh (rocprofv3 counters + ATT) + static ISA." >&2
   exit 3
 fi
 if ! locus_run rocprof-compute --version >/dev/null 2>&1; then

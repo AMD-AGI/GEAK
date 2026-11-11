@@ -14,10 +14,7 @@ means the parsing responsibility is yours, and you must adapt to whichever profi
 1. **Entry point**: read `<profile_output_dir>/profile_report.txt`. Its tail prints `Profiler used: <name>`
    and an `Artifacts:` list. Branch your parsing on which profiler produced it (the four cases below).
    Native artifacts (e.g. rocprofv3 CSVs, the `*_profile_raw.log`) are also left in the dir for deeper
-   parsing if `profile_report.txt` is not enough. If the run used an optional layer (`--pmc`,
-   `--derived`, `--att`, `--spi`; see "Optional deeper layers" below), its section is appended to the
-   same report and its raw output sits in a subdir; `profile_layers.json` records each layer's state
-   (`collected` / `partial` / `degraded:<why>` / `off`).
+   parsing if `profile_report.txt` is not enough.
 2. **Always extract the dispatch count** (kernels launched per call) regardless of profiler — it is the
    key geomean/overhead signal (see `geomean_levers.md`). How to find it differs per profiler (below).
 3. **Degrade gracefully**: if a metric/field is absent in the available profiler, say so explicitly in
@@ -96,41 +93,6 @@ Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMU
   **overhead-bound** (floor); a large-N case far above the floor ⇒ likely **compute-bound**. State that
   no profiler was available.
 
-## Optional deeper layers (`profile_kernel.sh ... --pmc | --derived | --att | --spi`)
-
-The default run above is the floor every profile has. When the classification needs more, re-run with
-an optional layer; the argv contract (`<gpu_id> <benchmark_cmd> <output_dir>`), the gpu_lock routing,
-the arch-aware profiler order and `profile_report.txt` + `Profiler used:` stay exactly as above. Every
-counter/ATT pass goes through `kernel_tools/rocprofv3_safe.sh` (timeout, mandatory kernel filter, the
-HIP-inside-ROCR guard) under `gpu_lock.sh`; nothing sets `HIP_VISIBLE_DEVICES` inline.
-
-| flag | collects | output | read it with |
-|---|---|---|---|
-| `--pmc` | the `kernel_tools/parse_pmc.py` `PMC_GROUPS` (memory, memory_ea, sol, stall, waitbusy, lds_raw), one rocprofv3 pass per group, bisected on abort/timeout | `pmc/pmc_<group>/`, `pmc/pmc_summary.txt`, `pmc/pmc_collection.json` (passes + dropped counters) | `parse_pmc.py <out>/pmc "" --arch <gfx>` (busy counters, bubble = 100 − MfmaUtil, C1 achieved DRAM bandwidth by independent routes); `kernel_breakdown.py <kernel.s> --pmc <out>/pmc` merges it with the static ISA audit |
-| `--derived` | only the derived busy/stall groups (sol, stall) — the cheap subset | `pmc/` | as `--pmc` |
-| `--att` | rocprofv3 advanced thread trace of the selected kernel (one CU; retried over all SIMDs when the traced CU caught no waves) | `att/ui_output_agent_*`, `att/hotspots.txt` | `hotspot_analyzer.py`, `att_opclass.py`, `mfma_efficiency.py` (all in `kernel_tools/`); `kernel_breakdown.py --att <ui_output dir>` |
-| `--spi` | occupancy-limiter evidence: `rocprof-compute analyze --block 6.2 2.1.15` on the main step's workload, else `PROFILE_SPI_COUNTERS` (build-specific raw SPI counters) | `spi/` | the SPI "Insufficient …" rows name the binding resource; cross-check the analytic occupancy below |
-| `--kernel R` | the kernel-name regex for all of the above (default: the dominant non-helper kernel of a kernel-trace pass, written to `kernel_select/selected_kernel.txt`) | | |
-
-Degrade, never fail: off CDNA the default counter names do not exist (`--pmc` records
-`degraded:non_cdna_arch`; list this build's counters with `rocprofv3 -L` or
-`rocprofv3-avail list --pmc` and pass `PROFILE_PMC_GROUPS="name:C1 C2;name2:C3"`); an unidentified arch
-is refused rather than guessed; `--att` needs the **rocprof-trace-decoder** library, which GEAK does not
-vendor — export `ROCPROF_ATT_LIBRARY_PATH=<dir>`, otherwise the layer records `degraded:decoder_absent`.
-**Counter-slot overflow is version-dependent**: too many counters in one pass may be replayed over
-several passes, abort the app (SIGABRT / rc 134, traceback pointing at the workload), or hang holding
-the GPU lock, depending on the rocprofv3 release. The safe wrapper's timeout turns a hang into rc 124;
-both abort and timeout bisect the group and drop only the counters that fail alone
-(`pmc_collection.json` lists them). Never read a dropped counter as zero.
-
-Other shared tools in `kernel_workflow/scripts/kernel_tools/` (the Gluon pack keeps shims at its old
-`scripts/` paths): `capture.sh` (source-linked trace/optional ATT capture,
-available IR + static audit, `capture.json`), `rocprof_compute_probe.sh` + `parse_rc.py` (rocprof-compute
-SOL/memory/warp-state/SPI → `rc_metrics.json`). All GPU-touching wrappers run under `gpu_lock.sh` (pass `--dev`/
-`--gpu <id>` and they lock themselves). rocprof-compute version caveats: on gfx95x `--roof-only` needs
-rocprof-compute >= 3.6.0, and on gfx950 FETCH_SIZE / TCC_BUBBLE-derived read bytes **under-count**
-(treat a counter-based byte numerator there as a lower bound; `parse_pmc.py --arch gfx950` stamps it).
-
 ### RDNA4 client (gfx1201) — PMC holes are expected
 
 On RDNA4, `rocprofv3 --kernel-trace` usually records dispatches, but CDNA SoL names (`SQ_WAVES`,
@@ -142,25 +104,6 @@ generations called this `--list-basic`, `--list-derived`, or
 phase** if MFMA% is absent — classify from kernel-trace durations + per-case latency + dispatch
 count + `amd_rdna4.md` §5. Never invent MFMA utilization.
 
-## Busy vs duty-cycle: read the busy counter (applies to every section below)
-
-Vendor counters expose two different things under confusingly similar names, and only one of them
-bounds a kernel:
-
-- **busy / throughput** — fraction of **all** cycles the unit was working: rocprofv3 `VALUBusy`,
-  `MfmaUtil`; rocprof-compute SoL "VALU Utilization" / "MFMA Utilization" (%-of-peak rows). **Classify
-  a compute bound from these.**
-- **duty-cycle / lane occupancy** — of the cycles the unit *did* issue, how full the lanes were:
-  rocprofv3 `VALUUtilization` (= rocprof-compute "VALU Active Threads"). It can sit near 100% on a
-  kernel that is not VALU-bound, because it ignores the cycles the unit could have issued and did not.
-  It is a divergence signal, never a bound.
-
-Discriminant: `VALUUtilization` ~100% while `VALUBusy` **and** `MfmaUtil` are both well under 100% and
-`MemUnitStalled` ~0 → the units idle on a dependency chain → **latency-bound C1** (shorten the chain /
-raise occupancy), not "at the VALU ceiling". A single busy counter at ~100% is still
-necessary-not-sufficient: confirm with a controlled A/B (remove some of that unit's work; if the time
-does not move, the 100% was a stall artifact).
-
 ## rocprof-compute (formerly omniperf) Output Interpretation
 
 ### Section 2: System Speed-of-Light (SoL)
@@ -169,8 +112,8 @@ The most important section. Shows overall utilization as percentage of peak.
 
 | Metric | What it means | Threshold |
 |--------|--------------|-----------|
-| VALU Utilization (busy) | Vector ALU busy, % of peak (rocprofv3: `VALUBusy` — **not** `VALUUtilization`) | > 60% = compute-bound |
-| MFMA Utilization (busy) | Matrix unit busy, % of peak (CDNA; rocprofv3: `MfmaUtil`) | > 40% = MFMA-active; **often absent on RDNA4** — see below |
+| VALU Utilization | Vector ALU usage | > 60% = compute-bound |
+| MFMA Utilization | Matrix unit usage (CDNA) | > 40% = MFMA-active; **often absent on RDNA4** — see below |
 | VMEM Utilization | Vector memory pipe | > 60% = memory-bound |
 | LDS Utilization | Local data share | > 50% = LDS-heavy |
 | Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; R9700 datasheet ceiling in `amd_rdna4.md` §4, or a separately labeled streaming measurement |
@@ -195,7 +138,7 @@ Shows how wavefronts spend their time.
 
 **Key ratios** (each row is an independent accumulator over the SAME `Total Wave Cycles` — divide each
 by Total, **never subtract them from one another**; subtracting produces negative "active" values,
-which is a mis-read, not a finding; `parse_rc.py` exposes the raw buckets as `warp_state.*_cyc`):
+which is a mis-read, not a finding):
 - `Active / Total` = Kernel efficiency (< 20% = CRITICAL inefficiency)
 - `Dependency Wait / Total` = fraction stalled on a data dependency feeding the math units
 - `Issue Wait / Total` = fraction stalled because too few waves are resident to issue from
@@ -236,8 +179,8 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 
 | Metric | What it means |
 |--------|--------------|
-| VALU Active Threads | Average active threads per VALU instruction (lane occupancy — the duty-cycle reading; rocprofv3 `VALUUtilization`) |
-| VALU Utilization % | How much of peak VALU is used (busy; rocprofv3 `VALUBusy`) |
+| VALU Active Threads | Average active threads per VALU instruction |
+| VALU Utilization % | How much of peak VALU is used |
 | Branch Divergence | Fraction of divergent branches |
 
 **Key checks:**
@@ -265,8 +208,6 @@ convert to waves using the **actual launch** before combining with register limi
 The compiler's maximum workgroup size is only an upper bound. gfx950 has 160 KiB
 LDS/CU and gfx942 64 KiB: for a 48 KiB workgroup, the LDS-only limits are **3 vs 1**
 workgroups/CU, not a fixed 2.5× workgroup ratio. Other resources can lower occupancy.
-Read the SPI limiter (`--spi`) when available to add runtime resource evidence.
-
 
 **R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
@@ -330,13 +271,8 @@ real mislabel. Run them before forming a hypothesis.
   efficiency read ~2× high (we saw 185%, 396%). Any roofline efficiency **> 100%** is a mis-calibrated
   peak (or SFU ops folded into the perf counter on rmsnorm/rope), not a record. Prefer HBM% and F32
   MFMA%; pass `--roofline-data-type` if the tool supports it.
-- **HBM can under-report on multi-XCD.** If SoL HBM% looks implausibly low, cross-check by an
-  independent route — `parse_pmc.py` reports three (TCC_MISS × 128 B, (FETCH_SIZE + WRITE_SIZE) × 1 KiB,
-  (TCC_EA0_RDREQ_sum + TCC_EA0_WRREQ_sum) × 128 B) and a range when they disagree — or bytes/time by
-  hand. EA requests are 32/64/128 B (rocprof-compute's L2–Fabric read bytes on gfx942 =
-  128·TCC_BUBBLE + 64·(RDREQ − BUBBLE − RDREQ_32B) + 32·RDREQ_32B), so the ×128 B EA route is an upper
-  bound; on gfx950 FETCH_SIZE / TCC_BUBBLE-derived read bytes under-count. `TCC_EA0_RDREQ_DRAM_sum`
-  (DRAM-destined reads only) is a different counter from `TCC_EA0_RDREQ_sum`; do not mix them.
+- **HBM can under-report on multi-XCD.** If SoL HBM% looks implausibly low, cross-check with
+  `TCC_EA*_RDREQ_DRAM × 64B`, or bytes/time by hand.
 - **MoE padding inflates AI.** Recompute arithmetic intensity from *effective* FLOPs (not padded rows)
   and confirmed bytes before believing an "AI far right of ridge → compute-bound" call.
 
@@ -349,8 +285,7 @@ real mislabel. Run them before forming a hypothesis.
   `min()` with the LDS term — see "Occupancy" above (`amd_occupancy.py`); 1–2 is register-starved.
   **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
-- **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle
-  (both are in `--pmc`'s `lds_raw` group).
+- **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
 - **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
 
 Only tune registers/occupancy when achieved occupancy actually sits at the register ceiling; if it is

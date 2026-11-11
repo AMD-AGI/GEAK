@@ -15,8 +15,8 @@ The DYNAMIC half of the kernel breakdown (the STATIC half is asm_loop_audit.py).
 
 GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/); the Gluon pack's
 scripts/parse_pmc.py is a shim. PMC_GROUPS below is the SINGLE SOURCE of the counter set:
-GEAK's kernel_workflow/scripts/profile_kernel.sh --pmc collects exactly these groups (one rocprofv3
-pass per group, through rocprofv3_safe.sh) into <out>/pmc/pmc_<group>/, which this parser reads.
+collect one rocprofv3_safe.sh pass per group (collect_pmc_group bisects a failing group) into
+<out>/pmc/pmc_<group>/, which this parser reads.
 Handles that layout (pmc_*/), the older derived/ / counters/ layout, and rocprof-compute pmc_perf.csv.
 Stdlib only, no GPU. rocprof-compute derived-metric CSVs can also be fed by pointing at a
 dir containing *counter_collection.csv or a rocprof-compute analyze CSV export.
@@ -71,7 +71,7 @@ PMC_GROUPS = {
 # NOT A SYNONYM: TCC_EA0_RDREQ_DRAM_sum (DRAM-destined read requests only) is a different counter
 # from TCC_EA0_RDREQ_sum (all L2->EA read requests). The pack's former profile_kernel.sh collected
 # the _DRAM_ variant while this parser reads TCC_EA0_RDREQ_sum / TCC_EA0_WRREQ_sum, so its numbers
-# were never used. GEAK's profile_kernel.sh --pmc now collects memory_ea exactly as named here.
+# were never used. PMC_GROUPS['memory_ea'] names exactly the counters read here.
 #
 # gfx950 CAVEAT (CDNA4, the main line): FETCH_SIZE and the TCC_BUBBLE-derived read bytes UNDER-count
 # on gfx950 (rocprof-compute reports the same), so the fetch_write route reads LOW there; prefer the
@@ -562,7 +562,7 @@ def _selftest() -> int:
     # a HANG (rocprofv3_safe.sh timeout, rc 124) bisects like an abort
     r5 = collect_pmc_group(["A", "HANG", "C"], lambda g: 124 if "HANG" in g else 0)
     assert r5["dropped"] == ["HANG"] and sorted(c for g in r5["passes"] for c in g) == ["A", "C"], r5
-    # the counter set profile_kernel.sh --pmc collects: memory_ea is the TCC_EA0_{RD,WR}REQ_sum pair
+    # the PMC_GROUPS counter set: memory_ea is the TCC_EA0_{RD,WR}REQ_sum pair
     # this parser reads -- never the DRAM-only _DRAM_ variant -- and no listed-absent name appears
     assert PMC_GROUPS["memory_ea"] == ["TCC_EA0_RDREQ_sum", "TCC_EA0_WRREQ_sum"], PMC_GROUPS
     _all = {c for g in PMC_GROUPS.values() for c in g}
@@ -625,7 +625,7 @@ def _selftest() -> int:
         e2e = memory_derived(p)
         assert abs(e2e["achieved_dram_tb_s"] - 4.60) < 0.01, e2e
         assert parse_pmc(td, "no_such_kernel")["meta"]["duration_ns"] is None
-        # dominant non-helper kernel of a kernel trace (the default --kernel for profile_kernel --pmc)
+        # dominant non-helper kernel of a kernel trace (--top-kernel: the default kernel filter for a PMC pass)
         with open(os.path.join(td, "r_kernel_trace.csv"), "w") as f:
             f.write("Kernel_Name,Start_Timestamp,End_Timestamp\n"
                     "at::native::elementwise_kernel,0,900000\n"

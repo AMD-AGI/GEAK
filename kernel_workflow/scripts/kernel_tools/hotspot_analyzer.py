@@ -7,7 +7,7 @@ GEAK shared kernel tool (kernel_workflow/scripts/kernel_tools/); the Gluon pack'
 scripts/hotspot_analyzer.py is a shim to this file. Hardware constants (LDS pool sizes) are read from
 perf_knowledge/hardware/data/hw_constants.json through the sibling `_hwdata` locator / amd_occupancy,
 never from literals. The ATT input needs the rocprof-trace-decoder (not vendored; see
-ROCPROF_ATT_LIBRARY_PATH in capture.sh / profile_kernel.sh --att).
+ROCPROF_ATT_LIBRARY_PATH in capture.sh / rocprofv3_safe.sh --att).
 
 Usage:
     python hotspot_analyzer.py <dispatch_dir> [--topk N] [--mode {asm,src,both}]

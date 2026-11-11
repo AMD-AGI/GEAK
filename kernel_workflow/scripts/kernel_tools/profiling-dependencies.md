@@ -93,16 +93,13 @@ results alongside the image digest and tool versions; CPU smoke cannot supply th
 
 ## Shared collection and task payloads
 
-`profile_kernel.sh` remains the public baseline/reprofile entry. Its optional
-PMC/ATT/SPI layers and `capture.sh` use `rocprofv3_safe.sh` for rocprofv3 execution,
-including allocation checks, timeout and one ATT SIMD retry. Run the main
-`profile_kernel.sh` inside the workload environment, as main already requires;
-it refuses `TILE_KERNEL_CONTAINER` to prevent mixing a host baseline with
-container optional layers. External-container capture goes through `capture.sh`
-and the shared primitive's locus routing. A successful process must also produce matching valid artifacts. Read
-`rocprofv3_safe.json` and `profile_layers.json`: collected, partial, unavailable
-and failed are different outcomes; a failed optional layer does not fail the
-main profile. A dispatch trace does not establish hardware-counter support.
+`profile_kernel.sh` remains the public baseline/reprofile entry and is unchanged.
+Extra counter/ATT passes go through `capture.sh` or `rocprofv3_safe.sh` directly, which
+handle allocation checks, timeout and one ATT SIMD retry. External-container capture goes
+through `capture.sh` and the shared primitive's locus routing. A successful process must
+also produce matching valid artifacts. Read `rocprofv3_safe.json`: collected, partial,
+unavailable and failed are different outcomes. A dispatch trace does not establish
+hardware-counter support.
 
 `capture.sh --payload FILE` uses the public
 [`profile_payload.py`](profile_payload.py) and

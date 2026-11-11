@@ -1,9 +1,6 @@
 #!/bin/bash
 # GPU lock + per-workspace build isolation wrapper.
 # Usage:  cd <workspace> && bash gpu_lock.sh <gpu_id> <command...>
-#         bash gpu_lock.sh group:<ids> <command...>                  hold exactly these GPUs
-#         bash gpu_lock.sh pool:<n>:<ids> <command...>       hold any n GPUs in this pool
-#         bash gpu_lock.sh --help | --selftest
 #
 # Run EVERY kernel command (compile / correctness / benchmark / profile) through this wrapper,
 # invoked from inside the workspace directory. It does three generic things — none kernel-specific:
@@ -18,112 +15,8 @@
 #  3. PYTORCH_ROCM_ARCH = the local GPU's gfx arch only -> avoids compiling for ~9 architectures
 #     (huge compile speedup). Runtime perf and correctness are unaffected (the kernel runs on the
 #     local arch either way). Honors a caller-set PYTORCH_ROCM_ARCH if already exported.
-#
-# Shared command entry point. DSL shims use this wrapper; multi-GPU requests delegate to
-# gpu_lease.py. Both acquire the same /tmp/team_gpu_locks/gpu_<id>.lock files.
-#
-# A single-card command receives HIP_VISIBLE_DEVICES=<id> and GEAK_GPU_LOCK_HELD=<id>.
-# Multi-GPU commands receive GEAK_GPU_LEASE_ACTIVE/IDS from gpu_lease.py; the e2e set wrapper
-# publishes GEAK_GPU_LOCKED_SET after acquiring all its cards. Consumers reuse matching ownership
-# instead of requesting the same lock again. These inherited markers are a caller contract,
-# not a replacement for acquiring a lock. Build-cache and compile-arch variables remain shared.
 
 set -euo pipefail
-
-_GL_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_GL_SELF="$_GL_HERE/$(basename "${BASH_SOURCE[0]}")"
-
-# --help, because the alternative is reading 300 lines of shell. Without a case for it, `--help`
-# fell through as a GPU SPEC and left a `gpu_--help.lock` file behind.
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    cat <<'USAGE'
-gpu_lock.sh -- run a command holding its requested GPU or GPU group.
-
-  cd <workspace> && bash gpu_lock.sh <gpu_id> <command...>      pin: wait for that GPU's lock
-  cd <workspace> && bash gpu_lock.sh <id,id,...> <command...>   pool: first free AND idle GPU
-  bash gpu_lock.sh group:<ids> <command...>                  hold exactly these GPUs
-  bash gpu_lock.sh pool:<n>:<ids> <command...>               hold any n GPUs in this pool
-  bash gpu_lock.sh --help | --selftest
-
-What it does for the command (all generic, nothing kernel-specific):
-  1. lock      flock /tmp/team_gpu_locks/gpu_<id>.lock for the whole command; exports
-               HIP_VISIBLE_DEVICES=<id> and GEAK_GPU_LOCK_HELD=<id>
-  2. idleness  refuses (pin) or skips (pool) a GPU with foreign work on it (sysfs busy%/VRAM)
-  3. build     TORCH_EXTENSIONS_DIR=<workspace>/.torch_ext (per-workspace torch build cache)
-  4. arch pin  PYTORCH_ROCM_ARCH / GPU_ARCHS = the locked GPU's gfx; refuses a mixed-ISA pool
-  5. reap      orphaned rocm_agent_enumerator processes (a pile-up once hung a whole box)
-  6. sources   workspace source-provenance check before AND after the command (exit 86 = discard
-               every number this invocation printed)
-
-Ownership: single-card commands receive GEAK_GPU_LOCK_HELD=<id>; gpu_lease.py publishes
-GEAK_GPU_LEASE_ACTIVE=1 and GEAK_GPU_LEASE_IDS=<ids> for a group. The e2e set wrapper publishes
-GEAK_GPU_LOCKED_SET=<ids> once all cards are held. A consumer under matching ownership runs
-directly; requesting a held GPU again is refused. Nested single-card acquisition is allowed
-only in ascending ID order, as used by the e2e set wrapper.
-
-Exit codes: the command's own, 86 (source provenance invalid), 1 (lock/allocation/idleness/arch
-refusal), 2 (unsafe nested acquisition). Ids are the HIP ordinals of THIS process: inside an inherited ROCR_VISIBLE_DEVICES mask
-they are logical, so every tenant of a box must use the same numbering for the locks to mean the
-same card.
-
-ENVIRONMENT
-  GEAK_GPU_ALLOWED=<a,b>     refuse any id outside the caller's allocation
-  GEAK_GPU_REQUIRE_IDLE=0    do not refuse a card that has foreign work on it (default 1)
-  GEAK_GPU_MAX_BUSY_PCT / GEAK_GPU_MAX_VRAM_MB   idleness thresholds (default 5 / 1024)
-  GEAK_GPU_POOL_WAIT=<s>     how long pool mode waits for a free lane (default 1200)
-  GEAK_GPU_USE_LOG=<file>    append one JSON line per acquisition: {t,gpu,pool,pid,mode,wait_s}
-                             mode = pool | pin (multi-GPU leases use their existing group log)
-  KERNEL_ENV_KEEP_ARCH=1     skip the arch pin (intentional multi-arch boxes)
-  KERNEL_ENV_SKIP_ENUM_REAP=1  skip the enumerator reap
-  GEAK_GPU_LOCK_DIR=<dir>    HERMETIC TESTS ONLY. Default /tmp/team_gpu_locks; two callers
-                             serialize only if they resolve the same directory.
-
-This wrapper may wait silently for a lock. Allow its acquisition timeout when supervising it.
-USAGE
-    exit 0
-fi
-
-# --selftest: offline (no GPU, no profiler). Exercises the lock itself in a private namespace so it
-# never touches a real lane: two holders of one id must not overlap, a read-only lock file must still
-# lock, the command must see HIP_VISIBLE_DEVICES/GEAK_GPU_LOCK_HELD, and the use-log must carry mode.
-if [ "${1:-}" = "--selftest" ]; then
-    _st_fail=0
-    _st_dir="$(mktemp -d "${TMPDIR:-/tmp}/geak_gpu_lock_selftest.XXXXXX")"
-    trap 'rm -rf -- "$_st_dir"' EXIT
-    mkdir -p "$_st_dir/locks" "$_st_dir/ws"
-    : > "$_st_dir/order.log"; : > "$_st_dir/use.log"
-    _st_env=(env -u GEAK_GPU_ALLOWED -u GEAK_GPU_LOCK_HELD -u GEAK_GPU_LOCKED_SET
-             -u GEAK_GPU_LEASE_ACTIVE -u GEAK_GPU_LEASE_IDS
-             GEAK_GPU_LOCK_DIR="$_st_dir/locks" GEAK_GPU_REQUIRE_IDLE=0 KERNEL_ENV_KEEP_ARCH=1
-             KERNEL_ENV_SKIP_ENUM_REAP=1 GEAK_GPU_USE_LOG="$_st_dir/use.log")
-    _st_cmd='echo "start $1 $(date +%s.%N)" >> "$2"; sleep 1; echo "end $1 $(date +%s.%N)" >> "$2"'
-    (cd "$_st_dir/ws" && "${_st_env[@]}" bash "$_GL_SELF" 7 bash -c "$_st_cmd" _ A "$_st_dir/order.log") &
-    _st_p1=$!
-    sleep 0.3
-    (cd "$_st_dir/ws" && "${_st_env[@]}" bash "$_GL_SELF" 7 bash -c "$_st_cmd" _ B "$_st_dir/order.log") &
-    _st_p2=$!
-    wait "$_st_p1" || { echo "FAIL: first holder exited non-zero"; _st_fail=1; }
-    wait "$_st_p2" || { echo "FAIL: second holder exited non-zero"; _st_fail=1; }
-    _st_seq="$(awk '{printf "%s%s ", $1, $2}' "$_st_dir/order.log")"
-    case "$_st_seq" in
-        "startA endA startB endB "|"startB endB startA endA ") ;;
-        *) echo "FAIL: two holders of gpu 7 overlapped: $_st_seq"; _st_fail=1 ;;
-    esac
-    grep -q '"mode":"pin"' "$_st_dir/use.log" || { echo "FAIL: use-log line has no mode field"; _st_fail=1; }
-    _st_out="$(cd "$_st_dir/ws" && "${_st_env[@]}" bash "$_GL_SELF" 7 bash -c \
-        'echo "HIP=$HIP_VISIBLE_DEVICES HELD=$GEAK_GPU_LOCK_HELD"')"
-    [ "$_st_out" = "HIP=7 HELD=7" ] || { echo "FAIL: command env wrong: $_st_out"; _st_fail=1; }
-    # A lock file another uid created (mode 664) is readable but not writable by us; flock(2) works
-    # on a read-only descriptor, so it must still lock rather than fail the redirection.
-    : > "$_st_dir/locks/gpu_8.lock"; chmod a-w "$_st_dir/locks/gpu_8.lock"
-    if [ "$(id -u)" != 0 ]; then
-        _st_out="$(cd "$_st_dir/ws" && "${_st_env[@]}" bash "$_GL_SELF" 8 echo ro-ok 2>&1)" \
-            || { echo "FAIL: read-only lock file was not usable: $_st_out"; _st_fail=1; }
-    fi
-    chmod u+w "$_st_dir/locks/gpu_8.lock"
-    [ "$_st_fail" = 0 ] && echo "GPU_LOCK SELFTEST PASS" || echo "GPU_LOCK SELFTEST FAIL"
-    exit "$_st_fail"
-fi
 
 # The usage line deliberately shows NO concrete ids. It used to read "e.g. 0,1,2,3", and that
 # example was copied verbatim into real commands by agents improvising one-off checks -- the
@@ -146,21 +39,6 @@ esac
 if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
     echo "ERROR: nested gpu_lock.sh call inside a GPU lease (GPUs ${GEAK_GPU_LEASE_IDS:-?}); run the command directly" >&2
     exit 2
-fi
-
-# gpu_lock_set.py acquires single cards in ascending order, then publishes LOCKED_SET.
-# Keep that existing path working, while rejecting a full-set re-entry or an acquisition that
-# could deadlock with an outer single-card lock. LOCK_HELD is the last (largest) acquired ID.
-if [ -n "${GEAK_GPU_LEASE_IDS:-}" ] || [ -n "${GEAK_GPU_LOCKED_SET:-}" ]; then
-    echo "ERROR: nested gpu_lock.sh call inside a GPU set (GPUs ${GEAK_GPU_LEASE_IDS:-${GEAK_GPU_LOCKED_SET:-?}}); run the command directly" >&2
-    exit 2
-fi
-if [ -n "${GEAK_GPU_LOCK_HELD:-}" ]; then
-    if ! [[ "$GPU_SPEC" =~ ^(0|[1-9][0-9]*)$ && "$GEAK_GPU_LOCK_HELD" =~ ^(0|[1-9][0-9]*)$ ]] \
-       || [ "$GPU_SPEC" -le "$GEAK_GPU_LOCK_HELD" ]; then
-        echo "ERROR: nested gpu_lock.sh call while GPU $GEAK_GPU_LOCK_HELD is held; only a higher single GPU id may be acquired; run commands on held GPUs directly" >&2
-        exit 2
-    fi
 fi
 
 # Source provenance is checked before executing any command and again on exit:
@@ -187,31 +65,9 @@ _check_sources_on_exit() {
 trap _check_sources_on_exit EXIT
 
 # ONE team-wide namespace: two runs serialize only if they flock the SAME file. GEAK_GPU_LOCK_DIR
-# exists for hermetic tests and must stay unset in real runs.
+# (also read by gpu_lease.py) exists for hermetic tests and must stay unset in real runs.
 LOCK_DIR="${GEAK_GPU_LOCK_DIR:-${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}}"
 mkdir -p "$LOCK_DIR"
-
-# How to open a lock file. The namespace belongs to whoever created it first; on a shared box that
-# is often another uid, leaving `gpu_<id>.lock` mode 664 owned by them. A WRITE open of that file
-# fails, and under `set -e` the redirection failure exits before the command runs -- a silent
-# non-zero with no output that reads like a workload failure. flock(2) does not need write access,
-# so open such a file READ-ONLY: it still serializes against every other tenant. Only a lock file
-# that does not exist in a directory we cannot write is a real refusal, and it is reported as one
-# (falling back to a private namespace would run the command unserialized against that tenant).
-_lock_open_mode() {   # <lock file> -> prints w | r | (nothing = unusable)
-    local f="$1"
-    if [ -e "$f" ]; then
-        if [ -w "$f" ]; then echo w; elif [ -r "$f" ]; then echo r; fi
-        return 0
-    fi
-    [ -w "$(dirname "$f")" ] && echo w
-    return 0
-}
-_lock_refuse() {
-    echo "ERROR: gpu_lock.sh cannot open '$1' (uid $(id -u)): the lock namespace '$LOCK_DIR' is owned by" >&2
-    echo "       another user and this lock file does not exist yet. Ask the owner to 'chmod 1777 $LOCK_DIR'" >&2
-    echo "       (or pre-create the file world-readable). Refusing to run unserialized." >&2
-}
 
 # ---- Allocation fence ---------------------------------------------------------------------------
 # GEAK_GPU_ALLOWED (comma list) is the set of GPUs the CALLER was actually allocated. When it is
@@ -258,7 +114,6 @@ fi
 # process holds the GPU, i.e. it fails exactly when we need it. Set GEAK_GPU_REQUIRE_IDLE=0 to skip
 # (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
 # another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
-# NOTE: the sysfs path assumes id N <-> renderD(128+8N), i.e. physical numbering with no ROCR mask.
 _gpu_is_idle() {
     local id="$1" dev busy vram
     dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
@@ -298,12 +153,7 @@ case "$GPU_SPEC" in
     while [ -z "$GPU_ID" ]; do
         for _g in $POOL; do
             # (1) flock: exclusive lane. Held until this process exits.
-            _lf="${LOCK_DIR}/gpu_${_g}.lock"
-            case "$(_lock_open_mode "$_lf")" in
-                w) exec {_fd}>>"$_lf" ;;
-                r) exec {_fd}<"$_lf" ;;
-                *) _lock_refuse "$_lf"; exit 1 ;;
-            esac
+            exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
                 if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
@@ -427,7 +277,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # Pool mode: (1) this process ALREADY holds the lane exclusively (and verified it idle).
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
-    export GEAK_GPU_LOCK_HELD="$GPU_ID"
+    export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@"
@@ -438,12 +288,8 @@ else
     # and comparing a measured pool wait against an assumed-zero pin wait would build the scheduler's
     # advantage into the instrument. Both paths measure, so the comparison is real.
     _wait_t0=$SECONDS
-    _lock_mode="$(_lock_open_mode "$LOCK_FILE")"
-    [ -n "$_lock_mode" ] || { _lock_refuse "$LOCK_FILE"; exit 1; }
     (
-        # (1) flock this GPU (exclusive for the duration of the command). fd 200 is opened
-        # read-only when the file belongs to another uid (see _lock_open_mode).
-        if [ "$_lock_mode" = "w" ]; then exec 200>>"$LOCK_FILE"; else exec 200<"$LOCK_FILE"; fi
+        # (1) flock this GPU (exclusive for the duration of the command).
         flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
@@ -464,9 +310,9 @@ else
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
-        export GEAK_GPU_LOCK_HELD="$GPU_ID"
+        export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         "$@"
-    )
+    ) 200>"$LOCK_FILE"
 fi
