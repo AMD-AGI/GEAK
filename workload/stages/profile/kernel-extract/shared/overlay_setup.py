@@ -14,11 +14,13 @@ Layout produced:
     <overlay>/sitecustomize.py          # generic, manifest-driven (idempotent)
     <overlay>/_overlay_manifest.json    # modules, rebinds, markers, installers
     <overlay>/_patched/<dotted>.py      # patched submodule sources (for module-inject entries)
+    <overlay>/_patched/<dotted>/        # a whole bound package (module-inject of a package __init__.py)
     <overlay>/<impl files>              # copied impl modules (for rebind/installer entries)
 Launch with:  PYTHONPATH=<overlay>:$PYTHONPATH
 
 Commands:
-  add-module    inject a patched submodule file in place of the installed one (whole-file source swap)
+  add-module    inject a patched submodule file in place of the installed one (whole-file source swap);
+                a package's __init__.py binds the whole package dir (copied to _patched/<dotted>/)
                 --overlay O --module sglang.srt.layers.activation
                 (--patched-file F  |  --patch D  [--src-file S])   # S defaults to the install's file
   add-rebind    rebind module:attr -> impl_module.impl_attr (single function/kernel swap; the default)
@@ -102,6 +104,12 @@ class _OverlayFinder(importlib.abc.MetaPathFinder):
         if _file is None:
             return None
         sys.stderr.write("[overlay] injected module %s <- %s\n" % (_name, _file))
+        if os.path.basename(_file) == "__init__.py":
+            # A package bind (add-module of a package's __init__.py copies the whole package dir):
+            # the package's __path__ and __file__ both point into that copy, so its submodules
+            # import from it, and code that finds sources from the package's __file__ reads it too.
+            return importlib.util.spec_from_file_location(
+                _name, _file, submodule_search_locations=[os.path.dirname(_file)])
         return importlib.util.spec_from_file_location(_name, _file)
 
 
@@ -158,7 +166,10 @@ LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
 
 
 # Hashes identify prior generic runtimes without retaining their retired capture code.
-_PREVIOUS_RUNTIMES = {'efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4', '1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9'}
+_PREVIOUS_RUNTIMES = {'efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4', '1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9',
+                      # before package binds (current and installer-less forms)
+                      '4aa425d4fe1777132b92b021c7f851155f60fd338a8bb697248451241b31cb38',
+                      '41d85cf6906ef00734345317bb7d9c0063df3791973308d186b76a0b5a55e56e'}
 
 
 def generic_runtime(source):
@@ -410,17 +421,31 @@ def cmd_add_module(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     patched_dir = os.path.join(a.overlay, "_patched")
     os.makedirs(patched_dir, exist_ok=True)
-    dst = os.path.join(patched_dir, a.module + ".py")
-    if a.patched_file:
-        shutil.copy2(a.patched_file, dst)
+    src = a.patched_file or a.src_file or module_file(a.module)
+    if os.path.basename(src) == "__init__.py":
+        # A package's __init__.py binds the WHOLE package: copied as a single-file module it is no
+        # package at all (no __path__), and an adapter that only redirects __path__ still leaves
+        # __file__ in the overlay, so code that finds submodule sources from the package's __file__
+        # (sgl_amd_mono.common.plan.kernel_sources) raised FileNotFoundError in the candidate leg
+        # (Muse Spark mono task, G1 11-11). The finder gives the copy both __file__ and __path__.
+        rel = os.path.join("_patched", a.module, "__init__.py")
+        pkg = os.path.join(patched_dir, a.module)
+        shutil.rmtree(pkg, ignore_errors=True)   # a file deleted from the source must not linger
+        stale = os.path.join(patched_dir, a.module + ".py")
+        if os.path.exists(stale):
+            os.remove(stale)
+        shutil.copytree(os.path.dirname(os.path.abspath(src)), pkg, symlinks=False,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
     else:
-        src = a.src_file or module_file(a.module)
-        shutil.copy2(src, dst)
-        if a.patch and not _try_apply(a.patch, target_file=dst):
-            raise SystemExit(f"failed to apply patch {a.patch} to {dst}")
+        rel = os.path.join("_patched", a.module + ".py")
+        shutil.rmtree(os.path.join(patched_dir, a.module), ignore_errors=True)
+        shutil.copy2(src, os.path.join(patched_dir, a.module + ".py"))
+    dst = os.path.join(a.overlay, rel)
+    if a.patch and not a.patched_file and not _try_apply(a.patch, target_file=dst):
+        raise SystemExit(f"failed to apply patch {a.patch} to {dst}")
     m = _load_man(man)
     m["modules"] = [e for e in m.get("modules", []) if e["module"] != a.module]
-    m["modules"].append({"module": a.module, "file": os.path.join("_patched", a.module + ".py")})
+    m["modules"].append({"module": a.module, "file": rel})
     _save_man(man, m)
     print(f"OVERLAY_DIR={a.overlay}")
     print(f"add-module {a.module} -> {dst}")

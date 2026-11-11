@@ -25,6 +25,11 @@ only the declared candidate computation may change.
 `meta.target_callable` is the inspected `module:attribute` entry. Module replacement
 uses `candidate_bind={kind:"module", module, file}`; rebind uses
 `{kind:"rebind", target, impl_module, impl_attr, file}`. Files live under `kernel_src/`.
+A module bind whose `file` is a package's `__init__.py` (for example
+`{kind:"module", module:"sgl_amd_mono", file:"kernel_src/sgl_amd_mono/__init__.py"}`)
+binds the whole package directory: the candidate overlay copies it, and the package's
+`__file__` and `__path__` both point at that copy. Keep that `__init__.py` byte-identical to
+the installed one; it needs no path-redirecting adapter.
 Native/JIT leaves must build and invoke the delivered computation, with its resources
 and architecture flags. A copied dispatcher alone is not extracted computation.
 

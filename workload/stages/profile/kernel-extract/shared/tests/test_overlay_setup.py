@@ -40,6 +40,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import types
@@ -60,6 +61,11 @@ def _load(mod_name, filename):
 ov = _load("overlay_setup", "overlay_setup.py")
 
 EMPTY_MANIFEST = {"modules": [], "rebinds": [], "markers": [], "captures": []}
+
+# The runtime as it was before package binds (the finder's __init__.py branch is the only change).
+_PKG_BRANCH = ov.SITECUSTOMIZE[ov.SITECUSTOMIZE.index("        if os.path.basename(_file) == \"__init__.py\":"):
+                               ov.SITECUSTOMIZE.index("        return importlib.util.spec_from_file_location(_name, _file)\n")]
+PRE_PACKAGE_RUNTIME = ov.SITECUSTOMIZE.replace(_PKG_BRANCH, "")
 
 
 class _RecordingRun:
@@ -179,7 +185,7 @@ class _OverlayCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestEnsureOverlay(_OverlayCase):
     def test_merge_preserves_a_frozen_baseline_from_the_previous_runtime(self):
-        old_runtime = ov.SITECUSTOMIZE.replace('if _m.get("captures"):\n    sys.stderr.write("[overlay] persistent oracle capture is retired; use profile evidence and fixed UT contracts\\n")\n    os._exit(78)\n\n', '# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost\n# stand-in and is already bound before any marker install imports a module that does\n# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).\nfor _e in _m.get("captures", []):\n    try:\n        import capture_shapes\n        capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))\n    except Exception as _ex:\n        sys.stderr.write("[overlay] capture install FAILED %r: %r\\n" % (_e, _ex))\n\n')
+        old_runtime = PRE_PACKAGE_RUNTIME.replace('if _m.get("captures"):\n    sys.stderr.write("[overlay] persistent oracle capture is retired; use profile evidence and fixed UT contracts\\n")\n    os._exit(78)\n\n', '# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost\n# stand-in and is already bound before any marker install imports a module that does\n# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).\nfor _e in _m.get("captures", []):\n    try:\n        import capture_shapes\n        capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))\n    except Exception as _ex:\n        sys.stderr.write("[overlay] capture install FAILED %r: %r\\n" % (_e, _ex))\n\n')
         source = self._write("baseline/sitecustomize.py", old_runtime)
         self._write("baseline/_overlay_manifest.json", json.dumps(EMPTY_MANIFEST))
         self._write("baseline/witness.txt", "source evidence")
@@ -742,6 +748,140 @@ class TestMain(_OverlayCase):
     def test_unknown_subcommand_is_rejected(self):
         # There is no uninstall verb: reversal is dropping the dir from PYTHONPATH.
         self.assertEqual(self._main_fails(["uninstall", "--overlay", self.overlay]).code, 2)
+
+
+# --------------------------------------------------------------------------- #
+# add-module of a package __init__.py -- the whole package is bound
+# --------------------------------------------------------------------------- #
+# Mirrors sgl_amd_mono.common.plan: a kernel module digests its own source at import, found from
+# the ROOT package's __file__ (not its __path__). Bound as a single-file module whose adapter only
+# redirected __path__, the Muse Spark candidate leg raised FileNotFoundError here (G1, 11-11).
+_PLAN = """import sys
+from pathlib import Path
+
+
+def kernel_sources(module):
+    root = module.split(".")[0]
+    init = getattr(sys.modules.get(root), "__file__", None)
+    base = Path(init).parent.joinpath(*module.split(".")[1:])
+    for f in (base / "__init__.py", base.with_suffix(".py")):
+        if f.is_file():
+            return f.read_text()
+    raise FileNotFoundError("no source for kernel module %r" % module)
+"""
+_PROBE = """import json, sys
+import ovmono, ovmono.layer
+print(json.dumps({"file": ovmono.__file__, "path": list(ovmono.__path__),
+                  "layer": ovmono.layer.__file__, "where": ovmono.layer.WHERE,
+                  "sources": ovmono.layer.SOURCES}))
+"""
+
+
+class TestAddPackage(_OverlayCase):
+    """A real interpreter imports through the generated sitecustomize (no recorder here)."""
+
+    def _package(self, root, where):
+        pkg = os.path.join(root, "ovmono")
+        self._write(os.path.join(pkg, "__init__.py"), "# %s\n" % where)
+        self._write(os.path.join(pkg, "common", "__init__.py"), "")
+        self._write(os.path.join(pkg, "common", "plan.py"), _PLAN)
+        self._write(os.path.join(pkg, "layer.py"),
+                    "from .common.plan import kernel_sources\nWHERE = %r\n"
+                    "SOURCES = kernel_sources(__name__)\n" % where)
+        return os.path.join(self.tmp, pkg)
+
+    def setUp(self):
+        super().setUp()
+        self.install = self._package("install", "install")
+        self.src = self._package(os.path.join("task", "kernel_src"), "kernel_src")
+        self._write(os.path.join("task", "kernel_src", "ovmono", "__pycache__", "layer.cpython.pyc"), "x")
+
+    def _bind(self, **kw):
+        return self._run(ov.cmd_add_module, self._ns(
+            module="ovmono", patched_file=os.path.join(self.src, "__init__.py"), **kw))
+
+    def _probe(self, overlay):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([overlay, os.path.dirname(self.install)])
+        env.pop("PYTHONHOME", None)
+        return subprocess.run([sys.executable, "-s", "-c", _PROBE], env=env, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+
+    def _probe_ok(self, overlay):
+        r = self._probe(overlay)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_the_package_dir_is_bound_not_a_single_file(self):
+        out = self._bind()
+        bound = os.path.join(self.overlay, "_patched", "ovmono")
+        self.assertEqual(self._manifest()["modules"],
+                         [{"module": "ovmono", "file": os.path.join("_patched", "ovmono", "__init__.py")}])
+        for rel in ("__init__.py", "layer.py", os.path.join("common", "plan.py")):
+            self.assertEqual(self._read(os.path.join(bound, rel)), self._read(os.path.join(self.src, rel)))
+        self.assertFalse(os.path.exists(os.path.join(bound, "__pycache__")))
+        self.assertFalse(os.path.exists(os.path.join(self.overlay, "_patched", "ovmono.py")))
+        self.assertEqual(out[1], "add-module ovmono -> %s" % os.path.join(bound, "__init__.py"))
+
+    def test_package_file_and_path_both_resolve_to_the_bound_kernel_src(self):
+        self._bind()
+        got = self._probe_ok(self.overlay)
+        bound = os.path.join(self.overlay, "_patched", "ovmono")
+        self.assertEqual(got["file"], os.path.join(bound, "__init__.py"))
+        self.assertEqual(got["path"], [bound])
+        self.assertEqual(got["layer"], os.path.join(bound, "layer.py"))
+        self.assertEqual(got["where"], "kernel_src")
+        # the lookup through the package's __file__ finds kernel_src's bytes, not the install's
+        self.assertEqual(got["sources"], self._read(os.path.join(self.src, "layer.py")))
+
+    def test_a_path_only_adapter_reproduces_the_g1_failure(self):
+        # The old form: __init__.py injected as a single-file module, its adapter redirecting only
+        # __path__ to kernel_src. Submodules import, but __file__ stays in the overlay.
+        adapter = "__path__ = [%r]\n__spec__.submodule_search_locations = __path__\n" % self.src
+        old = self._write(os.path.join("old_overlay", "_patched", "ovmono.py"), adapter)
+        overlay = os.path.dirname(os.path.dirname(old))
+        ov._save_man(ov._ensure_overlay(overlay),
+                     {"modules": [{"module": "ovmono", "file": os.path.join("_patched", "ovmono.py")}],
+                      "rebinds": [], "markers": [], "captures": []})
+        r = self._probe(overlay)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FileNotFoundError: no source for kernel module 'ovmono.layer'", r.stderr)
+
+    def test_rebinding_drops_files_deleted_from_the_source(self):
+        self._bind()
+        os.remove(os.path.join(self.src, "common", "plan.py"))
+        self._write(os.path.join("task", "kernel_src", "ovmono", "common", "plan2.py"), "")
+        self._bind()
+        bound = os.path.join(self.overlay, "_patched", "ovmono", "common")
+        self.assertEqual(sorted(os.listdir(bound)), ["__init__.py", "plan2.py"])
+
+    def test_package_and_single_file_binds_replace_one_another(self):
+        single = self._write("single.py", "X = 1\n")
+        self._run(ov.cmd_add_module, self._ns(module="ovmono", patched_file=single))
+        self._bind()
+        self.assertFalse(os.path.exists(os.path.join(self.overlay, "_patched", "ovmono.py")))
+        self.assertEqual(len(self._manifest()["modules"]), 1)
+        self._run(ov.cmd_add_module, self._ns(module="ovmono", patched_file=single))
+        self.assertFalse(os.path.exists(os.path.join(self.overlay, "_patched", "ovmono")))
+        self.assertEqual(self._manifest()["modules"],
+                         [{"module": "ovmono", "file": os.path.join("_patched", "ovmono.py")}])
+
+    def test_seeded_and_merged_overlays_carry_the_bound_package(self):
+        base = os.path.join(self.tmp, "base")
+        ov._ensure_overlay(base)
+        self._bind(base=base)
+        merged = ov.merge_overlays(os.path.join(self.tmp, "merged"), [base, self.overlay])
+        got = self._probe_ok(merged)
+        self.assertEqual(got["file"], os.path.join(merged, "_patched", "ovmono", "__init__.py"))
+        self.assertEqual(got["where"], "kernel_src")
+
+    def test_the_pre_package_runtimes_are_still_mergeable(self):
+        # Overlays written before package binds carry the previous sitecustomize.
+        self.assertNotEqual(PRE_PACKAGE_RUNTIME, ov.SITECUSTOMIZE)
+        self.assertTrue(ov.generic_runtime(PRE_PACKAGE_RUNTIME))
+        legacy = (PRE_PACKAGE_RUNTIME.split(ov._INSTALLER_START)[0] + ov._INSTALLER_END
+                  + PRE_PACKAGE_RUNTIME.split(ov._INSTALLER_END)[1])
+        self.assertTrue(ov.generic_runtime(legacy))
 
 
 if __name__ == "__main__":
