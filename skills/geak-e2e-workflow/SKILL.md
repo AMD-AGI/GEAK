@@ -59,7 +59,7 @@ after setup and validation.
 | Requested run | Entry point |
 | --- | --- |
 | Handoff from Hyperloom/another caller; optimize an accepted configuration | `interface/run_e2e.py`, below |
-| Standalone full loop including ConfigSweep, or explicit task/kernel budgets | [Full workflow](references/full-workflow.md): native Claude `Workflow` or Node runtime with Claude agents |
+| Standalone full loop including ConfigSweep, or explicit task/kernel budgets | [Full workflow](references/full-workflow.md): Claude Code's native `Workflow` |
 | AgentX replay or phase resume | Select the appropriate entry above, then read [Replay and resume](references/replay-resume.md) |
 
 **Current interface limitation:** `run_e2e.py` fixes `config_tune="false"`,
@@ -110,10 +110,11 @@ and workload exports. A GPU-less dry run may report
 `gpu_identity_status=unavailable_dry_run`; a real run still probes identity.
 Do not post a full dry-run document when its handoff contains sensitive env values.
 
-For the native SDK route, clear `GEAK_AGENT_BACKEND` and `GEAK_AGENT_PROFILE`
-in the launch environment and set `GEAK_AGENT_AUTO=0`. Explicit
-`GEAK_AGENT_BACKEND=claude` selects the **Node runtime**, not the native SDK.
-Preserve an explicitly requested runtime selection.
+Clear `GEAK_AGENT_BACKEND` and `GEAK_AGENT_PROFILE` in the launch environment
+and set `GEAK_AGENT_AUTO=0`. Any explicit backend, even `claude`, or auto-detected
+non-Anthropic keys route to GEAK's Node runtime instead of the Claude SDK. The
+dry run must show `agent_backend` `native (claude/Workflow)` and
+`runtime_selection` null.
 
 ## Step 4: Launch and monitor
 

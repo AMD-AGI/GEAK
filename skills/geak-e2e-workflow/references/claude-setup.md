@@ -20,10 +20,14 @@ git -C "$GEAK_ROOT" rev-parse HEAD
 Replace the path and retain the SHA in the run record. Do not update an active
 run's source tree. Keep the complete checkout, including both workflows.
 
-Use the workload's existing Python environment when it already has the correct
-ROCm/PyTorch/serving packages. Otherwise create a compatible environment first;
-Python 3.11+ is a practical choice for current SDK/interface use. The package's
-advertised Python 3.8 minimum is not a guarantee for every current dependency.
+**Prerequisite:** a Python 3.10+ environment with a working `pip` on the
+execution host/container. Prefer the workload's existing environment when it
+already has the correct ROCm/PyTorch/serving packages; current SGLang ROCm images
+ship Python 3.10, which works. The package's advertised Python 3.8 minimum is not
+a guarantee for every current dependency. If no suitable
+Python with `pip` exists (for example, `venv` fails because `ensurepip` is
+missing), stop and report the missing prerequisite rather than improvising an
+installer; provisioning it belongs to the environment owner or image.
 
 Set `GEAK_PYTHON` to that interpreter's absolute path. For an existing checkout,
 this installs Python dependencies without the build hook cloning another repo
@@ -38,15 +42,13 @@ Only `GEAK_SKIP_BOOTSTRAP` on this command is needed; do not leave it set and
 expect a later install to bootstrap Claude. Ordinary `pip install .` instead
 runs a best-effort checkout/CLI bootstrap. It may warn and still exit successfully,
 and cached wheels may skip build-time setup. Always verify the actual runtime.
-If pip is absent, provision pip in the chosen environment before this step.
 
 ## Claude CLI and Python SDK are separate
 
 | Component | Used by | Verification |
 | --- | --- | --- |
-| Claude Code CLI | Native `Workflow`; agents under the Node host | Actual binary's `--version`, auth and Workflow capability |
-| Python `claude-agent-sdk` | `interface/run_e2e.py` native Claude path | Import `ClaudeSDKClient` and `ClaudeAgentOptions` in the launch Python |
-| Node.js | `interface/runtime/engine/run_workflow.mjs` | `node --version`; use Node 20+ |
+| Claude Code CLI | Native `Workflow` (kernel runs, full e2e loop, and under the SDK) | Actual binary's `--version`, auth and Workflow capability |
+| Python `claude-agent-sdk` | `interface/run_e2e.py` | Import `ClaudeSDKClient` and `ClaudeAgentOptions` in the launch Python |
 
 Install/update the CLI if missing or incompatible. The checked GEAK bootstrap
 requires at least Claude Code 2.1.177 for native Workflow; version alone is not
@@ -58,8 +60,7 @@ export PATH="$HOME/.local/bin:$PATH"
 claude --version
 ```
 
-GEAK's documented fallback is `npm install -g @anthropic-ai/claude-code` when
-the native installer fails. Honor a known compatible user-selected CLI version.
+Honor a known compatible user-selected CLI version.
 
 **GEAK's pyproject does not depend on the Python SDK.** Install it explicitly
 before using the native Python interface, inside the execution container and
@@ -78,9 +79,9 @@ PY
 ```
 
 This is the Python package, not `anthropic`, the npm Claude CLI package, or a
-TypeScript SDK. An SDK-only install is not required for native interactive
-Workflow or Node-hosted kernel runs, but is required for the reliable e2e
-Python launch documented here. Do not upgrade dependencies during an active run.
+TypeScript SDK. It is not needed for interactive native Workflow runs, but is
+required for the reliable e2e Python launch documented here. Do not upgrade
+dependencies during an active run.
 
 The SDK can prefer its **bundled Claude** over the one on PATH. Pin GEAK to a
 verified CLI so an SDK update cannot silently select a different executable:
@@ -105,9 +106,18 @@ key in chat, echo it, or put it in a handoff/command argument. Supported pattern
   `ANTHROPIC_AUTH_TOKEN`, API key, or `ANTHROPIC_CUSTOM_HEADERS`.
 - Existing Claude login/OAuth configured for the execution user.
 
-Check presence without printing values. Select a model the configured endpoint
-actually serves through `GEAK_CLAUDE_MODEL`; do not copy an unavailable model
-from a README. Optional small auth probe, when setting up an authorized run:
+Check presence with exactly this command, which prints only set/unset. Do not
+improvise a filtered `env`/`printenv` dump: header and token values leak easily.
+
+```bash
+for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; do
+  if [ -n "${!v}" ]; then echo "$v=set"; else echo "$v=unset"; fi
+done
+```
+
+Select a model the configured endpoint actually serves and export it as
+`GEAK_CLAUDE_MODEL`; do not copy an unavailable model from a README. Optional
+small auth probe, when setting up an authorized run:
 
 ```bash
 "$GEAK_CLAUDE_BIN" -p "Reply with exactly: SETUP OK" \
@@ -127,8 +137,14 @@ For interactive native Workflow, launch the verified CLI from the checkout:
 ```bash
 cd "$GEAK_ROOT"
 IS_SANDBOX=1 "$GEAK_CLAUDE_BIN" --dangerously-skip-permissions \
+  --model "$GEAK_CLAUDE_MODEL" \
   --settings '{"enableWorkflows":true,"ultracode":true}'
 ```
+
+The workflow's agents inherit this session's model; GEAK's workflow scripts do
+not set a per-agent model. `GEAK_CLAUDE_MODEL` reaches them only through this
+`--model` flag (or through `run_e2e.py`, which passes it itself). Record the
+session model with the run.
 
 These are GEAK's documented unattended execution settings; use them in the
 allocated development execution environment. `IS_SANDBOX=1` is a Claude
@@ -141,10 +157,10 @@ ends. Install/fix the SDK before a long run; do not treat a parse failure as
 permission to restart a possibly live workflow. A minimal one-shot SDK
 `query()` replacement has the same lifetime problem.
 
-For the native SDK e2e path, launch with `GEAK_AGENT_AUTO=0` and no
+For the SDK e2e path, launch with `GEAK_AGENT_AUTO=0` and no
 `GEAK_AGENT_BACKEND`/`GEAK_AGENT_PROFILE`. Any explicit backend, including
-`claude`, selects the Node host. Check the dry-run selection. Preserve an
-intentionally chosen alternative runtime.
+`claude`, switches GEAK to its Node runtime, which these skills do not use.
+Check the dry-run selection.
 
 Do not change `HOME` or create an empty Claude config directory to make logs
 durable: this can hide working login credentials. `run_e2e.py` mirrors its

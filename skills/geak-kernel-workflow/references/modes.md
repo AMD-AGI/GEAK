@@ -79,9 +79,8 @@ does not change the user's scheduler CPU allocation policy.
 ## Research and recovery
 
 `dra_enabled: "true"` opts into web research before optimization; it needs
-WebSearch/WebFetch in the runtime's effective tool allowlist. The e2e SDK
-allowlist includes them; standalone runtime defaults may not. Inspect and
-configure the selected host before enabling research. Leave it off when the
+WebSearch/WebFetch to be allowed in the Claude session running the workflow.
+Check the session's permissions before enabling research. Leave it off when the
 request does not call for it.
 
 The standalone kernel entry has no documented generic phase-resume flag.

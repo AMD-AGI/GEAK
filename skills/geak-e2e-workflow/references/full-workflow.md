@@ -1,8 +1,8 @@
 # Standalone full e2e loop
 
 Read this when the user needs ConfigSweep or direct workflow controls that the
-Python handoff does not forward. Keep orchestration in GEAK. Native Claude's
-`Workflow` and the standalone Node host both run the unchanged workflow.
+Python handoff does not forward. Keep orchestration in GEAK: Claude Code's
+native `Workflow` tool runs the unchanged workflow.
 
 ## Prepare direct args
 
@@ -64,8 +64,10 @@ as documented in the checkout; do not rename handoff fields by guesswork.
 
 ## Native Claude Workflow
 
-In a running native Claude session with Workflow enabled, read `e2e-args.json`
-and call the tool with the **parsed object**, not the filename or encoded JSON:
+Start an interactive Claude Code session as in
+[Claude setup](claude-setup.md), inside tmux/screen or a scheduler job that keeps
+it alive for the whole run. Read `e2e-args.json` and call the tool with the
+**parsed object**, not the filename or encoded JSON:
 
 ```javascript
 Workflow({
@@ -79,28 +81,7 @@ literal tool argument to leave unresolved. Keep the Claude session and any
 background Workflow task alive; wait for the workflow terminal result. Do not
 launch a native background Workflow through a short-lived `claude -p` wrapper.
 
-## Headless Node host with Claude agents
-
-Use this when the current agent/shell has no native Workflow tool:
-
-```bash
-node "$GEAK_ROOT/interface/runtime/engine/selftest.mjs"
-node "$GEAK_ROOT/interface/runtime/engine/run_workflow.mjs" \
-  "$GEAK_ROOT/e2e_workflow/e2e_workflow.js" \
-  --agent claude --args-file "$RUN_DIR/e2e-args.json" \
-  --result-file "$RUN_DIR/workflow-result.json" \
-  --metrics-file "$RUN_DIR/runtime-metrics.json" \
-  > "$RUN_DIR/run.log" 2>&1
-```
-
-Run under a persistent session/job. This host owns the workflow lifetime and
-uses Claude CLI for individual agents; it does not use Python `claude-agent-sdk`.
-Do not describe it as the SDK path merely because `--agent claude` is selected.
-
-Node's result file is the **raw workflow return**, not the normalized
+The return is the **raw workflow return**, not the normalized
 `interface/run_e2e.py` result schema. Read it alongside the pinned
 `workflow_return.json`, final report and Director validation; do not assume
-interface-only fields or normalize a success from a process exit code alone.
-
-Changing `--agent` to another provider is a deliberate backend choice. Follow
-the selected checkout's runtime setup when the user requests that change.
+interface-only fields or infer success from the tool call ending.

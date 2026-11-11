@@ -20,18 +20,15 @@ rounds → integration → final validation. Do not reproduce that loop in chat.
 
 Read the checkout's `README.md`, `kernel_workflow/README.md` and the task's
 instructions. Use `kernel_workflow.js` as the public entry; `kernel_lane.js` is
-the internal worker. For headless launches also read
-`interface/runtime/engine/run_workflow.mjs` and its `registry.json`.
-Checked against [GEAK main, 001c5c7f](https://github.com/AMD-AGI/GEAK/tree/001c5c7f75df43c0c5b9c94bf980d2645e398ee9)
+the internal worker. Checked against [GEAK main, 001c5c7f](https://github.com/AMD-AGI/GEAK/tree/001c5c7f75df43c0c5b9c94bf980d2645e398ee9)
 on 2026-11-11. Follow the selected checkout when its interface changes.
 
 ## Step 1: Set up the execution environment
 
 For first setup, updates or Claude failures, follow
-[references/claude-setup.md](references/claude-setup.md). It distinguishes
-the CLI from **Python `claude-agent-sdk`**: native interactive Workflow and the
-Node runtime do not import the Python SDK; e2e's Python interface needs it for
-reliable background-workflow lifetime. `pip install GEAK` does not install it.
+[references/claude-setup.md](references/claude-setup.md). Kernel runs use the
+Claude Code CLI's native `Workflow` tool; the Python `claude-agent-sdk` described
+there is needed only by the e2e Python interface.
 
 Verify on the actual GPU host/container:
 
@@ -73,8 +70,8 @@ requests stop after setup/preflight.
 six hours or rounds. Benchmark/profile/verify/integrate/final validation are
 outside this count. `deep_explore` costs `deep_cost` (default 2). Bakeoff budget
 is **per lane**, so cost grows with the number of languages. A wall-clock limit
-needs a separate job/supervisor deadline; `--agent-timeout-ms` is per agent,
-not a total-run limit.
+needs a separate job/supervisor deadline; per-agent timeouts are not a
+total-run limit.
 
 ## Step 3: Launch the workflow
 
@@ -82,7 +79,22 @@ Use the full checkout: bakeoff references sibling e2e roles/scripts. Set
 `GEAK_ROOT`, `RUN_DIR`, `GEAK_PYTHON` to absolute paths; use a unique run
 directory. Resolve all example paths before launch.
 
-With a native Claude `Workflow` tool, call it with an object:
+Preflight in the launching environment before calling `Workflow`. The
+dispatcher does not check these; a missing task or GPU otherwise surfaces only
+after a Setup agent call as an unrelated-looking `physical_cu_count` error.
+
+```bash
+KERNEL_PATH=/work/tasks/knn   # the resolved kernel_path
+test -d "$KERNEL_PATH" && ls "$KERNEL_PATH"
+test -e /dev/kfd && test -d /dev/dri && rocminfo | grep -m1 -o 'gfx[0-9a-f]*'
+"$GEAK_PYTHON" -c "import geak"
+```
+
+Stop and report if any check fails. Launch from an interactive Claude Code
+session started as in [Claude setup](references/claude-setup.md) with
+`--model "$GEAK_CLAUDE_MODEL"`, inside tmux/screen or a scheduler job that keeps
+the session alive for the whole run. Every workflow agent runs on that session's
+model. Call `Workflow` with an object:
 
 ```javascript
 Workflow({
@@ -101,24 +113,15 @@ Workflow({
 ```
 
 `args` must be an object, not a JSON-encoded string. `workflow_dir` is required
-even with an absolute `scriptPath`.
+even with an absolute `scriptPath`. Save the resolved args as
+`$RUN_DIR/kernel-args.json` and record host, CLI/model, GEAK SHA, task identity
+and the session/job name.
 
-For a shell/agent without native `Workflow`, save that **args object only** as
-`$RUN_DIR/kernel-args.json`, then use GEAK's Node host with Claude agents:
-
-```bash
-node "$GEAK_ROOT/interface/runtime/engine/selftest.mjs"
-node "$GEAK_ROOT/interface/runtime/engine/run_workflow.mjs" \
-  "$GEAK_ROOT/kernel_workflow/kernel_workflow.js" \
-  --agent claude --args-file "$RUN_DIR/kernel-args.json" \
-  --result-file "$RUN_DIR/result.json" \
-  --metrics-file "$RUN_DIR/runtime-metrics.json" \
-  > "$RUN_DIR/run.log" 2>&1
-```
-
-The selftest needs no GPU or key. Run the real command under a persistent
-job/session; record job ID/PID, CLI/model, GEAK SHA, task identity, args and log.
-Do not run `node kernel_workflow.js` directly: it needs injected Workflow globals.
+Keep the session open until the workflow returns its terminal result; a turn
+saying it is running in the background is not completion. Do not launch through
+a short-lived `claude -p` call, which can end the background workflow with the
+turn. Do not run `kernel_workflow.js` with `node`: it needs the injected
+Workflow globals.
 
 When the user specifies a Git identity, propagate it to GEAK's workspace
 commits. Role examples may contain `team@workflow`; see the environment-override
@@ -144,7 +147,7 @@ latency gain a device-execution gain.
 
 ## Step 5: Deliver the validated kernel
 
-Read `result.json` or the native return and its exact `eval_dir`. Default lane
+Read the `Workflow` return and its exact `eval_dir`. Default lane
 outputs are under `<exp_root>/team_<kernel>_<timestamp>/<kernel>/`; use returned
 paths rather than constructing them for bakeoff or custom runs.
 
@@ -162,8 +165,10 @@ Applying/deploying follows the user's authorized scope.
 
 ## Troubleshooting
 
-- Missing paths: check absolute `workflow_dir`/`kernel_path` and the args object;
-  `--args-file` contains args alone, not the `Workflow` envelope.
+- Missing paths: check absolute `workflow_dir`/`kernel_path` and that `args`
+  is an object, not a filename or JSON string.
+- No `Workflow` tool: check the CLI version and the GEAK settings in
+  [Claude setup](references/claude-setup.md).
 - Broken baseline: fix its declared dependency/build setup first. A new
   implementation cannot replace the original performance denominator.
 - `author_failed`/`freeze_failed`: retain complete oracle and real baseline;
