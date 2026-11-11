@@ -1,9 +1,5 @@
 # Profiling Analysis Guide
 
-For optional static ISA queries, compilation capture and occupancy bounds, see the
-[shared ISA tool guide](../scripts/kernel_tools/isa_tools.md). These inputs inform
-optimization; achieved utilization and roofline measurements come from the profiler.
-
 ## Reading the raw profiler dump (START HERE — the script does NOT parse for you)
 
 `scripts/profile_kernel.sh` is intentionally thin: it warms up, picks the best available profiler, runs
@@ -192,22 +188,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 
 ## Occupancy (architecture-specific)
 
-**CDNA2/3/4 (gfx90a/gfx942/gfx950):** ArchVGPR and AGPR share one 512-entry
-file per SIMD. For combined count `N`, the register bound is
-`min(8, floor(512 / roundup8(N)))` waves/SIMD. Read `N` from
-`.amdhsa_next_free_vgpr` or AMDHSA `.vgpr_count`; these already include AGPRs.
-Only separate LLVM `NumVgprs` / `NumAgprs` need combining as
-`alignTo(ArchVGPR, 4) + AGPR` when AGPRs are used. Do not blindly sum profiler
-columns with different meanings. The shared `amd_occupancy.py --asm k.s` parser
-keeps these sources distinct; LLVM's `; Occupancy:` provides a compiler cross-check.
-
-This is a static bound, not achieved occupancy. One or two waves/SIMD may be
-intentional for a pipelined GEMM; use stalls and timing to decide whether more
-waves help. LDS contributes `floor(LDS_per_CU / LDS_per_workgroup)` workgroups/CU;
-convert to waves using the **actual launch** before combining with register limits.
-The compiler's maximum workgroup size is only an upper bound. gfx950 has 160 KiB
-LDS/CU and gfx942 64 KiB: for a 48 KiB workgroup, the LDS-only limits are **3 vs 1**
-workgroups/CU, not a fixed 2.5× workgroup ratio. Other resources can lower occupancy.
+**CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
 
 **R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
@@ -281,9 +262,7 @@ real mislabel. Run them before forming a hypothesis.
   occupy the GPU — no tile or register tuning helps; you must partition more (split-K, finer tiles,
   more blocks). This is separate from occupancy: a kernel can hit its per-wave occupancy ceiling and
   still leave most of the GPU idle because it never launched enough work.
-- **Occupancy ceiling (CDNA):** `waves/SIMD = min(8, ⌊512 / (8·⌈(Arch_VGPR + Accum_VGPR)/8⌉)⌋)`, then
-  `min()` with the LDS term — see "Occupancy" above (`amd_occupancy.py`); 1–2 is register-starved.
-  **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
+- **Occupancy ceiling (CDNA):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
 - **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
 - **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
