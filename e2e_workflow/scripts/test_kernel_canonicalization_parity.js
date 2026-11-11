@@ -47,6 +47,9 @@ for (const c of fixture.matches) {
   const forward = kernelIdentitiesMatch(c.a, c.b), back = kernelIdentitiesMatch(c.b, c.a);
   ok(forward === c.match && back === c.match,
     `${c.why} (got ${forward}/${back}, want ${c.match})`);
+  const member = c.member_match === undefined ? c.match : c.member_match;
+  const mf = kernelIdentitiesMatch(c.a, c.b, false), mb = kernelIdentitiesMatch(c.b, c.a, false);
+  ok(mf === member && mb === member, `as joint members: ${c.why} (got ${mf}/${mb}, want ${member})`);
 }
 
 console.log('\n# constants shared with the Python side');
