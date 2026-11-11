@@ -1,0 +1,67 @@
+name: CI EVO - CPU contracts
+
+on:
+  push:
+    branches: ["main", "ci/**"]
+    paths:
+      - ".github/workflows/ci-evo-cpu.yml"
+      - "evo/**"
+      - "e2e_workflow/e2e_workflow.js"
+      - "interface/run_e2e.py"
+      - "interface/effective_config.py"
+      - "kernel_workflow/kernel_workflow.js"
+      - "kernel_workflow/kernel_lane.js"
+      - "kernel_workflow/scripts/materialize_workspace.sh"
+      - "kernel_workflow/scripts/workspace_sources.py"
+      - "pyproject.toml"
+  pull_request:
+    branches: ["main", "ci/**"]
+    paths:
+      - ".github/workflows/ci-evo-cpu.yml"
+      - "evo/**"
+      - "e2e_workflow/e2e_workflow.js"
+      - "interface/run_e2e.py"
+      - "interface/effective_config.py"
+      - "kernel_workflow/kernel_workflow.js"
+      - "kernel_workflow/kernel_lane.js"
+      - "kernel_workflow/scripts/materialize_workspace.sh"
+      - "kernel_workflow/scripts/workspace_sources.py"
+      - "pyproject.toml"
+
+concurrency:
+  group: evo-cpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  evo-cpu:
+    name: EVO archive, dispatch and materializer contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GEAK_AGENT_AUTO: "0"
+    steps:
+      - name: Checkout with history for pinned-main comparisons
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install CPU test dependencies
+        run: pip install pyyaml
+      - name: Require Node and Git for CPU witnesses
+        run: |
+          node --version
+          git --version
+      - name: Check deterministic generated-worker parity
+        run: python evo/build_workflow.py --check
+      - name: Archive, dispatch and real-materializer CPU tests
+        run: python -m unittest discover -s evo/tests -p 'test_*.py' -v

@@ -24,6 +24,18 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.optimizer != null && typeof A.optimizer !== 'string') {
+  throw new Error('optimizer must be greedy or evo (a string)');
+}
+const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
+if (OPTIMIZER === 'evo') {
+  const kernelDir = String(A.workflow_dir || '').replace(/\/+$/, '');
+  if (!kernelDir) throw new Error('args.workflow_dir is required');
+  return await workflow({ scriptPath: `${kernelDir}/../evo/kernel_lane.js` }, A);
+}
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/model directory)');
 
 // WORKFLOW_DIR = the directory that holds this script + roles/ + knowledge/ + scripts/.

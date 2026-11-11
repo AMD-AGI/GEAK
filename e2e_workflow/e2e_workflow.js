@@ -90,7 +90,18 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
 // Call the single-language worker lane directly: going through the kernel_workflow.js dispatcher
 // would nest e2e -> dispatcher -> worker (3 levels), which the runtime forbids.
-const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
+if (A.optimizer != null && typeof A.optimizer !== 'string') {
+  throw new Error('optimizer must be greedy or evo (a string)');
+}
+const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
+if (OPTIMIZER === 'evo' && (!Array.isArray(A.evolution_source_paths) || !A.evolution_source_paths.length)) {
+  throw new Error('optimizer=evo requires explicit evolution_source_paths for the selected kernel tasks');
+}
+const KERNEL_WF_SCRIPT = OPTIMIZER === 'evo' ? `${KERNEL_WF_DIR}/../evo/kernel_lane.js`
+  : `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
@@ -124,6 +135,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
+    ...(OPTIMIZER === 'evo' ? { optimizer: 'evo', evolution_source_paths: A.evolution_source_paths } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
