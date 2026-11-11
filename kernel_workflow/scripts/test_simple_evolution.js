@@ -1000,6 +1000,73 @@ const caseViewRows = Array.from({length: 6}, (_, i) => ({name: `case-${i}`, spee
   reps: 3, speedup_spread: 0.01}));
 const caseViewRefs = Array.from({length: 8}, (_, i) => `/cpu-fixture/raw-${i}.json`);
 const integrationFixture = cases.find(sc => sc.name === 'integrated candidate retains contributor IDs and remains a selectable source');
+for (const sharedView of [false, true]) for (const handoff of [false, true]) {
+  for (const plannerView of [undefined, false, true, 'true']) {
+    const plannerEnabled = plannerView === undefined ? sharedView : plannerView === true;
+    cases.push({...integrationFixture,
+      name: `planner recipient override ${JSON.stringify(plannerView)} shared=${sharedView} handoff=${handoff}`,
+      args: {...integrationFixture.args, evolution_case_evidence_view: sharedView,
+        evolution_evidence_handoff: handoff,
+        ...(plannerView !== undefined ? {evolution_planner_case_view: plannerView} : {})},
+      plans: {...integrationFixture.plans,
+        r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+      candidates: {...integrationFixture.candidates,
+        r1_d0: {...integrationFixture.candidates.r1_d0,
+          verifier: {...verifiedAt(1.2), per_case: caseViewRows}},
+        r1_d1: {...integrationFixture.candidates.r1_d1,
+          verifier: {...verifiedAt(1.4), per_case: caseViewRows}},
+        r2_d0: {...integrationFixture.candidates.r2_d0, inherited: source(1, 0)}},
+      check: ({archive, events, h: harnessApi}) => {
+        const requireEvent = label => {
+          const matches = events.filter(event => event.label === label);
+          assert.equal(matches.length, 1, `recipient was actually called: ${label}`);
+          return matches[0];
+        };
+        const assertCases = entries => {
+          assert.ok(Array.isArray(entries) && entries.length > 0, 'nonempty evidence entries');
+          for (const entry of entries) {
+            const saved = archive.entries.find(row => row.id === entry.archive_ref.entry_id);
+            assert.ok(saved, 'evidence resolves to an actual retained source');
+            assert.deepEqual(entry.patch_ref, saved.patch_ref);
+            assert.equal(entry.entry_verified, saved.verified);
+            assert.deepEqual(entry.verifier?.per_case, saved.verifier?.per_case ?? null);
+          }
+        };
+        const planner = requireEvent('tech_lead:plan r2');
+        const plannerEntries = harnessApi.field(planner.prompt, 'EVOLUTION_ENTRIES');
+        assert.ok(plannerEntries.length >= 3, 'planner sees both donors and the integrated source');
+        assert.ok(plannerEntries.every(row => Object.hasOwn(row, 'case_evidence') === plannerEnabled));
+        assert.match(harnessApi.field(planner.prompt, 'EVOLUTION_ARCHIVE'), /\/evolution\/archive\.json$/);
+        if (plannerEnabled) assertCases(plannerEntries.map(row => row.case_evidence));
+        for (const round of ['r1', 'r2']) {
+          const memory = requireEvent(`tech_lead:memory ${round}`);
+          const memoryEntries = harnessApi.field(memory.prompt, 'EVOLUTION_ROUND');
+          assert.ok(memoryEntries.length > 0, 'memory receives the completed round');
+          assert.ok(memoryEntries.every(row => Object.hasOwn(row, 'case_evidence') === sharedView));
+          if (sharedView) assertCases(memoryEntries.map(row => row.case_evidence));
+        }
+        const integrator = requireEvent('integrate r1');
+        const integrationCases = harnessApi.field(integrator.prompt, 'CANDIDATE_CASE_EVIDENCE');
+        assert.equal(integrationCases !== undefined, sharedView);
+        if (sharedView) {
+          assertCases(integrationCases.entries);
+          assert.deepEqual(integrationCases.entries.map(row => row.archive_ref.entry_id), ['r1_d0', 'r1_d1']);
+        }
+        const engineer = requireEvent('eng r2_d0:memory');
+        const evolution = harnessApi.field(engineer.prompt, 'EVOLUTION');
+        assert.equal(Object.hasOwn(evolution, 'selected_case_evidence'), handoff);
+        assert.equal(Object.hasOwn(evolution, 'selected_evidence'), handoff);
+        if (handoff) {
+          assertCases(evolution.selected_case_evidence.entries);
+          assert.deepEqual(evolution.selected_case_evidence.entries.map(row => row.archive_ref.entry_id),
+            ['r1_d0', 'r1_d1']);
+        }
+        assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+        assert.equal(archive.entries.find(row => row.id === 'r1_integrated').verified, true);
+      },
+    });
+  }
+}
 cases.push({...integrationFixture,
   name: 'explicit invalid native integrator primary stays unavailable through adapters',
   args: {budget: 2}, best: 1.4, bestId: 'r1_d1', expected: fast,

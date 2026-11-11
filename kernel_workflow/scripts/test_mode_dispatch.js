@@ -186,10 +186,11 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(trace.lanes.some((l) => l.lang === 'flydsl' && l.mode === 'author'), 'flydsl:author', lanesOf(trace));
   }
 
-  for (const optimizer of ['greedy', 'evo']) {
+  for (const optimizer of ['greedy', 'evo']) for (const plannerView of [undefined, false, true, 'true']) {
     const controls = {optimizer, evolution_return_development: false,
       evolution_start: 'search_start', evolution_import_stall_sources: false,
       evolution_case_evidence_view: true, evolution_evidence_handoff: false,
+      ...(plannerView !== undefined ? {evolution_planner_case_view: plannerView} : {}),
       evolution_preserve_founder_attempts: false, record_planner_inputs: true,
       case_measurement_view: 'native_consistent'};
     const {run, trace} = build({...BASE, mode: 'bakeoff', backends: ['hip'], ...controls}, {
@@ -197,8 +198,9 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     });
     await run();
     ok(trace.workflowCalls.length > 0 && trace.workflowCalls.every(({args}) =>
-      Object.entries(controls).every(([k, v]) => args[k] === v)),
-      `bakeoff forwards explicit ${optimizer} and development/evidence controls`);
+      Object.entries(controls).every(([key, value]) => args[key] === value)
+      && Object.hasOwn(args, 'evolution_planner_case_view') === (plannerView !== undefined)),
+      `bakeoff forwards ${optimizer} and planner view ${JSON.stringify(plannerView)} without coercion`);
   }
 
   // -------------------------------------------------------------------------

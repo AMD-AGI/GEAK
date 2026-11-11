@@ -39,6 +39,31 @@ flags control distinct evidence and initialization paths; see the
 These search settings leave the task's model, knowledge and skill configuration
 to the shared GEAK controls; a longer search need not disable those capabilities.
 
+### Separate evidence recipients
+
+`evolution_case_evidence_view` controls inline retained-candidate case evidence
+for the planner, memory update and integrator. Optional
+`evolution_planner_case_view` overrides only the planner's view:
+
+| Planner override | Planner case evidence | Memory and integrator |
+| --- | --- | --- |
+| Omitted | Inherits `evolution_case_evidence_view` | Unchanged |
+| `true` | Enabled | Unchanged |
+| `false` | Disabled, even when the shared view is enabled | Unchanged |
+
+Only literal boolean `true` enables a view; values are not coerced. Leave the
+override omitted to preserve existing behavior. `evolution_evidence_handoff`
+separately controls the selected parent/donor evidence sent to engineers.
+These controls pass through the Python entrypoint, nested E2E calls and bakeoff
+lanes; a nested call's explicit argument takes precedence over its parent.
+
+For a planner-view by engineer-handoff experiment, vary the planner override
+and handoff independently while holding the shared view fixed. Disabling an
+inline view does not hide the archive, remove current-best/baseline evidence,
+change the objective, or alter retention and verification. It tests explicit
+presentation rather than access to information. Record actual agent use and
+qualified source outcomes separately from successful prompt construction.
+
 ## Sustained development and time allocation
 
 EVO preserves the shared specialist and deep-engineer loops and their role

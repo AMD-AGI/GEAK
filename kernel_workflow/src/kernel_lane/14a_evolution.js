@@ -450,7 +450,9 @@ async function createEvolution(start, {name = 'evolution', lineage = A.populatio
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          ...(A.evolution_case_evidence_view === true ? {case_evidence: caseEvidence(row)} : {}),
+          ...((A.evolution_planner_case_view !== undefined
+            ? A.evolution_planner_case_view === true
+            : A.evolution_case_evidence_view === true) ? {case_evidence: caseEvidence(row)} : {}),
           strategy: row.engineer && row.engineer.strategy,
           reported_context: boundedContext(row.reported_context,
             row.reported_context_ref || {path: archive, entry_id: row.id}, 2048)}))};

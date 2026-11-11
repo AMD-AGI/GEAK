@@ -34,6 +34,8 @@ const laneArgs = (wfArgs) => {
     // The worker enables these only for boolean true; do not coerce caller values.
     ...(A.evolution_case_evidence_view !== undefined
       ? { evolution_case_evidence_view: A.evolution_case_evidence_view } : {}),
+    ...(A.evolution_planner_case_view !== undefined
+      ? { evolution_planner_case_view: A.evolution_planner_case_view } : {}),
     ...(A.evolution_evidence_handoff !== undefined
       ? { evolution_evidence_handoff: A.evolution_evidence_handoff } : {}),
     ...(A.evolution_preserve_founder_attempts !== undefined
