@@ -18,6 +18,8 @@ const schemas = between('const obj =', '// Result of the ensure_flydsl');
 const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
 const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
+assert(!/Date\.now\(|new Date\(/.test(helper), 'the Workflow runtime throws on wall-clock reads');
+const pdHelpers = between('const PD_ROLES =', 'function roleAgent(');
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
@@ -73,17 +75,20 @@ async function run(body, overrides = {}, reply = selection()) {
     milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
     MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
+    SERVING_TOPOLOGY: '', MN: null, MN_SPEC: null, curPd: { prefill: {}, decode: {} },
+    AGENTX_METRIC_BASIS: 'aggregate_output_tok_s',
+    captureShard: () => (overrides.SERVING_TOPOLOGY ? { CAPTURE_ON_ENGINE: overrides.SERVING_TOPOLOGY } : {}),
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
     searchClosed: () => false, searchWindowShort: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
-    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
+    safeAgent: async (prompt, opts, tries, timeoutFor) => { calls.push({ ...prompt, opts, tries, capMs: timeoutFor?.() }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
     readAgentXPreparation: async () => structuredClone(reply),
     applyOpIdentityGuard: q => q, admitHeads: q => q, ensureFlydslGate: async () => {},
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${schemas}\n${phaseSelector}\n${helper}\n${body}
+    ${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
@@ -117,6 +122,39 @@ async function run(body, overrides = {}, reply = selection()) {
     phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5, overall_pct_gt: 3,
     combination: 'phase_top_k_and_overall_threshold', backfill: false,
   });
+  assert.equal(input.CAPTURE_ON_ENGINE, undefined, 'one host: no serving-leg capture inputs');
+  assert(!first.calls[0].intro.includes('MULTINODE'), 'one host: the prompt is unchanged');
+
+  // PD: one capture over both engines, sampling through serving legs; the engine weights ranked the
+  // queue already, so it keeps the extraction's order, and an envelope without them is refused.
+  const pdSelection = selection();
+  pdSelection.kernel_candidates = [{ ...candidate('p'), engine: 'prefill' }, { ...candidate('d'), engine: 'decode' }];
+  pdSelection.engine_weights = { rule: 'gpu_time_mass', weights: { prefill: 0.6, decode: 0.4 },
+    inputs: { mass_us: { PREFILL: 60e6, DECODE: 40e6 }, ranks: { prefill: 8, decode: 8 } }, warnings: [] };
+  const pdOverrides = { MN: { nodes: ['p0', 'd0'] }, SERVING_TOPOLOGY: 'pd_disagg' };
+  const pdRun = await run(initial, { ...pdOverrides, AGENTX_METRIC_BASIS: 'p90_intvty_inferencex' }, pdSelection);
+  assert.equal(pdRun.calls[0].inputs.CAPTURE_ON_ENGINE, 'pd_disagg');
+  assert(pdRun.calls[0].intro.includes('/wf/roles/_fragments/agentx_multinode.md'), 'multinode rules fragment');
+  const mnFragment = fs.readFileSync(path.join(__dirname, '..', 'roles', '_fragments', 'agentx_multinode.md'), 'utf8');
+  for (const rule of ['PROFILE=1', 'serving_probe.py', 'run/requested_kernel.json', 'gpu_lock.sh',
+    'pd-mass', '--roles', 'phase_mass_share_pct'])
+    assert(mnFragment.includes(rule), rule);
+  assert.deepEqual(pdRun.kernelQueue.map(c => c.engine), ['prefill', 'decode'],
+    'no axis-name reordering on top of the engine weights');
+  const decodeOnly = selection();
+  decodeOnly.head_candidates = [];
+  decodeOnly.kernel_candidates = [{ ...candidate('d'), engine: 'decode' }];
+  decodeOnly.failed_tasks = [{ short_name: 'prefill_capture', engine: 'prefill', reason: 'profiler fault' }];
+  const solo = await run(initial, pdOverrides, decodeOnly);
+  assert.equal(solo.strategy.engine_weights, undefined, 'a failed engine capture invents no weights');
+  assert.deepEqual(solo.kernelQueue.map(c => c.short_name), ['d'], 'the surviving engine continues the run');
+  const noneLeft = { ...decodeOnly, kernel_candidates: [],
+    failed_tasks: [...decodeOnly.failed_tasks, { short_name: 'decode_capture', engine: 'decode', reason: 'fault' }] };
+  assert.deepEqual((await run(initial, pdOverrides, noneLeft)).kernelQueue, [],
+    'both captures failed: an empty queue, as on a single node');
+
+  const span = await run(initial, { MN: { nodes: ['a', 'b'] }, SERVING_TOPOLOGY: 'tp_span' });
+  assert.equal(span.calls[0].inputs.CAPTURE_ON_ENGINE, 'tp_span');
   assert.equal(first.headQueue[0].pct_gpu_time, 7.25, 'routing uses attributable share, not window pct');
   assert.equal(first.kernelQueue[0].pct_gpu_time, 7.25);
   const closed = await run(initial, { searchClosed: () => true });
@@ -170,7 +208,6 @@ async function run(body, overrides = {}, reply = selection()) {
 
   for (const [name, body, expectedFixedCalls] of [
     ['config', config, 2], ['tuning', tuning, 2], ['deep', deep, 1],
-    ['head', head, 1], ['milestone refresh', milestoneRefresh, 1],
     ['milestone plan', milestonePlan, 1],
   ]) {
     const actual = await run(body);
@@ -192,7 +229,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const batch = await run(milestonePlan + milestoneFilter + milestoneSchedule + milestoneRefresh + carry,
       {kernelQueue: queue, remaining: 1});
     assert.equal(batch.scheduled[0].short_name, expected.short_name);
-    assert.deepEqual(batch.calls, [], 'an accepted optimization must not replenish the inventory');
+    assert.deepEqual(batch.calls, [], 'consuming the inventory needs no extraction');
     const resumedBatch = await run(resume, {ST: batch.state});
     assert.deepEqual(resumedBatch.calls, [], 'all-phase resume reuses the completed preparation');
     queue = resumedBatch.kernelQueue;
@@ -213,6 +250,8 @@ async function run(body, overrides = {}, reply = selection()) {
 
   // Execute the actual optimization + integration block with disagreeing metrics.
   const optimizeAndIntegrate = between('  const optimized = await parallel(cands.map', '  // --- (c) If improved:');
+  const engineHelpers = ['function engineWorkload(', 'function captureShard(']
+    .map(start => between(start, '\n}\n') + '\n}\n').join('');
   async function metricDispatch(enabled, weighted, geomean) {
     const integrated = [];
     const env = {KERNEL_EXTRACT_ON: enabled, cands: [candidate('weighted')],
@@ -220,6 +259,7 @@ async function run(body, overrides = {}, reply = selection()) {
       curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
       KERNEL_WF_SCRIPT: '/kernel.js', KERNEL_WF_DIR: '/kernel', USE_EXPERT_SKILLS: false,
       EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
+      SERVING_TOPOLOGY: '', curPd: { prefill: {}, decode: {} },
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
       laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
       extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
@@ -230,7 +270,7 @@ async function run(body, overrides = {}, reply = selection()) {
       },
       integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
-    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
+    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdHelpers}\n${engineHelpers}\n${optimizeAndIntegrate}`)(env);
     return integrated;
   }
   assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
@@ -281,6 +321,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
     const kernelSelectionVerified = () => ({ ok: true });
     const guardUnhydratedVerdicts = ext => ext;
+    const withDiskSelection = async ext => ext;
     const log = () => {};
     ${extraction}
     return extractWithBaseline;
@@ -323,6 +364,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
     const log = () => {};
     const require = () => { throw new Error('no capture files in this CPU fixture'); };
+    const withDiskSelection = async ext => ext;
     ${identity}
     ${extraction}
     return extractWithBaseline;
