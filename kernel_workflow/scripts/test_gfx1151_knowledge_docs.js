@@ -97,8 +97,18 @@ for (const doc of docs) {
   }
 }
 
+// The shared kernel guides point gfx115x at the long form: every page they name must exist, and the
+// occupancy sweep must not be pinned to gfx1151 (its VGPR steps differ from gfx1150/1152/1153's).
+for (const guide of ['profiling_guide.md', 'triton_optimization.md']) {
+  const text = fs.readFileSync(path.join(wfDir, 'knowledge', guide), 'utf8');
+  for (const m of text.matchAll(/rdna35_gfx1151\/(?:` `)?(\w+\.md)/g)) {
+    if (!pages.includes(m[1])) throw new Error(`${guide} points at missing ${longFormRel}/${m[1]}`);
+  }
+  if (/--arch gfx1151/.test(text)) throw new Error(`${guide} pins the occupancy sweep to gfx1151`);
+}
+
 mustInclude(
   fs.readFileSync(path.join(repoRoot, 'perf_knowledge', 'index', 'taxonomy.md'), 'utf8'),
   '| `gfx1151` |', 'taxonomy.md does not list gfx1151 as a hardware generation');
 
-console.log('PASS: amd_ryzen.md states the gfx1151 facts; the long form resolves, links its canonical sources, and every cited script exists.');
+console.log('PASS: amd_ryzen.md states the gfx1151 facts; the long form resolves, links its canonical sources, and every cited script and guide pointer exists.');
