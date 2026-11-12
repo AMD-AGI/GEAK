@@ -198,19 +198,20 @@ console.log('\n## C. additive when off');
 const gate = src.match(/const TUNING_SKILLSET_ENABLED = [\s\S]*?const TUNING_KB_ENABLED = [^\n]*\n/);
 ok(!!gate, 'TUNING_* gating block found');
 if (gate) {
-  const make = new Function('A', 'WORKFLOW_DIR', 'RDNA4_ISOLATE',
+  const make = new Function('A', 'WORKFLOW_DIR', 'GPU_FAMILY',
     gate[0] + '\nreturn { TUNING_SKILLSET_ENABLED, TUNING_SKILLSET_DIR, TUNING_KB_ENABLED };');
-  const off = make({ tuning_skillset: 'false' }, '/repo/e2e_workflow', false);
+  const CDNA = { isolate: false };
+  const off = make({ tuning_skillset: 'false' }, '/repo/e2e_workflow', CDNA);
   ok(off.TUNING_SKILLSET_ENABLED === false, 'tuning_skillset:"false" disables the phase');
-  const on = make({}, '/repo/e2e_workflow', false);
+  const on = make({}, '/repo/e2e_workflow', CDNA);
   ok(on.TUNING_SKILLSET_ENABLED === true, 'default is ON');
-  ok(make({}, '/repo/e2e_workflow', true).TUNING_SKILLSET_ENABLED === false,
+  ok(make({}, '/repo/e2e_workflow', { isolate: true }).TUNING_SKILLSET_ENABLED === false,
     'gfx1201 ISA isolation disables the CDNA tuning phase');
   ok(on.TUNING_SKILLSET_DIR === '/repo/perf_knowledge/expert_skills/tuning',
     'skillset dir defaults to the vendored tree beside the workflow dir');
-  ok(make({ tuning_skillset_dir: '/elsewhere/skillset/' }, '/repo/e2e_workflow', false).TUNING_SKILLSET_DIR === '/elsewhere/skillset',
+  ok(make({ tuning_skillset_dir: '/elsewhere/skillset/' }, '/repo/e2e_workflow', CDNA).TUNING_SKILLSET_DIR === '/elsewhere/skillset',
     'the vendored tree can be overridden (e.g. point at an upstream checkout to re-verify standalone)');
-  ok(on.TUNING_KB_ENABLED === true && make({ tuning_kb: 'false' }, '/wf', false).TUNING_KB_ENABLED === false,
+  ok(on.TUNING_KB_ENABLED === true && make({ tuning_kb: 'false' }, '/wf', CDNA).TUNING_KB_ENABLED === false,
     'tuning-kb (the answer key) is ON by default and gateable for blind evaluation runs');
 }
 // The tuning loop is uncapped by design: tuning ops are cheap and cumulative, unlike head ops.
