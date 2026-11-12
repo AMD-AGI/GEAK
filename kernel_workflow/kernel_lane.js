@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
-    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck (only with args.profile=on; off by default)' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
     { title: 'WarmStart', detail: 'search the experience KB by canonical id (geak:kernel:*) — the shared service when credentialed, else the on-disk store, brought level with kb_artifacts/ first — for the best curated patch per optimization direction for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
@@ -2477,6 +2477,13 @@ const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
 const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
 const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
 
+// PROFILING is OFF by default; args.profile='on' restores it. Off: no baseline profile, no reprofile
+// after a commit or a warm-start adopt, and neither the benchmark engineer nor the engineers run the
+// profiler. On a prepared extract UT one profiled run costs 20-40 min, and on the AgentX stacks
+// rocprofv3 aborts outright (LLVM option clash with FlyDSL), so every profile agent spent 10-30 min
+// on the fault ladder before falling back (GEAK #606). Every consumer already tolerates a null summary.
+const PROFILE_ON = String(A.profile != null ? A.profile : 'off').trim().toLowerCase() === 'on';
+
 // ===========================================================================
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
@@ -2484,7 +2491,7 @@ phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
+    ANALYSIS: analysis, PROFILING: PROFILE_ON ? 'on' : 'off',
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
@@ -2499,17 +2506,19 @@ const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
 // ===========================================================================
-// PHASE: Baseline profile (Profile Engineer)
+// PHASE: Baseline profile (Profile Engineer) — only with args.profile='on' (see PROFILE_ON).
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agentT(
+let profileSummary = !PROFILE_ON ? null : await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
-log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+log(PROFILE_ON
+  ? `Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`
+  : 'Profile: skipped (args.profile is off).');
 
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
@@ -2830,14 +2839,16 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.exp_dir = c.exp_dir || '';
             if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
-            profileSummary = await agentT(
-              roleAgent('profile_engineer', 'reprofile',
-                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
-                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-              }),
-              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
-            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (PROFILE_ON) {
+              profileSummary = await agentT(
+                roleAgent('profile_engineer', 'reprofile',
+                  'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                  WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
+                  COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+                }),
+                { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+              if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            }
             if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
             break;
           }
@@ -3094,6 +3105,7 @@ ${cfg({
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        PROFILING: PROFILE_ON ? 'on' : 'off',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
@@ -3481,13 +3493,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
       roundsCommitted += 1;
       installed = true;        // the winner is now the installed incumbent artifact
 
-      // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
-        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-        }),
-        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best (only with args.profile='on') -------
+      if (PROFILE_ON) {
+        profileSummary = await agentT(
+          roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+            WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+            COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+          }),
+          { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      }
     } else {
       // eikos v2 E1 (R4 round-4 / Astra re-review #4): ABORT-AND-QUARANTINE (replaces round-3 recovery). The
       // round was `improved` and a commit was attempted under ROUTING_ON, but it FAILED or is AMBIGUOUS —

@@ -39,8 +39,8 @@ by an agent returning **structured JSON**.
   `verify_engineer`, and `integrator`.
 
 ## Pipeline
-`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile → [Research (opt-in)] →`
-`LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
+`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → [Baseline Profile (profile=on)] → [Research (opt-in)] →`
+`LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → [Re-profile (profile=on)] → Update memory ] →`
 `Final Report → Director Validation`.
 
 Each round's winner is committed into the canonical workspace, so the next round builds on the
@@ -100,6 +100,8 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
+    profile: "off",            // optional, default "off": no baseline profile, no re-profile, no engineer
+                               //   self-profiling. "on" restores the profile_engineer phases.
     // --- Deep Research Agent (DRA) — opt-in web-grounded research phase before the optimize loop ---
     dra_enabled: "false",      // optional, default "false" (OFF → behavior byte-identical). "true" runs
                                //   the Research phase after Profile / before the optimize loop.

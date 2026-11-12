@@ -90,8 +90,8 @@ takes 20–40 min, and KernelExtract already did it during GPU validation: its r
    not in verify: use the UT's correctness-only mode if it has one (check `python3 unittest.py --help`,
    e.g. `--skip-timing`); otherwise run it once normally and, if step 1 found no usable baseline, take
    the baseline from this run's baseline leg.
-3. Do NOT run a separate benchmark, do NOT run the profile command (the Profile phase runs it right
-   after you), and do NOT repeat the full benchmark. Re-run only after fixing an error or failed gate.
+3. Do NOT run a separate benchmark, do NOT run the profile command, and do NOT repeat the full
+   benchmark. Re-run only after fixing an error or failed gate.
 
 The baseline recorded here is informational: absolute ms drift 1–4% between sessions, so verify
 judges a candidate on the UT's own in-run ratio, never on this number (see `verify_engineer.md`).
@@ -162,8 +162,8 @@ printed. Fix the build infrastructure and rerun before freezing the COMMANDMENT.
 paths, binding command and successful relocation probe in its `SOURCE_BINDING` section. Do not freeze
 a harness whose actual candidate input cannot be established.
 
-Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
-`gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
+Run compile (if any), correctness, benchmark once each (via `gpu_lock.sh $GPU_ID`), and the
+profile command too only when `PROFILING` is `on`. Fix anything that errors before continuing.
 
 **Weighted oracle:** you reuse the oracle verbatim, so there is no generated builder and no
 relocation probe to run. Record the oracle's own source binding in `SOURCE_BINDING`. The single
