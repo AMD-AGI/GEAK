@@ -221,10 +221,14 @@ def command(cfg, mode, trace_root, watch_dir=None):
                     fields.update(f.name for f in dataclasses.fields(ProfilerConfig))
             except ImportError:
                 fields = set()
+            # ignore_frontend: the AsyncLLM front-end trace holds no GPU work, spans the
+            # whole window regardless of max_iterations (vLLM warns of its overhead) and is
+            # not a TP rank; point_census counted it as a rank with 0 instances.
             for key, value in (("torch_profiler_dump_cuda_time_total", False),
                                ("torch_profiler_record_shapes", True),
                                ("torch_profiler_with_stack", True),
-                               ("detailed_trace_annotation", True)):
+                               ("detailed_trace_annotation", True),
+                               ("ignore_frontend", True)):
                 if key in fields:
                     prof.setdefault(key, value)
             prof.update(profiler="torch", torch_profiler_dir=trace_root)

@@ -1,7 +1,7 @@
 {
   "file_count": 113,
   "files": {
-    "PROVENANCE.json": "2e2d0f8f89b43d1e43a61dcd14b8d55cec41e8626d15f655be32332f656232df",
+    "PROVENANCE.json": "efcc04947f238f4dcd69dba389d85c557175b513ce4cf964ea026ccda7831a4c",
     "SKILL.md": "8013b00bf01265066bcf3b78e926294b083bffc612453dc82e38438e90cdc1a6",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -18,7 +18,7 @@
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
     "references/task-authoring.md": "44ada0f8b17a5a7eca1318cb79b3ddc4a612d33b2d1c4bd1c4d087cc2831ef9b",
     "references/ut-lane.md": "48050dbe3a594b459ddc6813804baead36f28d9ece58875a4a6cab6375d119b9",
-    "references/vllm.md": "ed39374ef79cd26a1e5f34710e1ef4bb7300f74d036375a1035285c3ee50d768",
+    "references/vllm.md": "3b1a64fad74c5083abe26eaa2897f5febf6dacfd6ca036c887b005d12d7bc510",
     "scripts/adjacency.py": "31e12a600fcb7c62361792702dcd125d81f37e6faf86af8aef2236d9abff7815",
     "scripts/build_ranking.py": "722a7f25897aa9e60e752de3e021b216e43ddabae346cecad5b58341a218f445",
     "scripts/build_task_plan.py": "ae0eff5f0c5ce4cd6ea30e8905e73178ed6b55511ff7330dc1623382ca8551b4",
@@ -29,11 +29,11 @@
     "scripts/observed_workload.py": "732fc3210d9631be4bfb25e80a7f058f6e964e8c0abd1b0d80c1025f537a0445",
     "scripts/plan_ut_cases.py": "ad3ddc8c010517303e90d7780cffa3c3d44fc019f8a89b3612bd336eeb10f74c",
     "scripts/point_census.py": "751834f5e16bfb2615b2193aa3a4ea28c996d72de92032555fbc5b5eed6e9beb",
-    "scripts/probe_server.py": "e80f73f73ba2201dc9cf3924dd932c2b9e299bfe26ed0e62e261d1c22f59c2bd",
+    "scripts/probe_server.py": "cfcfd7edc960ed357d212e3c494e53622dd5e7edca5bb265645a209d1f4e8b1d",
     "scripts/relabel_points.py": "821551bf30a46a0c16ed4f62cf73011c84da7264d438819654711c81d7199b95",
     "scripts/run_points.py": "74e07429819f53d0837ea5234578a6d8feb3c60c7c4eb0bb69da4d545673486d",
     "scripts/select_targets.py": "dea019a7796eb30d461a246840dc9b168d9f35050e83a51ac8ef3e41cc269658",
-    "scripts/serving_probe.py": "dcab5dd83e37876c9054be579414887a4e5a84c34bbea333172a89864890732f",
+    "scripts/serving_probe.py": "cc9041c764476a3b65f9c0ef81e5c5e7bab7b38a2f9836ebad4ed4ab977cbe63",
     "scripts/source_map.py": "336add2cca2dbf599b95396bb67f2bf7fdb5235583f7cf458f986a585d498cc9",
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
     "scripts/ut_gpu_queue.py": "2bc1b58c078dfce42036b1ef3b0ae33d72cbda587bab542d9499067bb75993d7",
@@ -81,7 +81,7 @@
     "tests/test_sampling_pipeline.py": "3e9629aa1dd5e8bc34226875bfc29db6d8b0cf172dd0b2d8e88732611b5ede6d",
     "tests/test_ut_gpu_queue.py": "d42339c0ccc1d97c629316f7432a5c2f4e7057932242e62f483c97366826520d",
     "tests/test_ut_wave.py": "50bbee1b74af94a85fad4daa679ace072ac84dd45be67ee234a1d2c4f3e4953b",
-    "tests/test_vllm_profile.py": "1481f66274cca12969c40fca4f325e18b722356424e733cd57cf8b265ceeab48",
+    "tests/test_vllm_profile.py": "758938d4fcda2e0b7078b8964e514c37f342b71ae18940c0946e21b3251aac5b",
     "ut_contracts/README.md": "affd31d43cd707942bb5e84e9cde244736eb460fa91fcdcc7ff837bf6610d9a7",
     "ut_contracts/families/act_mul.json": "8c7d3b8bf920796b0f2ad28213de73463c4cfe4c607dbf37b8ba08b4717ff0d0",
     "ut_contracts/families/all_reduce.json": "30215dedd2af7446669f72aae9364251be8b34c011ea288fa85a700f93dcd2a8",
@@ -116,9 +116,9 @@
     "ut_contracts/ut_driver.py": "ad3604baa8e7e037858f93e3d10bfed4af529ac33b62bf94c90c31e59aec31c9"
   },
   "modified_from_origin": false,
-  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt (serving_probe). Tests and references updated.",
+  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt, PREFILL windows closed by /stop_profile, no front-end trace in a point (serving_probe, probe_server). Tests and references updated.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "6dfb684a8c0dbe6c39abd44d057fd1fb6e11cd6dbf0fc5dcff882cffc700378f"
+  "tree_sha256": "cb59d1e547bc18e99d0d24c1c96a5f998914fabc3ed197d1164aa4ea7890e8c5"
 }

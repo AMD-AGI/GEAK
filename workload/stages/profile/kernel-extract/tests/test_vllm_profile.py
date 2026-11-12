@@ -303,6 +303,38 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(post.call_args.args[1:3],
                          ("/start_profile", {"profile_prefix": "de_2", "max_iterations": 8}))
 
+    def test_vllm_prefill_window_is_closed_by_stop_not_by_empty_worker_steps(self):
+        # vLLM counts empty worker steps toward max_iterations: a window of num_steps held
+        # one prefill on a KV-offload MI355X server. PREFILL arms with a runaway cap only and
+        # is closed by /stop_profile after its num_steps + 1 requests; DECODE keeps num_steps.
+        plan = self.root / "plan.json"
+        plan.write_text(json.dumps({"points": [
+            {"point_id": "pf", "phase": "PREFILL", "new_tokens": 64, "running": 1,
+             "cached_tokens": 0}]}))
+        order = []
+        with patch.object(probe, "post", side_effect=lambda *a, **k: order.append(a[1]) or "{}"), \
+                patch.object(probe, "start_profile",
+                             side_effect=lambda *a, **k: order.append(("arm", a[2], k))) as arm, \
+                patch.object(probe, "stop_profile", side_effect=lambda *a, **k: order.append("stop")), \
+                patch.object(probe, "server_up", return_value=True), \
+                patch.object(probe, "wait_drained"), patch.object(probe, "wait_traces_settled"), \
+                patch.object(probe, "traces_written", return_value=[{"path": "t.json", "bytes": 1}]), \
+                patch.object(probe, "verify_trace", return_value={"verified": True, "reason": "test"}), \
+                patch.object(sys, "stdout", new_callable=io.StringIO):
+            argv = ["serving_probe.py", "--framework", "vllm", "--served-model", "model",
+                    "--points", str(plan), "--point-id", "pf", "--num-steps", "4",
+                    "--trace-dir", str(self.root / "traces"), "--out", str(self.root / "pf.json")]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(probe.main(), 0)
+        self.assertEqual(arm.call_args.kwargs["max_iterations"], probe.vllm_prefill_iteration_cap(4))
+        self.assertGreater(probe.vllm_prefill_iteration_cap(4), 5 * 8)
+        armed = next(i for i, x in enumerate(order) if isinstance(x, tuple))
+        # all 5 measured requests are sent inside the window, then it is stopped explicitly
+        self.assertEqual(order[armed + 1:], ["/v1/completions"] * 5 + ["stop"])
+        with patch.object(probe, "post", return_value="{}") as post:
+            probe.start_profile("http://server", "/traces/pf", 4, [], 30, max_iterations=320)
+        self.assertEqual(post.call_args.args[2], {"profile_prefix": "pf", "max_iterations": 320})
+
     def test_vllm_metrics_use_generation_counter(self):
         metrics = b'vllm:num_requests_running{engine="0"} 2\nvllm:generation_tokens_total{engine="0"} 50\nvllm:prompt_tokens_total{engine="0"} 200\n'
         with patch.object(probe.urllib.request, "urlopen", return_value=io.BytesIO(metrics)):
@@ -319,11 +351,23 @@ class VllmProfileTest(unittest.TestCase):
         got = probe.traces_written(str(target), 0)
         self.assertEqual([Path(r["path"]).name for r in got], ["de_1_rank0.trace.json"])
 
+    def test_vllm_frontend_trace_is_not_linked_as_a_rank(self):
+        target = self.root / "pf"
+        target.mkdir()
+        for name in ("pf_dp0_pp0_tp0_dcp0_ep0_rank0.17943.pt.trace.json.gz",
+                     "pf_dp0_pp0_tp1_dcp1_ep1_rank1.17943.pt.trace.json.gz",
+                     "pf_crsuse2-m2m-v3-258_4520.async_llm.17943.pt.trace.json.gz"):
+            (self.root / name).write_text("{}")
+        got = sorted(Path(r["path"]).name for r in probe.traces_written(str(target), 0))
+        self.assertEqual(got, ["pf_dp0_pp0_tp0_dcp0_ep0_rank0.17943.pt.trace.json.gz",
+                               "pf_dp0_pp0_tp1_dcp1_ep1_rank1.17943.pt.trace.json.gz"])
+
     @unittest.skipUnless((ROOT / "scripts/probe_server.py").exists(), "main uses its existing serving adapter")
     def test_vllm_launcher_and_init_preserve_backend(self):
         import probe_server
         fields = {k: None for k in ("torch_profiler_dump_cuda_time_total", "detailed_trace_annotation",
-                                    "torch_profiler_record_shapes", "torch_profiler_with_stack")}
+                                    "torch_profiler_record_shapes", "torch_profiler_with_stack",
+                                    "ignore_frontend")}
         config = types.ModuleType("vllm.config")
         config.ProfilerConfig = types.SimpleNamespace(model_fields=fields)
         cfg = {"framework": "vllm", "model": "model", "tp": 2, "port": 8001,
@@ -336,6 +380,7 @@ class VllmProfileTest(unittest.TestCase):
         prof = json.loads(cmd[cmd.index("--profiler-config") + 1])
         self.assertTrue(prof["detailed_trace_annotation"])
         self.assertFalse(prof["torch_profiler_dump_cuda_time_total"])
+        self.assertTrue(prof["ignore_frontend"])
         self.assertEqual(env["GEAK_ITERATION_LOG_DIR"], str(self.root / "iterations"))
         cfg["args"] += ["--profiler-config=" + json.dumps({"torch_profiler_dir": "/old", "max_iterations": 11})]
         with patch.dict(sys.modules, {"vllm.config": config}), patch.dict(os.environ, {"GPU_ARCHS": "gfx950"}):

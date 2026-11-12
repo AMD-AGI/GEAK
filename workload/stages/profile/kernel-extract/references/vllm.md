@@ -73,8 +73,15 @@ python3 "$SKILL_ROOT/scripts/serving_probe.py" \
 vLLM requests use `/v1/completions` with token-ID prompts. Occupancy uses fresh
 worker observations when supplied, otherwise vLLM running-request and token
 counters. `/start_profile` receives `profile_prefix` and `max_iterations`;
-`/stop_profile` closes the window. Enable the torch profiler at server launch,
-including shape and detailed phase annotations on builds that expose them.
+`/stop_profile` closes the window. vLLM counts every WORKER step toward
+`max_iterations`, including steps that schedule no tokens (between requests, e.g.
+with a KV connector): a DECODE window (resident batch, every step non-empty) is
+closed by `num_steps`, a PREFILL window spans its `num_steps + 1` requests and is
+closed by the explicit `/stop_profile`, `max_iterations` being only a runaway cap.
+Enable the torch profiler at server launch, including shape and detailed phase
+annotations on builds that expose them; `probe_server.py` also sets
+`ignore_frontend` (the AsyncLLM front-end trace is not a TP rank, and
+`serving_probe.py` never links a `*.async_llm.*` trace into a point).
 On builds without the per-request profiler fields, use the existing time-bounded
 vLLM serving adapter and explicitly account for that alternative capture scope.
 

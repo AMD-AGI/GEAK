@@ -146,6 +146,20 @@ ITERATION_LOG_DIR = None
 CACHE_SALT = None
 
 
+# vLLM's profiler counts WORKER steps toward max_iterations, including steps that schedule
+# no tokens (they come between requests: the KV connector / async scheduler keeps the
+# engine stepping). On an MI355X server with SimpleCPUOffloadConnector, a window of
+# max_iterations=8 held 2 empty steps, ONE 9228-token prefill and 5 empty steps, so the
+# census found a single device anchor and refused the point. A PREFILL window is therefore
+# closed by the explicit /stop_profile after its num_steps + 1 requests; max_iterations is
+# only a runaway cap. DECODE keeps num_steps: its resident batch makes every step non-empty.
+VLLM_PREFILL_STEPS_PER_REQUEST = 64
+
+
+def vllm_prefill_iteration_cap(num_steps):
+    return (int(num_steps) + 1) * VLLM_PREFILL_STEPS_PER_REQUEST
+
+
 def cache_salt_for(framework, phase):
     """A fresh vLLM prefix-cache salt for one PREFILL probe invocation, else None.
 
@@ -297,7 +311,8 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0,
     return False, last.get("num_running_reqs"), last.get("gen_throughput")
 
 
-def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True):
+def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True,
+                  max_iterations=None):
     """Arm once. profile_by_stage is deliberately not offered -- see rule 2.
 
     With record_shapes the trace ties every device launch to the host op that issued it
@@ -310,7 +325,8 @@ def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True
     if record_shapes:
         body.update(record_shapes=True, with_stack=True)
     if FRAMEWORK == "vllm":
-        body = {"profile_prefix": os.path.basename(out_dir), "max_iterations": int(num_steps)}
+        body = {"profile_prefix": os.path.basename(out_dir),
+                "max_iterations": int(num_steps if max_iterations is None else max_iterations)}
     t0 = time.time()
     try:
         txt = post(base, "/start_profile", body, timeout=timeout)
@@ -324,6 +340,7 @@ def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True
         txt = post(base, "/start_profile", body, timeout=timeout)
     arm_s = round(time.time() - t0, 1)
     journal.append({"event": "armed", "arm_cost_s": arm_s, "num_steps": int(num_steps),
+                    "max_iterations": body.get("max_iterations"),
                     "profile_by_stage": False, "record_shapes": record_shapes,
                     "response": txt[:200]})
     if arm_s > 60:
@@ -409,6 +426,9 @@ def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, p
     journal.append({"event": "window_close_TIMEOUT", "waited_s": round(time.time() - t0, 1)})
     return False
 
+VLLM_FRONTEND_TRACE = re.compile(r"\.async_llm\.")
+
+
 def traces_written(trace_dir, since_ts):
     if FRAMEWORK == "vllm":
         # vLLM's per-session prefix changes names, not its configured output directory.
@@ -417,6 +437,10 @@ def traces_written(trace_dir, since_ts):
             dst = os.path.join(trace_dir, os.path.basename(src))
             suffix = os.path.basename(src)[len(tag):]
             if suffix and suffix[0].isdigit():
+                continue
+            if VLLM_FRONTEND_TRACE.search(suffix):
+                # the AsyncLLM front-end trace (ignore_frontend=False): no GPU work and not
+                # a TP rank; linked, it made point_census see a rank with 0 instances
                 continue
             if os.path.isfile(src) and os.path.getmtime(src) >= since_ts and not os.path.lexists(dst):
                 os.symlink(os.path.abspath(src), dst)
@@ -782,8 +806,12 @@ def main():
             warm_prefixes(args.base_url, prefixes, args, journal)
             if not args.no_shape_warmup:
                 warm_shape(args.base_url, prefixes, news, args, journal)
+            # vLLM: the window spans the num_steps + 1 driven requests and is closed by
+            # /stop_profile below (empty worker steps also count toward max_iterations)
             start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout,
-                          not args.no_record_shapes)
+                          not args.no_record_shapes,
+                          max_iterations=vllm_prefill_iteration_cap(num_steps)
+                          if FRAMEWORK == "vllm" else None)
             # /start_profile can return before every TP rank has armed; a prefill sent at
             # once then runs on a rank that is not recording (seen once in ~150 GLM-5.2 TP8
             # points: rank 7's trace lacked the extend). Waiting is not free -- with
