@@ -2498,11 +2498,18 @@ async function adoptAbandonedVerdict(integ, label) {
 // uses this, so an A/B never ends after the reference leg alone.
 const SPEEDUP_REVIEW_RESULTS = new Map();
 async function reviewSpeedup(integ, inputs, label, phaseName) {
+  // The workflow never writes 'pending': it is the integrator's own flag, and it must neither block a
+  // gain the estimate allows nor stand in for the confirmation the estimate requires.
+  if (integ && integ.speedup_review && integ.speedup_review.status === 'pending') {
+    log(`  ${label}: ignoring the integrator's own speedup_review 'pending'; the estimate decides on review.`);
+    integ = { ...integ };
+    delete integ.speedup_review;
+  }
   const kr = inputs.KERNEL_RESULT || {};
   const pct = kr.pct_gpu_time || 0, isolated = kr.verified_isolated_speedup || 0;
   if (!abDone(integ) || !['accepted', 'stack'].includes(integ.gate) || integ.output_parity === 'fail'
       || !speedupNeedsReview(pct, isolated, integ) || confirmedSpeedup(integ)) return integ;
-  if (integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
+  if (integ.speedup_review && ['inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
   const original = integ.measurement_evidence || {};
   const estimate = speedupEstimate(pct, isolated, integ);
   // Cache by measurement AND candidate/reference inputs. Returning the same cached A/B cannot
