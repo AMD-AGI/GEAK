@@ -1,7 +1,8 @@
 # Optimize calls
 
 Use the [invocation contract](../CONTRACT.md#direct-module-calls). Kernel implementations
-are [Kernel Workflow](geak-kernel-workflow/SKILL.md) and
+are [Kernel Workflow](geak-kernel-workflow/SKILL.md),
+[kernel dynamic loop](kernel-dynamic-loop/SKILL.md) and
 [native tools / OOB](native-frozen/SKILL.md); [raw agent](subagent-raw/SKILL.md) is another
 method. They share the frozen-task, budget and cold-verification contract in [README.md](README.md).
 For a serving configuration or implementation experiment use [system OOB](system-oob/SKILL.md).

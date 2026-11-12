@@ -20,6 +20,7 @@ normal order). For a standalone smoke run, set `TASKS_DIR` to the fixture task d
 | Skill | Notes |
 | --- | --- |
 | `geak-kernel-workflow/` | **default**. Drives GEAK's `kernel_workflow/kernel_workflow.js`. Requires a runner that exposes the Workflow tool. |
+| `kernel-dynamic-loop/` | an agent chooses small modules through Reasoning → Plan → Module → Report; uses native coding tools and the same frozen-task validation. |
 | `native-frozen/` | the same worker and frozen harness, optimized with the runner's own coding tools. Use it when the runner is a plain coding CLI, and for collectives: `kernel_workflow.js` takes a pool lock on one GPU. |
 | `subagent-raw/` | the "bare agent" option required by `instruct.md`; also the control group for the GEAK path. |
 
@@ -301,8 +302,8 @@ passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 `measure.sh` is required. The worker passes `TASK_DIR`, `RUN_DIR`, `MEASURE_TIMEOUT`,
 and `MEASURE_NATIVE_RC_FILE`; the hook prints
 `STATUS=<0|1> SPEEDUP=<x> CLEAN=<x-or-empty> SINGLE=<count>`.
-The three native-task implementations (`geak-kernel-workflow`, `native-frozen`,
-`subagent-raw`) delegate to the single reader in `stages/optimize/measure.sh`.
+Native-task implementations delegate to the single reader in
+`stages/optimize/measure.sh`.
 That reader runs the frozen task entry and interprets its output; the worker only
 invokes the hook, retains evidence, and consumes those fields. The slot's final
 acceptance criterion remains in `stages/optimize/finalize.py`.
