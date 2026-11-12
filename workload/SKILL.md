@@ -77,3 +77,20 @@ outcomes. Meeting a floor does not prove a higher goal.
 At campaign handoff, or when the user requests a route review, use the
 [Report module](stages/report/html-timeline/SKILL.md) to produce a compact HTML timeline
 and link it from the campaign report and user response.
+
+## Multi-config scenarios
+
+A multi-config scenario (`adopt-ci-artifacts` baseline, `multi_config: true`) optimizes every
+CI point of one EP group in one campaign. The split path is
+`baseline → profile → ut → roofline → optimize → applyback`: `profile: kernel-profile` locates
+runtime dispatch and shapes and freezes a `profile_handoff.json`; `ut: kernel-ut` consumes it
+and generates/qualifies the fixed-template UTs, one UT per task pooling every config
+(`kernel-extract/scripts/merge_policy.py` decides what pools). Set `task_source_stage: "ut"` so
+consumers use the separate task output, and run/retry `ut` without repeating captures. See
+[the handoff contract](stages/profile/HANDOFF.md) and [the UT stage](stages/ut/README.md).
+
+Applyback measures every CI point a UT covered (`stages/applyback/points.py`), each in that
+point's own CI configuration, and judges it against that point's official CI number
+(`reference: ci` in `stages/evaluate/finalize.py`); a covered point left unmeasured makes the
+verdict incomplete.
+

@@ -5,7 +5,7 @@ Run:  python3 -m unittest discover -s e2e_workflow/scripts/tests -v
   or: python3 e2e_workflow/scripts/tests/test_overlay_setup.py
 
 overlay_setup builds the directory we hand to a live inference server as
-`PYTHONPATH=<overlay>:$PYTHONPATH`, so a candidate kernel, a patched submodule or a capture_shapes
+`PYTHONPATH=<overlay>:$PYTHONPATH`, so a candidate kernel, a patched submodule or a source marker
 hook takes effect inside sglang/vllm WITHOUT editing site-packages. Two properties are load-bearing
 and neither is visible until an e2e run is already burning GPU hours:
 
@@ -178,6 +178,18 @@ class _OverlayCase(unittest.TestCase):
 # _ensure_overlay -- the shim + empty manifest, and its idempotence
 # --------------------------------------------------------------------------- #
 class TestEnsureOverlay(_OverlayCase):
+    def test_merge_preserves_a_frozen_baseline_from_the_previous_runtime(self):
+        old_runtime = ov.SITECUSTOMIZE.replace('if _m.get("captures"):\n    sys.stderr.write("[overlay] persistent oracle capture is retired; use profile evidence and fixed UT contracts\\n")\n    os._exit(78)\n\n', '# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost\n# stand-in and is already bound before any marker install imports a module that does\n# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).\nfor _e in _m.get("captures", []):\n    try:\n        import capture_shapes\n        capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))\n    except Exception as _ex:\n        sys.stderr.write("[overlay] capture install FAILED %r: %r\\n" % (_e, _ex))\n\n')
+        source = self._write("baseline/sitecustomize.py", old_runtime)
+        self._write("baseline/_overlay_manifest.json", json.dumps(EMPTY_MANIFEST))
+        self._write("baseline/witness.txt", "source evidence")
+        before = self._read(source)
+        output = os.path.join(self.tmp, "merged")
+        ov.merge_overlays(output, [os.path.dirname(source)])
+        self.assertEqual(self._read(source), before)
+        self.assertEqual(self._read(os.path.join(output, "witness.txt")), "source evidence")
+        self.assertEqual(self._read(os.path.join(output, "sitecustomize.py")), ov.SITECUSTOMIZE)
+
     def test_creates_missing_dir_with_shim_and_empty_manifest(self):
         self.assertFalse(os.path.exists(self.overlay))
         man = ov._ensure_overlay(self.overlay)
@@ -199,23 +211,9 @@ class TestEnsureOverlay(_OverlayCase):
 
     def test_shim_consumes_the_three_manifest_sections(self):
         shim = ov.SITECUSTOMIZE
-        for section in EMPTY_MANIFEST:
+        for section in ("modules", "rebinds", "markers"):
             self.assertIn('_m.get("%s", [])' % section, shim)
 
-    def test_shim_calls_capture_shapes_install_as_capture_shapes_defines_it(self):
-        # The shim's only cross-file call. capture_shapes.install(target, out_dir, max_cases=5)
-        # is copied in by add-capture, so the 3-positional-arg call site must keep matching.
-        self.assertIn('capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))',
-                      ov.SITECUSTOMIZE)
-        self.assertIn("def install(target, out_dir, max_cases=5):",
-                      self._read(os.path.join(SCRIPTS_DIR, "capture_shapes.py")))
-
-    def test_shim_installs_captures_before_markers(self):
-        # A marker on any module that does `from <capture module> import <attr>` imports that module
-        # and freezes the alias. If markers ran first, the later capture hook would rebind only the
-        # defining module and the live call (through the alias) would never be recorded.
-        shim = ov.SITECUSTOMIZE
-        self.assertLess(shim.index('_m.get("captures", [])'), shim.index('_m.get("markers", [])'))
 
     def test_rerun_preserves_an_edited_shim_and_an_existing_manifest(self):
         # Re-running any add-* must not reset an overlay that already carries accepted kernels.
@@ -255,9 +253,17 @@ class TestManifestIO(_OverlayCase):
         man = ov._ensure_overlay(self.overlay)
         payload = {"modules": [{"module": "a.b", "file": os.path.join("_patched", "a.b.py")}],
                    "rebinds": [{"target": "a.b:f", "impl_module": "impl", "impl_attr": "g"}],
-                   "captures": [{"target": "a.b:f", "out": "/tasks/t1", "max": 3}]}
+                   "markers": [{"target": "a.b:f"}]}
         ov._save_man(man, payload)
         self.assertEqual(ov._load_man(man), payload)
+
+    def test_retired_capture_manifest_is_rejected_without_rewriting_it(self):
+        payload = {"captures": [{"target": "a.b:f", "out": "/tasks/t1", "max": 3}]}
+        man = self._write("old_overlay/_overlay_manifest.json", json.dumps(payload))
+        before = self._read(man)
+        with self.assertRaisesRegex(ValueError, "persistent oracle capture overlays are retired"):
+            ov._load_man(man)
+        self.assertEqual(self._read(man), before)
 
     def test_save_truncates_rather_than_appending(self):
         man = ov._ensure_overlay(self.overlay)
@@ -491,16 +497,16 @@ class TestAddModule(_OverlayCase):
         self._run(ov.cmd_add_module, self._ns(module="sglang.b", patched_file=src))
         self.assertEqual([e["module"] for e in self._manifest()["modules"]], ["sglang.a", "sglang.b"])
 
-    def test_add_module_leaves_existing_rebinds_and_captures_alone(self):
+    def test_add_module_leaves_existing_rebinds_and_markers_alone(self):
         src = self._write("candidate.py", "x = 1\n")
         man = ov._ensure_overlay(self.overlay)
         ov._save_man(man, {"rebinds": [{"target": "m:f", "impl_module": "i", "impl_attr": "g"}],
-                           "captures": [{"target": "m:h", "out": "/t", "max": 5}]})
+                           "markers": [{"target": "m:h"}]})
         self._run(ov.cmd_add_module, self._ns(module=self.DOTTED, patched_file=src))
 
         got = self._manifest()
         self.assertEqual(len(got["rebinds"]), 1)
-        self.assertEqual(len(got["captures"]), 1)
+        self.assertEqual(len(got["markers"]), 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -555,52 +561,6 @@ class TestAddRebind(_OverlayCase):
 # --------------------------------------------------------------------------- #
 # add-capture -- the shape/IO oracle hook
 # --------------------------------------------------------------------------- #
-class TestAddCapture(_OverlayCase):
-    TARGET = "sglang.srt.layers.activation:silu_and_mul"
-
-    def _ns_capture(self, **kw):
-        base = {"overlay": self.overlay, "target": self.TARGET,
-                "out": os.path.join(self.tmp, "task"), "max": 5, "capture_file": ""}
-        base.update(kw)
-        return argparse.Namespace(**base)
-
-    def test_records_the_hook_and_copies_the_given_capture_file(self):
-        cap = self._write("my_capture.py", "def install(target, out_dir, max_cases=5):\n    pass\n")
-        out = self._run(ov.cmd_add_capture, self._ns_capture(capture_file=cap, max=3))
-
-        self.assertEqual(self._manifest()["captures"],
-                         [{"target": self.TARGET, "out": os.path.join(self.tmp, "task"), "max": 3}])
-        self.assertEqual(self._read(os.path.join(self.overlay, "capture_shapes.py")),
-                         "def install(target, out_dir, max_cases=5):\n    pass\n")
-        self.assertEqual(out[1], "add-capture %s -> %s" % (self.TARGET, os.path.join(self.tmp, "task")))
-
-    def test_capture_file_is_always_named_capture_shapes_py(self):
-        # The shim does a bare `import capture_shapes`, so the basename cannot be preserved.
-        cap = self._write("my_capture.py", "def install(target, out_dir, max_cases=5):\n    pass\n")
-        self._run(ov.cmd_add_capture, self._ns_capture(capture_file=cap))
-        self.assertEqual(self._overlay_entries(),
-                         ["_overlay_manifest.json", "capture_shapes.py", "sitecustomize.py"])
-
-    def test_default_capture_file_is_the_repo_copy_beside_this_script(self):
-        self._run(ov.cmd_add_capture, self._ns_capture())
-        copied = self._read(os.path.join(self.overlay, "capture_shapes.py"))
-        self.assertEqual(copied, self._read(os.path.join(SCRIPTS_DIR, "capture_shapes.py")))
-        self.assertIn("def install(target, out_dir, max_cases=5):", copied)
-
-    def test_max_is_kept_as_an_int_the_shim_can_cast(self):
-        self._run(ov.cmd_add_capture, self._ns_capture(max=1))
-        self.assertIsInstance(self._manifest()["captures"][0]["max"], int)
-
-    def test_re_capturing_the_same_target_replaces_it(self):
-        self._run(ov.cmd_add_capture, self._ns_capture(max=5))
-        self._run(ov.cmd_add_capture, self._ns_capture(max=9))
-        self.assertEqual(len(self._manifest()["captures"]), 1)
-        self.assertEqual(self._manifest()["captures"][0]["max"], 9)
-
-    def test_distinct_targets_compound(self):
-        self._run(ov.cmd_add_capture, self._ns_capture(target="m:a"))
-        self._run(ov.cmd_add_capture, self._ns_capture(target="m:b"))
-        self.assertEqual([e["target"] for e in self._manifest()["captures"]], ["m:a", "m:b"])
 
 
 class TestAddMarker(_OverlayCase):
@@ -765,17 +725,6 @@ class TestMain(_OverlayCase):
             self.assertIn("add-module requires --module", str(caught.exception))
         self.assertFalse(os.path.exists(self.overlay))
 
-    def test_add_capture_parses_max_as_an_int(self):
-        cap = self._write("my_capture.py", "def install(target, out_dir, max_cases=5):\n    pass\n")
-        self._main(["add-capture", "--overlay", self.overlay, "--target", "m:f",
-                    "--out", os.path.join(self.tmp, "task"), "--max", "3", "--capture-file", cap])
-        self.assertEqual(self._manifest()["captures"][0]["max"], 3)
-
-    def test_add_capture_defaults_max_to_five(self):
-        cap = self._write("my_capture.py", "def install(target, out_dir, max_cases=5):\n    pass\n")
-        self._main(["add-capture", "--overlay", self.overlay, "--target", "m:f",
-                    "--out", os.path.join(self.tmp, "task"), "--capture-file", cap])
-        self.assertEqual(self._manifest()["captures"][0]["max"], 5)
 
     def test_check_end_to_end(self):
         self._import_dir()

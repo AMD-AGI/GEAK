@@ -10,13 +10,10 @@
     "name_tokens": [],
     "enforce": true
   },
-  "order": [
-    "baseline",
-    "profile",
-    "roofline",
-    "optimize",
-    "applyback"
-  ],
+
+  "_note_order": "roofline is skipped by default: the optimize scheduler orders tasks by their measured share of profiled GPU time (stages.optimize.params.order_by=share), and roofline's model left the largest task of a campaign unranked (no PerfModel for it) so ranking by its gain put that task behind eight smaller ones. To use it, add \"roofline\" back before \"optimize\" and set order_by=roofline.",
+  "order": ["baseline", "profile", "optimize", "applyback"],
+
   "stages": {
     "baseline": {
       "skill": "adopt",
@@ -76,8 +73,10 @@
         "bad_node_limit": 2,
         "keep_threshold": 1.045,
         "apply_to_original": true,
-        "_note_task_limit": "This stage's in-flight capacity for an eight-GPU campaign, not a performance threshold and not a cap on extraction: optimize the first eight tasks in roofline order and carry the rest in optimized.json as capacity_deferred, each with its rank and reason, for a later wave. A whole-node collective still needs its real GPU group. Profile extracts as far as the evidence goes -- the same skill run by hand delivered ten complete tasks -- so a surplus is scheduling, not a defect, and is never silently truncated by max_tasks or exclusions.",
+        "_note_task_limit": "This stage's in-flight capacity for an eight-GPU campaign, not a performance threshold and not a cap on extraction: optimize the first eight tasks in task order (order_by) and carry the rest in optimized.json as capacity_deferred, each with its rank and reason, for a later wave. A whole-node collective still needs its real GPU group. Profile extracts as far as the evidence goes -- the same skill run by hand delivered ten complete tasks -- so a surplus is scheduling, not a defect, and is never silently truncated by max_tasks or exclusions.",
         "task_limit": 8,
+        "order_by": "share",
+        "_note_order_by": "share = descending share of profiled GPU time from profile/out/results.json (every task has one); roofline = descending expected e2e gain from roofline/out/roofline.json (needs the roofline stage in order).",
         "max_tasks": null
       }
     },

@@ -2,7 +2,11 @@
 """Judge a native serving comparison; shared by direct Evaluate and kernel applyback.
 
 The benchmark owns its measurements and validity receipts. This module owns metric-basis
-admission, the fresh-reference comparison and its report. It never installs a candidate
+admission, the comparison and its report. The reference is either a fresh stock control
+measured in the same A/B (the default) or, with `reference: ci`, the official number of the
+CI point the leg reproduced (multi-config scenarios, which never re-measure a baseline): then
+the leg must prove it launched exactly the CI's configuration (alignment.json) and held the
+CI's pins (pins.json). In both modes the server must have served the whole window. It never installs a candidate
 or re-measures it. Kernel integration is checked by applyback before it calls main with
 that metadata. Direct system calls need their declared quality and effect evidence;
 reading an E2E receipt alone does not establish that a proposed patch was installed.
@@ -16,6 +20,30 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
+import serving_watch  # noqa: E402
+
+# A full window measures within a few seconds of its configured length (3599-3630 s for 3600 s
+# on 2026-11-06, the CI's own 3618 s); a leg cut short by a dead server falls below.
+MIN_WINDOW_FRACTION = 0.98
+
+
+def server_death(out):
+    """Why the leg's server is known to have died, or None. The leg's own watch record
+    (serving_watch.py) when there is one; otherwise its saved server log, scanned with the
+    same patterns, so a leg measured before the watch existed is held to the same rule.
+
+    A rank can abort while the container and its HTTP front end stay up; the client then
+    times out its in-flight requests and the row still looks like a measurement (2026-11-06:
+    a finished c40 leg whose server died of HSA_STATUS_ERROR_OUT_OF_RESOURCES two minutes
+    before the end of its window, admitted as 1085.68 tok/s)."""
+    watch = read_json(os.path.join(out, "server_watch.json"))
+    if watch.get("dead") is True:
+        return watch.get("line") or watch.get("reason") or "serving_watch"
+    log = os.path.join(out, "server.log")
+    if not watch and os.path.exists(log):
+        with open(log, errors="replace") as fh:
+            return serving_watch.fatal_line(fh.read())
+    return None
 
 
 def pct(x):
@@ -156,8 +184,9 @@ def main(integration=None):
         if bad:
             return fail(bad)
 
-    reference = params.get("reference_baseline") or os.path.join(
-        run_root, "baseline", "out", "baseline.json")
+    # A multi-config point is judged against its own point baseline (applyback sets it).
+    reference = os.environ.get("APPLYBACK_BASELINE") or params.get("reference_baseline") \
+        or os.path.join(run_root, "baseline", "out", "baseline.json")
     reference = os.path.expandvars(os.path.expanduser(reference))
     if not os.path.isabs(reference):
         reference = os.path.join(os.environ.get("GEAK_ROOT", ""), reference)
@@ -168,7 +197,42 @@ def main(integration=None):
     if "measured" in historical and historical["measured"] is not True:
         return fail("the baseline is not a measured receipt; complete the baseline stage "
                     "before an A/B", status="blocked")
-    base = summary.get("stock_control")
+    # The server has to have served the whole window, whichever reference the leg uses.
+    dead = server_death(out)
+    if dead:
+        return fail("the server died during the leg (%s); its row does not measure the "
+                    "candidate serving the workload" % dead)
+    measured = summary.get("measured_duration_s")
+    want = summary.get("duration_s") or summary.get("ci_duration_s")
+    if measured and want and measured < want * MIN_WINDOW_FRACTION:
+        return fail("the measured window was %.0fs of the configured %ss: the client stopped "
+                    "early, so the row is not a full-window measurement" % (measured, want))
+
+    if (params.get("reference") or summary.get("reference")) == "ci":
+        # Against the official CI number: admissible only if this leg launched exactly what
+        # the CI job launched (ci_point_leg.sh -> alignment.json: image, every CI server arg,
+        # every CI env var), held the CI's pins, and ran the CI's full duration.
+        align = read_json(os.path.join(out, "alignment.json"))
+        if align.get("aligned") is not True:
+            return fail("reference=ci needs alignment.json with aligned=true: the leg must "
+                        "launch the CI config exactly (image, args, env), or the delta "
+                        "measures the configuration difference", status="blocked")
+        pinned = read_json(os.path.join(out, "pins.json"))
+        if pinned.get("proven") is not True:
+            return fail("reference=ci needs pins.json with proven=true (stages/_shared/"
+                        "ci_pins.py): the leg's own records must show the CI's model and "
+                        "draft commits and the CI's client argv; `main` moves upstream",
+                        status="blocked")
+        if summary.get("duration_s") and summary.get("ci_duration_s") \
+                and summary["duration_s"] != summary["ci_duration_s"]:
+            return fail("the leg ran %ss against the CI's %ss; a shortened leg is a smoke, "
+                        "not an A/B" % (summary["duration_s"], summary["ci_duration_s"]))
+        ci_key = (historical.get("provenance") or {}).get("throughput_key")
+        base = {"throughput": historical.get("throughput"), "metric_basis": ci_key,
+                "provenance": historical.get("provenance"), "admissible": True,
+                "reference": "ci"}
+    else:
+        base = summary.get("stock_control")
     if not isinstance(base, dict) or base.get("admissible") is not True:
         return fail("bench_summary.json has no admissible fresh stock_control; measure "
                     "the unchanged stack in this A/B before comparing the candidate",
@@ -211,6 +275,9 @@ def main(integration=None):
         "verdict": verdict,
         "basis_comparable": True,
         "stock_control": summary.get("stock_control"),
+        "reference": base.get("reference") or "stock_control",
+        "secondary": summary.get("secondary"),
+        "alignment": "alignment.json" if base.get("reference") == "ci" else None,
     }
     if integration is not None:
         ab.update(overlay_all_shadowed=True, op_level=ops,
@@ -243,8 +310,10 @@ def main(integration=None):
 
     artifacts = {"ab": "ab.json"}
     if integration is not None:
-        artifacts.update(applied="applied.json", overlay="overlay")
-    for name in ("shadow_check.json", "REPORT.md"):
+        artifacts["applied"] = "applied.json"
+    # a per-point leg of a multi-config A/B shares the stage's one overlay, so list only
+    # what this directory actually holds
+    for name in ("overlay", "shadow_check.json", "alignment.json", "pins.json", "REPORT.md"):
         if os.path.exists(os.path.join(out, name)):
             artifacts[name.split(".")[0].lower()] = name
     return emit("ok", artifacts=artifacts, metrics=metrics, notes=" ".join(notes))

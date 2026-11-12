@@ -9,6 +9,7 @@
 | --- | --- | --- |
 | `adopt/` | script | **default**. Reuse an already-measured serving receipt. No GPUs, no tokens, replayable |
 | `measure/` | agent | measure on this machine. Which benchmark runs is config (`bench_e2e.sh` against a running service, or the site's own CI harness in a fresh container), and whether a reproduction target is *proven* is `params.pins` |
+| `adopt-ci-artifacts/` | script | take an official InferenceX CI run as the baseline, **every config of it**: one baseline per search-space point straight from the run's `bmk_agentic_*` and `server_logs_*` artifacts, grouped (default by EP) with each group's lowest/highest concurrency marked representative. With no run pinned it adopts the latest published curve for the target hardware/framework/precision. Nothing is re-measured; the reference is the CI's own number. Needs a GitHub token to download artifacts, or pre-downloaded copies |
 
 Choose by what the baseline has to withstand. `adopt` is right when the number is already
 trusted and the question is only "what was it". `measure` with `pins` is right when **this

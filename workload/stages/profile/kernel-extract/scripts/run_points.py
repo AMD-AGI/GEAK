@@ -1,49 +1,18 @@
 #!/usr/bin/env python3
-"""Capture every sampling point on ONE live server and census each one while the next
-is being captured; finish with the ledger, the ranking and the target selection.
+"""Capture planned points on the supplied server; census and collect dispatch evidence.
 
-    python3 run_points.py --points sampling_points.json \
-        --base-url http://127.0.0.1:PORT --trace-root <SGLANG_TORCH_PROFILER_DIR> \
-        --expect-files <TP ranks> --decode-eager --eval-dir "$EVAL_DIR"
+    run_points.py --server-state probe/probe_server.json \
+        --points sampling_points.json --observed evidence/observed_workload.json \
+        --eval-dir <pool-directory> --all-evidence
 
-Produces, under --eval-dir:
-    evidence/probe/<point>.json     serving_probe.py result per point (and <point>_r2)
-    evidence/census/<point>.json    point_census.py output per verified point
-    coverage.json                   coverage_ledger.py
-    kernel_ranking.json             build_ranking.py
-    selection_targets.json          select_targets.py: by kernel name first, then (after
-                                    the evidence below) by operator, which replaces it
-    attribution_candidates.json     select_targets.py --candidates: kernels whose launch
-                                    stacks are resolved so operators can be ranked
-    evidence/shapes, evidence/source_map.json, evidence/adjacency.json, task_decls.json
-    profile_run.json                what ran, in what order, and how long each step took
+Prefill runs in token order, decode in batch/context order. Each point gets at most
+one recapture. A graph-hidden decode window requests eager fallback from
+probe_server.py; a dead server stops capture. Signed completed censuses are reused
+unless --redo is specified. Census work overlaps capture of the next point.
 
-Why one script
---------------
-The last two runs spent the profile hour like this: one probe server per pass (five
-restarts at ~2 min each), the prompt cache flushed before every decode point so each
-re-prefilled 137-179k tokens, a fixed post-arm wait of the whole window timeout, every
-trace parsed with json.load, the census only after the last capture, and then 30-60
-GPU-idle minutes of hand-written census/merge/ranking scripts. Here the server is
-started once by the caller and never restarted or flushed, points run back to back,
-and a point's census runs in the background as soon as its trace verifies.
-
-The server
-----------
-Starting it stays the caller's job: the launcher, flags and environment belong to the
-deployment (see references/capture.md). Start it ONCE, with the deployment's flags plus
-`--disable-cuda-graph` when decode is graph-deployed, and pass --decode-eager: graph
-replay hides decode kernels from the profiler, and verifying that only after a graph
-pass cost one run a second server and ~35 minutes. Prefill is normally eager anyway,
-so the same server serves both phases.
-
-Order: PREFILL points (ascending tokens), then DECODE (ascending batch). Decode request
-i uses the same prompt at every point, so moving to a larger batch only prefills the
-requests that are new. A point whose capture fails gets one recapture (<point>_r2), as
-the skill allows, and is then reported and skipped. If the server stops answering, the
-captures stop at once and nothing is ranked; a rerun resumes.
-
-Stdlib only.
+Outputs: per-point probe/census/shape evidence, coverage, ranking, selection,
+source map, adjacency and profile_run.json. UT declarations are generated separately
+by draft_task_decls.py after the profile handoff. Stdlib only.
 """
 import argparse
 import json
@@ -68,6 +37,24 @@ def run(cmd, log):
     return p.returncode, round(time.time() - t0, 1), (p.stdout + p.stderr).strip()
 
 
+def census_graph_hidden_reason(phase, rc, message):
+    """Only the census's explicit missing-GPU-anchor diagnosis requests eager retry.
+
+    A probe may verify one rank while the all-rank census rejects another. Other
+    census failures (missing files, unequal rank counts, etc.) are not evidence of
+    graph-hidden kernels and must keep their original failure classification.
+    """
+    if phase != "DECODE" or rc == 0:
+        return None
+    for line in message.splitlines():
+        line = line.strip()
+        if (line.startswith("point_census:")
+                and "fewer than 2 decode anchors on the GPU timeline" in line
+                and "replayed kernels are not traced" in line):
+            return line
+    return None
+
+
 def ordered(points, wanted):
     pts = [p for p in points if not wanted or p["point_id"] in wanted]
     missing = set(wanted or ()) - {p["point_id"] for p in pts}
@@ -87,7 +74,7 @@ def ordered(points, wanted):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--points", required=True, help="plan_sampling_points.py output")
+    ap.add_argument("--points", required=True, help="shared sampling pool sampling_points.json")
     ap.add_argument("--point-id", nargs="*", default=None, help="subset; default all")
     ap.add_argument("--server-state", default=None,
                     help="probe_server.py's probe_server.json: supplies --base-url, "
@@ -104,6 +91,11 @@ def main():
     ap.add_argument("--decode-eager", action="store_true",
                     help="decode is graph-deployed but this server runs eagerly: decode "
                          "collective wait is excluded from the ranking denominator")
+    ap.add_argument("--decode-on-graph", action="store_true",
+                    help="try DECODE points on this graph-mode server too (old behaviour). "
+                         "Default: when --server-state says the server keeps the decode CUDA "
+                         "graph, it captures PREFILL only and every DECODE point is deferred "
+                         "to the eager server without a capture")
     ap.add_argument("--draft-shares-name", action="store_true",
                     help="passed to point_census.py for PREFILL points")
     ap.add_argument("--observed", default=None,
@@ -114,10 +106,11 @@ def main():
     ap.add_argument("--evidence-capture", action="store_true",
                     help="the server is eager now: capture the decode point named in "
                          "evidence/eager_evidence_request.json for launch evidence only "
-                         "(frames, launching ops), then redo the evidence and the draft")
+                         "(frames, launching ops), then redo the evidence")
     ap.add_argument("--no-evidence", action="store_true",
-                    help="stop after selection: no shapes, source map, adjacency or draft")
-    ap.add_argument("--ut-cases", default=None, help="passed to coverage_ledger.py")
+                    help="stop after selection: no shapes, source map or adjacency")
+    ap.add_argument("--all-evidence", action="store_true",
+                    help="shared capture pool: resolve every censused kernel before per-config selection")
     ap.add_argument("--probe-arg", action="append", default=[],
                     help="extra serving_probe.py argument, e.g. --probe-arg=--decode-tokens=20000")
     ap.add_argument("--select-arg", action="append", default=[],
@@ -139,6 +132,9 @@ def main():
             a.probe_arg += ["--framework", "vllm", "--served-model", st["model"]]
             if st.get("iteration_log_dir"):
                 a.probe_arg += ["--iteration-log-dir", st["iteration_log_dir"]]
+        server_capture = st.get("decode_capture")
+    else:
+        server_capture = None
     if not (a.base_url and a.trace_root and a.expect_files):
         ap.error("--base-url, --trace-root and --expect-files (or --server-state) are required")
     if a.vocab_size:
@@ -165,6 +161,16 @@ def main():
     timeline = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": {},
                 "server": a.base_url, "decode_eager": a.decode_eager}
     t_all = time.time()
+    # Decode on a graph-mode server: under spec decoding the profiler drops most VERIFY
+    # replays (sglang 0.5.21/ROCm 7.2: 1 of 8 kept on most ranks), so every decode point
+    # was refused as graph-hidden and recaptured eagerly anyway -- after a failed attempt
+    # that cost up to the window timeout. Defer them to the eager server up front.
+    # Only when the server state says the decode graph is on: without --server-state the
+    # server's mode is unknown, and an "as_declared" deployment may not be graph-launched.
+    defer_decode = (st.get("framework", "sglang") == "sglang" and server_capture == "profile_cuda_graph" and not a.decode_eager
+                    and not a.decode_on_graph)
+    timeline["decode_deferred_to_eager"] = defer_decode
+    deferred = []
 
     def census_job(pt, trace_dir):
         out = os.path.join(census_dir, pt["point_id"] + ".json")
@@ -176,8 +182,12 @@ def main():
         if pt["phase"] == "PREFILL" and a.draft_shares_name:
             cmd.append("--draft-shares-name")
         rc, took, msg = run(cmd, log)
-        return {"rc": rc, "wall_s": took, "out": out if rc == 0 else None,
-                "trace_dir": trace_dir, "message": msg.splitlines()[-1] if msg else ""}
+        result = {"rc": rc, "wall_s": took, "out": out if rc == 0 else None,
+                  "trace_dir": trace_dir, "message": msg.splitlines()[-1] if msg else ""}
+        hidden_reason = census_graph_hidden_reason(pt["phase"], rc, msg)
+        if hidden_reason:
+            result.update(graph_hidden=True, graph_hidden_reason=hidden_reason)
+        return result
 
     if a.evidence_capture:
         eager_evidence(a, ev, plan, py, log, timeline)
@@ -191,12 +201,26 @@ def main():
             pid = pt["point_id"]
             done = os.path.join(census_dir, pid + ".json")
             if os.path.exists(done) and pid not in a.redo:
+                signature = pt.get("measurement_signature")
+                if signature and prev.get(pid, {}).get("measurement_signature") != signature:
+                    raise SystemExit("run_points: incompatible or unsigned shared census for %s; "
+                                     "use --redo %s or a fresh capture pool" % (pid, pid))
                 # Resume: a censused point is evidence already paid for.
                 timeline["points"][pid] = dict(prev.get(pid, {"phase": pt["phase"]}),
                                                resumed=True)
                 censuses[pid] = done
                 continue
-            rec = timeline["points"].setdefault(pid, {"phase": pt["phase"], "attempts": []})
+            rec = timeline["points"].setdefault(pid, {"phase": pt["phase"], "attempts": [],
+                                                     "measurement_signature": pt.get("measurement_signature")})
+            if defer_decode and pt["phase"] == "DECODE":
+                # graph_hidden is the contract probe_server.py (and any group driver) reads
+                # to restart eagerly and --redo exactly these points.
+                rec["attempts"].append({"tag": pid, "status": "deferred", "graph_hidden": True,
+                                        "reason": "decode is captured on the eager server "
+                                                  "(--decode-on-graph tries it here)",
+                                        "probe_wall_s": 0})
+                deferred.append(pid)
+                continue
             stamp = time.strftime("%H%M%S")
             for attempt in ("", "_r2"):
                 tag = "%s%s_%s" % (pid, attempt, stamp) if pid in a.redo else pid + attempt
@@ -224,6 +248,8 @@ def main():
                 print("[%s]   %s in %.0fs: %s" % (now(), res.get("status"), took,
                                                   res.get("verify_reason")), flush=True)
                 if res.get("status") in ("ok", "partial"):
+                    rec["capture_mode"] = ("eager" if a.decode_eager else "profile_cuda_graph") \
+                        if pt["phase"] == "DECODE" else "eager_prefill"
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
                     break
                 if res.get("server_down"):
@@ -242,7 +268,18 @@ def main():
               flush=True)
         for pid, fut in futures.items():
             c = fut.result()
-            timeline["points"][pid]["census"] = c
+            rec = timeline["points"][pid]
+            if c.get("graph_hidden"):
+                # probe_server.graph_hidden_points treats a `census` entry as a
+                # completed census. Retain the rejected census separately so the
+                # existing fallback sees this point as still needing a capture.
+                rec["census_failure"] = c
+                attempt = next(a for a in reversed(rec["attempts"])
+                               if a["trace_dir"] == c["trace_dir"])
+                attempt.update(graph_hidden=True, graph_hidden_source="point_census",
+                               graph_hidden_reason=c["graph_hidden_reason"])
+            else:
+                rec["census"] = c
             if c["out"]:
                 censuses[pid] = c["out"]
             else:
@@ -262,6 +299,13 @@ def main():
         print("run_points: the server went down after %d/%d point(s) censused; fix the cause "
               "and rerun -- censused points are kept" % (len(censuses), len(points)))
         return 1
+    if deferred:
+        # A ranking without the decode phase would be thrown away by the eager pass.
+        finish("decode deferred to eager")
+        print("[%s] %d decode point(s) deferred to the eager server: %s; %d/%d censused "
+              "here, no ranking yet" % (now(), len(deferred), ", ".join(deferred),
+                                        len(censuses), len(points)), flush=True)
+        return 1
     if not censuses:
         finish("no point produced a census")
         print("run_points: no point produced a census; nothing to rank")
@@ -279,14 +323,13 @@ def main():
     cmd = [py, os.path.join(HERE, "coverage_ledger.py"), "--points", points_file, "--out", cov]
     for pid, path in censuses.items():
         cmd += ["--census", "%s=%s" % (pid, path)]
-    if a.ut_cases:
-        cmd += ["--ut-cases", a.ut_cases]
     steps.append(("coverage_ledger", cmd))
     rank = os.path.join(ev, "kernel_ranking.json")
     cmd = [py, os.path.join(HERE, "build_ranking.py"), "--coverage", cov, "--out", rank,
            "--probe-result", os.path.join(probe_dir, "*.json")]
-    if a.decode_eager:
-        cmd += ["--eager-captured", "DECODE"]
+    for pid in sorted(censuses):
+        if timeline["points"].get(pid, {}).get("capture_mode") == "eager":
+            cmd += ["--eager-point", pid]
     steps.append(("build_ranking", cmd))
     sel = os.path.join(ev, "selection_targets.json")
     steps.append(("select_targets", [py, os.path.join(HERE, "select_targets.py"), rank,
@@ -363,7 +406,7 @@ def same_targets(shapes_file, targets_file):
 
 def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
     """After the ranking: launch stacks for the attribution candidates, selection by
-    operator over them, then what a task needs that only the traces hold, and the draft."""
+    operator over them, then collect shape/source and companion-launch evidence."""
     phase = {p["point_id"]: p["phase"] for p in points}
     rank = os.path.join(ev, "kernel_ranking.json")
     cand = sel
@@ -374,6 +417,17 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
                             "--output", cand] + [x for x in a.select_arg
                                                   if x.split("=")[0] in ("--phases",)])]):
             return False
+    if getattr(a, "all_evidence", False):
+        # A kernel small in the pooled log can dominate one config. Selection happens
+        # after projection, so discovery here must not discard its source evidence.
+        from coverage_ledger import load_census
+        names = set()
+        for pid, path in censuses.items():
+            kernels, _, _ = load_census(path, phase[pid])
+            names.update(k for k in kernels if k not in ("__collective_wait__", "__untracked_tail__"))
+        cand = os.path.join(ev, "attribution_candidates.shared.json")
+        json.dump({"scope": "shared_pool_all_censused_kernels",
+                   "targets": [{"id": k, "name": k} for k in sorted(names)]}, open(cand, "w"), indent=1)
     shapes_dir = os.path.join(ev, "evidence", "shapes")
     os.makedirs(shapes_dir, exist_ok=True)
     trace_dirs = {}
@@ -428,19 +482,10 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
     if not a.select_by_kernel:
         steps.append(("select_operators", [py, os.path.join(HERE, "select_targets.py"), rank,
                                            "--source-map", smap, "--output", sel] + a.select_arg))
-    steps += [("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets", sel,
+    steps += [("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets",
+                            cand if getattr(a, "all_evidence", False) else sel,
                             "--out", os.path.join(ev, "evidence", "adjacency.json")]
               + [x for pid in sorted(trace_dirs) for x in ("--trace-dir", trace_dirs[pid])])]
-    decls = os.path.join(ev, "task_decls.json")
-    unreviewed = False
-    if os.path.exists(decls):
-        d = json.load(open(decls))
-        unreviewed = all(t.get("needs_review") for t in d.get("tasks", []) + d.get("excluded", []))
-    if not os.path.exists(decls) or unreviewed:
-        # A draft nobody has touched is regenerated from the newer evidence; a reviewed
-        # declaration is never overwritten.
-        steps.append(("draft_task_decls", [py, os.path.join(HERE, "draft_task_decls.py"),
-                                           "--eval-dir", ev, "--out", decls, "--force"]))
     return run_steps(steps) and not bad
 
 

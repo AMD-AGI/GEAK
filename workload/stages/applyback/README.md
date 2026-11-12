@@ -6,8 +6,11 @@ baseline. This is the only stage permitted to claim an end-to-end gain.
 
 **Input**: `$RUN_ROOT/optimize/out/optimized.json` (the kept list, with each kernel's
 `kernel_src`, `kernel_src_hashes` and frozen `task_meta_sha256`),
-`$RUN_ROOT/profile/out/tasks/<k>/meta.json` (`candidate_bind` — how to wire it back), and
+`$TASKS_DIR/<k>/meta.json` (`candidate_bind` — how to wire it back), and
 `$RUN_ROOT/baseline/out/baseline.json` (the reference).
+
+Split scenarios export `TASKS_DIR` from `task_source_stage: "ut"`; legacy invocations
+fall back to `$RUN_ROOT/profile/out/tasks` in the entry scripts.
 
 **Output**: `$OUT/overlay/`, `$OUT/applied.json`, `$OUT/shadow_check.json`,
 `$OUT/e2e/bench_summary.json`, `$OUT/ab.json`, `$OUT/result.json`.

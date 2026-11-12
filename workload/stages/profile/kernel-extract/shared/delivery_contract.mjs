@@ -109,7 +109,7 @@ const EXTRACT_SCHEMA = obj({
 
 const CALLABLE_SPEC_RX = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 const validCallableSpec = (s) => CALLABLE_SPEC_RX.test(String(s || '').trim());
-// parse_profile.short_name truncates display names at 60 chars; a declared name that hit the limit
+// Legacy profiles truncated display names at 60 chars; a declared name that hit the limit
 // is our own doing, so a prefix match at it is accepted rather than read as a mismatch.
 const SHORT_NAME_LIMIT = 60;
 // Balanced groups are removed innermost-first until the symbol stops changing. One greedy pass
@@ -134,7 +134,7 @@ const stripBalanced = (symbol, opener, closer) => {
 // the `[clone .1]` rule: this pipeline appends its own annotations to a kernel name
 // (`_fwd_grouped_kernel_stage1 [sliding_attention]`, `main_kernel[prefill]`), and rocprof spells
 // memory ops `Memcpy DtoD (Device -> Device)`. The return type is then dropped by name and the FIRST
-// identifier taken, as parse_profile.short_name does; taking the last whitespace token also drops
+// identifier taken, as the legacy display formatter did; taking the last whitespace token also drops
 // `void`, but on any of those annotated spellings it answers with the annotation.
 function canonicalDeviceKernel(s) {
   const stripped = stripBalanced(stripBalanced(
@@ -188,7 +188,7 @@ function kernelIdentitiesMatch(a, b) {
 }
 function requiredDeviceKernel(h) {
   if (!h || h.entity_kind !== 'gpu_kernel') return '';
-  // entity_evidence.matched_profiled_kernel is what parse_profile.py --annotate stamped on the row,
+  // entity_evidence.matched_profiled_kernel is what the legacy profile annotation stamped on the row,
   // so it is the profiler's own name for this entity and outranks the display short_name.
   return String(h.device_kernel ||
     (h.entity_evidence && h.entity_evidence.matched_profiled_kernel) ||
@@ -396,7 +396,7 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
 // triton_kernel) as entity_kind. The profiled row is the authority: a head whose device_kernel
 // matches a profiled gpu_kernel row takes that row's entity_kind.
 // Every row kind is evidence, not only gpu_kernel rows: canonicalization drops the namespace, so
-// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as parse_profile.py guards.
+// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as the recorded entity-kind contract requires.
 // Exact names decide first; a canonical match that reaches rows of different kinds is ambiguous.
 // A row is identified by its most specific name only: a display short_name is shared across
 // distinct kernels (every vectorized_elementwise_kernel instantiation), so it must not stand in for
