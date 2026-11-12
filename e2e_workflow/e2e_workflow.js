@@ -124,6 +124,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
+    use_gluon_skill: USE_GLUON_SKILL,
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
@@ -131,6 +132,7 @@ const laneArgs = (wfArgs) => {
   if (RDNA4_ISOLATE) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
+    out.use_gluon_skill = 'false';
     out.perf_knowledge_dir = '';
     out.warm_start = 'off';
   }
@@ -672,6 +674,8 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // high priors that roles reproduce and gate by the usual on-box A/B; never override measurement.
 // Default off (use_expert_skills="true" enables); flag and dir are passed to the kernel layer.
 const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_GLUON_SKILL = String(A.use_gluon_skill != null ? A.use_gluon_skill : 'false').toLowerCase();
+if (!['auto', 'true', 'false'].includes(USE_GLUON_SKILL)) throw new Error('use_gluon_skill must be auto, true or false');
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.

@@ -36,7 +36,7 @@ operator cards; for raw hardware numbers see `[[hardware/cdna3_mi300/arch.md]]` 
 
 | file | what it covers |
 |---|---|
-| `[[optimization/occupancy_and_registers.md]]` | 512 VGPR/EU, 16-granule alloc, AGPR pool, occupancy vs spilling, waves/EU, `num_warps`/`waves_per_eu` |
+| `[[optimization/occupancy_and_registers.md]]` | 512 VGPR/EU, 8-granule alloc, AGPR pool, occupancy vs spilling, waves/EU, `num_warps`/`waves_per_eu` |
 | `[[optimization/lds_and_bank_conflicts.md]]` | 64KB (CDNA3) / 160KB (CDNA4) LDS, 32 banks, padding, XOR swizzle, double-buffer |
 | `[[optimization/mfma_scheduling.md]]` | 16×16 vs 32×32 MFMA, AGPR accumulators, issue cadence, latency hiding, `OPTIMIZE_EPILOGUE`, 512B Tagram |
 | `[[optimization/memory_pipelining.md]]` | `global_load_lds` / async copy, software pipelining, `num_stages`, prefetch, ds_read/ds_write overlap, 128-bit GLOBAL_LOAD_LDS on CDNA4 |

@@ -12,7 +12,7 @@ You work in the canonical `WORKSPACE` (the author mode's empty/seed workspace bu
 from the op task dir). The op's correctness contract is an **IMMUTABLE** unittest you must not edit.
 
 ## Inputs (in your prompt)
-- `TARGET_LANGUAGE` — `triton` (always supported) | `flydsl` | `hip` | `ck` (pluggable; only if
+- `TARGET_LANGUAGE` — `triton` | `gluon` | `flydsl` | `hip` | `ck` (pluggable; only if
   requested). `flydsl` is aiter's Python kernel DSL (JIT like triton — NO build step); it is the
   preferred author target for **dense / quantized GEMM (esp. fp8 / A4W4 / mxfp4)** because aiter ships a
   production FlyDSL hgemm you reuse as the correct baseline, then the optimize loop tunes its knobs.
@@ -63,9 +63,12 @@ Read, as reference, before writing:
   correct baseline is to call aiter's `flydsl_hgemm` — `out = a @ b.T (+bias)` — rather than hand-writing
   layout algebra; commit that, the optimize loop tunes tile/split_k/preshuffle. flydsl is JIT (no build).
   For **gluon** the dir is facts-only (`overview.md`, `programming_model.md`, `gemm_cookbook.md`); the
-  fuller language surface, the TTGIR→Gluon transcription toolchain and pipeline re-injection live in the
-  `gluon_authoring` expert skill and are only injected when `use_expert_skills` is on. That skill is
-  mechanics only — it carries no search strategy, so it does not compete with your own loop.
+  full Gluon method — API surface, TTGIR→Gluon transcription, the stage spine (entry → budget →
+  transcribe → recover → climb → close), hand-written pipeline first, gfx950-first with gfx942 as the
+  downgrade — lives in the `gluon_authoring` skill, supplied as a language reference on gfx942/gfx950
+  Triton/Gluon lanes only when the run sets `use_gluon_skill=auto` (default false). Draft status remains
+  visible; this does not claim a validated speedup. Follow applicable stages and evidence
+  rules within your rounds, but this workflow still owns the loop, the GPU lock, timing and acceptance.
 - **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus
   `operators/<op>/backends/<lang>.md` (the card for your exact language — code skeleton, knobs, pitfalls).
   Op short→dir: gemm→`dense_gemm`, attention_prefill→`attention_prefill_fmha`,
@@ -146,7 +149,7 @@ Return JSON:
 ```json
 {
   "authored": true,
-  "target_language": "triton|flydsl|hip|ck",
+  "target_language": "triton|gluon|flydsl|hip|ck",
   "correctness": "pass|fail",
   "baseline_ms": 0.0,
   "kernel_src_path": "<WORKSPACE>/kernel_src/<file>",

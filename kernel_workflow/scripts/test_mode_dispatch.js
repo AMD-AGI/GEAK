@@ -399,6 +399,16 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       JSON.stringify(trace.agentLabels));
   }
 
+  for (const mode of ['optimize', 'bakeoff']) {
+    for (const setting of ['auto', 'false']) {
+      const {run, trace} = build({...BASE, mode, use_gluon_skill:setting, backends:['triton','gluon']}, {
+        agent:healthy('triton', [{language:'gluon',route:'author'}])});
+      await run();
+      ok(trace.workflowCalls.length > 0 && trace.workflowCalls.every(c => c.args.use_gluon_skill === setting),
+        `Gluon method ${setting} reaches every ${mode} lane`);
+    }
+  }
+
   console.log(failures === 0
     ? '\nPASS: mode dispatch + bake-off lane routing behave as specified.'
     : `\nFAILED: ${failures} assertion(s).`);

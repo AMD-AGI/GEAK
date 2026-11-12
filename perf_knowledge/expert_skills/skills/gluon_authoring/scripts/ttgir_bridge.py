@@ -37,6 +37,7 @@ Three consequences worth stating, because they are the reason to switch:
 
 MODES
 -----
+  capabilities  report installed compiler APIs and normalization probes, no TTGIR needed.
   recover   .ttgir -> Gluon layout constants (+ JSON facts), with per-use-site
             provenance and a round-trip proof for every layout.
   verify    plain.ttgir vs anchor.ttgir, compared as LinearLayout normal forms.
@@ -127,7 +128,8 @@ _CAPS: dict | None = None
 # on the one build where it matters, which is how a 3.6 box ends up comparing its
 # DISTRIBUTED layouts as text too -- weaker than it needs to be, for no reason.
 _CAP_PROBE = """\
-import sys
+import inspect, json, sys
+import triton
 from triton._C.libtriton import ir, gluon_ir
 import triton.experimental.gluon.language as gl
 
@@ -137,6 +139,26 @@ def say(c):
     sys.stdout.flush()
 
 
+def api(obj):
+    if obj is None:
+        return {"available": False, "parameters": None}
+    try:
+        parameters = list(inspect.signature(getattr(obj, "fn", obj)).parameters)
+    except (TypeError, ValueError):
+        parameters = None
+    return {"available": True, "parameters": parameters}
+
+
+amd = getattr(gl, "amd", None)
+cdna4 = getattr(amd, "cdna4", None)
+apis = {
+    "mfma_layout": api(getattr(amd, "AMDMFMALayout", None)),
+    "wmma_layout": api(getattr(amd, "AMDWMMALayout", None)),
+    "scale_layout": api(getattr(cdna4, "get_mfma_scale_layout", None)),
+    "padded_shared_layout": api(getattr(cdna4, "compute_efficient_padded_shared_layout", None)),
+    "layout_view": api(getattr(gluon_ir, "get_layout_view", None)),
+}
+print("API:" + json.dumps({"triton_version": triton.__version__, "native_apis": apis}), flush=True)
 if hasattr(gluon_ir, "get_layout_view"):
     say("layout_view")
 ctx = ir.context()
@@ -148,7 +170,7 @@ try:
     say("distributed_norm")
 except Exception:
     pass
-# LAST: aborts the interpreter on Triton 3.6.
+# LAST: can abort on older builds; some vendor 3.6 builds backport this capability.
 try:
     lay = gl.SwizzledSharedLayout(4, 1, 16, order=[1, 0])
     b.to_linear_layout(lay._to_ir(b), [64, 64])
@@ -158,7 +180,7 @@ except Exception:
 """
 
 
-def capabilities() -> dict:
+def capabilities(force_probe: bool = False) -> dict:
     """What this Triton build can do, probed in a CHILD process.
 
     Probed rather than version-gated, and out-of-process rather than in a try/except,
@@ -174,10 +196,10 @@ def capabilities() -> dict:
     subprocess (or to force a set) if the ~0.4s is unwelcome in a loop.
     """
     global _CAPS
-    if _CAPS is not None:
+    if _CAPS is not None and not force_probe:
         return _CAPS
     env = os.environ.get("TTGIR_BRIDGE_CAPS")
-    if env is not None:
+    if env is not None and not force_probe:
         names = {n.strip() for n in env.split(",") if n.strip()}
         _CAPS = {"shared_norm": "shared_norm" in names,
                  "distributed_norm": "distributed_norm" in names,
@@ -186,6 +208,8 @@ def capabilities() -> dict:
     import subprocess
     names: set = set()
     how = "subprocess"
+    api_info: dict = {}
+    diagnostic = ""
     try:
         # A non-zero / signal exit is EXPECTED on the builds this probe exists for; what
         # matters is the lines that made it out before the child died, so returncode is
@@ -195,11 +219,17 @@ def capabilities() -> dict:
         for ln in (r.stdout or "").splitlines():
             if ln.startswith("CAP:"):
                 names.add(ln[4:].strip())
-    except Exception:  # noqa: BLE001
+            elif ln.startswith("API:"):
+                api_info = json.loads(ln[4:])
+        if r.returncode:
+            diagnostic = (r.stderr or f"probe exited {r.returncode}")[-2000:]
+    except Exception as exc:  # noqa: BLE001
         how = "probe-failed"
+        diagnostic = str(exc)
     _CAPS = {"shared_norm": "shared_norm" in names,
              "distributed_norm": "distributed_norm" in names,
-             "layout_view": "layout_view" in names, "probed": how}
+             "layout_view": "layout_view" in names, "probed": how,
+             **api_info, "probe_diagnostic": diagnostic}
     return _CAPS
 
 
@@ -351,13 +381,15 @@ def _pipeline_facts(text: str) -> dict:
     Signals, both literal in the TTGIR: the `tt.num_stages` attribute, and the count of
     `scf.for` loop-carried `iter_args`.
 
-    **They are not of equal standing, and treating them as such produced a false positive.**
-    The attribute is decisive. The carry count is not: the pipeliner does add carries for
-    its in-flight buffers, but an algorithmic loop carries accumulators for its own reasons
-    -- every online-softmax attention loop carries m/l/acc and usually an offset, so it
-    reads >= 2 while un-pipelined. One dump cannot separate the pipeliner's carries from
-    the algorithm's. So the caller must let the attribute decide when it is present, and
-    report INCONCLUSIVE rather than assert when it is absent.
+    **They are not of equal standing, and treating them as such is a false positive.** The
+    attribute decides. The carry count does not: the pipeliner does add carries for its
+    in-flight buffers, but an algorithmic loop carries accumulators for its own reasons --
+    every online-softmax attention loop carries m/l/acc and usually an offset, so it reads
+    >= 2 while un-pipelined. One dump cannot separate the pipeliner's carries from the
+    algorithm's, so the caller lets the attribute decide when it is present and reports
+    INCONCLUSIVE rather than asserting when it is absent. `parity_gate.py` refuses the same
+    inference at the gate; the two must agree or a port is told two different things about
+    which suspect owns its residual.
     """
     ns = [int(m.group(1)) for m in _NS_ATTR_RE.finditer(text)]
     carries = [len([x for x in m.group(1).split(",") if x.strip()])
@@ -433,12 +465,13 @@ _MMA_KINDS = ("amd_mfma", "amd_wmma", "nvidia_mma")
 # 64 KiB/CU, CDNA4 has 160 KiB. The figure lives in the shared vendor/amd occupancy model
 # rather than being copied here, because three copies of one hardware table drift.
 #
-# GEAK carries only the two CDNA generations this skill claims (`match.gens`), sourced from
+# GEAK fallback, for when `amd_occupancy` (kernel_workflow/scripts/kernel_tools/, reached through
+# the shim beside this file) is not importable (scripts copied out
+# alone): only the two CDNA generations this skill claims (`match.gens`), sourced from
 # perf_knowledge/hardware/: cdna3_mi300/arch.md "64 KiB/CU, 32 banks" and
-# cdna4_mi350/memory.md "160 KiB/CU, 64 banks". Upstream delegates to its own
-# `amd_occupancy.lds_per_cu()`, which belongs to the occupancy/roofline regime this package
-# deliberately does not vendor -- so that module is preferred when present and this table is
-# the fallback, rather than the other way round.
+# cdna4_mi350/memory.md "160 KiB/CU, 64 banks". `amd_occupancy.lds_per_cu()` (backed by
+# perf_knowledge/hardware/data/hw_constants.json via _hwdata) is preferred whenever it imports, and its None is
+# final -- this table never overrides a decline from the shared model.
 _LDS_PER_CU = {"gfx942": 65536, "gfx950": 163840}
 
 
@@ -1192,12 +1225,9 @@ def report(rec: Recovery, verbose: bool = False) -> str:
         lines.append(f"  PIPELINE (read from THIS dump, not from the source): "
                      f"tt.num_stages={pf.get('num_stages') or 'absent'}, "
                      f"{pf['loops']} scf.for, max iter_args={mia}")
-        # `iter_args >= 2` is NOT on its own evidence of pipelining, and treating it as
-        # such misreported an attention kernel whose dump said tt.num_stages=1: every
-        # online-softmax loop carries m/l/acc (plus an offset), so the count is >= 2 for
-        # algorithmic reasons. The pipeliner's own carries cannot be told apart from the
-        # algorithm's in a single dump, so the attribute decides when it is present and the
-        # carry count is only ever a hint when it is absent.
+        # The attribute decides; `iter_args >= 2` never does on its own. Every online-softmax
+        # loop carries m/l/acc for algorithmic reasons, so a carry-count verdict calls an
+        # un-pipelined attention kernel pipelined and sends its whole residual to layer 4.
         if (mns or 0) > 1:
             lines.append("  => plain IS software-pipelined. `gluon_to_ttgir` does not run the")
             lines.append("     pipeliner by default, so a FAITHFUL anchor sits below plain BY")
@@ -1224,7 +1254,9 @@ def report(rec: Recovery, verbose: bool = False) -> str:
             lines.append(f"     max iter_args={mia} is a hint at best -- the pipeliner adds carries,")
             lines.append("     but so does any accumulator loop, and one dump cannot separate them.")
             lines.append("     Settle it with the load count and a peeled prologue across a depth")
-            lines.append("     sweep, or measure `plain at num_stages=1` directly.")
+            lines.append("     sweep, or measure `plain at num_stages=1` directly. Do NOT hand a")
+            lines.append("     guess to Stage-Recover: `lost pipeline` is one of three suspects and")
+            lines.append("     naming the wrong one mis-attributes the residual for the whole run.")
         lines.append("     Do not infer num_stages from the source: a file containing 1 can")
         lines.append("     dispatch a branch compiled at 2.")
     lines.append("")
@@ -2174,21 +2206,19 @@ def _selftest() -> int:
     ck("_pipeline_facts on a loop-free module is empty",
        _pipeline_facts("tt.func @k() { tt.return }")["loops"] == 0)
 
-    # An online-softmax loop carries m/l/acc/offset for ALGORITHMIC reasons, so a carry
-    # count >= 2 must not by itself produce a "plain IS pipelined" verdict. Pinned in both
-    # directions, and on the rendered text rather than the facts dict, because the bug was
-    # in the verdict rather than in the parse.
+    # The verdict, not the parse. An online-softmax loop carries m/l/acc/offset for
+    # ALGORITHMIC reasons, so a carry count >= 2 must never on its own read as "pipelined".
+    # Pinned on the rendered text in all three directions, because that is where the bug was.
     def _verdict(text):
-        r = Recovery(path="<selftest>", arch="gfx950", num_warps=None,
-                     threads_per_warp=None, pipeline=_pipeline_facts(text))
-        return report(r)
+        return report(Recovery(path="<selftest>", arch="gfx950", num_warps=None,
+                               threads_per_warp=None, pipeline=_pipeline_facts(text)))
 
-    attn = ('scf.for %i = %c0 to %n step %c1 iter_args(%m = %a, %l = %b, %acc = %c, '
-            '%off = %d) { } {tt.num_stages = 1 : i32}')
-    v_attn = _verdict(attn)
-    ck("attention-shaped ns=1 loop is NOT called pipelined",
-       "is NOT pipelined" in v_attn and "IS software-pipelined" not in v_attn,
-       v_attn)
+    v_attn = _verdict('scf.for %i = %c0 to %n step %c1 iter_args(%m = %a, %l = %b, '
+                      '%acc = %c, %off = %d) { } {tt.num_stages = 1 : i32}')
+    ck("an attention-shaped ns=1 loop is NOT called pipelined",
+       "is NOT pipelined" in v_attn and "IS software-pipelined" not in v_attn, v_attn)
+    ck("...and its 4 carries are named as a non-counter-signal",
+       "NOT a counter-signal" in v_attn, v_attn)
     ck("...and it says the depth may still be reachable via the annotation",
        "REACHABLE" in v_attn, v_attn)
     v_deep = _verdict('scf.for %i = %c0 to %n step %c1 iter_args(%a = %x) '
@@ -2197,7 +2227,7 @@ def _selftest() -> int:
        "IS software-pipelined" in v_deep, v_deep)
     v_none = _verdict("scf.for %i = %c0 to %n step %c1 iter_args(%a = %x, %b = %y) { }")
     ck("a dump with no tt.num_stages is INCONCLUSIVE, not a verdict",
-       "INCONCLUSIVE" in v_none, v_none)
+       "INCONCLUSIVE" in v_none and "IS software-pipelined" not in v_none, v_none)
 
     ck("_backend_key amd", _backend_key("gfx942") == ("amd", "hip", "gfx942", 64))
     ck("_backend_key nvidia via sm90", _backend_key("sm90") == ("nvidia", "cuda", 90, 32))
@@ -2464,10 +2494,12 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="offline smoke; no GPU")
     sub = ap.add_subparsers(dest="mode")
+    c = sub.add_parser("capabilities", help="inspect installed Triton APIs; no GPU or hardware assets")
+    c.add_argument("--json", action="store_true", help="print the capability record as JSON")
 
     r = sub.add_parser("recover", help="ttgir -> Gluon layout constants + JSON facts")
     r.add_argument("--ttgir", required=True)
-    r.add_argument("--arch", default="gfx942")
+    r.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     r.add_argument("--warp-size", type=int)
     r.add_argument("--out", help="write the layout module here (default: stdout report only)")
     r.add_argument("--json", dest="json_out", help="write machine-readable facts here")
@@ -2480,14 +2512,14 @@ def main() -> None:
     v = sub.add_parser("verify", help="plain vs anchor, as LinearLayout normal forms")
     v.add_argument("--plain", required=True)
     v.add_argument("--anchor", required=True)
-    v.add_argument("--arch", default="gfx942")
+    v.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     v.add_argument("--warp-size", type=int)
     v.add_argument("--json", dest="json_out", help="write the verdict here")
 
     w = sub.add_parser("view", help="ASCII per-lane view of one recovered layout")
     w.add_argument("--ttgir", required=True)
     w.add_argument("--role", required=True)
-    w.add_argument("--arch", default="gfx942")
+    w.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     w.add_argument("--warp-size", type=int)
     w.add_argument("--hardware", action="store_true", help="hardware view instead of tensor view")
     w.add_argument("--max-rows", type=int, default=24, help="0 = no limit")
@@ -2496,9 +2528,29 @@ def main() -> None:
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(_selftest())
+    if a.mode == "capabilities":
+        # An inventory must inspect the real compiler, not TTGIR_BRIDGE_CAPS overrides.
+        caps = capabilities(force_probe=True)
+        caps["note"] = "API presence and normalization probes only; target lowering, numerical correctness and performance require separate checks."
+        if a.json:
+            print(json.dumps(caps, indent=2))
+        else:
+            print(f"Triton {caps.get('triton_version', 'unavailable')}")
+            for name, info in caps.get("native_apis", {}).items():
+                print(f"{name}: {info}")
+            for name in ("layout_view", "distributed_norm", "shared_norm", "probe_diagnostic", "note"):
+                print(f"{name}: {caps[name]}")
+        raise SystemExit(0 if caps.get("native_apis") else 3)
     if a.mode is None:
         ap.print_help()
         raise SystemExit(2)
+    if not getattr(a, "arch", None):
+        # No silent default: the recovered constructors, the LDS divisor and the gl.amd
+        # sub-namespace are all arch-specific, and a gfx942 default applied to a gfx950 dump
+        # reports a plausible wrong anchor rather than an error.
+        raise SystemExit(
+            f"[ttgir_bridge] {a.mode}: --arch is required (the arch the TTGIR was compiled for, "
+            f"e.g. --arch gfx950; gfx942 for the CDNA3 downgrade). Refusing to guess one.")
 
     if a.mode == "recover":
         rec = recover(a.ttgir, a.arch, a.warp_size)
