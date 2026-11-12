@@ -73,3 +73,7 @@ quality evidence plus every required objective; a throughput verdict alone is in
 An E2E claim requires the declared serving comparison. Stop on demonstrated goal attainment,
 user stop, exhausted budget or unavailable prerequisites; preserve progress and distinguish these
 outcomes. Meeting a floor does not prove a higher goal.
+
+At campaign handoff, or when the user requests a route review, use the
+[Report module](stages/report/html-timeline/SKILL.md) to produce a compact HTML timeline
+and link it from the campaign report and user response.

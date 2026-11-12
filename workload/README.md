@@ -36,6 +36,7 @@ needed; it need not be named in the controller. All calls follow the
 | Optimize | Produce an isolated candidate | Kernel: [invocation scope](stages/optimize/direct.md), [Kernel Workflow](stages/optimize/geak-kernel-workflow/SKILL.md), [OOB / native tools](stages/optimize/native-frozen/SKILL.md), [raw agent](stages/optimize/subagent-raw/SKILL.md). System: [OOB](stages/optimize/system-oob/SKILL.md) |
 | Apply back | Integrate a candidate and prove it took effect | [Kernel integration](stages/applyback/direct.md), [system runtime](stages/applyback/system-runtime/SKILL.md) |
 | Evaluate | Judge a serving comparison | [Native E2E](stages/evaluate/native-e2e/SKILL.md), using the benchmark's own quality and validity receipts |
+| Report | Explain the actual decisions, calls and parallel work | [HTML timeline](stages/report/html-timeline/SKILL.md), with an [interactive example](stages/report/html-timeline/assets/example.html) |
 
 ## Evidence and the performance floor
 
