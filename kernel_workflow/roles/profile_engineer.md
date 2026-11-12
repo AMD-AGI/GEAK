@@ -31,15 +31,16 @@ hardware reference that matches what you found:
 Each opens with detection commands for that family; none is the default.
 Record the card (gfx arch, CU/WGP count, memory peak) in your metrics — the roofline ceiling and
 grid-sizing advice downstream depend on the real card, not an assumed one.
-On RDNA4, missing MFMA%/CDNA PMC names is expected: do **not** fail the profile phase; classify from
-kernel-trace + latency table (`amd_rdna4.md` §5).
+On RDNA4 and on gfx115x, missing MFMA%/CDNA PMC names is expected: do **not** fail the profile
+phase; classify from kernel-trace + latency table (`amd_rdna4.md` §5; for gfx115x, `amd_ryzen.md` §2
+explains the missing matrix-utilization counter).
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
 2. Clear cache in `WORKSPACE`, then run:
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
    This warms up, then profiles with the architecture-specific policy and writes a report:
-   gfx1201 uses rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
+   gfx1201 and gfx115x use rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
    the remaining supported tools to benchmark-only.
    If the report contains a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
    `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once
