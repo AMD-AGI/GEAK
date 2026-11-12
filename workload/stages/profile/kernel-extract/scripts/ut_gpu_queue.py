@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -22,6 +23,59 @@ def identity(pid):
         return fields[19] if fields[0] not in ('Z', 'X') else None
     except (OSError, IndexError):
         return None
+
+
+# A docker CPU lane runs in its own PID namespace, where the broker's PID (a process of
+# the controller's namespace) is invisible or names an unrelated process. Lanes judge the
+# broker by its heartbeat file instead; same-namespace callers keep the PID identity check.
+# The broker records its staleness bound in broker.json, so a lane needs no matching env.
+BROKER_STALE_S = float(os.environ.get('UT_WAVE_BROKER_STALE_S', 30))
+BROKER_BEAT_S = 1.0
+
+
+def pid_namespace():
+    try:
+        return os.readlink('/proc/self/ns/pid')
+    except OSError:
+        return None
+
+
+def beat(wave, stopped=False):
+    from ut_wave import save
+    save(os.path.join(wave, 'broker.hb'), {'pid': os.getpid(), 't': time.time(), 'stopped': stopped})
+
+
+def beat_while_alive(wave):
+    """Beat from a daemon thread for the broker's lifetime, independent of its main loop:
+    a loop iteration blocked on docker/filesystem calls must not look like a dead broker.
+    Set the returned event and join the thread before the final `stopped` beat."""
+    done = threading.Event()
+
+    def run():
+        while not done.wait(BROKER_BEAT_S):
+            try:
+                beat(wave)
+            except OSError:
+                pass  # transient filesystem error; the next beat retries
+    thread = threading.Thread(target=run, name='broker-heartbeat', daemon=True)
+    thread.start()
+    return done, thread
+
+
+def broker_alive(wave, now=None):
+    """Is this wave's broker running, judged from the caller's PID namespace?"""
+    from ut_wave import load
+    broker = load(os.path.join(wave, 'broker.json'), {})
+    if not broker:
+        return False
+    ns = pid_namespace()
+    if 'pid_ns' not in broker or (ns is not None and ns == broker['pid_ns']):
+        return identity(broker['pid']) == broker['identity']
+    hb = load(os.path.join(wave, 'broker.hb'), {})
+    stale = float(broker.get('stale_s', BROKER_STALE_S))
+    age = (time.time() if now is None else now) - float(hb.get('t', 0))
+    return (hb.get('pid') == broker['pid'] and not hb.get('stopped')
+            and -stale <= age <= stale)
 
 
 def release(fds):
@@ -138,8 +192,7 @@ def submit(a):
                 if result.get('error'):
                     print(result['error'], file=sys.stderr)
                 return result['returncode']
-            broker = load(os.path.join(wave, 'broker.json'), {})
-            if not broker or identity(broker['pid']) != broker['identity']:
+            if not broker_alive(wave):
                 Path(request, 'cancel').touch()
                 raise SystemExit('GPU broker exited; request cancelled; inspect gpu_queue before resuming')
             time.sleep(.2)
@@ -163,8 +216,7 @@ def drain_owner(wave, owner):
                 pending.append(path)
         if not pending:
             return
-        broker = load(os.path.join(wave, 'broker.json'), {})
-        if not broker or identity(broker['pid']) != broker['identity']:
+        if not broker_alive(wave):
             raise RuntimeError('GPU broker lost before task drained; do not relaunch writer')
         time.sleep(.2)
 
@@ -191,7 +243,10 @@ def broker(wave, controller_pid):
     stopping = [parent_id is None]
     for s in (signal.SIGTERM, signal.SIGINT):
         signal.signal(s, lambda *_: stopping.__setitem__(0, True))
-    save(os.path.join(wave, 'broker.json'), {'pid': os.getpid(), 'identity': identity(os.getpid())})
+    beat(wave)
+    beating, beater = beat_while_alive(wave)
+    save(os.path.join(wave, 'broker.json'), {'pid': os.getpid(), 'identity': identity(os.getpid()),
+                                             'pid_ns': pid_namespace(), 'stale_s': BROKER_STALE_S})
 
     def valid(req):
         token = load(os.path.join(wave, 'state', req.get('owner', '') + '.token'), {})
@@ -275,6 +330,9 @@ def broker(wave, controller_pid):
         if identity(controller_pid) != parent_id:
             for row in cfg['rows']:
                 backend.stop(row['label'])
+        beating.set()
+        beater.join()
+        beat(wave, stopped=True)
 
 
 def descendants():

@@ -9,6 +9,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -165,6 +167,83 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(self.result(job)['returncode'], 86)
         self.assertFalse(Q.last_command_passed(str(self.wave), 'a'))
         self.assert_free()
+
+    def test_lane_in_another_pid_namespace_judges_the_broker_by_heartbeat(self):
+        # A docker CPU lane cannot see the broker's PID (other namespace). Before the
+        # heartbeat, its `ut_wave.py gpu` cancelled every request as "GPU broker exited".
+        wave = str(self.wave)
+        self.assertTrue(Q.broker_alive(wave))
+        foreign = mock.patch.multiple(Q, pid_namespace=mock.DEFAULT, identity=mock.DEFAULT)
+        with foreign as m:
+            m['pid_namespace'].return_value = 'pid:[1]'
+            m['identity'].return_value = None
+            self.assertTrue(Q.broker_alive(wave))
+            env = {'UT_WAVE_DIR': wave, 'UT_WAVE_OWNER': 'a', 'UT_WAVE_TOKEN': 'a', 'UT_WAVE_TASK': 'a'}
+            args = SimpleNamespace(count=None, timeout=20, env=[], cwd=None,
+                                   command=['--', sys.executable, '-c', 'print("lane job")'])
+            with mock.patch.dict(os.environ, env):
+                self.assertEqual(Q.submit(args), 0)
+            hb = W.load(str(self.wave / 'broker.hb'))
+            self.assertFalse(Q.broker_alive(wave, now=hb['t'] + Q.BROKER_STALE_S + 5))
+            self.broker.terminate()
+            self.broker.wait(20)
+            self.assertTrue(W.load(str(self.wave / 'broker.hb'))['stopped'])
+            self.assertFalse(Q.broker_alive(wave))
+        self.assertFalse(Q.broker_alive(wave))
+
+
+    def test_heartbeat_continues_while_the_broker_loop_is_blocked(self):
+        # A broker iteration can block on docker/filesystem calls for longer than the
+        # staleness bound; a heartbeat written only between iterations then made every
+        # docker lane cancel its request as "GPU broker exited".
+        self.broker.terminate()
+        self.broker.wait(20)
+        blocked, release = self.wave / 'blocked', self.wave / 'release'
+        self.addCleanup(lambda: release.touch())  # runs before cleanup(): unblock a failed run
+        stub = Path(self.temp.name, 'blocking_broker.py')
+        stub.write_text(
+            'import sys, time\n'
+            'from pathlib import Path\n'
+            'sys.path.insert(0, %r)\n'
+            'import ut_gpu_queue as Q, ut_wave as W\n'
+            'class Blocking(W.Local):\n'
+            '    def alive(self, name):\n'
+            '        Path(%r).touch()\n'
+            '        while not Path(%r).exists():\n'
+            '            time.sleep(.05)\n'
+            '        return super().alive(name)\n'
+            'Q.BROKER_BEAT_S = .1\n'
+            'Q.backend_for = lambda wave, cfg: Blocking(wave)\n'
+            'Q.broker(sys.argv[1], int(sys.argv[2]))\n' % (str(Path(Q.__file__).parent), str(blocked), str(release)))
+        (self.wave / 'broker.json').unlink()
+        self.broker = subprocess.Popen([sys.executable, str(stub), str(self.wave), str(self.parent.pid)],
+                                       env=dict(os.environ, GEAK_GPU_REQUIRE_IDLE='0'),
+                                       stdout=self.broker_log, stderr=subprocess.STDOUT)
+        self.wait(lambda: (self.wave / 'broker.json').exists())
+        self.submit('a', 'print("PASS")')
+        self.wait(blocked.exists)
+        first = W.load(str(self.wave / 'broker.hb'))['t']
+        self.wait(lambda: W.load(str(self.wave / 'broker.hb'), {}).get('t', 0) > first + .5)
+        self.assertIsNone(self.broker.poll())
+        with mock.patch.object(Q, 'pid_namespace', return_value='pid:[1]'), \
+                mock.patch.object(Q, 'identity', return_value=None):
+            hb = W.load(str(self.wave / 'broker.hb'))
+            self.assertTrue(Q.broker_alive(str(self.wave), now=hb['t'] + 1))
+        release.touch()
+        self.broker.terminate()
+        self.broker.wait(20)
+        self.assertTrue(W.load(str(self.wave / 'broker.hb'))['stopped'])
+        self.assertFalse(Q.broker_alive(str(self.wave)))
+
+    def test_lane_honours_the_staleness_bound_the_broker_recorded(self):
+        wave = str(self.wave)
+        broker = W.load(str(self.wave / 'broker.json'))
+        self.assertEqual(broker['stale_s'], Q.BROKER_STALE_S)
+        W.save(str(self.wave / 'broker.json'), dict(broker, stale_s=300))
+        hb = W.load(str(self.wave / 'broker.hb'))
+        with mock.patch.object(Q, 'pid_namespace', return_value='pid:[1]'):
+            self.assertTrue(Q.broker_alive(wave, now=hb['t'] + 200))
+            self.assertFalse(Q.broker_alive(wave, now=hb['t'] + 400))
 
 
 if __name__ == '__main__':
