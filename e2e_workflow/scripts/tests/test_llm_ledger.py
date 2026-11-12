@@ -1219,11 +1219,19 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
         "e2e_workflow/e2e_workflow.js": {
             "const { spawn } = require('child_process');": 1,
             "const { execFileSync } = require('child_process');": 4,
+            # PR #574: the Expt-3 routing cascade's Path-B verifier (__routeReadFile) does a GUARDED
+            # require('fs') -- try/catch returns null where require is absent, so the seam suppresses
+            # routing (Path A) rather than failing. Intentional + reviewed; pinned here like the others.
+            "var fs = require('fs');": 1,
         },
         "kernel_workflow/kernel_workflow.js": {
             "const { spawn } = require('child_process');": 1,
         },
-        "kernel_workflow/kernel_lane.js": {},
+        "kernel_workflow/kernel_lane.js": {
+            # PR #574: P1 shadow audit's GUARDED fs probe (typeof require check + try/catch -> null),
+            # so it no-ops where require is absent. Intentional + reviewed; pinned like the others.
+            "try { if (typeof require === 'function') { __p1ShadowFS = require('fs'); } } catch (e) { __p1ShadowFS = null; }": 1,
+        },
     }
 
     @staticmethod
