@@ -297,6 +297,29 @@ class VllmProfileTest(unittest.TestCase):
                 self.assertEqual([c[2] for c in mine[1:]], [want] * 5)
         self.assertEqual(len(set(salts)), 3)
 
+    def test_vllm_entry_defaults_preimports_and_stack_frames_do_not(self):
+        import build_task_plan as B
+        tdir = self.root / "tasks" / "t"
+        (tdir / "run").mkdir(parents=True)
+        (self.root / "evidence").mkdir()
+        want = ["vllm.platforms", "vllm._custom_ops", "vllm._aiter_ops"]
+        kda = {"kernels": ["chunk_kda_fwd_kernel"],
+               "target_callable": "vllm.model_executor.layers.fla.ops.kda:chunk_kda"}
+        se = B.server_evidence(str(self.root), kda, str(tdir))
+        self.assertEqual(se["server_preimports"], want)
+        # an AITER / Triton entry launched from vLLM code keeps a bare import environment
+        cv = {"variants": [{"stack": ["vllm.model_executor.layers.fused_moe:fused_experts",
+                                      "aiter.ops.triton.moe:moe_kernel"]}]}
+        self.assertEqual(B.frameworks({"target_callable": "aiter.ops.triton.moe:moe"}, cv), [])
+        self.assertEqual(B.frameworks(kda, cv), ["vllm"])
+        # sglang keeps its stack-wide default
+        cv["variants"].append({"stack": ["sglang.srt.layers.attention:fwd"]})
+        self.assertEqual(B.frameworks({"target_callable": "aiter.x:y"}, cv), ["sglang"])
+        # the task's own declaration always wins
+        se = B.server_evidence(str(self.root), dict(kda, server_preimports=["vllm.platforms"]),
+                               str(tdir))
+        self.assertEqual(se["server_preimports"], ["vllm.platforms"])
+
     def test_profile_rpc_uses_vllm_fields(self):
         with patch.object(probe, "post", return_value="{}") as post:
             probe.start_profile("http://server", "/traces/de_2", 8, [], 30)

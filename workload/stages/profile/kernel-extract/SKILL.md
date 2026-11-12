@@ -144,7 +144,8 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   `run/server_calls.json` (structural operands inline; bulk operands as seeded descriptors, so
   no tensor file -- `run/server_calls/*.pt` only for a call recorded before this, or above
   COMPILE_WATCH_INLINE_CAP) and sets `meta.server_preimports`
-  (decls `server_preimports`; sglang defaults to `sglang.srt.utils.common`).
+  (decls `server_preimports`; sglang defaults to `sglang.srt.utils.common`; a `vllm.*`
+  entry to `vllm.platforms, vllm._custom_ops, vllm._aiter_ops`).
 
 The source map's frames prove a call reached a file on this deployment; they do not prove
 a binding. Verify the live callable with `$SHARED_TOOLS/seam_trace.py` and

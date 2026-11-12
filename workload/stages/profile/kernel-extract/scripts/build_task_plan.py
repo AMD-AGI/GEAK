@@ -27,7 +27,8 @@ or a denominator:
                                  an existing unittest.py is never overwritten without --force)
 
 meta.server_preimports (decls `server_preimports`, default by framework: sglang ->
-sglang.srt.utils.common) are imported by both UT legs before the task's cases, so the kernel
+sglang.srt.utils.common for an sglang entry or an sglang frame on the launch stack; vllm ->
+vllm.platforms, vllm._custom_ops, vllm._aiter_ops for a vllm entry only) are imported by both UT legs before the task's cases, so the kernel
 compiles in the import environment the server has.
 
 Lint (also `--check` alone, no writes): every selected identity owned exactly once by a
@@ -59,7 +60,19 @@ LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # Modules the serving process has imported before any kernel compiles, whose import-time
 # rebinding of library functions the UT must reproduce (sglang.srt.utils.common replaces
 # triton.next_power_of_2). Light on purpose: every timing bucket is a fresh process.
-SERVER_PREIMPORTS = {"sglang": ["sglang.srt.utils.common"]}
+#
+# vllm: the modules a vLLM worker has imported before it launches kernels (platform
+# resolution, the _C custom-op registrations, the AITER op table). Checked importable in
+# vllm/vllm-openai-rocm:kimi-k31 (vllm 0.0.0+mum.14d1ec2336); none of them rebinds a
+# triton/torch attribute (compile_watch.env_fingerprint unchanged). Default for entries
+# that live in vllm only (ENTRY_ONLY_PREIMPORTS): a Triton or AITER task that merely has
+# vLLM frames on its launch stack does not get them, because they change nothing in its
+# compile namespace and an import failure in a lane would fail every such task. If the
+# server's namespaces still differ, the compile_variants gate reports env_differs and the
+# task's own decls `server_preimports` (which always wins) adds the module.
+SERVER_PREIMPORTS = {"sglang": ["sglang.srt.utils.common"],
+                     "vllm": ["vllm.platforms", "vllm._custom_ops", "vllm._aiter_ops"]}
+ENTRY_ONLY_PREIMPORTS = {"vllm"}
 
 
 def load(path, default=None):
@@ -271,11 +284,14 @@ def joint_ut(t, rank, depth=None):
 
 
 def frameworks(task, cv):
-    """Serving frameworks on the task's launch paths (its entry or any server stack)."""
-    mods = [(task.get("target_callable") or "").split(".")[0]]
+    """Serving frameworks on the task's launch paths (its entry or any server stack;
+    ENTRY_ONLY_PREIMPORTS frameworks count only as the entry's own package)."""
+    entry = (task.get("target_callable") or "").split(".")[0]
+    mods = []
     for r in (cv or {}).get("variants", []):
         mods += [f.split(".")[0] for f in r.get("stack") or []]
-    return sorted({m for m in mods if m in SERVER_PREIMPORTS})
+    return sorted({m for m in mods if m in SERVER_PREIMPORTS and m not in ENTRY_ONLY_PREIMPORTS}
+                  | ({entry} if entry in SERVER_PREIMPORTS else set()))
 
 
 # a recorded call larger than this is referenced where it is, never copied into the task
