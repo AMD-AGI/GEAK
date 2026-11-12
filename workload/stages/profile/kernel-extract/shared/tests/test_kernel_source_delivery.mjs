@@ -156,6 +156,23 @@ test('correctness qualification keeps every non-timing gate and matching scope',
   }
 });
 
+test('correctness qualification from the current driver requires its process_state gate', async t => {
+  const f = await correctnessFixture(t);
+  for (const doc of [f.report, f.ut]) {
+    doc.required_gates = [...doc.required_gates, 'process_state'];
+    doc.gates.process_state = doc === f.ut ? { status: 'pass', ok: true } : { status: 'pass' };
+  }
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, true);
+  f.report.gates.process_state.status = f.ut.gates.process_state.status = 'fail';
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
+  f.report.gates.process_state.status = f.ut.gates.process_state.status = 'pass';
+  f.ut.required_gates = f.ut.required_gates.filter(g => g !== 'process_state');
+  await f.persist();
+  assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
+});
+
 test('performance validation still needs timing after correctness-only extraction', async t => {
   const f = await correctnessFixture(t);
   for (const doc of [f.report, f.ut]) {

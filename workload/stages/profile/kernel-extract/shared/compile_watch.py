@@ -545,8 +545,10 @@ def frame_for(rec, target_callable):
 
 def belongs(rec, kernel_names, target_callable=None):
     """A server variant is the task's when its kernel is one of the task's device kernels or
-    its launch stack passes through the task's entry."""
-    if rec.get("name") in kernel_names:
+    its launch stack passes through the task's entry. A trace names a Triton kernel's code
+    object `<name>.kd`; the compile record names the kernel `<name>`."""
+    name = rec.get("name")
+    if name in kernel_names or (name and name + ".kd" in kernel_names):
         return True
     if target_callable:
         mod, _, qual = target_callable.partition(":")
@@ -623,6 +625,9 @@ class Unreplayable(Exception):
 # not fit: the ids they hold are renumbered densely and the pool shrinks to the rows touched.
 INDEX_ARG_RE = re.compile(r"(block_table|page_table|req_to_token|kv_indices|token_indices|"
                           r"page_indices|topk_indices|^indices$)", re.I)
+# Integer operands holding token slots (page * page_size + offset) into a paged pool. They are
+# compacted by whole pages, so each token keeps its offset inside its page.
+SLOT_ARG_RE = re.compile(r"(slot_mapping|^slots$)", re.I)
 SNAPSHOT_CAP = 256 << 20
 
 
@@ -727,9 +732,10 @@ def _compact(plan, data, budget, notes):
     torch = __import__("torch")
     pools = [n for n, p in plan.items() if p.get("data") is None and p["shape"]
              and p["nbytes"] >= (64 << 20)]
-    idx = [n for n, p in plan.items() if p.get("data") is not None
-           and INDEX_ARG_RE.search(n.split("[")[0]) and "float" not in p["dtype"]]
-    if not pools or not idx:
+    integer = [n for n, p in plan.items() if p.get("data") is not None and "float" not in p["dtype"]]
+    slot = [n for n in integer if SLOT_ARG_RE.search(n.split("[")[0])]
+    idx = [n for n in integer if INDEX_ARG_RE.search(n.split("[")[0]) and n not in slot]
+    if not pools or not (idx or slot):
         raise Unreplayable("needs %.1f GiB > budget %.1f GiB and has no pool/index pair to "
                            "compact" % (sum(_bytes(p) for p in plan.values()) / 2**30, budget / 2**30))
     rows = {int(plan[n]["shape"][0]) for n in pools}
@@ -737,31 +743,47 @@ def _compact(plan, data, budget, notes):
         raise Unreplayable("pools %s differ in leading size %s; cannot compact them with one "
                            "renumbering" % (pools, sorted(rows)))
     n_rows = rows.pop()
-    vals = torch.cat([data[plan[n]["data"]].reshape(-1).to(torch.int64) for n in idx])
-    vals = vals[vals >= 0]
-    top = int(vals.max()) if vals.numel() else -1
     page = int(plan[pools[0]]["shape"][1]) if len(plan[pools[0]]["shape"]) > 1 else 1
-    if top < n_rows:
+    paged = all(len(plan[n]["shape"]) > 1 and int(plan[n]["shape"][1]) == page for n in pools)
+
+    def values(names):
+        v = torch.cat([data[plan[n]["data"]].reshape(-1).to(torch.int64) for n in names]) \
+            if names else torch.zeros(0, dtype=torch.int64)
+        return v[v >= 0]
+    if slot and not (paged and page > 1):
+        raise Unreplayable("slot operands %s need pools paged on dim 1; pools %s are not"
+                           % (slot, pools))
+    vals = values(idx)
+    top = int(vals.max()) if vals.numel() else -1
+    if slot:
+        # A slot addresses a page by slot // page; the other index operands are page rows.
         unit = 1
-    elif top < n_rows * page and all(len(plan[n]["shape"]) > 1 and int(plan[n]["shape"][1]) == page
-                                     for n in pools):
+        top = max(top, int(values(slot).max() // page) if values(slot).numel() else -1)
+        if top >= n_rows:
+            raise Unreplayable("index operands reach page %d, past the pools' %d rows"
+                               % (top, n_rows))
+    elif top < n_rows:
+        unit = 1
+    elif top < n_rows * page and paged:
         unit = page
     else:
         raise Unreplayable("index operands reach %d, past the pools' %d rows" % (top, n_rows))
-    used = torch.unique(vals // unit)
+    units = dict({n: unit for n in idx}, **{n: page for n in slot})
+    used = torch.unique(torch.cat([values([n]) // u for n, u in units.items()]))
     if used.numel() >= n_rows:
         raise Unreplayable("index operands touch every pool row; nothing to compact")
-    for n in idx:
+    for n, u in units.items():
         t = data[plan[n]["data"]]
         v = t.to(torch.int64)
         hit = v >= 0
-        new = torch.searchsorted(used, (v // unit).clamp(min=0)) * unit + v % unit
+        new = torch.searchsorted(used, (v // u).clamp(min=0)) * u + v % u
         data[plan[n]["data"]] = torch.where(hit, new, v).to(t.dtype)
     for n in pools:
         plan[n]["shape"] = [int(used.numel())] + list(plan[n]["shape"][1:])
         plan[n]["compacted"] = True
     notes.append("pools %s compacted from %d to %d rows (unit %d) through %s"
-                 % (pools, n_rows, used.numel(), unit, idx))
+                 % (pools, n_rows, used.numel(), unit, idx)
+                 + (" and slots %s (by page of %d)" % (slot, page) if slot else ""))
 
 
 MAX_INT_32 = 2**31 - 1

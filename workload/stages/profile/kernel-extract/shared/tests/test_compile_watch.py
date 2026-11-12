@@ -137,6 +137,8 @@ class CollectTest(unittest.TestCase):
     def test_belongs_by_kernel_name_or_entry_on_the_stack(self):
         rec = event(compile_info(), 1, 1.0)
         self.assertTrue(cw.belongs(rec, {"_attn_kernel"}))
+        self.assertTrue(cw.belongs(rec, {"_attn_kernel.kd"}))      # the trace's code-object name
+        self.assertFalse(cw.belongs(rec, {"_attn_kernel_v2.kd"}))
         self.assertTrue(cw.belongs(dict(rec, name="_helper"), set(), "pkg.attn:attention"))
         self.assertFalse(cw.belongs(dict(rec, name="_helper"), set(), "pkg.attn:other"))
         self.assertTrue(cw.belongs(dict(rec, name="_h"), set(), "pkg.model:Layer.forward"))

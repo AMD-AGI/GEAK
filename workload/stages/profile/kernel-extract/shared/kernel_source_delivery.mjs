@@ -11,6 +11,9 @@ const sourceExt = /\.(py|c|cc|cpp|cxx|h|hpp|cu|cuh|hip|s|mlir)$/i;
 export const UT_DRIVER_SNAPSHOT_CONTRACT = 'ut_driver/path_sha256_concat/v1';
 const fullUtGates = ['contract', 'inputs', 'binding', 'launches', 'correctness', 'server_calls',
   'compile_variants', 'isolation', 'replay', 'negative_controls', 'restore', 'timing'];
+// ut_driver.GATES gained process_state (2026-11-07): a scoped receipt that lists it must pass
+// it; receipts written before it list the gates above.
+const processStateGate = 'process_state';
 const hexDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 // Python sorts Unicode code points, whereas Array.sort() compares UTF-16 units.
 const pythonSorted = names => [...names].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
@@ -215,6 +218,8 @@ async function verifyUtSnapshot(task, manifest, ut) {
         [report, ut].some(d => d.validation_contract !== 'kernel_ut_validation/v1'))
       throw new Error('UT result/report must declare the same supported validation mode');
     required = mode === 'correctness' ? fullUtGates.filter(g => g !== 'timing') : fullUtGates;
+    if ([report, ut].some(d => Array.isArray(d.required_gates) && d.required_gates.includes(processStateGate)))
+      required = [...required, processStateGate];
     const sameGates = a => Array.isArray(a) && a.length === required.length &&
       new Set(a).size === required.length && required.every(g => a.includes(g));
     if ([report, ut].some(d => !sameGates(d.required_gates) || !sameGates(Object.keys(d.gates || {})) ||
