@@ -100,6 +100,7 @@ Env knobs (all optional):
 | `GEAK_NODE_BIN` | node binary for the runtime | `node` |
 | `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
 | `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_LANE_AGENT_TIMEOUT_MS` | per-agent guard inside each kernel lane (forwarded as the lane's `agent_timeout_ms`) | unset (lane default `3600000`) |
 | `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
 | `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
 | `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |

@@ -55,6 +55,7 @@ absolute per-case latencies. The script trusts only your numbers.
    **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): run FULL_BENCHMARK
    **once**. The UT already interleaves baseline/candidate legs per case and repeats them itself, and
    one run of a prepared extract UT takes 20–40 min. Re-run only after an error or a failed gate.
+   A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
 4b. **(ONLY if `REQUIRE_GRAPH_CAPTURE` is set) CUDA/HIP-graph capture-safety smoke.** This op will be
    overlaid on the graph-captured decode path, so a kernel that passes iso but host-syncs or lazily
    compiles UNDER CAPTURE passes here yet CRASHES the live TP>1 server. Catch it now (cheap), in `$WS`
