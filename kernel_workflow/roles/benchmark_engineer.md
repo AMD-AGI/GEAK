@@ -89,7 +89,7 @@ takes 20–40 min, and KernelExtract already did it during GPU validation: its r
 2. **One correctness check in this workspace** (via gpu_lock), so a relocation problem shows up now and
    not in verify: use the UT's correctness-only mode if it has one (check `python3 unittest.py --help`,
    e.g. `--skip-timing`); otherwise run it once normally and, if step 1 found no usable baseline, take
-   the baseline from this run's baseline leg.
+   the baseline from this run's baseline leg. A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
 3. Do NOT run a separate benchmark, do NOT run the profile command, and do NOT repeat the full
    benchmark. Re-run only after fixing an error or failed gate.
 

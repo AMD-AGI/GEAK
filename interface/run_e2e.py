@@ -833,6 +833,12 @@ def map_args(
     agent_timeout_ms = _int_or_none(os.environ.get("GEAK_AGENT_TIMEOUT_MS"), "GEAK_AGENT_TIMEOUT_MS")
     if agent_timeout_ms is not None:
         ps_args["agent_timeout_ms"] = agent_timeout_ms
+    # The kernel lane has its own per-agent guard (JS default 60min). A prepared extract UT can take
+    # 20-40 min per run, so a verify on a heavy kernel can need more (GEAK #606).
+    lane_agent_timeout_ms = _int_or_none(
+        os.environ.get("GEAK_LANE_AGENT_TIMEOUT_MS"), "GEAK_LANE_AGENT_TIMEOUT_MS")
+    if lane_agent_timeout_ms is not None:
+        ps_args["lane_agent_timeout_ms"] = lane_agent_timeout_ms
     if os.environ.get("GEAK_AGENT_TIMEOUT_RETRY", "").strip():
         ps_args["agent_timeout_retry"] = (
             "true" if _as_bool(os.environ["GEAK_AGENT_TIMEOUT_RETRY"]) else "false")

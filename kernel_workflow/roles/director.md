@@ -344,7 +344,7 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    THIS run's own baseline leg, not from `BASELINE_TIMING`. Absolute ms drift 1–4% between sessions on
    these UTs, and `BASELINE_TIMING` may come from KernelExtract's validation run; only the in-run pair
    is a like-for-like comparison. Then `director_verified_speedup_weighted` equals the
-   `GEAK_WEIGHTED_SPEEDUP` the UT printed.
+   `GEAK_WEIGHTED_SPEEDUP` the UT printed. A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
 6. Arbitration vs the TechLead's claim (on the PRIMARY metric — `director_verified_speedup_weighted` from
    `h.serving_weighted_speedup`; `geomean` only when it returns `None`):
    - Within 10%, or Director higher → `accepted`.

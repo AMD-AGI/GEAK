@@ -43,7 +43,7 @@ do not invent new optimizations; you compose and reconcile existing ones.
    **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): run it once per
    combination and take `weighted` = its `GEAK_WEIGHTED_SPEEDUP` and per-case speedups from its own
    in-run baseline/candidate legs, not from `BASELINE_PER_CASE` (absolute ms drift 1–4% between
-   sessions; see `verify_engineer.md`).
+   sessions; see `verify_engineer.md`). A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
 
 ## Output
 If the best combination beats `BEST_INDIVIDUAL`, save it:
