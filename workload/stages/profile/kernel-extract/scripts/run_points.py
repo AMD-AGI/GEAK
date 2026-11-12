@@ -10,6 +10,15 @@ one recapture. A graph-hidden decode window requests eager fallback from
 probe_server.py; a dead server stops capture. Signed completed censuses are reused
 unless --redo is specified. Census work overlaps capture of the next point.
 
+Incremental signing: while points are captured, profile_run.json is a checkpoint with
+status "running" that holds every signed record (the resumed and carried-over ones, and
+each point of this invocation as soon as its census is written and verified), rewritten
+atomically (temporary file + os.replace). A hard kill or a preemption therefore keeps
+every finished census signed: rerunning the same command resumes them, and recaptures,
+under a fresh tag, only the points the killed invocation left without a signed record
+(a census in flight, or a window's traces). The finished file is written exactly as
+before.
+
 Environment knobs (default off; they never change what a window captures, and they are
 environment rather than flags so a frozen capture argv stays byte-identical):
   GEAK_CENSUS_SERIAL=1        wait for each point's census before opening the next window
@@ -31,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,6 +52,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EAGER_SUFFIX = ".eager"
 LEGACY_EAGER_SUFFIXES = ("@eager",)       # sglang-era files; still recognised when read
 MEMORY_RESTART = "memory restart requested"
+# profile_run.json while points are captured (the incremental checkpoint); a file that
+# still says so was left by an invocation that did not finish (killed or preempted).
+RUNNING = "running"
 
 
 def eager_tag(pid):
@@ -102,6 +115,84 @@ def run(cmd, log):
     with open(log, "a") as fh:
         fh.write("[%s] $ %s\n%s%s\n" % (now(), " ".join(cmd), p.stdout, p.stderr))
     return p.returncode, round(time.time() - t0, 1), (p.stdout + p.stderr).strip()
+
+
+def write_json_atomic(path, doc):
+    """Write `doc` as `path` (indent=1) so that a reader or a kill sees the old or the new
+    file, never a partial one."""
+    tmp = "%s.tmp.%d.%d" % (path, os.getpid(), threading.get_ident())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(doc, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def census_complete(c, pid, expect_files):
+    """None if census result `c` of point `pid` may be signed, else why not.
+
+    point_census.py exited 0 and was not a graph-hidden refusal; its output is a readable
+    census of this point over this capture's trace directory, with at least one instance
+    and every expected rank; the directory still holds that many trace files.
+    """
+    if c.get("rc") != 0 or not c.get("out") or c.get("graph_hidden"):
+        return "census rc=%s" % c.get("rc")
+    try:
+        with open(c["out"]) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:
+        return "census unreadable: %s" % e
+    if d.get("point_id") != pid:
+        return "census is of %r" % d.get("point_id")
+    if os.path.abspath(d.get("trace_dir") or "") != os.path.abspath(c.get("trace_dir") or ""):
+        return "census trace_dir %s is not the capture's" % d.get("trace_dir")
+    if not (d.get("instances") or 0) > 0:
+        return "census has no instance"
+    ranks = len(d.get("per_rank") or {})
+    if ranks < (expect_files or 1) or (d.get("ranks") or 0) < (expect_files or 1):
+        return "census has %d of %d ranks" % (ranks, expect_files)
+    traces = [f for f in os.listdir(c["trace_dir"]) if ".trace.json" in f] \
+        if os.path.isdir(c["trace_dir"]) else []
+    if len(traces) < (expect_files or 1):
+        return "trace directory holds %d of %d files" % (len(traces), expect_files)
+    return None
+
+
+def resume_plan(points, prev_doc, census_dir, trace_root, redo=()):
+    """(resumed, recapture): the points whose census is reused, and those a killed
+    invocation left unsigned.
+
+    A finished profile_run.json keeps the old contract: a census with a missing or
+    different measurement_signature is refused (SystemExit). A checkpoint left by a
+    killed invocation (status "running") holds every record it signed, so a point it
+    does not hold, yet has a census file (in flight at the kill, possibly partial) or a
+    non-empty trace directory (a window in flight), is recaptured under a fresh tag; a
+    point it holds with a different signature is still refused.
+    """
+    prev = (prev_doc or {}).get("points") or {}
+    killed = (prev_doc or {}).get("status") == RUNNING
+    resumed, recapture = [], []
+    for pt in points:
+        pid = pt["point_id"]
+        if pid in redo:
+            continue
+        done = os.path.exists(os.path.join(census_dir, pid + ".json"))
+        if killed and pid not in prev:
+            dirs = [os.path.join(trace_root, pid + x) for x in ("", "_r2")]
+            if done or any(os.path.isdir(d) and os.listdir(d) for d in dirs):
+                recapture.append(pid)
+            continue
+        if done:
+            signature = pt.get("measurement_signature")
+            if signature and prev.get(pid, {}).get("measurement_signature") != signature:
+                raise SystemExit("run_points: incompatible or unsigned shared census for %s; "
+                                 "use --redo %s or a fresh capture pool" % (pid, pid))
+            resumed.append(pid)
+    return resumed, recapture
 
 
 def census_graph_hidden_reason(phase, rc, message):
@@ -220,11 +311,14 @@ def main():
     points = ordered(plan["points"], a.point_id)
     py = sys.executable
     run_path = os.path.join(ev, "profile_run.json")
-    prev = {}
+    prev_doc = {}
     try:
-        prev = json.load(open(run_path)).get("points", {})
+        prev_doc = json.load(open(run_path))
     except (OSError, ValueError):
         pass
+    if not isinstance(prev_doc, dict):
+        prev_doc = {}
+    prev = prev_doc.get("points") or {}
     knobs = env_knobs()
     timeline = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": {},
                 "server": a.base_url, "decode_eager": a.decode_eager}
@@ -240,6 +334,16 @@ def main():
                     and not a.decode_on_graph)
     timeline["decode_deferred_to_eager"] = defer_decode
     deferred = []
+    # Before any capture: refuse an unsigned or incompatible census up front (the loop
+    # used to find it only when it got there), and take the points a killed invocation
+    # left unsigned as redo points.
+    _resumed, recapture = resume_plan(points, prev_doc, census_dir, a.trace_root, a.redo)
+    redo = list(a.redo) + recapture
+    if recapture:
+        timeline["recaptured_after_kill"] = recapture
+        print("[%s] profile_run.json is the checkpoint of an invocation that did not finish; "
+              "recapturing %d point(s) it left unsigned: %s"
+              % (now(), len(recapture), ", ".join(recapture)), flush=True)
 
     def census_job(pt, trace_dir):
         out = os.path.join(census_dir, pt["point_id"] + ".json")
@@ -263,6 +367,45 @@ def main():
     if a.evidence_capture:
         eager_evidence(a, ev, plan, py, log, timeline, knobs["census_workers"])
 
+    # The checkpoint: every record signed so far, under ck_lock (census callbacks run on
+    # the census thread). Earlier signed records are carried over as the resume path
+    # writes them; a redo point's old record is not (its census file is about to change).
+    ck_lock = threading.Lock()
+    ck = {"open": True, "points": {
+        pid: dict(r, resumed=True) for pid, r in prev.items()
+        if pid not in redo and isinstance(r, dict)
+        and os.path.exists(os.path.join(census_dir, pid + ".json"))}}
+    ck_header = {k: v for k, v in timeline.items() if k != "points"}
+
+    def checkpoint():
+        # caller holds ck_lock
+        if not ck["open"]:
+            return
+        doc = dict(ck_header, status=RUNNING, points=ck["points"],
+                   signed_points=len(ck["points"]))
+        try:
+            write_json_atomic(run_path, doc)
+        except OSError as e:
+            print("[%s] run_points: checkpoint not written: %s" % (now(), e), flush=True)
+
+    def sign(pid, record, fut):
+        """Add `pid`'s record, with its census, to the checkpoint once that census is
+        complete; an incomplete one stays unsigned (a rerun recaptures it)."""
+        try:
+            c = fut.result()
+            why = census_complete(c, pid, a.expect_files)
+        except Exception as e:          # noqa: BLE001 -- never break the census thread
+            c, why = None, repr(e)
+        with ck_lock:
+            if why:
+                if ck["open"]:
+                    print("[%s] %s not signed: %s" % (now(), pid, why), flush=True)
+                return
+            ck["points"][pid] = dict(record, census=c)
+            checkpoint()
+
+    with ck_lock:
+        checkpoint()
     futures, censuses = {}, {}
     down = mem_stop = False
     captured_here = 0
@@ -272,7 +415,7 @@ def main():
                 break
             pid = pt["point_id"]
             done = os.path.join(census_dir, pid + ".json")
-            if os.path.exists(done) and pid not in a.redo:
+            if os.path.exists(done) and pid not in redo:
                 signature = pt.get("measurement_signature")
                 if signature and prev.get(pid, {}).get("measurement_signature") != signature:
                     raise SystemExit("run_points: incompatible or unsigned shared census for %s; "
@@ -313,7 +456,7 @@ def main():
                     break
             stamp = time.strftime("%H%M%S")
             for attempt in ("", "_r2"):
-                tag = "%s%s_%s" % (pid, attempt, stamp) if pid in a.redo else pid + attempt
+                tag = "%s%s_%s" % (pid, attempt, stamp) if pid in redo else pid + attempt
                 trace_dir = os.path.join(a.trace_root, tag)
                 server_dir = os.path.join(a.server_trace_root or a.trace_root, tag)
                 os.makedirs(trace_dir, exist_ok=True)
@@ -340,12 +483,19 @@ def main():
                 if res.get("status") in ("ok", "partial"):
                     rec["capture_mode"] = ("eager" if a.decode_eager else "profile_cuda_graph") \
                         if pt["phase"] == "DECODE" else "eager_prefill"
+                    record = json.loads(json.dumps(rec))     # as finish() writes it
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
                     captured_here += 1
                     if knobs["census_serial"]:
                         t_wait = time.time()
                         futures[pid].result()
                         rec["census_serial_wait_s"] = round(time.time() - t_wait, 1)
+                        sign(pid, dict(record, census_serial_wait_s=rec["census_serial_wait_s"]),
+                             futures[pid])
+                    else:
+                        # signed on the census thread the moment the census completes
+                        futures[pid].add_done_callback(
+                            lambda f, pid=pid, record=record: sign(pid, record, f))
                     break
                 if res.get("server_down"):
                     # Every later point would fail the same way; a rerun resumes from here.
@@ -386,7 +536,9 @@ def main():
         timeline["total_s"] = round(time.time() - t_all, 1)
         timeline["points_without_census"] = sorted(set(p["point_id"] for p in points)
                                                    - set(censuses))
-        json.dump(timeline, open(run_path, "w"), indent=1)
+        with ck_lock:
+            ck["open"] = False              # no checkpoint may overwrite the final file
+            write_json_atomic(run_path, timeline)
 
     if mem_stop or down:
         # The loop stopped early. Points after the stop that an earlier invocation already
@@ -396,7 +548,7 @@ def main():
         for pt in points:
             pid = pt["point_id"]
             done = os.path.join(census_dir, pid + ".json")
-            if (pid not in timeline["points"] and pid not in a.redo and pid in prev
+            if (pid not in timeline["points"] and pid not in redo and pid in prev
                     and os.path.exists(done)):
                 timeline["points"][pid] = dict(prev[pid], resumed=True)
                 censuses[pid] = done

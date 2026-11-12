@@ -70,7 +70,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHARED = os.path.join(os.path.dirname(HERE), "shared")
 sys.path.insert(0, SHARED)
-from run_points import MEMORY_RESTART, eager_shapes_names  # noqa: E402  (same directory)
+from run_points import MEMORY_RESTART, RUNNING, eager_shapes_names  # noqa: E402  (same directory)
 import compile_watch  # noqa: E402
 
 TEMPLATE = {
@@ -494,8 +494,9 @@ def evidence_requested(cmd):
         status = json.load(open(os.path.join(ev, "profile_run.json"))).get("status")
     except (OSError, ValueError):
         status = None
-    if status in ("server down", MEMORY_RESTART):
-        # The capture did not finish: an eager server must not take the missing points.
+    if status in ("server down", MEMORY_RESTART, RUNNING):
+        # The capture did not finish (RUNNING: run_points died before writing its final
+        # status): an eager server must not take the missing points.
         return False
     r = json.load(open(req))
     names = [os.path.join(ev, "evidence", "shapes", n) for n in eager_shapes_names(r["point"])]

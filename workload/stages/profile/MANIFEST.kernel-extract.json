@@ -1,15 +1,15 @@
 {
-  "file_count": 117,
+  "file_count": 118,
   "files": {
-    "PROVENANCE.json": "23bcae728303932b1de6ce1850bf802001fc1200dd8868f7149c84dbcb060d70",
+    "PROVENANCE.json": "ecef59fc9950eceb04f897c330419885a66b51098dc00d811901b193f73fb852",
     "SKILL.md": "ed71bc980a5ee1a1948c64f28a5fe1196f74ade6052c3959cb11c0ed81ad543d",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
     "references/delivery-contract.md": "888be480426fdda80d0c7d4304fd610976fe5ed68349bbb467488ed8e78ac996",
-    "references/dynamic-workloads.md": "28d516f7173e9a4647b859fc107faaa54391afd9886dbf7542afe61abe4a5a9d",
+    "references/dynamic-workloads.md": "1bd1e0b46a6baa986d5c5ea0aa5c5c8b76b9791c49bc6ef373c951ce0605a60f",
     "references/glm-agentx-example.md": "ed47a7aaf739eb93b75c921da5c6166c066807aa889ac5175a9b61b5168131f7",
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
-    "references/multi-config-sampling.md": "f14d032883feba01cfd2907ec02b7f3a7a75552024772dce81d8677f5e935bac",
+    "references/multi-config-sampling.md": "4c4266bf1a34db065a4fb28c4573eafab1d5aa445a0970354632efd150bc5042",
     "references/multi-config-ut-merge.md": "09f9e9f0fad260025f10be98cd907fe0ae04a2513d7b60e1b39d9cde03989453",
     "references/pipeline-handoff.md": "a4c16858cc2305c96bd77620f5ee41e10f6325531379fe6153ffb77f3867b4af",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
@@ -29,9 +29,9 @@
     "scripts/observed_workload.py": "732fc3210d9631be4bfb25e80a7f058f6e964e8c0abd1b0d80c1025f537a0445",
     "scripts/plan_ut_cases.py": "ad3ddc8c010517303e90d7780cffa3c3d44fc019f8a89b3612bd336eeb10f74c",
     "scripts/point_census.py": "751834f5e16bfb2615b2193aa3a4ea28c996d72de92032555fbc5b5eed6e9beb",
-    "scripts/probe_server.py": "8df0729858a9713980d35801e6faab6b6a73252984ed17c64631b4fc8fdd6437",
+    "scripts/probe_server.py": "0f80a72a05a4d3d2fa06eb47cafda8b31343c15b39101bb8ee06846b46de1acb",
     "scripts/relabel_points.py": "821551bf30a46a0c16ed4f62cf73011c84da7264d438819654711c81d7199b95",
-    "scripts/run_points.py": "b60fd6864f56add3d5d4ec93055dac4da6fc26eddf13f57e2af84de08596063c",
+    "scripts/run_points.py": "6436f3814d2be944d1fa7ec156c2008323deae6a7a3ff517b33e507b802a0a94",
     "scripts/select_targets.py": "dea019a7796eb30d461a246840dc9b168d9f35050e83a51ac8ef3e41cc269658",
     "scripts/serving_probe.py": "73bccfccb88ddbfe75a62c08b222ee62d600b6578d93921345a07279ef3f27b8",
     "scripts/source_map.py": "336add2cca2dbf599b95396bb67f2bf7fdb5235583f7cf458f986a585d498cc9",
@@ -74,6 +74,7 @@
     "shared/workspace_sources.py": "b6809ad323bcce4994a7171629b4925569042e78e07c25535b11693689626139",
     "tests/test_decode_prefix_warmup.py": "2fc10558f12c0ca212d5efeec265f0d6277286b919aed03a90e71058e810da6d",
     "tests/test_eager_prefix_and_census_knobs.py": "790adfd993ae6ec9a0d18cac14cf46ca3e738ec08e677b3082c2485f3beb3d8c",
+    "tests/test_incremental_signing.py": "fd510e4025057a19294cee145ef706e95129a9e781aebc1fbdbefbf0b8d4fe33",
     "tests/test_invocation_anchors.py": "e917dec30c3f6b54d7e56dd89a043b93c076896833748159b54a4b1121f18db8",
     "tests/test_merge_policy.py": "2f9c4c0d354184fc3418e1b37bfbf98cf7620fe2ed964f2aae703afa2c9d431f",
     "tests/test_mixed_capture_ranking.py": "ddf26b3d623e0583727e616c2b12c10ce0549b2593d3744b7bf59964d22f88fa",
@@ -120,9 +121,9 @@
     "ut_contracts/ut_driver.py": "ad3604baa8e7e037858f93e3d10bfed4af529ac33b62bf94c90c31e59aec31c9"
   },
   "modified_from_origin": false,
-  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt, PREFILL windows closed by /stop_profile, no front-end trace in a point, invalid profile prefixes refused early (serving_probe, probe_server); server_preimports default for vllm.* entries (build_task_plan); profiler window release after each trace is written, fixing a host-memory leak (vllm_observer/geak_profiler_release.py, loaded by sitecustomize.py); eager evidence window tagged <point>.eager (legacy @eager still read), a failed eager pass reported as 'eager evidence failed', default-off knobs GEAK_CENSUS_SERIAL, GEAK_CENSUS_WORKERS, GEAK_BOUNDARY_RESTART_GB, and signed records of already-censused points kept on an early stop (run_points); ut_gpu_queue broker heartbeat from a daemon thread, judged by docker lanes in another PID namespace with the stale_s bound recorded in broker.json; slot-addressed server calls replayed and trace identities <name>.kd matched to their Triton compile records (shared/compile_watch.py); the process_state gate required in scoped UT receipts that list it (shared/kernel_source_delivery.mjs). Tests, SKILL.md and references updated.",
+  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt, PREFILL windows closed by /stop_profile, no front-end trace in a point, invalid profile prefixes refused early (serving_probe, probe_server); server_preimports default for vllm.* entries (build_task_plan); profiler window release after each trace is written, fixing a host-memory leak (vllm_observer/geak_profiler_release.py, loaded by sitecustomize.py); eager evidence window tagged <point>.eager (legacy @eager still read), a failed eager pass reported as 'eager evidence failed', default-off knobs GEAK_CENSUS_SERIAL, GEAK_CENSUS_WORKERS, GEAK_BOUNDARY_RESTART_GB, signed records of already-censused points kept on an early stop, and incremental signing: profile_run.json is an atomically rewritten 'running' checkpoint of every verified census, so a killed or preempted capture resumes them and recaptures only what it left unsigned (run_points, probe_server); ut_gpu_queue broker heartbeat from a daemon thread, judged by docker lanes in another PID namespace with the stale_s bound recorded in broker.json; slot-addressed server calls replayed and trace identities <name>.kd matched to their Triton compile records (shared/compile_watch.py); the process_state gate required in scoped UT receipts that list it (shared/kernel_source_delivery.mjs). Tests, SKILL.md and references updated.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "fbbc0bc8e14fe1e9c1d6a293b26ba038a8d8c2b78722cbf24501a0a34c0f9ba3"
+  "tree_sha256": "b5d3aae2b6dd374b542e0af8f747ba109d8f2962f3b2a1a8383526a1518b8835"
 }
