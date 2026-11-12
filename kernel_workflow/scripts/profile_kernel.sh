@@ -12,7 +12,7 @@
 #
 # Optional env overrides (all have sensible defaults; nothing kernel-specific is hard-coded):
 #   PROFILER_PRIORITY  space-separated profiler order to try (default is arch-aware:
-#                      gfx1201 -> rocprofv3 first; CDNA/other -> rocprof-compute first)
+#                      gfx1201/gfx115x -> rocprofv3 first; CDNA/other -> rocprof-compute first)
 #   WARMUP_RUNS        number of warmup runs before profiling (default: 3)
 #   RPC_PROFILE_ARGS   extra args passed to rocprof-compute/omniperf `profile` (default: "--no-roof")
 #   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv",
