@@ -92,8 +92,11 @@ evidence only; UT declaration/scaffolding is a separate explicit stage.
   as soon as a point's census is written and verified (all ranks, its own trace
   directory). After a kill or a preemption, rerunning the same command resumes the
   signed points and recaptures, under a fresh tag, only the points the checkpoint
-  does not hold but whose census or traces were in flight. A finished
-  `profile_run.json` keeps the old contract (an unsigned census is refused).
+  does not hold but whose census or traces were in flight. Such a recapture stays
+  pending (`recaptured_after_kill`, also in a finished file) until it has a census, so
+  a launch that stops early (server down, memory restart) before reaching it neither
+  refuses nor resumes the partial census it left. A finished `profile_run.json`
+  otherwise keeps the old contract (an unsigned census is refused).
 - `point_census.py` counts complete instances: prefill target plus its draft;
   decode anchor to anchor. Collectives split per launch into transfer and wait,
   retaining rank-mean mass. `build_ranking.py` records any eager-only wait excluded

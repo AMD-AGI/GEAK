@@ -172,12 +172,22 @@ def resume_plan(points, prev_doc, census_dir, trace_root, redo=()):
     does not hold, yet has a census file (in flight at the kill, possibly partial) or a
     non-empty trace directory (a window in flight), is recaptured under a fresh tag; a
     point it holds with a different signature is still refused.
+
+    A recapture stays pending (recaptured_after_kill, in the checkpoint and the finished
+    file) until its point has a record with a census: an invocation that stops early
+    (server down, memory restart, a kill) before recapturing it leaves the partial
+    census on disk, and possibly a record of a failed attempt, neither of which may be
+    resumed.
     """
     prev = (prev_doc or {}).get("points") or {}
     killed = (prev_doc or {}).get("status") == RUNNING
+    pending = set((prev_doc or {}).get("recaptured_after_kill") or [])
     resumed, recapture = [], []
     for pt in points:
         pid = pt["point_id"]
+        if pid in pending and not ((prev.get(pid) or {}).get("census") or {}).get("out"):
+            recapture.append(pid)       # also under --redo, so it stays pending
+            continue
         if pid in redo:
             continue
         done = os.path.exists(os.path.join(census_dir, pid + ".json"))
@@ -339,9 +349,14 @@ def main():
     # left unsigned as redo points.
     _resumed, recapture = resume_plan(points, prev_doc, census_dir, a.trace_root, a.redo)
     redo = list(a.redo) + recapture
+    # still pending: recaptures of points outside this invocation's --point-id subset
+    ids = set(p["point_id"] for p in points)
+    pending = recapture + [p for p in prev_doc.get("recaptured_after_kill") or []
+                           if p not in ids and p not in recapture]
+    if pending:
+        timeline["recaptured_after_kill"] = pending
     if recapture:
-        timeline["recaptured_after_kill"] = recapture
-        print("[%s] profile_run.json is the checkpoint of an invocation that did not finish; "
+        print("[%s] profile_run.json records an invocation that did not finish; "
               "recapturing %d point(s) it left unsigned: %s"
               % (now(), len(recapture), ", ".join(recapture)), flush=True)
 

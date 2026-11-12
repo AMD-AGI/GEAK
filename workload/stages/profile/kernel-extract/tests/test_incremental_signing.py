@@ -167,6 +167,47 @@ class KillMidPoolTest(_Kill):
         # pr_256's census completes while de_1's window hangs: signed on the census thread
         self._kill_and_resume({})
 
+    def test_a_recapture_cut_short_by_a_finished_stop_is_still_recaptured(self):
+        # A kill leaves de_1 with a partial census; the rerun takes it as a recapture but
+        # its server goes down before de_1 is captured, so it finishes "server down" with
+        # no signed record of de_1. The next launch must recapture de_1 again, neither
+        # refusing the unsigned file nor resuming the partial census.
+        self.sign_plan()
+        env = {"GEAK_CENSUS_SERIAL": "1"}
+        server = HangingServer(hang_at=3)
+        self.addCleanup(server.close)
+        proc = self.start(server, "--decode-eager", "--no-evidence", env=env)
+        self.kill_when(proc, server, ["pr_64", "pr_256"])
+        census = self.ev / "evidence" / "census"
+        (census / "de_1.json").write_text('{"point_id": "de_1", "per_')
+        dead = FakeServer()
+        dead.close()
+        dead.httpd.server_close()          # nothing listens: /health is refused
+        p = self.run_points(dead, "--decode-eager", "--no-evidence", env=env)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        doc = self.run_doc()
+        self.assertEqual(doc["status"], "server down")
+        self.assertEqual(doc["recaptured_after_kill"], ["de_1"])
+        self.assertNotIn("census", doc["points"].get("de_1", {}))
+        fresh = FakeServer()
+        self.addCleanup(fresh.close)
+        p = self.run_points(fresh, "--decode-eager", "--no-evidence", env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        doc = self.run_doc()
+        self.assertEqual(doc["status"], "ok")
+        self.assertEqual(doc["recaptured_after_kill"], ["de_1"])
+        self.assertTrue(doc["points"]["de_1"]["attempts"][-1]["tag"].startswith("de_1_"))
+        self.assertEqual(doc["points"]["de_1"]["census"]["rc"], 0)
+        self.assertEqual(json.loads((census / "de_1.json").read_text())["point_id"], "de_1")
+        self.assertEqual(doc["points_without_census"], [])
+        # once signed it is resumed like any other point
+        third = FakeServer()
+        self.addCleanup(third.close)
+        p = self.run_points(third, "--decode-eager", "--no-evidence", env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(third.profile_bodies, [])
+        self.assertNotIn("recaptured_after_kill", self.run_doc())
+
     def test_a_kill_during_a_redo_drops_the_old_record_and_the_rerun_redoes_it(self):
         self.sign_plan()
         server = FakeServer()
@@ -359,6 +400,19 @@ class ResumePlanTest(unittest.TestCase):
         (self.traces / "c").mkdir()        # an empty directory is no evidence
         (self.traces / "c_r2" / "x.trace.json").unlink()
         self.assertEqual(self.plan(run_points.RUNNING, ["a", "b"]), (["a", "b"], []))
+
+    def test_a_pending_recapture_stays_pending_until_it_has_a_census(self):
+        # a finished stop after a kill: b's partial census, a record of a failed attempt
+        doc = {"status": "server down", "recaptured_after_kill": ["b"],
+               "points": {"a": {"measurement_signature": "s-a"},
+                          "b": {"measurement_signature": "s-b", "attempts": []}}}
+        args = (self.points, doc, str(self.census), str(self.traces))
+        self.assertEqual(run_points.resume_plan(*args), (["a"], ["b"]))
+        self.assertEqual(run_points.resume_plan(*args, ["b"]), (["a"], ["b"]))
+        doc["points"]["b"]["census"] = {"rc": 1, "out": None}
+        self.assertEqual(run_points.resume_plan(*args), (["a"], ["b"]))
+        doc["points"]["b"]["census"] = {"rc": 0, "out": str(self.census / "b.json")}
+        self.assertEqual(run_points.resume_plan(*args), (["a", "b"], []))
 
     def test_running_file_still_refuses_a_different_signature(self):
         doc = {"status": run_points.RUNNING,
