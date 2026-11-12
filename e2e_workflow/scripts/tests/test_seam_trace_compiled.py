@@ -73,7 +73,10 @@ class TestMarkerUnderCompile(unittest.TestCase):
         x, w = torch.randn(4, 8), torch.randn(16, 8)
         compiled = torch.compile(self._forward, fullgraph=True, backend="eager")
 
-        with self.assertRaises(torch._dynamo.exc.Unsupported):
+        with self.assertRaisesRegex(
+            (torch._dynamo.exc.Unsupported, torch._dynamo.exc.TorchRuntimeError),
+            "is_current_stream_capturing|_cuda_isCurrentStreamCapturing",
+        ):
             compiled(x, w)
 
     def test_eager_calls_still_enter_the_marker(self):
