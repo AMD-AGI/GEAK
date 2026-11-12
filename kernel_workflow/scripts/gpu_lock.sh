@@ -96,6 +96,29 @@ if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
     fi
 fi
 
+# ---- Re-entrancy --------------------------------------------------------------------------------
+# A command that already runs under this wrapper's single-GPU or pool lock may call the wrapper
+# again: profile_kernel.sh locks internally, and the roles tell agents to run GPU work through
+# gpu_lock.sh, so `gpu_lock.sh 0 bash profile_kernel.sh ...` is the normal way to profile. flock is
+# not re-entrant across processes, so the inner call used to block on the outer one until something
+# killed the caller (in practice the agent's 600 s tool timeout -- ten lost minutes per profile).
+# If the GPU we already hold is the one asked for (or one of the pool), run on it directly. The
+# EXIT trap above still runs, so the source-provenance check is unchanged for nested calls.
+if [ -n "${GEAK_GPU_LOCK_HELD:-}" ]; then
+    case "$GPU_SPEC" in
+        group:*|pool:*:*) ;;   # multi-GPU leases keep their own nesting guard (GEAK_GPU_LEASE_ACTIVE)
+        *)
+            case ",${_SPEC_IDS}," in
+                *",${GEAK_GPU_LOCK_HELD},"*)
+                    export HIP_VISIBLE_DEVICES="$GEAK_GPU_LOCK_HELD"
+                    "$@"
+                    exit $?
+                    ;;
+            esac
+            ;;
+    esac
+fi
+
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
 # With a pool we do not pre-assign a GPU: we take the first one that is BOTH unlocked AND idle,
@@ -276,6 +299,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
     export HIP_VISIBLE_DEVICES="$GPU_ID"
+    export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested gpu_lock.sh calls reuse this lane (see Re-entrancy)
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@"
 else
@@ -308,6 +332,7 @@ else
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
+        export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested gpu_lock.sh calls reuse this GPU (see Re-entrancy)
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         "$@"
     ) 200>"$LOCK_FILE"

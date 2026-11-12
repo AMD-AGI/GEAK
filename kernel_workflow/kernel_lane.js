@@ -1633,6 +1633,11 @@ mkdir -p ${d.out_dir}
 bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh \\
   --src ${CANONICAL} --dst ${d.out_dir}/workspace \\
   --shared-root ${EVAL_DIR}/_shared --link-aiter
+# materialize_workspace.sh does not copy .git. Give the copy a baseline commit so the
+# \`git diff\` below produces your patch -- without it best_patch.diff comes out EMPTY and
+# verify drops the result as apply_failed.
+cd ${d.out_dir}/workspace && { [ -d .git ] || { git init -q && git add -A && \\
+  git -c user.email=engineer@geak -c user.name=engineer commit -qm baseline; }; }
 \`\`\`
 ${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
