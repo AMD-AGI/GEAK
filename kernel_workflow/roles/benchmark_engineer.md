@@ -78,9 +78,11 @@ correctness AND the weighted metric; do NOT author `test_harness.py`. Skip Step 
 **single-run setup** below in Steps 3 and 5.
 
 **Single-run setup (weighted oracle only).** One `python3 unittest.py` run already does correctness
-AND times the frozen baseline leg against the candidate leg on every weighted case, and on a
-prepared extract UT that one run can take 20–40 min. So in this path run it **exactly ONCE** (via
-gpu_lock) and take the baseline from that run's baseline leg. Do NOT run a separate benchmark, do
+AND times the frozen baseline leg against the candidate leg on every weighted case, repeating and
+interleaving the legs itself (e.g. `--reps N` takes the median of N baseline/candidate pairs per
+case). On a prepared extract UT that one run can take 20–40 min. So in this path run it **exactly
+ONCE** (via gpu_lock), in the UT's own authoritative timing mode, and take the baseline from that
+run's baseline leg. Do NOT run a separate benchmark, do
 NOT run the profile command (the Profile phase runs it right after you), and do NOT repeat the full
 benchmark. Re-run only if that one run errored or failed a gate, after fixing the cause.
 

@@ -158,6 +158,7 @@ jobs:
             evo/tests/test_dispatch.py \
             evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
+            kernel_workflow/scripts/tests/test_stop_lane_work.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             perf_knowledge/expert_skills/_contribute/test_expert_skill_planner_extension.py \
             perf_knowledge/expert_skills/_contribute/test_expert_skill_validation.py \
