@@ -126,8 +126,7 @@ scenario whose baseline `select` names that EP.
    `selection_overall_pct_gt` (the multi-config scenario: Top 10 and >3%) -- in any one
    config; not on its share averaged over the
    configs, which would bury an operator that dominates some concurrencies and is absent at
-   others (Muse Spark: the large-M dense GEMM path is 5.7% of c64, 0.2% of c1, 1.8% on
-   average). Each config is selected by the unchanged `select_targets.py` on its own
+   others. Each config is selected by the unchanged `select_targets.py` on its own
    `kernel_ranking.json`, by operator (against the merged source map, so operator keys
    agree across configs), with the configured scope; the union is written to
    `$OUT/selection_targets.json` with each target's `selected_in_configs` and
@@ -141,8 +140,7 @@ scenario whose baseline `select` names that EP.
    A standalone collective UT reproduces neither the interconnect state, the rank skew nor
    the overlap with compute that decide its serving time; its real levers (fusing the
    all-reduce with the following norm, quantized or fewer collectives) lie outside one
-   kernel's seam; and its multi-rank UT costs the whole node -- on Muse Spark it was the
-   flakiest gate of the run (TCPStore timeouts, a capture abort, ~4 h of timing reruns).
+   kernel's seam; and its multi-rank UT costs the whole node and is the flakiest gate.
    Set the list to `[]` to extract them anyway.
 4. Every planned case now carries its `config_id` (sig `<pid>/<PHASE>_<shape>`), each config
    planned on its own bands. The UT pools the configs with
@@ -159,13 +157,9 @@ scenario whose baseline `select` names that EP.
 
 ### Merging across concurrency: what decides the task boundary
 
-From the 2026-11-02 Muse Spark merge of a c8 and a c32 optimization campaign
-(`/shared_nfs/yueliu14/muse_merge_1102/SKILL_merge_multi_conc_kernels/SKILL.md`):
-
 - **"The gain disappears at another concurrency" is usually a path switch, not a shape
-  change.** At a larger M the server routes the same operator to a different kernel (c8's
-  fused split-K `_dense_partial` GEMMs were 13.9% of GPU time at c8 and 1.1% at c32, where the
-  same GEMMs ran on hipBLASLt). So **the unit of merging is the operator entry, above the
+  change.** At a larger M the server routes the same operator to a different kernel. So
+  **the unit of merging is the operator entry, above the
   path selection**, never one Triton kernel: put `target_callable` above the M-dependent
   dispatch, so every config's cases enter the same seam, reach their own path, and the
   switch threshold itself is something the optimizer can move.
@@ -182,18 +176,10 @@ From the 2026-11-02 Muse Spark merge of a c8 and a c32 optimization campaign
   (`M = pad(bs) x tokens_per_req`, e.g. DFLASH 8 x the captured bs list). Add the captured
   buckets no point covers as task `envelope_cases` (tested, weight 0), so a regression at an
   M no sampled point hit is still visible.
-- **Who decides: `kernel-extract/scripts/merge_policy.py`**, from the evidence, not the
-  reviewer. Same launch group and same entry: one UT, all configs (the default). A config
-  difference splits a task only if the task's source reads it. Different entries chosen above
-  them by batch size are one task when, pairwise, one common caller calls them from different
-  lines, each under a conditional, never launched at the same sampled point, with
-  non-interleaving batch sizes. Once that holds they are merged; the seam's recorded arguments
-  only pick HOW (`dispatcher`, `rebuilt_instance`, `scope_equalized`). Profiler frames carry
-  def lines, so call sites are read from the caller's source (an nn.Module's `forward` by the
-  `self.<attr> = <Class>(` that holds it).
+- **Who decides:** `kernel-extract/scripts/merge_policy.py`, from the evidence; the rules are
+  its docstring, the procedure `kernel-extract/references/multi-config-ut-merge.md`.
 - **One owner per file.** When two tasks touch one module, one owns it; a whole-module
-  replacement also replaces the other functions in that file (a c32 whole-file `mxfp4_moe.py`
-  silently overwrote another operator's `run_compact_a4`): rebind the function instead.
+  replacement also replaces the other functions in that file: rebind the function instead.
 - A merged dispatch file that loads `_*.py` helpers from its own directory must ship them in
   the overlay; a missing helper fails at import and the server reports the model as not
   registered. Check imports on one GPU before starting the 8-GPU server.
