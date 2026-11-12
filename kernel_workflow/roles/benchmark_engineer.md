@@ -74,7 +74,15 @@ it to learn the exact commands and the per-case output format it prints (e.g. li
 
 **Workload-weighted oracle present (the e2e-fed path)**: if `unittest.py` already prints
 `GEAK_WEIGHTED_SPEEDUP` (extractor baked `meta.workload`), it IS the perf harness too — reuse it for
-correctness AND the weighted metric; do NOT author `test_harness.py`. Skip Step 2.
+correctness AND the weighted metric; do NOT author `test_harness.py`. Skip Step 2, and follow the
+**single-run setup** below in Steps 3 and 5.
+
+**Single-run setup (weighted oracle only).** One `python3 unittest.py` run already does correctness
+AND times the frozen baseline leg against the candidate leg on every weighted case, and on a
+prepared extract UT that one run can take 20–40 min. So in this path run it **exactly ONCE** (via
+gpu_lock) and take the baseline from that run's baseline leg. Do NOT run a separate benchmark, do
+NOT run the profile command (the Profile phase runs it right after you), and do NOT repeat the full
+benchmark. Re-run only if that one run errored or failed a gate, after fixing the cause.
 
 ### 2. Create the (performance) harness — only when NOT already covered by a weighted oracle
 Write `WORKSPACE/test_harness.py` when there is no usable runner, OR (even if a runner exists) when a
@@ -144,6 +152,10 @@ a harness whose actual candidate input cannot be established.
 
 Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
 `gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
+
+**Weighted oracle:** you reuse the oracle verbatim, so there is no generated builder and no
+relocation probe to run. Record the oracle's own source binding in `SOURCE_BINDING`. The single
+`unittest.py` run (see Step 1) replaces the correctness/benchmark/profile runs above.
 
 ### 4. Write the COMMANDMENT
 Write `EVAL_DIR/COMMANDMENT.md` — the immutable contract. Fill in the EXACT commands discovered/
@@ -215,6 +227,11 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "runs_ms": [[...run1...],[...run2...],[...run3...]]
 }
 ```
+
+**Weighted oracle:** skip the 3 runs. `latency_ms` per case = the baseline-leg time from the single
+`unittest.py` run (Step 1), `runs_ms` holds that one run, and `reliable` is `true` when that run
+passed every gate with finite timings on both legs. Say in `notes` that the baseline comes from one
+run.
 
 ## Return JSON
 ```json
