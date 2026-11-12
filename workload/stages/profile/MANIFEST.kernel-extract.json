@@ -1,7 +1,7 @@
 {
-  "file_count": 114,
+  "file_count": 116,
   "files": {
-    "PROVENANCE.json": "aed2fb658a1ecd00334b372dca1f6384ca1a1cb9edde63ced7498d96d6a0faef",
+    "PROVENANCE.json": "525ecaac6e95606caa90b3639d30747d0c50af87621591129ace8ed916266391",
     "SKILL.md": "ed71bc980a5ee1a1948c64f28a5fe1196f74ade6052c3959cb11c0ed81ad543d",
     "references/capture.md": "b9c8889d487cd3214a4ad4a304dde1eb5d0e786ed25e74100ed391970c04faf4",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
@@ -38,8 +38,9 @@
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
     "scripts/ut_gpu_queue.py": "2bc1b58c078dfce42036b1ef3b0ae33d72cbda587bab542d9499067bb75993d7",
     "scripts/ut_wave.py": "e57c8a6d779063795dfefb2f696d3cf1678ff4404069fd1d552620a127b386eb",
+    "scripts/vllm_observer/geak_profiler_release.py": "6ae6fb4289b68266746085dbd85ffc3dafb9301a3ddfc318674b60ce62563462",
     "scripts/vllm_observer/geak_vllm_observer.py": "90ae4d8e3d2976ae65241eab4ac63d751a12b549302c1b9157c7915098adb0cf",
-    "scripts/vllm_observer/sitecustomize.py": "f18f510938d52f91e014c4516c6dbf899a28055491ce04f4fba8e94ed1d3e784",
+    "scripts/vllm_observer/sitecustomize.py": "927a88ce5f9ea8fa8b4c7cfe040a2ff3d4128c10dbffc0b4eb871ed54d721c9e",
     "shared/compile_watch.py": "9e945dc7132fa73ab65a6811c05b93ac219bd6c16e769b940945e404ee13f02b",
     "shared/delivery_contract.mjs": "461ae0eb8618ba65304eb1d75820455103b8077b0008b115f67840ca5e1dee90",
     "shared/gpu_lock.sh": "b51f99375c738ba9ebbcfb6d249c4149e27ef5dd1e75dcdcf344a205703ab0bd",
@@ -78,6 +79,7 @@
     "tests/test_probe_exhaustion.py": "1e4ee355ce88d419687cf261250527f1cd141d0814a3b4d657dbb0c96dba16df",
     "tests/test_probe_stop.py": "5c58160c9a32ed3af8f3aafbdbf023f0e59bbf0e95458a3ff30e6e66ecc810c5",
     "tests/test_profile_fast_path.py": "0e3dfd0c83e6162588ee888253a83cd26ecafbd35c3825c3b8b4fe6c3b7159d5",
+    "tests/test_profiler_release.py": "c3cb367cc065d8a41d038708eb5c5cec799e61f71c0eb66a68baf2280bd4940b",
     "tests/test_run_points_graph_hidden.py": "5990d5dd84515644f731d6dcadce78dc421167cc65a36630b59a0abba58b70b5",
     "tests/test_sampling_pipeline.py": "3e9629aa1dd5e8bc34226875bfc29db6d8b0cf172dd0b2d8e88732611b5ede6d",
     "tests/test_ut_gpu_queue.py": "d42339c0ccc1d97c629316f7432a5c2f4e7057932242e62f483c97366826520d",
@@ -117,9 +119,9 @@
     "ut_contracts/ut_driver.py": "ad3604baa8e7e037858f93e3d10bfed4af529ac33b62bf94c90c31e59aec31c9"
   },
   "modified_from_origin": false,
-  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt, PREFILL windows closed by /stop_profile, no front-end trace in a point (serving_probe, probe_server); server_preimports default for vllm.* entries (build_task_plan); slot-addressed server calls replayed and trace identities <name>.kd matched to their Triton compile records (shared/compile_watch.py); the process_state gate required in scoped UT receipts that list it (shared/kernel_source_delivery.mjs). Tests, SKILL.md and references updated.",
+  "note": "Intentional changes on top of origin for vLLM multi-config UT extraction (PROVENANCE.json lists each): vLLM mixed-step prefill context and decode cross-check counting the decode requests of mixed steps (observed_workload); per-invocation PREFILL cache_salt, PREFILL windows closed by /stop_profile, no front-end trace in a point (serving_probe, probe_server); server_preimports default for vllm.* entries (build_task_plan); profiler window release after each trace is written, fixing a host-memory leak (vllm_observer/geak_profiler_release.py, loaded by sitecustomize.py); slot-addressed server calls replayed and trace identities <name>.kd matched to their Triton compile records (shared/compile_watch.py); the process_state gate required in scoped UT receipts that list it (shared/kernel_source_delivery.mjs). Tests, SKILL.md and references updated.",
   "origin": "AMD-AGI/GEAK geak-x-multiconfig fcbc098ded60194eb3b8df372412609afec6f023",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "cf49a035e53ea0eea71d3160755a5de9361f2d1d33f636ccaebb22ade4453f72"
+  "tree_sha256": "bcdd4a4f0cb542045127264d2e97bde0ced92a40654947b1aa0cef4bffd426fd"
 }

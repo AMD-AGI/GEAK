@@ -42,6 +42,7 @@
     "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
     "process_state gate (2026-11-07, menghongtao): leg_runner snapshots process-wide state (environment, torch backend/BLAS/precision/determinism switches, TunableOp, identities of shared torch callables) before and after a leg when PROCESS_STATE_OUT is set; ut_driver gate_process_state runs each phase's smallest and largest case in both legs and fails on any change the candidate makes that the baseline does not, unless declared in ut_contract.process_state_allow [{prefix, why}]. A UT runs the op alone, so such a change passes every other gate while changing every other op of a server: a gemm_a8w8 candidate that enabled TunableOp for its own GEMM passed cold verification and faulted all four serving ranks on the first agentic prefill (Muse Spark, 2026-11-06). GATES gains process_state after isolation (twelve non-timing gates); docs updated to match.",
     "vLLM multi-config extraction fixes (validated on Kimi-K3.1-Pro FP4, MI355X, vLLM, InferenceX run 42371416815): observed_workload vllm-iterations counts only the context requests' prior extent as a mixed step's cached_token (decode extent kept as mixed_decode_context_tokens); serving_probe sends one fresh vLLM cache_salt per PREFILL invocation so retries, point-independent repeat suffixes and colliding point seeds cannot hit an earlier invocation's prefix cache (intent of 27360aeb; 49b3f37e's mixed-step M was already counted this way, its test ported); build_task_plan defaults server_preimports for vllm.* entries only to vllm.platforms, vllm._custom_ops, vllm._aiter_ops (import-checked in the kimi-k31 image, no triton/torch rebinding). serving_probe/probe_server (vLLM on MI355X): PREFILL windows are closed by /stop_profile after their num_steps + 1 requests with max_iterations only a runaway cap, because vLLM counts empty worker steps toward max_iterations (a window of 8 held one prefill and the census refused it); probe_server sets ProfilerConfig.ignore_frontend and serving_probe skips *.async_llm.* front-end traces (counted as a rank with 0 instances). observed_workload decode cross-check route A adds the decode requests of mixed steps (completed output tokens include them; a concurrency-48 run showed a false 9.52% gap, 0.23% with them).",
+    "Profiler window release (host-memory leak fix, 2026-11-12): scripts/vllm_observer/geak_profiler_release.py, installed by vllm_observer/sitecustomize.py in every process that imports vllm.profiler.wrapper, wraps TorchProfilerWrapper._stop; after the original stop (which writes the trace) it drops the finished profiler, runs gc.collect() and malloc_trim(0). vLLM keeps each window's self-referencing torch profiler (and its kineto_results with shapes and stacks) alive until a full cyclic GC, which the workers' frozen heap seldom runs, so a TP8 vLLM capture at concurrency 1 leaked ~100-170 GB host memory per captured point. Recorded events, shapes and stacks are unchanged; GEAK_PROFILER_RELEASE=0 disables it. tests/test_profiler_release.py covers it.",
     "kernel_source_delivery.mjs (this branch): scoped UT receipts are checked against their validation mode's gates, plus ut_driver's process_state gate when the receipt lists it (ut_driver.GATES gained process_state on 2026-11-07; without it every current correctness receipt was refused).",
     "compile_watch server-call replay (2026-11-12): _compact also renumbers token-slot operands (slot_mapping, slots: page * page_size + offset) by whole pages, keeping each slot's offset in its page, together with the page-row index operands; an FP4 indexer key store's recorded call carries only slots into the 58 GB merged MLA cache and was refused as having no pool/index pair. belongs() also matches a trace identity `<name>.kd` to the compile record of Triton kernel `<name>`, so a task that names its Triton kernels by trace identity gets their server variants. tests/test_compile_watch_slots.py and tests/test_compile_watch.py cover both."
   ],
@@ -643,6 +644,16 @@
     },
     {
       "file": "ut_contracts/tests/test_process_state.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/vllm_observer/geak_profiler_release.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "tests/test_profiler_release.py",
       "source": null,
       "added_here": true
     }
