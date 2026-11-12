@@ -8,9 +8,14 @@ switch), it is not a phase of its own: it is broken down into the stages GEAK al
   `fusion-analysis` skill).
 - **Strategize** routes the regions worth a fused kernel into the kernel track, as kernel candidates
   that name a `fusion_id` (the Feasibility Review, now the System Architect's).
-- **The Milestone loop** builds, optimizes and measures each routed region like any kernel candidate:
-  a region UT (extract), a fused kernel (`kernel_lane.js`), then the integrate A/B on the overlay
-  accepted so far. An accepted region's overlay is checked on disk before it is banked.
+- **HeadKernel** takes a routed region that covers one of its heads' own kernels (typically an L2 region on
+  a GEMM or attention head) as one more candidate in that head's slot: the region UT and the fused kernel are
+  built there, and the head's A/B measures it against the reference the head's own candidates share, so
+  the best measured one lands. A head HeadKernel never reaches leaves its region to the Milestone loop.
+- **The Milestone loop** builds, optimizes and measures every other routed region like any kernel
+  candidate: a region UT (extract), a fused kernel (`kernel_lane.js`), then the integrate A/B on the
+  overlay accepted so far. An accepted region's overlay is checked on disk before it is banked, in either
+  track.
 - **The Finalize-gate, Finalize and Validate** are GEAK's own and unchanged. A region's A/B that did not
   finish in the loop is finished at the Finalize-gate like any other.
 
@@ -19,7 +24,7 @@ Switched off, nothing changes: no prompt, lane, log line or result field carries
 ## The shape of the integration
 
 ```
-e2e_workflow/e2e_workflow.js                    KF_ON-gated hooks in Profile, Strategize, the Milestone loop and the integrate A/B
+e2e_workflow/e2e_workflow.js                    KF_ON-gated hooks in Profile, Strategize, HeadKernel, the Milestone loop and the integrate A/B
 e2e_workflow/roles/fusion_analyst.md            the fusion profile (PHASE=analyze: Opportunity Analysis)
 e2e_workflow/roles/_fragments/fusion_strategy.md
                                                 the Feasibility Review and routing rules the System Architect follows
@@ -36,11 +41,12 @@ interface/kernel_fusion_args.py                 the switch and knobs -> workflow
 ```
 
 ```
-GEAK  Setup ─► Profile ─────────────► Strategize ─────────────► ConfigSweep ─► Tuning ─► HeadKernel ─► Milestone loop ─────────────────► Finalize-gate ─► Finalize ─► Validate
-KF             + fusion profile        + fusion regions as                                            a region is a kernel candidate:
-               (Opportunity Analysis   kernel_candidates                                              extract (region UT) ─► kernel_lane.js
-               on Profile's trace)     (Feasibility Review)                                           (fused kernel) ─► integrate A/B
-                                                                                                      + overlay check ─► bank
+GEAK  Setup ─► Profile ─────────────► Strategize ─────────────► ConfigSweep ─► Tuning ─► HeadKernel ───────────────────► Milestone loop ─────────────────► Finalize-gate ─► Finalize ─► Validate
+KF             + fusion profile       + fusion regions as                                a region on a head's kernel:    every other region is a kernel candidate:
+               (Opportunity Analysis  kernel_candidates                                  one more candidate in its       extract (region UT) ─► kernel_lane.js
+               on Profile's trace)    (Feasibility Review)                               slot: region UT ─► fused        (fused kernel) ─► integrate A/B
+                                                                                         kernel ─► the head's A/B        + overlay check ─► bank
+                                                                                         + overlay check ─► bank
 ```
 
 | What the KernelFusion PR did | Where it runs now | GEAK code it reuses |
@@ -48,9 +54,9 @@ KF             + fusion profile        + fusion regions as                      
 | capture a serving trace | nothing of its own: the Profile round's trace (AgentX: the kernel-extract skill's sampling captures); `trace_dir` overrides | Profile / KernelExtract |
 | Opportunity Analysis (`topk`) | the fusion profile, right after `profiler:baseline` (AgentX: after the baseline preparation) | `roles/fusion_analyst.md` PHASE=analyze; `kf_trace_digest.py`, `parse_profile.py` |
 | Feasibility Review | the System Architect, at Strategize and every `plan_milestone`: it routes regions as `kernel_candidates` `{short_name: "kf_<id>", fusion_id, pct_gpu_time, ...}` | `system_architect.md` step 1e + `fusion_strategy.md`; the strategy and plan schemas as they are |
-| region UT | the Milestone loop's extract for that candidate. AgentX: the kernel-extract skill prepares one UT per recommended region at KernelExtract (one invocation each, scoped by `FUSION_SCOPE`), and a passing one joins the prepared inventory by its GPU-time share | `kernel_extractor` PHASE=extract / the kernel-extract skill PHASE=prepare, under `fusion_ut_contract.md`; `reusePreparedUT` |
-| fused kernel | the candidate's kernel lane | `kernel_lane.js` (`reserveBoundedWorkflow`), with `fused_kernel_task.md` |
-| Integration Review + combined A/B (`apply`) | each region's own integrate A/B on the overlay accepted so far, in the order the kernel track dispatches. Regions that rebind the same callable or overlap are routed one at a time, and one that does not land leaves its `fallback` eligible | `runIntegrateBothLegs` (finish retries, speedup review, checkpoint), corrective re-author, the Finalize-gate replay; `roles/e2e_integrator.md` PHASE=integrate as it is |
+| region UT | the Milestone loop's extract for that candidate, or HeadKernel's for a region in a head's slot. AgentX: the kernel-extract skill prepares one UT per recommended region at KernelExtract (one invocation each, scoped by `FUSION_SCOPE`), and a passing one joins the prepared inventory by its GPU-time share | `kernel_extractor` PHASE=extract / the kernel-extract skill PHASE=prepare, under `fusion_ut_contract.md`; `reusePreparedUT` |
+| fused kernel | the candidate's kernel lane | `kernel_lane.js` (`reserveBoundedWorkflow`; in a head's slot, the head lanes' `fastBoundedWorkflow`), with `fused_kernel_task.md` |
+| Integration Review + combined A/B (`apply`) | each region's own integrate A/B on the overlay accepted so far, in the order the kernel track dispatches. A region on a head's kernel is A/B'd in that head's slot instead, against the reference the head's own candidates share, and banked only if it measures best. Regions that rebind the same callable or overlap are routed one at a time, and one that does not land leaves its `fallback` eligible | `runIntegrateBothLegs` (finish retries, speedup review, checkpoint), corrective re-author, the Finalize-gate replay, HeadKernel's candidate A/B; `roles/e2e_integrator.md` PHASE=integrate as it is |
 | overlay validation | `fusion_overlay_check.py` on every accepted region overlay before it is banked: it compiles, the kernels it loads exist, every file of the overlay it was built on is kept, and it is the overlay the A/B measured. A failed or unrun check turns the accept into a final rejection | inside `runIntegrateBothLegs` |
 | re-validation | GEAK's own re-profile after each milestone, Finalize and Validate, on the whole stack | unchanged |
 
@@ -81,10 +87,12 @@ What runs ahead of the search gets a bounded share of it. Under `time_budget_s`,
 (AgentX) the region UTs together have a quarter of the search window left when the fusion profile starts.
 The analysis reads a trace and source on no GPU, so it gets two attempts of at most an hour each. Each region
 UT call makes one attempt, plus one retry that is told the first attempt's outcome. A failed fusion profile
-is recorded and the run goes on exactly as with the switch off. Everything in the Milestone loop runs under
-GEAK's own bounds (`budget`, `milestone_min_pct`, the lane reserve, the final reserve).
+is recorded and the run goes on exactly as with the switch off. Everything in HeadKernel and the Milestone
+loop runs under GEAK's own bounds (`head_budget`, `budget`, `milestone_min_pct`, the lane reserve, the final
+reserve).
 
-Fast and deep mode run no Milestone loop, so KernelFusion records `skipped` there.
+Fast and deep mode run no Milestone loop, which runs most fusion regions and is the fallback for the rest, so
+KernelFusion records `skipped` there.
 
 ## Switch
 
@@ -125,9 +133,11 @@ as for every integrate).
 
 `<eval_dir>/kernel_fusion/analysis/` (digest, `topk.json`, `REPORT.md`, `MODEL_NOTES.md`); a region's UT
 is a task dir like any kernel candidate's (AgentX: from `<eval_dir>/kernel_extraction/round_kf_<id>/`), its
-lane runs under `<eval_dir>/kernels/_exp/`, and its candidate overlay is `<eval_dir>/overlay/cand_kf_<id>`.
+lane runs under `<eval_dir>/kernels/_exp/`, and its candidate overlay is `<eval_dir>/overlay/cand_kf_<id>`
+(in a head's slot, the head's candidate overlay with its `CAND_TAG`).
 A banked region is in `accepted_kernels` as `kind: "patch"` (the knowledge-base replay reads it like any
-patch) with `op_kind: "fusion"` and its `fusion_id`. The workflow return, `state` and `result.json` gain a
+patch) with `op_kind: "fusion"` and its `fusion_id`; one banked in a head's slot is in `accepted_heads`, under
+the head's `short_name`, the same way. The workflow return, `state` and `result.json` gain a
 `kernel_fusion` record only when the switch is on:
 
 | field | meaning |
@@ -138,8 +148,8 @@ patch) with `op_kind: "fusion"` and its `fusion_id`. The workflow return, `state
 | `candidates` / `recommended` | the fusion profile: every region and the analyst's non-conflicting picks |
 | `routed` | the regions the architect routed into the kernel track |
 | `unprepared` | AgentX: recommended regions that got no passing region UT, with the reason |
-| `accepted` | the banked regions: `short_name`, `fusion_id`, `isolated_speedup`, `e2e_delta_pct` |
-| `outcomes` | the kernel track's verdict on every routed region (from `history.ledger`) |
+| `accepted` | the banked regions: `short_name` (the head's, for one banked in its slot), `fusion_id`, `isolated_speedup`, `e2e_delta_pct` |
+| `outcomes` | the verdict on every routed region (from `history.ledger`); a region tried in a head's slot is `<head>:<region>` |
 | `soft_parity` | a region is banked: later A/Bs and Validate carry the accuracy gate |
 
 The record is carried in `state`, so a resumed run reuses its fusion profile.

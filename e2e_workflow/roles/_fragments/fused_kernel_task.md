@@ -1,7 +1,7 @@
 # Fused kernel for a fusion region
 
-Read by the kernel-layer agents (`kernel_lane.js`) when the Milestone loop of `e2e_workflow.js` hands
-them a FUSION REGION task (a kernel candidate naming a region of the run's fusion profile, KernelFusion
+Read by the kernel-layer agents (`kernel_lane.js`) when `e2e_workflow.js` (its Milestone loop, or HeadKernel
+for a region on a head's own kernel) hands them a FUSION REGION task (a kernel candidate naming a region of the run's fusion profile, KernelFusion
 switched on): ONE fused kernel that replaces a whole kernel region of a live LLM serving stack. The lane `task` text names the region (level, the device kernels it launches today in order, the
 phases it runs in, the m range, the seam, the tensors that cross its boundary, the analyst's suggested
 design and whether the outputs are expected bit-exact).

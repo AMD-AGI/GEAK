@@ -127,8 +127,12 @@ candidates that name a `fusion_id`, and the milestone loop treats each one like
 any kernel candidate: a region unit test, one fused kernel from the kernel
 workflow (`kernel_lane.js`), and the run's own integrate A/B on the overlay
 accepted so far (gsm8k accuracy gate, then throughput), finished at the
-Finalize-gate when it is still pending. A banked region is carried like any
-accepted kernel, and Finalize ships it. A fusion profile that fails, finds
+Finalize-gate when it is still pending. A region on a head's own kernel is
+built the same way in HeadKernel instead, as one more candidate in that head's
+slot, and banked only if it measures best against the reference the head's
+own candidates share; a head HeadKernel never reaches leaves its region to the
+milestone loop. A banked region is carried like any accepted kernel, and
+Finalize ships it. A fusion profile that fails, finds
 nothing or is switched off leaves the run exactly as it is without KF.
 
 KF is off by default. Switch it on with `--kernel-fusion`,
@@ -152,8 +156,8 @@ CLI flags (`--kernel-fusion` / `--no-kernel-fusion`), the
 workflow args (`interface/kernel_fusion_args.py`); off, nothing. Under
 `time_budget_s`, the fusion profile and the AgentX region unit tests together
 have at most a quarter of the search window left when the fusion profile
-starts; the fused kernels then run under the run's own kernel budget and
-reserves. Fast and deep mode skip KF (`status: skipped`). A failed fusion
+starts; the fused kernels then run under the run's own head and kernel budgets
+and reserves. Fast and deep mode skip KF (`status: skipped`). A failed fusion
 profile, or a knob it cannot use, is recorded as `status: error` and the run
 goes on without KF. A region's accepted overlay is banked only after
 `e2e_workflow/scripts/fusion_overlay_check.py` passes (inside the run's eval
@@ -255,7 +259,9 @@ because it includes accepted upstream configuration gains.
 
 A banked fusion region is part of the run's own result like any accepted
 kernel: it is in `accepted_kernels` (`kind: "patch"`, `op_kind: "fusion"`, its
-`fusion_id`), and the run's `throughput_speedup` and final bundle include it.
+`fusion_id`), or in `accepted_heads` under the head's `short_name` when it won
+a head's slot, and the run's `throughput_speedup` and final bundle include it.
+In `outcomes`, a region tried in a head's slot is `<head>:<region>`.
 
 `current_best_same_config_divergence_pct` is the primary cross-harness
 alignment metric. `measurement_divergence_pct` remains an exact compatibility

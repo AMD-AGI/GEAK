@@ -6,6 +6,8 @@
 //   - switched on, the fusion profile reads Profile's own trace and leaves Profile as it is, Strategize routes
 //     its regions as kernel candidates, and the Milestone loop builds, optimizes (kernel_lane.js) and
 //     measures each one with GEAK's own extract, integrate A/B, Finalize-gate and Validate;
+//   - a region on a head's own kernel is one more candidate in that head's HeadKernel slot instead, and goes
+//     back to the Milestone loop when the head never reaches its A/B;
 //   - every outcome (accepted, pending, overlay rejected, unknown region, failed or unconfigured profile,
 //     fast/deep mode, a given topk, AgentX, a resumed run) ends cleanly and the run goes on to Validate.
 //
@@ -75,6 +77,11 @@ ok(['...(KF_ON ? kfExpand(c) : c), idx: i',
   '...(KF_ON && kfExtractInputs(c)),', "task: (KF_ON && kfLaneTask(c)) || 'Compare candidate backends '",
   '...(KF_ON && kfResultFields(c)) },', '...(KF_ON && kfAccuracyFor(c)),'].every((s) => src.split(s).length === 2),
   'the Milestone loop treats a region as a kernel candidate: one hook each in plan, extract, lane and integrate');
+const count = (s) => src.split(s).length - 1;
+ok(count('if (KF_ON) headCands.push(...(await kfHeadCandidates(h)));') === 1 &&
+  count('...(KF_ON && kfHeadResult(cand)) },') === 1 && count('...(KF_ON && kfAccuracyFor(cand.kf)),') === 1 &&
+  count('(KF_ON && kfHeadPct(cand)) || h.pct_gpu_time') === 4 && count('...(KF_ON && kfHeadSpec(cand)),') === 2,
+  'HeadKernel takes a region as one more candidate: its A/B inputs, gate share, pending entry and correctives');
 // Outside its own blocks every KernelFusion reference sits behind KF_ON, so a GEAK test that slices one
 // function out of the workflow needs only KF_ON = false for it.
 const cut = (s, from, to) => {
@@ -118,12 +125,14 @@ ok(role.includes('## PHASE=analyze') && (role.match(/## PHASE=/g) || []).length 
 const strat = fs.readFileSync(path.join(WF_DIR, 'roles', '_fragments', 'fusion_strategy.md'), 'utf8');
 ok(/Feasibility Review/.test(strat) && /never `head_candidates`/.test(strat) && /exclusive_with/.test(strat) &&
   /route at most one of them at a time/.test(strat), 'roles/_fragments/fusion_strategy.md: the routing rules');
+ok(/stays in `head_candidates` exactly as it would without the\s+region/.test(strat) && /`<head short_name>:kf_<id>`/.test(strat),
+  'roles/_fragments/fusion_strategy.md: a head op keeps its head route, and HISTORY names a region tried in its slot');
 const arch = fs.readFileSync(path.join(WF_DIR, 'roles', 'system_architect.md'), 'utf8');
 ok(/1e\. \*\*Fusion regions \(only if `FUSION_STRATEGY` is in your inputs; otherwise skip this step entirely/.test(arch),
   'the architect routes fusion regions only when FUSION_STRATEGY is in its inputs');
 
 console.log('\n## B. switched off: no trace of it anywhere');
-for (const s of ['off', 'off_false', 'off_kernels', 'off_agentx']) {
+for (const s of ['off', 'off_false', 'off_kernels', 'off_agentx', 'off_head', 'off_agentx_head']) {
   const r = run(s);
   const hits = [...r.calls.map((c) => c.prompt), ...r.logs, ...r.lanes.map((l) => JSON.stringify(l))]
     .filter((t) => KF_MARKS.test(t));
@@ -133,6 +142,8 @@ for (const s of ['off', 'off_false', 'off_kernels', 'off_agentx']) {
 ok(same(run('off').calls, run('off_false').calls) && same(run('off').logs, run('off_false').logs) &&
   same(run('off').result, run('off_false').result), 'kernel_fusion "false" is exactly unset');
 ok(labels(run('off_kernels')).includes('finish-integrate mk_gemm'), 'off_kernels: GEAK\'s own Finalize-gate replay ran');
+ok(labels(run('off_head')).includes('integrate h_gemm:aiter') && labels(run('off_agentx_head')).includes('integrate h_gemm:aiter'),
+  'off_head, off_agentx_head: GEAK\'s own head track ran');
 
 console.log('\n## C. switched on: profile, route, optimize, measure');
 const on = run('on');
@@ -243,6 +254,65 @@ const res = run('on_resume', { KF_MOCK_STATE: stateFile });
 ok(!labels(res).includes('fusion_analyst:analyze') && /FUSION REGION/.test(promptOf(res, 'extract kf_c2')) &&
   promptOf(res, 'architect:plan m2').includes('FUSION_STRATEGY') && names(res).includes('kf_c2') &&
   kfOf(res).status === 'accepted', 'resume: the carried regions are routed, optimized and banked without a new profile');
+
+console.log('\n## G. HeadKernel: a region on a head\'s own kernel is one more candidate in that head\'s slot');
+const krIn = (r, label) => {
+  const p = promptOf(r, label), i = p.indexOf('- KERNEL_RESULT: ');
+  return i < 0 ? {} : JSON.parse(p.slice(i + 17, p.indexOf('\n', i)));
+};
+const heads = (r) => (r.result && r.result.accepted_heads) || [];
+const once = (r, label) => labels(r).filter((l) => l === label).length === 1;
+const hd = run('on_head');
+ok(before(hd, 'bakeoff h_gemm', 'extract kf_c4') && before(hd, 'extract kf_c4', 'integrate h_gemm:kf_c4') &&
+  once(hd, 'extract kf_c4') && !labels(hd).includes('integrate kf_c4') &&
+  /FUSION REGION/.test(promptOf(hd, 'extract kf_c4')) && promptOf(hd, 'extract kf_c4').includes('pkg.mlp:MLP.forward'),
+  'on_head: the region UT is built in the head\'s slot after its bake-off, and the Milestone loop never gets the region');
+ok(/^FUSION REGION c4 \(L2\)/.test(laneOf(hd, 'kf_c4').task) && /^Author\+optimize a triton/.test(laneOf(hd, 'h_gemm').task),
+  'on_head: one fused kernel lane beside the head\'s own author lane');
+const fk = krIn(hd, 'integrate h_gemm:kf_c4'), ak = krIn(hd, 'integrate h_gemm:aiter');
+ok(fk.short_name === 'h_gemm' && fk.task_dir === `${EV}/tasks/kf_c4` && fk.op_kind === 'fusion' && fk.fusion_id === 'c4' &&
+  fk.winner_kind === 'patch' && fk.pct_gpu_time === 22 && fk.live_call_seam === 'pkg.mlp:MLP.forward' &&
+  /ACCURACY_GATE/.test(promptOf(hd, 'integrate h_gemm:kf_c4')),
+  'on_head: the fused candidate\'s A/B carries the region\'s UT, seam, GPU-time share and accuracy gate');
+ok(ak.task_dir === `${EV}/tasks/h_gemm` && ak.op_kind === 'gemm' && ak.pct_gpu_time === 20 && !('fusion_id' in ak) &&
+  /REUSE_REF: true/.test(promptOf(hd, 'integrate h_gemm:aiter')) && !/ACCURACY_GATE/.test(promptOf(hd, 'integrate h_gemm:aiter')),
+  'on_head: the head\'s own candidates are A/B\'d as before, against the reference leg the fused one measured');
+ok(before(hd, 'integrate h_gemm:kf_c4', 'overlay-check h_gemm') && before(hd, 'overlay-check h_gemm', 'integrate h_gemm:aiter'),
+  'on_head: the fused candidate\'s accepted overlay is checked on disk before the next candidate runs');
+const hk = heads(hd)[0] || {};
+ok(heads(hd).length === 1 && hk.backend === 'kf_c4' && hk.kind === 'patch' && hk.op_kind === 'fusion' && hk.fusion_id === 'c4' &&
+  same(kfOf(hd).routed, ['kf_c4', 'kf_c2']) && kfOf(hd).accepted.some((a) => a.short_name === 'h_gemm' && a.fusion_id === 'c4') &&
+  kfOf(hd).outcomes.some((o) => o.short_name === 'h_gemm:kf_c4' && o.verdict === 'candidate_passed'),
+  'on_head: the best measured candidate, the fused one, is banked as the head\'s win; the record says where it ran');
+const lose = run('on_head_loses');
+const lk = heads(lose)[0] || {};
+ok(lk.backend === 'aiter' && lk.op_kind === 'gemm' && !('fusion_id' in lk) && !kfOf(lose).accepted.some((a) => a.fusion_id === 'c4') &&
+  kfOf(lose).outcomes.some((o) => o.short_name === 'h_gemm:kf_c4' && o.verdict === 'candidate_passed') &&
+  once(lose, 'extract kf_c4') && !labels(lose).includes('integrate kf_c4'),
+  'on_head_loses: a fused candidate measured below another is not banked, and the region is not tried again');
+const unrun = run('on_head_unrun');
+ok(!labels(unrun).includes('bakeoff h_gemm') && labels(unrun).includes('integrate kf_c4') &&
+  /^FUSION REGION c4/.test(laneOf(unrun, 'kf_c4').task) && (banked(unrun).find((x) => x.short_name === 'kf_c4') || {}).op_kind === 'fusion' &&
+  kfOf(unrun).outcomes.some((o) => o.short_name === 'kf_c4' && o.verdict === 'confirmed'),
+  'on_head_unrun: a head that never reaches its A/B leaves its region to the Milestone loop');
+const hp = run('on_head_pending');
+const pr = krIn(hp, 'finish-integrate h_gemm');
+ok(pr.op_kind === 'fusion' && pr.task_dir === `${EV}/tasks/kf_c4` && /ACCURACY_GATE/.test(promptOf(hp, 'finish-integrate h_gemm')) &&
+  before(hp, 'finish-integrate h_gemm', 'overlay-check h_gemm') && (heads(hp)[0] || {}).fusion_id === 'c4',
+  'on_head_pending: the Finalize-gate replays the fused A/B as it was, checks the overlay, and banks it');
+const fx = run('on_head_fix');
+const fixLane = fx.lanes.find((l) => /^CORRECTIVE FIX/.test(String(l.task))) || {};
+const fr = krIn(fx, 'integrate h_gemm corrective');
+ok(String(fixLane.kernel_path).endsWith('/_exp/kf_c4') && (fixLane.op_spec || {}).op_kind !== 'gemm' &&
+  fr.op_kind === 'fusion' && fr.task_dir === `${EV}/tasks/kf_c4` && fr.pct_gpu_time === 22 &&
+  /ACCURACY_GATE/.test(promptOf(fx, 'integrate h_gemm corrective')) && before(fx, 'integrate h_gemm corrective', 'overlay-check h_gemm') &&
+  (heads(fx)[0] || {}).fusion_id === 'c4' && (heads(fx)[0] || {}).corrective === true,
+  'on_head_fix: a fixable live failure of the fused kernel gets the head\'s corrective re-author, on the fused kernel');
+const axh = run('on_agentx_head');
+ok(!labels(axh).some((l) => /^extract/.test(l)) && labels(axh).includes('kernel_extractor:prepare kf_c4') &&
+  axh.lanes.filter((l) => l.kernel_path.endsWith('/kf_c4')).length === 1 && before(axh, 'integrate h_gemm:kf_c4', 'integrate kf_c2') &&
+  !labels(axh).includes('integrate kf_c4') && (heads(axh)[0] || {}).fusion_id === 'c4',
+  'AgentX: the head takes the region\'s prepared UT, so nothing is extracted, and the Milestone loop skips the region');
 
 console.log(failures === 0 ? '\nPASS: KernelFusion runs inside GEAK\'s own stages; off, it leaves no trace.'
   : `\n${failures} check(s) FAILED`);

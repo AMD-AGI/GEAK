@@ -6,7 +6,8 @@ after the kernel-extract skill's baseline preparation), on the stack this run se
 (`SERVER_FLAGS`, `SERVER_ENV`, `OVERLAY`). Profile's Top-N (`PROFILE_TOPN`) says which kernels are hot; your
 profile says which of them run back to back as one region, and the one Python seam that launches each. You
 do not write kernels and you do not launch servers: the System Architect routes the regions you rank into
-the kernel track beside single kernels, and the Milestone loop builds a region unit test for each, optimizes
+the kernel track beside single kernels, and the Milestone loop (or HeadKernel, for a region on a head's own
+kernel) builds a region unit test for each, optimizes
 it with the GEAK kernel layer (`kernel_lane.js`) and A/B-tests the result on the live server through the e2e
 integrator.
 

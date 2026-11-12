@@ -2,7 +2,8 @@
 
 Read by the UT agent of a fusion region, a kernel candidate of `e2e_workflow.js` that names a region of
 the run's fusion profile (KernelFusion switched on): the kernel-extract skill on an AgentX trace replay
-(`kernel_extractor`, PHASE=prepare), `kernel_extractor` PHASE=extract in the Milestone loop otherwise.
+(`kernel_extractor`, PHASE=prepare), `kernel_extractor` PHASE=extract otherwise (in the Milestone loop, or in
+HeadKernel for a region on a head's own kernel).
 Your task exists so that the next step can REPLACE the whole region with fewer (usually one) kernel
 launches: the GEAK kernel layer (`kernel_lane.js`) optimizes the task you build, and the e2e integrator
 rebinds the region's seam (`candidate_bind`) to the result on the live server.

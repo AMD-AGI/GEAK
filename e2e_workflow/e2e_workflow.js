@@ -3351,7 +3351,7 @@ async function kfProfile(phaseName) {
   if (!KF_ON || kfRecord.status !== 'not_run') return;
   if (FAST_MODE || DEEP_MODE) {
     Object.assign(kfRecord, { status: 'skipped',
-      reason: `${FAST_MODE ? 'fast' : 'deep'} mode runs no Milestone loop, where fusion regions are optimized` });
+      reason: `${FAST_MODE ? 'fast' : 'deep'} mode runs no Milestone loop, which runs most fusion regions and is the fallback for the rest` });
     return;
   }
   if (A.kf_config_errors) {
@@ -3542,6 +3542,61 @@ function kfBanked(rec) {
     short_name: rec.short_name, fusion_id: rec.fusion_id || '', isolated_speedup: rec.isolated_speedup,
     e2e_delta_pct: rec.e2e_delta_pct }]);
 }
+// HeadKernel: a queued region whose kernels include a head's own (typically GEMM or attention plus its
+// neighbors) leaves the kernel queue for that head's slot when the head reaches its A/B, as one more candidate:
+// its region UT and one fused kernel from kernel_lane.js, measured against the reference the head's other
+// candidates share, so it lands only by beating them. A head that never gets here leaves its region to the
+// Milestone loop.
+async function kfHeadCandidates(h) {
+  const own = [requiredDeviceKernel(h), ...kfList(h.selected_device_kernels)].filter(Boolean);
+  const at = kernelQueue.findIndex((k) => {
+    const r = kfRegionOf(k);
+    return !!r && kfList(r.kernels).some((n) => own.some((d) => kernelIdentitiesMatch(n, d)));
+  });
+  if (at < 0 || laneWindowShort(`fused lane ${h.short_name}`)) return [];
+  const c = { ...kfExpand(kernelQueue.splice(at, 1)[0]), gpu_id: h.gpu_id };
+  const tag = `${h.short_name}:${c.short_name}`;
+  const fail = (lesson) => {
+    log(`  ${tag}: ${lesson}; the head goes on with its own candidates.`);
+    history.ledger.push({ direction: tag, verdict: 'dead_end', lesson });
+    return [];
+  };
+  const x = await extractWithBaseline('kernel_extractor', 'extract', kfExtractIntro(c), {
+    EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
+    CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+    ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+    ...kfExtractInputs(c),
+  }, { phase: 'HeadKernel', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
+  if (!x || x.editable === false || x.unittest_smoke !== 'pass' || !x.task_dir) return fail(`region UT failed (${extractFailWhy(x)})`);
+  let r;
+  try {
+    r = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
+      kernel_path: x.task_dir, workflow_dir: KERNEL_WF_DIR,
+      use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR, ...KB_ARGS,
+      budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+      task: kfLaneTask(c), apply_to_original: 'false',
+    }, tag);
+  } catch (e) {
+    return fail(`fused kernel lane failed (${String(e).slice(0, 300)})`);
+  }
+  // The head's own basis: workload-weighted, as its other candidates are ranked.
+  const iso = !r ? 0 : KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0)
+    : (r.final_weighted != null ? r.final_weighted : r.final_geomean);
+  if (!(iso > 1.0) || !r.final_patch) return fail(`no isolated speedup (${r ? r.reason || r.validation_status : 'lane not run'})`);
+  log(`  ${tag}: fused kernel ${iso.toFixed(2)}x weighted; it joins ${h.short_name}'s candidates.`);
+  // kind 'authored' keeps the head's corrective re-author; winner_kind 'patch' banks it as the Milestone loop does.
+  return [{ kind: 'authored', source: c.short_name, winner_kind: 'patch', language: c.candidate_backends[0],
+    final_patch: r.final_patch, kernel_eval_dir: r.eval_dir, isolated: iso, kf: c, kfx: x }];
+}
+// The head's A/B, corrective and pending entry of a fused candidate: the region's UT, seam and share. {} otherwise.
+function kfHeadResult(cand) {
+  const c = cand.kf, x = cand.kfx;
+  return !c ? {} : { task_dir: x.task_dir, source_path_in_sglang: x.source_path_in_sglang || '',
+    target_callable: x.target_callable || c.target_callable, pct_gpu_time: c.pct_gpu_time, ...kfResultFields(c) };
+}
+const kfHeadPct = (cand) => (cand.kf ? cand.kf.pct_gpu_time : 0);
+const kfHeadSpec = (cand) => (!cand.kf ? {} : { op_kind: cand.kfx.op_kind, shapes: cand.kfx.shapes,
+  dtype: cand.kfx.dtype, task_dir: cand.kfx.task_dir, pct_gpu_time: cand.kf.pct_gpu_time });
 // A region's accepted overlay is checked on disk before any caller banks it (scripts/fusion_overlay_check.py):
 // it compiles, every fused kernel it names exists, every file of the overlay it was built on is kept (existing
 // optimizations preserved), and it is the overlay the A/B measured. A failed or unrun check makes the accept a
@@ -5703,6 +5758,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
       }
     }
+    if (KF_ON) headCands.push(...(await kfHeadCandidates(h)));
     if (!headCands.length) {
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) produced NO candidate (bake-off + author route both empty) — flagged, NOT silently skipped.`);
@@ -5732,9 +5788,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
         code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
         verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
-        parity_note: cand.parity_note || 'expected_close' },
+        parity_note: cand.parity_note || 'expected_close', ...(KF_ON && kfHeadResult(cand)) },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, ...(KF_ON && kfAccuracyFor(cand.kf)),
       CAND_TAG: `c${ci}_${cand.source}`,
       ...(sharedRefMed != null ? { REUSE_REF: true, SHARED_REF_MED: sharedRefMed } : {}),
     });
@@ -5752,7 +5808,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const passed = abc && integAccepted(integ, (KF_ON && kfHeadPct(cand)) || h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
       // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
         e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
@@ -5762,7 +5818,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!bestPick || integ.e2e_throughput_tok_s > bestPick.integ.e2e_throughput_tok_s) bestPick = { cand, integ, inputs };
         log(`  ${h.short_name}: candidate ${cand.source} PASSED e2e gate (${integ.e2e_throughput_tok_s} tok/s, +${integ.e2e_delta_pct}%).`);
       } else {
-        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
+        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, (KF_ON && kfHeadPct(cand)) || h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
       }
     }
 
@@ -5790,6 +5846,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+              ...(KF_ON && kfHeadSpec(cand)),
             })
           : { banked: false };
         if (corr.banked) {
@@ -5799,7 +5856,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed crash: ${reason}` });
         } else {
           pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
-            pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
+            pct_gpu_time: (KF_ON && kfHeadPct(cand)) || h.pct_gpu_time, inputs: headIntegrateInputs,
             winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
             op_kind: ext.op_kind, backend: cand.source,
             partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
@@ -5809,13 +5866,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       } else {
         // Route actual parity/accuracy failures to correctness fixes and JIT/capture failures
         // to integration fixes; an inconclusive speedup review is not a kernel defect.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const reason = gateRejectReason(integ, (KF_ON && kfHeadPct(cand)) || h.pct_gpu_time, cand.isolated);
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
               gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
+              ...(KF_ON && kfHeadSpec(cand)),
             })
           : { banked: false };
         if (corr.banked) {
@@ -6386,11 +6444,13 @@ if (want('final')) {
 }
 
 // KernelFusion record (result["kernel_fusion"] in run_e2e.py; carried in state): what the fusion profile
-// found, and the kernel track's verdict on every region it routed (history.ledger).
+// found, and the verdict on every region it routed (history.ledger), a region tried in a head's slot being
+// its `<head>:<region>` rows.
 function kfReturn() {
   const routed = new Set(kfRecord.routed);
+  const mine = (e) => e && (routed.has(e.direction) || routed.has(String(e.direction).split(':').pop()));
   return { ...kfRecord, soft_parity: KF_SOFT_LANDED,
-    outcomes: history.ledger.filter((e) => e && routed.has(e.direction)).map((e) => ({ short_name: e.direction,
+    outcomes: history.ledger.filter(mine).map((e) => ({ short_name: e.direction,
       verdict: e.verdict, isolated_speedup: e.isolated_speedup ?? null, e2e_delta_pct: e.e2e_delta_pct ?? null,
       lesson: String(e.lesson || '').slice(0, 300) })) };
 }

@@ -53,7 +53,8 @@ Optional **KernelFusion** (off by default; `kernel_fusion: "true"`, which `inter
 from `--kernel-fusion`, `GEAK_KERNEL_FUSION=1` or handoff `"kernel_fusion": true`) adds no phase: Baseline
 Profile gets a fusion profile of the same trace (`knowledge/kernel_fusion_skills/fusion-analysis/`),
 Strategize routes fusion regions as kernel candidates, and the milestone loop extracts, optimizes and gates
-each one like any kernel. See "Kernel fusion" below, `knowledge/kernel_fusion_integration.md` and
+each one like any kernel (a region on a head's own kernel is one more candidate in that head's HeadKernel
+slot instead). See "Kernel fusion" below, `knowledge/kernel_fusion_integration.md` and
 `docs/reference/run-e2e-contract.md`.
 
 Setup runs a **preflight** (see `knowledge/preflight.md`) — a judgment-guided env self-check (not a
@@ -408,7 +409,10 @@ input). **The milestone loop** then treats a region like any kernel candidate: a
 `kernel_extractor` (on AgentX, prepared at KernelExtract by the kernel-extract skill) under
 `roles/_fragments/fusion_ut_contract.md`, one fused kernel from a `kernel_lane.js` run, and the integrate
 A/B on the overlay accepted so far, with its finish retries, speedup review, corrective re-author and
-Finalize-gate replay. Off, it injects nothing: no prompt, log line, lane or return field changes
+Finalize-gate replay. A region on a head's own kernel (typically an L2 region on a GEMM or attention head) is built
+the same way in **HeadKernel** instead, as one more candidate in that head's slot: the head's A/B measures
+it against the reference its own candidates share and banks the best measured one, and a head HeadKernel
+never reaches leaves its region to the milestone loop. Off, it injects nothing: no prompt, log line, lane or return field changes
 (`scripts/test_kernel_fusion.js` runs the whole workflow both ways).
 
 **An accept is not taken on trust.** A region's A/B is held to task accuracy (a fused kernel reorders

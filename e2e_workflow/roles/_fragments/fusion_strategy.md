@@ -41,8 +41,16 @@ A region you pick is ONE entry of `kernel_candidates` (never `head_candidates`):
   rows), not the fusion profile's `region_pct_device_time` once the profile has moved; the kernel track's
   bars (`MILESTONE_MIN_PCT`, Amdahl) apply to that share like to any kernel. Drop a region whose kernels are
   gone from the latest profile.
-- Do not also route, in the same plan, a single-kernel candidate for one of the region's `kernels`: the
-  fused kernel replaces them, and two overlays rebinding the same code cannot both go in.
+- Do not also route, in the same plan, a single-kernel `kernel_candidates` entry for one of the region's
+  `kernels`: the fused kernel replaces them, and two overlays rebinding the same code cannot both go in.
+- A region on a head op (one whose `kernels` include the kernel of a head you route in `head_candidates`,
+  typically an L2 region: GEMM plus its bias/activation/quant, attention plus its local pre/post-processing)
+  is routed here all the same, and that head op stays in `head_candidates` exactly as it would without the
+  region. When HeadKernel reaches the head's A/B, the workflow moves the region into the head's slot as one
+  more candidate beside the head's own, all measured against the same reference; the best measured one
+  lands. A head HeadKernel never reaches leaves its region to the Milestone loop.
+- HISTORY names a region tried in a head's slot `<head short_name>:kf_<id>`; it counts as tried, like a
+  region the Milestone loop ran.
 - Kernels that rebind the same callable or whose regions overlap (exclusive_with) cannot go in together --
   route at most one of them at a time. When it does not land, its `fallback` (or another of them) is still
   eligible in a later plan.
