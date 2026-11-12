@@ -53,6 +53,8 @@ split it into `baseline → profile → ut → roofline → optimize → applyba
 finishes with a hashed dispatch/shape handoff, and UT generation can run or resume
 separately using the fixed templates. See [profile/HANDOFF.md](stages/profile/HANDOFF.md)
 and [the UT stage](stages/ut/README.md). Existing five-stage configs remain supported.
+A multi-config scenario's applyback judges every CI point the UT covered against that point's
+own official CI number (`reference: ci`, see `stages/evaluate/README.md`).
 
 Keep the verified fixed-route result available during migration. Preserve required
 search and verification budgets; compare policies at the same starting state and total

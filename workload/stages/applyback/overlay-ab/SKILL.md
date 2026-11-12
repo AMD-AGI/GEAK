@@ -155,6 +155,68 @@ baseline separately in this control record; leave the baseline stage's receipt i
 The finalizer uses the fresh control for A/B and keeps the historical baseline alongside
 it. Without a usable fresh control, report `blocked` rather than substituting history.
 
+## Several configs: against the CI, in the CI's own configuration
+
+With a multi-config baseline (`adopt-ci-artifacts`: `baseline.json` has `multi_config: true`)
+the reference is **the official CI number of each point**, and the only admissible way to
+measure against it is to launch **exactly what the CI job launched** for that point. Set
+`params.reference: "ci"`. Everything runs on this node in the deployment image -- the same
+image optimize built and cold-verified the kernels in -- never on the host's Python:
+
+1. **Build and prove the overlay once, inside the image.** The binding check imports the target
+   modules, so run `overlay_setup.py check` with the image's interpreter (`docker run --rm
+   --device /dev/kfd --device /dev/dri -v /shared_nfs:/shared_nfs <image> python3 ...`), and run
+   it through `python3 -c "import runpy,sys; ..."` rather than `python3 <task>/overlay_setup.py`:
+   a script's own directory goes first on `sys.path`, and a task directory's `unittest.py` then
+   shadows the stdlib `unittest` and `import sglang` fails. Save `shadow_check.json`.
+2. **Measure each point with `../ci_point_leg.sh <baseline/out/points/<pid>> $OUT/points/<pid>
+   $OUT/overlay`**, in the order `python3 ../points.py` prints. **Every config a UT case names
+   (`tasks/<k>/meta.json` `workload.cases[].config_id`) is measured**: it priced the kernels that
+   were kept, so leaving it out hides a regression there. `params.points` defaults to `covered`;
+   `all` adds points no UT covered; `representative` (each group's two ends) is a screening run
+   whose left-out covered points make the verdict `incomplete`. The order is each EP group's
+   lowest, middle and highest concurrency first, then the rest -- `points.py` recomputes it when
+   an older baseline has no `measure_order`, so nothing is narrowed silently. If the budget
+   cannot hold every covered point, measure in that order and stop: finalize names the points
+   not reached and the verdict stays `incomplete` until a later session measures them. The leg watches its own server (`../../_shared/serving_watch.py`): a rank can abort while the
+   container and its HTTP front end stay up, so it scans the server log for the fatal lines a
+   dead GPU server leaves, fails a start that dies in seconds instead of at the 75 min health
+   timeout, and stops the client the moment the server dies mid-window (exit 3, the line in
+   `server_watch.json`) instead of waiting out the 3 h leg timeout. When a full overlay kills the
+   server, attribute it before re-measuring: stock alone, then each kernel alone, then all but the
+   culprit, each a fresh short leg under the same watch; record the culprit and its server line as
+   a counterexample for optimize and leave it out of the overlay. The leg reads the point's `server_logs/logs/config.yaml` --
+   image, every server arg, every server env var, the client's concurrency, duration and AIPERF
+   env -- launches a fresh server container from it with the overlay as `PYTHONPATH` (the only
+   difference), writes `alignment.json` from `docker inspect` of what actually runs
+   (`../ci_config.py align`) and stops unless it is ALIGNED, checks a correctness probe, runs the
+   CI's `aiperf profile` argv through the AgentX harness, and turns the export into the CI row
+   with InferenceX's own `process_agentic_result` (`../ci_result.py`) -> `e2e/bench_summary.json`.
+   The CI run's pins come from its own records through `../../_shared/ci_pins.py` -- the same
+   rule `baseline/measure` states: the leg refuses before GPU time unless the hub's `refs/main`
+   of every repo the CI loaded is the commit the CI loaded (the server is offline; `main` moves
+   upstream), gives the client a private hub and `--tokenizer-revision <that commit>`, and after
+   the run proves from its own logs that the server loaded those commits and the client ran the
+   CI's recorded argv -> `pins.json`. Never point a networked client at a shared hub: resolving
+   `main` online rewrote another user's `refs/main` to a newer, partial snapshot (2026-11-06).
+   Its inputs are `params.ci` (`hf_hub`, `model_mounts`, `agentx_bin`, `inferencex_path`),
+   exported as `CI_HF_HUB`, `CI_MODEL_MOUNTS`, `AGENTX_BIN`, `INFERENCEX_PATH`.
+3. Copy `applied.json` and `shadow_check.json` into each `$OUT/points/<pid>/`. Points measured
+   by an earlier session (`result.json` `ok`) are kept, not re-measured.
+
+The finalizer (`../finalize.py`, which hands each point to `../../evaluate/finalize.py` with
+`reference: ci`) judges each point against `baseline/out/points/<pid>/baseline.json` with the CI
+row's own metric key, refuses a point without an ALIGNED `alignment.json`, a PROVEN `pins.json` or with a
+shortened duration, a measured window that ended early (`measured_duration_s` below 98% of the
+configured length) or a server that died during the leg (`server_watch.json`, or for older legs
+the saved `server.log`, scanned by `../../_shared/serving_watch.py`), marks every selected point that has no
+measurement as unmeasured, and folds them (`../aggregate_points.py`): any regression makes the verdict
+`regression`, a gain needs a gain somewhere and no regression, a point without an A/B makes it
+`incomplete`. Each point's `ab.json` also carries p90 interactivity and per-GPU total throughput
+from the same row. What remains different from the CI is the node itself (CPU count and host
+memory); `noise_band` has to cover it. Kernels verified only under one EP group are still
+measured under the others -- the correctness probe is their first check there, so say so.
+
 ## 4. Do not grade yourself
 
 `../finalize.py` writes `result.json`, after this session, and it is the stage's
