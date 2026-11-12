@@ -618,6 +618,9 @@ ok(/async function requireE2EValidationCheckpoint\(relativePath, intent\) \{\s*c
 const persistSrc = src.slice(src.indexOf('let lastCommittedCheckpoint = null;'),
   src.indexOf('// Expert-skills prompt injection.'));
 const dispatchSrc = src.slice(src.indexOf('function agentBounded('), src.indexOf('// --- FlyDSL provisioning gate'));
+const offPathSrc =
+  src.slice(src.indexOf('function routeOptsFor('), src.indexOf('\n}', src.indexOf('function routeOptsFor(')) + 2) + '\n' +
+  src.slice(src.indexOf('function __agentGuarded('), src.indexOf('\n}', src.indexOf('function __agentGuarded(')) + 2);
 ok(persistSrc.includes('async function requireE2EValidationCheckpoint(') &&
   dispatchSrc.includes('async function safeAgent('), 'checkpoint writer and dispatch loop located');
 const SCALE = 15000;
@@ -626,13 +629,13 @@ const commitHarness = ({ leftMs = RESERVE, retry = false, writer }) => {
   const api = new Function(
     'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'AGENT_TIMEOUT_RETRY',
     'withProcessSafety', 'ablEffortFor', 'ablEvent', 'ABL', 'tlAgent', 'LLM_TL', 'log', 'agent',
-    'EVAL_DIR', 'CHECKPOINT_WRITE_SCHEMA', 'setTimeout',
-    `${src.slice(aStart, kEnd)}\n${dispatchSrc}\n${persistSrc}
+    'EVAL_DIR', 'CHECKPOINT_WRITE_SCHEMA', 'setTimeout', 'ROUTING_ON',
+    `${src.slice(aStart, kEnd)}\n${offPathSrc}\n${dispatchSrc}\n${persistSrc}
      return { persistE2EValidationCheckpoint, requireE2EValidationCheckpoint, ABANDONED_RUNS };`)(
     H, AGENT_MAX, RESERVE, () => leftMs, retry,
     (p) => p, () => null, () => {}, () => false, () => null, { nested: [] }, (m) => logs.push(m),
     (prompt, opts) => { calls.push(opts.label); return writer(calls.length); },
-    '/eval', {}, (fn, ms) => setTimeout(fn, ms / SCALE));
+    '/eval', {}, (fn, ms) => setTimeout(fn, ms / SCALE), false);
   return { ...api, calls, logs };
 };
 const STACK = 'overlay/accepted_stack/e2e_validation.json';
