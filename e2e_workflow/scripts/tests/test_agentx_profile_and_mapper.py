@@ -300,8 +300,8 @@ class VendoredMapperTest(unittest.TestCase):
         return json.loads(dst.read_text())
 
     def test_the_mapper_carries_the_fields_the_interactivity_axes_grade_on(self):
-        """A standalone run grades on InferenceX P90 interactivity by default, and
-        upstream's inline mapping has no P90 ITL: every leg summarized to nothing."""
+        """A standalone run grades on P50 interactivity by default, beside the P90 tail;
+        a mapper without these fields leaves every leg summarized to nothing."""
         result = self._map(FULL_EXPORT)
         self.assertEqual(result["p90_tpot_ms"], 34.0)
         self.assertEqual(result["p90_ttft_ms"], 2400.0)

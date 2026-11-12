@@ -102,15 +102,32 @@ if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201')
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
+// ---- GPU families: keep this block identical in kernel_workflow.js, kernel_lane.js and e2e_workflow.js ----
+// Per-GPU-family policy, looked up by ISA. The Workflow sandbox has no import, so each workflow carries
+// a copy (kernel_workflow/scripts/test_gpu_family_table.js keeps them identical). An ISA no row
+// matches gets GPU_FAMILY_DEFAULT, the Instinct (CDNA) policy. Each workflow reads the fields it needs.
+//   name        how the bake-off Discover prompt names an isolated family (gfx1201 keeps
+//               upstream's 'R9700' label)
+//   isolate     withhold the MI-series-calibrated inputs (perf_knowledge cards, expert skills, learned
+//               KB, warm start, tuning skillset); the in-tree guide is the hardware reference
+//   matrixCore  the matrix ISA the prompts name
+const GPU_FAMILIES = [
+  { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
+  // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
+  { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
+];
+const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
+const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
+// ---- end GPU families ----
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
-// ISA isolation and product policy are separate: any gfx1201 target avoids CDNA priors, but only
-// an exact product identity selects calibrated peaks, serving backend and image policy.
-const RDNA4_ISOLATE = RDNA4_ISA;
-const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
-const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
+// ISA isolation and product policy are separate: any isolating family (GPU_FAMILIES) avoids CDNA
+// priors, but only an exact product identity selects calibrated peaks, serving backend and image policy.
+const GPU_FAMILY = gpuFamily(EXPECTED_GFX);
+const E2E_LEARNED_KB_ENABLED = !GPU_FAMILY.isolate;
+const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore;
 
 // Lanes launched from here default the learned KB OFF (kernel_workflow alone defaults it ON): e2e
 // extracts whatever the profiler surfaces, where another run's card for a similar-looking op is an
@@ -120,7 +137,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // Every nested lane call builds its args here, so none silently takes the lane's own defaults;
 // test_e2e_lane_defaults.py fails on a `scriptPath: KERNEL_WF_SCRIPT` call that doesn't.
 // ablLaneArgs() forwards the ablation arm; llm_stats is forwarded only when the parent got one
-// explicitly. wfArgs spreads last so a per-call value wins (RDNA4 isolation still forces KB off).
+// explicitly. wfArgs spreads last so a per-call value wins (family isolation still forces KB off).
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
@@ -128,7 +145,7 @@ const laneArgs = (wfArgs) => {
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
-  if (RDNA4_ISOLATE) {
+  if (GPU_FAMILY.isolate) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
     out.perf_knowledge_dir = '';
@@ -222,6 +239,12 @@ if (MODEL_PATH && RDNA4_ISA && !RDNA4_PRODUCT_E2E) {
     'gfx1201 architecture detected but the product is not confirmed as one of ' +
     `${RDNA4_SERVING_PRODUCTS.join('/')}; refusing the product-scoped serving ` +
     'policy for an unknown gfx1201 product.');
+}
+// Any other isolated family has no validated E2E serving or prompt policy yet, so model mode refuses
+// it instead of starting with the global backend and MI-series fp8 advice. A pass-through is fine.
+if (MODEL_PATH && GPU_FAMILY.isolate && !RDNA4_ISA) {
+  throw new Error(`${EXPECTED_GFX} E2E is not supported yet: no serving policy is validated for ` +
+    `${GPU_FAMILY.name}; use the kernel workflow (args.kernel_path) for single-kernel work`);
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
@@ -372,14 +395,14 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // The vendored tuning skillset (hash-pinned whole by scripts/tuning_skillset_sync.py) is run by one
 // role (tuning_specialist) as one phase between ConfigSweep and HeadKernel (that phase says why).
 // tuning_skillset="false" disables it entirely.
-const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_ENABLED = !GPU_FAMILY.isolate && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Under expert_skills/ so its skills are selected through the same index.yaml as every other expert
 // skill; the index entries live outside the pinned tree.
 const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge/expert_skills/tuning')).replace(/\/+$/, '');
 // tuning-kb/ is the skillset's per-model answer key (verified wins + artifacts): fine in production,
 // contaminating in a blind eval. tuning_kb="false" tells the role not to read it.
-const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+const TUNING_KB_ENABLED = !GPU_FAMILY.isolate && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // No tuning op budget on purpose: tuning ops are cheap and cumulative; the role decides when to stop.
 // Head-kernel track (GEMM/attention) — the highest-pct_gpu_time ops, optimized regardless of edit flag.
 const HEAD_THRESHOLD_PCT = parseFloat(A.head_threshold_pct != null ? A.head_threshold_pct : 5);
@@ -570,7 +593,7 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+if (GPU_FAMILY.isolate) KERNEL_KNOWLEDGE_DIR = '';
 // Kernel-layer warm start: before round 1 a lane re-validates its kernel's top stored patches from
 // kb_artifacts/ through the normal verify gate. e2e only forwards the knobs, so every lane shares one
 // store and an orchestrator-supplied store reaches them; unset values equal the lane defaults.
@@ -578,7 +601,7 @@ const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
   kb_artifacts_dir: KB_ARTIFACTS_DIR,
-  warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
+  warm_start: GPU_FAMILY.isolate ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // The KB plane lanes read and write (one per run); unset leaves the lane default `store`
@@ -671,7 +694,7 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // Expert skills: human-authored, validated recipes (perf_knowledge/expert_skills/) used as advisory
 // high priors that roles reproduce and gate by the usual on-box A/B; never override measurement.
 // Default off (use_expert_skills="true" enables); flag and dir are passed to the kernel layer.
-const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = !GPU_FAMILY.isolate && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
@@ -712,9 +735,10 @@ const AGENTX_DEFAULTS = {
   // Not defaulted: the client picks the tolerance per leg (MEASUREMENT_PURPOSE: exploring vs
   // compared). A declared value overrides it for the whole run.
   failed_request_threshold: null,
-  // InferenceX P90 interactivity, 1000 / P90(ITL) tok/s/user (decode-only; bench_summarize.py
-  // also reports total tok/s as a guard). Hyperloom declares its own basis; this is the default.
-  metric_basis: 'p90_intvty_inferencex',
+  // TTFT-inclusive P50 interactivity, 1 / P50(E2EL/OSL) tok/s/user: the axis Hyperloom keeps
+  // AgentX candidates on, with its guards beside it (see agentxAxisNote). Hyperloom declares its
+  // own basis; this is the default.
+  metric_basis: 'e2e_norm_intvty_p50',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
 // ONE concurrency for the run: roles pass CONC=<WORKLOAD.conc> on every bench line, which outranks
@@ -861,6 +885,25 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// How far each guard may fall before a gain on the graded AgentX axis stops counting, when the
+// caller states no KEEP rule: the noise band Hyperloom holds its AgentX guards to.
+// run_e2e.py DEFAULT_AGENTX_GUARD_DROP_PCT is the same number.
+const AGENTX_GUARD_DROP_PCT = 5.0;
+// The prompt's note on the graded axis: its unit and the guards bench_summary.json carries beside
+// it. A caller's KEEP rule names its own guards, so the total guard and the Validate verdict on
+// the guards are only added without one.
+function agentxAxisNote() {
+  const note = /intvty/.test(AGENTX_METRIC_BASIS)
+    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
+    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.';
+  if (WORKLOAD_SPEC.acceptance != null || AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s') return note;
+  return note + '\n  Report `guard_aggregate_total_token_tok_s_median` beside every delta: the trace fixes the\n' +
+    '  work each request asks for, so this axis can rise while the server completes less of it, and a\n' +
+    '  candidate that does has not made the server faster. At Validate every guard named here is part\n' +
+    `  of the verdict: a gain whose final leg reads any of them more than ${AGENTX_GUARD_DROP_PCT}% below the base leg\n` +
+    '  is not a win, so report `validated_no_win` and name the guard in `arbitration_note`.';
+}
 // KB recall can use its own basis (e.g. only p50 candidates while the bench grades output/total);
 // it never changes the bench axis or the writer's basis.
 function resolveKbMetric() {
@@ -1535,10 +1578,7 @@ measurement duration. Consequences you must respect:
   \`E2E_METRIC\` or any \`AGENTX_*\` variable yourself, and never delete or edit that file.
 * **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
-  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
-    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
-      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
-    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
+  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${agentxAxisNote()}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
   timed-out leg blindly.
@@ -2481,11 +2521,18 @@ async function adoptAbandonedVerdict(integ, label) {
 // uses this, so an A/B never ends after the reference leg alone.
 const SPEEDUP_REVIEW_RESULTS = new Map();
 async function reviewSpeedup(integ, inputs, label, phaseName) {
+  // The workflow never writes 'pending': it is the integrator's own flag, and it must neither block a
+  // gain the estimate allows nor stand in for the confirmation the estimate requires.
+  if (integ && integ.speedup_review && integ.speedup_review.status === 'pending') {
+    log(`  ${label}: ignoring the integrator's own speedup_review 'pending'; the estimate decides on review.`);
+    integ = { ...integ };
+    delete integ.speedup_review;
+  }
   const kr = inputs.KERNEL_RESULT || {};
   const pct = kr.pct_gpu_time || 0, isolated = kr.verified_isolated_speedup || 0;
   if (!abDone(integ) || !['accepted', 'stack'].includes(integ.gate) || integ.output_parity === 'fail'
       || !speedupNeedsReview(pct, isolated, integ) || confirmedSpeedup(integ)) return integ;
-  if (integ.speedup_review && ['pending', 'inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
+  if (integ.speedup_review && ['inconclusive', 'rejected'].includes(integ.speedup_review.status)) return integ;
   const original = integ.measurement_evidence || {};
   const estimate = speedupEstimate(pct, isolated, integ);
   // Cache by measurement AND candidate/reference inputs. Returning the same cached A/B cannot
@@ -3163,6 +3210,7 @@ async function prepareAgentXKernels(round, throughput) {
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
     BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    BASELINE_ITERATION_DIR: `${EVAL_DIR}/baseline/iterations`,
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
     BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
     CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
@@ -4880,7 +4928,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
         ` DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (${MATRIX_CORE_NAME}) for software pipelining.`,
         ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        RDNA4_ISOLATE
+        MATRIX_CORE_NAME === 'WMMA'
           ? ' DIRECTION=wmma-layout: re-tune WMMA tile shape / LDS swizzle / num_warps / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).'
           : ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
         ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',

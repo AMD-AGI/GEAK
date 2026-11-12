@@ -300,7 +300,7 @@ Output entry point: `<output_dir>/profile_report.txt`.
 bash profile_kernel.sh <gpu_spec> <benchmark_cmd> <output_dir>   # gpu_spec: any gpu_lock.sh form
 ```
 
-Env: `PROFILER_PRIORITY` (default: gfx1201 uses `rocprofv3 rocprof metrix rocprof-compute omniperf`;
+Env: `PROFILER_PRIORITY` (default: gfx1201 and gfx115x use `rocprofv3 rocprof metrix rocprof-compute omniperf`;
 CDNA/other uses `rocprof-compute omniperf rocprofv3 rocprof metrix`), `WARMUP_RUNS` (3),
 `RPC_PROFILE_ARGS`, `RPV3_TRACE_ARGS`, `RPROF_ARGS`, `METRIX_ARGS`.
 

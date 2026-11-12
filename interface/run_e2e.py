@@ -123,6 +123,7 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+BENCH_SUMMARIZE_SCRIPT = E2E_DIR / "scripts" / "bench_summarize.py"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
@@ -3982,6 +3983,74 @@ def handoff_acceptance(h: dict) -> dict | None:
     return None
 
 
+#: The axis an AgentX run is graded on when nothing else is declared (e2e_workflow.js
+#: AGENTX_DEFAULTS.metric_basis): the median Hyperloom keeps AgentX candidates on.
+DEFAULT_AGENTX_OBJECTIVE = "e2e_norm_intvty_p50"
+#: The bars Hyperloom's AgentX KEEP rule holds an orchestrated run to (its 3% median gain and
+#: default 5% noise band), so a run that states no rule is judged alike. The guard band is also
+#: e2e_workflow.js AGENTX_GUARD_DROP_PCT.
+DEFAULT_AGENTX_MIN_GAIN_PCT = 3.0
+DEFAULT_AGENTX_GUARD_DROP_PCT = 5.0
+
+_BENCH_SUMMARIZE: Any = None
+
+
+def _bench_summarize() -> Any:
+    """``e2e_workflow/scripts/bench_summarize.py``, loaded once: the bench runs it as a script,
+    GEAK's own KEEP rule reads its axis and guard tables."""
+    global _BENCH_SUMMARIZE
+    if _BENCH_SUMMARIZE is None:
+        spec = importlib.util.spec_from_file_location("geak_bench_summarize", BENCH_SUMMARIZE_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BENCH_SUMMARIZE = module
+    return _BENCH_SUMMARIZE
+
+
+def default_acceptance(h: dict) -> dict | None:
+    """GEAK's own KEEP rule for an AgentX handoff that states none; None leaves GEAK's verdict.
+
+    A trace replay graded on any axis but total token throughput, with no rule from the caller,
+    is kept only when that axis gains at least 3% and each guard bench_summarize.py summarizes
+    beside it (``_guard_table``) falls no more than 5% below the reference. On the default P50
+    axis that is Hyperloom's own rule (the P90 tail and output tok/s) plus total token
+    throughput. The corpus fixes the work each request asks for, so every other axis can rise
+    while the server completes less of it: the decode-only axis by shedding prefill, any of them
+    by finishing short requests in place of long ones. A declared ``acceptance`` block, even one
+    handoff_acceptance ignores, is the caller's own rule and keeps this one out.
+
+    Only this interface applies it. A direct ``Workflow`` call never reaches it: its Director is
+    given the guards as a Validate instruction (e2e_workflow.js agentxAxisNote), and the run's
+    noise band is the gain bar there.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    if spec.get("acceptance") is not None:
+        return None
+    summarize = _bench_summarize()
+    basis_of_token = {token: entry[1] for token, entry in summarize._BASES.items()}
+    # The axis e2e_workflow.js resolveAgentxMetric grades: the declared basis or its token, else
+    # an exported E2E_METRIC token, else the default. One it cannot resolve fails the run there.
+    declared = str(spec.get("metric_basis") or "").strip().lower()
+    inherited = str(os.environ.get("E2E_METRIC") or "").strip().lower()
+    if declared:
+        objective = (declared if declared in basis_of_token.values()
+                     else basis_of_token.get(declared))
+    elif inherited:
+        objective = basis_of_token.get(inherited)
+    else:
+        objective = DEFAULT_AGENTX_OBJECTIVE
+    guards = summarize._guard_table(objective, True)
+    if not guards:
+        return None
+    return {
+        "objective": objective,
+        "min_gain_pct": DEFAULT_AGENTX_MIN_GAIN_PCT,
+        "guard_max_drop_pct": {basis: DEFAULT_AGENTX_GUARD_DROP_PCT for basis in guards},
+    }
+
+
 def acceptance_verdict(
     rule: dict,
     *,
@@ -3990,16 +4059,19 @@ def acceptance_verdict(
     final: float,
     reference: dict,
     candidate: dict,
+    unmeasured_fails: bool = True,
 ) -> dict:
-    """Apply the caller's KEEP rule to the pair this run publishes.
+    """Apply a KEEP rule to the pair this run publishes.
 
     Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
     objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
     (1 - max_drop_pct / 100)``. Guards are read from the ``guard_<basis>_median`` fields of the
-    two legs' bench summaries, and one missing from either leg fails: a guard nobody measured
-    is not one the candidate held. Hyperloom also refuses rounds of unequal length or with more
-    failed requests and applies its latency budget; the summaries carry neither, so Hyperloom's
-    re-measurement keeps the last word.
+    two legs' bench summaries. Under a caller's rule one missing from either leg fails: a guard
+    nobody measured is not one the candidate held. GEAK's own rule (``unmeasured_fails=False``)
+    lists it under ``not_checked`` instead: the verdict then rests on the objective, and
+    ``e2e_store.win_gate`` declines to record the pair in the KB. Hyperloom also
+    refuses rounds of unequal length or with more failed requests and applies its latency
+    budget; the summaries carry neither, so Hyperloom's re-measurement keeps the last word.
     """
     objective = rule["objective"]
     gain_pct = (final - baseline) / baseline * 100.0 if baseline > 0.0 and final > 0.0 else None
@@ -4011,6 +4083,7 @@ def acceptance_verdict(
     elif gain_pct < rule["min_gain_pct"]:
         reasons.append(f"{objective} gained {gain_pct:.3f}%, below {rule['min_gain_pct']}%")
     guards = {}
+    not_checked = []
     for basis, max_drop_pct in rule["guard_max_drop_pct"].items():
         ref = _positive_finite_float(reference.get(f"guard_{basis}_median"))
         cand = _positive_finite_float(candidate.get(f"guard_{basis}_median"))
@@ -4020,9 +4093,11 @@ def acceptance_verdict(
             "reference": ref or None,
             "candidate": cand or None,
             "max_drop_pct": max_drop_pct,
-            "holds": holds,
+            "holds": holds if measured or unmeasured_fails else None,
         }
-        if not measured:
+        if not measured and not unmeasured_fails:
+            not_checked.append(basis)
+        elif not measured:
             reasons.append(f"guard {basis} was not measured on both legs")
         elif not holds:
             reasons.append(f"guard {basis} fell {(1.0 - cand / ref) * 100.0:.3f}%, "
@@ -4033,9 +4108,30 @@ def acceptance_verdict(
         "gain_pct": round(gain_pct, 3) if gain_pct is not None else None,
         "min_gain_pct": rule["min_gain_pct"],
         "guards": guards,
+        "not_checked": not_checked,
         "keep": not reasons,
         "reasons": reasons,
     }
+
+
+def _recovered_pair_legs(wf: dict, baseline: float, final: float) -> tuple[dict, dict]:
+    """The bench summaries a recovered win's pair was read from, or two empty dicts.
+
+    Only an integrate A/B leaves them (``recovered_pair_dir``: its ``ref`` and ``cand`` legs), and
+    they count only while their medians are the published pair: once the baseline is re-based
+    (a config restacked over the default, say), the legs on disk measured some other pair.
+    """
+    pair_dir = str(wf.get("recovered_pair_dir") or "")
+    if not pair_dir:
+        return {}, {}
+    legs = (_read_json(Path(pair_dir) / "ref" / "bench_summary.json"),
+            _read_json(Path(pair_dir) / "cand" / "bench_summary.json"))
+    for summary, published in zip(legs, (baseline, final)):
+        median = _positive_finite_float(summary.get("throughput_tok_s_median"))
+        # An integrator that rounds the medians it copies still matches; another leg does not.
+        if not (median > 0.0 and published > 0.0 and abs(median - published) <= 0.01 * published):
+            return {}, {}
+    return legs
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -4080,7 +4176,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         if recovered is not None and float(recovered.get("throughput_speedup") or 0.0) > 1.0:
             merged = dict(wf)
             for k in ("throughput_speedup", "baseline_throughput_tok_s",
-                      "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms"):
+                      "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms",
+                      "recovered_pair_dir"):
                 if recovered.get(k) is not None:
                     merged[k] = recovered[k]
             # The recovered win's own overlay (C7); "" means config-only, in
@@ -4512,8 +4609,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
-    # The one exception is ``acceptance``, added below only when the handoff states
-    # the caller's KEEP rule.
+    # The one exception is ``acceptance``, added below only when a KEEP rule applies:
+    # the one the handoff states, or GEAK's own for an AgentX run that states none.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
     # The metric-neutral spread first: the output_*-named alias is only written on the output
     # basis, so on any other axis it would leave both legs' scatter unknown.
@@ -4585,23 +4682,35 @@ def normalize_result(h: dict, wf: dict) -> dict:
         or "aggregate_output_tok_s"
     )
 
-    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # ── the KEEP rule ────────────────────────────────────────────────────────
     # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
     # interactivity grading), "ok" means that rule keeps the published pair, not merely
-    # that the final beat the baseline. Guards come from the two legs the pair was read
-    # from; a pair with no such legs (a recovered win) cannot show its guards held.
-    acceptance = handoff_acceptance(h)
+    # that the final beat the baseline. An AgentX run that states none is held to GEAK's
+    # own rule on Hyperloom's bars, with total tok/s among its guards. Guards come from the
+    # two legs the pair was read from. Under the caller's rule a recovered win has none and
+    # cannot pass; GEAK's own reads its A/B's legs when they are on disk, and leaves a guard
+    # it cannot read unchecked.
+    caller_rule = handoff_acceptance(h)
+    acceptance = caller_rule or default_acceptance(h)
     if acceptance is not None:
+        if not wf.get("recovered_intermediate"):
+            reference = {
+                "validation_base_bench_summary": base_leg_summary,
+                "setup_baseline": baseline_summary,
+            }.get(baseline_basis_source, {})
+            candidate = final_summary
+        elif caller_rule is None:
+            reference, candidate = _recovered_pair_legs(wf, geak_baseline, promoted_final)
+        else:
+            reference, candidate = {}, {}
         verdict = acceptance_verdict(
             acceptance,
             measured_basis=metric_basis,
             baseline=geak_baseline,
             final=promoted_final,
-            reference={
-                "validation_base_bench_summary": base_leg_summary,
-                "setup_baseline": baseline_summary,
-            }.get(baseline_basis_source, {}),
-            candidate={} if wf.get("recovered_intermediate") else final_summary,
+            reference=reference,
+            candidate=candidate,
+            unmeasured_fails=caller_rule is not None,
         )
         validation_evidence["acceptance"] = verdict
         if status == "ok" and not verdict["keep"]:
@@ -6575,8 +6684,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
             review = ir.get("speedup_review") or {}
             if not isinstance(review, dict):
                 review = {}
-            review_pending = (review.get("status") in
-                              ("pending", "inconclusive", "rejected")
+            # 'pending' is only ever the integrator's own flag, which the live workflow ignores
+            # (reviewSpeedup): the estimate alone decides whether a gain awaits confirmation.
+            review_pending = (review.get("status") in ("inconclusive", "rejected")
                               or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
@@ -6881,6 +6991,8 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         "accepted_heads": [],
         "recovered_from_disk": True,
         "recovered_intermediate": True,
+        # Its ref/ and cand/ legs carry the guards a KEEP rule reads (_recovered_pair_legs).
+        "recovered_pair_dir": str(best["dir"]),
         # No candidate cleared the integrator's own bar for a standalone win.
         "recovered_stack_provisional": stack_only or None,
         # How the headline was chosen, so picking a maximum out of N noisy
@@ -7921,9 +8033,11 @@ def main(argv: list[str]) -> int:
     # Module B writes workflow_return.json before normalize_result runs. Send the same
     # comparability calculation into that return while the selected client is known.
     ps_args["comparability"] = _workload_comparability(h)
-    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # A KEEP rule's verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
     # until then; _kb_write_back handles successful runs too when Module B left no receipt.
-    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
+    ps_args["kb_defer_to_interface"] = (
+        handoff_acceptance(h) or default_acceptance(h)
+    ) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)

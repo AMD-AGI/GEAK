@@ -183,9 +183,9 @@ class AgentXSmokeTest(unittest.TestCase):
     def test_the_vendored_mapper_carries_the_default_graded_axis(self):
         self._stub_aiperf(AGENTX_AIPERF_HELP)
         proc = self._run()
-        self.assertIn("carries the graded axis (E2E_METRIC=p90_intvty_inferencex", proc.stdout)
+        self.assertIn("carries the graded axis (E2E_METRIC=e2e_norm_intvty_p50", proc.stdout)
 
-    def test_a_checkout_mapper_without_p90_itl_blocks_the_default_axis(self):
+    def test_a_checkout_mapper_without_interactivity_blocks_the_default_axis(self):
         self._stub_aiperf(AGENTX_AIPERF_HELP)
         proc = self._run(INFERENCEX_PATH=str(self._checkout_without_interactivity()))
         self.assertIn("emits nothing for the graded axis", proc.stdout)

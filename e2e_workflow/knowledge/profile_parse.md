@@ -21,6 +21,22 @@ are given, HW durations come from rocprofv3 and shapes are enriched from the tor
                    shapes[], dtypes[], classification, backend_guess, editable, opt_hint } ] }
 ```
 
+For vLLM detailed annotations, a step containing context tokens is classified as
+prefill, including a mixed context/generation step. Its `by_phase.prefill.m` and
+`est_shape.prefill.M` count all query tokens in that step exactly once:
+`context.sq + generation.sq`. The generation request count is separate; speculative
+decoding can schedule multiple query tokens per request. The `prefill_tokens`
+metadata returned by `parse_torch_trace` sums those aggregate prefill/mixed-step
+token counts.
+For example, 200 context tokens plus six generation tokens produce M=206 whether
+the generation tokens belong to one request or six requests.
+
+This accounting applies to every vLLM Profile Top-N, including fixed ISL/OSL runs,
+without an AgentX guard. Mixed-step `prefill_tokens` metadata therefore includes
+generation tokens that older reports omitted; historical mixed-step token/shape
+metadata should be regenerated before comparison. Pure-prefill and pure-decode
+accounting, SGLang parsing, and measured kernel durations are unchanged.
+
 ## The classification field (this is the triage signal the Architect routes on)
 - `library_gemm` — hipBLASLt/Tensile/rocBLAS GEMM. **Not source-editable.** Route to Config Tuner
   (backend/env/heuristics swap: aiter vs hipBLASLt vs CK GEMM, tuning DB) — NOT to the kernel squad.
