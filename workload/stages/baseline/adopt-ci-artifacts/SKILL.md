@@ -90,8 +90,6 @@ $OUT/baseline.json                    first representative point's baseline + po
 $OUT/points/<pid>/baseline.json       the single-point schema (stages/baseline/README.md)
 $OUT/points/<pid>/observed_inputs.json  log paths, interval, window, completed tokens
 $OUT/points/<pid>/observed_workload.json
-$OUT/points/<pid>/launch.json         the CI recipe's serving args/env (logs/config.yaml)
-$OUT/points/<pid>/serving_env.sh      that launch as an env file (EXTRA_SERVER_ARGS + env); applyback's default
 $OUT/points/<pid>/server_logs/        only the members above, extracted with path checks
 $OUT/artifacts/                       downloaded artifacts (when any were downloaded)
 $OUT/stack_identity.json              when every point names one model and one image

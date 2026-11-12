@@ -69,9 +69,7 @@
       "params": {
         "repeats": 3,
         "smoke_required": true,
-        "serving_env": null,
-        "point_serving_env": {},
-        "_note_point_serving_env": "Per representative point id (baseline.json representative): an env file with that config's launch settings (KV offload, speculative decoding, ...). CONC and TP are taken from the point's CI config and win over the file."
+        "serving_env": null
       }
     },
     "ut": {
