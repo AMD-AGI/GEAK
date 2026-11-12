@@ -5,15 +5,25 @@
 spent, then runs each task's own unit test once more from cold and hands on only what
 clears its noise band.
 
-**Input**: `$RUN_ROOT/profile/out/tasks/` and `$RUN_ROOT/roofline/out/roofline.json`
-(order by expected e2e gain; absent, directory order — ranking degrades, correctness
-does not).
+**Input**: `$TASKS_DIR` and the task producer's sibling `results.json`. Split scenarios
+export `TASKS_DIR=$RUN_ROOT/ut/out/tasks`; legacy invocations set
+`TASKS_DIR=${TASKS_DIR:-$RUN_ROOT/profile/out/tasks}` before the commands below.
+Tasks run in descending share of profiled GPU time (`params.order_by=share`, the default).
+`order_by=roofline` uses `$RUN_ROOT/roofline/out/roofline.json` expected e2e gain instead;
+roofline is optional in the default pipeline because unsupported models can leave the
+largest tasks unranked.
 
-The slot resolves tasks from profile, independently of `$IN` (roofline's output in the
-normal order). For a standalone smoke run, set `TASKS_DIR` to the fixture task directory;
+The slot resolves tasks from profile, independently of `$IN`. For a standalone smoke run, set `TASKS_DIR` to the fixture task directory;
 `finalize.py --tasks-dir` remains available for inspecting a delivery directly.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
+
+UT generation can deliver a correctness-qualified task with
+`validation_mode: "correctness"` and `performance_measured: false`. Its weighted shapes
+and timing implementation are ready, but no baseline latency or 1.0 ratio was measured.
+For the shared driver, evaluate with `unittest.py --validation-mode performance --reuse`
+(the bare command also defaults to performance). Reuse unchanged correctness gates;
+measure the baseline/candidate pair before reporting speedup or keeping an optimization.
 
 ## Implementations
 
@@ -43,21 +53,22 @@ accrete that way, and an agent reading it can tell a crash from a wrong answer.
 
 ### Step 1 — dispatch
 
-**Account for every extracted task.** The profile task plan is the input set; roofline
+**Account for every extracted task.** The profile task plan is the input set; the task order
 orders that set and never removes a task because its predicted gain is small or unknown.
 `params.task_limit` (default 8) is **this stage's in-flight capacity** — how many
 independent tasks the campaign can hold at once, one per GPU — and not a cap on what
 profile may extract. Extraction stops where the evidence stops: the same skill run by
 hand delivered ten complete tasks, and a limit applied upstream would have made that
-delivery a defect. Submit the complete task set to the scheduler in roofline order; it
-fills released slots from that queue. Resume the same work root so completed tasks retain
-their credit and later tasks enter the slots they free.
+delivery a defect. Submit the complete task set to the scheduler in task order
+(`--order-by $PARAMS.order_by`, default share of profiled GPU time); it fills released
+slots from that queue. Resume the same work root so completed tasks retain their credit
+and later tasks enter the slots they free.
 
 Queue admission is not an optimization attempt. Record actual attempts and remaining
 credit for every task, including tasks that have not started when a deadline forces a
 checkpoint. A task already admitted to the scheduler queue is not also
 `capacity_deferred`. If a partial dispatch has not admitted a task, preserve its name,
-roofline rank and continuation reason in `capacity_deferred`; it is unattempted and
+rank in the task order and continuation reason in `capacity_deferred`; it is unattempted and
 prevents a claim that the full delivery is complete. Do not use `max_tasks` or
 `exclude_tasks` to silently optimize only a convenient subset, and do not leave runnable
 queued tasks waiting while the scheduler has an unused slot.
@@ -66,7 +77,7 @@ Before dispatch, ask the slot's verdict what it will require:
 
 ```
 python3 $WORKLOAD_ROOT/stages/optimize/finalize.py \
-    --tasks-dir $RUN_ROOT/profile/out/tasks
+    --tasks-dir "$TASKS_DIR"
 ```
 
 An extracted task that cannot run still needs an explicit entry and blocker in the final
@@ -74,7 +85,7 @@ report. Repair a missing precondition when possible and resume that task; it mus
 vanish from the input set or be counted as attempted merely because another task won.
 
 **Parallel is the default.** Submit all ready tasks together, one task per physically
-isolated GPU slot, retaining roofline order when there are fewer slots than tasks. Do not
+isolated GPU slot, retaining the task order when there are fewer slots than tasks. Do not
 serialize independent kernels through a shell loop or put two optimization workers on the
 same GPU to simulate parallelism. Record the assigned GPUs and start/end times so progress
 reports describe actual overlap.
@@ -111,10 +122,10 @@ declared edit boundary. Do not rewrite an existing work root's frozen snapshot.
 
 ```
 python3 $WORKLOAD_ROOT/engine/campaign/scheduler.py run \
-    --work-root $OUT/work --tasks-dir $RUN_ROOT/profile/out/tasks \
+    --work-root $OUT/work --tasks-dir "$TASKS_DIR" \
     --skill-root $SKILL_ROOT --runner $RUNNER \
     --gpus <list> [--gpus-per-task <n>] --target <sec> --backend docker --image <img> \
-    [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
+    [--order-by share|roofline] [--order-file $RUN_ROOT/roofline/out/roofline.json] [--exclude a,b] \
     [--keep-threshold 1.045] [--keep-threshold-override task=1.35]
 ```
 
@@ -225,7 +236,8 @@ retroactively verify it.
 
 A serving integration failure goes back to the owning stage with its failing input or
 dispatch, native error and selected source identity. The optimization agent owns kernel
-implementation fixes; a deficient frozen test or source boundary belongs to profile.
+implementation fixes; a deficient frozen test or source boundary belongs to UT generation
+(the combined profile stage in legacy scenarios). Missing dispatch measurements belong to profile.
 After a source fix, repeat cold qualification for that changed source and publish a new
 snapshot. Prior scores remain attached to their prior source. Compatible extraction and
 unchanged kernels' evidence can be reused; do not restart the entire search or rewrite
@@ -237,10 +249,11 @@ only there — read the file, or run it early with the command in step 1, rather
 looking for a second copy of its rules in this document. It checks names, counts and
 budget; it never re-judges a unit test.
 
-Report extracted, attempted and kept counts separately, and explain every unattempted
-task and its continuation. Distinguish device kernel identities from task boundaries: two
-attention dispatch branches or a real fused chain can belong to one optimization task,
-with their mapping recorded in `task_plan.json`.
+Report extracted, attempted and kept counts separately. `all_tasks_attempted=false`
+means the work is partial; explain every unattempted task and its continuation.
+Distinguish device kernel identities from task boundaries: two attention dispatch
+branches or a real fused chain can belong to one optimization task, with their
+mapping recorded in `task_plan.json`.
 
 Report three distinct time quantities: elapsed wall time (with concurrent intervals
 counted once), summed worker credited seconds, and GPU-slot hours (worker duration times

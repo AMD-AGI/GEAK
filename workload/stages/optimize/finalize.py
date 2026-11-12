@@ -124,7 +124,7 @@ def check_dispatch(tasks, selected, limit, deferred=None):
     unused = min(len(tasks), limit) - len(selected)
     if deferrals and unused > 0:
         raise ValueError("%d tasks were deferred for capacity while %d of the %d slots "
-                         "are unused: %s. Capacity defers what does not fit, in roofline "
+                         "are unused: %s. Capacity defers what does not fit, in task "
                          "order; it is not a reason to optimize fewer tasks than the "
                          "campaign can hold." % (len(deferrals), unused, limit,
                                                  sorted(deferrals)))
