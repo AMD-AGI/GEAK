@@ -58,6 +58,7 @@ import json
 import os
 import random
 import re
+import secrets
 import sys
 from pathlib import Path
 import time
@@ -142,6 +143,23 @@ UNKNOWN_VOCAB_HI = 31999    # every tokenizer this targets has at least 32000 id
 FRAMEWORK = "sglang"
 SERVED_MODEL = None
 ITERATION_LOG_DIR = None
+CACHE_SALT = None
+
+
+def cache_salt_for(framework, phase):
+    """A fresh vLLM prefix-cache salt for one PREFILL probe invocation, else None.
+
+    A PREFILL point's M is the uncached part of its prompt, and every prompt here is
+    seeded: an `_r2` retry or `--redo` of a point resends a prompt the server already
+    cached, the vLLM repeat suffixes are seeded independently of the point (two points
+    with the same cached prefix share them), and point salts are a sum of characters
+    (anagram ids collide). Any of these hits the prefix cache and the window measures a
+    smaller M than the point. One salt for the whole invocation keeps the invocation's own
+    warmed prefix reusable (its cached context is part of the point) and isolates it
+    from every earlier one, without flushing the live server's cache. DECODE is not
+    salted: its shape is the resident batch, and its prompts deliberately share the
+    cache across points (drive_decode)."""
+    return secrets.token_hex(16) if framework == "vllm" and phase == "PREFILL" else None
 
 
 def rand_ids(n, seed):
@@ -168,6 +186,8 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
         endpoint = "/v1/completions"
         body = {"model": SERVED_MODEL, "prompt": ids, "max_tokens": max_new_tokens,
                 "temperature": 0.0, "ignore_eos": True}
+        if CACHE_SALT is not None:
+            body["cache_salt"] = CACHE_SALT
     t0 = time.time()
     try:
         post(base, endpoint, body, timeout=timeout)
@@ -695,7 +715,7 @@ def main():
     ap.add_argument("--served-model")
     ap.add_argument("--iteration-log-dir")
     args = ap.parse_args()
-    global ID_HI, FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR
+    global ID_HI, FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, CACHE_SALT
     FRAMEWORK, SERVED_MODEL = args.framework, args.served_model
     ITERATION_LOG_DIR = args.iteration_log_dir
     if FRAMEWORK == "vllm" and not SERVED_MODEL:
@@ -710,9 +730,11 @@ def main():
                             ", ".join(p["point_id"] for p in plan["points"])))
     point = pts[0]
     phase = point["phase"]
+    CACHE_SALT = cache_salt_for(FRAMEWORK, phase)
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
                 "vocab_size": args.vocab_size, "max_token_id": ID_HI,
+                "request_seed": args.seed, "cache_salt": CACHE_SALT,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
     server_dir = args.server_trace_dir or args.trace_dir

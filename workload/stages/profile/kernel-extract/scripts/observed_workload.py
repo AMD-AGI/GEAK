@@ -222,9 +222,15 @@ def parse_vllm_iterations(paths, rank=0, window=None, accept_len=1.0):
                 common = dict(rank=rank, ts=ts, queue=0, cuda_graph=None,
                               request_geometry=reqs, scheduled_tokens=total)
                 if ctx:
+                    # cached_token is the context requests' prior extent only. The sampler
+                    # divides (cached_token + new_token) by new_seq (the context requests),
+                    # and the probe rebuilds cached_token as one prompt's prefix, so a
+                    # resident decode request's KV here would be replayed as prefill
+                    # context (at concurrency 48, several million tokens, past max-model-len).
                     pre.append(dict(common, kind="prefill", new_seq=len(ctx),
-                                    new_token=total, cached_token=sum(r["computed"] for r in reqs),
+                                    new_token=total, cached_token=sum(r["computed"] for r in ctx),
                                     running=len(reqs), mixed_decode_requests=len(gen),
+                                    mixed_decode_context_tokens=sum(r["computed"] for r in gen),
                                     context_query_tokens=sum(r["query"] for r in ctx)))
                 elif gen:
                     dec.append(dict(common, kind="decode", running=len(gen),
@@ -256,20 +262,27 @@ def expand_decode(rows, interval):
     return out
 
 
-def crosscheck_decode(expanded, completed_output_tokens):
+def crosscheck_decode(expanded, completed_output_tokens, mixed_decode_request_steps=0):
     """Two independent routes to the same quantity: request-steps executed.
 
       route A (log structure)  = SUM over rows of iterations x batch
+                                 + decode request-steps carried by mixed steps
       route B (work completed) = completed output tokens / mean accept length
 
     They share no term. Agreement is evidence the expansion is right; disagreement
-    is reported rather than reconciled.
+    is reported rather than reconciled. Route B counts every generated token, so
+    route A must include the decode requests that ran inside mixed (PREFILL-owned)
+    steps (vllm-iterations records them once each); leaving them out reported a
+    false 9.5% gap on a concurrency-48 run (474 of 476 prefill steps mixed).
     """
-    steps_a = sum(r["iterations"] * r["running"] for r in expanded)
+    steps_pure = sum(r["iterations"] * r["running"] for r in expanded)
+    steps_a = steps_pure + mixed_decode_request_steps
     n = sum(r["iterations"] for r in expanded)
     wa = sum(r["iterations"] * r["accept_len"] for r in expanded)
     accept_mean = wa / n if n else 1.0
     out = {"route_a_request_steps_from_log_structure": steps_a,
+           "route_a_pure_decode_request_steps": steps_pure,
+           "route_a_mixed_step_decode_request_steps": mixed_decode_request_steps,
            "iterations": n, "accept_len_mean_iteration_weighted": round(accept_mean, 6)}
     if completed_output_tokens:
         steps_b = completed_output_tokens / accept_mean if accept_mean else 0
@@ -452,7 +465,8 @@ def main():
             % (args.rank, " in the window" if window else ""))
 
     expanded = expand_decode(dec, interval)
-    check = crosscheck_decode(expanded, args.completed_output_tokens)
+    check = crosscheck_decode(expanded, args.completed_output_tokens,
+                              sum(p.get("mixed_decode_requests", 0) for p in pre))
 
     new_tok = sum(p["new_token"] for p in pre)
     cached_tok = sum(p["cached_token"] for p in pre)
@@ -497,9 +511,10 @@ def main():
         out["measurement_notes"] = [
             "Each worker iteration is recorded exactly once; no logging-interval expansion.",
             "Mixed steps belong to PREFILL with their total scheduled M; request geometry is retained.",
-            "cached_token is prior context extent, not a prefix-cache hit counter.",
+            "cached_token is the context (PREFILL) requests' prior extent, not a prefix-cache "
+            "hit counter; a mixed step's decode requests' extent is mixed_decode_context_tokens.",
             "Graph execution mode must be established from runtime evidence, not scheduler geometry.",
-            "accept_len is supplied for the cross-check; mixed-step generation is outside its decode-only total.",
+            "accept_len is supplied for the cross-check; its route A adds the decode requests of mixed steps (one request-step each).",
         ]
     with open(args.out, "w") as fh:
         json.dump(out, fh, indent=1, default=str)

@@ -41,6 +41,8 @@ class VllmProfileTest(unittest.TestCase):
         patch.object(probe, "FRAMEWORK", "vllm").start()
         patch.object(probe, "SERVED_MODEL", "served-model").start()
         patch.object(probe, "ITERATION_LOG_DIR", None).start()
+        patch.object(probe, "CACHE_SALT", None).start()
+        patch.object(probe, "ID_HI", 150000).start()
 
     def test_observer_preserves_return_and_records_geometry_without_payloads(self):
         result = object()
@@ -137,6 +139,59 @@ class VllmProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conserve"):
             ow.parse_vllm_iterations([str(log)])
 
+    def test_mixed_step_context_counts_context_requests_only(self):
+        """2 context + 3 resident decode requests: the decode KV is not prefill context."""
+        row = {"time": 100, "rank": 0, "scheduled_tokens": 4012,
+               "requests": [{"phase": "PREFILL", "query": 2000, "computed": 30000},
+                            {"phase": "PREFILL", "query": 2000, "computed": 50000},
+                            {"phase": "DECODE", "query": 4, "computed": 900000},
+                            {"phase": "DECODE", "query": 4, "computed": 1000000},
+                            {"phase": "DECODE", "query": 4, "computed": 1100000}]}
+        log = self.root / "mixed.jsonl"
+        log.write_text(json.dumps(row))
+        pre, dec = ow.parse_vllm_iterations([str(log)], accept_len=2.88)
+        self.assertEqual((len(pre), len(dec)), (1, 0))
+        p = pre[0]
+        self.assertEqual(p["new_token"], 4012)                 # whole step M, mixed tokens included
+        self.assertEqual(p["new_seq"], 2)
+        self.assertEqual(p["cached_token"], 80000)             # context requests only
+        self.assertEqual(p["mixed_decode_requests"], 3)
+        self.assertEqual(p["mixed_decode_context_tokens"], 3000000)
+        self.assertEqual(p["context_query_tokens"], 4000)
+        sampling = ROOT.parent / "multi_config_sampling.py"
+        if not sampling.exists():
+            return
+        spec = importlib.util.spec_from_file_location("test_mc_sampling", sampling)
+        mcs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mcs)
+        got = mcs.observations({"raw_prefill_rows": [dict(p, ts=p["ts"].isoformat())]})
+        self.assertEqual(len(got), 1)
+        # per context request: (80000 cached + 4012 scheduled) / 2 -- not ~1.5M
+        self.assertEqual(got[0]["context"], (80000 + 4012) / 2)
+        self.assertEqual(round(got[0]["context"] * got[0]["sequences"] - got[0]["shape"]), 80000)
+
+    def test_crosscheck_counts_decode_requests_of_mixed_steps(self):
+        """Completed tokens include mixed-step generation; route A must too."""
+        rows = [{"time": 100, "rank": 0, "scheduled_tokens": 2008,
+                 "requests": [{"phase": "PREFILL", "query": 2000, "computed": 0},
+                              {"phase": "DECODE", "query": 4, "computed": 500},
+                              {"phase": "DECODE", "query": 4, "computed": 600}]},
+                {"time": 101, "rank": 0, "scheduled_tokens": 8,
+                 "requests": [{"phase": "DECODE", "query": 4, "computed": 504},
+                              {"phase": "DECODE", "query": 4, "computed": 604}]}]
+        log = self.root / "mixed_check.jsonl"
+        log.write_text("\n".join(json.dumps(r) for r in rows))
+        out = self.root / "observed.json"
+        run = subprocess.run([sys.executable, str(ROOT / "scripts/observed_workload.py"),
+            "--log", str(log), "--log-format", "vllm-iterations", "--accept-len", "2",
+            "--completed-output-tokens", "8", "--out", str(out)], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        check = json.loads(out.read_text())["decode"]["crosscheck"]
+        self.assertEqual(check["route_a_pure_decode_request_steps"], 2)
+        self.assertEqual(check["route_a_mixed_step_decode_request_steps"], 2)
+        self.assertEqual(check["route_a_request_steps_from_log_structure"], 4)
+        self.assertEqual(check["disagreement_pct"], 0.0)   # was 50% without the mixed term
+
     def test_aggregate_log_reports_missing_geometry_instead_of_guessing(self):
         log = self.root / "server.log"
         log.write_text("(APIServer pid=123) INFO [loggers.py:320] Engine 000: Avg prompt throughput: 12 tokens/s\n")
@@ -155,6 +210,92 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(args[2], {"model": "served-model", "prompt": [1, 2, 3],
                                    "max_tokens": 8, "temperature": 0.0, "ignore_eos": True})
         self.assertEqual(journal[0]["event"], "request_done")
+
+    def test_mixed_prefill_probe_matches_total_query_tokens(self):
+        """Ported from 49b3f37e: a mixed step's M is every query token in it, once."""
+        for decode_requests in (1, 6):
+            with self.subTest(decode_requests=decode_requests):
+                trace = self.root / "mixed.trace.json"
+                trace.write_text(json.dumps({"traceEvents": [
+                    {"name": "execute_206_context_1(sq200sk1200)_generation_%d(sq6sk406)"
+                             % decode_requests,
+                     "cat": "gpu_user_annotation", "ph": "X", "ts": 0, "dur": 10, "pid": 1, "tid": 1},
+                    {"name": "kernel", "cat": "kernel", "ph": "X", "ts": 1, "dur": 1, "pid": 1, "tid": 1},
+                ]}))
+                paths = [{"path": str(trace), "bytes": trace.stat().st_size}]
+                result = probe.verify_trace(paths, "PREFILL", "new_tokens", 206, [])
+                self.assertIs(result["verified"], True, result)
+                self.assertEqual(result["step_spans_by_phase_shape"], {"PREFILL": {206: 1}})
+                wrong = probe.verify_trace(paths, "PREFILL", "new_tokens", 200, [])
+                self.assertIsNot(wrong["verified"], True)
+
+    def test_cache_salt_only_for_vllm_prefill(self):
+        a, b = probe.cache_salt_for("vllm", "PREFILL"), probe.cache_salt_for("vllm", "PREFILL")
+        self.assertTrue(a and b and a != b)
+        self.assertIsNone(probe.cache_salt_for("vllm", "DECODE"))
+        self.assertIsNone(probe.cache_salt_for("sglang", "PREFILL"))
+
+    def test_sglang_request_does_not_receive_vllm_cache_salt(self):
+        with patch.object(probe, "FRAMEWORK", "sglang"), patch.object(probe, "CACHE_SALT", "salt"), \
+                patch.object(probe, "post", return_value="{}") as post:
+            probe.generate("http://server", [1, 2], 1, [], "sglang")
+        self.assertEqual(post.call_args.args[1], "/generate")
+        self.assertNotIn("cache_salt", post.call_args.args[2])
+
+    def test_prefill_invocations_cannot_hit_an_earlier_invocations_prefix_cache(self):
+        """Point A, then point B (same zero cached prefix, smaller M), then B's retry. Each
+        invocation's measured requests must compute their full M; without the salt B's
+        repeats (seeded independently of the point) and B's retry (same seed) hit A's / the
+        first attempt's cache and compute 16 tokens."""
+        plan = self.root / "points.json"
+        plan.write_text(json.dumps({"points": [
+            {"point_id": "mc_a", "phase": "PREFILL", "new_tokens": 512, "running": 1,
+             "cached_tokens": 0},
+            {"point_id": "mc_b", "phase": "PREFILL", "new_tokens": 256, "running": 1,
+             "cached_tokens": 0}]}))
+        cache, calls = {}, []
+
+        def cached_server(base, endpoint, body, **kwargs):
+            salt, prompt = body.get("cache_salt"), body["prompt"]
+            matched = 0
+            for old in cache.get(salt, []):
+                common = 0
+                for x, y in zip(old, prompt):
+                    if x != y:
+                        break
+                    common += 1
+                matched = max(matched, min((common // 16) * 16, len(prompt) - 1))
+            cache.setdefault(salt, []).append(prompt)
+            calls.append((salt, len(prompt), len(prompt) - matched))
+            return "{}"
+
+        salts = []
+        with patch.object(probe, "post", side_effect=cached_server), \
+                patch.object(probe, "start_profile"), patch.object(probe, "stop_profile"), \
+                patch.object(probe, "server_up", return_value=True), \
+                patch.object(probe, "wait_drained"), patch.object(probe, "wait_traces_settled"), \
+                patch.object(probe, "traces_written", return_value=[{"path": "t.json", "bytes": 1}]), \
+                patch.object(probe, "verify_trace", return_value={"verified": True, "reason": "test"}), \
+                patch.object(sys, "stdout", new_callable=io.StringIO):
+            for index, pid in enumerate(("mc_a", "mc_b", "mc_b")):
+                out = self.root / ("%d.json" % index)
+                argv = ["serving_probe.py", "--framework", "vllm", "--served-model", "model",
+                        "--points", str(plan), "--point-id", pid, "--seed", "1234",
+                        "--num-steps", "4", "--trace-dir", str(self.root / "traces"),
+                        "--out", str(out)]
+                before = len(calls)
+                with patch.object(sys, "argv", argv):
+                    self.assertEqual(probe.main(), 0)
+                mine = calls[before:]
+                salt = json.loads(out.read_text())["journal"][0]["cache_salt"]
+                salts.append(salt)
+                self.assertTrue(salt)
+                self.assertEqual({c[0] for c in mine}, {salt})   # one salt per invocation
+                # shape warmup + (num_steps + 1) measured repeats, each computing all of M
+                want = 512 if pid == "mc_a" else 256
+                self.assertEqual(len(mine), 1 + 5)
+                self.assertEqual([c[2] for c in mine[1:]], [want] * 5)
+        self.assertEqual(len(set(salts)), 3)
 
     def test_profile_rpc_uses_vllm_fields(self):
         with patch.object(probe, "post", return_value="{}") as post:
