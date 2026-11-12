@@ -52,6 +52,9 @@ absolute per-case latencies. The script trusts only your numbers.
 4. Run FULL_BENCHMARK via `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. Parse per-case
    latency using the parse hint. Run it **twice** and keep the better/median if the two disagree by
    >5% (note the variance).
+   **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): run FULL_BENCHMARK
+   **once**. The UT already interleaves baseline/candidate legs per case and repeats them itself, and
+   one run of a prepared extract UT takes 20–40 min. Re-run only after an error or a failed gate.
 4b. **(ONLY if `REQUIRE_GRAPH_CAPTURE` is set) CUDA/HIP-graph capture-safety smoke.** This op will be
    overlaid on the graph-captured decode path, so a kernel that passes iso but host-syncs or lazily
    compiles UNDER CAPTURE passes here yet CRASHES the live TP>1 server. Catch it now (cheap), in `$WS`
@@ -77,6 +80,11 @@ absolute per-case latencies. The script trusts only your numbers.
    ratio-of-sums (workload-aligned), ALSO compute `verified_weighted = Σ weight_i /
    Σ (weight_i / speedup_i)` using each case's `weight` — this is the PRIMARY number; regression is
    judged on it, not the geomean.**
+   **Workload-weighted oracle:** do NOT divide by `BASELINE_PER_CASE`. It was timed in another session,
+   and absolute ms drift 1–4% between sessions on these UTs, which is larger than most real gains. Use
+   the UT's own in-run numbers from your run: per-case `speedup` (with its `baseline_ms`/`optimized_ms`)
+   from its per-case output, and `verified_weighted` = the `GEAK_WEIGHTED_SPEEDUP` it printed. The UT's
+   baseline leg is the frozen online kernel, so this is already the speedup vs the TRUE baseline.
 
 ## Return JSON
 ```json
