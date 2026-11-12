@@ -3145,6 +3145,27 @@ class TestMain(_RunE2ECase):
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())
 
+    def test_kernel_fusion_switch_is_forwarded_and_never_stops_the_run(self):
+        """KernelFusion is OFF by default and lives in the workflow: run_e2e forwards only its switch and knobs."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: self.fail("dry-run must not invoke"))
+        for k in [k for k in os.environ if k == "GEAK_KERNEL_FUSION" or k.startswith("GEAK_KF_")]:
+            del os.environ[k]
+        kf_keys = lambda mapped: [k for k in mapped if k == "kernel_fusion" or k.startswith("kf_")]
+        rc, stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual((rc, kf_keys(json.loads(stdout)["mapped_args"])), (0, []))
+        rc, stdout = self._run(self._handoff(kernel_fusion={"implementable_levels": "L1,L2"}), "--dry-run")
+        mapped = json.loads(stdout)["mapped_args"]
+        self.assertEqual((rc, mapped["kernel_fusion"], mapped["kf_implementable_levels"]), (0, "true", "L1,L2"))
+
+        def unloadable():
+            raise RuntimeError("kernel_fusion_args.py unreadable")
+        self.patch_rx("_kf_args", unloadable)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = rx.main([str(self._handoff(kernel_fusion=True)), str(self.result_path), "--dry-run"])
+        self.assertEqual((rc, kf_keys(json.loads(out.getvalue())["mapped_args"])), (0, []))
+        self.assertIn("kernel_fusion: switch not applied (RuntimeError: kernel_fusion_args.py unreadable)", err.getvalue())
+
     def test_probe_less_dry_run_is_host_only(self):
         os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
         self.patch_rx(

@@ -445,7 +445,7 @@ function parityIsSoft(integ) {
   const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
   if (pk === 'accuracy') return true;
   if (pk === 'byte_exact' || pk === 'none') return false;
-  return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
+  return ACCURACY_GATE !== 'none' || (KF_ON && KF_SOFT_LANDED);   // unknown -> soft only when the run uses an accuracy gate
 }
 function speedupEstimate(pct_gpu_time, isolated, integ) {
   const fallback = { pct_gpu_time, estimate_pct: amdahlCeilingPct(pct_gpu_time, isolated), source: 'head_estimate' };
@@ -594,6 +594,21 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
 if (GPU_FAMILY.isolate) KERNEL_KNOWLEDGE_DIR = '';
+// ---- KERNEL FUSION (opt-in switch, default OFF; knowledge/kernel_fusion_integration.md) ----
+// Not a phase: a fusion profile beside Profile's Top-N, fusion regions routed by Strategize, and each
+// routed region's UT and fused kernel through the Milestone loop like any kernel candidate. A fused kernel
+// reorders floating-point work (a fused reduction, fp32 kept in registers), so like a quant kernel it is held
+// to TASK ACCURACY, not byte-exact greedy parity: the integrator's ACCURACY_GATE switch, gsm8k unless
+// accuracy_gate is set. Once a fused kernel is in the carried overlay, no later candidate can pass byte
+// parity vs the true baseline, so banking one merges the same gate into ACCURACY_INPUTS, which every later
+// integrate and Validate spreads; until then, and whenever the switch is off, it adds nothing.
+const KF_ON = String(A.kernel_fusion != null ? A.kernel_fusion : 'false') === 'true';
+const KF_ACCURACY_GATE = String(A.accuracy_gate || 'gsm8k').trim();
+const KF_ACCURACY_INPUTS = KF_ACCURACY_GATE !== 'none'
+  ? { ACCURACY_GATE: KF_ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  : {};
+let KF_SOFT_LANDED = false;
+const kfLandSoft = () => { KF_SOFT_LANDED = true; Object.assign(ACCURACY_INPUTS, KF_ACCURACY_INPUTS); };
 // Kernel-layer warm start: before round 1 a lane re-validates its kernel's top stored patches from
 // kb_artifacts/ through the normal verify gate. e2e only forwards the knobs, so every lane shares one
 // store and an orchestrator-supplied store reaches them; unset values equal the lane defaults.
@@ -1087,6 +1102,7 @@ const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
 const AGENTX_SKIP = KERNEL_EXTRACT_ON ? new Set(['profile', 'config', 'tune']) : null;
 const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p)) && !(AGENTX_SKIP && AGENTX_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
+if (KF_ON && ST.kernel_fusion && ST.kernel_fusion.soft_parity) kfLandSoft();
 // Hoisted: WarmStart's integrate legs reach tuningIntegrateInputs() before the TuningSkillset phase
 // runs, so `tuning` must already be declared; that phase reassigns it.
 let tuning = ST.tuning || null;
@@ -2485,7 +2501,9 @@ const bankAccepted = (list, e, kr) => {
     apply_env: e.apply_env || k.apply_env || '',
     apply_flags: e.apply_flags || k.apply_flags || '',
     pct_gpu_time: e.pct_gpu_time != null ? e.pct_gpu_time : (k.pct_gpu_time || 0),
+    ...(KF_ON && k.op_kind === 'fusion' ? { op_kind: 'fusion', fusion_id: k.fusion_id || '' } : {}),
   });
+  if (KF_ON && k.op_kind === 'fusion') kfBanked(list[list.length - 1]);
 };
 
 // An integrator abandoned at the reserve boundary is still measuring; with no FINISH retry allowed
@@ -2611,6 +2629,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
       { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
   integ = await reviewSpeedup(integ, withTuning, label, phaseName);
+  if (KF_ON) integ = await kfOverlayGate(integ, withTuning, phaseName);
   if (integ && integ.short_name) {
     // Preserve every candidate's review when several backends share one head short_name.
     const measurementId = (integ.measurement_evidence && integ.measurement_evidence.measurement_id) || withTuning.CAND_TAG || '';
@@ -3251,6 +3270,295 @@ async function prepareAgentXKernels(round, throughput) {
         { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
     }
   }
+}
+
+// ---- KernelFusion (kernel_fusion=true), broken down into the stages above and below ----
+// Fusion profile: the fusion-analysis skill (roles/fusion_analyst.md) on the trace Profile just took -- on
+// AgentX the kernel-extract sampling captures. parse_profile.py's Top-N says which kernels are hot; the
+// fusion profile says which of them run back to back and the one Python seam that launches each run. It
+// takes no capture and leaves `profile` as it is. Strategize routes its regions (KF_INPUTS, {} until there
+// are regions) as kernel_candidates naming a fusion_id; on AgentX the kernel-extract skill prepares the
+// recommended regions' UTs into its inventory. The Milestone loop then builds, optimizes and measures a
+// region like any kernel candidate (kfExpand and the kf* helpers below: no-ops for every other candidate).
+const KF_SKILL_DIR = `${WORKFLOW_DIR}/knowledge/kernel_fusion_skills/fusion-analysis`;
+const KF_PROMPTS = String(A.kf_prompt || `${KF_SKILL_DIR}/SKILL.md`)
+  .split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
+// The fusion levels a fused kernel may implement; the analysis may recommend only these (it ranks all).
+const KF_LEVELS = String(A.kf_implementable_levels || 'L1,L2,L3');
+// Patterns inside those levels not implemented yet: ranked, but not recommended or routed.
+const KF_UNSUPPORTED = String(A.kf_unsupported_patterns || 'L3 MegaKernel (one persistent kernel that absorbs a heavy expert/GEMM or attention stage together with its dispatch, combine or communication, e.g. MegaMoE); L4 (whole-layer MonoKernel)');
+const KF_TASK = String(A.kf_task || '');   // operator constraints, binding on every fusion agent
+// A finished analysis (run_e2e.py reads kf_topk_json into it): reused, not re-run.
+const KF_TOPK = A.kf_topk && typeof A.kf_topk === 'object' && Array.isArray(A.kf_topk.candidates) ? A.kf_topk : null;
+const KF_UT_CONTRACT = `${WORKFLOW_DIR}/roles/_fragments/fusion_ut_contract.md`;
+
+const KF_CANDIDATE_SCHEMA = obj({
+  id: { type: 'string' },
+  seam: obj({ target_callable: { type: 'string' }, source_file: { type: 'string' } }),
+  exclusive_with: arrStr,
+  fallback: { type: ['string', 'null'] },
+  kernels: arrStr, phases: arrStr,
+}, ['id']);
+const KF_OPPORTUNITY_SCHEMA = obj({
+  topk_json: { type: 'string' }, report_path: { type: 'string' }, digest_md: { type: 'string' },
+  candidates: { type: 'array', items: KF_CANDIDATE_SCHEMA }, recommended: arrStr, notes: { type: 'string' },
+  report_md: { type: 'string' }, model_notes_md: { type: 'string' },
+}, ['topk_json', 'candidates', 'recommended', 'report_md']);
+const KF_OVERLAY_CHECK_SCHEMA = obj({ ok: { type: 'boolean' }, problems: arrStr, manifest_sha256: { type: 'string' },
+  files: { type: 'number' } }, ['ok']);
+// What a routed region needs (kept in state), and the part the architect routes on.
+const KF_CAND_KEYS = ['id', 'rank', 'level', 'region', 'kernels', 'phases', 'occurrences', 'm_range', 'seam',
+  'inputs_outputs', 'launches_before', 'launches_after', 'region_pct_device_time', 'est_gain_pct_expected',
+  'difficulty', 'bitwise_exact', 'exclusive_with', 'language', 'fallback', 'fused_design'];
+const KF_ROUTE_KEYS = ['id', 'rank', 'level', 'region', 'kernels', 'phases', 'm_range', 'seam',
+  'region_pct_device_time', 'est_gain_pct_expected', 'difficulty', 'bitwise_exact', 'exclusive_with', 'fallback'];
+const kfPick = (c, keys) => Object.fromEntries(keys.filter((k) => c[k] !== undefined).map((k) => [k, c[k]]));
+const kfList = (v) => (Array.isArray(v) ? v.map(String) : []);
+const kfSeamOf = (c) => (c && c.seam && c.seam.target_callable) || '';
+const kfShortOf = (c) => `kf_${String(c.id).replace(/[^A-Za-z0-9_]+/g, '_')}`;
+const kfIntro = (s) => s + (KF_TASK ? ` OPERATOR CONSTRAINTS (they bind you): ${KF_TASK}` : '');
+// What runs ahead of the search gets a bounded share of it: under time_budget_s the fusion profile and the
+// region UTs together have a quarter of the search window left when the fusion profile starts, each agent
+// attempt within GEAK's own cap. The analysis reads a trace and source on no GPU: an hour per attempt.
+let KF_PRE_DEADLINE_MS = null;
+const kfClock = () => {
+  if (TIME_BUDGET_MS != null && KF_PRE_DEADLINE_MS == null) KF_PRE_DEADLINE_MS = ELAPSED_MS + Math.floor(Math.max(0, searchWindowMs()) / 4);
+};
+const kfLeftMs = () => (KF_PRE_DEADLINE_MS == null ? Infinity : KF_PRE_DEADLINE_MS - ELAPSED_MS);
+const kfTimeout = (capMs) => () => Math.max(AGENT_TIMEOUT_FLOOR_MS, Math.min(agentTimeoutFor(), capMs, kfLeftMs()));
+
+let KF_INPUTS = {};
+const kfRegions = new Map();   // fusion_id -> region of this run's fusion profile
+// The run's KernelFusion record (wfReturn.kernel_fusion), carried in state: a resumed run reuses its profile.
+const kfRecord = KF_ON ? { status: 'not_run', routed: [], accepted: [], unprepared: [],
+  ...(ST.kernel_fusion && typeof ST.kernel_fusion === 'object' ? ST.kernel_fusion : {}) } : null;
+function kfAdopt(rec) {
+  kfRegions.clear();
+  for (const c of rec.candidates || []) if (c && c.id != null) kfRegions.set(String(c.id), c);
+  KF_INPUTS = !kfRegions.size ? {} : {
+    FUSION_STRATEGY: `${WORKFLOW_DIR}/roles/_fragments/fusion_strategy.md`,
+    FUSION_TOPK_JSON: rec.topk_json || '', FUSION_REPORT: rec.report_path || '',
+    FUSION_CANDIDATES: [...kfRegions.values()].map((c) => kfPick(c, KF_ROUTE_KEYS)),
+    FUSION_RECOMMENDED: rec.recommended || [],
+    IMPLEMENTABLE_LEVELS: KF_LEVELS, UNSUPPORTED_PATTERNS: KF_UNSUPPORTED,
+    ...(KF_TASK ? { OPERATOR_CONSTRAINTS: KF_TASK } : {}),
+  };
+}
+if (kfRecord && Array.isArray(kfRecord.candidates)) kfAdopt(kfRecord);
+
+// Once per run, beside the Profile round it reads; a failure is recorded and the run goes on without it.
+async function kfProfile(phaseName) {
+  if (!KF_ON || kfRecord.status !== 'not_run') return;
+  if (FAST_MODE || DEEP_MODE) {
+    Object.assign(kfRecord, { status: 'skipped',
+      reason: `${FAST_MODE ? 'fast' : 'deep'} mode runs no Milestone loop, where fusion regions are optimized` });
+    return;
+  }
+  if (A.kf_config_errors) {
+    Object.assign(kfRecord, { status: 'error', reason: `config: ${A.kf_config_errors}`.slice(0, 1500) });
+    log(`[kf] fusion profile not run: ${kfRecord.reason}`);
+    return;
+  }
+  if (searchClosed('fusion profile')) return;
+  kfClock();
+  const out = `${EVAL_DIR}/kernel_fusion/analysis`;
+  const topn = (profile && profile.profile_topN_json) || '';
+  const traceDir = String(A.kf_trace_dir || (topn ? `${topn.replace(/\/[^/]*$/, '')}/profile` : ''));
+  const kxDir = KERNEL_EXTRACT_ON && profile && profile.kernel_extraction_delivery_json
+    ? profile.kernel_extraction_delivery_json.replace(/\/[^/]*$/, '') : '';
+  const workloadSummary = String(A.kf_workload_summary || (profile && profile.profile_workload_json) || '');
+  kfRecord.trace_dir = traceDir || kxDir;
+  try {
+    let res = KF_TOPK ? { topk_json: String(A.kf_topk_json || ''), candidates: KF_TOPK.candidates,
+      recommended: KF_TOPK.recommended || [] } : null;
+    if (!res) {
+      if (!kfRecord.trace_dir) throw new Error('no trace: this run has no profile trace to analyze; pass kf_trace_dir');
+      res = await safeAgent(roleAgent('fusion_analyst', 'analyze', kfIntro('Rank the fusion opportunities in this run\'s trace.'), {
+        EVAL_DIR, KF_OUT: out, KF_SKILL_DIR, WORKFLOW_DIR, PROMPTS: KF_PROMPTS,
+        TRACE_DIR: traceDir || '(none: see KX_EVIDENCE_DIR)', ...(kxDir ? { KX_EVIDENCE_DIR: kxDir } : {}),
+        WORKLOAD_SUMMARY: workloadSummary || '(none)', PROFILE_TOPN: topn || '(none)',
+        MODEL_PATH, SERVER_FLAGS: curFlags, SERVER_ENV: curEnv, OVERLAY: curOverlay || '(none)',
+        LAUNCH_SCRIPT: LAUNCH_SCRIPT || '(none)', WORKLOAD,
+        IMPLEMENTABLE_LEVELS: KF_LEVELS, UNSUPPORTED_PATTERNS: KF_UNSUPPORTED,
+        ...(A.kf_source_dirs ? { SOURCE_DIRS: String(A.kf_source_dirs) } : {}),
+        ...(KF_TASK ? { OPERATOR_CONSTRAINTS: KF_TASK } : {}),
+      }), { phase: phaseName, label: 'fusion_analyst:analyze', schema: KF_OPPORTUNITY_SCHEMA }, 2, kfTimeout(3600000));
+      if (!res) throw new Error('the fusion analysis returned nothing');
+    }
+    // A structured result may give a seam as the bare "pkg.mod:fn" (topk.json on disk keeps the object).
+    const candidates = (res.candidates || []).filter((c) => c && c.id != null).map((c) => kfPick({ ...c,
+      seam: typeof c.seam === 'string' ? { target_callable: c.seam } : (c.seam && typeof c.seam === 'object' ? c.seam : {}),
+      kernels: kfList(c.kernels), phases: kfList(c.phases), exclusive_with: kfList(c.exclusive_with) }, KF_CAND_KEYS));
+    kfAdopt(Object.assign(kfRecord, { status: 'profiled', topk_json: res.topk_json || '',
+      report_path: KF_TOPK ? '' : (res.report_path || `${out}/REPORT.md`),
+      candidates, recommended: (res.recommended || []).map(String) }));
+    log(`[kf] fusion profile: ${candidates.length} candidates, recommended ${JSON.stringify(kfRecord.recommended)}`);
+  } catch (e) {
+    Object.assign(kfRecord, { status: 'error', reason: String((e && e.message) || e).slice(0, 600) });
+    log(`[kf] fusion profile failed (${kfRecord.reason}); the run goes on without it.`);
+  }
+}
+
+// AgentX: one kernel-extract invocation per recommended region builds its region UT under the fusion UT
+// contract from this run's evidence; a passing one joins the prepared inventory by its GPU-time share.
+async function kfPrepare(c, gpu, previous, throughput) {
+  const t = kfShortOf(c);
+  const inputs = {
+    EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, TASK, ROUND: t,
+    BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
+    BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    BASELINE_ITERATION_DIR: `${EVAL_DIR}/baseline/iterations`,
+    EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${t}`,
+    BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
+    CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+    PREVIOUS_WORKLOAD_JSON: (profile && profile.profile_workload_json) || '',
+    PREVIOUS_RANKING_JSON: (profile && profile.kernel_ranking_json) || '',
+    PREVIOUS_UT_DELIVERY: (profile && profile.kernel_extraction_delivery_json) || '',
+    TRACE_DIR: kfRecord.trace_dir,
+    FUSION_SCOPE: [{ task: t, fusion_level: c.level, region: c.region, device_kernels: c.kernels || [],
+      phases: c.phases || [], seam: c.seam || {}, inputs_outputs: c.inputs_outputs || '', m_range: c.m_range || '' }],
+    SOURCE_DELIVERY_REQUIRED: true, REMAINING_MIN: Math.min(remainingMin(), Math.round(kfLeftMs() / 60000)),
+    SKILL_DIR: WORKFLOW_DIR, ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+  };
+  const intro = kfIntro((previous
+    ? `A previous attempt at this region did not produce a passing UT. Its outcome: ${previous}. Reuse what it ` +
+      'saved under EVIDENCE_DIR, fix that blocker (do not just restate it), and finish. ' : '') +
+    `Read ${KF_UT_CONTRACT} first: its FUSION UT CONTRACT and its AgentX section are your scope for this invocation.`);
+  let reply = await safeAgent(roleAgent('kernel_extractor', 'prepare', intro, inputs),
+    { phase: 'KernelExtract', label: `kernel_extractor:prepare ${t}${previous ? ' (retry)' : ''}`, schema: AGENTX_PREPARATION_SCHEMA },
+    1, kfTimeout(Infinity));
+  let prepared = null, why = '';
+  for (let attempt = 0; attempt < 2 && !prepared; attempt++) {
+    try {
+      if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
+      prepared = readAgentXPreparation(reply);
+    } catch (error) {
+      why = String(error.message || error);
+      if (attempt >= 1) break;
+      reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
+        'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
+        'passing GPU tests. Preserve every real failure and all task results. The reader failed with: ' +
+        why + '. Re-pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ' +
+        '{delivery_path, prepared} for the repaired file, prepared being that stdout verbatim.',
+        { ...inputs, PREVIOUS_DELIVERY_PATH: reply?.delivery_path || '' }),
+        { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${t}`, schema: AGENTX_PREPARATION_SCHEMA },
+        1, kfTimeout(Infinity));
+    }
+  }
+  if (!prepared) return { why: why || 'no result' };
+  const all = [...prepared.head_candidates, ...prepared.kernel_candidates];
+  const k = all.find((x) => x && x.short_name === t) || (all.length === 1 ? all[0] : null);
+  if (!k) {
+    return { why: [...prepared.failed_tasks, ...prepared.deferred_tasks]
+      .map((f) => f && (f.reason || f.notes || f.status)).filter(Boolean).join('; ') || 'no passing task in the delivery' };
+  }
+  const ut = reusePreparedUT(k);
+  return ut.smoke === 'pass' ? { k } : { why: ut.smoke_detail || 'prepared UT did not pass' };
+}
+async function kfPrepareRegions(prepared, throughput) {
+  if (!KF_ON || !kfRegions.size || searchClosed('fusion region UTs')) return prepared;
+  kfClock();
+  const late = () => kfLeftMs() <= AGENT_TIMEOUT_FLOOR_MS;
+  const picks = (kfRecord.recommended || []).map((id) => kfRegions.get(String(id))).filter((c, i, a) => c && a.indexOf(c) === i);
+  const got = await parallel(picks.map((c, i) => async () => {
+    if (!kfSeamOf(c)) return { c, why: 'no seam.target_callable' };
+    if (late()) return { c, why: 'time: the fusion share of the search window is spent' };
+    const gpu = GPU_LIST[i % GPU_LIST.length];
+    try {
+      const first = await kfPrepare(c, gpu, null, throughput);
+      return { c, ...(first.k || late() ? first : await kfPrepare(c, gpu, String(first.why).slice(0, 1500), throughput)) };
+    } catch (e) {
+      return { c, why: `error: ${String((e && e.message) || e).slice(0, 300)}` };
+    }
+  }));
+  const fused = [];
+  for (const r of got.filter(Boolean)) {
+    if (r.k) fused.push({ ...r.k, fusion_id: String(r.c.id) });
+    else {
+      kfRecord.unprepared.push({ id: String(r.c.id), reason: String(r.why).slice(0, 600) });
+      log(`[kf] ${r.c.id}: no region UT (${String(r.why).slice(0, 300)})`);
+    }
+  }
+  prepared.kernel_candidates = kfMerge(prepared.kernel_candidates, fused);
+  log(`[kf] region UTs: ${fused.length} of ${picks.length} recommended region(s) joined the prepared inventory.`);
+  return prepared;
+}
+function kfMerge(queue, fused) {
+  const out = (queue || []).slice();
+  for (const f of fused) {
+    if (out.some((q) => q && q.short_name === f.short_name)) continue;
+    const at = out.findIndex((q) => !(Number(q && q.pct_gpu_time) >= Number(f.pct_gpu_time)));
+    out.splice(at < 0 ? out.length : at, 0, f);
+  }
+  return out;
+}
+
+// The region a kernel candidate names by fusion_id, or null: off, or not a region of this run's profile.
+const kfRegionOf = (c) => (KF_ON && c && c.fusion_id != null && kfRegions.get(String(c.fusion_id))) || null;
+// A routed region as a Milestone kernel candidate: the region's facts from the fusion profile; the router's
+// (or the kernel-extract skill's) short_name, share, backends, op_kind and prepared_ut stay.
+function kfExpand(c) {
+  const r = kfRegionOf(c);
+  if (!r) return c;
+  const seam = kfSeamOf(r);
+  const name = c.short_name || kfShortOf(r);
+  if (!kfRecord.routed.includes(name)) kfRecord.routed.push(name);
+  return { ...c, classification: 'fusion', fusion_level: r.level || '', region: r.region || '',
+    device_kernel: c.device_kernel || (r.kernels || [])[0] || '', device_kernels: r.kernels || [],
+    target_callable: seam, seam_candidates: seam ? [seam] : [], source_hint: (r.seam || {}).source_file || '',
+    inputs_outputs: r.inputs_outputs || '', phases: r.phases || [], m_range: r.m_range || '',
+    candidate_backends: (c.candidate_backends || []).length ? c.candidate_backends : [r.language || 'triton'],
+    short_name: name, pct_gpu_time: typeof c.pct_gpu_time === 'number' ? c.pct_gpu_time : (r.region_pct_device_time || 0) };
+}
+// Each Milestone hook reads `KF_ON && kf...(c)`: '' / {} for any other kernel, so its own text stays.
+const kfExtractIntro = (c) => (!kfRegionOf(c) ? '' : kfIntro(
+  `Build the immutable unittest task dir for a FUSION REGION, not a single kernel. Read ${KF_UT_CONTRACT} first: ` +
+  'its FUSION UT CONTRACT and its kernel_extractor section are your scope for this invocation.'));
+const kfExtractInputs = (c) => (kfRegionOf(c) && A.kf_workload_summary ? { WORKLOAD_SUMMARY: String(A.kf_workload_summary) } : {});
+function kfLaneTask(c) {
+  const r = kfRegionOf(c);
+  if (!r) return '';
+  const lang = (c.candidate_backends || [])[0] || 'triton';
+  const region = { region: r.region || '', kernels_in_order: r.kernels || [], phases: r.phases || [],
+    m_range: r.m_range || '', seam: r.seam || {}, inputs_outputs: r.inputs_outputs || '',
+    launches_before: r.launches_before || (r.kernels || []).length, launches_after: r.launches_after || 1,
+    suggested_design: r.fused_design || '', bitwise_exact_expected: !!r.bitwise_exact };
+  return `FUSION REGION ${r.id} (${r.level || '?'}): write ONE fused ${lang} kernel that replaces this whole ` +
+    `kernel region of a live LLM serving stack. Read ${WORKFLOW_DIR}/roles/_fragments/fused_kernel_task.md first. The region: ` +
+    JSON.stringify(region) + '. ' + GRAPH_REQ + (TASK || '') + (KF_TASK ? ` OPERATOR CONSTRAINTS: ${KF_TASK}` : '');
+}
+// The integrate A/B of a region: its facts in KERNEL_RESULT and the accuracy gate, both in the inputs, so
+// the Finalize-gate's replay of a pending A/B and a corrective re-author keep them. {} for any other kernel.
+function kfResultFields(c) {
+  const r = kfRegionOf(c);
+  return !r ? {} : { op_kind: 'fusion', fusion_id: String(r.id), live_call_seam: kfSeamOf(r),
+    device_kernels: r.kernels || [], parity_note: r.bitwise_exact ? 'expected_exact' : 'expected_close' };
+}
+const kfAccuracyFor = (c) => (kfRegionOf(c) ? KF_ACCURACY_INPUTS : {});
+function kfBanked(rec) {
+  if (KF_ACCURACY_GATE !== 'none') kfLandSoft();
+  kfRecord.status = 'accepted';
+  kfRecord.accepted = kfRecord.accepted.filter((a) => a.short_name !== rec.short_name).concat([{
+    short_name: rec.short_name, fusion_id: rec.fusion_id || '', isolated_speedup: rec.isolated_speedup,
+    e2e_delta_pct: rec.e2e_delta_pct }]);
+}
+// A region's accepted overlay is checked on disk before any caller banks it (scripts/fusion_overlay_check.py):
+// it compiles, every fused kernel it names exists, every file of the overlay it was built on is kept (existing
+// optimizations preserved), and it is the overlay the A/B measured. A failed or unrun check makes the accept a
+// completed rejection. Every other A/B passes through unchanged.
+async function kfOverlayGate(integ, inputs, phaseName) {
+  const kr = (inputs && inputs.KERNEL_RESULT) || {};
+  if (kr.op_kind !== 'fusion' || !(integ && ['accepted', 'stack'].includes(integ.gate) && integ.accepted_overlay)) return integ;
+  const check = await safeAgent('Run EXACTLY this command and nothing else:\n```bash\n' +
+    `python3 "${WORKFLOW_DIR}/scripts/fusion_overlay_check.py" --overlay "${integ.accepted_overlay}" ` +
+    `--initial "${inputs.CURRENT_OVERLAY || ''}" --root "${EVAL_DIR}"\n` + '```\nIt prints one JSON object (and exits 1 ' +
+    'when the check fails). Return that object EXACTLY as printed. Do NOT modify any file and do NOT run anything else.',
+    { phase: phaseName, label: `overlay-check ${kr.short_name}`, effort: 'low', schema: KF_OVERLAY_CHECK_SCHEMA }, 1, () => 10 * 60000);
+  if (check && check.ok === true) return { ...integ, overlay_check: check };
+  const why = check ? (check.problems || []).join('; ') || 'not ok' : 'the check did not run';
+  log(`[kf] ${kr.short_name}: accepted overlay ${integ.accepted_overlay} failed validation: ${why}`);
+  return { ...integ, gate: 'rejected', ab_complete: true, overlay_check: check || { ok: false, problems: [why] },
+    reason: `overlay: accepted overlay failed validation: ${why}`.slice(0, 1500) };
 }
 
 if (want('setup')) {
@@ -4128,6 +4436,10 @@ print(json.dumps(res))
     if (KERNEL_EXTRACT_ON) {
       strategy = await prepareAgentXKernels('baseline', kbSeedTput || BASELINE_TPUT);
       profile = strategy;
+      if (KF_ON) {
+        await kfProfile('KernelExtract');
+        strategy = await kfPrepareRegions(strategy, kbSeedTput || BASELINE_TPUT);
+      }
     } else {
       phase('Profile');
       profile = await safeAgent(
@@ -4138,13 +4450,14 @@ print(json.dumps(res))
         }),
         { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
       log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+      if (KF_ON) await kfProfile('Profile');
 
       phase('Strategize');
       strategy = await safeAgent(
         roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
           EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS, ...(KF_ON && KF_INPUTS),
         }),
         { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
     }
@@ -4188,6 +4501,7 @@ print(json.dumps(res))
     profile = strategy;
     headQueue = applyOpIdentityGuard(strategy.head_candidates.slice(), 'resume selection');
     kernelQueue = strategy.kernel_candidates.slice();
+    if (KF_ON) kernelQueue = kfMerge(kernelQueue, (ST.kernelQueue || []).filter((k) => kfRegionOf(k) && !unusable(k)));
   }
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
@@ -4245,7 +4559,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
         roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
           EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-          ...ANALYSIS_SKILL_INPUTS,
+          ...ANALYSIS_SKILL_INPUTS, ...(KF_ON && KF_INPUTS),
         }),
         { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
       if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
@@ -4565,7 +4879,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
           EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-          ...ANALYSIS_SKILL_INPUTS,
+          ...ANALYSIS_SKILL_INPUTS, ...(KF_ON && KF_INPUTS),
         }),
         { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
       if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
@@ -5561,7 +5875,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
           MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
           PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
-          ...ANALYSIS_SKILL_INPUTS,
+          ...ANALYSIS_SKILL_INPUTS, ...(KF_ON && KF_INPUTS),
         }),
         { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
 
@@ -5583,7 +5897,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   }
 
   const cands = planCands.slice(0, remaining).map((c, i) => ({
-    ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
+    ...(KF_ON ? kfExpand(c) : c), idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `k${milestone}_${i}`,
   }));
   // AgentX selection inventories more work than this execution budget can run.
@@ -5596,10 +5910,11 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // integrate: e2e A/Bs must not overlap, and accepted overlays compound in order.
   const optimized = await parallel(cands.map((c) => async () => {
     const ext = await extractWithBaseline(
-      'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
+      'kernel_extractor', 'extract', (KF_ON && kfExtractIntro(c)) || 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
         ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        ...(KF_ON && kfExtractInputs(c)),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
@@ -5613,7 +5928,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
-        task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
+        task: (KF_ON && kfLaneTask(c)) || 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
       }, String(c.short_name || ext.op_kind || 'milestone'));
@@ -5653,9 +5968,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-        final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time },
+        final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time,
+        ...(KF_ON && kfResultFields(c)) },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
+      CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR, ...(KF_ON && kfAccuracyFor(c)),
     };
     const integ = await runIntegrateBothLegs(
       'Overlay the optimized kernel back; gate on e2e throughput.', mileIntegrateInputs,
@@ -6069,6 +6385,16 @@ if (want('final')) {
   log(`Phase(s) [${PHASES.join(',')}] done. Carried throughput ${curTput} tok/s. Pass the returned 'state' to the next phase invocation.`);
 }
 
+// KernelFusion record (result["kernel_fusion"] in run_e2e.py; carried in state): what the fusion profile
+// found, and the kernel track's verdict on every region it routed (history.ledger).
+function kfReturn() {
+  const routed = new Set(kfRecord.routed);
+  return { ...kfRecord, soft_parity: KF_SOFT_LANDED,
+    outcomes: history.ledger.filter((e) => e && routed.has(e.direction)).map((e) => ({ short_name: e.direction,
+      verdict: e.verdict, isolated_speedup: e.isolated_speedup ?? null, e2e_delta_pct: e.e2e_delta_pct ?? null,
+      lesson: String(e.lesson || '').slice(0, 300) })) };
+}
+
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
   backend: BACKEND,
@@ -6090,6 +6416,7 @@ const carryState = {
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Full tuning result: a phase-by-phase resume neither re-runs tuning nor loses its attribution.
   ...(tuning ? { tuning } : {}),
+  ...(KF_ON ? { kernel_fusion: kfReturn() } : {}),
   // Pending wins WITH their inputs, so a resumed run can finish their A/B.
   pending_integrations: pendingIntegrations,
   history,
@@ -6191,6 +6518,7 @@ const wfReturn = {
   accepted_heads: acceptedHeads,
   // Tuning phase attribution, reported apart from accepted_heads/accepted_kernels.
   tuning_skillset: tuningReturn(),
+  ...(KF_ON ? { kernel_fusion: kfReturn() } : {}),
   ...(KERNEL_EXTRACT_ON ? { kernel_extraction: {
     delivery_path: profile?.kernel_extraction_delivery_json || '',
     failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],

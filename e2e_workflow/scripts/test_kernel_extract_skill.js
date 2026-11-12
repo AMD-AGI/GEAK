@@ -23,7 +23,7 @@ const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
   const NOISE_BAND = 0.5, curFlags = '', curEnv = '', curOverlay = '', curTput = 100;
   const profile = null, strategy = null, tuning = null, history = {};
   const headQueue = [], kernelQueue = [], acceptedHeads = [], flaggedHeads = [];
-  const acceptedKernels = [], pendingIntegrations = [];
+  const acceptedKernels = [], pendingIntegrations = [], KF_ON = false;
   ${carry}
   return carryState;
 `);

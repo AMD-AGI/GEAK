@@ -47,7 +47,7 @@ function harness(original = candidate(), fresh = candidate({ measurement_evidenc
     const A = {}, ACCURACY_GATE = 'gsm8k', FIXABLE_REJECT_RX = /no_engagement|signature_mismatch/;
     const SEARCH_REPLICAS = 1, ACCURACY_INPUTS = {}, MEASUREMENT_MODE = 'warm_server';
     const EVAL_DIR = '/eval', WORKLOAD = {}, INTEGRATE_SCHEMA = {}, profile = {profile_topN_json:'/profile/h0.json'};
-    const AB_FINISH_RETRIES = 3, log = () => {}, tuningIntegrateInputs = () => ({});
+    const AB_FINISH_RETRIES = 3, log = () => {}, tuningIntegrateInputs = () => ({}), KF_ON = false;
     const roleAgent = (role, phase, intro, inputs) => ({role, phase, intro, inputs});
     const adoptAbandonedVerdict = async r => r;
     ${core}\n${abDone}\n${abLegs}\n${wrapper}

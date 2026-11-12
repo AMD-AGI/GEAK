@@ -84,6 +84,9 @@ OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`,
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
 `TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`, `TRACELENS_ANALYSIS_MD`,
 `TRACELENS_TRACE_FILE`.
+OPTIONAL fusion profile (only when KernelFusion is switched on and found regions): `FUSION_STRATEGY`,
+`FUSION_CANDIDATES`, `FUSION_RECOMMENDED`, `FUSION_TOPK_JSON`, `FUSION_REPORT`, `IMPLEMENTABLE_LEVELS`,
+`UNSUPPORTED_PATTERNS` — see step 1e.
 
 0. Read `EVAL_DIR/env_report.json`. Let `model_arch_class` set expectations (e.g. MoE → expect
    grouped/fused-MoE GEMM in the Top-N; hybrid-mamba → expect linear-attn Triton kernels; MLA → expect
@@ -195,6 +198,9 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    fixed**. The user-supplied workload — `isl`, `osl`, **`conc`/batch size — must NOT be changed**, and
    **speculative decoding (MTP or otherwise) must NOT be introduced** as an optimization. Raising
    throughput by changing what is being measured is out of scope for this workflow.
+1e. **Fusion regions (only if `FUSION_STRATEGY` is in your inputs; otherwise skip this step entirely and
+   route exactly as before).** Read `FUSION_STRATEGY` and follow it: it adds the fusion profile's regions
+   to the kernel track as `kernel_candidates` that name a `fusion_id`.
 
 2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
@@ -352,6 +358,8 @@ change), `HISTORY`, `SKILL_DIR`.
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a
    permanent blocklist.** A past null may just mean it wasn't optimized well; if it's still the best
    remaining lever, nominate it with a fresh angle.
+6. **Fusion regions (only if `FUSION_STRATEGY` is in your inputs).** Nominate the fusion profile's regions
+   as `FUSION_STRATEGY` says, under rules 2-5 like any kernel.
 
 Return JSON:
 ```json
