@@ -2239,19 +2239,23 @@ return {
 };
 
 function createEvolution() {
-  const sourcePaths = A.evolution_source_paths;
+  let sourcePaths = A.evolution_source_paths == null ? [] : A.evolution_source_paths;
   if (A.kernel_lane_script) throw new Error('optimizer=evo cannot override kernel_lane_script');
   if (!['optimize', 'author'].includes(String(A.mode || 'optimize').trim().toLowerCase() || 'optimize')) {
     throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
   }
-  if (!Array.isArray(sourcePaths) || !sourcePaths.length || sourcePaths.length > 256 ||
-      new Set(sourcePaths).size !== sourcePaths.length ||
-      sourcePaths.some(sourcePath => typeof sourcePath !== 'string' || !sourcePath ||
+  function validateSourcePaths(paths) {
+    if (!Array.isArray(paths) || paths.length > 256 ||
+      new Set(paths).size !== paths.length ||
+      paths.some(sourcePath => typeof sourcePath !== 'string' || !sourcePath ||
         sourcePath.length > 1024 || sourcePath.includes('\\') || sourcePath.startsWith('/') ||
         sourcePath.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git') ||
-        /[^\x20-\x7e]/.test(sourcePath) || sourcePaths.some(other => sourcePath.startsWith(other + '/')))) {
-    throw new Error('evolution_source_paths must list safe relative source files, not directories');
+        /[^\x20-\x7e]/.test(sourcePath) || paths.some(other => sourcePath.startsWith(other + '/')))) {
+      throw new Error('EVO analyzed/supplemental evolution_source_paths must list safe relative source files, not directories');
+    }
+    return paths;
   }
+  validateSourcePaths(sourcePaths);
   const helper = `${WORKFLOW_DIR}/../evo/archive.py`;
   const errors = [];
   let archive = '';
@@ -2270,7 +2274,16 @@ function createEvolution() {
         schema: obj({ exit_code: { type: 'number' }, stdout: { type: 'string' }, stderr: { type: 'string' } },
           ['exit_code', 'stdout']) });
     if (!result || result.exit_code !== 0 || typeof result.stdout !== 'string') {
-      throw new Error(`EVO ${operation} did not complete: ${result ? result.stderr || 'command failed' : 'no return'}`);
+      let diagnostic = result ? result.stderr || 'command failed' : 'no return';
+      if (result && typeof result.stdout === 'string') {
+        let receipt;
+        try { receipt = JSON.parse(result.stdout); } catch {}
+        if (receipt && receipt.ok === false && receipt.error &&
+            typeof receipt.error.code === 'string' && typeof receipt.error.message === 'string') {
+          diagnostic = `${receipt.error.code}: ${receipt.error.message}`;
+        }
+      }
+      throw new Error(`EVO ${operation} did not complete: ${diagnostic}`);
     }
     const receipt = JSON.parse(result.stdout);
     if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) ||
@@ -2281,6 +2294,12 @@ function createEvolution() {
   }
 
   function initialize() {
+    const editable = analysis && analysis.modifiable_files != null ? analysis.modifiable_files : [];
+    validateSourcePaths(editable);
+    sourcePaths = validateSourcePaths([...new Set([...editable, ...sourcePaths])].sort());
+    if (!sourcePaths.length) {
+      throw new Error('optimizer=evo requires source files from Analyze modifiable_files or evolution_source_paths');
+    }
     archive = `${String(EVAL_DIR).replace(/\/+$/, '')}/evolution_archive`;
     return run('init', ['--canonical', CANONICAL,
       ...sourcePaths.flatMap(sourcePath => ['--source-path', sourcePath])]);

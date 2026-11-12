@@ -25,7 +25,7 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PINNED_MAIN = "a48ac8bef9aeab299ba5ac9cb44164d997e94524"
+PINNED_MAIN = "ec97e49ca886f8d02f8415192fdaac45d1005d2a"
 HARNESS = Path(__file__).with_name("dispatch_harness.cjs")
 NODE = shutil.which("node") or str(Path.home() / ".local/bin/node")
 SAFE_ENV = {"PATH": "/usr/bin:/bin", "GEAK_AGENT_AUTO": "0", "PYTHONDONTWRITEBYTECODE": "1"}
@@ -114,7 +114,7 @@ class DispatchTests(unittest.TestCase):
     def test_pinned_lane_is_the_reviewed_main(self):
         self.assertEqual(
             hashlib.sha256(self.pinned[JAVASCRIPT[1]].encode()).hexdigest(),
-            "6ab6132593eb9675df7a37b62fab428f61df82247a17f97ed55652e331e78b83",
+            "13887c03ab681625799756081177ae782be4fd82beecfb72ec3bb2da13d1edd2",
         )
 
     def test_shared_lane_has_no_generated_worker_or_extension(self):
@@ -323,7 +323,7 @@ class DispatchTests(unittest.TestCase):
 
     def test_shared_lane_evo_requires_safe_source_paths(self):
         for source_paths in (
-            None, [], "kernel.py", [""], [None], [3], ["/absolute.py"], ["../escape.py"],
+            "kernel.py", [""], [None], [3], ["/absolute.py"], ["../escape.py"],
             ["a/../b.py"], ["a//b.py"], ["a\n.py"], ["./kernel.py"], ["a/./b.py"],
             ["a/"], ["a\\b.py"], [".git/config"], ["a/.GiT/config"], ["a\t.py"],
             ["a\x00.py"], ["a\x7f.py"], ["\u00e9.py"], ["kernel.py", "kernel.py"],
@@ -344,6 +344,92 @@ class DispatchTests(unittest.TestCase):
                         self.assertEqual(outcome["trace"]["agents"], [])
                     else:
                         self.assert_rejected_before_agents(outcome, "evolution_source_paths")
+
+    def test_evo_uses_main_editable_sources_even_with_narrow_legacy_list(self):
+        editable = ["kernel.py", "knn_wrapper.py", "src/knn.cpp"]
+        for entry in JAVASCRIPT:
+            for supplemental in ({}, {"evolution_source_paths": None}, {"evolution_source_paths": []},
+                                 {"evolution_source_paths": ["kernel.py"]}):
+                with self.subTest(entry=entry, supplemental=supplemental):
+                    outcome = self.run_workflow(entry, {"optimizer": "evo", **supplemental},
+                                                replies={"tech_lead:analyze": {"kernel_type": "fixture",
+                                                         "roadmap_summary": "Ordinary main sources",
+                                                         "modifiable_files": editable}})
+                    self.assert_success(outcome)
+                    planners = [call for call in outcome["trace"]["agents"]
+                                if call["options"]["label"].startswith("tech_lead:plan ")]
+                    self.assertTrue(planners)
+                    for call in planners:
+                        evolution = json.loads(call["prompt"].split("\n- EVOLUTION: ", 1)[1].splitlines()[0])
+                        self.assertEqual(evolution["source_paths"], editable)
+                    initialization = next(call for call in outcome["trace"]["agents"]
+                                          if call["options"]["label"] == "evo:init")
+                    for source in editable:
+                        self.assertIn("'--source-path' '" + source + "'", initialization["prompt"])
+
+    def test_evo_supplemental_new_file_does_not_replace_main_editable_sources(self):
+        outcome = self.run_workflow(JAVASCRIPT[1], {
+            "optimizer": "evo", "evolution_source_paths": ["new_source.py"],
+        })
+        self.assert_success(outcome)
+        planner = next(call for call in outcome["trace"]["agents"]
+                       if call["options"]["label"].startswith("tech_lead:plan "))
+        evolution = json.loads(planner["prompt"].split("\n- EVOLUTION: ", 1)[1].splitlines()[0])
+        self.assertEqual(evolution["source_paths"], ["kernel.py", "new_source.py"])
+
+    def test_evo_validates_analyzed_scope_before_archive_initialization(self):
+        for editable in ([], "kernel.py", ["../outside.py"], [".git/config"], [None],
+                         ["kernel.py", "kernel.py"], ["src", "src/kernel.py"]):
+            with self.subTest(editable=editable):
+                outcome = self.run_workflow(JAVASCRIPT[1], {"optimizer": "evo"},
+                                            replies={"tech_lead:analyze": {"kernel_type": "fixture",
+                                                     "roadmap_summary": "Invalid source fixture",
+                                                     "modifiable_files": editable}})
+                self.assertIsNotNone(outcome["error"])
+                labels = [call["options"]["label"] for call in outcome["trace"]["agents"]]
+                self.assertNotIn("evo:init", labels)
+
+    def test_evo_accepts_explicit_sources_when_optional_analyze_sources_are_absent(self):
+        for entry in JAVASCRIPT:
+            for fields in ({}, {"modifiable_files": []}):
+                with self.subTest(entry=entry, fields=fields):
+                    replies = {"tech_lead:analyze": {"kernel_type": "fixture",
+                               "roadmap_summary": "Optional source list", **fields}}
+                    legacy = self.run_workflow(entry, replies=replies, pinned=True)
+                    outcome = self.run_workflow(entry, {
+                        "optimizer": "evo", "evolution_source_paths": ["kernel.py"],
+                    }, replies=replies)
+                    self.assert_success(outcome)
+                    labels = [call["options"]["label"] for call in outcome["trace"]["agents"]]
+                    ordinary_labels = [call["options"]["label"] for call in legacy["trace"]["agents"]]
+                    engineers = [label for label in labels if label.startswith(("eng ", "deep "))]
+                    ordinary_engineers = [label for label in ordinary_labels if label.startswith(("eng ", "deep "))]
+                    self.assertEqual(len(engineers), 2)
+                    self.assertEqual(engineers, ordinary_engineers)
+                    self.assertIn("evo:prepare", labels)
+                    initialization = next(call for call in outcome["trace"]["agents"]
+                                          if call["options"]["label"] == "evo:init")
+                    self.assertIn("'--source-path' 'kernel.py'", initialization["prompt"])
+
+    def test_evo_reports_missing_source_scope_across_entries(self):
+        for entry in JAVASCRIPT:
+            for fields in ({}, {"modifiable_files": []}):
+                with self.subTest(entry=entry, fields=fields):
+                    outcome = self.run_workflow(entry, {"optimizer": "evo"}, replies={
+                        "tech_lead:analyze": {"kernel_type": "fixture",
+                            "roadmap_summary": "Missing source list", **fields},
+                    })
+                    if entry == JAVASCRIPT[2]:
+                        result = self.assert_success(outcome)
+                        self.assertEqual(result["validation_status"], "error")
+                        message = result["note"]
+                    else:
+                        self.assertIsNotNone(outcome["error"])
+                        message = outcome["error"]["message"]
+                    self.assertIn("source files from Analyze modifiable_files or evolution_source_paths", message)
+                    labels = [call["options"]["label"] for call in outcome["trace"]["agents"]]
+                    self.assertNotIn("evo:init", labels)
+                    self.assertNotIn("evo:prepare", labels)
 
     def test_evo_author_route_and_ordinary_verifier_prompts_are_preserved(self):
         arguments = {"mode": "author", "optimizer": "evo", "evolution_source_paths": ["kernel.py"]}
@@ -490,7 +576,8 @@ class DispatchTests(unittest.TestCase):
 
     def test_e2e_lane_args_and_all_bound_wrappers_preserve_legacy_defaults(self):
         for flags in LEGACY_FLAGS:
-            for identity in ({}, {"expected_gfx": "gfx1201", "expected_target": "r9700"}):
+            for identity in ({}, {"expected_gfx": "gfx1201", "expected_target": "r9700"},
+                             {"expected_gfx": "gfx1151", "expected_target": "unknown"}):
                 with self.subTest(flags=flags, identity=identity):
                     arguments = {**flags, **identity, "ablation_arm": "B6", "ablation_seed": "fixed"}
                     probe = {"kernel_path": "/fixture/head", "workflow_dir": str(ROOT / "kernel_workflow"),
@@ -563,7 +650,8 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(before.USE_RUNTIME, expected_runtime)
                 self.assertEqual(after.USE_RUNTIME, expected_runtime)
                 self.assertEqual(before.EFFECTIVE_BACKEND, after.EFFECTIVE_BACKEND)
-                for identity in ({}, {"expected_gfx": "gfx1201", "expected_target": "r9700"}):
+                for identity in ({}, {"expected_gfx": "gfx1201", "expected_target": "r9700"},
+                                 {"expected_gfx": "gfx1151", "expected_target": "unknown"}):
                     handoff = {"model_path": "/fixture/model", "exp_root": "/fixture/exp",
                                "eval_dir": "/fixture/eval", "tp": 2, "gpu_ids": "2,5", **identity}
                     for flags in LEGACY_FLAGS:
@@ -577,18 +665,27 @@ class DispatchTests(unittest.TestCase):
                     self.assertEqual(evolved, legacy)
                     self.assertEqual(after.USE_RUNTIME, expected_runtime)
 
-    def test_python_rejects_unknown_optimizer_and_missing_sources_before_host_probe(self):
+    def test_python_rejects_unknown_optimizer_and_invalid_supplemental_sources(self):
         module = self.load_runner(self.current_runner, {})
         handoff = {"model_path": "/fixture/model", "exp_root": "/fixture/exp"}
         for optimizer in ("evolution", "evp", "null", {"name": "evo"}):
             with self.subTest(optimizer=optimizer):
                 with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
                     self.map_handoff(module, {**handoff, "optimizer": optimizer})
-        for source_paths in (None, [], "kernel.py", [""], [None], [3]):
+        for source_paths in ("kernel.py", [""], [None], [3]):
             with self.subTest(source_paths=source_paths):
                 with self.assertRaisesRegex(ValueError, "evolution_source_paths"):
                     self.map_handoff(module, {**handoff, "optimizer": "evo",
                                                "evolution_source_paths": source_paths})
+
+    def test_python_evo_flag_alone_keeps_main_host_selection(self):
+        module = self.load_runner(self.current_runner, {})
+        handoff = {"model_path": "/fixture/model", "exp_root": "/fixture/exp"}
+        legacy = self.map_handoff(module, handoff)
+        evolved = self.map_handoff(module, {**handoff, "optimizer": "evo"})
+        self.assertEqual(evolved.pop("optimizer"), "evo")
+        self.assertNotIn("evolution_source_paths", evolved)
+        self.assertEqual(evolved, legacy)
 
     def test_host_selection_source_and_shared_prompt_files_are_unchanged(self):
         for function in ("_side_env_names", "_derive_agent_from_env"):

@@ -19,21 +19,47 @@ function command(program, values, cwd) {
 
 async function helperAgent(prompt, options) {
   calls.push({ label: options.label, prompt });
-  if (scenario === 'false-receipt') {
-    return { exit_code: 0, stdout: JSON.stringify({ ok: false, command: 'init' }) };
-  }
+  const responses = {
+    'false-receipt': { exit_code: 0, stdout: JSON.stringify({ ok: false, command: 'init' }) },
+    'structured-error': { exit_code: 2, stderr: 'command failed', stdout: JSON.stringify({
+      ok: false, error: { code: 'init_conflict', message: 'Initialization differs from captured founder' },
+      verification: 'not_performed',
+    }) },
+    'missing-result': null,
+    'missing-stdout': { exit_code: 0 },
+    'non-string-stdout': { exit_code: 0, stdout: {} },
+    'malformed-stdout': { exit_code: 0, stdout: 'not JSON' },
+    'empty-stdout': { exit_code: 0, stdout: '' },
+    'null-receipt': { exit_code: 0, stdout: 'null' },
+    'nonzero-malformed-stdout': { exit_code: 2, stdout: 'not JSON', stderr: 'helper crashed' },
+    'nonzero-missing-stdout': { exit_code: 2, stderr: 'helper crashed' },
+    'nonzero-invalid-diagnostic': { exit_code: 2, stderr: 'helper crashed',
+      stdout: JSON.stringify({ ok: false, error: { code: 123, message: 'invalid diagnostic' } }) },
+    'nonzero-success-receipt': { exit_code: 2, stdout: JSON.stringify({
+      ok: true, command: 'init', archive: path.join(fixture, 'eval', 'evolution_archive'),
+    }) },
+  };
+  if (Object.hasOwn(responses, scenario)) return responses[scenario];
   const script = prompt.split('```bash\n')[1].split('\n```')[0];
   const result = childProcess.spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 30000 });
+  if (scenario === 'helper-error' && options.label === 'evo:query') {
+    assert.equal(result.status, 2);
+    assert.equal(result.stderr, '');
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.ok, false);
+    assert.deepEqual(receipt.error, { code: 'unknown_source', message: 'Unknown entry: missing-parent' });
+  }
   return { exit_code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 const exercise = new AsyncFunction('A', 'WORKFLOW_DIR', 'CANONICAL', 'EVAL_DIR', 'agentT', 'obj', 'log',
-  'fs', 'path', 'assert', 'command', 'scenario',
+  'fs', 'path', 'assert', 'command', 'scenario', 'analysis',
   'let round = 1;\n' + factorySource + `
   const evolution = createEvolution();
   assert.deepEqual(Object.keys(evolution).sort(),
     ['initialize', 'plannerInput', 'prepare', 'engineerInput', 'recordBatch', 'checkPatch', 'run', 'result'].sort());
   await evolution.initialize();
+  if (scenario === 'helper-error') return evolution.run('query', ['--entry', 'missing-parent']);
   assert.equal(evolution.result().archive, path.join(EVAL_DIR, 'evolution_archive'));
   assert.deepEqual(evolution.plannerInput().source_paths, ['kernel.py']);
   const direction = { id: 'first', idx: 0, title: 'Source custody witness', out_dir: path.join(EVAL_DIR, 'round_1', 'engineer_0') };
@@ -80,7 +106,7 @@ const exercise = new AsyncFunction('A', 'WORKFLOW_DIR', 'CANONICAL', 'EVAL_DIR',
 exercise({ optimizer: 'evo', evolution_source_paths: ['kernel.py'] }, path.join(root, 'kernel_workflow'),
   path.join(fixture, 'canonical'), path.join(fixture, 'eval'), helperAgent,
   (properties, required) => ({ type: 'object', properties, required }), () => {},
-  fs, path, assert, command, scenario).then(result => {
+  fs, path, assert, command, scenario, { modifiable_files: ['kernel.py'] }).then(result => {
     process.stdout.write(JSON.stringify({ ...result, calls: calls.map(call => call.label) }) + '\n');
   }).catch(error => {
     process.stderr.write(String(error.stack || error) + '\n');

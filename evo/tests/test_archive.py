@@ -86,9 +86,9 @@ class ArchiveTests(unittest.TestCase):
         (workspace / "src/kernel.py").write_bytes(data)
         self.patch.write_bytes(self.run_git(workspace, "diff", "--binary", "--no-ext-diff", "--no-textconv"))
 
-    def assert_error(self, code, function, *arguments):
+    def assert_error(self, code, function, *arguments, **keywords):
         with self.assertRaises(archive.ArchiveError) as caught:
-            function(*arguments)
+            function(*arguments, **keywords)
         self.assertEqual(code, caught.exception.code)
 
     def cli(self, *arguments):
@@ -102,7 +102,7 @@ class ArchiveTests(unittest.TestCase):
         os.chmod(self.canonical / "src/kernel.py", 0o640)
         initialized = self.initialize()
         self.assertFalse(initialized["reused"])
-        self.assertEqual((b"warmstart = True\r\n", 0o640), self.source("FOUNDER")["src/kernel.py"])
+        self.assertEqual((b"warmstart = True\r\n", 0o644), self.source("FOUNDER")["src/kernel.py"])
         self.assertIsNone(self.source("FOUNDER")["new.py"])
         index = archive.query(self.storage)["index"]
         self.assertEqual("external_not_captured", index["original_benchmark"]["status"])
@@ -628,6 +628,127 @@ class ArchiveTests(unittest.TestCase):
                                  "--canonical", str(self.canonical), "--parent", "FOUNDER")
         self.assertEqual(code, 0, receipt)
         self.assertEqual(receipt["receipt"]["materialized_canonical_source_id"], self.entry("FOUNDER")["source_id"])
+
+    def test_materializer_permission_changes_preserve_source_identity(self):
+        materializer = HELPER.parents[1] / "kernel_workflow/scripts/materialize_workspace.sh"
+        for original_mode, copied_mode in ((0o775, 0o755), (0o664, 0o644)):
+            with self.subTest(original_mode=original_mode):
+                self.storage = self.root / ("archive-" + str(original_mode))
+                (self.canonical / "src/kernel.py").chmod(original_mode)
+                self.initialize()
+                workspace = self.root / ("materialized-" + str(original_mode))
+                subprocess.run(["bash", str(materializer), "--src", str(self.canonical), "--dst", str(workspace)],
+                               env=dict(os.environ, TAR_OPTIONS="--no-same-permissions"),
+                               preexec_fn=lambda: os.umask(0o022), check=True, capture_output=True)
+                self.assertEqual(copied_mode, stat.S_IMODE((workspace / "src/kernel.py").stat().st_mode))
+                receipt = archive.prepare(str(self.storage), str(workspace), initialize_index=True,
+                                          canonical=str(self.canonical))
+                self.assertEqual(self.entry("FOUNDER")["source_id"], receipt["receipt"]["prepared_source_id"])
+                self.assertEqual(original_mode, stat.S_IMODE((self.canonical / "src/kernel.py").stat().st_mode))
+
+    def test_capture_uses_owner_executable_bit_even_when_git_ignores_modes(self):
+        source = self.canonical / "src/kernel.py"
+        self.run_git(self.canonical, "config", "core.filemode", "false")
+        identities = {}
+        for mode in (0o600, 0o640, 0o644, 0o664, 0o654, 0o700, 0o751, 0o755, 0o775):
+            source.chmod(mode)
+            manifest, unused_blobs = archive.capture(self.canonical, self.source_paths)
+            identities[mode] = archive.digest(archive.json_bytes(manifest))
+        self.assertEqual(1, len({identities[mode] for mode in (0o600, 0o640, 0o644, 0o664, 0o654)}))
+        self.assertEqual(1, len({identities[mode] for mode in (0o700, 0o751, 0o755, 0o775)}))
+        self.assertNotEqual(identities[0o644], identities[0o755])
+
+    def test_canonical_comparison_still_rejects_bytes_executable_and_absence(self):
+        self.initialize()
+        source = self.workspace / "src/kernel.py"
+        for changed in ("bytes", "executable", "missing"):
+            with self.subTest(changed=changed):
+                source.write_bytes(b"value = 1\n")
+                source.chmod(0o644)
+                if changed == "bytes":
+                    source.write_bytes(b"value = 2\n")
+                elif changed == "executable":
+                    source.chmod(0o755)
+                else:
+                    source.unlink()
+                self.assert_error("materialization_mismatch", archive.prepare,
+                                  str(self.storage), str(self.workspace), canonical=str(self.canonical))
+
+    def test_patch_and_workspace_capture_have_identical_git_style_identity(self):
+        (self.canonical / "src/kernel.py").chmod(0o664)
+        self.initialize()
+        self.prepare()
+        self.save_patch(b"value = 3\n")
+        (self.workspace / "src/kernel.py").chmod(0o640)
+        result = self.record()
+        self.assertFalse(result["has_failures"], result)
+        self.assertEqual(self.entry("round1-best")["source_id"], self.entry("round1-development")["source_id"])
+
+    def test_main_source_set_retains_wrapper_binding_and_kernel_together(self):
+        self.source_paths.extend(["knn_wrapper.py", "src/knn.cpp"])
+        (self.canonical / "knn_wrapper.py").write_bytes(b"wrapper = 1\n")
+        (self.canonical / "src/knn.cpp").write_bytes(b"int binding = 1;\n")
+        self.commit(self.canonical)
+        self.workspace = self.clone("complete-main-source")
+        self.initialize()
+        self.prepare()
+        (self.workspace / "knn_wrapper.py").write_bytes(b"wrapper = 2\n")
+        (self.workspace / "src/knn.cpp").write_bytes(b"int binding = 2;\n")
+        self.save_patch(b"value = 2\n")
+        checked = archive.check_patch(str(self.storage), str(self.canonical), str(self.patch))
+        result = self.record()
+        self.assertFalse(result["has_failures"], result)
+        self.assertEqual(checked["source_id"], self.entry("round1-best")["source_id"])
+        retained = self.source("round1-best")
+        self.assertEqual(retained["knn_wrapper.py"][0], b"wrapper = 2\n")
+        self.assertEqual(retained["src/knn.cpp"][0], b"int binding = 2;\n")
+        self.assertEqual(retained["src/kernel.py"][0], b"value = 2\n")
+        self.assertEqual((self.canonical / "outside.txt").read_bytes(), b"unchanged\n")
+
+    def test_dirty_canonical_and_untracked_declared_source_need_no_clean_head(self):
+        (self.canonical / "src/kernel.py").write_bytes(b"staged = True\n")
+        self.run_git(self.canonical, "add", "src/kernel.py")
+        (self.canonical / "src/kernel.py").write_bytes(b"actual = True\n")
+        (self.canonical / "new.py").write_bytes(b"new_source = True\n")
+        index_before = (self.canonical / ".git/index").read_bytes()
+        head_before = self.run_git(self.canonical, "rev-parse", "HEAD")
+        self.initialize()
+        self.assertEqual(b"actual = True\n", self.source("FOUNDER")["src/kernel.py"][0])
+        self.assertEqual(b"new_source = True\n", self.source("FOUNDER")["new.py"][0])
+        materializer = HELPER.parents[1] / "kernel_workflow/scripts/materialize_workspace.sh"
+        workspace = self.root / "dirty-materialized"
+        subprocess.run(["bash", str(materializer), "--src", str(self.canonical), "--dst", str(workspace)],
+                       check=True, capture_output=True)
+        receipt = archive.prepare(str(self.storage), str(workspace), initialize_index=True,
+                                  canonical=str(self.canonical))
+        self.assertEqual(self.entry("FOUNDER")["source_id"], receipt["receipt"]["prepared_source_id"])
+        self.assertEqual(index_before, (self.canonical / ".git/index").read_bytes())
+        self.assertEqual(head_before, self.run_git(self.canonical, "rev-parse", "HEAD"))
+
+    def test_legacy_archive_is_rejected_without_rewriting_it(self):
+        self.initialize()
+        index_path = self.storage / "index.json"
+        index = json.loads(index_path.read_bytes())
+        index["schema_version"] = 1
+        index_path.write_text(json.dumps(index))
+        before = {str(path.relative_to(self.storage)): path.read_bytes()
+                  for path in self.storage.rglob("*") if path.is_file()}
+        self.assert_error("unsupported_archive_version", archive.query, str(self.storage))
+        self.assert_error("unsupported_archive_version", self.initialize)
+        after = {str(path.relative_to(self.storage)): path.read_bytes()
+                 for path in self.storage.rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
+
+    def test_source_snapshot_does_not_require_an_existing_commit(self):
+        self.canonical = self.root / "unborn-canonical"
+        (self.canonical / "src").mkdir(parents=True)
+        self.run_git(self.canonical, "init", "--quiet", "--template=")
+        (self.canonical / "src/kernel.py").write_bytes(b"uncommitted = True\n")
+        initialized = self.initialize()
+        self.assertTrue(initialized["ok"])
+        self.assertEqual(b"uncommitted = True\n", self.source("FOUNDER")["src/kernel.py"][0])
+        self.assertEqual(self.run_git(self.canonical, "rev-list", "--all"), b"")
+        self.assertFalse((self.canonical / ".git/index").exists())
 
 
 if __name__ == "__main__":

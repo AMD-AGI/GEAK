@@ -8,7 +8,9 @@ Do not rematerialize it, reset its index or commit a new baseline. Its index
 remains relative to this round's canonical, so your patch must include both the
 selected parent's differences and your own development.
 
-Modify only `EVOLUTION.source_paths`. Include declared new source files using
+Keep the ordinary task's modifiable-source authority, including wrappers and
+C++ bindings. `EVOLUTION.source_paths` includes the ordinary Analyze source set
+and any supplemental files declared for this run. Include declared new files using
 `git add -N` before producing the ordinary best patch. Never change the oracle,
 benchmark, objective or verification rules. An archive/source error is a failure
 to report, not permission to substitute a different parent silently.

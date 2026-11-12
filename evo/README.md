@@ -26,21 +26,25 @@ main arguments plus:
 
 ```json
 {
-  "optimizer": "evo",
-  "evolution_source_paths": ["kernel_src/kernel.py"]
+  "optimizer": "evo"
 }
 ```
 
-Paths are relative to the canonical task workspace, not the GEAK repository.
-The task owner must declare the editable regular files, including any anticipated
-new files. Do not include tests, the oracle, workload weights or benchmarking
+The archive uses the ordinary Analyze `modifiable_files`, including wrappers
+and bindings, rather than a separate narrower EVO editing policy. The optional
+`evolution_source_paths` list supplements that set, for example with anticipated
+new source files; it cannot remove main's analyzed sources. Paths are relative
+to the canonical task workspace, not the GEAK repository. When Analyze omits
+its optional source list, an explicit `evolution_source_paths` list still works.
+Initialization requires at least one source from the combined lists. Ordinary task rules
+still prohibit changing tests, the oracle, workload weights or benchmarking
 code. Directory, symlink, submodule and out-of-scope patch inputs are rejected.
 The first implementation supports optimize/author lanes, not multi-language
 bakeoff. An explicit custom `kernel_lane_script` cannot be combined with EVO.
 
 The top-level direct lane, dispatcher and E2E all use the same main lane and
-forward the explicit source list. Only select E2E tasks for which that source contract is valid; this
-patch does not infer a safe editable scope from an arbitrary extraction. Normal
+forward any supplemental source list. Source discovery remains with main's
+ordinary Analyze phase, not a new file scanner or Git ignore policy. Normal
 HL+GEAK arguments and learned-KB policy remain unchanged when EVO is off.
 
 Custom callers keep using `kernel_workflow/kernel_lane.js` and its ordinary
@@ -89,12 +93,20 @@ Each engineer workspace is materialized by main's existing script. EVO prepares
 its declared-source Git index before overlaying the selected parent, so candidate
 diffs still apply to the current round's canonical source. The engineer must not
 proceed if materialization omitted or changed any declared source: the helper
-compares exact bytes, modes and absence against the round canonical first. Files
+compares exact bytes, Git-style executable status and absence against the round canonical first. Files
 under main's excluded paths, such as `build/`, therefore fail closed. It must not
 reinitialize or commit a new baseline. The immutable task/oracle is not replaced.
 Source custody is checked before the ordinary verifier. A custody failure skips
 that candidate rather than weakening verification or substituting a fallback
 parent. Other work and canonical final validation can still finish.
+
+Source identity describes the actual current files, not a clean `HEAD` commit.
+Staged or unstaged canonical changes and declared new files are captured without
+committing or resetting main's repository. Permission differences such as 0775
+versus 0755 do not create different source identities. Read/access checks remain
+separate. Schema-2 archives use this rule consistently; older archives are left
+unchanged and must be inspected with their original helper revision, not resumed
+under new identity semantics.
 
 Before promotion or cleanup, the archive separately retains best-patch bytes and
 unfinished workspace bytes. Missing patches are explicit diagnostics, not a

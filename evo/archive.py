@@ -25,6 +25,7 @@ MAX_PATHS = 256
 MAX_REPORTS = 128
 MAX_RECORDS = 4096
 MAX_OBJECTS = 32768
+SCHEMA_VERSION = 2
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,95}\Z")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE_CAVEAT = (
@@ -315,8 +316,9 @@ def capture(workspace, paths):
             total += len(data)
             identity = digest(data)
             blobs[identity] = data
-            files[path] = {"present": True, "sha256": identity, "size": len(data), "mode": mode}
-    manifest = {"schema_version": 1, "files": files}
+            files[path] = {"present": True, "sha256": identity, "size": len(data),
+                           "mode": 0o755 if mode & stat.S_IXUSR else 0o644}
+    manifest = {"schema_version": SCHEMA_VERSION, "files": files}
     return manifest, blobs
 
 
@@ -376,7 +378,7 @@ class Store:
         if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "files"}:
             fail("corrupt_archive", "Invalid source manifest")
         files = manifest["files"]
-        if manifest["schema_version"] != 1 or not isinstance(files, dict) or sorted(files) != paths:
+        if manifest["schema_version"] != SCHEMA_VERSION or not isinstance(files, dict) or sorted(files) != paths:
             fail("stale_source", "Source manifest differs from declared scope")
         blobs = {}
         total = 0
@@ -386,7 +388,7 @@ class Store:
             if not isinstance(metadata, dict) or set(metadata) != {"present", "sha256", "size", "mode"}:
                 fail("corrupt_archive", "Invalid source file metadata")
             if (metadata["present"] is not True or type(metadata["mode"]) is not int
-                    or not 0 <= metadata["mode"] <= 0o777 or type(metadata["size"]) is not int):
+                    or metadata["mode"] not in (0o644, 0o755) or type(metadata["size"]) is not int):
                 fail("corrupt_archive", "Invalid regular file mode or size")
             data = self.get(metadata["sha256"])
             total += len(data)
@@ -397,8 +399,10 @@ class Store:
 
 
 def validate_index(index):
-    if not isinstance(index, dict) or index.get("schema_version") != 1:
-        fail("corrupt_archive", "Unsupported or invalid archive index")
+    if not isinstance(index, dict):
+        fail("corrupt_archive", "Invalid archive index")
+    if index.get("schema_version") != SCHEMA_VERSION:
+        fail("unsupported_archive_version", "Git-style source identity requires a fresh schema-2 archive; preserve older archives unchanged")
     required = {"schema_version", "source_paths", "initial_canonical", "original_benchmark",
                 "entries", "reports", "preparations", "workspace_receipts", "batches"}
     if set(index) != required or not isinstance(index["initial_canonical"], str):
@@ -503,7 +507,7 @@ def initialize(archive, canonical, source_paths):
             return {"ok": True, "command": "init", "founder_source_id": identity,
                     "source_retention": "retained", "verification": "unknown", "reused": True}
         store.save_source(manifest, blobs)
-        index = {"schema_version": 1, "source_paths": paths, "initial_canonical": str(canonical),
+        index = {"schema_version": SCHEMA_VERSION, "source_paths": paths, "initial_canonical": str(canonical),
                  "original_benchmark": {"status": "external_not_captured", "source_id": None,
                                         "note": "Main owns ORIGINAL; FOUNDER may include warmstart changes."},
                  "entries": {"FOUNDER": {"id": "FOUNDER", "kind": "founder", "source_id": identity,
@@ -715,12 +719,11 @@ def patch_source(base, base_blobs, patch):
                 fail("out_of_scope_patch", "Patch creates undeclared source: " + relative)
             data = git(repository, "cat-file", "blob", object_id, output_limit=MAX_SOURCE_BYTES - total)
             total += len(data)
-            previous = base["files"][relative]
-            permissions = previous["mode"] if previous["present"] and git_mode(previous) == mode else int(mode[-3:], 8)
+            permissions = int(mode[-3:], 8)
             identity = digest(data)
             blobs[identity] = data
             files[relative] = {"present": True, "sha256": identity, "size": len(data), "mode": permissions}
-        return {"schema_version": 1, "files": files}, blobs
+        return {"schema_version": SCHEMA_VERSION, "files": files}, blobs
 
 
 def parent_binding(store, index, report, workspace):

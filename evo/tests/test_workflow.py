@@ -53,6 +53,43 @@ class WorkflowWitness(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid receipt", result.stderr)
 
+    def test_real_helper_error_preserves_stdout_diagnostic(self):
+        result = self.run_witness("helper-error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("EVO query did not complete: unknown_source: Unknown entry: missing-parent", result.stderr)
+
+    def test_nonzero_stdout_diagnostic_takes_precedence_over_stderr(self):
+        result = self.run_witness("structured-error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("EVO init did not complete: init_conflict: Initialization differs from captured founder",
+                      result.stderr)
+
+    def test_malformed_or_absent_result_still_fails(self):
+        for scenario, diagnostic in (
+            ("missing-result", "EVO init did not complete: no return"),
+            ("missing-stdout", "EVO init did not complete: command failed"),
+            ("non-string-stdout", "EVO init did not complete: command failed"),
+            ("malformed-stdout", "SyntaxError"),
+            ("empty-stdout", "SyntaxError"),
+            ("null-receipt", "EVO init returned an invalid receipt"),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.run_witness(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_nonzero_without_valid_diagnostic_preserves_failure(self):
+        for scenario, diagnostic in (
+            ("nonzero-malformed-stdout", "helper crashed"),
+            ("nonzero-missing-stdout", "helper crashed"),
+            ("nonzero-invalid-diagnostic", "helper crashed"),
+            ("nonzero-success-receipt", "command failed"),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.run_witness(scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("EVO init did not complete: " + diagnostic, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

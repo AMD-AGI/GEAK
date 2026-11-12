@@ -1,4 +1,4 @@
-# Local EVO archive CLI contract (schema 1)
+# Local EVO archive CLI contract (schema 2)
 
 `archive.py` uses standard-library Python 3.8+ and local Linux Git. It retains
 bounded source snapshots and author-reported evidence. It performs no agent,
@@ -6,6 +6,12 @@ GPU, API, task execution, evaluation, performance calculation, ranking,
 promotion, migration, or automatic parent/donor selection. It does not import
 another EVO implementation. Main owns dispatch, materialization, benchmark
 references, verification, promotion, cleanup and actual peer review.
+
+Schema 2 uses Git-style regular-file modes throughout source identity. Schema-1
+archives retain their original exact-POSIX-mode meaning and are rejected without
+rewriting their objects or index. Use the original helper to read those archives;
+new runs need fresh archives. No automatic migration or alternative backend is
+introduced.
 
 ## Invocation and integration order
 
@@ -28,7 +34,7 @@ python3 -B evo/archive.py record-batch --archive PATH --canonical ABS_ROUND_CANO
 2. Materialize each engineer workspace using main's existing materializer.
    It excludes `.git`. Call `prepare --initialize-index --canonical ROUND_CANONICAL` before the engineer.
    The workflow always supplies the round canonical and requires its source-identity
-   receipt. Declared file bytes, modes and absence must match before index creation
+   receipt. Declared file bytes, owner-executable status and absence must match before index creation
    or parent overlay. An excluded declared file, such as `build/kernel.py`, fails
    explicitly instead of silently becoming absent. Standalone helper calls may
    omit this comparison only when they intentionally manage their own baseline;
@@ -97,7 +103,7 @@ a partial index. Source retention and verification are distinct fields.
 Returns `founder_source_id`, `source_retention:"retained"`,
 `verification:"unknown"`, and `reused`. The archive directory must be new; an
 exact completed initialization retry is allowed. Different initialization
-canonical, scope or current founder bytes/modes yields `init_conflict`.
+canonical, scope or current founder bytes/executable status yields `init_conflict`.
 
 `FOUNDER` means the canonical bytes captured at initialization. Those may
 already contain warmstart changes. `original_benchmark.status` is
@@ -115,8 +121,9 @@ workspace-to-receipt references and batches. It never silently truncates.
 With `--entry`, returns `entry`. For retained entries it also returns
 `source_manifest`, `source_manifest_path`, and `blob_directory`. The manifest
 maps every declared relative path to either `{"present":false}` or
-`{"present":true,"sha256":"...","size":N,"mode":N}`. `mode` is the exact
-ordinary POSIX permission integer, not the Git mode string. Read a retained
+`{"present":true,"sha256":"...","size":N,"mode":N}`. `mode` is the normalized
+integer 0644 or 0755, selected using the owner-executable bit, not the full
+filesystem permissions or Git mode string. Read a retained
 file's bytes from `blob_directory/SHA256`; validate its SHA256 before use.
 Donors therefore remain materializable after original workspaces are deleted.
 Do not execute these bytes merely to inspect a donor.
@@ -249,9 +256,15 @@ independently established by this helper.
   sanitized environment, disabled hooks/fsmonitor/global/system config, no
   external diff/filter commands, no network and no task execution. Source
   reconstruction uses raw blob plumbing without content conversions.
-- Source snapshots preserve all ordinary permission bits. Git patches encode
-  only regular 100644/100755 modes. Unchanged Git mode retains exact captured
-  permissions; a patch mode transition/new file uses 0644 or 0755.
+- Source snapshots and reconstructed patches use the same regular-file modes:
+  0644 or 0755 according to the owner-executable bit. Group/world write and read
+  permissions are operational metadata, not source identity. Capturing an
+  incumbent does not change its actual permissions; restoring another source
+  uses the normalized mode. Exact historical POSIX-mode restoration is not claimed.
+- The canonical source is captured from current file bytes, not assumed equal
+  to `HEAD`. A dirty index/worktree or declared untracked source does not require
+  a commit, reset or greedy fallback. The engineer index must still remain bound
+  to the prepared canonical baseline for its final diff.
 - Archive operations use an exclusive nonblocking `flock`; contention returns
   `archive_busy`. Objects have SHA256 filenames, are written immutable/read-only
   and verified on access. The index is fsynced and replaced atomically. Failures
