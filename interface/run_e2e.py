@@ -1013,6 +1013,50 @@ def map_args(
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    # --- ROUTING master switch (PR #574 review: amd-ethany) -------------------
+    # One toggle that wires the router for a Hyperloom+GEAK run. The reviewer found
+    # the routing knobs were never mapped here, so a HL+GEAK run could NEVER turn
+    # routing on -- it always stayed on the OFF default. This maps them. The switch
+    # is DEFAULT-ON (so routing is actually exercised in CI/CD and in HL+GEAK) and
+    # is explicit and documented, NOT a silent switch.
+    #
+    # WHAT HYPERLOOM MUST SEND to control routing:
+    #   * ROUTING = "ON" (default) | "OFF"
+    #       env var ``ROUTING`` (preferred) or handoff field ``routing``.
+    #       ON  -> routing enabled: routing=true, decider=eikos, every route_*
+    #              forwarded, and (on a real run, see main()) GEAK_ROUTING /
+    #              GEAK_EIKOS_ROUTER exported plus GEAK_ENGINEER_ID /
+    #              GEAK_RECORDER_INV_ID forwarded from the handoff.
+    #       OFF -> nothing below is set; the run is byte-identical to the prior
+    #              default-OFF behaviour.
+    #   * route_decider = "p1" -- OPT-IN ONLY. When ON the decider DEFAULTS to
+    #       ``eikos`` (the control ladder); P1 is never defaulted. P1 still runs as
+    #       a shadow audit under eikos, so its decisions stay observable.
+    #   * route_* knobs (all optional; forwarded verbatim from the handoff when
+    #       present): route_conf_escalate, route_max_retries_per_lane,
+    #       route_max_top_escalations, route_max_output_tokens, route_floors,
+    #       route_episode_identity, route_output_cap, route_eikos_tau,
+    #       route_eikos_max_consults, route_eikos_carrier_model,
+    #       route_eikos_carrier_timeout_ms.
+    # Reads only (never mutates h or os.environ); the env exports happen in main()
+    # on a real run, so map_args stays side-effect-free for its unit tests.
+    _routing_master = os.environ.get("ROUTING")
+    if _routing_master is None:
+        _routing_master = h.get("routing")
+    if str(_routing_master if _routing_master is not None else "ON").strip().upper() != "OFF":
+        ps_args["routing"] = "true"
+        # Decider defaults to eikos; P1 only when the handoff explicitly asks for it.
+        ps_args["route_decider"] = str(h.get("route_decider") or "eikos").strip().lower()
+        for _rk in (
+            "route_conf_escalate", "route_max_retries_per_lane",
+            "route_max_top_escalations", "route_max_output_tokens", "route_floors",
+            "route_episode_identity", "route_output_cap", "route_eikos_tau",
+            "route_eikos_max_consults", "route_eikos_carrier_model",
+            "route_eikos_carrier_timeout_ms",
+        ):
+            if h.get(_rk) is not None:
+                ps_args[_rk] = str(h[_rk])
+    # -------------------------------------------------------------------------
     return ps_args
 
 
@@ -7963,6 +8007,23 @@ def main(argv: list[str]) -> int:
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+    # Router ENV for a real run (PR #574 review: amd-ethany). When map_args turned
+    # routing ON (ps_args["routing"]), export the switches the JS / recorder read
+    # from the environment and forward the provenance ids from the handoff. Skipped
+    # on --dry-run (wiring-only) and never written during map_args' own unit tests,
+    # so os.environ stays unpolluted. ROUTING=OFF -> map_args set no routing args ->
+    # this exports nothing either. (GEAK_EIKOS_ROUTER now only reaches the standalone
+    # scripts/eikos_router.py helper; its dead JS hook was removed in this PR.)
+    if not is_dry_run and ps_args.get("routing") == "true":
+        os.environ.setdefault("GEAK_ROUTING", "1")
+        os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
+        for _env_key, _handoff_key in (
+            ("GEAK_ENGINEER_ID", "engineer_id"),
+            ("GEAK_RECORDER_INV_ID", "recorder_inv_id"),
+        ):
+            _val = h.get(_handoff_key)
+            if _val:
+                os.environ[_env_key] = str(_val)
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     # Module B writes workflow_return.json before normalize_result runs. Send the same

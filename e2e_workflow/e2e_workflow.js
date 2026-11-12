@@ -1829,87 +1829,20 @@ function ablEffortFor(opts, attempt) {
 }
 
 // ---------------------------------------------------------------------------
-// Eikos router (OPT-IN). Generalises the B5 static decision above from `effort` into
-// `{effort, model}` by asking Eikos -- a local typed-decision model served on this host -- to
-// classify the task. See scripts/eikos_router.py for the model, its limits and its protocol.
+// B5 static-effort route for a dispatch. (PR #574 review, amd-ethany: the opt-in
+// Eikos router hook that used to live here -- eikosEnv / EIKOS_ROUTER_ON /
+// eikosRouteFor -- was REMOVED. It needed require('child_process'), which NEITHER
+// supported runtime provides: the native Workflow tool has no require()/process,
+// and the standalone runtime runs scripts as ES-module AsyncFunctions without
+// require(). So the switch always read off and the helper never ran in any real run;
+// making it live needs a supported host-side evaluator boundary, which does not
+// exist yet. Until then the dead code is gone. Complexity routing lives in the
+// ROUTING-INLINE region below.)
 //
-//   1. OFF BY DEFAULT. Without GEAK_EIKOS_ROUTER=1 this returns null immediately and the run is
-//      byte-identical to the static path.
-//   2. HOST DECIDES ON ANY FAILURE. The helper answers "no decision" (source "host") whenever it
-//      is disabled, the task is a retry, empty or over its state cap, the server is unreachable,
-//      or the answer is malformed. Only an actual Eikos decision is applied; everything else
-//      falls through to ablEffortFor exactly as if the router did not exist.
-//   3. RECORDED, NOT CERTIFIED. The helper records each outcome in
-//      <exp_root>/eikos_router_cache.json keyed by a digest of the FULL task, so a repeated
-//      request gets the same answer. Whether this runtime re-executes the hook on resume is not
-//      documented, so that is a best-effort record, not a replay guarantee.
-//
-// COVERAGE. Only E2E labels the static router already deems cheap-eligible reach this hook --
-// eligibility is deterministic, never a model's opinion. Kernel-lane, nested-workflow and raw
-// agent() calls are not routed here. It also needs require('child_process'), and NEITHER
-// supplied runtime provides it today. The native Workflow tool has no `require` and no
-// `process` (probe wf_940bf156-7d8, 2026-09-29): the switch reads as off and nothing is
-// attempted. The standalone runtime (interface/runtime/engine) has `process` but runs scripts
-// as ES-module AsyncFunctions without `require` (Astra, 2026-09-29): the helper call throws, is
-// logged, and the host decides. So this hook is tested offline but inert in every real run;
-// making it live needs a supported host-side evaluator boundary, which does not exist yet.
-// <<EIKOS-ROUTER-START>>
-// Read at load time, so it MUST NOT throw where `process` is undefined: an unguarded
-// `process.env` here would fail the whole workflow at startup, router on or off.
-function eikosEnv(name, dflt) {
-  try { return String(process.env[name] || dflt); } catch (e) { return dflt; }
-}
-const EIKOS_ROUTER_ON = eikosEnv('GEAK_EIKOS_ROUTER', '0') === '1';
-const EIKOS_ROUTER_TIMEOUT_MS = Number(eikosEnv('GEAK_EIKOS_ROUTER_TIMEOUT_MS', '15000'));
-// Only labels the static router already considers cheap-eligible are worth asking about. This
-// keeps the helper off the critical path of every spawn (~100-300 ms of python startup each).
-function eikosRouteFor(opts, attempt, prompt) {
-  if (!EIKOS_ROUTER_ON || attempt > 0) return null;
-  const label = String((opts && opts.label) || '');
-  if (!ABL_CHEAP_LABELS.test(label)) return null;
-  try {
-    const { execFileSync } = require('child_process');
-    // The FULL prompt: the helper refuses to judge a task by a prefix and says so.
-    const req = JSON.stringify({
-      label,
-      phase: String((opts && opts.phase) || ''),
-      attempt: attempt || 0,
-      task: String(prompt || ''),
-    });
-    const out = execFileSync('python3', [
-      '-B', `${WORKFLOW_DIR}/scripts/eikos_router.py`,
-      '--cache-dir', String(A.exp_root || EVAL_DIR || '.'),
-      '--timeout-s', String(Math.max(1, Math.round(EIKOS_ROUTER_TIMEOUT_MS / 1000))),
-    ], { input: req, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
-         timeout: EIKOS_ROUTER_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
-    const d = JSON.parse(out);
-    // Anything but a real Eikos decision leaves the host in charge.
-    if (!d || typeof d !== 'object' || d.source !== 'eikos') {
-      if (d && d.reason) log(`  [eikos-router] ${label}: host decides (${d.reason})`);
-      return null;
-    }
-    if (!d.model && !d.effort) return null;
-    return d;
-  } catch (e) {
-    log(`  [eikos-router] ${label}: host decides (${(e && e.message) || e})`);
-    return null;
-  }
-}
-
-// The options this dispatch actually uses: an Eikos decision if there is one, else the host's
-// own B5 static route, else the caller's options untouched.
+// Only labels the static router already deems cheap-eligible reach this hook;
+// eligibility is deterministic, never a model's opinion. Returns the host's own B5
+// static effort route when one applies, else the caller's options untouched.
 function routeOptsFor(opts, attempt, prompt) {
-  const d = eikosRouteFor(opts, attempt, prompt);
-  if (d) {
-    const label = (opts && opts.label) || '';
-    const out = { ...(opts || {}) };
-    if (d.model) out.model = d.model;
-    if (d.effort) out.effort = d.effort;
-    ablEvent({ event: 'route', label, tier: d.tier || null, effort: d.effort || null,
-      model: d.model || null, source: 'eikos', cached: !!d.cached,
-      confidence: d.confidence, escalated: !!d.escalated });
-    return out;
-  }
   const ablEffort = ablEffortFor(opts, attempt);
   if (ablEffort) {
     ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
@@ -1917,7 +1850,6 @@ function routeOptsFor(opts, attempt, prompt) {
   }
   return opts;
 }
-// <<EIKOS-ROUTER-END>>
 
 // --- Expt-3 complexity routing (INLINE; canonical + tested source: routing/tier_map.js) ------
 // A thrown agentTimeoutFor() must NOT silently disarm the hung-agent guard (return 0). Fall back to the
@@ -2090,8 +2022,8 @@ async function __routeEscalate(prompt, opts, decision, onHung, timeoutFor) {
 }
 // <<ROUTING-INLINE-END>>
 
-// Two seams meet here. With routing OFF the dispatch takes feat/geak-jev's path unchanged: the opt-in
-// Eikos router hook, else the B5 static effort route (routeOptsFor). With routing ON, Expt-3 routing
+// Two seams meet here. With routing OFF the dispatch takes feat/geak-jev's path unchanged: the B5
+// static effort route (routeOptsFor; the opt-in Eikos router hook was removed in PR #574). With routing ON, Expt-3 routing
 // supersedes both, as on expt/3-routing: mapped scopes go through __routeDecide/__routeEscalate and every
 // other scope runs on the caller's options. Either way the call is hung-agent guarded by __agentGuarded.
 function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
