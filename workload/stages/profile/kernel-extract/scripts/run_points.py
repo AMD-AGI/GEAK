@@ -10,6 +10,18 @@ one recapture. A graph-hidden decode window requests eager fallback from
 probe_server.py; a dead server stops capture. Signed completed censuses are reused
 unless --redo is specified. Census work overlaps capture of the next point.
 
+Environment knobs (default off; they never change what a window captures, and they are
+environment rather than flags so a frozen capture argv stays byte-identical):
+  GEAK_CENSUS_SERIAL=1        wait for each point's census before opening the next window
+                              (the census and the next window otherwise overlap in host RAM)
+  GEAK_CENSUS_WORKERS=N       pass --workers N to point_census.py (default min(files, CPUs))
+  GEAK_BOUNDARY_RESTART_GB=G  at a point boundary (previous census finished, next window not
+                              yet open, at least one point captured by this invocation), stop
+                              capturing when MemAvailable < G GB: status "memory restart
+                              requested", exit 1; rerunning the same command resumes from the
+                              signed censuses (the server restart is the caller's job)
+All three are recorded in profile_run.json.
+
 Outputs: per-point probe/census/shape evidence, coverage, ranking, selection,
 source map, adjacency and profile_run.json. UT declarations are generated separately
 by draft_task_decls.py after the profile handoff. Stdlib only.
@@ -23,6 +35,61 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# The eager evidence window's tag: trace subdirectory, probe/shapes file stem, and the
+# vLLM profile_prefix. vLLM's validate_profile_prefix accepts only [A-Za-z0-9._-] (first
+# character alphanumeric), so the old "@eager" tag was refused with HTTP 400.
+EAGER_SUFFIX = ".eager"
+LEGACY_EAGER_SUFFIXES = ("@eager",)       # sglang-era files; still recognised when read
+MEMORY_RESTART = "memory restart requested"
+
+
+def eager_tag(pid):
+    return pid + EAGER_SUFFIX
+
+
+def eager_shapes_names(pid):
+    """Every shapes-file name an eager evidence window of `pid` may have written."""
+    return [s + ".json" for s in [eager_tag(pid)] + [pid + x for x in LEGACY_EAGER_SUFFIXES]]
+
+
+def is_eager_shapes_file(name):
+    return any(name.endswith(s + ".json") for s in (EAGER_SUFFIX,) + LEGACY_EAGER_SUFFIXES)
+
+
+def env_knobs(environ=None):
+    """GEAK_CENSUS_SERIAL / GEAK_CENSUS_WORKERS / GEAK_BOUNDARY_RESTART_GB, validated."""
+    env = os.environ if environ is None else environ
+    serial = env.get("GEAK_CENSUS_SERIAL", "").strip()
+    if serial not in ("", "0", "1"):
+        raise SystemExit("run_points: GEAK_CENSUS_SERIAL must be 0 or 1, not %r" % serial)
+    workers = env.get("GEAK_CENSUS_WORKERS", "").strip()
+    if workers and not (workers.isdigit() and int(workers) > 0):
+        raise SystemExit("run_points: GEAK_CENSUS_WORKERS must be a positive integer, "
+                         "not %r" % workers)
+    restart = env.get("GEAK_BOUNDARY_RESTART_GB", "").strip()
+    try:
+        restart_gb = float(restart) if restart else None
+    except ValueError:
+        restart_gb = -1.0
+    if restart_gb is not None and not restart_gb > 0:
+        raise SystemExit("run_points: GEAK_BOUNDARY_RESTART_GB must be a positive number, "
+                         "not %r" % restart)
+    return {"census_serial": serial == "1", "census_workers": int(workers) if workers else None,
+            "boundary_restart_gb": restart_gb}
+
+
+def mem_available_gb(path=None):
+    """MemAvailable in GB (kB / 1048576, the unit the watchdogs use), or None if unreadable."""
+    path = path or os.environ.get("GEAK_MEMINFO") or "/proc/meminfo"
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1048576.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 def now():
@@ -158,8 +225,10 @@ def main():
         prev = json.load(open(run_path)).get("points", {})
     except (OSError, ValueError):
         pass
+    knobs = env_knobs()
     timeline = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": {},
                 "server": a.base_url, "decode_eager": a.decode_eager}
+    timeline.update(knobs)
     t_all = time.time()
     # Decode on a graph-mode server: under spec decoding the profiler drops most VERIFY
     # replays (sglang 0.5.21/ROCm 7.2: 1 of 8 kept on most ranks), so every decode point
@@ -181,6 +250,8 @@ def main():
             cmd += ["--planned-shape", str(planned)]
         if pt["phase"] == "PREFILL" and a.draft_shares_name:
             cmd.append("--draft-shares-name")
+        if knobs["census_workers"]:
+            cmd += ["--workers", str(knobs["census_workers"])]
         rc, took, msg = run(cmd, log)
         result = {"rc": rc, "wall_s": took, "out": out if rc == 0 else None,
                   "trace_dir": trace_dir, "message": msg.splitlines()[-1] if msg else ""}
@@ -190,10 +261,11 @@ def main():
         return result
 
     if a.evidence_capture:
-        eager_evidence(a, ev, plan, py, log, timeline)
+        eager_evidence(a, ev, plan, py, log, timeline, knobs["census_workers"])
 
     futures, censuses = {}, {}
-    down = False
+    down = mem_stop = False
+    captured_here = 0
     with ThreadPoolExecutor(max_workers=1) as census_pool:
         for pt in points:
             if down:
@@ -221,6 +293,24 @@ def main():
                                         "probe_wall_s": 0})
                 deferred.append(pid)
                 continue
+            if knobs["boundary_restart_gb"] and captured_here:
+                # A point boundary: no window open. Measure after the previous census, so
+                # its transient memory is not mistaken for the server's residual growth.
+                for f in futures.values():
+                    f.result()
+                gb = mem_available_gb()
+                if gb is not None and gb < knobs["boundary_restart_gb"]:
+                    timeline["boundary_stop"] = {
+                        "before_point": pid, "mem_available_gb": round(gb, 1),
+                        "threshold_gb": knobs["boundary_restart_gb"],
+                        "captured_this_run": captured_here,
+                        "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    print("[%s] MemAvailable %.0f GB < %.0f GB at the boundary before %s: "
+                          "stopping for a server restart" % (now(), gb,
+                          knobs["boundary_restart_gb"], pid), flush=True)
+                    del timeline["points"][pid]
+                    mem_stop = True
+                    break
             stamp = time.strftime("%H%M%S")
             for attempt in ("", "_r2"):
                 tag = "%s%s_%s" % (pid, attempt, stamp) if pid in a.redo else pid + attempt
@@ -251,6 +341,11 @@ def main():
                     rec["capture_mode"] = ("eager" if a.decode_eager else "profile_cuda_graph") \
                         if pt["phase"] == "DECODE" else "eager_prefill"
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
+                    captured_here += 1
+                    if knobs["census_serial"]:
+                        t_wait = time.time()
+                        futures[pid].result()
+                        rec["census_serial_wait_s"] = round(time.time() - t_wait, 1)
                     break
                 if res.get("server_down"):
                     # Every later point would fail the same way; a rerun resumes from here.
@@ -293,6 +388,24 @@ def main():
                                                    - set(censuses))
         json.dump(timeline, open(run_path, "w"), indent=1)
 
+    if mem_stop or down:
+        # The loop stopped early. Points after the stop that an earlier invocation already
+        # censused were never visited; keep their records (as the resume path would have
+        # written them), or the next invocation's signature check and the multi-config
+        # projection find a census without a measurement_signature and refuse it.
+        for pt in points:
+            pid = pt["point_id"]
+            done = os.path.join(census_dir, pid + ".json")
+            if (pid not in timeline["points"] and pid not in a.redo and pid in prev
+                    and os.path.exists(done)):
+                timeline["points"][pid] = dict(prev[pid], resumed=True)
+                censuses[pid] = done
+    if mem_stop:
+        finish(MEMORY_RESTART)
+        print("run_points: %s after %d point(s) captured here (%d/%d censused); rerun the "
+              "same command on a fresh server -- censused points are kept"
+              % (MEMORY_RESTART, captured_here, len(censuses), len(points)), flush=True)
+        return 1
     if down:
         # A ranking over the points captured before the crash would misweight the phases.
         finish("server down")
@@ -349,7 +462,23 @@ def main():
     ok = run_steps(steps)
     if ok and not a.no_evidence:
         ok = evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps)
-    finish("ok" if ok and len(censuses) == len(points) else "incomplete")
+    status = "ok" if ok and len(censuses) == len(points) else "incomplete"
+    if a.evidence_capture:
+        ee = timeline.get("eager_evidence") or {}
+        missing = timeline.get("eager_evidence_needed")
+        if ee.get("status") != "ok" or missing:
+            # This invocation WAS the eager evidence pass; nothing retries it. Graph-replayed
+            # decode kernels keep no launching op and no source frame, so say so loudly.
+            note = ("EAGER EVIDENCE FAILED: the eager window for %s %s; %d graph-replayed "
+                    "decode kernel(s) have no launch evidence (see evidence/"
+                    "eager_evidence_request.json and run_points.log)"
+                    % (ee.get("point"), ee.get("reason") or "did not cover every kernel",
+                       len(missing or [])))
+            timeline.setdefault("notes", []).append(note)
+            print("[%s] %s" % (now(), note), flush=True)
+            if status == "ok":
+                status = "eager evidence failed"
+    finish(status)
     print("[%s] %s in %.0fs; %d/%d points censused%s"
           % (now(), timeline["status"], timeline["total_s"], len(censuses), len(points),
              (" -- missing: " + ", ".join(timeline["points_without_census"]))
@@ -357,12 +486,13 @@ def main():
     return 0 if timeline["status"] == "ok" else 1
 
 
-def eager_evidence(a, ev, plan, py, log, timeline):
+def eager_evidence(a, ev, plan, py, log, timeline, census_workers=None):
     """One decode window on the eager server, for frames and launching ops only. Its
     census lives apart (evidence/census_eager) and never enters the ledger: under eager
     launch every rank spins in the all-reduce, so its costs are not the deployment's."""
     req = json.load(open(os.path.join(ev, "evidence", "eager_evidence_request.json")))
-    pid, tag = req["point"], req["point"] + "@eager"
+    pid = req["point"]
+    tag = eager_tag(pid)
     pt = next(p for p in plan["points"] if p["point_id"] == pid)
     trace_dir = os.path.join(a.trace_root, tag)
     os.makedirs(trace_dir, exist_ok=True)
@@ -371,12 +501,25 @@ def eager_evidence(a, ev, plan, py, log, timeline):
                          "--point-id", pid, "--base-url", a.base_url, "--trace-dir", trace_dir,
                          "--server-trace-dir", os.path.join(a.server_trace_root or a.trace_root, tag),
                          "--expect-files", str(a.expect_files), "--out", out] + a.probe_arg, log)
+    try:
+        probe_status = json.load(open(out)).get("status")
+    except (OSError, ValueError):
+        probe_status = None
+    # serving_probe exits 1 on "partial" too (shape off plan); launch evidence only needs
+    # the window's ops and frames, exactly as a partial capture is accepted for a point.
+    reason = None
+    if probe_status not in ("ok", "partial"):
+        reason = "probe %s (rc=%d): %s" % (probe_status or "wrote no result", rc,
+                                           msg.splitlines()[-1] if msg else "")
+        rc = rc or 1
+    else:
+        rc = 0
     cdir = os.path.join(ev, "evidence", "census_eager")
     os.makedirs(cdir, exist_ok=True)
     cpath = os.path.join(cdir, pid + ".json")
     steps = [[py, os.path.join(HERE, "point_census.py"), "--trace-dir", trace_dir, "--phase",
               "DECODE", "--point-id", tag, "--planned-shape", str(pt.get("batch_size")),
-              "--out", cpath],
+              "--out", cpath] + (["--workers", str(census_workers)] if census_workers else []),
              [py, os.path.join(HERE, "kernel_shapes.py"), "--trace-dir", trace_dir, "--phase",
               "DECODE", "--census", cpath, "--point-id", tag, "--out",
               os.path.join(ev, "evidence", "shapes", tag + ".json")]
@@ -385,10 +528,16 @@ def eager_evidence(a, ev, plan, py, log, timeline):
         rc, t2, msg = run(cmd, log)
         took += t2
         if rc:
+            reason = "%s rc=%d: %s" % (os.path.basename(cmd[1]), rc,
+                                       msg.splitlines()[-1] if msg else "")
             break
-    timeline["eager_evidence"] = {"point": pid, "rc": rc, "wall_s": took,
+    timeline["eager_evidence"] = {"point": pid, "tag": tag, "rc": rc, "wall_s": took,
+                                  "status": "ok" if rc == 0 else "failed",
+                                  "probe_status": probe_status, "reason": reason,
                                   "message": msg.splitlines()[-1] if msg else ""}
-    print("[%s] eager evidence window %s: rc=%d in %.0fs" % (now(), tag, rc, took), flush=True)
+    print("[%s] eager evidence window %s: %s rc=%d in %.0fs%s"
+          % (now(), tag, "ok" if rc == 0 else "FAILED", rc, took,
+             " -- " + reason if reason else ""), flush=True)
 
 
 def same_targets(shapes_file, targets_file):
@@ -460,7 +609,7 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
                 replayed.setdefault(k, []).append(pid)
     covered = set()
     for f in os.listdir(shapes_dir):
-        if f.endswith("@eager.json"):
+        if is_eager_shapes_file(f):
             d = json.load(open(os.path.join(shapes_dir, f)))
             covered |= set(d.get("requested") or d.get("kernels", {}))
     if set(replayed) - covered:

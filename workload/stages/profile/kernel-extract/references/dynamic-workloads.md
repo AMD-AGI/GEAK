@@ -78,7 +78,15 @@ evidence only; UT declaration/scaffolding is a separate explicit stage.
   defers decode to an eager server. `--decode-on-graph` can try graph decode first;
   graph-hidden or partially traced cycles are rejected and retried eagerly.
 - A graph decode window with valid costs but missing source frames requests one
-  eager evidence window. Its cost is kept outside the original graph census.
+  eager evidence window. Its cost is kept outside the original graph census. Its tag
+  is `<point>.eager` (vLLM accepts only `[A-Za-z0-9._-]` in `profile_prefix`); a
+  failed evidence pass ends `profile_run.json` as `eager evidence failed`, not `ok`.
+- `run_points.py` environment knobs, default off and recorded in `profile_run.json`:
+  `GEAK_CENSUS_SERIAL=1` finishes each census before the next window opens,
+  `GEAK_CENSUS_WORKERS=N` passes `--workers N` to `point_census.py`, and
+  `GEAK_BOUNDARY_RESTART_GB=G` stops at a point boundary with status
+  `memory restart requested` when MemAvailable < G GB, for a caller to restart the
+  server and rerun the same command. None changes what a window records.
 - `point_census.py` counts complete instances: prefill target plus its draft;
   decode anchor to anchor. Collectives split per launch into transfer and wait,
   retaining rank-mean mass. `build_ranking.py` records any eager-only wait excluded
