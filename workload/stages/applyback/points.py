@@ -29,13 +29,8 @@ import json
 import os
 import sys
 
-
-def read_json(path, default=None):
-    try:
-        with open(path) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return default
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_shared"))
+from emit_result import read_json  # noqa: E402
 
 
 def ut_configs(tasks_dir):

@@ -18,10 +18,8 @@ SLOT = Path(__file__).resolve().parent
 SCRIPTS = SLOT / "kernel-extract/scripts"
 sys.path.insert(0, str(SCRIPTS))
 from relabel_points import relabel  # noqa: E402
-
-
-def read(path):
-    return json.loads(Path(path).read_text())
+sys.path.insert(0, str(SLOT))
+from handoff import read, write  # noqa: E402  (same strict JSON I/O as the handoff)
 
 
 def digest(value):
@@ -32,14 +30,6 @@ def digest(value):
 def file_ref(path):
     path = Path(path).resolve()
     return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
-def write(path, doc):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".pending")
-    tmp.write_text(json.dumps(doc, indent=2, allow_nan=False) + "\n")
-    tmp.replace(path)
 
 
 def positive(value, name):
