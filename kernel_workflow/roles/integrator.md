@@ -40,6 +40,10 @@ do not invent new optimizations; you compose and reconcile existing ones.
    **If the COMMANDMENT's METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO report
    `weighted = Σ weight_i / Σ (weight_i / speedup_i)`; that is the number compared to
    `BEST_INDIVIDUAL` (which is already the primary metric).**
+   **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): run it once per
+   combination and take `weighted` = its `GEAK_WEIGHTED_SPEEDUP` and per-case speedups from its own
+   in-run baseline/candidate legs, not from `BASELINE_PER_CASE` (absolute ms drift 1–4% between
+   sessions; see `verify_engineer.md`).
 
 ## Output
 If the best combination beats `BEST_INDIVIDUAL`, save it:

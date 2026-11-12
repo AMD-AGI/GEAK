@@ -77,14 +77,24 @@ it to learn the exact commands and the per-case output format it prints (e.g. li
 correctness AND the weighted metric; do NOT author `test_harness.py`. Skip Step 2, and follow the
 **single-run setup** below in Steps 3 and 5.
 
-**Single-run setup (weighted oracle only).** One `python3 unittest.py` run already does correctness
-AND times the frozen baseline leg against the candidate leg on every weighted case, repeating and
-interleaving the legs itself (e.g. `--reps N` takes the median of N baseline/candidate pairs per
-case). On a prepared extract UT that one run can take 20–40 min. So in this path run it **exactly
-ONCE** (via gpu_lock), in the UT's own authoritative timing mode, and take the baseline from that
-run's baseline leg. Do NOT run a separate benchmark, do
-NOT run the profile command (the Profile phase runs it right after you), and do NOT repeat the full
-benchmark. Re-run only if that one run errored or failed a gate, after fixing the cause.
+**Reuse the extraction measurement (weighted oracle only).** One `python3 unittest.py` run does
+correctness AND times the frozen baseline leg against the candidate leg on every weighted case,
+repeating and interleaving the legs itself (e.g. `--reps N`). On a prepared extract UT that one run
+takes 20–40 min, and KernelExtract already did it during GPU validation: its result is
+`run/ut_result.json` in the workspace (copied from the task dir). So in this path:
+
+1. **Baseline from the extraction run.** If `run/ut_result.json` has `exit_code: 0`, timing gate ok,
+   and a finite `baseline_ms` for every weighted case in `gates.timing.per_case`, take
+   `baseline_per_case` from it (`latency_ms` = that `baseline_ms`). Do NOT re-time the baseline.
+2. **One correctness check in this workspace** (via gpu_lock), so a relocation problem shows up now and
+   not in verify: use the UT's correctness-only mode if it has one (check `python3 unittest.py --help`,
+   e.g. `--skip-timing`); otherwise run it once normally and, if step 1 found no usable baseline, take
+   the baseline from this run's baseline leg.
+3. Do NOT run a separate benchmark, do NOT run the profile command (the Profile phase runs it right
+   after you), and do NOT repeat the full benchmark. Re-run only after fixing an error or failed gate.
+
+The baseline recorded here is informational: absolute ms drift 1–4% between sessions, so verify
+judges a candidate on the UT's own in-run ratio, never on this number (see `verify_engineer.md`).
 
 ### 2. Create the (performance) harness — only when NOT already covered by a weighted oracle
 Write `WORKSPACE/test_harness.py` when there is no usable runner, OR (even if a runner exists) when a
@@ -157,7 +167,7 @@ Run compile (if any), correctness, benchmark, profile once each (correctness/ben
 
 **Weighted oracle:** you reuse the oracle verbatim, so there is no generated builder and no
 relocation probe to run. Record the oracle's own source binding in `SOURCE_BINDING`. The single
-`unittest.py` run (see Step 1) replaces the correctness/benchmark/profile runs above.
+correctness check (see Step 1) replaces the correctness/benchmark/profile runs above.
 
 ### 4. Write the COMMANDMENT
 Write `EVAL_DIR/COMMANDMENT.md` — the immutable contract. Fill in the EXACT commands discovered/
@@ -230,10 +240,11 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
 }
 ```
 
-**Weighted oracle:** skip the 3 runs. `latency_ms` per case = the baseline-leg time from the single
-`unittest.py` run (Step 1), `runs_ms` holds that one run, and `reliable` is `true` when that run
-passed every gate with finite timings on both legs. Say in `notes` that the baseline comes from one
-run.
+**Weighted oracle:** skip the 3 runs. `latency_ms` per case = the baseline-leg time from
+`run/ut_result.json` (or from the one run in Step 1 when that file had none), `runs_ms` holds that
+one run, and `reliable` is `true` when it passed every gate with finite timings on both legs. Say in
+`notes` where the baseline came from. In the COMMANDMENT's `METRIC`, state that verify uses the UT's
+in-run `GEAK_WEIGHTED_SPEEDUP` and per-case `speedup`, and that `FULL_BENCHMARK` runs once.
 
 ## Return JSON
 ```json

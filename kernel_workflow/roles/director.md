@@ -340,6 +340,11 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    the profile window. If `res["weighted"] is None` (all buckets identity/untrusted) the measurement is not
    trustworthy → re-measure per-bucket ms / regenerate; fall back to `geomean` only then. This is identical
    to what the unittest computes, so Director and TechLead arbitrate on the same instrument.
+   **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): use `baseline_ms` from
+   THIS run's own baseline leg, not from `BASELINE_TIMING`. Absolute ms drift 1–4% between sessions on
+   these UTs, and `BASELINE_TIMING` may come from KernelExtract's validation run; only the in-run pair
+   is a like-for-like comparison. Then `director_verified_speedup_weighted` equals the
+   `GEAK_WEIGHTED_SPEEDUP` the UT printed.
 6. Arbitration vs the TechLead's claim (on the PRIMARY metric — `director_verified_speedup_weighted` from
    `h.serving_weighted_speedup`; `geomean` only when it returns `None`):
    - Within 10%, or Director higher → `accepted`.
