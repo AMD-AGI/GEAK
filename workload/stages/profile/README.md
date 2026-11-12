@@ -98,6 +98,10 @@ scenario whose baseline `select` names that EP.
    `$RUN_ROOT/baseline/out/points/<pid>/observed_inputs.json` (the CI's own scheduler log,
    decode interval, measured window and completed tokens) -- or reuse the baseline's
    validated `observed_workload.json` -- and `serving.json` is that config's deployment.
+   A vLLM point's `observed_inputs.json` has `"observation_required": true`: its CI log has
+   no step geometry, so observe the point locally (worker observer,
+   [vllm.md](kernel-extract/references/vllm.md)) and parse it with
+   `--log-format vllm-iterations --accept-len <observed_inputs.accept_len>`.
    Follow [shared sampling](kernel-extract/references/multi-config-sampling.md):
    `multi_config.py plan` groups compatible deployments and deduplicates their observed
    points, `capture` profiles each pool once, and `project --merge` recomputes each

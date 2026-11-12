@@ -338,6 +338,63 @@ def serving_env(launch, path):
         fh.write("EXTRA_SERVER_ARGS=%s\n" % shlex.quote(" ".join(shlex.quote(a) for a in args)))
 
 
+def _json_arg(v):
+    """A JSON-valued CI launch arg: YAML gives it as a JSON string or as a mapping."""
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            d = json.loads(v)
+        except ValueError:
+            return None
+        return d if isinstance(d, dict) else None
+    return None
+
+
+def _int_arg(v):
+    try:
+        return int(v) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def vllm_launch_fields(launch):
+    """The vLLM launch facts the local observation and the sampling planner need, read
+    from the CI recipe instead of re-derived by hand.
+
+    accept_len is the acceptance the CI *imposed* (rejection_sample_method "synthetic" with
+    synthetic_acceptance_length); for any other rejection method it is not known from the
+    recipe and stays None -- it must then be measured, never assumed. Without speculative
+    decoding every step accepts exactly one token. cudagraph_capture_sizes are vLLM capture
+    sizes in TOKENS (running x (1 + num_speculative_tokens) on decode), not batch sizes."""
+    args = (launch or {}).get("args") or {}
+    spec = _json_arg(args.get("speculative-config"))
+    comp = _json_arg(args.get("compilation-config")) or {}
+    out = {"num_speculative_tokens": None, "accept_len": None, "accept_len_source": None,
+           "max_num_batched_tokens": _int_arg(args.get("max-num-batched-tokens")),
+           "max_num_seqs": _int_arg(args.get("max-num-seqs")),
+           "cudagraph_capture_sizes": comp.get("cudagraph_capture_sizes"),
+           "cudagraph_capture_sizes_unit": "tokens",
+           "cudagraph_mode": comp.get("cudagraph_mode")}
+    if args.get("speculative-config") is not None and spec is None:
+        out["accept_len_source"] = "speculative-config is not parseable JSON"
+    elif spec is None:
+        out.update(num_speculative_tokens=0, accept_len=1.0,
+                   accept_len_source="no speculative decoding")
+    else:
+        out["num_speculative_tokens"] = _int_arg(spec.get("num_speculative_tokens"))
+        al = num(spec.get("synthetic_acceptance_length"))
+        if spec.get("rejection_sample_method") == "synthetic" and al and al > 0:
+            out.update(accept_len=al, accept_len_source=(
+                "speculative-config synthetic_acceptance_length (rejection_sample_method "
+                "synthetic: the CI imposed this acceptance)"))
+        else:
+            out["accept_len_source"] = (
+                "not in the recipe (rejection_sample_method %r): measure it"
+                % spec.get("rejection_sample_method"))
+    return out
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -449,6 +506,10 @@ def main():
                             % (pid, [os.path.basename(f) for f in files],
                                "; disaggregated serving is not supported yet" if disagg else ""))
             continue
+        # vLLM's CI log carries no per-step geometry (kernel-extract/references/vllm.md):
+        # its observation is a local replay with the worker observer, so the SGLang
+        # decode_log_interval and the log-parsing check do not apply to it.
+        vllm = str(bmk.get("framework") or "").lower() == "vllm"
         interval = None
         with open(server[0], errors="replace") as fh:
             for line in fh:
@@ -463,7 +524,7 @@ def main():
         why = []
         if not tput or tput <= 0:
             why.append("no %s" % THROUGHPUT_KEY)
-        if not interval:
+        if not interval and not vllm:
             why.append("decode_log_interval not in the server log")
         if not ws:
             why.append("no measured window (%s)" % wsrc)
@@ -472,12 +533,22 @@ def main():
         if why:
             problems.append("%s: %s" % (pid, "; ".join(why)))
             continue
-        inputs = {"log": server, "rank": 0, "decode_log_interval": interval,
-                  "window_start": ws, "window_end": we, "window_source": wsrc,
-                  "completed_output_tokens": tokens, "bench_log": bench}
+        if vllm:
+            inputs = {"log_format": "vllm-iterations", "observation_required": True,
+                      "reason": "vLLM CI logs carry no per-step geometry "
+                                "(kernel-extract/references/vllm.md): observe this point "
+                                "locally with the worker observer and parse it with "
+                                "observed_workload.py --log-format vllm-iterations",
+                      "log": server, "rank": 0,
+                      "window_start": ws, "window_end": we, "window_source": wsrc,
+                      "completed_output_tokens": tokens, "bench_log": bench}
+        else:
+            inputs = {"log": server, "rank": 0, "decode_log_interval": interval,
+                      "window_start": ws, "window_end": we, "window_source": wsrc,
+                      "completed_output_tokens": tokens, "bench_log": bench}
         json.dump(inputs, open(os.path.join(pdir, "observed_inputs.json"), "w"), indent=1)
         check = None
-        if os.path.exists(observed_script):
+        if not vllm and os.path.exists(observed_script):
             cmd = [sys.executable, "-I", observed_script, "--log", *server, "--rank", "0",
                    "--decode-log-interval", str(interval), "--window-start", ws, "--window-end", we,
                    "--out", os.path.join(pdir, "observed_workload.json")]
@@ -520,6 +591,10 @@ def main():
             problems.append("%s: CI recipe roles %s; only aggregated serving is supported"
                             % (pid, launch["unsupported_roles"]))
             continue
+        if launch and vllm:
+            inputs.update(vllm_launch_fields(launch))
+            with open(os.path.join(pdir, "observed_inputs.json"), "w") as fh:
+                json.dump(inputs, fh, indent=1)
         if launch:
             json.dump(launch, open(os.path.join(pdir, "launch.json"), "w"), indent=1)
             serving_env(launch, os.path.join(pdir, "serving_env.sh"))

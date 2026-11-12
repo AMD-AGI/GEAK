@@ -80,7 +80,20 @@ must cover it.
 
 The skill runs `observed_workload.py` on every point as a check and blocks a point whose
 decode expansion disagrees with the completed tokens by more than
-`max_decode_disagreement_pct`. Disaggregated serving (separate prefill/decode logs) is
+`max_decode_disagreement_pct`.
+
+**vLLM points** (bmk `framework: vllm`) are adopted differently: a vLLM CI server log has
+no per-step geometry and no `decode_log_interval`
+([vllm.md](../../profile/kernel-extract/references/vllm.md)), so no interval is required and
+no log parse is attempted. `observed_inputs.json` then says `"log_format":
+"vllm-iterations", "observation_required": true` -- the profile stage must observe the point
+locally with the worker observer and parse it with `observed_workload.py --log-format
+vllm-iterations` -- and carries the launch facts read from the CI recipe: `accept_len`
+(the recipe's `synthetic_acceptance_length` when `rejection_sample_method` is `synthetic`;
+`null` otherwise, to be measured, never assumed; 1.0 without speculation) with
+`accept_len_source`, `num_speculative_tokens`, `max_num_batched_tokens`, `max_num_seqs`,
+`cudagraph_mode` and `cudagraph_capture_sizes` (vLLM capture sizes are tokens, not batch
+sizes). The CI window and completed tokens are kept for reference. Disaggregated serving (separate prefill/decode logs) is
 reported as unsupported rather than read as an aggregated log.
 
 ## Output
@@ -101,5 +114,5 @@ $OUT/stack_identity.json              when every point names one model and one i
 than `agg`) and points without a readable recipe are reported, not guessed.
 
 `blocked` when artifacts cannot be listed or downloaded, a selected point lacks a server log,
-a throughput, a decode interval or a window, `power_valid` is false (with
+a throughput, a decode interval (SGLang) or a window, `power_valid` is false (with
 `require_power_valid`), or the decode cross-check fails.
