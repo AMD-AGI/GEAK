@@ -1,80 +1,40 @@
-# Bounded live capture without a workflow runner
+# Bounded profile evidence capture
 
-This is a fallback during extraction, not a step inside the UT. Prefer seeded
-inputs from the fixed case manifest in [task authoring](task-authoring.md#seeded-inputs-by-default).
-Use existing shape/dispatch metadata first; capture only evidence or structural
-state that cannot otherwise be recovered. Numerical test payloads do not require
-serving capture. Runtime launch attribution remains a separate selection check.
+Capture belongs to profile. UT authoring consumes the handoff, generates numerical
+inputs from seeds and requests missing evidence from profile when necessary.
 
-Read the user's actual serving launch and request-client commands. Reuse a
-compatible trace/capture before launching another service. For the profile stage's
-sampling probes the launcher is `scripts/probe_server.py`: declare the deployment in
-`serving.json` (flags, model configuration and environment copied from the installed
-backend's actual launch, never assumed) and it owns the lifecycle described below. A
-task-local capture launcher is still the route for a capture this template does not
-cover (operand capture through an overlay, a non-sglang backend).
+Use [shared sampling](multi-config-sampling.md) with the actual serving configuration
+and pinned runtime identity. Reuse compatible traces before taking another capture.
+`probe_server.py` owns the serving lifecycle; `run_points.py` captures planned points,
+checks phase/shape, drains requests and produces the per-rank census/source evidence.
+`compile_watch.py` records compile variants and call descriptors, retaining necessary
+structural values while describing bulk operands without saving their full payloads.
 
-Record request count, concurrency, token/context controls, timeout, capture
-window and case/total byte budgets before launch. Inspect wrappers and warmup
-hooks: zero measured repeats need not mean zero client requests. Disable any
-outer full-replay warmup for this bounded probe and verify the effective client.
-Probe measurements must be labeled diagnostic and cannot replace baseline
-throughput or the original workload distribution.
+Preserve serving TP and the allocated physical devices. Hold a full-set GPU lease for
+the foreground server/client lifecycle. Record owned PIDs, stop and wait for workers
+on exit, and use bounded health polling. Do not clean up unrelated services. Record
+request count, concurrency, context, capture trigger/length and graph/eager mode.
+Diagnostic probe costs do not replace the original workload distribution or baseline
+throughput.
 
-Keep serving TP and allocated devices unchanged. Run an owned serving probe
-under a full-set lease, with the launcher in the foreground for the entire
-server/client lifecycle. It may start child processes only if it records their
-PIDs/process group, traps exit/signals, stops and waits for those owned children
-before returning. Apply bounded health polling; stop polling if the server
-exits. Do not attach cleanup to unrelated processes or stop an existing service
-unless the user authorized that lifecycle. Isolate a temporary capture overlay
-from the accepted baseline and restore it after the probe.
-
-For Python callables use the shared overlay and trace hooks; inspect CLI help
-for exact options. A typical preparation sequence is:
+When live callable attribution needs a bounded diagnostic trace, mark the real
+Python launchers using the existing overlay:
 
 ```bash
-python3 "$SHARED_TOOLS/overlay_setup.py" add-capture \
-  --target "$TARGET_CALLABLE" --out "$CAPTURE_DIR" \
-  --overlay "$CAPTURE_OVERLAY" --from "$BASELINE_OVERLAY" \
-  --capture-file "$SHARED_TOOLS/capture_shapes.py"
 python3 "$SHARED_TOOLS/overlay_setup.py" add-marker \
   --target "$TARGET_CALLABLE" --overlay "$CAPTURE_OVERLAY" \
-  --marker-file "$SHARED_TOOLS/seam_trace.py"
+  --from "$BASELINE_OVERLAY" --marker-file "$SHARED_TOOLS/seam_trace.py"
 ```
 
-Pass the capture overlay through the serving process's `PYTHONPATH`; preserve
-the existing baseline module/search paths and environment. Mark all relevant
-candidate callsites, including cached aliases, with separate `add-marker`
-calls as appropriate. Native/JIT kernel objects may not be safely monkeypatched;
-trace their real Python launchers and native launches instead.
+Apply its `PYTHONPATH` only to the owned diagnostic process and retain the accepted
+baseline's other import settings. Mark every candidate callsite, including cached
+aliases. Native/JIT objects may require marking their real Python launcher instead.
 
-Choose a persist policy before launching, not after the workspace fills:
-Export `CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY:-structure_only}` into every
-capture server/process; GEAK supplies this value for AgentX. The library fallback remains
-`share_large` for callers that do not set a policy. Preserve an explicit policy override
-(`share_large`, `moe_slim` or `full`). With `structure_only`, use
-`CAPTURE_STRUCTURAL_OPERANDS` to name additional operands whose content selects work;
-regenerate the oracle afterwards with `regen_reference.py`. See *Capture policy* in
-[task authoring](task-authoring.md#capture-policy) for the dividing line and its cost.
+Use `kernel_selection.py --strict-launch` with the process metadata and raw traces.
+Pass `--required-device-kernel` only for simultaneous mandatory members. Preserve the
+full verdict, grids, invocation counts, phase and rank evidence. The selector reads
+these inputs without promoting or deleting captured tensor files.
 
-Read the helpers' environment controls before choosing budgets and profiler
-windows. Do not assume their defaults capture every relevant shape or phase.
-`capture_shapes.py` handles tensors and ordinary containers; opaque `self`, KV
-getters, routing/state or multiple phase targets may require a task-local
-serializer. Follow [source extraction](source-extraction.md) for byte accounting,
-shared-state, independent phase state and replay checks. Keep customizations
-task-local, with source hashes and a bounded small replay before a larger sweep.
-
-Once captured, verify target-call markers, host-launch correlation, real device
-kernel names, grids, invocation counts, phase identity and rank integrity using
-`kernel_selection.py --strict-launch`. Pass `--required-device-kernel` only for simultaneous
-mandatory members, not alternative dispatch. Run `--help` for its input contract.
-Store its complete JSON, raw trace and metadata. The CLI may promote/reclaim
-oracles under `--task-dir`; use a separate directory per phase and preserve
-needed captures before allowing that cleanup. No evidence from one phase may
-overwrite another phase's oracle.
-
-When capture was necessary, replay one baseline case per declared phase before expanding source
-extraction. Successful file persistence alone does not prove complete inputs,
-correct state reconstruction or faithful whole-call timing.
+The old persistent input/output oracle capture and regeneration path is retired.
+New tasks follow [fixed-contract authoring](task-authoring.md). Keep minimal structural
+fixtures only where descriptors/reconstruction cannot preserve the required semantics.

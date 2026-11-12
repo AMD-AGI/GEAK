@@ -6,15 +6,15 @@ earlier path entry FULLY shadows the install — Python does not merge regular p
 entries, so every sibling submodule disappears and `import sglang` breaks. The correct, reversible
 mechanism is a `sitecustomize.py` (auto-run by Python at interpreter startup, before anything imports
 the target) that either (a) injects a PATCHED submodule file into sys.modules under its dotted name,
-or (b) imports the real module and REBINDS one attribute (monkeypatch), or (c) installs a capture
-hook, or (d) registers a deferred installer for a multi-seam package. All are driven by a manifest
+or (b) imports the real module and REBINDS one attribute (monkeypatch), or registers
+a marker/deferred installer for a multi-seam package. All are driven by a manifest
 so multiple overlays COMPOUND (each accepted kernel appends).
 
 Layout produced:
     <overlay>/sitecustomize.py          # generic, manifest-driven (idempotent)
-    <overlay>/_overlay_manifest.json    # modules, rebinds, captures, markers, installers
+    <overlay>/_overlay_manifest.json    # modules, rebinds, markers, installers
     <overlay>/_patched/<dotted>.py      # patched submodule sources (for module-inject entries)
-    <overlay>/<impl files>              # copied impl modules (for rebind/capture entries)
+    <overlay>/<impl files>              # copied impl modules (for rebind/installer entries)
 Launch with:  PYTHONPATH=<overlay>:$PYTHONPATH
 
 Commands:
@@ -24,8 +24,6 @@ Commands:
   add-rebind    rebind module:attr -> impl_module.impl_attr (single function/kernel swap; the default)
                 --overlay O --target sglang.srt.layers.activation:silu_and_mul
                 --impl-module fast_act --impl-attr fast_silu_and_mul [--impl-file fast_act.py]
-  add-capture   install a shape/IO capture hook on module:attr (uses capture_shapes.py)
-                --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
                 --overlay O --target sglang...:fn [--marker-file seam_trace.py]
   add-installer register a package's deferred import hooks (package files must already be in O)
@@ -138,15 +136,9 @@ for _e in _m.get("rebinds", []):
     except Exception as _ex:
         sys.stderr.write("[overlay] rebind FAILED %r: %r\n" % (_e, _ex))
 
-# (c) capture hooks (shape/IO oracle recording) go on FIRST, so the capture wrapper is the innermost
-# stand-in and is already bound before any marker install imports a module that does
-# `from <capture target module> import <attr>` (which would otherwise alias the un-captured function).
-for _e in _m.get("captures", []):
-    try:
-        import capture_shapes
-        capture_shapes.install(_e["target"], _e["out"], int(_e.get("max", 5)))
-    except Exception as _ex:
-        sys.stderr.write("[overlay] capture install FAILED %r: %r\n" % (_e, _ex))
+if _m.get("captures"):
+    sys.stderr.write("[overlay] persistent oracle capture is retired; use profile evidence and fixed UT contracts\n")
+    os._exit(78)
 
 # (d) marker-only hooks used to compare every candidate seam in one trace.
 for _e in _m.get("markers", []):
@@ -163,6 +155,14 @@ _INSTALLER_START = "# Manifest installers register deferred hooks"
 _INSTALLER_END = "# (b) rebind single attributes (monkeypatch)."
 LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
                        + _INSTALLER_END + SITECUSTOMIZE.split(_INSTALLER_END)[1])
+
+
+# Hashes identify prior generic runtimes without retaining their retired capture code.
+_PREVIOUS_RUNTIMES = {'efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4', '1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9'}
+
+
+def generic_runtime(source):
+    return source in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE) or hashlib.sha256(source.encode()).hexdigest() in _PREVIOUS_RUNTIMES
 
 
 def installer_module_manifest(overlay, manifest):
@@ -223,7 +223,7 @@ def cmd_add_installer(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     runtime = os.path.join(a.overlay, "sitecustomize.py")
     with open(runtime) as handle:
-        if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+        if not generic_runtime(handle.read()):
             raise SystemExit("cannot add an installer to a custom sitecustomize; preserve its hooks first")
     m = _load_man(man)
     entry = {"id": a.id, "module": a.module, "callable": a.callable,
@@ -254,7 +254,7 @@ def merge_overlays(output, sources):
     output = os.path.abspath(output)
     if os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
         raise ValueError("merge output must be absent or empty: " + output)
-    kinds = {"modules": "module", "rebinds": "target", "captures": "target",
+    kinds = {"modules": "module", "rebinds": "target",
              "markers": "target", "installers": "id"}
     merged, files, targets = {}, {}, {}
     for source in sources:
@@ -268,8 +268,10 @@ def merge_overlays(output, sources):
         if not isinstance(manifest, dict):
             raise ValueError("overlay manifest must be an object: " + source)
         with open(os.path.join(source, "sitecustomize.py")) as handle:
-            if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+            if not generic_runtime(handle.read()):
                 raise ValueError("custom sitecustomize cannot be merged automatically: " + source)
+        if manifest.get("captures"):
+            raise ValueError("persistent oracle capture overlays are retired")
         manifest = installer_module_manifest(source, manifest)
         for kind, entries in manifest.items():
             if kind not in kinds:
@@ -375,7 +377,10 @@ def _ensure_overlay(overlay, base=""):
 
 def _load_man(man):
     with open(man) as fh:
-        return json.load(fh)
+        m = json.load(fh)
+    if m.get("captures"):
+        raise ValueError("persistent oracle capture overlays are retired")
+    return m
 
 
 def _save_man(man, m):
@@ -435,19 +440,6 @@ def cmd_add_rebind(a):
     print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
 
 
-def cmd_add_capture(a):
-    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
-    cap = a.capture_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "capture_shapes.py")
-    shutil.copy2(cap, os.path.join(a.overlay, "capture_shapes.py"))
-    m = _load_man(man)
-    m["captures"] = [e for e in m.get("captures", []) if e["target"] != a.target]
-    m["captures"].append({"target": a.target, "out": a.out, "max": a.max})
-    _save_man(man, m)
-    print(f"OVERLAY_DIR={a.overlay}")
-    print(f"add-capture {a.target} -> {a.out}")
-    print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
-
-
 def cmd_add_marker(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     marker = a.marker_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "seam_trace.py")
@@ -497,15 +489,6 @@ def main():
         p.add_argument("--impl-file", default="", dest="impl_file")
         p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
         p.set_defaults(func=cmd_add_rebind)
-
-    p = sub.add_parser("add-capture")
-    p.add_argument("--overlay", required=True)
-    p.add_argument("--target", required=True, help="module:attr to hook")
-    p.add_argument("--out", required=True, help="task dir to flush reference_io.pt + meta.json into")
-    p.add_argument("--max", type=int, default=5)
-    p.add_argument("--capture-file", default="", dest="capture_file")
-    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
-    p.set_defaults(func=cmd_add_capture)
 
     p = sub.add_parser("add-marker")
     p.add_argument("--overlay", required=True)

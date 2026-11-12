@@ -56,6 +56,33 @@ PLUMBING = re.compile(r"(^|/)(torch/_ops\.py|torch_guard\.py|triton/runtime/|"
                       r"torch/_dynamo/|torch/_library/)")
 
 
+_PKG_PARENTS = {}
+
+
+def norm_path(path, packages):
+    """An editable install launches from an absolute path (/sgl-workspace/sglang/python/
+    sglang/srt/...): map it to the package-relative form (sglang/srt/...) the rest of this
+    file reads, using the directory the installed package actually resolves to. Without
+    this every frame of an editable sglang was dropped and its kernels had no operator
+    (2026-11-02, Muse Spark image)."""
+    if not os.path.isabs(path):
+        return path
+    for pkg in packages:
+        if pkg not in _PKG_PARENTS:
+            parent = None
+            try:
+                spec = importlib.util.find_spec(pkg)
+                locs = list(spec.submodule_search_locations or []) if spec else []
+                parent = os.path.dirname(os.path.realpath(locs[0])) if locs else None
+            except (ImportError, ValueError):
+                parent = None
+            _PKG_PARENTS[pkg] = parent
+        parent = _PKG_PARENTS[pkg]
+        if parent and path.startswith(parent + "/" + pkg + "/"):
+            return path[len(parent) + 1:]
+    return path
+
+
 class Resolver:
     def __init__(self, roots, packages):
         self.roots, self.packages, self.cache, self.qual = roots, packages, {}, {}
@@ -142,9 +169,10 @@ def frames_of(kernel_entry, packages):
                 m = FRAME_RE.match(f)
                 if not m or PLUMBING.search(m.group("path")):
                     continue
-                if m.group("path").lstrip("/").split("/", 1)[0] not in packages:
+                path = norm_path(m.group("path"), packages)
+                if path.lstrip("/").split("/", 1)[0] not in packages:
                     continue
-                st.append((m.group("path"), int(m.group("line")), m.group("func")))
+                st.append((path, int(m.group("line")), m.group("func")))
             if st and (st, replayed) not in stacks:
                 stacks.append((st, replayed))
     return stacks
@@ -161,10 +189,11 @@ def op_of_sample(py_frames, packages):
         m = FRAME_RE.match(f)
         if not m or PLUMBING.search(m.group("path")):
             continue
-        path = m.group("path").lstrip("/")
+        npath = norm_path(m.group("path"), packages)
+        path = npath.lstrip("/")
         if path.split("/", 1)[0] not in packages:
             continue
-        rec = (m.group("path"), int(m.group("line")), m.group("func"))
+        rec = (npath, int(m.group("line")), m.group("func"))
         if entry is None:
             if MODEL_TREE.search(path):
                 # the model code is reached: the library run (if any) ends here
