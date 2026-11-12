@@ -32,7 +32,8 @@ import re
 import shlex
 import sys
 
-import yaml
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ci_recipe import argv_map, load  # noqa: E402
 
 SNAP_RE = re.compile(r"models--([A-Za-z0-9._-]+?)--([A-Za-z0-9._-]+)/snapshots/([0-9a-f]{40})")
 # Flags whose value is the run's own plumbing, not part of what was measured.
@@ -64,38 +65,17 @@ def cli_command(text):
     return toks
 
 
-def argv_map(toks):
-    """A flag takes every value up to the next flag (a list when there are several): the CI's
-    `--server-metrics <server>/metrics <gpu-exporter>/metrics` is one flag, not a flag plus a
-    positional (2026-11-09: the second URL read as a positional failed every leg's pins)."""
-    out, i = {}, 0
-    while i < len(toks):
-        t = toks[i]
-        if t.startswith("--"):
-            j = i + 1
-            while j < len(toks) and not toks[j].startswith("--"):
-                j += 1
-            vals = toks[i + 1:j]
-            out[t] = True if not vals else vals[0] if len(vals) == 1 else vals
-            i = j
-        else:
-            out.setdefault("_positional", []).append(t)
-            i += 1
-    return out
-
-
 def pins(point_dir):
     d = logs_dir(point_dir)
-    cfg = yaml.safe_load(open(os.path.join(d, "config.yaml")))
+    recipe = load(os.path.join(d, "config.yaml"))
     server_text = "".join(open(os.path.join(d, f), errors="replace").read()
                           for f in sorted(os.listdir(d)) if f.endswith(".out"))
     snaps = snapshots(server_text)
     ambiguous = {k: sorted(v) for k, v in snaps.items() if len(v) != 1}
     bench = os.path.join(d, "agentic", "benchmark.log")
     cli = cli_command(open(bench, errors="replace").read()) if os.path.exists(bench) else None
-    model = str((cfg.get("model") or {}).get("path") or "")
-    model = model[3:] if model.startswith("hf:") else model
-    doc = {"image": str((cfg.get("model") or {}).get("container") or "").strip(),
+    model = recipe["model"]
+    doc = {"image": recipe["image"],
            "model": model,
            "revisions": {k: next(iter(v)) for k, v in snaps.items() if len(v) == 1},
            "ambiguous_revisions": ambiguous,

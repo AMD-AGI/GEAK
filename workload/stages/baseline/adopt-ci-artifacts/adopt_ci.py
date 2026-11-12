@@ -37,6 +37,7 @@ import zipfile
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "_shared"))
 from emit_result import emit, read_json  # noqa: E402
+import ci_recipe  # noqa: E402
 
 API = "https://api.github.com/repos/%s/actions/runs/%s/artifacts?per_page=100&page=%d"
 IX_API = "https://inferencex.semianalysis.com/api/v1"
@@ -292,21 +293,13 @@ SPLIT_ON = ["attention-backend", "kv-cache-dtype", "page-size", "speculative-alg
 def launch_of(config_yaml):
     """CI recipe (logs/config.yaml) -> {"args": {...}, "env": {...}} of the serving role."""
     try:
-        import yaml
-    except ImportError:
+        recipe = ci_recipe.load(config_yaml)
+    except Exception:  # noqa: BLE001  (no PyYAML, unreadable or malformed recipe)
         return None
-    try:
-        doc = yaml.safe_load(open(config_yaml))
-    except Exception:  # noqa: BLE001
-        return None
-    roles = (doc or {}).get("roles") or {}
-    if set(roles) != {"agg"}:
-        return {"unsupported_roles": sorted(roles)}
-    agg = roles["agg"] or {}
-    return {"args": {str(k): v for k, v in (agg.get("args") or {}).items()},
-            "env": {str(k): str(v) for k, v in (agg.get("env") or {}).items()},
-            "image": ((doc.get("model") or {}).get("container") or "").strip(),
-            "recipe": config_yaml}
+    if set(recipe["roles"]) != {"agg"}:
+        return {"unsupported_roles": sorted(recipe["roles"])}
+    r = ci_recipe.role(recipe)
+    return {"args": r["args"], "env": r["env"], "image": recipe["image"], "recipe": config_yaml}
 
 
 def launch_value(launch, key):

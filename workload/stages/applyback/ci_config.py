@@ -26,40 +26,22 @@ import os
 import shlex
 import sys
 
-import yaml
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_shared"))
+from ci_recipe import argv_map, load, recipe_path, role, server_argv  # noqa: E402
 
 PLUMBING = {"model-path", "host", "port"}
 
 
 def point_config(point_dir):
-    path = os.path.join(point_dir, "server_logs", "logs", "config.yaml")
-    with open(path) as fh:
-        cfg = yaml.safe_load(fh)
-    roles = cfg.get("roles") or {}
-    role = roles.get("agg") or next(iter(roles.values()))
-    bench_env = (cfg.get("benchmark") or {}).get("env") or {}
-    model = str((cfg.get("model") or {}).get("path") or "")
-    model = model[3:] if model.startswith("hf:") else model
+    recipe = load(recipe_path(point_dir))
+    r = role(recipe)
+    bench_env = recipe["bench_env"]
     base = json.load(open(os.path.join(point_dir, "baseline.json")))
-    return {"config_yaml": path, "image": str((cfg.get("model") or {}).get("container") or "").strip(),
-            "model": model, "args": role.get("args") or {}, "env": {k: str(v) for k, v in
-                                                                   (role.get("env") or {}).items()},
-            "gpus": role.get("gpus"), "bench_env": {k: str(v) for k, v in bench_env.items()},
+    return {"config_yaml": recipe["path"], "image": recipe["image"], "model": recipe["model"],
+            "args": r["args"], "env": r["env"], "gpus": r["gpus"], "bench_env": bench_env,
             "conc": int(bench_env.get("CONC") or base["config"]["concurrency"]),
             "duration": int(bench_env.get("DURATION") or 3600),
             "point_config": base.get("config") or {}}
-
-
-def server_argv(args):
-    out = []
-    for k, v in args.items():
-        if v is True:
-            out.append("--%s" % k)
-        elif v is False or v is None:
-            continue
-        else:
-            out += ["--%s" % k, str(v)]
-    return out
 
 
 def cmd_launch(point_dir):
@@ -74,24 +56,9 @@ def cmd_launch(point_dir):
     return 0
 
 
-def parse_argv(tokens):
-    got, i = {}, 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t.startswith("--"):
-            k = t[2:]
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                got[k] = tokens[i + 1]
-                i += 2
-            else:
-                got[k] = True
-                i += 1
-        else:
-            i += 1
-    return got
-
-
 def norm(v):
+    if isinstance(v, (list, tuple)):
+        return " ".join(norm(x) for x in v)
     return "true" if v is True else str(v).strip().lower()
 
 
@@ -105,7 +72,7 @@ def cmd_align(point_dir, inspect_path, out_path):
     tokens = []
     for part in cmd:
         tokens += shlex.split(part) if " " in part else [part]
-    got = parse_argv(tokens)
+    got = {k[2:]: v for k, v in argv_map(tokens).items() if k.startswith("--")}
     want = {k: v for k, v in c["args"].items() if v is not False and v is not None}
     missing = sorted(k for k in want if k not in got)
     differ = sorted([k, want[k], got[k]] for k in want if k in got and norm(want[k]) != norm(got[k]))
