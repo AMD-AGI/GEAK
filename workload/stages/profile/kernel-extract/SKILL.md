@@ -1,9 +1,14 @@
 ---
 name: kernel-extract
-description: Extract actual GPU kernel source and workload-weighted standalone tests from AgentX replay evidence. Use with serving logs, traces and an accessible deployed GPU environment; covers phase selection, live dispatch, source binding, correctness and timing. Excludes fixed ISL/OSL benchmarking and kernel optimization unless explicitly requested.
+description: Extract actual GPU kernel source and workload-weighted standalone tests from AgentX replay evidence. Use with serving logs, traces and an accessible deployed GPU environment; covers phase selection, live dispatch, source binding and correctness qualification without timing. Excludes fixed ISL/OSL benchmarking and kernel optimization unless explicitly requested.
 ---
 
 # AgentX kernel extraction
+
+This is the legacy combined workflow and the shared implementation bundle. New split
+scenarios use [kernel-profile](../kernel-profile/SKILL.md) for runtime evidence and
+[kernel-ut](../../ut/kernel-ut/SKILL.md) for template-based generation/qualification.
+Follow the selected skill's boundary; UT-only invocations do not run the capture stages.
 
 The agent performs the five stages below using this skill's method and the
 shared tools bundled with it. Set `SKILL_ROOT` to this directory and `SHARED_TOOLS`
@@ -43,11 +48,11 @@ Read [workload measurement](references/dynamic-workloads.md) and
 and sampling points; runtime traces determine actual kernels and costs. Keep request,
 token, call and device-time mass distinct; target at least 90% of device-time mass per
 material phase and disclose achieved coverage, approximations and missing mass. Counts
-come from the serving log, never from a parametric ISL/OSL model
-(`parse_profile.analytic_regime_calls` only when no log exists at all, and say so).
+come from the serving log. Missing observation logs are an explicit evidence gap.
 
-This stage is a fixed template. **The only inputs you write are `serving.json` (step 1)
-and the review of `task_decls.json` (§3).** Everything else is produced by the scripts
+This stage is a fixed template. **The inputs you write are `serving.json` (step 1),
+the runtime identity for shared multi-config sampling, and the review of
+`task_decls.json` (§3).** Everything else is produced by the scripts
 below; do not hand-write census, rank-merge, ranking, shape-manifest, source-map or
 task-plan scripts -- every run that did produced numbers no other run could compare
 with, and spent most of the hour doing it.
@@ -55,31 +60,21 @@ with, and spent most of the hour doing it.
 1. **Declare the deployment.** `python3 "$SKILL_ROOT/scripts/probe_server.py" init --out
    "$EVAL_DIR/serving.json"`, then copy model, TP, GPUs, flags and environment from the
    baseline's launch exactly. Leave `decode_capture` at `profile_cuda_graph`.
-2. **Observed workload and points.**
-   `observed_workload.py` → `plan_sampling_points.py` (commands in the reference).
-3. **Capture, census, rank, select, collect evidence** -- one command, one server:
-
-   ```bash
-   python3 "$SKILL_ROOT/scripts/probe_server.py" run --serving "$EVAL_DIR/serving.json" \
-       --run-dir "$EVAL_DIR/probe" -- \
-     python3 "$SKILL_ROOT/scripts/run_points.py" --server-state "$EVAL_DIR/probe/probe_server.json" \
-       --points "$EVAL_DIR/sampling_points.json" \
-       --observed "$EVAL_DIR/evidence/observed_workload.json" --eval-dir "$EVAL_DIR"
-   ```
-
-   It starts the server once (falling back to an eager server, and recapturing only the
-   decode points, if graph replay hides decode kernels), captures every point back to
-   back, censuses each in the background, relabels points to their achieved shapes, and
-   writes `coverage.json`, `kernel_ranking.json`, `selection_targets.json`,
-   `evidence/{shapes,source_map.json,adjacency.json}` and a draft `task_decls.json`. It
-   resumes: rerunning it recaptures only points without a census (`--redo` forces one).
-   One recapture per failed point, then the gap is reported, as the skill requires.
-   The probe server also records, from process start, every Triton compile variant it
-   builds and the entry call that built it (`shared/compile_watch.py`, on by default) into
-   `evidence/compile_variants.json`. This covers what the timed windows skip -- startup,
-   warmup and graph capture -- and what M coverage cannot see: a variant is selected by
-   argument dtypes, None-ness, integer specialization (an int equal to 1 is a constexpr),
-   constexprs and the autotune config, not by M.
+2. **Observe and plan.** Use `observed_workload.py` for each supplied config, then
+   the [shared sampling workflow](references/multi-config-sampling.md):
+   `multi_config.py plan` → `capture` → `project --merge` → `select`.
+   Supply one `--config` for a single workload. Pin its runtime identity and pass
+   the scenario's global sampling budget. Compatible configs share observed points;
+   projection retains each config's own frequencies and uncovered mass. Lowest/highest
+   concurrency do not substitute for the middle configs' dispatch evidence.
+3. **Capture and freeze profile evidence.** The capture helper holds each pool's
+   GPU-set lease and runs `probe_server.py` / `run_points.py`: prefill on the graph
+   server, decode normally on the eager server, per-point census, achieved-shape
+   relabeling, ranking and dispatch/source evidence. Resume reuses signed censuses;
+   `--redo` requests recapture. Failed or hidden windows stay explicit gaps.
+   `compile_watch.py` records startup, warmup and graph-capture compile variants and
+   call descriptors as well as timed-window evidence. Profile stops at that evidence;
+   it never drafts UT declarations automatically.
 4. Write `kernel_workload.json` from those artifacts (coverage, phase split, sampling
    plan, approximations). Distinguish stage share, share within the callable and share
    the extracted source can affect; nested scopes, not additive. Collectives,
@@ -99,7 +94,14 @@ but cannot turn a partial batch into completed extraction.
 
 ## 3. Declare complete task boundaries
 
-Read [delivery contract](references/delivery-contract.md). `task_decls.json` is drafted
+Read [delivery contract](references/delivery-contract.md). Start this UT step explicitly:
+
+```bash
+python3 "$SKILL_ROOT/scripts/draft_task_decls.py" --eval-dir "$EVAL_DIR" \
+    --out "$EVAL_DIR/task_decls.json"
+```
+
+`task_decls.json` is drafted
 from the evidence: one task per selected operator with all its member kernels and its
 other phase branch; its `target_callable` is the operator's entry (or the branches'
 innermost common frame); its `ut_family` is the family whose `match` patterns fit (the
@@ -114,6 +116,11 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   `companions` with a reason. Mandatory chains, including split-K plus reduce, are one
   task; mutually exclusive branches are separate `joint_phases` rows, never demanded in
   every invocation. Whole fused MoE keeps routing and the complete operation.
+- **Merging across configs (a multi-config group).** After the initial declaration
+  review, follow [the multi-config UT merge procedure](references/multi-config-ut-merge.md)
+  before authoring. It first builds the provisional plan consumed by `merge_policy.py`,
+  then applies the policy and rebuilds the final plan. Preserve every dispatch branch
+  and record each application in `decisions.json`.
 - Selected indexer score/top-k is one task covering both served prefill and decode
   branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
   [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)
@@ -134,7 +141,9 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   bucket cases for the bands no point covers, without double-weighting), and scaffolds
   the UT from its family. An existing `unittest.py` is never overwritten without `--force`.
   It also slices the compile evidence per task into `run/server_variants.json` and
-  `run/server_calls.json` (+ `run/server_calls/*.pt`) and sets `meta.server_preimports`
+  `run/server_calls.json` (structural operands inline; bulk operands as seeded descriptors, so
+  no tensor file -- `run/server_calls/*.pt` only for a call recorded before this, or above
+  COMPILE_WATCH_INLINE_CAP) and sets `meta.server_preimports`
   (decls `server_preimports`; sglang defaults to `sglang.srt.utils.common`).
 
 The source map's frames prove a call reached a file on this deployment; they do not prove
@@ -157,13 +166,15 @@ python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$EVAL_DIR" --runner "
 python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 540   # repeat
 ```
 
-One agent lane per task, each writing, validating and fixing its own task directory
-([UT lane](references/ut-lane.md)) on its own GPU(s). The lanes are the deployment's GPUs
-(`serving.json` `gpus`, free again once the probe server stopped): the most expensive task
-starts first, GPUs left over when there are fewer tasks than GPUs go to the most expensive
-tasks (the UT spreads its legs over every GPU it holds), and a task needing several GPUs at
-once runs after the single-GPU ones. Timing is not run in the lanes: each task is timed
-alone afterwards over all GPUs (`unittest.py --reuse` keeps the gates the lane passed).
+One CPU agent lane per task writes and fixes its own task directory
+([UT lane](references/ut-lane.md)); `--author-workers` controls author concurrency.
+The wave leases GPUs only for each `ut_wave.py gpu -- <command>`.
+The pool is the deployment's physical GPUs (`serving.json` `gpus`); release the probe
+server and any outer campaign GPU lock first. Each command leases `required_gpu_count`
+cards together (normally 1), drains its workers, then returns them to the pool. CPU
+writing/lint holds no GPU. The wave qualifies all non-timing
+gates with `unittest.py --validation-mode correctness --reuse`; no timing tail runs.
+Preserve weighted shapes and timing support for the optimizer.
 `wait` returns 0 when every task is `passed`, `blocked` or `failed`; read `ut_wave/summary.json`
 and the lane logs it names, fix nothing in a task yourself, and carry blocked and failed
 tasks into the report with their reasons. `start` again resumes an interrupted wave.
@@ -176,8 +187,7 @@ at shapes/dtypes/layouts established from existing workload evidence. Run one su
 baseline case per phase, then expand cases and editable leaves. The UT reads its
 frozen case manifest; it never launches serving, profiles, or captures shapes.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
-`unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
-optional; preserve minimal structural fixtures only where needed.
+`unittest.py`, baseline manifest/overlay and `run/` evidence. Preserve minimal structural fixtures only where needed.
 Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
 
 Build each task from its UT contract family: read [UT contracts](ut_contracts/README.md),
@@ -198,13 +208,16 @@ routing semantics, cache/page state and complete outputs.
 
 Run every GPU command from its task directory under the lease tools in
 [setup](references/setup.md) — `gpu_lock.sh` for one device, `gpu_lock_set.py` for the
-whole allocated set. Never run a GPU command outside a lease. (A UT-wave lane holds its
-GPUs through its container; inside it, `GPU_IDS` is the lease.)
+whole allocated set outside a wave. Inside an on-demand UT lane use `ut_wave.py gpu --
+<command>`; its host broker owns the lease and returns GPUs after worker cleanup.
+Never nest the old lock wrappers inside it. `GPU_IDS` is populated only in GPU commands.
 
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input
 refresh, each editable leaf's numerical negative control, restored-source
-integrity, and both timing legs for every positive-mass signature. Compilation
+integrity. UT extraction does not measure timing: use the explicit correctness
+validation mode, retain every weighted signature, and report performance as unmeasured.
+Optimization later measures both timing legs for every positive-mass signature. Compilation
 failure is not a successful numerical negative control. Report missing cases
 and mass; do not renormalize survivors into full coverage.
 
@@ -231,17 +244,15 @@ Before reporting a verdict, verify deterministic input construction, baseline
 self-noise and that numerical bad-source controls actually fail. For generated
 cases, obtain reference outputs from the frozen baseline in a separate process
 using the same seeds; never use the candidate to generate its own expected output.
-Do not create a serving capture merely to obtain a golden file. With persisted
-capture oracles, also run `oracle_power.py`; regenerate `structure_only` placeholders
-before checking them. See [task authoring](references/task-authoring.md).
+Use the fixed driver's bounded temporary output batches. See
+[task authoring](references/task-authoring.md).
 
 Randomize ordinary numerical payloads, not the workload definition. Keep observed
 shape/layout/quantization, phase and call weights. Routing, indices, page tables and
 sequence metadata must retain valid semantics and the observed work/access pattern:
 reuse or reconstruct them from existing metadata where reliable; capture only the
 missing structural state. Synthetic structural cases may extend correctness coverage,
-but do not claim they reproduce serving performance without evidence. Any necessary
-capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
+but do not claim they reproduce serving performance without evidence. Missing structural evidence goes back to the profile stage.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness (the driver's timing gate does). Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and

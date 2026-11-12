@@ -1,8 +1,7 @@
 """CPU tests for scripts/ut_wave.py: planning, and a whole wave on the local backend with a
 stub runner standing in for the agent (runners/CONTRACT.md interface).
 
-Each stub task's unittest.py is a fake that writes a receipt, so the timing tail's
-`unittest.py --reuse` is exercised as well. Stdlib only.
+Stub tasks write synthetic receipts; no real GPU is touched. Stdlib only.
 """
 import json
 import os
@@ -13,27 +12,39 @@ import tempfile
 import textwrap
 import time
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 import ut_wave as W  # noqa: E402
+import ut_gpu_queue as Q
 
-# A task's UT stand-in: --skip timing -> partial receipt without timing; --reuse -> pass.
+# A task's UT stand-in records any accidental timing request.
 FAKE_UT = textwrap.dedent('''\
     import json, os, sys, time
     here = os.path.dirname(os.path.abspath(__file__))
     gates = ["contract", "correctness", "negative_controls", "restore"]
-    if "--skip" not in sys.argv:
+    measuring = "--skip" not in sys.argv and "correctness" not in sys.argv
+    if measuring:
         gates.append("timing")
     with open(os.path.join(here, "run", "ut_calls.log"), "a") as f:
         f.write(" ".join(sys.argv[1:]) + " GPU_IDS=%s\\n" % os.environ.get("GPU_IDS"))
-    verdict = "pass" if "timing" in gates else "partial"
-    rep = {"gates": {g: {"status": "pass"} for g in gates}, "verdict": verdict}
-    time.sleep(0.05)
+    if measuring:
+        with open(os.path.join(here, "run", "timing.trace"), "a") as f:
+            f.write("start %s %s\\n" % (time.time(), os.environ.get("ROCR_VISIBLE_DEVICES")))
+    verdict = "pass" if "timing" in gates or "correctness" in sys.argv else "partial"
+    rep = {"gates": {g: {"status": "pass"} for g in gates}, "verdict": verdict,
+           "validation_mode": "performance" if measuring else "correctness" if "correctness" in sys.argv else "performance"}
+    time.sleep(0.3)
     json.dump(rep, open(os.path.join(here, "run", "ut_report.json"), "w"))
     json.dump({"verdict": verdict, "exit_code": 0 if verdict == "pass" else 1},
               open(os.path.join(here, "run", "ut_result.json"), "w"))
+    if measuring:
+        with open(os.path.join(here, "run", "timing.trace"), "a") as f:
+            f.write("end %s\\n" % time.time())
     ''')
 
 # The stub agent: behaviour per task label, chosen by a file in the task directory.
@@ -43,14 +54,17 @@ STUB_RUNNER = textwrap.dedent('''\
     T="$TASK_DIR"
     echo "start $(date +%s.%N) ROCR=$ROCR_VISIBLE_DEVICES GPU_IDS=$GPU_IDS" >> "$T/run/lane.trace"
     mode="$(cat "$T/mode")"
-    SKIP="--skip timing"; grep -q "run every gate, timing included" "$PROMPT" && SKIP=""
+    SKIP="--validation-mode correctness --reuse"
     grep -q "THIS IS ATTEMPT" "$PROMPT" && echo continuation >> "$T/run/lane.trace"
     sleep 1
+    run_ut() {
+      python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$T/unittest.py" $SKIP
+    }
     case "$mode" in
-      ok)      python3 "$T/unittest.py" $SKIP ;;
+      ok)      run_ut ;;
       block)   python3 "$SKILL_ROOT/scripts/ut_wave.py" block --task-dir "$T" --reason "no fixture X: ls shows it" ;;
       runner78) exit 78 ;;
-      second)  if [ -f "$T/run/tried" ]; then python3 "$T/unittest.py" $SKIP; else touch "$T/run/tried"; fi ;;
+      second)  if [ -f "$T/run/tried" ]; then run_ut; else touch "$T/run/tried"; fi ;;
       never)   : ;;
     esac
     echo "end $(date +%s.%N)" >> "$T/run/lane.trace"
@@ -92,7 +106,9 @@ class WaveTest(unittest.TestCase):
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ut_wave.py"), "start",
                             "--eval-dir", self.eval, "--runner", self.runner, "--backend", "local",
                             "--foreground", "--tick-sec", "1", "--lane-sec", "120", *extra],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, KERNEL_EXTRACT_LOCK_DIR=os.path.join(self.tmp, 'locks'),
+                                    GEAK_GPU_REQUIRE_IDLE='0', KERNEL_ENV_KEEP_ARCH='1'))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         with open(os.path.join(self.eval, "ut_wave", "summary.json")) as f:
             return json.load(f)["tasks"], p.stdout
@@ -101,37 +117,14 @@ class WaveTest(unittest.TestCase):
         with open(os.path.join(self.eval, "tasks", label, "run", "lane.trace")) as f:
             return f.read()
 
-    def test_allocation_gives_spare_gpus_to_the_costliest_task(self):
-        rows = [{"label": "moe", "need": 1, "cost": 300.0}, {"label": "gemm", "need": 1, "cost": 50.0},
-                {"label": "ar", "need": 8, "cost": 10.0}]
-        share = W.allocate(rows, 4, cap=4)
-        self.assertEqual(share, {"moe": 3, "gemm": 1, "ar": 8})
-        self.assertEqual(W.allocate(rows[:2], 8, cap=4), {"moe": 4, "gemm": 4})   # none idle
-        many = [{"label": str(i), "need": 1, "cost": float(i)} for i in range(10)]
-        self.assertEqual(set(W.allocate(many, 4, cap=4).values()), {1})
-
-    def test_lanes_run_concurrently_pinned_and_are_timed_alone(self):
-        self.tasks([("moe", "fused_moe", 100, 1, "ok"), ("gemm", "gemm", 50, 1, "ok"),
-                    ("norm", "rmsnorm", 40, 1, "ok")])
+    def test_correctness_wave_finishes_without_any_timing(self):
+        self.tasks([("gemm", "gemm", 3, 1, "ok"), ("norm", "rmsnorm", 2, 1, "ok")])
         res, out = self.wave()
-        self.assertEqual({k: v["status"] for k, v in res.items()},
-                         {"moe": "passed", "gemm": "passed", "norm": "passed"}, out)
-        spans = {}
-        for t in res:
-            lines = self.trace(t).split("\n")
-            spans[t] = (float(lines[0].split()[1]), float(lines[-2].split()[1]))
-        # every lane overlaps every other: they ran at the same time
-        self.assertLess(max(s for s, _ in spans.values()), min(e for _, e in spans.values()))
-        # 4 GPUs, 3 tasks: moe (largest cost) holds two, each lane sees its GPUs as 0..k-1
-        self.assertIn("GPU_IDS=0,1", self.trace("moe"))
-        gpus = sorted(res[t]["gpus"] for t in res)
-        self.assertEqual(sorted(g for gs in gpus for g in gs), [0, 1, 2, 3])
-        # the timing tail ran once per task, with --reuse, on all four GPUs
-        with open(os.path.join(self.eval, "tasks", "gemm", "run", "ut_calls.log")) as f:
-            calls = f.read()
-        self.assertIn("--reuse GPU_IDS=0,1,2,3", calls)
-        with open(os.path.join(self.eval, "ut_wave", "wave.json")) as f:
-            self.assertEqual(json.load(f)["env"]["SGLANG_USE_AITER"], "1")
+        self.assertEqual({r["status"] for r in res.values()}, {"passed"}, out)
+        for name in res:
+            td = os.path.join(self.eval, "tasks", name)
+            self.assertFalse(os.path.exists(os.path.join(td, "run", "timing.trace")))
+            self.assertTrue(W.passed(td))
 
     def test_blockers_runner_78_and_a_second_attempt(self):
         self.tasks([("a", "gemm", 10, 1, "block"), ("b", "gemm", 10, 1, "runner78"),
@@ -145,15 +138,6 @@ class WaveTest(unittest.TestCase):
         self.assertIn("continuation", self.trace("c"))
         self.assertEqual((res["d"]["status"], res["d"]["attempts"]), ("failed", 2))
 
-    def test_a_multi_gpu_task_waits_for_the_single_gpu_lanes(self):
-        self.tasks([("ar", "all_reduce", 5, 4, "ok"), ("g1", "gemm", 10, 1, "ok"),
-                    ("g2", "gemm", 10, 1, "ok")])
-        res, out = self.wave("--timing", "lane")
-        self.assertEqual({v["status"] for v in res.values()}, {"passed"}, out)
-        self.assertEqual(res["ar"]["gpus"], [0, 1, 2, 3])
-        ar_start = float(self.trace("ar").split("\n")[0].split()[1])
-        for t in ("g1", "g2"):
-            self.assertGreater(ar_start, float(self.trace(t).split("\n")[-2].split()[1]))
 
     def planned(self):
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ut_wave.py"), "plan",
@@ -167,6 +151,140 @@ class WaveTest(unittest.TestCase):
         time.sleep(0.05)
         os.utime(os.path.join(self.eval, "tasks", "a", "unittest.py"))   # a changed after its receipt
         self.assertEqual(self.planned(), ["a"])
+
+    def test_on_demand_authors_overlap_without_gpu_and_request_only_needed_cards(self):
+        W.save(os.path.join(self.eval, 'serving.json'), {'gpus': '3,7'})
+        self.tasks([('a', 'gemm', 10, 1, 'ok'), ('b', 'gemm', 10, 1, 'ok'),
+                    ('ar', 'all_reduce', 10, 2, 'ok')])
+        res, out = self.wave('--gpus', '3,7')
+        self.assertEqual({r['status'] for r in res.values()}, {'passed'}, out)
+        spans = []
+        for name in res:
+            self.assertEqual(res[name]['gpus'], [])
+            start, end = self.trace(name).splitlines()
+            self.assertIn('ROCR= GPU_IDS=', start)
+            spans.append((float(start.split()[1]), float(end.split()[1])))
+        self.assertLess(max(s for s, _ in spans), min(e for _, e in spans))
+        paths = list(Path(self.eval, 'ut_wave', 'gpu_queue').glob('*/request.json'))
+        self.assertEqual(len(paths), 3)
+        for path in paths:
+            req = W.load(str(path))
+            result = W.load(str(path.with_name('result.json')))
+            self.assertEqual(result['returncode'], 0)
+            self.assertTrue(set(result['gpus']) <= {3, 7})
+            self.assertEqual(len(result['gpus']), 2 if req['task'] == 'ar' else 1)
+            calls = Path(self.eval, 'tasks', req['task'], 'run', 'ut_calls.log').read_text()
+            self.assertIn('GPU_IDS=0,1' if req['task'] == 'ar' else 'GPU_IDS=0', calls)
+            self.assertFalse(Path(self.eval, 'tasks', req['task'], 'run', 'timing.trace').exists())
+
+
+    def test_stopped_on_demand_wave_drains_before_resuming_same_task(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        ut = Path(self.eval, 'tasks', 'a', 'unittest.py')
+        ut.write_text('''import os, time
+once = os.path.join(os.path.dirname(__file__), 'run', 'once')
+if not os.path.exists(once):
+    open(once, 'w').close()
+    time.sleep(600)
+''' + FAKE_UT)
+        first, _ = self.wave('--max-wall-sec', '3')
+        self.assertEqual(first['a']['status'], 'running')
+        queue = Path(self.eval, 'ut_wave', 'gpu_queue')
+        old = list(queue.glob('*/result.json'))
+        self.assertEqual(len(old), 1)
+        self.assertEqual(W.load(str(old[0]))['returncode'], 130)
+        res, out = self.wave()
+        self.assertEqual(res['a']['status'], 'passed', out)
+        results = list(queue.glob('*/result.json'))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(Q.last_command_passed(str(queue.parent), 'a'))
+
+    def test_failed_gpu_envelope_prevents_receipt_reuse_and_force_retries(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        self.wave()
+        self.assertEqual(self.planned(), [])
+        result = next(Path(self.eval, 'ut_wave', 'gpu_queue').glob('*/result.json'))
+        state = W.load(str(result))
+        state['returncode'] = 86  # simulate a post-command source audit invalidating its receipt
+        W.save(str(result), state)
+        self.assertEqual(self.planned(), ['a'])
+        res, out = self.wave('--force')
+        self.assertEqual(res['a']['status'], 'passed', out)
+        self.assertTrue(Q.last_command_passed(str(result.parent.parent.parent), 'a'))
+
+    def test_group_request_does_not_hold_a_partial_set(self):
+        import fcntl
+        locks = Path(self.tmp, 'locks')
+        locks.mkdir()
+        with open(locks / 'gpu_7.lock', 'w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.assertEqual(Q.try_lease([3, 7], 2, str(locks), lambda _: True), ([], []))
+            gpus, fds = Q.try_lease([3], 1, str(locks), lambda _: True)
+            self.assertEqual(gpus, [3])
+            Q.release(fds)
+        gpus, fds = Q.try_lease([3, 7], 2, str(locks), lambda _: True)
+        self.assertEqual(gpus, [3, 7])
+        Q.release(fds)
+
+    def test_cpu_docker_has_no_devices_and_gpu_container_has_only_leased_nodes(self):
+        backend = W.Docker(self.tmp, 'pinned:image')
+        with mock.patch.dict(os.environ, {'UT_WAVE_CONTAINER_PREFIX': ''}):
+            self.assertNotEqual(W.Docker(self.tmp, 'image').cname('a'),
+                                W.Docker(self.tmp + '/other', 'image').cname('a'))
+        with mock.patch.object(W.subprocess, 'run') as run, mock.patch.object(W.os.path, 'exists', return_value=True):
+            run.return_value = subprocess.CompletedProcess([], 0, stdout='', stderr='')
+            backend.start('author', [], ['worker.py'], {'ROCR_VISIBLE_DEVICES': '0,1,2,3'})
+            cpu = run.call_args.args[0]
+            self.assertNotIn('--device', cpu)
+            self.assertIn('ROCR_VISIBLE_DEVICES=', cpu)
+            backend.start('gpu_job', [3, 7], ['worker.py'], {'ROCR_VISIBLE_DEVICES': '0,1,2,3'})
+            gpu = run.call_args.args[0]
+            devices = [gpu[i + 1] for i, arg in enumerate(gpu) if arg == '--device']
+            self.assertEqual(devices, ['/dev/kfd', '/dev/dri/renderD152', '/dev/dri/renderD184'])
+            self.assertIn('GPU_IDS=0,1', gpu)
+            self.assertNotIn('ROCR_VISIBLE_DEVICES=0,1,2,3', gpu)
+
+    def pool_plan(self, gpus=None):
+        args = SimpleNamespace(eval_dir=self.eval, gpus=gpus, tasks=None, force=False)
+        return W.cmd_plan(args, quiet=True)[1]
+
+    def test_gpu_pool_inherits_workload_and_can_only_be_narrowed(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        for allowed in ('', '0,1,2,3,4,5,6,7'):
+            with self.subTest(allowed=allowed), mock.patch.dict(
+                    os.environ, {'GEAK_GPU_ALLOWED': allowed, 'ROCR_VISIBLE_DEVICES': ''}):
+                self.assertEqual(self.pool_plan(), [0, 1, 2, 3])
+                self.assertEqual(self.pool_plan('1,3'), [1, 3])
+                for gpus in ('0,1,2,3,4', '4,5', '0,7'):
+                    with self.assertRaisesRegex(SystemExit, 'exceed workload'):
+                        self.pool_plan(gpus)
+
+    def test_scheduler_allocation_can_further_restrict_workload_pool(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '0,1', 'ROCR_VISIBLE_DEVICES': ''}):
+            self.assertEqual(self.pool_plan('0'), [0])
+            with self.assertRaisesRegex(SystemExit, 'GEAK_GPU_ALLOWED'):
+                self.pool_plan('2')
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '', 'ROCR_VISIBLE_DEVICES': '2,3'}):
+            self.assertEqual(self.pool_plan('2'), [2])
+            with self.assertRaisesRegex(SystemExit, 'inherited ROCR'):
+                self.pool_plan('1')
+
+    def test_parent_workload_and_gpu_zero_still_bound_explicit_pool(self):
+        self.tasks([('a', 'gemm', 10, 1, 'ok')])
+        Path(self.eval, 'serving.json').unlink()
+        W.save(os.path.join(self.tmp, 'serving.json'), {'gpus': 0})
+        with mock.patch.dict(os.environ, {'GEAK_GPU_ALLOWED': '', 'ROCR_VISIBLE_DEVICES': ''}):
+            self.assertEqual(self.pool_plan(), [0])
+            with self.assertRaisesRegex(SystemExit, 'exceed workload'):
+                self.pool_plan('1')
+
+    def test_invalid_workload_allocation_cannot_be_bypassed_with_explicit_gpus(self):
+        for value in ('', None, '0,0', '0,,1', [], 'bad'):
+            with self.subTest(value=value):
+                W.save(os.path.join(self.eval, 'serving.json'), {'gpus': value})
+                with self.assertRaisesRegex(SystemExit, 'serving.json'):
+                    self.pool_plan('0')
 
 if __name__ == "__main__":
     unittest.main()

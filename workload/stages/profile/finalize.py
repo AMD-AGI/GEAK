@@ -25,6 +25,7 @@ and every claim is carried by a file somebody can open. `$PARAMS` is the executa
 policy; a skill's own documented default never overrides it (stages/CONTRACT.md).
 """
 
+import math
 import os
 import sys
 
@@ -172,22 +173,40 @@ def scope_findings(selection, ranking, scope):
 
 
 def denominator(out, ranking):
-    """(milliseconds, source) for the share denominator, or (None, None).
+    """(milliseconds, source), or (None, source) for normalized config means.
 
     Two shapes are accepted because both are real: a skill that writes a separate
     `kernel_workload.json` census, and a skill that reuses a prior census and carries its
     denominators inside the ranking. What the slot requires is that the number every
     share is a fraction of can be named, not that a particular file exists."""
+    denominators = ranking.get("denominators") or {}
+    if "config_weights" in denominators:
+        weights = denominators.get("config_weights")
+        configs = denominators.get("per_config")
+        def positive(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+        if (not isinstance(weights, dict) or not weights or not isinstance(configs, dict)
+                or set(weights) != set(configs) or not all(positive(w) for w in weights.values())
+                or not math.isclose(sum(weights.values()), 1.0, abs_tol=1e-8)):
+            return None, None
+        for doc in configs.values():
+            if not isinstance(doc, dict) or not any(positive(doc.get(k)) for k in
+                    ("total_device_ms", "total_gpu_time_ms", "total_ms", "total_device_us")):
+                return None, None
+        # Mean per-config percentages have no single measured millisecond denominator.
+        return None, "kernel_ranking.json:denominators.per_config (config-normalized mean)"
     workload = read_json(os.path.join(out, "kernel_workload.json"), default={})
     for key in ("total_gpu_time_ms", "total_device_ms", "total_ms"):
         value = workload.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             return float(value), "kernel_workload.json:%s" % key
-    denominators = ranking.get("denominators") or {}
     for key in ("total_device_ms", "total_gpu_time_ms", "total_ms"):
         value = denominators.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             return float(value), "kernel_ranking.json:denominators.%s" % key
+    value = denominators.get("total_device_us")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+        return float(value) / 1000.0, "kernel_ranking.json:denominators.total_device_us"
     return None, None
 
 
@@ -317,11 +336,16 @@ def reported_coverage(out):
     return numeric[0], numeric[1]
 
 
-def main():
+def main(params_override=None, require_serving_coverage=True):
     out = os.environ.get("OUT")
     if not out:
         print("OUT is not set; run run.py prepare profile first", file=sys.stderr)
         return 2
+
+    params = stage_params(out) if params_override is None else params_override
+    if params.get("output_kind") == "dispatch_evidence":
+        from handoff import finalize_evidence
+        return finalize_evidence(out, params)
 
     missing = [f for f in REQUIRED if not os.path.exists(os.path.join(out, f))]
     if missing:
@@ -337,7 +361,6 @@ def main():
               for t in targets}
 
     status, notes = "ok", []
-    params = stage_params(out)
     try:
         scope = configured_scope(params)
     except ValueError as exc:
@@ -349,7 +372,7 @@ def main():
         notes.append(note)
 
     census_ms, census_source = denominator(out, ranking)
-    if census_ms is None:
+    if census_source is None:
         status = worse(status, "blocked")
         notes.append("no census denominator can be resolved: neither "
                      "kernel_workload.json nor kernel_ranking.json.denominators carries a "
@@ -366,6 +389,9 @@ def main():
     tasks_dir = os.path.join(out, "tasks")
     names = sorted(n for n in (os.listdir(tasks_dir) if os.path.isdir(tasks_dir) else [])
                    if os.path.isdir(os.path.join(tasks_dir, n)))
+    if not names and not require_serving_coverage:
+        status = worse(status, "blocked")
+        notes.append("No standalone UT tasks were generated; accounted-for blockers are not a UT delivery.")
     evidence = [task_evidence(out, n) for n in names]
     broken = [e for e in evidence if e["lack"]]
     ut_green = [e for e in evidence if not e["lack"] and not e["ut"]]
@@ -420,7 +446,7 @@ def main():
     owned_pct = sum(shares[i] for i in owned_ids)
     blocked_pct = sum(shares[i] for i in blocked_ids)
     declared_pct, achieved_pct = reported_coverage(out)
-    if achieved_pct is None:
+    if achieved_pct is None and require_serving_coverage:
         status = worse(status, "blocked")
         notes.append("results.json reports no achieved coverage "
                      "(coverage.delivered_achieved_pct_gpu_time, or per-identity "
@@ -428,7 +454,7 @@ def main():
                      "it: a task can own a kernel its captured operands never launch, and "
                      "without that number the delivery cannot be told apart from one that "
                      "covered everything it declared.")
-    else:
+    elif achieved_pct is not None:
         if declared_pct is None:
             declared_pct = owned_pct
         if achieved_pct > declared_pct + EPSILON:
@@ -476,6 +502,8 @@ def main():
         "selected_pct_gpu_time": round(sum(shares.values()), 5),
         "census_denominator_ms": census_ms,
         "census_denominator_source": census_source,
+        "census_config_denominators": (ranking.get("denominators") or {}).get("per_config"),
+        "census_config_weights": (ranking.get("denominators") or {}).get("config_weights"),
         "selection_top_k": scope[0],
         "selection_overall_pct_gt": scope[1],
         "identities_owned_by_tasks": len(owned_ids),
@@ -496,8 +524,12 @@ def main():
         "acceptance_task_completion": not broken and not undelivered and bool(names),
         "acceptance_gpu_ut_status": bool(names) and len(ut_green) == len(names),
         "acceptance_delivery_consistency": bool(names) and len(gate_green) == len(names),
+        "serving_coverage_known": achieved_pct is not None,
     }
 
+    if not require_serving_coverage and achieved_pct is None:
+        notes.append("UT acceptance uses the frozen case and source-delivery receipts. Exact "
+                     "whole-serving coverage remains unknown and is not inferred from a UT pass.")
     return emit(status=status, artifacts=artifacts, metrics=metrics,
                 notes="; ".join(notes))
 

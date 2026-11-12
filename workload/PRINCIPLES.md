@@ -2,8 +2,13 @@
 
 This is a **skill**, not a product and not a framework: an agent chooses bounded
 experiments through modules and their implementations. The five-stage standard recipe
-remains available with its existing budgets. `README.md` says how it works.
+remains available with its existing budgets. `README.md` says how it works. Multi-config scenarios add a `ut` stage after
+`profile` (see `stages/ut/README.md`).
 This file says how it is designed and maintained, and is what a PR here is read against.
+
+Profiling and UT generation may be separate stages (`profile` → `ut`) so completed
+dispatch evidence can be reused without repeating GPU captures. Their boundary is a
+versioned artifact contract; the original combined profile skill remains compatible.
 If a rule is wrong, change *it* here, with the reason.
 
 ## Design

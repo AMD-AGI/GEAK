@@ -32,129 +32,65 @@ Record both call mass and baseline-time mass. Configured caps and graph capture
 lists constrain possible shapes; runtime evidence establishes their mass and
 served eager fallbacks. Keep unobserved envelope probes at zero observed weight.
 
-## Turn observed shapes into trace sampling points
+## One sampling path for one or many configs
 
-**Run the scripts below rather than reimplementing them.** Everything in this
-section used to be prose only, and the predictable result was that each agent wrote its
-own log parser, its own sampling heuristic and its own coverage arithmetic — so two
-runs against the same deployment produced different points, different denominators and
-different coverage claims, none of them comparable. The pipeline is now executable, and
-the prose that follows is the reasoning behind it, not a specification to implement.
+Each input config directory holds `serving.json`, `runtime_identity.json` and
+`evidence/observed_workload.json`. Pin the actual image, model/source revisions and
+GPU architecture as described in [shared sampling](multi-config-sampling.md).
+A single config uses exactly the same planner and evidence schema as several configs.
 
 ```bash
-# 1. log + config -> what the measured leg actually executed
-python3 "$SKILL_ROOT/scripts/observed_workload.py" \
-    --log <serving log> --rank 0 --server-info server_info.json \
-    --bench-log <client bench log> --completed-output-tokens <N> \
-    --out "$EVAL_DIR/evidence/observed_workload.json"
+# CONFIG_DIR is one input config directory; repeat observation for each supplied config.
+python3 "$TOOLS/scripts/observed_workload.py" \
+    --log <serving-log> --rank 0 --server-info <server-info.json> \
+    --bench-log <client-bench-log> --completed-output-tokens <N> \
+    --out "$CONFIG_DIR/evidence/observed_workload.json"
 
-# 2. distribution + budget -> N sampling points, each annotated with the mass it stands for
-python3 "$SKILL_ROOT/scripts/plan_sampling_points.py" \
-    --observed "$EVAL_DIR/evidence/observed_workload.json" -n 6 \
-    --server-info server_info.json --out "$EVAL_DIR/sampling_points.json"
-
-# 3. one server (probe_server.py, from serving.json), every point back to back, census in
-#    the background, relabel, ledger, ranking, selection, then the evidence a task needs
-#    (shapes, source map, adjacency) and a draft task_decls.json. Resumable.
-python3 "$SKILL_ROOT/scripts/probe_server.py" run --serving "$EVAL_DIR/serving.json" \
-    --run-dir "$EVAL_DIR/probe" -- \
-  python3 "$SKILL_ROOT/scripts/run_points.py" --server-state "$EVAL_DIR/probe/probe_server.json" \
-    --points "$EVAL_DIR/sampling_points.json" \
-    --observed "$EVAL_DIR/evidence/observed_workload.json" --eval-dir "$EVAL_DIR"
-# -> evidence/{probe,census,shapes}/*.json, evidence/{source_map,adjacency}.json,
-#    sampling_points_final.json, coverage.json, kernel_ranking.json,
-#    selection_targets.json, task_decls.json (draft), profile_run.json (per-step timings)
-
-# the same steps one at a time, for a single point or a re-run:
-python3 "$SKILL_ROOT/scripts/serving_probe.py" --points "$EVAL_DIR/sampling_points.json" \
-    --point-id de_5 --base-url http://127.0.0.1:PORT --trace-dir <dir>/de_5 \
-    --expect-files 8 --vocab-size <config.json vocab_size> \
-    --out "$EVAL_DIR/evidence/probe/de_5.json"
-python3 "$SKILL_ROOT/scripts/point_census.py" --trace-dir <dir>/de_5 --phase DECODE \
-    --point-id de_5 --out "$EVAL_DIR/evidence/census/de_5.json"
-python3 "$SKILL_ROOT/scripts/coverage_ledger.py" --points "$EVAL_DIR/sampling_points.json" \
-    --census de_5="$EVAL_DIR/evidence/census/de_5.json" ... --out "$EVAL_DIR/coverage.json"
-python3 "$SKILL_ROOT/scripts/build_ranking.py" --coverage "$EVAL_DIR/coverage.json" \
-    --eager-captured DECODE --probe-result "$EVAL_DIR/evidence/probe/*.json" \
-    --out "$EVAL_DIR/kernel_ranking.json"
+# For one config supply one --config; for several repeat it with distinct IDs.
+python3 "$PROFILE_SLOT/multi_config.py" plan --group-dir "$EVAL_DIR" \
+    --config default="$CONFIG_DIR" --num-points <global-budget>
+python3 "$PROFILE_SLOT/multi_config.py" capture --group-dir "$EVAL_DIR"
+python3 "$PROFILE_SLOT/multi_config.py" project --group-dir "$EVAL_DIR" --merge
+python3 "$PROFILE_SLOT/multi_config.py" select --group-dir "$EVAL_DIR" --params "$PARAMS"
 ```
 
-Properties of this path worth knowing before you deviate from it:
+`PROFILE_SLOT` is `$WORKLOAD_ROOT/stages/profile`, and
+`TOOLS=$PROFILE_SLOT/kernel-extract`; set these paths explicitly outside the pipeline. A common `--runtime-identity <file>` can replace per-config identity files.
+`--num-points` is a global point budget. The retired time-budget planner's fixed
+GLM-5.2 throughput estimates are not used to choose points for other deployments.
 
-- **Traces are read with `trace_scan.py`, never `json.load`.** An eager decode trace is
-  ~280 MB of gzip (~4 GB of JSON) per rank; `json.load` takes ~60 s and ~16 GB of memory
-  per rank, which also rules out parsing the ranks in parallel. The streaming scan takes
-  ~20 s and ~300 MB, checks its row counts against the raw category counts and falls
-  back to `json.load` itself if they disagree. Measured on GLM-5.2 TP8: an 8-rank decode
-  census in 22 s, matching the hand-written census's compute time to 0.03%.
-- `serving_probe.py` verifies on one rank, closes when the trace files settle rather than
-  waiting out `--window-timeout`, aborts its decode requests and returns only on an empty
-  batch, so the next point starts clean on the same server. Its decode prompts depend on
-  the request index only, so a larger-batch point re-prefills only its new requests. It
-  defaults to 8 steps in both phases.
-- A decode window whose `step[VERIFY|DECODE ...]` span appears only on the CPU timeline
-  was captured under the CUDA graph: `serving_probe.py` fails it as `graph_hidden` and
-  `run_points.py` does not spend a recapture on it. Restart the server eagerly.
-- `probe_server.py` keeps decode under its CUDA graph and adds
-  `--enable-profile-cuda-graph`, so decode runs as deployed and the profiler sees the
-  replayed kernels. If the server rejects the flag, or a decode window still comes back
-  graph-hidden, it restarts eagerly and `run_points.py` recaptures only those points with
-  `--decode-eager`. probe_server.json records which mode was used.
-- Decode kernels replayed from the CUDA graph are visible with `--enable-profile-cuda-graph`
-  (verified on sglang 0.5.20: five decode points in ~20 s each, collective wait 4% of
-  decode) but carry no launching op and no source frame. Their costs stay from the graph
-  windows; `run_points.py` asks for one eager evidence window at the smallest decode
-  batch and `probe_server.py` serves it (~4 min with a warm JIT), after which
-  `source_map.py` uses the eager frames. That window never enters the ledger.
-- A prefill point is driven as ONE request with the batch's new tokens over one
-  sequence's share of the cached prefix: sglang admits concurrent requests one extend
-  at a time, so splitting a two-sequence batch measured half of it (measured: 32768 ->
-  16416), and the old one-request-per-sequence form measured twice it.
-- `relabel_points.py` sets every point to the shape its probe achieved (a two-sequence
-  batch admitted one request at a time, a prefix residue) and re-partitions the observed
-  instances over the achieved shapes; the instances no point covers within the ledger's
-  tolerance are reported as bands, which `plan_ut_cases.py` turns into bucket cases.
-  `point_census.py` takes the window's shape nearest the planned one, not the most
-  expensive one, so a merged extend in the same window cannot replace the point.
-- `kernel_shapes.py` (record_shapes + with_stack, which serving_probe arms by default)
-  gives each selected kernel's launch variants, launches per instance, launching op with
-  operand dims/dtypes/strides/scalars, and Python frames; `source_map.py` resolves the
-  frames to installed files and `module:Class.method` (run it in the serving container);
-  `adjacency.py` gives consecutive-launch evidence between selected kernels.
-- `point_census.py` defines the instance (one prefill batch = target EXTEND + its draft;
-  one decode iteration = anchor to anchor) and splits collectives per launch: the
-  min-over-ranks duration is transfer, each rank's excess is `__collective_wait__`.
-  Under eager decode that wait is ~90% of a step; `build_ranking.py --eager-captured
-  DECODE` takes it out of the denominator (it does not exist under the graph) and reports
-  how much it was. `__untracked_tail__` and `__collective_wait__` are never rankable.
+The planner keeps exact observed shape, sequence count and graph mode, with an
+explicit context tolerance. It balances normalized per-config/per-phase proxy mass;
+it never equates prefill tokens or decode iterations with measured GPU time.
+`sampling_plan.json` records the union, chosen observations and unselected mass.
+`project` reweights the measured points using each config's own original log.
 
+The capture helper leases each deployment's full GPU set and invokes
+`probe_server.py` / `run_points.py`. Those tools can also be invoked directly with
+an existing pool's `sampling_points.json` for a targeted retry. They produce profile
+evidence only; UT declaration/scaffolding is a separate explicit stage.
 
-- `parse_profile.py` phase-classifies forwards from the step-span dialect its
-  `STEP_DIALECTS` registry knows, and a trace whose step spans are in an unregistered
-  dialect **raises**. It used to return an empty phase split, which is indistinguishable
-  from a trace with no forwards in it, and silently zeroed every per-phase number
-  downstream. A new serving stack costs one registry entry.
-
-- `observed_workload.py` **refuses to guess `decode_log_interval`**. Each decode row
-  stands for that many iterations, so a wrong value scales the entire decode mass.
-  It also cross-checks the expansion against completed output tokens — two routes to
-  request-steps that share no term — and prints the disagreement.
-- `plan_sampling_points.py` splits the budget **evenly between phases by default**,
-  because the prefill proxy (tokens) and the decode proxy (iterations) are different
-  units and comparing them as device time would silently decide the split. After the
-  first census, re-run with `--phase-budget` to put the points where the time is.
-- `serving_probe.py` encodes the arming rules in *Trace integrity* below as code:
-  confirm occupancy from the server's own counters before arming, arm **once**, never
-  `profile_by_stage`, close in a `finally`, then parse the trace back and assert the
-  intended phase and shape are in it.
-- `coverage_ledger.py` **refuses to report mass coverage for a phase measured at one
-  point**, because a UT at that point covers 100% of a denominator built from that same
-  measurement. It reports instance coverage instead and says why. It reads
-  `parse_profile.py`'s own output as a census directly — dividing the window total by
-  that file's per-phase step count, keeping only the point's phase, and booking the mass
-  below the top-N cut to `__untracked_tail__` so a truncated census cannot shrink the
-  denominator. It refuses a census that is both mixed-phase and truncated, because the
-  remainder below the cut then belongs to no phase in particular.
+- `trace_scan.py` streams large traces, validates category counts and falls back to
+  JSON parsing when the streaming format does not match.
+- `serving_probe.py` checks phase/shape on one rank, closes after trace files settle,
+  and drains its requests before returning. `point_census.py` checks every rank.
+- `probe_server.py` captures prefill on the declared graph server and normally
+  defers decode to an eager server. `--decode-on-graph` can try graph decode first;
+  graph-hidden or partially traced cycles are rejected and retried eagerly.
+- A graph decode window with valid costs but missing source frames requests one
+  eager evidence window. Its cost is kept outside the original graph census.
+- `point_census.py` counts complete instances: prefill target plus its draft;
+  decode anchor to anchor. Collectives split per launch into transfer and wait,
+  retaining rank-mean mass. `build_ranking.py` records any eager-only wait excluded
+  from the modeled graph denominator.
+- `relabel_points.py` uses achieved query/context shapes and retains uncovered
+  bands. `kernel_shapes.py`, `source_map.py` and `adjacency.py` retain dispatch,
+  operands, installed source frames and companion-launch evidence.
+- `coverage_ledger.py` consumes per-point censuses. A Top-N report is rejected:
+  omitted kernels and mixed phases cannot establish a complete denominator.
+  One measured point gives no mass-coverage percentage for that phase.
+- `observed_workload.py` refuses an unknown decode logging interval and checks
+  reconstructed iterations against completed output tokens.
 
 Start from the completed baseline's logs and measured-leg exports. Reuse matching
 windows already captured from that replay. If kernel costs or dispatch boundaries

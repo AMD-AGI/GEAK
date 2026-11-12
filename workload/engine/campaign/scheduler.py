@@ -174,9 +174,27 @@ def sh(cmd, timeout=60):
 
 # ---------------------------------------------------------------- tasks and state
 
-def discover_tasks(tasks_dir, order_file=None, max_tasks=None, exclude=()):
-    """Task directories are the profile stage's output. Ordering prefers roofline's
-    ranking (descending expected end-to-end gain).
+def task_shares(tasks_dir):
+    """{task: % of merged GPU time} from the profile stage's results.json (sibling of the
+    tasks directory), or {} when it is absent or unreadable."""
+    try:
+        doc = json.load(open(os.path.join(os.path.dirname(os.path.abspath(tasks_dir)),
+                                          "results.json")))
+        return {r["task"]: float(r["selection_pct_gpu_time"]) for r in doc.get("tasks", [])
+                if r.get("task") and r.get("selection_pct_gpu_time") is not None}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+def discover_tasks(tasks_dir, order_file=None, max_tasks=None, exclude=(), order_by="share"):
+    """Task directories are the profile stage's output.
+
+    order_by="share" (default): descending share of the profiled GPU time, read from the
+    profile stage's results.json. A roofline model that cannot model a task leaves its
+    expected gain null, and ranking by gain then put the largest task of a campaign
+    (24% of GPU time, unmodelled) behind eight tasks worth 35% together. The share is
+    measured for every task. Falls back to the roofline order when no share is known.
+    order_by="roofline": descending expected end-to-end gain from --order-file.
 
     The order matters: with fewer GPUs than kernels, which kernels run first decides
     whether this campaign moves the end-to-end number at all.
@@ -185,7 +203,10 @@ def discover_tasks(tasks_dir, order_file=None, max_tasks=None, exclude=()):
                      if os.path.isdir(os.path.join(tasks_dir, d, "kernel_src"))
                      and d not in set(exclude))
     ordered = []
-    if order_file and os.path.exists(order_file):
+    share = task_shares(tasks_dir) if order_by == "share" else {}
+    if share:
+        ordered = sorted((t for t in present if t in share), key=lambda t: (-share[t], t))
+    elif order_file and os.path.exists(order_file):
         try:
             data = json.load(open(order_file))
             rows = data.get("kernels") if isinstance(data, dict) else data
@@ -597,7 +618,12 @@ def main():
     ap.add_argument("--tasks-dir")
     ap.add_argument("--skill-root")
     ap.add_argument("--runner")
-    ap.add_argument("--order-file", help="roofline.json, ranked by expected e2e gain")
+    ap.add_argument("--order-file", help="roofline.json, ranked by expected e2e gain "
+                                         "(used with --order-by roofline, or when no "
+                                         "GPU share is known)")
+    ap.add_argument("--order-by", choices=("share", "roofline"), default="share",
+                    help="task order: share of profiled GPU time (default, from "
+                         "profile/out/results.json) or roofline's expected gain")
     ap.add_argument("--gpus", default="")
     ap.add_argument("--gpus-per-task", type=int, default=1,
                     help="default width for a task whose meta.json does not declare "
@@ -688,7 +714,8 @@ def main():
             % (k, v, args.keep_threshold))
 
     excluded = [t for t in args.exclude.split(",") if t.strip()]
-    tasks = discover_tasks(args.tasks_dir, args.order_file, args.max_tasks, excluded)
+    tasks = discover_tasks(args.tasks_dir, args.order_file, args.max_tasks, excluded,
+                           args.order_by)
     if excluded:
         log(args.work_root, "excluded by configuration: %s" % ", ".join(excluded))
     if not tasks:

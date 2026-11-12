@@ -12,5 +12,5 @@ def selected_identities(row):
 def task_records(plan):
     # The standalone skill names a row `task`; older slot deliveries used `name`.
     for row in (plan or {}).get("tasks") or []:
-        name = row.get("name") or row.get("task") or row.get("id") or row.get("short_name")
+        name = row.get("name") or row.get("task") or row.get("label") or row.get("id") or row.get("short_name")
         yield name, selected_identities(row)
