@@ -840,6 +840,31 @@ async function agentT(p, o) {
   return null;
 }
 
+// LANE STOP. A null from agentT does not stop the agent: a timed-out benchmark_engineer kept its UT
+// runs on the GPU for 2+ hours after its lane had failed, and the retried lane timed out waiting for
+// that GPU (GEAK #606). So before the lane ENDS on an agent that returned nothing, it stops everything
+// still running under its EVAL_DIR and blocks gpu_lock.sh there (scripts/stop_lane_work.py). Only on
+// lane-ending paths: the stop file blocks every later GPU command under EVAL_DIR. Non-fatal.
+const STOP_LANE_SCHEMA = obj({ ok: { type: 'boolean' }, blocked: { type: 'boolean' },
+  stopped: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  survivors: { type: 'array', items: { type: 'object', additionalProperties: true } } }, []);
+async function stopLaneWork(evalDir, reason, phaseName) {
+  if (!evalDir) return null;
+  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  const cmd = `python3 ${q(`${WORKFLOW_DIR}/scripts/stop_lane_work.py`)} --eval-dir ${q(evalDir)} --block --reason ${q(reason)}`;
+  const r = await agentT(
+    'You are the kernel lane\'s GPU release step. Run EXACTLY this command, once, and return its JSON ' +
+    'stdout verbatim as StructuredOutput. It stops only processes inside this lane\'s EVAL_DIR and never ' +
+    'signals your own shell or its ancestors. Do not edit it, retry it, or act on what it reports; a ' +
+    'non-zero exit is a valid answer, so return what it printed.\n```bash\n' + cmd + '\n```',
+    { phase: phaseName, label: 'stop:lane', schema: STOP_LANE_SCHEMA });
+  if (!r) { log(`  [lane-stop] ${reason}: the stop step returned nothing (NON-FATAL).`); return null; }
+  const n = Array.isArray(r.stopped) ? r.stopped.length : 0;
+  const left = Array.isArray(r.survivors) ? r.survivors.length : 0;
+  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under EVAL_DIR${left ? `, ${left} still up` : ''}; gpu_lock.sh blocked there.`);
+  return r;
+}
+
 // ---------------------------------------------------------------------------
 // WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
 //   DEADLINE_EPOCH  unix seconds after which NO new optimization round may start.
@@ -1052,6 +1077,7 @@ if (MODE === 'author') {
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
     log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no seed to optimize).`);
+    if (!authored) await stopLaneWork(EVAL_DIR, `author:${TARGET_LANGUAGE} returned nothing`, 'Author');
     return {
       mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
       eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
@@ -1095,7 +1121,10 @@ const bench = await agentT(
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
-if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+if (!bench || !bench.baseline_per_case) {
+  await stopLaneWork(EVAL_DIR, 'benchmark_engineer returned no baseline', 'Benchmark');
+  throw new Error('Benchmark setup failed: no baseline recorded');
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);

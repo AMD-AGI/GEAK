@@ -315,7 +315,8 @@ knowledge/learned/   distilled experience cards (ADVISORY priors; each card self
                      kernel-gated (frozen-baseline isolated A/B); e2e-gated lessons stay in
                      e2e_workflow/knowledge/learned/ and cite these cards -- see learned/README.md
 scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), gpu_lease.py (the
-                     group lease manager), sweep_orphan_leases.sh, profile_kernel.sh,
+                     group lease manager), sweep_orphan_leases.sh, stop_lane_work.py (stops and
+                     blocks a failed lane's leftover GPU work), profile_kernel.sh,
                      kb.py ... index      (regenerate a learned/INDEX.md from the cards' discovery
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),

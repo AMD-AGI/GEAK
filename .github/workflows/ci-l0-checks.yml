@@ -148,6 +148,7 @@ jobs:
             kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kernel_workflow/scripts/tests/test_workspace_sources.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
+            kernel_workflow/scripts/tests/test_stop_lane_work.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
