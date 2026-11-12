@@ -1,4 +1,26 @@
-# The `optimize` slot
+# Optimize
+
+Produce an isolated candidate under the plan's declared scope and validation contract.
+Kernel calls use the shared recipe below; serving-system calls use OOB's direct-call
+instructions and their own native quality and effect checks.
+
+## Implementations
+
+| Skill | Method |
+| --- | --- |
+| [geak-kernel-workflow](geak-kernel-workflow/SKILL.md) | **Default.** The existing Kernel Workflow runtime and roles. |
+| [kernel-dynamic-loop](kernel-dynamic-loop/SKILL.md) | Evidence-driven reasoning over small, interchangeable kernel modules. |
+| [oob](oob/SKILL.md) | Direct native coding tools for a qualified kernel or declared system experiment. |
+
+Select with `stages.optimize.skill` or name the implementation in a direct-call plan.
+Kernel methods share dispatch, accounting, frozen-task measurement, KEEP and cold
+verification. System calls follow their declared system validation, not kernel hooks.
+
+The earlier `native-frozen`, `subagent-raw` and `system-oob` entrypoints are consolidated
+into `oob`. Update new-call configurations explicitly; retain original method labels
+in historical receipts.
+
+## Kernel recipe
 
 **What it does**: takes each frozen-harness task extracted by the profile stage
 (`tasks/<kernel>/`), optimizes them one kernel per GPU slot until the time budget is
@@ -14,20 +36,6 @@ normal order). For a standalone smoke run, set `TASKS_DIR` to the fixture task d
 `finalize.py --tasks-dir` remains available for inspecting a delivery directly.
 
 **Output**: `$OUT/optimized.json`, `$OUT/result.json`.
-
-## Implementations
-
-| Skill | Notes |
-| --- | --- |
-| `geak-kernel-workflow/` | **default**. Drives GEAK's `kernel_workflow/kernel_workflow.js`. Requires a runner that exposes the Workflow tool. |
-| `kernel-dynamic-loop/` | an agent chooses small modules through Reasoning → Plan → Module → Report; uses native coding tools and the same frozen-task validation. |
-| `native-frozen/` | the same worker and frozen harness, optimized with the runner's own coding tools. Use it when the runner is a plain coding CLI, and for collectives: `kernel_workflow.js` takes a pool lock on one GPU. |
-| `subagent-raw/` | the "bare agent" option required by `instruct.md`; also the control group for the GEAK path. |
-
-Switch with `stages.optimize.skill`, or `--set stages.optimize.skill=subagent-raw`.
-
-They differ only in `prompt.sh`. Dispatch, timing, credit, cold verification and the
-verdict are the slot's and are identical for all three.
 
 ## This is an agent-shape stage (contract §2B)
 
@@ -93,8 +101,8 @@ measurement noise. In particular, routed workloads need observed local expert oc
 and short collectives need device timing that is not dominated by host launch overhead.
 Use the already-qualified evidence; repeat qualification only when it is missing or a
 specific defect is found. An unchanged-source control establishes noise, not a kernel win.
-Check that the selected method's tools are available through `$RUNNER`; `native-frozen`
-and `subagent-raw` remain available when the GEAK Workflow tool is absent.
+Check that the selected method's tools are available through `$RUNNER`. OOB and the
+kernel dynamic loop use native coding tools and do not require the GEAK Workflow tool.
 
 If a task's harness needs repair, preserve its old receipts and source snapshots, send
 the defect to the profile slot, and requalify that task before restarting its search.
@@ -338,7 +346,8 @@ Confusing these two tests can discard useful directions before they are measured
   of truth.
 * **A collective gets its whole device set.** `kernel_workflow.js` holds a pool lock that
   selects one GPU; run it on an eight-rank task and seven ranks are missing while the
-  numbers still look like measurements. That is what `native-frozen/` is for.
+  numbers still look like measurements. Select a method that preserves the entire
+  declared device set.
 * **Multi-GPU parallelism requires the docker backend.** The local backend pins only
   through the environment, and an agent resets `ROCR_VISIBLE_DEVICES` in its own
   subprocesses, putting two workers on one physical GPU. Use local only for single-GPU

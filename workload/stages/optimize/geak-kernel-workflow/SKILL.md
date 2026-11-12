@@ -19,7 +19,7 @@ tolerance and KEEP/revert belong to the stage-shared `engine/campaign/worker.sh`
                        <──────────────── $PROMPT_OUT ────────────────┘
 
 So changing the optimization method means a different directory containing a `prompt.sh`
-(see `subagent-raw/` alongside it), with no edit to scheduling or accounting.
+(see `oob/` alongside it), with no edit to scheduling or accounting.
 
 ## What it asks the agent to do
 

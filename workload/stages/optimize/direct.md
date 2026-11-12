@@ -2,10 +2,10 @@
 
 Use the [invocation contract](../CONTRACT.md#direct-module-calls). Kernel implementations
 are [Kernel Workflow](geak-kernel-workflow/SKILL.md),
-[kernel dynamic loop](kernel-dynamic-loop/SKILL.md) and
-[native tools / OOB](native-frozen/SKILL.md); [raw agent](subagent-raw/SKILL.md) is another
-method. They share the frozen-task, budget and cold-verification contract in [README.md](README.md).
-For a serving configuration or implementation experiment use [system OOB](system-oob/SKILL.md).
+[kernel dynamic loop](kernel-dynamic-loop/SKILL.md) and [OOB](oob/SKILL.md).
+They share the frozen-task, budget and cold-verification contract in [README.md](README.md).
+OOB also handles serving-system experiments through direct calls with the plan's system
+validation. The scoped kernel instructions below apply to qualified kernel tasks.
 
 Before dispatch, compare `source_tree.py editable <task>` with the qualified UT contract.
 A callable's binding adapter is not necessarily its editable computation. Missing delivery
