@@ -83,15 +83,33 @@ repeating and interleaving the legs itself (e.g. `--reps N`). On a prepared extr
 takes 20–40 min, and KernelExtract already did it during GPU validation: its result is
 `run/ut_result.json` in the workspace (copied from the task dir). So in this path:
 
-1. **Baseline from the extraction run.** If `run/ut_result.json` has `exit_code: 0`, timing gate ok,
-   and a finite `baseline_ms` for every weighted case in `gates.timing.per_case`, take
-   `baseline_per_case` from it (`latency_ms` = that `baseline_ms`). Do NOT re-time the baseline.
-2. **One correctness check in this workspace** (via gpu_lock), so a relocation problem shows up now and
-   not in verify: use the UT's correctness-only mode if it has one (check `python3 unittest.py --help`,
-   e.g. `--skip-timing`); otherwise run it once normally and, if step 1 found no usable baseline, take
-   the baseline from this run's baseline leg. A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
-3. Do NOT run a separate benchmark, do NOT run the profile command, and do NOT repeat the full
-   benchmark. Re-run only after fixing an error or failed gate.
+1. **Read and preserve the extraction baseline BEFORE invoking the UT** (even correctness-only runs
+   can overwrite `run/ut_result.json`). Run:
+   ```bash
+   python3 "$SKILL_DIR/scripts/read_extraction_baseline.py" --workspace "$WORKSPACE" \
+     --out "$EVAL_DIR/extraction_baseline.json"
+   ```
+   The reader accepts inline `gates.timing.per_case` (MOE/AR), `gates.timing.report` pointing to a
+   JSON object with `per_case` (WOA), and `gates.timing.record` pointing to a JSON list (HCB).
+   References are relative to the workspace. It checks the run's exit code and gates, case coverage,
+   and positive finite times on both legs. When `usable: true`, take `baseline_per_case` from its
+   saved `per_case` (`latency_ms` = `baseline_ms`) and record `source` in the notes.
+2. **Choose exactly one local UT run** (via gpu_lock), so relocation and correctness are checked:
+   - Saved baseline `usable: true` (`next_run: correctness`): use the UT's correctness-only mode if
+     available (read its CLI/code, e.g. `--skip-timing`); otherwise run it once normally.
+   - Saved baseline `usable: false` (`next_run: full`): run the full UT ONCE, with timing enabled,
+     even if a correctness-only mode exists. This run supplies BOTH correctness and the baseline.
+     Re-run the reader after it completes and use its baseline-leg times. If the result is still
+     unusable, report the missing/failed evidence; never invent a baseline.
+   For correctness-only modes that intentionally exit nonzero because timing was skipped, check all
+   non-timing gates using the oracle's documented pass rule. Do not mistake the expected skipped
+   timing gate for a failed correctness gate. A single Bash tool call is killed after 10 min, and one
+   UT run takes longer, so start it in the background and poll:
+   `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until
+   `UT_EXIT=` appears.
+3. The selected run above replaces the separate correctness/benchmark/profile sequence and the
+   3 full-benchmark repeats. Do NOT add another benchmark or profile run. Re-run only after fixing an
+   error or failed gate. A full UT pass already includes correctness; do not run correctness again.
 
 The baseline recorded here is informational: absolute ms drift 1–4% between sessions, so verify
 judges a candidate on the UT's own in-run ratio, never on this number (see `verify_engineer.md`).
@@ -167,7 +185,7 @@ profile command too only when `PROFILING` is `on`. Fix anything that errors befo
 
 **Weighted oracle:** you reuse the oracle verbatim, so there is no generated builder and no
 relocation probe to run. Record the oracle's own source binding in `SOURCE_BINDING`. The single
-correctness check (see Step 1) replaces the correctness/benchmark/profile runs above.
+local UT run selected in Step 1 replaces the correctness/benchmark/profile runs above.
 
 ### 4. Write the COMMANDMENT
 Write `EVAL_DIR/COMMANDMENT.md` — the immutable contract. Fill in the EXACT commands discovered/
@@ -240,9 +258,10 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
 }
 ```
 
-**Weighted oracle:** skip the 3 runs. `latency_ms` per case = the baseline-leg time from
-`run/ut_result.json` (or from the one run in Step 1 when that file had none), `runs_ms` holds that
-one run, and `reliable` is `true` when it passed every gate with finite timings on both legs. Say in
+**Weighted oracle:** skip the 3 runs. `latency_ms` per case = the baseline-leg time preserved in
+`EVAL_DIR/extraction_baseline.json` (or read after the one full local UT when extraction had no usable
+baseline), `runs_ms` holds that one timed run, and `reliable` is `true` when it passed every gate with
+finite timings on both legs and the local correctness check passed. Say in
 `notes` where the baseline came from. In the COMMANDMENT's `METRIC`, state that verify uses the UT's
 in-run `GEAK_WEIGHTED_SPEEDUP` and per-case `speedup`, and that `FULL_BENCHMARK` runs once.
 
