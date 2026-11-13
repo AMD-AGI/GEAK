@@ -53,10 +53,13 @@ Workflow({ scriptPath: "<GEAK>/perf_knowledge/expert_skills/expert_workflows/meg
 }})
 ```
 
-Without a skill this runs the generic lifecycle. To guide it with a MegaMoE Expert Skill, add this
-workflow's own `use_expert_skills=true` plus the pin printed by
-`python perf_knowledge/expert_skills/_contribute/validate_skill.py <skill id> --emit-plan` (skill id,
-revision and component digests). Optional `analysis_skill=moe_bottleneck` adds a route-attribution
+Without a skill this runs the generic lifecycle. To run on-card with a MegaMoE Expert Skill, add this
+workflow's own `use_expert_skills=true`, `expert_skill_id`, `expert_skill_validation_status=experimental`
+(the MegaMoE skills never auto-apply, so the run names their status), `expert_skill_usage=candidate_validation`
+(`authoring` is a GPU-free structural run), and the skill's `expert_skill_bundle_sha256`,
+`expert_skill_planner_extension_sha256` and `expert_skill_contract_sha256` from
+`python perf_knowledge/expert_skills/_contribute/validate_skill.py <skill id> --emit-bundle`; a run whose
+skill files no longer match these digests stops. Optional `analysis_skill=moe_bottleneck` adds a route-attribution
 pass after Profile. All other args (time budgets, final top-k, gates) are read at the top of
 `workflow.js` with their defaults. A caller that is itself a workflow (e.g. e2e) launches `workflow.js`
 the same way, as its one nested level.
