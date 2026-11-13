@@ -25,8 +25,21 @@ if (!WORKFLOW_DIR) {
     'kernel_workflow.js + kernel_lane.js + roles/ + knowledge/ (i.e. the dirname of this script).');
 }
 // The single-language worker lane (unchanged behavior). Same dir as this dispatcher.
+if (A.optimizer != null && typeof A.optimizer !== 'string') {
+  throw new Error('optimizer must be greedy or evo (a string)');
+}
+const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
+if (OPTIMIZER === 'evo' && A.kernel_lane_script) {
+  throw new Error('optimizer=evo cannot override kernel_lane_script');
+}
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
+if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
+  throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
+}
 
 // ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
 // Started HERE so a direct kernel run is tracked from its first agent, not only
