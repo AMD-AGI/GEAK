@@ -125,6 +125,7 @@ jobs:
             e2e_workflow/scripts/tests/test_overlay_installers.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
+            e2e_workflow/scripts/tests/test_seam_trace_compiled.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
             e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
@@ -345,6 +346,8 @@ jobs:
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
+      - name: GPU family table (identical in every workflow)
+        run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
