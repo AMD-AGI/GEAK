@@ -1687,17 +1687,24 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       }
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
-        `sending best_patch.diff to verify anyway (oracle decides).`);
+        `sending best_patch.diff to verify anyway (oracle decides)${eng ? '' : '; verify stops the engineer first'}.`);
+      // A missing return (agentT hit AGENT_TIMEOUT_MS, or gave up after API errors) does not stop the
+      // engineer: agent() cannot be cancelled, so it may still be rebuilding, benchmarking on the shared
+      // GPUs and rewriting best_patch.diff while its verify runs. Verify therefore stops it first
+      // (STOP_ENGINEER), then measures a frozen copy of the patch, and every later step (integrate,
+      // commit) uses that copy, so the patch merged is byte-for-byte the patch verified.
+      const frozen = `${d.out_dir}/verify/candidate.diff`;
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
-          CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          CANONICAL, PATCH: patch, FROZEN_PATCH: frozen, VERIFY_DIR: `${d.out_dir}/verify`,
           ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
+          ...(!eng ? { STOP_ENGINEER: d.out_dir } : {}),
           EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then((ver) => ({ d, eng, ver, patch: frozen }));
     }
   );
 

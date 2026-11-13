@@ -12,6 +12,10 @@ absolute per-case latencies. The script trusts only your numbers.
   on-disk patch to recover (measurement, not the engineer's return, is the source of truth). If the
   file is missing or empty, first check the Engineer's source audit (step 0). Without an invalid
   experiment, return `status:"apply_failed"`, `verified_geomean:0`.
+- `FROZEN_PATCH` — where you freeze `PATCH` before step 0. Every later step reads ONLY this copy;
+  the lane integrates and commits this exact file, never `PATCH`.
+- `STOP_ENGINEER` (optional) — present when the engineer's return never came back (timeout / API
+  failure). The engineer may still be running and rewriting `PATCH`; stop it before step 0.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -21,13 +25,23 @@ absolute per-case latencies. The script trusts only your numbers.
   the immutable oracle's correctness/tolerance.
 
 ## Steps
+Before anything else, stop the engineer if asked and freeze the patch. The stop comes first so the
+copy cannot be a half-written or later-replaced `best_patch.diff`; nothing to stop is fine.
+```bash
+[ -n "${STOP_ENGINEER:-}" ] && bash "$SKILL_DIR/scripts/stop_engineer.sh" "$STOP_ENGINEER"
+mkdir -p "$(dirname "$FROZEN_PATCH")"
+cp "$PATCH" "$FROZEN_PATCH" 2>/dev/null || : > "$FROZEN_PATCH"
+```
+From here on "the patch" means `FROZEN_PATCH`: never re-read or re-copy `PATCH`, even if it changes on
+disk — your numbers must describe exactly the file the lane will merge.
+
 0. When `ENGINEER_WORKSPACE` is supplied, read its `.geak/invalid_measurements.jsonl` if present.
    If the patch is missing/empty and this log records a source-binding failure, return
    `status:"invalid_measurement"`, `correctness:"not_checked"`, zero speedups, no per-case timings,
    and explain that the earlier candidate experiment was invalid. Do NOT treat this as a measured
    no-op or evidence that the edit had no benefit. For an available patch, preserve that history in
    `notes` and proceed with independent measurement after any build defect has been repaired.
-1. Build a clean copy and apply the patch:
+1. Build a clean copy and apply the FROZEN patch:
    ```bash
    # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
    # must never land in verify clones. Script excludes recursive *.so/*.o and aiter/jit, preserves
@@ -39,7 +53,7 @@ absolute per-case latencies. The script trusts only your numbers.
      --shared-root "${EVAL_DIR:-$(dirname "$VERIFY_DIR")}/_shared" --link-aiter
    cd "$WS"
    git checkout -- . 2>/dev/null || true
-   git apply "$PATCH" || { echo "PATCH_APPLY_FAILED"; }
+   git apply "$FROZEN_PATCH" || { echo "PATCH_APPLY_FAILED"; }
    ```
    (Use `$WS` as your verify workspace for all subsequent commands.)
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.

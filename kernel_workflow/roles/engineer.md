@@ -93,6 +93,11 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    Do not edit the frozen harness yourself. Keep `.geak/invalid_measurements.jsonl` as the audit trail.
    If unresolved, save the candidate diff as `best_patch.diff` for recovery, return
    `status:"invalid_measurement"`, `measurement_valid:false`, zero speedups and no per-case timings.
+9. **`$OUTPUT_DIR/STOP` means stop now.** The lane writes it once it has stopped waiting for you
+   (your time limit passed), has killed your running processes and is verifying the patch it froze.
+   Prefix every gpu_lock command and every `best_patch.diff` save with `test ! -e $OUTPUT_DIR/STOP &&`.
+   If STOP exists (or a command dies unexpectedly and STOP is there), run nothing more, change no
+   file, and return at once with `status:"failed"` and a note saying you were stopped.
 
 ## Workflow
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record
