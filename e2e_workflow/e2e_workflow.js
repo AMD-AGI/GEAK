@@ -1030,14 +1030,13 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%): 0.5 for a fixed-shape workload (identical work per replica, isolated
-// measurements, non-overlap and engagement proof). A trace replay varies with which trajectories a
-// replica completes, so it gets a 4% floor; a TTFT-inclusive axis needs an explicit noise_band_pct.
-const NOISE_BAND_AGENTX = 4.0;
-const NOISE_BAND_DEFAULT = parseFloat(
-  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
-// The gate band from the Director's value. The Director starts at 0.5, so on a trace replay it may
-// only raise the band above the workload floor; a fixed-shape run uses the Director's value.
+// Acceptance noise band (%): 0.5 unless the Director or an explicit noise_band_pct widens it. A trace
+// replay's replicas spread a few percent, but that is not its default: one kernel's A/B rarely moves
+// e2e that far, and run_e2e.py holds the final pair to the KEEP rule. A TTFT-inclusive axis needs an
+// explicit noise_band_pct.
+const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// The gate band from the Director's value. On a trace replay an explicit noise_band_pct is a floor
+// the Director can only widen; a fixed-shape run uses the Director's value.
 function gateNoiseBand(reported) {
   const r = parseFloat(reported);
   const director = Number.isFinite(r) && r > 0 ? r : 0;
@@ -3326,7 +3325,7 @@ if (want('setup')) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
       `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
       `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
-      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+      `${A.noise_band_pct != null ? 'noise_band_pct' : 'default'} ${NOISE_BAND_DEFAULT}%).`);
   }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
