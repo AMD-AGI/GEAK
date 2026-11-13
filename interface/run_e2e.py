@@ -662,6 +662,17 @@ def map_args(
     dry_run: bool = False,
 ) -> dict:
     workload = h.get("workload") or {}
+    if h.get("optimizer") is not None and not isinstance(h["optimizer"], str):
+        raise ValueError("optimizer must be greedy or evo (a string)")
+    optimizer = str(h.get("optimizer") or "").strip().lower()
+    if optimizer and optimizer not in {"greedy", "evo"}:
+        raise ValueError("optimizer must be greedy or evo")
+    if optimizer == "evo" and h.get("evolution_source_paths") is not None:
+        source_paths = h.get("evolution_source_paths")
+        if not isinstance(source_paths, list) or any(
+            not isinstance(source_path, str) or not source_path for source_path in source_paths
+        ):
+            raise ValueError("evolution_source_paths must be an optional list of supplemental source files")
     tp = int(h.get("tp", 1) or 1)
     has_explicit_identity = bool(
         str(h.get("expected_gfx") or "").strip()
@@ -970,6 +981,10 @@ def map_args(
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    if optimizer == "evo":
+        ps_args["optimizer"] = "evo"
+        if h.get("evolution_source_paths") is not None:
+            ps_args["evolution_source_paths"] = source_paths
     return ps_args
 
 

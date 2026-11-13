@@ -24,6 +24,13 @@ export const meta = {
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
 const A = args || {};
+if (A.optimizer != null && typeof A.optimizer !== 'string') {
+  throw new Error('optimizer must be greedy or evo (a string)');
+}
+const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/model directory)');
 
 // WORKFLOW_DIR = the directory that holds this script + roles/ + knowledge/ + scripts/.
@@ -38,6 +45,8 @@ if (!WORKFLOW_DIR) {
 // kernel_workflow dir (…/<parent>/kernel_workflow -> …/<parent>/exp). Override with args.exp_root.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
+let EVO = OPTIMIZER === 'evo' ? createEvolution() : null;
+let EVO_FALLBACK = null;   // set when EVO could not start; the lane then runs as the ordinary lane
 const KERNEL_PATH_ORIG = A.kernel_path;
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
@@ -615,6 +624,11 @@ const PLAN_SCHEMA = obj({
     }, ['id', 'title', 'specialty', 'prompt']),
   },
 }, ['stop', 'directions']);
+
+if (EVO) {
+  PLAN_SCHEMA.properties.directions.items.properties.parent_id = { type: 'string' };
+  PLAN_SCHEMA.properties.directions.items.properties.donor_ids = { type: 'array', items: { type: 'string' } };
+}
 
 const ENG_SCHEMA = obj({
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
@@ -1482,6 +1496,14 @@ correctness check; only report committed=true if it still passes. Return JSON {c
   }
 }
 
+if (EVO && !(await EVO.initialize())) {
+  EVO_FALLBACK = EVO.result();
+  EVO = null;
+  // The ordinary lane plans with the ordinary schema: drop the EVO-only lineage fields added above.
+  delete PLAN_SCHEMA.properties.directions.items.properties.parent_id;
+  delete PLAN_SCHEMA.properties.directions.items.properties.donor_ids;
+}
+
 let plannerStopReason = '';
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
@@ -1502,6 +1524,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   // --- (a) Plan the round (TechLead) ------------------------------------
   const planInputs = (forbidStop) => ({
+    ...(EVO ? { EVOLUTION: EVO.plannerInput() } : {}),
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
@@ -1543,9 +1566,11 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
   });
 
+  const evoPlannerRole = EVO
+    ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/planner.md for the opt-in archive tools and selection policy.` : '';
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
-      planInputs(false)),
+      planInputs(false)) + evoPlannerRole,
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
@@ -1561,7 +1586,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
-        planInputs(true)),
+        planInputs(true)) + evoPlannerRole,
       { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
     left = await secondsLeft(`replan-r${round}`);
   }
@@ -1607,7 +1632,16 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
     directions,
-    (d) => {
+    async (d) => {
+      if (EVO) {
+        try {
+          d.evo_prepared = await EVO.prepare(d);
+        } catch (error) {
+          EVO.result().errors.push({ round, operation: 'prepare', id: d.id,
+            message: String(error && error.message || error) });
+          return { d, eng: null, evo_prepare_failed: true };
+        }
+      }
       const isDeep = d.specialty === 'deep_explore';
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
@@ -1622,7 +1656,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
           `knowledge files for your specialty, and follow them.`;
       return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-First create YOUR private workspace, then optimize.
+${EVO ? 'Your selected-parent workspace is already prepared. Do not recreate it.\n' : `First create YOUR private workspace, then optimize.
 \`\`\`bash
 # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Agents that omitted
 # --exclude='*.so' previously copied multi-GiB aiter/jit/*.so into every engineer/verify clone.
@@ -1634,13 +1668,14 @@ bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh \\
   --src ${CANONICAL} --dst ${d.out_dir}/workspace \\
   --shared-root ${EVAL_DIR}/_shared --link-aiter
 \`\`\`
-${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+`}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
 Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>${CANDIDATE_FLOOR_TXT}.
 
 ## Inputs
 ${cfg({
+        ...(EVO ? { EVOLUTION: EVO.engineerInput(d) } : {}),
         SPECIALTY: d.specialty,
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: d.expected_speedup ? `reach ${d.expected_speedup}x (or ~90% of the roofline ceiling), whichever is the harder bar` : 'reach ~90% of the roofline ceiling' } : {}),
@@ -1659,14 +1694,16 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') +
+      (EVO ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/engineer.md for the selected-parent and donor contract.` : ''),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
     ).then((eng) => ({ d, eng }));
     },
 
-    (prev) => {
+    async (prev) => {
       const { d, eng } = prev;
-      const patch = `${d.out_dir}/best_patch.diff`;
+      if (EVO && prev.evo_prepare_failed) return { d, eng, ver: null };
+      let patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
       // best_patch.diff when it beat the floor (the Optimize prompt: "Save best_patch.diff ... when
       // geomean>CANDIDATE_FLOOR"), so a lost/failed StructuredOutput does NOT imply there is no winning patch: an
@@ -1685,6 +1722,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
+      if (EVO) {
+        const custody = await EVO.checkPatch(d, patch);
+        if (!custody) return { d, eng, ver: null };
+        patch = custody.patch_object_path;
+      }
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
@@ -1702,6 +1744,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   );
 
   const clean = results.filter(Boolean);
+  if (EVO) await EVO.recordBatch(clean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
     says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
@@ -1731,17 +1774,19 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+    const integrateCustody = EVO && integrate && integrate.best && integrate.best.patch_file
+      ? await EVO.checkPatch({ id: `r${round}_integrated` }, integrate.best.patch_file) : null;
     const integPrim = integrate && integrate.best ? primSpeedup({
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
-    if (integrate && integrate.conclusion === 'improved' && integrate.best &&
+    if (integrate && (!EVO || integrateCustody) && integrate.conclusion === 'improved' && integrate.best &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
         geomean: integPrim, geomean_unweighted: integrate.best.geomean,
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
-        per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        per_case: integrate.best.per_case || [], patch: EVO ? integrateCustody.patch_object_path : integrate.best.patch_file,
       });
     }
   }
@@ -2120,6 +2165,7 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
   : finalPrimary;
 
 return {
+  ...(EVO ? { evolution: EVO.result() } : EVO_FALLBACK ? { evolution: EVO_FALLBACK } : {}),
   mode: MODE,
   // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
   // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.
@@ -2198,3 +2244,195 @@ return {
   },
   kb_written: kb_written && kb_written.written ? { slug: kb_written.slug, dir: kb_written.dir } : null,
 };
+
+function createEvolution() {
+  let sourcePaths = A.evolution_source_paths == null ? [] : A.evolution_source_paths;
+  if (A.kernel_lane_script) throw new Error('optimizer=evo cannot override kernel_lane_script');
+  if (!['optimize', 'author'].includes(String(A.mode || 'optimize').trim().toLowerCase() || 'optimize')) {
+    throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
+  }
+  function validateSourcePaths(paths) {
+    if (!Array.isArray(paths) || paths.length > 256 ||
+      new Set(paths).size !== paths.length ||
+      paths.some(sourcePath => typeof sourcePath !== 'string' || !sourcePath ||
+        sourcePath.length > 1024 || sourcePath.includes('\\') || sourcePath.startsWith('/') ||
+        sourcePath.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git') ||
+        /[^\x20-\x7e]/.test(sourcePath) || paths.some(other => sourcePath.startsWith(other + '/')))) {
+      throw new Error('EVO analyzed/supplemental evolution_source_paths must list safe relative source files, not directories');
+    }
+    return paths;
+  }
+  const helper = `${WORKFLOW_DIR}/../evo/archive.py`;
+  const errors = [];
+  let archive = '';
+  const quote = value => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+  const command = (operation, values) => ['python3', helper, operation, '--archive', archive, ...values]
+    .map(quote).join(' ');
+
+  async function run(operation, values, prelude = '') {
+    const result = await agentT(
+      'Execute the following deterministic archive command with Bash exactly as supplied. ' +
+      'Do not edit source, repair failures, rerun a successful command, or invent output. ' +
+      'This operation is source bookkeeping, not correctness or performance verification. ' +
+      'Return its actual exit_code and the complete stdout as a string; put diagnostics in stderr.\n' +
+      '```bash\nset -euo pipefail\n' + prelude + command(operation, values) + '\n```',
+      { phase: 'Optimize', label: `evo:${operation}`,
+        schema: obj({ exit_code: { type: 'number' }, stdout: { type: 'string' }, stderr: { type: 'string' } },
+          ['exit_code', 'stdout']) });
+    if (!result || result.exit_code !== 0 || typeof result.stdout !== 'string') {
+      let diagnostic = result ? result.stderr || 'command failed' : 'no return';
+      if (result && typeof result.stdout === 'string') {
+        let receipt;
+        try { receipt = JSON.parse(result.stdout); } catch {}
+        if (receipt && receipt.ok === false && receipt.error &&
+            typeof receipt.error.code === 'string' && typeof receipt.error.message === 'string') {
+          diagnostic = `${receipt.error.code}: ${receipt.error.message}`;
+        }
+      }
+      throw new Error(`EVO ${operation} did not complete: ${diagnostic}`);
+    }
+    let receipt;
+    try { receipt = JSON.parse(result.stdout); } catch { receipt = null; }
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) ||
+        receipt.ok !== true || receipt.command !== operation || receipt.archive !== archive) {
+      throw new Error(`EVO ${operation} returned an invalid receipt`);
+    }
+    return receipt;
+  }
+
+  // Returns the init receipt, or null when EVO cannot start (unusable source list or a failed/invalid
+  // init receipt). The caller then runs the ordinary lane; the reason is kept in result().errors.
+  async function initialize() {
+    try {
+      const editable = analysis && analysis.modifiable_files != null ? analysis.modifiable_files : [];
+      validateSourcePaths(editable);
+      validateSourcePaths(sourcePaths);
+      sourcePaths = validateSourcePaths([...new Set([...editable, ...sourcePaths])].sort());
+      if (!sourcePaths.length) {
+        throw new Error('optimizer=evo requires source files from Analyze modifiable_files or evolution_source_paths');
+      }
+      archive = `${String(EVAL_DIR).replace(/\/+$/, '')}/evolution_archive`;
+      return await run('init', ['--canonical', CANONICAL,
+        ...sourcePaths.flatMap(sourcePath => ['--source-path', sourcePath])]);
+    } catch (error) {
+      const message = String(error && error.message || error);
+      errors.push({ operation: 'init', message, fallback: 'ordinary_lane' });
+      log(`EVO could not start; continuing as the ordinary lane: ${message}`);
+      return null;
+    }
+  }
+
+  function plannerInput() {
+    return { archive, query_command: command('query', []), source_paths: sourcePaths };
+  }
+
+  async function prepare(direction) {
+    const workspace = `${direction.out_dir}/workspace`;
+    const prelude = `mkdir -p ${quote(direction.out_dir)}\n` +
+      ['bash', `${WORKFLOW_DIR}/scripts/materialize_workspace.sh`, '--src', CANONICAL,
+        '--dst', workspace, '--shared-root', `${EVAL_DIR}/_shared`, '--link-aiter'].map(quote).join(' ') +
+        ` > ${quote(`${direction.out_dir}/materialize.json`)}\n`;
+    const donorIds = direction.donor_ids == null ? [] : direction.donor_ids;
+    if (!Array.isArray(donorIds) || donorIds.some(donorId => typeof donorId !== 'string')) {
+      throw new Error('donor_ids must be a list of archive entry IDs');
+    }
+    if (direction.parent_id != null && typeof direction.parent_id !== 'string') {
+      throw new Error('parent_id must be an archive entry ID');
+    }
+    const parentId = direction.parent_id || 'INCUMBENT';
+    const prepared = await run('prepare', ['--workspace', workspace, '--canonical', CANONICAL,
+      '--initialize-index', '--parent', parentId,
+      ...donorIds.flatMap(donorId => ['--donor', donorId])], prelude);
+    if (!prepared.receipt || prepared.receipt.workspace !== workspace ||
+        !/^[a-f0-9]{64}$/.test(prepared.receipt.materialized_canonical_source_id) ||
+        prepared.receipt.requested_parent_id !== parentId || !Array.isArray(prepared.receipt.donors) ||
+        JSON.stringify(prepared.receipt.donors.map(donor => donor.id)) !== JSON.stringify(donorIds)) {
+      throw new Error('prepare receipt does not match the selected workspace, parent and donors');
+    }
+    return prepared;
+  }
+
+  function engineerInput(direction) {
+    return { ...plannerInput(), parent_id: direction.parent_id || 'INCUMBENT',
+      donor_ids: direction.donor_ids || [], prepared: direction.evo_prepared };
+  }
+
+  async function recordBatch(clean) {
+    const reports = clean.map(result => ({
+      id: `r${round}_d${result.d.idx}`,
+      parent_id: result.d.parent_id || 'INCUMBENT', donor_ids: result.d.donor_ids || [],
+      title: result.d.title, workspace: `${result.d.out_dir}/workspace`,
+      patch: result.patch || `${result.d.out_dir}/best_patch.diff`, engineer: result.eng, verifier: result.ver,
+    }));
+    try {
+      const reportJson = JSON.stringify(reports);
+      const receipt = await run('record-batch', ['--canonical', CANONICAL, '--report-json', reportJson,
+        '--report-sha256', sha256Hex(reportJson)]);
+      if (receipt.has_failures) errors.push({ round, operation: 'record-batch', results: receipt.results });
+      return receipt;
+    } catch (error) {
+      const message = String(error && error.message || error);
+      errors.push({ round, operation: 'record-batch', message });
+      log(message);
+      return null;
+    }
+  }
+
+  async function checkPatch(direction, patch) {
+    try {
+      const receipt = await run('check-patch', ['--canonical', CANONICAL, '--patch', patch]);
+      if (typeof receipt.patch_object_path !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.patch_sha256) ||
+          receipt.patch_object_path !== `${archive}/objects/${receipt.patch_sha256}`) {
+        throw new Error('check-patch did not return a bound immutable patch');
+      }
+      return receipt;
+    } catch (error) {
+      const message = String(error && error.message || error);
+      errors.push({ round, operation: 'check-patch', id: direction.id, message });
+      log(message);
+      return null;
+    }
+  }
+
+  return { initialize, plannerInput, prepare, engineerInput, recordBatch, checkPatch, run,
+    result: () => ({ archive, errors }) };
+}
+
+// SHA-256 of a string's UTF-8 bytes (FIPS 180-4). The workflow sandbox has no crypto module; record-batch
+// passes this digest so archive.py can refuse report JSON that changed while an agent retyped the command.
+function sha256Hex(text) {
+  const bytes = [];
+  for (const character of unescape(encodeURIComponent(text))) bytes.push(character.charCodeAt(0));
+  const K = [];
+  for (let candidate = 2, found = 0; found < 64; candidate++) {
+    let prime = true;
+    for (let divisor = 2; divisor * divisor <= candidate; divisor++) if (candidate % divisor === 0) { prime = false; break; }
+    if (prime) { K.push((Math.cbrt(candidate) % 1) * 2 ** 32 >>> 0); found++; }
+  }
+  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const bitLength = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let shift = 56; shift >= 0; shift -= 8) bytes.push(Math.floor(bitLength / 2 ** shift) & 0xff);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  const W = new Array(64);
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      W[i] = (bytes[offset + 4 * i] << 24) | (bytes[offset + 4 * i + 1] << 16) |
+        (bytes[offset + 4 * i + 2] << 8) | bytes[offset + 4 * i + 3];
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotate(W[i - 15], 7) ^ rotate(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+      const s1 = rotate(W[i - 2], 17) ^ rotate(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+    }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + W[i]) | 0;
+      const t2 = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((value, index) => { H[index] = (H[index] + value) | 0; });
+  }
+  return H.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
+}
