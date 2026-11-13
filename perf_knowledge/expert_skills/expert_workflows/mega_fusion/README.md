@@ -53,14 +53,15 @@ Workflow({ scriptPath: "<GEAK>/perf_knowledge/expert_skills/expert_workflows/meg
 }})
 ```
 
-Without a skill this runs the generic lifecycle. To run on-card with a MegaMoE Expert Skill, add this
-workflow's own `use_expert_skills=true`, `expert_skill_id`, `expert_skill_validation_status=experimental`
-(the MegaMoE skills never auto-apply, so the run names their status), `expert_skill_usage=candidate_validation`
-(`authoring` is a GPU-free structural run), and the skill's `expert_skill_bundle_sha256`,
-`expert_skill_planner_extension_sha256` and `expert_skill_contract_sha256` from
-`python perf_knowledge/expert_skills/_contribute/validate_skill.py <skill id> --emit-bundle`; a run whose
-skill files no longer match these digests stops. Optional `analysis_skill=moe_bottleneck` adds a route-attribution
-pass after Profile. All other args (time budgets, final top-k, gates) are read at the top of
+Without a skill this runs the generic lifecycle. To run on-card with a MegaMoE Expert Skill, add
+`expert_skill_id: "<skill id>"`. The run reads the skill's status and digests once at start (skill:pin),
+refuses a skill that is not validated or experimental, and turns on the gates a skill validation needs
+(graph capture and direct graph accuracy, hardware activation, distinct artifacts, attribution, no
+partial fusion); any of them passed explicitly wins. To pin an exact skill version, also pass the three
+digests from `python perf_knowledge/expert_skills/_contribute/validate_skill.py <skill id> --emit-bundle`
+(`expert_skill_bundle_sha256`, `expert_skill_planner_extension_sha256`, `expert_skill_contract_sha256`);
+`expert_skill_usage=authoring` with `mega_structural_only=true` is the GPU-free structural run.
+Optional `analysis_skill=moe_bottleneck` adds a route-attribution pass after Profile. All other args (time budgets, final top-k, gates) are read at the top of
 `workflow.js` with their defaults. A caller that is itself a workflow (e.g. e2e) launches `workflow.js`
 the same way, as its one nested level.
 

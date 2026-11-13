@@ -75,8 +75,9 @@ console.log('\n# backward compatibility: the gate is inert unless the wave opts 
 
 console.log('\n# wiring: the requirement is enforced in code, threaded, and not waived at commit');
 {
-  ok(/const REQUIRE_HW_ACTIVATION = String\(\s*A\.require_hardware_activation/.test(src),
-     'REQUIRE_HW_ACTIVATION is parsed from the launch arg, default OFF');
+  ok(/const REQUIRE_HW_ACTIVATION = gateArg\(A\.require_hardware_activation\);/.test(src) &&
+     /const gateArg = \(value\) => String\(value != null \? value : SKILL_GATES\) === 'true';/.test(src),
+     'REQUIRE_HW_ACTIVATION is parsed from the launch arg, default OFF (ON only for a skill validation run)');
   ok(/requireHardwareActivation: REQUIRE_HW_ACTIVATION/.test(src),
      'functionalRequirementsFor threads it — and, per its comment, NOT gated on strictPath and NOT ' +
      'emptied by runtimeCommit, so a still-slow terminal commit cannot waive it');

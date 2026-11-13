@@ -43,7 +43,11 @@ ok(/one `ls \.\.`|walking up one directory/.test(wf),
 // --- 2. the check fires BEFORE any budget is spent ------------------------
 console.log('\n# it fires before the run costs anything');
 const iCheck = wf.indexOf('REFERENCE NOT CONTAINED');
-const iSetup = wf.indexOf("phase('Setup')");
+// The director's Setup; only skill:pin (expert_skill_id without digests) may run an agent earlier.
+const iSetup = wf.indexOf("phase('Setup');\nconst setup = await agentT(");
+const earlyAgents = wf.slice(0, iCheck).match(/await agent\(/g) || [];
+ok(earlyAgents.length === 1 && wf.slice(0, iCheck).includes("label: 'skill:pin'"),
+   'before the check, the only agent is skill:pin', earlyAgents.length);
 const iLoop = wf.indexOf('while (dispatched < BUDGET');
 ok(iCheck > 0 && iSetup > iCheck, 'containment is asserted before Setup');
 ok(iCheck > 0 && iLoop > iCheck, 'containment is asserted before the optimize loop');
