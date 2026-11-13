@@ -1,9 +1,9 @@
 ---
-name: workload-reasoning
+name: workload-brain
 description: Control a workload campaign as its persistent main agent, choosing bounded module calls from evidence and responding to asynchronous progress or failures.
 ---
 
-# Reasoning
+# Brain
 
 Remain the campaign's main agent: **Reasoning → Plan → Module → Report → Reasoning**.
 This is a continuing responsibility, not a new agent per round. Implementations may

@@ -1,6 +1,6 @@
 # Execution and evidence tools
 
-[Reasoning](../reasoning/SKILL.md) makes campaign decisions. Engine tools provide
+[Brain](../brain/SKILL.md) makes campaign decisions. Engine tools provide
 mechanical execution, isolation, recovery and evidence retention.
 Modules may reuse these tools by path; their native validators still own acceptance.
 The [sequential driver](core/README.md) is an optional executor with a narrower protocol.

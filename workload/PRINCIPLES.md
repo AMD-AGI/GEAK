@@ -13,7 +13,7 @@ A `SKILL.md`, a `README.md`, or a JSON field beats a module. Code is for what mu
 checked mechanically; everything else is instructions to an agent.
 
 **R2 — Modularity is contracts, not a framework.**
-`reasoning/SKILL.md` controls the campaign; `stages/CONTRACT.md` defines module calls. A module defines
+`brain/SKILL.md` controls the campaign; `stages/CONTRACT.md` defines module calls. A module defines
 a capability and its input/output/acceptance contract; implementation skills or tools
 provide the method. Call them by path or configuration. No registry, DSL, workflow
 engine or base classes. Module selection and implementation selection are separate.

@@ -9,7 +9,7 @@ Read the [UT contract](../README.md). Use the declaration, task construction and
 parts of [kernel-extract](../../profile/kernel-extract/SKILL.md).
 Set `SKILL_ROOT` to that vendored directory, `SHARED_TOOLS` to its `shared/`, and
 `EVAL_DIR` to this invocation's output. Reuse compatible Profile evidence; request
-missing observations through Reasoning instead of silently launching another full replay.
+missing observations through Brain instead of silently launching another full replay.
 The plan sets scope; GPU capacity limits concurrent execution, not extraction coverage.
 
 Finish callable bindings, case geometry/weights, editable leaves and device requirements
@@ -21,5 +21,5 @@ negative controls still detect incorrect outputs. The oracle and harness remain 
 
 For a repair, retain the original failure and task version, change only the affected
 delivery in a new directory and rerun its native qualification. Report new task identities,
-receipts and remaining blockers promptly to Reasoning for rescheduling.
+receipts and remaining blockers promptly to Brain for rescheduling.
 The legacy combined Profile/UT delivery uses [Profile's artifact mapping](../../profile/README.md#driver-delivery).

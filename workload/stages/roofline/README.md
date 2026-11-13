@@ -3,7 +3,7 @@
 Use the [invocation contract](../CONTRACT.md#direct-module-calls) to assess a bound
 or search priority. Provide explicit task/case evidence and a separate analysis output;
 a scoped input view preserves its original ownership and whole-workload shares.
-The report informs Reasoning; it does not force a search or establish E2E gain.
+The report informs Brain; it does not force a search or establish E2E gain.
 
 **Input** `$IN` = profile's out (`selection_targets.json` for shares, `tasks/<name>/` for
 runnable unit tests).

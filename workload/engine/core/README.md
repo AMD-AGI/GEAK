@@ -2,7 +2,7 @@
 
 `workload/run.py` executes the config's `order`, revalidates retained results on resume
 and runs each slot's finalizer. It is an executor, not the
-[Reasoning controller](../../reasoning/SKILL.md). Its default route combines Profile
+[Brain](../../brain/SKILL.md). Its default route combines Profile
 with UT and Apply back with Evaluate.
 
 ## Commands
@@ -22,7 +22,7 @@ The driver may open one repair session for a blocked agent delivery, preserving 
 original diagnosis if that session returns no valid result.
 
 `all` starts `watch.py` by default; `--report-interval SEC`, `--no-report` and the
-`report` config control its file reports. This monitor does not schedule Reasoning
+`report` config control its file reports. This monitor does not schedule Brain
 or send messages to the user's conversation.
 
 ## Calling convention

@@ -3,7 +3,7 @@
 A module defines a capability and its input/output/acceptance criteria in `README.md`.
 Implementations live in `<implementation>/SKILL.md`; start with one general method and
 add another only for a distinct need. A module is not a position in an execution order.
-[Reasoning](../reasoning/SKILL.md) owns planning and coordination.
+[Brain](../brain/SKILL.md) owns planning and coordination.
 
 ## Direct module calls
 

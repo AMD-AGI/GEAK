@@ -2,7 +2,7 @@
 """The standard recipe entry point: `python3 workload/run.py --config <scenario> all`.
 
 Everything it can do, and every flag it takes, is `engine/core/stage.py` — see its module
-docstring, or `workload/engine/core/README.md`. The adaptive controller is reasoning/SKILL.md.
+docstring, or `workload/engine/core/README.md`. The adaptive controller is brain/SKILL.md.
 This file exists so that the recipe entry point does not
 move when the implementation behind it does.
 """

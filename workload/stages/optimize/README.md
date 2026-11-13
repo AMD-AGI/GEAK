@@ -29,7 +29,7 @@ Read existing qualification before dispatch. Compare `source_tree.py editable <t
 with the declared computation; a binding adapter is not necessarily an editable kernel.
 The frozen snapshot must cover the immutable inputs, including their declarations.
 `check-frozen` compares only snapshot members, so it does not prove coverage.
-Missing/conflicting qualification returns through Reasoning to UT.
+Missing/conflicting qualification returns through Brain to UT.
 Use the selected method's tools and preserve its complete verification/integration path;
 an attempt cap is not permission to substitute a different method.
 
@@ -55,7 +55,7 @@ python3 "$WORKLOAD_ROOT/engine/campaign/scheduler.py" run \
 Resolve flags from the plan/scenario, including order file, task widths, attempt/measurement
 limits, KEEP policy, mounts and retention. Inspect `scheduler.py --help` for the interface.
 The scheduler handles queueing, worker liveness, stale reclamation and durable credit;
-Reasoning owns the next inspection and decisions about reported defects.
+Brain owns the next inspection and decisions about reported defects.
 Attempt bounds must allow observed method-completion and full-test costs.
 
 For a deficient task, preserve its failure, source and credit history and report promptly.
@@ -129,7 +129,7 @@ Apply back consumes these exact bytes.
 | `incorrect` | The test compared outputs and found a correctness failure |
 | `harness_error` | No valid judgement: execution, timing or other non-correctness failure |
 
-A serving integration defect returns through Reasoning with the failing input/dispatch,
+A serving integration defect returns through Brain with the failing input/dispatch,
 native error and selected source identity. Source fixes require fresh cold qualification;
 a deficient frozen task belongs to UT. Preserve unaffected tasks' evidence.
 
@@ -194,7 +194,7 @@ A changed harness needs its own work root and qualification, with earlier costs 
 
 `checkpoint_reserve_sec` is a planning allowance, not an automatic shutdown mechanism.
 `--max-wall-sec` stops the scheduler loop and can leave workers running.
-Reasoning must arrange a checkpoint before the allocation deadline: stop new dispatch,
+Brain must arrange a checkpoint before the allocation deadline: stop new dispatch,
 allow active measurements to finish, retain evidence and stop owned workers.
 Reserve final-attempt, cold-test and E2E costs as well as cleanup; revise bounds from
 observed durations. Incomplete search is a continuation, never a completed time budget.

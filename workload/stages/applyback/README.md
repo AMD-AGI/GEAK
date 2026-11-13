@@ -21,7 +21,7 @@ For kernel integration, use the source-identity and actual-loading checks in
 Task metadata supplies the binding, not a replacement working source.
 
 Hand the proven runtime to [Evaluate](../evaluate/README.md) when comparison is requested.
-A serving failure returns its native evidence and candidate identity to Reasoning for
+A serving failure returns its native evidence and candidate identity to Brain for
 routing to the owning module; do not rewrite frozen tests to make integration pass.
 
 ## Driver delivery

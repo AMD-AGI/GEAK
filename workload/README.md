@@ -1,7 +1,7 @@
 # Workload optimization through modular experiments
 
 Give an agent the [root skill](SKILL.md), task/scenario and a run directory.
-[Reasoning](reasoning/SKILL.md) is the persistent main agent: it chooses bounded calls,
+[Brain](brain/SKILL.md) is the persistent main agent: it chooses bounded calls,
 receives asynchronous reports and decides what to do next while independent work continues.
 Read [PRINCIPLES.md](PRINCIPLES.md) before changing the workflow.
 
@@ -34,7 +34,7 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 | Path | Purpose |
 | --- | --- |
 | `SKILL.md` | Entry into the campaign |
-| `reasoning/` | Persistent controller, starting route and evidence-guided planning |
+| `brain/` | Persistent controller, starting route and evidence-guided planning |
 | `stages/` | Module contracts and interchangeable implementations |
 | `config/` | Scenarios and defaults; campaign variants stay with their evidence |
 | `run.py`, `engine/core/` | [Sequential driver and protocol](engine/core/README.md) |
@@ -42,7 +42,7 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 | `engine/` | [Mechanical execution and evidence tools](engine/README.md) |
 | `docs/` | Illustrations |
 
-The [starting route](reasoning/SKILL.md#starting-route-and-adoption) preserves existing
+The [starting route](brain/SKILL.md#starting-route-and-adoption) preserves existing
 coverage, methods and budgets when no better-supported plan is available.
 Only a qualified serving comparison can replace the verified performance floor.
 The [pipeline figure](docs/pipeline.svg) depicts that sequential route.
