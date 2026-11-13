@@ -108,3 +108,13 @@ def test_single_matrix_instruction_has_no_cadence_or_trailing_interval():
     assert result['cadence_median'] is None and result['span'] is None
     assert not result['cyc_by_cls']
 
+
+def test_inconsistent_module_is_refused_without_traceback(tmp_path):
+    asm = tmp_path / 'cat.s'
+    meta = ('.amdgpu_metadata\namdhsa.kernels:\n  - .name: first\n    .vgpr_count: 64\n'
+            '  - .name: second\n    .vgpr_count: 128\n.end_amdgpu_metadata\n')
+    asm.write_text(multi_kernel_text() + meta + multi_kernel_text().replace('second', 'other'))
+    p = subprocess.run([sys.executable, str(KT / 'deep_mfma_analysis.py'), str(asm), '--kernel', 'first'],
+                       capture_output=True, text=True, check=False)
+    assert p.returncode != 0 and 'Traceback' not in p.stderr, p.stderr
+    assert 'cannot identify one kernel' in p.stderr
