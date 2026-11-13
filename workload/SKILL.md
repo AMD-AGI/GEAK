@@ -32,6 +32,8 @@ Repeat:
 4. **Report.** Read the module's native results and `REPORT.md`, including failures.
    Match receipts to their invocations and retain them before reusing an output path;
    failed calls and later exports can expose another invocation's files.
+   Evidence can include installed-library symlinks: retain their literal targets
+   without traversing them; a retained link does not archive its external contents.
    Repair report formatting from evidence attributable to the same invocation,
    retaining its original request and output as context. An empty response or
    unfinished execution is not a formatting error; missing facts cannot be filled

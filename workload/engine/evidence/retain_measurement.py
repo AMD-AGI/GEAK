@@ -17,7 +17,7 @@ ARTIFACT_ROOTS = ("run", "kernel_src", "ut_result.json", "_baseline_random.pt")
 
 
 def reuse_helper():
-    """Load only this file's optional sibling; preserve exact-module test patches."""
+    """Load this file's evidence sibling; preserve exact-module test patches."""
     import importlib.util
     path = Path(__file__).resolve().with_name('retention_reuse.py')
     loaded = sys.modules.get('retention_reuse')
@@ -207,7 +207,7 @@ def retain(task, directory, raw_log=None, measure_exit=None, native_exit=None, c
     if (directory / 'retention-files.jsonl').exists() or (directory / 'retention-files.jsonl').is_symlink():
         raise ValueError('existing reuse journal; recover into a fresh archive instead')
     record.update(measure_exit_code=measure_exit, native_exit_code=native_exit,
-                  copied_files=0, copied_bytes=0, missing=[], artifact_roots=list(ARTIFACT_ROOTS))
+                  copied_files=0, copied_bytes=0, copied_symlinks=0, missing=[], artifact_roots=list(ARTIFACT_ROOTS))
     write_record(directory, record)
     helper = reuse_helper() if os.environ.get('WORKLOAD_RETENTION_REUSE') == '1' else None
     reuse = None
@@ -231,9 +231,13 @@ def retain(task, directory, raw_log=None, measure_exit=None, native_exit=None, c
                 reuse.copy(source, destination)
             record["copied_files"] += 1
             record["copied_bytes"] += destination.stat().st_size
+        elif stat.S_ISLNK(mode):
+            # Retain the link itself, including dangling links and directory links.
+            # Regular-file accounting and reuse never include external payloads.
+            target = os.readlink(source)
+            destination.symlink_to(target)
+            record["copied_symlinks"] += 1
         else:
-            # Following links can copy mutable external data or recurse into this
-            # archive. A partial copy is retained and the worker must stop instead.
             raise ValueError("non-regular evidence entry: " + str(source))
 
     try:
@@ -247,6 +251,7 @@ def retain(task, directory, raw_log=None, measure_exit=None, native_exit=None, c
                 record["missing"].append(name)
         if raw_log is not None and (raw_log.exists() or raw_log.is_symlink()):
             copy(raw_log, directory / "native.log")
+        _, record['symlink_sha256'] = (helper or reuse_helper()).symlink_identity(directory)
         record.update(complete=True, finished=time.time())
     except (OSError, ValueError) as exc:
         record.update(error=str(exc), finished=time.time())
@@ -289,6 +294,8 @@ def recover(task, pending, raw_log, lock_timeout=None, cancelled=None, evidence_
     record = json.loads((previous / "retention.json").read_text())
     if record.get("task_dir") != str(task.resolve()):
         raise ValueError("pending evidence belongs to another task")
+    if record.get("complete"):
+        reuse_helper().verify_symlinks(previous, record)
     parent, placement = previous.parent, None
     if evidence_root is not None:
         parent, placement = evidence_parent(task, pending.parent / 'recovery', pending, evidence_root)

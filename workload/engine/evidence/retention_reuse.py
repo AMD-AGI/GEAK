@@ -83,6 +83,33 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def symlink_identity(directory):
+    """Hash link names and literal targets, never the trees they point into."""
+    directory = Path(directory)
+    hasher, count = hashlib.sha256(), 0
+
+    def visit(path):
+        nonlocal count
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            row = [path.relative_to(directory).as_posix(), os.readlink(path)]
+            hasher.update((json.dumps(row, ensure_ascii=True) + '\n').encode())
+            count += 1
+        elif stat.S_ISDIR(mode):
+            for child in sorted(path.iterdir()):
+                visit(child)
+
+    visit(directory)
+    return count, hasher.hexdigest()
+
+
+def verify_symlinks(directory, receipt):
+    count, sha256 = symlink_identity(directory)
+    if (count != receipt.get('copied_symlinks', 0)
+            or sha256 != receipt.get('symlink_sha256', digest(b''))):
+        raise ValueError('archived symlink identity differs from receipt')
+
+
 def open_path(path, flags=os.O_RDONLY):
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts:
@@ -273,6 +300,7 @@ class Reuse:
                     receipt = json.loads(retention_raw)
                     if not isinstance(receipt, dict) or receipt.get('complete') is not True or receipt.get('task_dir') != str(self.task):
                         raise ValueError('hint archive is not complete for this task')
+                    verify_symlinks(base, receipt)
                     if receipt.get('kind') == 'manual':
                         final = json.loads(raw_file(base / 'manual_exit.json'))
                         if not isinstance(final, dict) or any(type(final.get(a)) is not int or final[a] != receipt.get(b) for a,b in
