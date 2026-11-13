@@ -3,6 +3,8 @@
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm/ATOM
 serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
 (gfx1201, vLLM or SGLang only). Generic gfx1201 is an ISA identity, not a supported serving product.
+The Radeon Pro W7900 (gfx1100, target `w7900`) is vLLM-only, with product-scoped roofline peaks
+that have no BF16 or FP8 entry; any other gfx1100 board is refused.
 It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
@@ -124,8 +126,8 @@ Workflow({
     model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
-    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|unknown; gfx1201 never implies a product
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm or sglang only; R9600D and gfx115x are vllm-only (default vllm)
+    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|w7900|unknown; gfx1201 never implies a product; gfx1100 requires w7900
+    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm or sglang only; R9600D, gfx115x and W7900 are vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)

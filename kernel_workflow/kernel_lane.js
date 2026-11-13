@@ -1,6 +1,6 @@
 export const meta = {
   name: 'kernel-lane',
-  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target.',
+  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) and the RDNA3 Radeon Pro W7900 (gfx1100) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md, on W7900 knowledge/amd_rdna3.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target; gfx1100 without W7900 identity is refused.',
   whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.gpus_per_job, args.job_gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
@@ -71,10 +71,20 @@ const GPU_FAMILIES = [
   { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
   // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
   { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
+  // Discrete RDNA3. The workflows accept gfx1100 only as the exact Radeon Pro W7900 (target w7900).
+  { name: 'W7900', isa: /^gfx1100$/, isolate: true, matrixCore: 'WMMA' },
 ];
 const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
 // ---- end GPU families ----
+if (EXPECTED_TARGET === 'w7900' && EXPECTED_GFX !== 'gfx1100') {
+  throw new Error('expected_target=w7900 requires expected_gfx=gfx1100');
+}
+if (EXPECTED_GFX === 'gfx1100' && EXPECTED_TARGET !== 'w7900') {
+  throw new Error(
+    `expected_gfx=gfx1100 requires expected_target=w7900 (got ${EXPECTED_TARGET || 'none'}): ` +
+    'no other gfx1100 product is validated');
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -2362,13 +2372,21 @@ if (!GFX) {
   throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
 }
 if (!DEVICE_TARGET) {
-  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | unknown)');
+  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | w7900 | unknown)');
 }
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
 if (GFX === 'gfx1200') {
   throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+}
+if (GFX === 'gfx1100' && DEVICE_TARGET !== 'w7900') {
+  throw new Error(
+    `Detected gfx1100 with device_target=${DEVICE_TARGET}: only the exact Radeon Pro W7900 is ` +
+    'validated on gfx1100; refusing RDNA3 guidance');
+}
+if (DEVICE_TARGET === 'w7900' && GFX !== 'gfx1100') {
+  throw new Error(`Setup returned device_target=w7900 on ${GFX}: w7900 requires gfx1100`);
 }
 if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${GFX || 'unknown'}`);
@@ -2391,6 +2409,8 @@ const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+// The W7900's section is TraceLens's W7900 spec, which has no BF16 or FP8 entry; the roles say which
+// axes that leaves.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 // ISA rows of peaks.md that hold only at the CU count they were measured on: the 8050S / 8040S share
 // gfx1151 with the 40-CU 8060S. Any other part of an isolated family is a hard unknown, as
@@ -2399,10 +2419,25 @@ const TABULATED_CU = { gfx1151: 40 };
 const GPU_FAMILY = gpuFamily(GFX);
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
+  : (DEVICE_TARGET === 'w7900' && GFX === 'gfx1100') ? 'calibrated-w7900'
   : /^gfx120/.test(GFX) ? 'unknown-device-not-r9700'
   : TABULATED_CU[GFX] === Number(PHYSICAL_CU_COUNT) ? `tabulated-${GFX}`
   : GPU_FAMILY.isolate ? `unknown-${GFX}-not-tabulated`
   : 'non-rdna';
+// PROFILING is OFF by default; args.profile='on' restores it. Off: no baseline profile, no reprofile
+// after a commit or a warm-start adopt, and neither the benchmark engineer nor the engineers run the
+// profiler. On a prepared extract UT one profiled run costs 20-40 min, and on the AgentX stacks
+// rocprofv3 aborts outright (LLVM option clash with FlyDSL), so every profile agent spent 10-30 min
+// on the fault ladder before falling back (GEAK #606). Every consumer already tolerates a null summary.
+const PROFILE_ON = String(A.profile != null ? A.profile : 'off').trim().toLowerCase() === 'on';
+// gfx1100 counters are valid only at the profile_standard level, which the operator sets and declares
+// in gpu_perf_level (Hyperloom records it as stable_std; amd-smi prints AMDSMI_DEV_PERF_LEVEL_STABLE_STD).
+// With profiling off no agent collects counters, so the safe set also needs PROFILE_ON.
+// The key is sent only on the W7900, so every other prompt stays byte-identical.
+const GPU_PERF_LEVEL = String(A.gpu_perf_level || '').trim().toLowerCase().replace(/^amdsmi_dev_perf_level_/, '');
+const AT_PROFILE_STANDARD = GPU_PERF_LEVEL === 'profile_standard' || GPU_PERF_LEVEL === 'stable_std';
+const COUNTER_INPUTS = DEVICE_TARGET === 'w7900'
+  ? { COUNTER_GUIDANCE: PROFILE_ON && AT_PROFILE_STANDARD ? 'gfx1100-safe-set' : 'unavailable' } : {};
 if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // an isolating family (GPU_FAMILIES) gets the dedicated in-tree hardware guide but no CDNA-biased cards.
@@ -2492,6 +2527,7 @@ const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
     KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...RESUME_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
@@ -2503,13 +2539,6 @@ log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
 const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
 const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
 const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
-
-// PROFILING is OFF by default; args.profile='on' restores it. Off: no baseline profile, no reprofile
-// after a commit or a warm-start adopt, and neither the benchmark engineer nor the engineers run the
-// profiler. On a prepared extract UT one profiled run costs 20-40 min, and on the AgentX stacks
-// rocprofv3 aborts outright (LLVM option clash with FlyDSL), so every profile agent spent 10-30 min
-// on the fault ladder before falling back (GEAK #606). Every consumer already tolerates a null summary.
-const PROFILE_ON = String(A.profile != null ? A.profile : 'off').trim().toLowerCase() === 'on';
 
 // ===========================================================================
 // PHASE: Benchmark setup (Benchmark Engineer)
@@ -2540,6 +2569,7 @@ let profileSummary = !PROFILE_ON ? null : await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
@@ -2871,7 +2901,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
                 roleAgent('profile_engineer', 'reprofile',
                   'Re-profile the adopted warm-start state and classify the new bottleneck.', {
                   WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
-                  COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+                  COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
                 }),
                 { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
               if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
@@ -2957,6 +2987,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...KB_INPUTS,
     // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
     // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
@@ -3529,7 +3560,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
         profileSummary = await agentT(
           roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
             WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-            COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+            COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
           }),
           { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
       }

@@ -9,7 +9,17 @@ directions. Used for the baseline (PHASE=baseline) and after improving rounds (P
 `DEVICE_TARGET`, `PHYSICAL_CU_COUNT`, and `ROOFLINE_STATUS` are authoritative
 policy inputs: use a product's table peaks only for `calibrated-<product>`, and the ISA's
 `peaks.md` row for `tabulated-<gfx>`; for any `unknown-*` status, report measured
-durations/counters without assigning numeric peaks. Use the physical CU count for grid/occupancy context.
+durations/counters without assigning numeric peaks. `calibrated-w7900` (Radeon Pro W7900)
+permits the W7900 table peaks in `amd_rdna3.md` §1 (memory, FP16 and INT8 matrix, FP32 vector);
+report BF16 and FP8 kernels on the memory axis.
+Use the physical CU count for grid/occupancy context.
+`COUNTER_GUIDANCE` is sent on the W7900 only (`amd_rdna3.md` §4). When it is
+`unavailable`, classify from kernel-trace durations, per-case latency and dispatch
+count. When it is `gfx1100-safe-set`, the operator declared the `profile_standard`
+perf level: if `metrix list metrics` passes the version check in §4, collect the
+12 Metrix metrics listed there after the kernel trace and classify from them; if it
+fails, proceed as for `unavailable` and say so in your summary. Never change the
+perf level.
 
 **FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave; PHASE=baseline): the bottleneck was
 already classified in a prior wave. Do NOT re-run the full baseline profile from scratch — read the prior
@@ -25,7 +35,8 @@ hardware reference that matches what you found:
 | detected `gfx` | hardware reference |
 |---|---|
 | `gfx94*` / `gfx95*` — CDNA, Instinct MI-series | `SKILL_DIR/knowledge/amd_instinct.md` |
-| `gfx11*` — RDNA3.5, Radeon / Ryzen AI client parts | `SKILL_DIR/knowledge/amd_ryzen.md` |
+| `gfx115x` — RDNA3.5, Ryzen AI APU parts | `SKILL_DIR/knowledge/amd_ryzen.md` |
+| `gfx1100` — RDNA3 discrete, Radeon Pro W7900 only | `SKILL_DIR/knowledge/amd_rdna3.md` |
 | `gfx1201` — RDNA4 client (R9700 class) | `SKILL_DIR/knowledge/amd_rdna4.md` |
 
 Each opens with detection commands for that family; none is the default.
@@ -34,13 +45,15 @@ grid-sizing advice downstream depend on the real card, not an assumed one.
 On RDNA4 and on gfx115x, missing MFMA%/CDNA PMC names is expected: do **not** fail the profile
 phase; classify from kernel-trace + latency table (`amd_rdna4.md` §5; for gfx115x, `amd_ryzen.md` §2
 explains the missing matrix-utilization counter).
+On the W7900, a rocprofv3 kernel-trace and latency profile is complete; add the safe-set metrics
+under `COUNTER_GUIDANCE=gfx1100-safe-set` (`amd_rdna3.md` §4).
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
 2. Clear cache in `WORKSPACE`, then run:
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
    This warms up, then profiles with the architecture-specific policy and writes a report:
-   gfx1201 and gfx115x use rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
+   gfx1201, gfx115x and gfx1100 use rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
    the remaining supported tools to benchmark-only.
    If the report contains a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
    `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once

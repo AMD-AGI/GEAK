@@ -229,6 +229,51 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
+    def test_w7900_peaks_require_product_identity(self):
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100"))
+        for name in ("AMD Radeon Pro W7900", "AMD Radeon PRO W7900 Dual Slot"):
+            with self.subTest(name=name):
+                w7900 = _identity("gfx1100", name, 96)
+                self.assertEqual(w7900["target"], "w7900")
+                p = rt.resolve_peaks(PEAKS_MD, w7900["gfx"], product=w7900["target"])
+                self.assertIsNotNone(p)
+                self.assertEqual(p["source"], "table")
+                self.assertEqual(p["confidence"], "high")
+                self.assertEqual(p.get("product"), "w7900")
+                self.assertEqual(p["cu"], 96)
+                self.assertAlmostEqual(p["hbm_bw_bytes_s"], 8.64e11, delta=1e8)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "fp16"), 1.23e14, delta=1e11)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 1.23e14, delta=1e11)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 6.13e13, delta=1e11)
+                for dtype in ("bf16", "fp8", "float8_e4m3fn", "fp4"):
+                    self.assertIsNone(rt.peak_flops_for(p, dtype), dtype)
+        w7800 = _identity("gfx1100", "AMD Radeon Pro W7800", 70)
+        self.assertEqual(w7800["target"], "unknown")
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, w7800["gfx"], product=w7800["target"]))
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100", product="r9700"))
+
+    def test_gfx1100_without_w7900_is_hard_unknown_not_derived(self):
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return {"hbm_bw_bytes_s": 1.0, "flops": {}, "cu": 96,
+                    "source": "derived", "confidence": "low"}
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100"))
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100", product="w7900"))
+            self.assertEqual(called, [])
+            self.assertTrue(rt.is_discrete_rdna3("gfx1100"))
+            self.assertFalse(rt.is_discrete_rdna3("gfx1151"))
+            self.assertFalse(rt.is_discrete_rdna3("gfx1101"))
+            self.assertIsNotNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1101"))
+            self.assertEqual(called, [0])
+        finally:
+            rt.derive_peaks_from_props = original
+
     def test_gfx1250_missing_table_may_derive(self):
         called = []
         original = rt.derive_peaks_from_props
@@ -246,7 +291,7 @@ class TestPeaks(unittest.TestCase):
             self.assertEqual(called, [])
             self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1152", cu=40))
             self.assertEqual(called, [])  # an RDNA 3.5 APU's "memory clock" is system DRAM
-            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100"))
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1101"))
             self.assertEqual(called, [0])
         finally:
             rt.derive_peaks_from_props = original

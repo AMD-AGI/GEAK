@@ -4,9 +4,10 @@ A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimiz
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
 CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950) **and the validated Radeon AI PRO R9700
-product on gfx1201**.
+product on gfx1201**, plus the **Radeon Pro W7900 on gfx1100** (RDNA3; other gfx1100 boards are refused).
 The card is detected on-box (`rocminfo`), not assumed. On gfx1201, agents must follow `knowledge/amd_rdna4.md`
-(wave32, WMMA) rather than Instinct MFMA/wave64 tables. The
+(wave32, WMMA) rather than Instinct MFMA/wave64 tables; on the W7900 they follow `knowledge/amd_rdna3.md`
+(wave32, gfx11 WMMA, no FP8/MX, roofline `calibrated-w7900` from the published W7900 peaks). The
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
 
@@ -83,6 +84,10 @@ Workflow({
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
     eval_dir: "",              // optional, override the output dir for this single run
     apply_to_original: "false",// optional; if "true", write the validated patch back to kernel_path
+    gpu_perf_level: "",        // optional: the amdgpu perf level the operator set (GEAK never sets it).
+                               //   On the W7900 only, with profile: "on", "profile_standard" or
+                               //   "stable_std" gives the lanes COUNTER_GUIDANCE=gfx1100-safe-set;
+                               //   otherwise "unavailable".
     // --- mode dispatch (kernel_workflow.js is the single ENTRY POINT / dispatcher) ---
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
                                //   | "bakeoff" (try several backend languages, keep the fastest)

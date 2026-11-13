@@ -63,6 +63,11 @@ _HERE = Path(__file__).resolve().parent
 
 _SENTINEL = object()
 
+_W7900_IDENTITY = {
+    "gfx": "gfx1100", "target": "w7900",
+    "marketing_name": "AMD Radeon Pro W7900 Dual Slot", "physical_cu_count": 96,
+}
+
 
 def _load(name: str = "run_e2e"):
     spec = importlib.util.spec_from_file_location(name, _HERE / "run_e2e.py")
@@ -355,13 +360,14 @@ class TestMapArgs(_RunE2ECase):
 
     def test_vllm_only_identities_default_to_vllm(self):
         # R9700 / R9600D by product; gfx115x by ISA (no product key; ROCm 7.2.3 reports
-        # an empty name on gfx1151). Discrete RDNA3 keeps the global default.
+        # an empty name on gfx1151). Discrete RDNA3 other than the W7900 (gfx1100, tested
+        # with its probe below) keeps the global default.
         for gfx, target, name, cus, backend in (
             ("gfx1201", "r9700", "AMD Radeon AI PRO R9700", 64, "vllm"),
             ("gfx1201", "r9600d", "AMD Radeon AI PRO R9600D", 48, "vllm"),
             ("gfx1151", "unknown", "", 40, "vllm"),
             ("gfx1150", "unknown", "", 16, "vllm"),
-            ("gfx1100", "unknown", "AMD Radeon RX 7900 XTX", 96, "sglang"),
+            ("gfx1101", "unknown", "AMD Radeon RX 7800 XT", 60, "sglang"),
         ):
             with self.subTest(gfx=gfx, target=target):
                 mapped = rx.map_args(self._handoff(
@@ -432,6 +438,119 @@ class TestMapArgs(_RunE2ECase):
         self.patch_rx("subprocess", probe(stdout="not json"))
         with self.assertRaisesRegex(RuntimeError, "returned invalid JSON"):
             rx._expected_gpu_identity({})
+
+    def _no_probe(self):
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx("_rocminfo_available", lambda: False)
+        self.patch_rx("subprocess", types.SimpleNamespace(
+            run=lambda *_a, **_k: self.fail("no probe is available here")))
+
+    def test_w7900_identity_selects_vllm_on_gfx1100_only(self):
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(_W7900_IDENTITY)
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_w7900"),
+            expected_gfx="gfx1100", expected_target="w7900",
+        ))
+        self.assertEqual(ps["expected_gfx"], "gfx1100")
+        self.assertEqual(ps["expected_target"], "w7900")
+        self.assertEqual(ps["expected_device_name"], "AMD Radeon Pro W7900 Dual Slot")
+        self.assertEqual(ps["expected_physical_cu_count"], 96)
+        self.assertEqual(ps["backend"], "vllm")
+        self.assertEqual(rx._expected_gpu_identity({}), _W7900_IDENTITY)
+
+        self._no_probe()
+        for gfx in ("gfx1201", "gfx1101", "gfx1102", "gfx950"):
+            with self.subTest(gfx=gfx), self.assertRaisesRegex(
+                    ValueError, "w7900 requires expected_gfx=gfx1100"):
+                rx._expected_gpu_identity({"expected_gfx": gfx, "expected_target": "w7900"})
+        for target in ("r9700", "r9600d"):
+            with self.subTest(target=target), self.assertRaisesRegex(
+                    ValueError, f"{target} requires expected_gfx=gfx1201"):
+                rx._expected_gpu_identity({"expected_gfx": "gfx1100", "expected_target": target})
+
+    def test_gpu_perf_level_is_forwarded_only_when_declared(self):
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(_W7900_IDENTITY)
+        pin = {"expected_gfx": "gfx1100", "expected_target": "w7900"}
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_perf_level"), gpu_perf_level=" STABLE_STD ", **pin))
+        self.assertEqual(ps["gpu_perf_level"], "stable_std")
+        for value in (None, "", "  "):
+            with self.subTest(value=value):
+                extra = {} if value is None else {"gpu_perf_level": value}
+                ps = rx.map_args(self._handoff(
+                    eval_dir=str(self.tmp / "e2e_perf_level_absent"), **pin, **extra))
+                self.assertNotIn("gpu_perf_level", ps)
+
+    def test_bare_gfx1100_is_refused(self):
+        self._no_probe()
+        with self.assertRaisesRegex(ValueError, "gfx1100 requires expected_target=w7900"):
+            rx._expected_gpu_identity({"expected_gfx": "gfx1100", "expected_target": "unknown"})
+        cases = [
+            ({"gfx": "gfx1100", "target": "unknown",
+              "marketing_name": "AMD Radeon Pro W7800", "physical_cu_count": 70},
+             "gfx1100 with product unknown"),
+            ({"gfx": "gfx1100", "target": "unknown", "physical_cu_count": 96},
+             "gfx1100 with product unknown"),
+            ({"gfx": "gfx1201", "target": "w7900", "physical_cu_count": 96},
+             "w7900 on a non-gfx1100 ISA"),
+        ]
+        for identity, pattern in cases:
+            with self.subTest(identity=identity):
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(identity)
+                with self.assertRaisesRegex(RuntimeError, pattern):
+                    rx._expected_gpu_identity({})
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx("subprocess", types.SimpleNamespace(run=lambda *_a, **_k: (
+            types.SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+                "gfx": "gfx1100", "target": "unknown",
+                "marketing_name": "AMD Radeon RX 7900 XTX", "physical_cu_count": 96,
+            })))))
+        with self.assertRaisesRegex(RuntimeError, "no other gfx1100 product is validated"):
+            rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_bare_gfx1100")))
+
+    def test_explicit_w7900_must_agree_with_an_available_probe(self):
+        pin = {"expected_gfx": "gfx1100", "expected_target": "w7900"}
+        self._no_probe()
+        self.assertEqual(rx._expected_gpu_identity(pin), {
+            "gfx": "gfx1100", "target": "w7900",
+            "marketing_name": "", "physical_cu_count": 0,
+        })
+
+        self.patch_rx("_rocminfo_available", lambda: True)
+
+        def probe(returncode=0, stdout="", stderr=""):
+            return types.SimpleNamespace(run=lambda *_a, **_k: types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr=stderr))
+
+        self.patch_rx("subprocess", probe(stdout=json.dumps({
+            "gfx": "gfx1201", "target": "r9700",
+            "marketing_name": "AMD Radeon AI PRO R9700", "physical_cu_count": 64,
+        })))
+        with self.assertRaisesRegex(RuntimeError, "does not match the detected GPU: r9700"):
+            rx._expected_gpu_identity(pin)
+        self.patch_rx("subprocess", probe(returncode=1, stderr="rocminfo timed out"))
+        with self.assertRaisesRegex(RuntimeError, "rocminfo timed out"):
+            rx._expected_gpu_identity(pin)
+        self.patch_rx("subprocess", probe(stdout=json.dumps(_W7900_IDENTITY)))
+        self.assertEqual(rx._expected_gpu_identity(pin), _W7900_IDENTITY)
+
+    def test_rocminfo_available_checks_path_then_opt_rocm(self):
+        """A pinned w7900 is checked against the probe only when rocminfo can run."""
+        fake_bin = self.tmp / "opt_rocm_bin"
+        fake_bin.mkdir()
+        self.patch_rx("shutil", types.SimpleNamespace(which=lambda _name: "/usr/bin/rocminfo"))
+        self.assertTrue(rx._rocminfo_available())
+        self.patch_rx("shutil", types.SimpleNamespace(which=lambda _name: None))
+        self.patch_rx("Path", lambda _p: fake_bin / "rocminfo")
+        self.assertFalse(rx._rocminfo_available())
+        (fake_bin / "rocminfo").write_text("")
+        self.assertTrue(rx._rocminfo_available())
+
+    def test_target_isa_map_matches_gpu_identity(self):
+        spec = importlib.util.spec_from_file_location("gpu_identity", rx.GPU_IDENTITY_SCRIPT)
+        gpu_identity = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gpu_identity)
+        self.assertEqual(rx._TARGET_GFX, gpu_identity.TARGET_GFX)
 
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
