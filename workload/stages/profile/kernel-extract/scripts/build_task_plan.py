@@ -228,11 +228,14 @@ def joint_ut(t, rank, depth=None):
     rows, single = [], []
     js = t.get("joint_phases") or []
     branches = {k for j in js for k in j.get("required_kernels") or []}
-    if js and all(len(j.get("required_kernels") or []) == 1 for j in js) and len(branches) > 1:
-        # Every row one kernel, the kernels distinct: mutually exclusive branches of one
-        # whole op, which the delivery contract declares as dispatch_ut, never joint_ut.
+    if js and (t.get("selection_scope") == "dispatch" or
+               all(len(j.get("required_kernels") or []) == 1 for j in js) and len(branches) > 1):
+        # Dispatch is still one complete operator; a branch may itself be a chain.
         return None, [], {"phases": [
-            {"regime": j["regime"], "device_kernel": j["required_kernels"][0],
+            {"regime": j["regime"],
+             "device_kernel": max(j["required_kernels"], key=lambda k: rank.get(k, {}).get("mass_us", 0)),
+             **({"required_device_kernels": j["required_kernels"]}
+                if len(j["required_kernels"]) > 1 else {}),
              "served_phase": j.get("phase"), "owned_point_ids": j.get("points"),
              "seam_candidates": seam(t, j["required_kernels"], depth)} for j in js]}
     for j in js:

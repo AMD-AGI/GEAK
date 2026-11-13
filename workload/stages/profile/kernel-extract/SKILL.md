@@ -114,6 +114,12 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   `companions` with a reason. Mandatory chains, including split-K plus reduce, are one
   task; mutually exclusive branches are separate `joint_phases` rows, never demanded in
   every invocation. Whole fused MoE keeps routing and the complete operation.
+- **Mixed dispatch.** A branch can itself be a mandatory chain. Declare
+  `selection_scope: "dispatch"` and keep each branch's `required_kernels` together.
+  Verify chain rows with `--dispatch-chain`: every call containing any member must
+  contain all members; keep other calls in the evidence as inapplicable. Shared
+  companions leave this scope ambiguous: keep it blocked and refine the evidence.
+  Never discard partial calls or split a chain into independent leaves.
 - Selected indexer score/top-k is one task covering both served prefill and decode
   branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
   [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)

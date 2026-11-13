@@ -1,8 +1,7 @@
-// Generated from e2e_workflow/e2e_workflow.js at GEAK 02bfbb0 by the same five-block
-// extraction kernel_extraction_delivery.mjs's loadContract() performs, so the profile slot
-// does not load the workflow runner. Regenerate rather than edit:
-//   node -e "import('./kernel_extraction_delivery.mjs').then(m => m.loadContract('<geak>/e2e_workflow/e2e_workflow.js'))"
-// checks a checkout's contract; this file is that extraction, frozen.
+// Derived from e2e_workflow/e2e_workflow.js at GEAK 02bfbb0. The received geak-x
+// kernel-extract source owns its later joint/dispatch contract; see PROVENANCE.json.
+// Update that source and explicitly pin its revision in MANIFEST.kernel-extract.json.
+// loadContract(path) still reads the historical workflow's own five-block contract.
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
@@ -257,6 +256,34 @@ function prepareHeadSelection(h) {
     : 'extractor_must_discover_live_launcher';
   return out;
 }
+function chainMembersVerified(spec, verdict, scope) {
+  const members = spec.required_device_kernels;
+  if (!Array.isArray(members) || members.length < 2 ||
+      !members.every(k => typeof k === 'string' && k.trim()) ||
+      members.some((k, i) => members.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
+      !members.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
+    return { ok: false, why: 'chain must declare its anchor and companion kernels' };
+  if (!verdict || verdict.selection_scope !== scope)
+    return { ok: false, why: `chain requires a ${scope} verdict` };
+  const reported = verdict.required_device_kernels || [];
+  if (reported.length !== members.length ||
+      members.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
+    return { ok: false, why: 'chain verdict has the wrong member kernel set' };
+  if (members.some(k => !(verdict.chain_members || []).some(m =>
+      kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
+    return { ok: false, why: 'missing positive member-kernel execution evidence' };
+  const calls = verdict.joint_call_coverage;
+  if (!Array.isArray(calls) || !calls.length || calls.some(c =>
+      !Array.isArray(c.missing_members) || (scope === 'dispatch_chain' && c.applicable === false
+        ? c.missing_members.length !== members.length ||
+          members.some(k => !c.missing_members.some(v => kernelIdentitiesMatch(k, v)))
+        : c.missing_members.length || scope === 'dispatch_chain' && c.applicable !== true)))
+    return { ok: false, why: 'incomplete chain invocation coverage' };
+  if (scope === 'dispatch_chain' && (calls.length !== Number(verdict.target_marker_calls) ||
+      !calls.some(c => c.applicable === true)))
+    return { ok: false, why: 'dispatch chain must retain every marker call and observe its branch' };
+  return { ok: true };
+}
 function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
   if (ext && ext.selection_evidence_error) return { ok: false, why: ext.selection_evidence_error };
   if (h && h.dispatch_ut) {
@@ -273,12 +300,17 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       const matches = rows.filter(r => r.regime === spec.regime);
       if (matches.length !== 1 || matches[0].target_callable !== ext.target_callable)
         return { ok: false, why: `${spec.regime}: dispatch branch must verify the same whole-op callable` };
+      if (spec.required_device_kernels) {
+        const chain = chainMembersVerified(spec, matches[0].selection_validation, 'dispatch_chain');
+        if (!chain.ok) return { ok: false, why: `${spec.regime}: ${chain.why}` };
+      }
       const check = kernelSelectionVerified({ ...h, dispatch_ut: undefined,
-        is_fused_kernel: true, device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates }, matches[0]);
+        is_fused_kernel: true, device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates },
+        matches[0], spec.required_device_kernels);
       if (!check.ok) return { ok: false, why: `${spec.regime}: ${check.why}` };
     }
     if ([requiredDeviceKernel(h), ...(h.selected_device_kernels || [])].some(k =>
-        !phases.some(p => kernelIdentitiesMatch(k, p.device_kernel))))
+        !phases.some(p => (p.required_device_kernels || [p.device_kernel]).some(v => kernelIdentitiesMatch(k, v)))))
       return { ok: false, why: 'dispatch branches omit a selected device kernel' };
     return { ok: true, why: 'verified whole-op dispatch branches independently' };
   }
@@ -297,27 +329,12 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
         return { ok: false, why: 'joint UT phases must have distinct nonempty regime labels' };
       regimes.add(regime);
       const requiredMembers = spec.required_device_kernels;
-      if (!Array.isArray(requiredMembers) || requiredMembers.length < 2 ||
-          !requiredMembers.every(k => typeof k === 'string' && k.trim()) ||
-          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
-          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
-        return { ok: false, why: `${regime}: joint phase must declare its anchor and companion kernels` };
       const matches = results.filter(r => r.regime === regime);
       if (matches.length !== 1)
         return { ok: false, why: `${regime}: expected one joint selection verdict` };
       const result = matches[0], verdict = result.selection_validation;
-      if (!verdict || verdict.selection_scope !== 'joint_chain')
-        return { ok: false, why: `${regime}: a leaf verdict cannot certify a joint chain` };
-      const reported = verdict.required_device_kernels || [];
-      if (reported.length !== requiredMembers.length ||
-          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
-        return { ok: false, why: `${regime}: joint verdict has the wrong member kernel set` };
-      if (requiredMembers.some(k => !(verdict.chain_members || []).some(m =>
-          kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
-        return { ok: false, why: `${regime}: missing positive member-kernel execution evidence` };
-      if (!Array.isArray(verdict.joint_call_coverage) || !verdict.joint_call_coverage.length ||
-          verdict.joint_call_coverage.some(c => !Array.isArray(c.missing_members) || c.missing_members.length))
-        return { ok: false, why: `${regime}: incomplete joint invocation coverage` };
+      const chain = chainMembersVerified(spec, verdict, 'joint_chain');
+      if (!chain.ok) return { ok: false, why: `${regime}: ${chain.why}` };
       const check = kernelSelectionVerified({ ...h, joint_ut: undefined,
         device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates || result.seam_candidates },
         result, requiredMembers);
@@ -337,7 +354,7 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
   const verdict = ext && ext.selection_validation;
   if (!verdict || verdict.contract !== 'kernel_selection')
     return { ok: false, why: 'kernel_selection.py verdict is missing' };
-  if (verdict.selection_scope === 'joint_chain' && !jointScopeMembers)
+  if (['joint_chain', 'dispatch_chain'].includes(verdict.selection_scope) && !jointScopeMembers)
     return { ok: false, why: 'joint-chain selection requires a declared joint UT boundary' };
   if (verdict.ok !== true)
     return { ok: false,

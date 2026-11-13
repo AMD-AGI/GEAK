@@ -126,6 +126,35 @@ test('alternative dispatch branches verify one whole-op entry without simultaneo
   }
 });
 
+test('grouped dispatch cannot hide omitted calls, orphan members or a changed boundary', async t => {
+  const f = await fixture(t), p = f.phases[0];
+  const spec = p.spec, row = p.row;
+  row.selection_validation.selection_scope = 'dispatch_chain';
+  row.selection_validation.joint_call_coverage = [
+    { call: 0, applicable: true, missing_members: [] },
+    { call: 1, applicable: false, missing_members: [...spec.required_device_kernels] },
+  ];
+  const head = { ...f.kernel, joint_ut: undefined,
+    selected_device_kernels: spec.required_device_kernels, dispatch_ut: { phases: [spec] } };
+  const result = { target_callable: row.target_callable, phase_selection_validations: [row] };
+  assert.equal(contract.kernelSelectionVerified(head, result).ok, true);
+  for (const mutate of [
+    v => { v.selection_scope = 'joint_chain'; },
+    v => { v.joint_call_coverage.pop(); },
+    v => { v.joint_call_coverage[1].missing_members.pop(); },
+    v => { v.joint_call_coverage[1].applicable = true; },
+    v => { delete v.joint_call_coverage[0].applicable; },
+    v => { v.chain_members[1].matched_kernel_calls = 0; },
+  ]) {
+    const bad = structuredClone(result);
+    mutate(bad.phase_selection_validations[0].selection_validation);
+    assert.equal(contract.kernelSelectionVerified(head, bad).ok, false);
+  }
+  const bad = structuredClone(head);
+  delete bad.dispatch_ut.phases[0].required_device_kernels;
+  assert.equal(contract.kernelSelectionVerified(bad, result).ok, false);
+});
+
 test('file integrity errors fail closed and cannot fall back to inline PASS', async t => {
   const f = await fixture(t);
   const packed = await f.pack();

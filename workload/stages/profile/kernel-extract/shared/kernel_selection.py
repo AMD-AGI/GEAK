@@ -427,12 +427,14 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
 
 
 def verify_chain(target_callable, device_kernel, required_device_kernels, capture_meta,
-                 trace_events, candidate_targets=None):
+                 trace_events, candidate_targets=None, *, dispatch_chain=False):
     """Verify the deepest callable containing every member of a joint chain.
 
     A score-only child may be deeper than the joint entry but cannot replace it.
     Each observed invocation must contain every required member, including when
     GPU execution is asynchronous and only host launch correlations establish it.
+    A dispatch branch applies to every invocation containing ANY member. Keep
+    inapplicable calls in the verdict; anchor-only filtering would lose orphans.
     """
     members = list(dict.fromkeys([device_kernel] + list(required_device_kernels)))
     if len(members) < 2 or any(not str(name or '').strip() for name in members):
@@ -451,8 +453,13 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
                                               strict_launch=True)["matched"]]}
             for index, span in enumerate(spans)
         ]
+    if dispatch_chain:
+        for calls in coverage.values():
+            for call in calls:
+                call["applicable"] = len(call["missing_members"]) < len(members)
     complete = {candidate for candidate, calls in coverage.items()
-                if calls and all(not call["missing_members"] for call in calls)}
+                if any(call.get("applicable", True) for call in calls)
+                and all(not call["missing_members"] for call in calls if call.get("applicable", True))}
     outer = _complete_spans(trace_events, MARKER_PREFIX + target_callable)
     deeper = sorted(candidate for candidate in complete if candidate != target_callable
                     and _is_nested(_complete_spans(trace_events, MARKER_PREFIX + candidate), outer))
@@ -464,7 +471,8 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
         failed.add("deeper_live_candidate_exists")
     result.update(
         ok=not failed, failed=sorted(failed), deepest_verified=not failed,
-        selection_scope="joint_chain", required_device_kernels=members,
+        selection_scope="dispatch_chain" if dispatch_chain else "joint_chain",
+        required_device_kernels=members,
         live_candidate_targets=sorted(complete), deeper_live_candidates=deeper,
         partial_candidate_targets=sorted(candidate for candidate, calls in coverage.items()
                                          if calls and candidate not in complete),
@@ -497,6 +505,8 @@ def main(argv=None):
                         help="attribute kernels by their own host launch (AgentX extraction)")
     parser.add_argument("--required-device-kernel", action="append", default=[],
                         help="additional mandatory joint-chain member; repeat for this phase")
+    parser.add_argument("--dispatch-chain", action="store_true",
+                        help="require the chain in every call containing any of its members")
     parser.add_argument("--capture-meta", required=True, nargs="+",
                         help="one or more process-local capture_shapes meta.json files")
     parser.add_argument("--torch-trace", required=True, nargs="+",
@@ -509,6 +519,8 @@ def main(argv=None):
     parser.add_argument("--no-reclaim-captures", action="store_true",
                         help="skip promote/reclaim of process-local capture artifacts")
     args = parser.parse_args(argv)
+    if args.dispatch_chain and not args.required_device_kernel:
+        parser.error("--dispatch-chain requires --required-device-kernel")
 
     trace_paths = list(args.torch_trace)
     attempts = []
@@ -525,7 +537,7 @@ def main(argv=None):
             ]
         if not matching_traces:
             verdict = (verify_chain(args.target, args.device_kernel, args.required_device_kernel,
-                                    meta, [], args.candidate_target)
+                                    meta, [], args.candidate_target, dispatch_chain=args.dispatch_chain)
                        if args.required_device_kernel else
                        verify(args.target, args.device_kernel, meta, [], args.candidate_target,
                               strict_launch=args.strict_launch))
@@ -538,7 +550,8 @@ def main(argv=None):
             meta_path,
             matching_traces,
             (verify_chain(args.target, args.device_kernel, args.required_device_kernel, meta,
-                          merge_process_traces(matching_traces), args.candidate_target)
+                          merge_process_traces(matching_traces), args.candidate_target,
+                          dispatch_chain=args.dispatch_chain)
              if args.required_device_kernel else
              verify(args.target, args.device_kernel, meta,
                     merge_process_traces(matching_traces), args.candidate_target,

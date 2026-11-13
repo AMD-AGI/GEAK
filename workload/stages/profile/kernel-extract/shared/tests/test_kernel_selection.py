@@ -2,8 +2,13 @@
 """Regression tests for machine-verified live kernel selection."""
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -179,6 +184,114 @@ class TestJointChainSelection(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(len(result["joint_call_coverage"]), 2)
         self.assertTrue(all(c["missing_members"] for c in result["joint_call_coverage"]))
+
+
+class TestDispatchChainSelection(unittest.TestCase):
+    target = 'pkg.ops:whole'
+
+    def dispatch_trace(self, calls):
+        events = [{"cat": "cpu_op", "name": ks.INSTALL_PREFIX + self.target,
+                   "ph": "X", "pid": 1, "tid": 2, "ts": 0, "dur": 1}]
+        for index, members in enumerate(calls):
+            start = 100 + index * 100
+            events.append({"cat": "cpu_op", "name": ks.MARKER_PREFIX + self.target,
+                           "ph": "X", "pid": 1, "tid": 2, "ts": start, "dur": 90})
+            for offset, member in enumerate(members):
+                corr = index * 100 + offset
+                events.extend([
+                    {"cat": "hip_runtime", "name": "hipLaunchKernel", "ph": "X",
+                     "pid": 1, "tid": 2, "ts": start + 10 + offset * 10, "dur": 1,
+                     "args": {"correlation": corr}},
+                    {"cat": "kernel", "name": member, "ph": "X", "pid": 5,
+                     "ts": start + 1000 + offset * 10, "dur": 2, "args": {"correlation": corr}},
+                ])
+        return events
+
+    def check(self, calls, dispatch=True):
+        return ks.verify_chain(self.target, 'B', ['C'],
+            {"module": 'pkg.ops', "attr": 'whole', "total_calls_observed": len(calls)},
+            self.dispatch_trace(calls), [self.target], dispatch_chain=dispatch)
+
+    def test_mixed_singleton_chain_and_unselected_calls_keep_full_coverage(self):
+        result = self.check([['A'], ['B', 'C'], ['unselected']])
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['selection_scope'], 'dispatch_chain')
+        self.assertEqual([c['applicable'] for c in result['joint_call_coverage']], [False, True, False])
+        self.assertEqual(result['target_marker_calls'], 3)
+        self.assertFalse(self.check([['A'], ['B', 'C']], dispatch=False)['ok'])
+        self.assertTrue(self.check([['B', 'C']], dispatch=False)['ok'])
+
+    def test_partial_orphan_and_shared_companion_calls_fail(self):
+        for partial in [['B'], ['C'], ['A', 'C']]:
+            with self.subTest(partial=partial):
+                result = self.check([['A'], ['B', 'C'], partial, ['unselected']])
+                self.assertFalse(result['ok'], result)
+                self.assertIn('joint_member_missing_in_call', result['failed'])
+                self.assertTrue(result['joint_call_coverage'][2]['applicable'])
+        self.assertFalse(self.check([['A'], ['unselected']])['ok'])
+
+    def test_cli_keeps_failing_process_and_all_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metas, traces = [], []
+            for pid, calls in [(11, [['A'], ['B', 'C']]), (22, [['B', 'C'], ['C']])]:
+                meta_path = os.path.join(directory, f'meta-{pid}.json')
+                trace_path = os.path.join(directory, f'trace.pid-{pid}.json')
+                with open(meta_path, 'w') as fh:
+                    json.dump({"module": 'pkg.ops', "attr": 'whole',
+                               "total_calls_observed": len(calls), "process_id": pid}, fh)
+                with open(trace_path, 'w') as fh:
+                    json.dump({"traceEvents": self.dispatch_trace(calls)}, fh)
+                metas.append(meta_path)
+                traces.append(trace_path)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = ks.main(['--target', self.target, '--device-kernel', 'B',
+                    '--required-device-kernel', 'C', '--dispatch-chain',
+                    '--capture-meta', *metas, '--torch-trace', *traces, '--no-reclaim-captures'])
+            self.assertEqual(code, 1)
+            result = json.loads(output.getvalue())
+            self.assertEqual(len(result['joint_call_coverage']), 4)
+            self.assertEqual(result['target_marker_calls'], 4)
+            self.assertEqual([p['ok'] for p in result['process_verdicts']], [True, False])
+
+    def test_native_verdicts_and_task_plan_reach_delivery_gate(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js 18+ is required for the native delivery gate')
+        scripts = os.path.join(os.path.dirname(SCRIPTS), 'scripts')
+        sys.path.insert(0, scripts)
+        try:
+            import build_task_plan
+            task = {"target_callable": self.target, "selection_scope": "dispatch", "joint_phases": [
+                {"regime": "single", "phase": "DECODE", "required_kernels": ['A']},
+                {"regime": "chain", "phase": "DECODE", "required_kernels": ['B', 'C']},
+            ]}
+            joint, single, dispatch = build_task_plan.joint_ut(task, {})
+        finally:
+            sys.path.remove(scripts)
+        self.assertIsNone(joint)
+        self.assertEqual(single, [])
+        self.assertEqual(dispatch['phases'][1]['required_device_kernels'], ['B', 'C'])
+        head = {"entity_kind": "gpu_kernel", "device_kernel": 'A',
+                "selected_device_kernels": ['A', 'B', 'C'], "dispatch_ut": dispatch}
+        js = ('const m = await import(process.argv[1]);'
+              'const [h, r] = JSON.parse(process.argv[2]);'
+              'console.log(JSON.stringify(m.kernelSelectionVerified(h, r)));')
+        for calls, expected in [([['A'], ['B', 'C'], ['unselected']], True),
+                                ([['A'], ['B', 'C'], ['C']], False),
+                                ([['A'], ['B', 'C'], ['B']], False),
+                                ([['A', 'C'], ['B', 'C']], False)]:
+            meta = {"module": 'pkg.ops', "attr": 'whole', "total_calls_observed": len(calls)}
+            leaf = ks.verify(self.target, 'A', meta, self.dispatch_trace(calls), [self.target],
+                             strict_launch=True)
+            result = {"target_callable": self.target, "phase_selection_validations": [
+                {"regime": 'single', "target_callable": self.target, "selection_validation": leaf},
+                {"regime": 'chain', "target_callable": self.target, "selection_validation": self.check(calls)},
+            ]}
+            proc = subprocess.run([node, '--input-type=module', '-e', js,
+                os.path.join(SCRIPTS, 'delivery_contract.mjs'), json.dumps([head, result])],
+                capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(proc.stdout)['ok'], expected, proc.stdout)
 
 
 class TestCallableSpec(unittest.TestCase):
