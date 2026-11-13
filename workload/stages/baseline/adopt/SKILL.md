@@ -7,7 +7,7 @@ description: Freeze an already-measured serving receipt into this pipeline's can
 
 This step measures nothing. It reads a receipt someone else produced and translates it
 into the only file downstream reads, `baseline.json`. Whether the receipt is *admissible*
-is decided by `../finalize.py`, which belongs to the slot (`stages/CONTRACT.md` 3.1) —
+is decided by `../finalize.py`, which belongs to the slot (`engine/core/README.md`) —
 read that file for the rules rather than looking for a second copy of them here.
 
 **Nothing is retyped.** A receipt that nests its numbers, or splits them across two

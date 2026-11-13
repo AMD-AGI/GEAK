@@ -11,7 +11,7 @@ campaign:
 
 * **One container per slot.** A slot is as many consecutive GPUs as the task declared in
   its `meta.json` (`required_gpus`, defaulting to `--gpus-per-task`); mount exactly that
-  group's /dev/dri/renderD<128+8*i> nodes into the container. Widths are per task, not
+  group's discovered or configured render devices into the container. Widths are per task, not
   per campaign: a single-rank elementwise kernel and a TP8/EP8 collective share one run. An env-only ROCR_VISIBLE_DEVICES does not hold — the agent resets it in its
   own subprocesses, two workers land on the same physical GPU, and both sets of numbers
   are worthless. Physical isolation is the only isolation.
@@ -31,7 +31,8 @@ Usage:
                          --runner <runners/x.sh> [--gpus 0,1,...] [--target 172800]
     python3 scheduler.py --work-root <dir> status
 """
-import argparse, fcntl, json, os, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, subprocess, sys, time
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(HERE, "worker.sh")
@@ -82,8 +83,8 @@ def task_gpus(tasks_dir, task, default=1):
 def allocate(free, n):
     """Take `n` consecutive GPUs out of `free`, aligned to a multiple of n.
 
-    Consecutive and aligned because the container mounts /dev/dri/renderD<128+8*i> for
-    exactly this group, and a collective's rank numbering follows the group order. A task
+    A collective's rank numbering follows this group order; its container mounts only
+    the corresponding render devices. A task
     is never handed fewer ranks than it asked for: that does not run slowly, it fails
     every attempt.
     """
@@ -297,7 +298,8 @@ class Backend(object):
         self.mounts = list(mounts)
 
     def name_of(self, kernel, gpus):
-        return ("wl_opt_%s_%s" % (slot_label(gpus), kernel))[:200]
+        owner = hashlib.sha256(os.path.realpath(self.work_root).encode()).hexdigest()[:12]
+        return ("wl_opt_%s_%s_%s" % (owner, slot_label(gpus), kernel))[:200]
 
     def alive(self, kernel, gpus):
         raise NotImplementedError
@@ -372,13 +374,45 @@ class LocalBackend(Backend):
                 pass
 
 
+def render_devices(topology="/sys/class/kfd/kfd/topology/nodes"):
+    """ROCm topology order, excluding CPU nodes; never assume a render-minor stride."""
+    devices = []
+    for node in sorted(Path(topology).iterdir(), key=lambda p: int(p.name)):
+        fields = dict(line.split() for line in (node / "properties").read_text().splitlines())
+        minor = int(fields.get("drm_render_minor", 0))
+        if minor:
+            devices.append("/dev/dri/renderD%d" % minor)
+    return devices
+
+
 class DockerBackend(Backend):
+    render_paths = None
+
+    def name_of(self, kernel, gpus):
+        # Recover pre-namespace workers only when their recorded environment proves ownership.
+        legacy = ("wl_opt_%s_%s" % (slot_label(gpus), kernel))[:200]
+        rc, out = sh(["docker", "inspect", "-f", "{{json .Config.Env}}", legacy])
+        if rc == 0 and "WORK_ROOT=" + self.work_root in (json.loads(out) or []):
+            return legacy
+        return super().name_of(kernel, gpus)
+
     def alive(self, kernel, gpus):
         rc, out = sh(["docker", "inspect", "-f", "{{.State.Running}}",
                       self.name_of(kernel, gpus)])
         return rc == 0 and out.strip() == "true"
 
     def start(self, kernel, gpus, env):
+        try:
+            paths = self.render_paths if self.render_paths is not None else render_devices()
+            if any(gpu < 0 or gpu >= len(paths) for gpu in gpus):
+                raise ValueError("requested GPU index is absent from the render device map")
+            selected = [paths[gpu] for gpu in gpus]
+            if any(not os.path.exists(path) for path in selected):
+                raise ValueError("a selected render device is absent")
+        except (OSError, ValueError, IndexError) as exc:
+            log(self.work_root, "cannot resolve GPU render devices: %s; use --render-devices "
+                "with the host GPU order" % exc)
+            return False
         name = self.name_of(kernel, gpus)
         if self.retain_containers:
             rc, observed = sh(["docker", "inspect", "-f", "{{.Id}}", name])
@@ -400,20 +434,14 @@ class DockerBackend(Backend):
         from container_runtime import runtime_options
         runtime_args, entry_prefix = runtime_options(name)
         cmd += runtime_args
-        for gpu in gpus:
-            render = "/dev/dri/renderD%d" % (128 + 8 * gpu)
-            if not os.path.exists(render):
-                log(self.work_root, "%s for GPU %d does not exist — this node does not "
-                                    "number renderD as 128+8i; specify it with "
-                                    "--render-base/--render-step" % (render, gpu))
-                return False
+        for render in selected:
             cmd += ["--device", render]
         for k, v in env.items():
             cmd += ["-e", "%s=%s" % (k, v)]
         # The container sees exactly this slot's GPUs, so the worker addresses them as
         # 0..N-1 whatever their physical indices are.
         logical_ids = ",".join(str(i) for i in range(len(gpus)))
-        render_nodes = ",".join("renderD%d" % (128 + 8 * gpu) for gpu in sorted(gpus))
+        render_nodes = ",".join(os.path.basename(path) for path in selected)
         cmd += ["-e", "GPU_IDS=" + logical_ids,
                 "-e", "HIP_VISIBLE_DEVICES=" + logical_ids,
                 "-e", "GEAK_GPU_ALLOWED=" + logical_ids,
@@ -626,6 +654,8 @@ def main():
     ap.add_argument("--max-tasks", type=int)
     ap.add_argument("--backend", choices=["local", "docker"], default="local")
     ap.add_argument("--image")
+    ap.add_argument("--render-devices", help="comma-separated render device paths in host GPU "
+                    "index order; default: discover from ROCm KFD topology")
     ap.add_argument("--evidence-root", help="absolute optional destination root for newly begun evidence archives")
     ap.add_argument("--mount", action="append", default=[],
                     help="host path to bind-mount into each worker container at the same "
@@ -707,6 +737,8 @@ def main():
     backend = (DockerBackend(args.work_root, args.image, args.retain_containers, mounts)
                if args.backend == "docker" else LocalBackend(args.work_root))
     if args.backend == "docker":
+        if args.render_devices is not None:
+            backend.render_paths = [path.strip() for path in args.render_devices.split(",")]
         log(args.work_root, "worker containers mount: %s" % (", ".join(mounts) or "(none)"))
     if args.backend == "local" and len(args.gpus) > 1:
         log(args.work_root, "note: the local backend can only pin GPUs via env, which the "

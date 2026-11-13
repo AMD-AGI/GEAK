@@ -1,4 +1,9 @@
-# Stage `roofline` — compute each selected kernel's ceiling, and set the optimization order
+# Roofline
+
+Use the [invocation contract](../CONTRACT.md#direct-module-calls) to assess a bound
+or search priority. Provide explicit task/case evidence and a separate analysis output;
+a scoped input view preserves its original ownership and whole-workload shares.
+The report informs Reasoning; it does not force a search or establish E2E gain.
 
 **Input** `$IN` = profile's out (`selection_targets.json` for shares, `tasks/<name>/` for
 runnable unit tests).
@@ -9,37 +14,26 @@ runnable unit tests).
 
 | Directory | Notes |
 | --- | --- |
-| `kernel-roofline/` | default. External archive, vendored unmodified. Three modes: `tl-only` (TraceLens prediction, no GPUs), `rocprof` (measured counters, requires rocprof-compute ≥ 3.6.0), `combination` (reconciles both legs in the time domain). Integrity enforced by `../MANIFEST.kernel-roofline.json` |
+| `kernel-roofline/` | default. External archive, vendored unmodified. Three modes: `tl-only` (TraceLens prediction, no GPUs), `rocprof` (measured counters, requires rocprof-compute ≥ 3.6.0), `combination` (reconciles both legs in the time domain). Integrity enforced by `MANIFEST.kernel-roofline.json` |
 | `stub-roofline/` | a minimal worked example of swapping this slot |
 
 Agent-shaped. The mode comes from `params.roofline_mode`, defaulting to `tl-only` — no
 GPUs, and sufficient for ranking. Set `rocprof` for measured counters, or `combination`
 to reconcile the two legs.
 
-## Why this stage exists
+## Ranking
 
-Not to produce a pretty table — to decide **which kernels get the 48 hours**.
+Rank by potential whole-workload savings, retaining unknown bounds as unknown:
 
 ```
 expected_e2e_gain_pct = pct_gpu_time × (1 − 1 / attainable_speedup)
 ```
 
-Historical calibration on this workload:
-
-| Kernel | GPU share | Roofline | Attainable | Measured e2e |
-| --- | --- | --- | --- | --- |
-| `fused_moe_kernel` | 26.45% | 88% | 1.02× | **−0.064%** |
-| `kernel_paged_attention_2d` | 8.86% | 18% | 2.8× | 1.56× in isolation |
-
-The largest consumer of GPU time was already against its ceiling: another 48 hours buys
-roughly half a percent. The kernel with a third of its share had 2.8× of headroom.
-**Ranking by operator-speedup potential would have put every GPU on the former.**
-
 ## Artifacts → `result.json`
 
 The slot's `finalize.py` performs this mapping and is the stage's verdict (it belongs to
 the slot, not to any implementation, and the driver runs it after every session —
-`stages/CONTRACT.md` section 3.1):
+[driver protocol](../../engine/core/README.md#execution-shapes)):
 
 ```bash
 python3 "$WORKLOAD_ROOT/stages/roofline/finalize.py"
@@ -100,8 +94,6 @@ predicted performance ranking. A partial ranked subset cannot imply a known tota
   `expected_e2e_gain_pct` to null — listed, but excluded from the ranking.
 - **`bound_type` is a model classification, not proof of a measured bottleneck.** Low
   efficiency on its own does not establish a bandwidth, occupancy or issue limit.
-- **TraceLens percentages and rocprof percentages are different quantities and must not
-  be divided by one another.** On gfx950 their denominators differ by HBM 0.856, bf16
-  0.573, fp8 0.628, fp4 0.502; stacking a `target_eff=0.90` on top of TraceLens bandwidth
-  that is already derated is a double derate and inflates `attainable_speedup` by roughly
-  17%.
+- **Different models can use different denominators.** Reconcile their definitions
+  before comparing efficiencies or applying a derating factor; do not derate an already
+  adjusted bound twice.

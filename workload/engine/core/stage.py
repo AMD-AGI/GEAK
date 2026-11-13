@@ -4,7 +4,7 @@
 It does three things and no more: resolve the config to locate a stage skill, prepare the
 stage's run environment, and validate the `result.json` the stage hands back before
 recording it in `STATE.json`. All stage logic lives in `stages/<stage>/<skill>/`; this
-file knows no individual skill. Contract in ../stages/CONTRACT.md.
+file knows no individual skill. Driver protocol in README.md.
 
     run.py plan              # resolve and print where all five stages land (= --dry-run)
     run.py prepare <stage>   # create OUT, write params.json/env.sh, print the SKILL.md path
@@ -246,7 +246,7 @@ def save_state(cfg, state):
 
 def check_skill(lay, problems):
     # Every slot owns its acceptance criterion and the driver runs it after every stage,
-    # whichever implementation is plugged in (stages/CONTRACT.md 3.1). Checked here so a
+    # whichever implementation is plugged in (engine/core/README.md). Checked here so a
     # slot that cannot judge its own output is found by --dry-run rather than 48 hours in.
     if not os.path.exists(lay["finalize"]):
         problems.append("%s: the slot has no finalize.py, so nothing but the skill itself "
@@ -503,7 +503,7 @@ def cmd_run(cfg, args):
     print("[stage] run.sh exited %d after %.1fs" % (proc.returncode, time.time() - started))
     # The slot judges a script exactly as it judges an agent session. Both shapes write
     # their own result.json and both are equally able to be generous about it, so the
-    # acceptance criterion has the last word in both (stages/CONTRACT.md 3.1). A script
+    # acceptance criterion has the last word in both (engine/core/README.md). A script
     # that exited nonzero still cannot publish `ok` -- cmd_validate holds that line.
     import agent_stage
     agent_stage.finalize(env)

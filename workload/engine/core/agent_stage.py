@@ -3,7 +3,7 @@
 
 Three of the five slots hold skills that are procedures rather than scripts: choosing a
 kernel boundary, deciding which dispatch branch is one operator, reading a roofline and
-saying what it implies. Those are judgement, and the contract (stages/CONTRACT.md §2 B)
+saying what it implies. Those are judgement, and the contract (engine/core/README.md)
 says so by letting a skill ship a `SKILL.md` and no `run.sh`.
 
 Until now that meant a human-attended session: `run.py run profile` printed "this is an
@@ -161,7 +161,7 @@ def finalize(env, log_cb=print):
     `stages/<stage>/finalize.py` reads `$OUT` and overwrites `result.json` last. Every
     slot has one and it runs unconditionally: calling it only where the file happened to
     exist is how three of the five slots ended up grading their own work, two of them
-    under a different filename. `stages/CONTRACT.md` section 3.1 is the rule; a missing
+    under a different filename. `engine/core/README.md` is the rule; a missing
     one is a defect in the slot, reported here and caught before the run by
     `run.py --dry-run`.
     """
@@ -171,7 +171,7 @@ def finalize(env, log_cb=print):
     stages_root = os.path.join(workload_root, "stages")
     script = os.path.join(stages_root, env.get("STAGE", ""), "finalize.py")
     # The envelope writer belongs to the stage contract, not to the plumbing, so it lives
-    # with the contract in stages/_shared (stages/CONTRACT.md 3). The dependency points
+    # with the contract in stages/_shared (engine/core/README.md). The dependency points
     # that way round on purpose: the pipeline implements the contract, and a slot that
     # reached back up here for a tool would couple a replaceable skill to this file.
     sys.path.insert(0, os.path.join(stages_root, "_shared"))
@@ -192,7 +192,7 @@ def finalize(env, log_cb=print):
     rc = None
     if not os.path.exists(script):
         status, problem = "blocked", ("the slot has no finalize.py, so nothing but the "
-                                      "agent judged this stage (stages/CONTRACT.md 3.1)")
+                                      "agent judged this stage (engine/core/README.md)")
     else:
         try:
             rc = subprocess.call([sys.executable, script], env=env)

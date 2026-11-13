@@ -42,8 +42,12 @@ ATTEMPT_MIN="${ATTEMPT_MIN:-600}"
 read_override() {  # <file> <current>
   local v
   [ -f "$1" ] || { echo "$2"; return; }
-  v="$(tr -dc '0-9' < "$1" | head -c 9)"
-  [ -n "$v" ] && [ "$v" -gt 0 ] 2>/dev/null && echo "$v" || echo "$2"
+  v="$(cat "$1")"
+  if [[ "$v" =~ ^[0-9]{1,9}$ ]] && (( 10#$v > 0 )); then
+    echo "$((10#$v))"
+  else
+    echo "$2"
+  fi
 }
 # Keep threshold, calibrated by measurement rather than quoted from documentation: four
 # kernels in the previous campaign whose source was md5-identical to the original
@@ -551,33 +555,9 @@ print(1 if $OK and sp >= $KEEP_THRESHOLD and sp > best + $KEEP_MARGIN else 0)")"
       copy_sources "$TASK_DIR/kernel_src" "$RUN/best_kernel_src"
       cp -a "$RUN/.measure.log" "$RUN/best_measure.log" 2>/dev/null
     else
-      # Separate "the harness would not run" from "a gate said no". The negative
-      # control is built by text-patching kernel_src at a literal source anchor, so an
-      # edit that rewrites the anchored line aborts the run before anything is measured.
-      # Reporting that as a gate failure sends the next attempt to fix a kernel that was
-      # never evaluated.
-      REFUSED=0
-      if grep -qE 'anchor is not unique|refusing to patch blind' "$RUN/.measure.log" \
-         2>/dev/null; then
-        REFUSED=1
-      fi
-      if [ "$REFUSED" = 1 ]; then
-        ANCHOR_MUT="$(sed -n 's/.*RuntimeError: mutation \([A-Za-z0-9_]*\).*/\1/p' \
-          "$RUN/.measure.log" 2>/dev/null | tail -1)"
-        note "attempt $N: revert -- the harness refused to run (negative control \
-${ANCHOR_MUT:-mutation} lost its source anchor); nothing was measured"
-        record_rejected "$N" "" "$CLEAN" "${SINGLE:-0}" \
-          "the harness refused to run: the ${ANCHOR_MUT:-negative-control} mutation \
-text-patches kernel_src at a literal source anchor and this edit removed it, so the run \
-aborted before any gate or timing. The kernel was NOT judged -- do not read this as a \
-correctness or speed failure. Keep the anchored expression and neutralise it at trace \
-time instead (a folded constant leaves the control armed), then this same candidate can \
-be measured"
-      else
-        note "attempt $N: revert (correct=$OK measured=${SP} best=${BEST}x threshold=${KEEP_THRESHOLD})"
-        record_rejected "$N" "$SP" "$CLEAN" "${SINGLE:-0}" \
-            "$( [ "$OK" = 1 ] && echo "below the keep threshold" || echo "a gate failed" )"
-      fi
+      note "attempt $N: revert (native_status=$OK measured=${SP} best=${BEST}x threshold=${KEEP_THRESHOLD})"
+      record_rejected "$N" "$SP" "$CLEAN" "${SINGLE:-0}" \
+          "$( [ "$OK" = 1 ] && echo "below the keep threshold" || echo "native measurement rejected; inspect the retained log" )"
       copy_sources "$SNAP" "$TASK_DIR/kernel_src"
     fi
   fi

@@ -1,71 +1,48 @@
 # Workload optimization through modular experiments
 
-Start by giving an agent the [root skill](SKILL.md), the task/scenario and a run directory.
-The agent follows that control loop: it chooses a question,
-plans a bounded experiment, invokes modules and uses their reports to decide the next
-step. A module defines a capability and its input/output/acceptance contract; one or
-more implementation skills or tools provide the method. Replacing a method does not
-replace the criterion. Read [PRINCIPLES.md](PRINCIPLES.md) before changing the workflow.
+Give an agent the [root skill](SKILL.md), task/scenario and a run directory.
+[Reasoning](reasoning/SKILL.md) is the persistent main agent: it chooses bounded calls,
+receives asynchronous reports and decides what to do next while independent work continues.
+Read [PRINCIPLES.md](PRINCIPLES.md) before changing the workflow.
 
-![Dynamic optimization loop: Reasoning chooses a question, Plan defines the experiment, Module invokes a selected implementation, and Report feeds evidence back to Reasoning. Modules can repeat, skip, combine or run in parallel.](docs/dynamic-loop.png)
+![Dynamic optimization loop: Reasoning chooses a question, Plan defines the experiment, Module invokes a selected implementation, and Report feeds evidence back to Reasoning.](docs/dynamic-loop.png)
 
-Reasoning chooses the next task from evidence; modules are capabilities, not checklist
-steps. Each call reports **task → module / implementation → result → next decision**.
+Modules can repeat, combine or run in parallel. A defective task can return to UT and
+resume optimization after qualification while healthy branches continue.
 [Editable figure](docs/dynamic-loop.svg).
-
-The [standard recipe](recipes/standard.md) retains the existing five-stage route and
-its configured budgets. It is one possible plan. A diagnostic call can return a trace
-without extracting UTs; a configuration candidate can be evaluated without a kernel
-overlay; a ready candidate can be tested while unrelated work continues on other
-resources. Each call declares its scope and leaves evidence, including negative results.
 
 ## Modules
 
-This is a discovery table, not a registry or a required sequence. A capability may use
-part of an existing implementation. Add another skill or command when a new method is
-needed; it need not be named in the controller. All calls follow the
-[invocation contract](stages/CONTRACT.md#direct-module-calls).
+This is a discovery table, not a registry or required sequence. Each module's README
+defines its contract; implementation skills describe the method.
+All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-calls).
 
-| Module | Responsibility | Available implementations / instructions |
+| Module | Responsibility | Implementations |
 | --- | --- | --- |
-| Setup | Prepare the permitted runtime and resources | [Baseline preparation](stages/baseline/direct.md), using the configured environment and resource tools |
-| Baseline | Establish or revalidate a reference | [Adopt](stages/baseline/adopt/SKILL.md), [measure](stages/baseline/measure/SKILL.md) |
-| Profile | Diagnose the serving bottleneck | [Profile scope](stages/profile/direct.md), with the selected profiler or native telemetry |
-| UT | Define and qualify a computation boundary | [UT scope](stages/profile/direct.md), reusing kernel-extract's tools |
-| Roofline | Assess a performance bound or search priority | [Kernel roofline](stages/roofline/direct.md), [CPU fixture](stages/roofline/stub-roofline/SKILL.md) |
-| Optimize | Produce an isolated candidate | [Invocation scope](stages/optimize/direct.md), [Kernel Workflow](stages/optimize/geak-kernel-workflow/SKILL.md), [kernel dynamic loop](stages/optimize/kernel-dynamic-loop/SKILL.md), [OOB / native tools](stages/optimize/oob/SKILL.md) for kernel or system candidates |
-| Apply back | Integrate a candidate and prove it took effect | [Kernel integration](stages/applyback/direct.md), [system runtime](stages/applyback/system-runtime/SKILL.md) |
-| Evaluate | Judge a serving comparison | [Native E2E](stages/evaluate/native-e2e/SKILL.md), using the benchmark's own quality and validity receipts |
-| Report | Explain the actual decisions, calls and parallel work | [HTML timeline](stages/report/html-timeline/SKILL.md), with an [interactive example](stages/report/html-timeline/assets/example.html) |
-
-## Evidence and the performance floor
-
-An experiment names its input state and owns its output directory. `BRIEF.md` carries
-constraints and the comparison target; `STATE.md` carries pointers and decisions.
-Reuse the modules' native receipts and `REPORT.md` rather than copying their counters
-into a second state system. A module can report ongoing work, a blocker, or a negative
-finding without inventing a candidate or declaring an optimization success.
-
-Keep the verified fixed-route result available during migration. Preserve required
-search and verification budgets; compare policies at the same starting state and total
-resource allowance. Only a qualified serving comparison can replace the reference.
-A local kernel win, a working controller and a measured system improvement are different
-claims. Reference platforms, target metrics and allowed changes belong to the task.
+| [Setup](stages/setup/README.md) | Prepare runtime and resources | [runtime](stages/setup/runtime/SKILL.md) |
+| [Baseline](stages/baseline/README.md) | Establish or revalidate a reference | [adopt](stages/baseline/adopt/SKILL.md), [measure](stages/baseline/measure/SKILL.md) |
+| [Profile](stages/profile/README.md) | Diagnose the serving bottleneck | [kernel-extract](stages/profile/kernel-extract/SKILL.md), scoped to observations |
+| [UT](stages/ut/README.md) | Define and qualify a computation boundary | [kernel-extract](stages/ut/kernel-extract/SKILL.md), reusing the existing tools |
+| [Roofline](stages/roofline/README.md) | Assess bounds and search priority | [kernel-roofline](stages/roofline/kernel-roofline/SKILL.md), [CPU fixture](stages/roofline/stub-roofline/SKILL.md) |
+| [Optimize](stages/optimize/README.md) | Produce an isolated candidate | [Kernel Workflow](stages/optimize/geak-kernel-workflow/SKILL.md), [kernel dynamic loop](stages/optimize/kernel-dynamic-loop/SKILL.md), [OOB](stages/optimize/oob/SKILL.md) |
+| [Apply back](stages/applyback/README.md) | Integrate a candidate and prove it took effect | [kernel overlay](stages/applyback/overlay-ab/SKILL.md), [system runtime](stages/applyback/system-runtime/SKILL.md) |
+| [Evaluate](stages/evaluate/README.md) | Judge a serving comparison | [native-e2e](stages/evaluate/native-e2e/SKILL.md) |
+| [Report](stages/report/README.md) | Explain decisions, calls and parallel work | [HTML timeline](stages/report/html-timeline/SKILL.md) and [example](stages/report/html-timeline/assets/example.html) |
 
 ## Where things live
 
 | Path | Purpose |
 | --- | --- |
-| `SKILL.md` | The agent's control loop |
-| `recipes/standard.md` | The fixed route, commands and compatibility behavior |
-| `stages/CONTRACT.md` | Direct module calls and the standard recipe's adapter contract |
-| `stages/` | Existing implementation skills and their validation owners; directory names are not a required call order |
-| `config/` | Maintained scenarios and shared defaults; campaign-specific variants stay with their campaign |
-| `run.py` | Stable executor for the standard recipe and individual configured stages |
-| `runners/` | CLI adapters, including their credential and exit-code contract |
-| `engine/` | [Isolation, scheduling, recovery and evidence tools](engine/README.md) |
-| `docs/` | Illustrations, not executable policy |
+| `SKILL.md` | Entry into the campaign |
+| `reasoning/` | Persistent controller, starting route and evidence-guided planning |
+| `stages/` | Module contracts and interchangeable implementations |
+| `config/` | Scenarios and defaults; campaign variants stay with their evidence |
+| `run.py`, `engine/core/` | [Sequential driver and protocol](engine/core/README.md) |
+| `runners/` | Agent CLI adapters and [runner contract](runners/CONTRACT.md) |
+| `engine/` | [Mechanical execution and evidence tools](engine/README.md) |
+| `docs/` | Illustrations |
 
-The existing [pipeline figure](docs/pipeline.svg) depicts the standard recipe. Native
-skills remain byte-identical where the manifests require it. New prompt or selection
-policy belongs in Markdown; code is reserved for mechanical execution and validation.
+The [starting route](reasoning/SKILL.md#starting-route-and-adoption) preserves existing
+coverage, methods and budgets when no better-supported plan is available.
+Only a qualified serving comparison can replace the verified performance floor.
+The [pipeline figure](docs/pipeline.svg) depicts that sequential route.
