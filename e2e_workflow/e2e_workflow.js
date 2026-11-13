@@ -1042,14 +1042,13 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%): 0.5 for a fixed-shape workload (identical work per replica, isolated
-// measurements, non-overlap and engagement proof). A trace replay varies with which trajectories a
-// replica completes, so it gets a 4% floor; a TTFT-inclusive axis needs an explicit noise_band_pct.
-const NOISE_BAND_AGENTX = 4.0;
-const NOISE_BAND_DEFAULT = parseFloat(
-  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
-// The gate band from the Director's value. The Director starts at 0.5, so on a trace replay it may
-// only raise the band above the workload floor; a fixed-shape run uses the Director's value.
+// Acceptance noise band (%): 0.5 unless the Director or an explicit noise_band_pct widens it. A trace
+// replay's replicas spread a few percent, but that is not its default: one kernel's A/B rarely moves
+// e2e that far, and run_e2e.py holds the final pair to the KEEP rule. A TTFT-inclusive axis needs an
+// explicit noise_band_pct.
+const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// The gate band from the Director's value. On a trace replay an explicit noise_band_pct is a floor
+// the Director can only widen; a fixed-shape run uses the Director's value.
 function gateNoiseBand(reported) {
   const r = parseFloat(reported);
   const director = Number.isFinite(r) && r > 0 ? r : 0;
@@ -1632,6 +1631,12 @@ function agentxValidateSkip(adoptedNothing, leftMs) {
   if (!IS_AGENTX) return '';
   if (adoptedNothing) return 'final_is_baseline';
   return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
+}
+// A trace replay benches its A/Bs on the search window but curTput starts at Setup's canonical number,
+// and the two are not comparable: an accepted same-window win is kept for Validate's canonical A/B to
+// judge. A sub-threshold `stack` result still has to beat curTput.
+function beatsCurTput(integ, curTput) {
+  return (IS_AGENTX && integ.gate === 'accepted') || integ.e2e_throughput_tok_s > curTput;
 }
 
 function correctnessEnvBlock(role) {
@@ -2783,7 +2788,7 @@ async function tryCorrectiveReauthor(spec) {
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && integ2.e2e_throughput_tok_s > curTput) {
+    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && beatsCurTput(integ2, curTput)) {
       // Carry the corrected patch out to bankAccepted: the call site's KERNEL_RESULT still holds the
       // rejected one.
       return { banked: true, integ: integ2, isolated: fix.final_geomean, patch: fix.final_patch,
@@ -3332,7 +3337,7 @@ if (want('setup')) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
       `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
       `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
-      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+      `${A.noise_band_pct != null ? 'noise_band_pct' : 'default'} ${NOISE_BAND_DEFAULT}%).`);
   }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
@@ -4870,7 +4875,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
+        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && beatsCurTput(integ, curTput)) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
@@ -5188,7 +5193,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const integ = await runIntegrateBothLegs(
         'Apply the head-op winner; gate on e2e throughput.', headWinnerInputs,
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && beatsCurTput(integ, curTput)) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -5457,7 +5462,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && beatsCurTput(integ, curTput);
       // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
         e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
@@ -5682,7 +5687,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
     // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && beatsCurTput(integ, curTput)) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
@@ -5871,7 +5876,7 @@ if (want('final')) {
       // Measured against the latest accepted baseline (current overlay/flags/env/throughput).
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
-    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && beatsCurTput(integ, curTput)) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
