@@ -513,6 +513,9 @@ class TestStepSpans(unittest.TestCase):
     def test_sglang_step_dialect_preserves_prefill_and_speculative_decode(self):
         self.assertEqual(pp._classify_step("step[EXTEND bs=2 toks=64]"), (True, 64, 0, 0))
         self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
+        # DFLASH speculative decoding: both decode-side forwards are generation shapes.
+        self.assertEqual(pp._classify_step("step[VERIFY bs=1]"), (False, 0, 1, 0))
+        self.assertEqual(pp._classify_step("step[DRAFT bs=2]"), (False, 0, 2, 0))
         self.assertIsNone(pp._classify_step("step[malformed]"))
 
     def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):

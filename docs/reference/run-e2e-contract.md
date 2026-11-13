@@ -19,14 +19,20 @@ changes while the workflow evolves internally.
 Run the external orchestrator entry point as follows.
 
 ```bash
-python interface/run_e2e.py <handoff.json> <result.json> [--dry-run]
+python interface/run_e2e.py <handoff.json> <result.json> [--timeout-s N] [--dry-run] \
+    [--kernel-fusion | --no-kernel-fusion]
 ```
 
 - Exit code `0`: `result.json.status` is `ok`, `no_gain` or `timeout`.
 - Exit code `1`: a crash; `result.json.status == "error"` with an `error` field.
 - Exit code `2`: bad usage or unreadable handoff.
 - `--dry-run`: print the mapped `e2e_workflow.js` args and the prompt and
-  exit `0` (no GPU work). Use this to validate the mapping in CI.
+  exit `0` (no GPU work). Use this to validate the mapping in CI. With
+  KernelFusion on, the mapped args carry `kernel_fusion: "true"` and its `kf_*`
+  knobs; off, none of them.
+- `--kernel-fusion` / `--no-kernel-fusion`: switch KernelFusion on or off for
+  this run; overrides the handoff and `GEAK_KERNEL_FUSION` (see
+  [KernelFusion](#kernelfusion)).
 
 Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
@@ -109,6 +115,59 @@ The mapping is owned by `run_e2e.py:map_args`.
 | — | `config_tune="false"` | Caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
 
+### KernelFusion
+
+KernelFusion (KF) adds no phase to `e2e_workflow.js`; it runs inside the
+stages the workflow already has. Right after the baseline Profile round (on
+AgentX, after the baseline kernel-extract preparation), the `fusion-analysis`
+skill reads the same trace and writes a fusion profile: which kernels run back
+to back as one region, and the one Python seam that launches each. Strategize
+and every milestone plan route the regions worth a fused kernel as kernel
+candidates that name a `fusion_id`, and the milestone loop treats each one like
+any kernel candidate: a region unit test, one fused kernel from the kernel
+workflow (`kernel_lane.js`), and the run's own integrate A/B on the overlay
+accepted so far (gsm8k accuracy gate, then throughput), finished at the
+Finalize-gate when it is still pending. A region on a head's own kernel is
+built the same way in HeadKernel instead, as one more candidate in that head's
+slot, and banked only if it measures best against the reference the head's
+own candidates share; a head HeadKernel never reaches leaves its region to the
+milestone loop. A banked region is carried like any accepted kernel, and
+Finalize ships it. A fusion profile that fails, finds
+nothing or is switched off leaves the run exactly as it is without KF.
+
+KF is off by default. Switch it on with `--kernel-fusion`,
+`GEAK_KERNEL_FUSION=1` or the handoff key below. Precedence, highest first: the
+CLI flags (`--kernel-fusion` / `--no-kernel-fusion`), the
+`GEAK_KERNEL_FUSION=1|0` environment variable, then the handoff:
+
+```jsonc
+{
+  "kernel_fusion": true                       // on with defaults (absent or false: off)
+  // or a settings object (switches it on unless "enabled": false):
+  "kernel_fusion": {
+    "prompt": "/path/deployment_notes.txt",   // run-specific prompt(s), comma-separated
+    "implementable_levels": "L1,L2,L3",
+    "task": "operator constraints for every KernelFusion agent"
+  }
+}
+```
+
+`run_e2e.py` only forwards the switch: `kernel_fusion: "true"` and the `kf_*`
+workflow args (`interface/kernel_fusion_args.py`); off, nothing. Under
+`time_budget_s`, the fusion profile and the AgentX region unit tests together
+have at most a quarter of the search window left when the fusion profile
+starts; the fused kernels then run under the run's own head and kernel budgets
+and reserves. Fast and deep mode skip KF (`status: skipped`). A failed fusion
+profile, or a knob it cannot use, is recorded as `status: error` and the run
+goes on without KF. A region's accepted overlay is banked only after
+`e2e_workflow/scripts/fusion_overlay_check.py` passes (inside the run's eval
+dir, compiles, every fused kernel it names exists, every file of the overlay it
+was built on kept byte-identical with its sitecustomize still imported, and
+unchanged since the A/B that accepted it); otherwise that A/B counts as a
+rejection and the run keeps its overlay. Every settings key also has a
+`GEAK_KF_*` environment variable; the full list is in
+`e2e_workflow/knowledge/kernel_fusion_integration.md`.
+
 ### TraceLens prior autodiscovery
 
 Owned by `run_e2e.py:resolve_tracelens_report`. An upstream orchestrator might have
@@ -177,13 +236,32 @@ The workflow writes the following fields to the result file.
   },
   "report_path": ".../final_report.md",
   "kernel_journey_path": ".../kernel_journey.json",
-  "recovered_from_disk": true
+  "recovered_from_disk": true,
+  "kernel_fusion": {                     // present only when kernel_fusion was switched on
+    "status": "accepted | profiled | skipped | error | not_run",
+    "reason": "...",                     // when skipped or error
+    "trace_dir": ".../profile/round_0/profile",
+    "topk_json": ".../kernel_fusion/analysis/topk.json",
+    "candidates": [ /* the fusion profile's regions */ ],
+    "recommended": ["c2", "c1"],
+    "routed": ["kf_c2"],                 // regions the architect sent to the kernel track
+    "unprepared": [ /* AgentX: recommended regions without a passing region UT, with the reason */ ],
+    "accepted": [{"short_name": "kf_c2", "fusion_id": "c2", "isolated_speedup": 1.3, "e2e_delta_pct": 1.8}],
+    "outcomes": [{"short_name": "kf_c2", "verdict": "confirmed", "e2e_delta_pct": 1.8}],
+    "soft_parity": true                  // a region is banked: later A/Bs and Validate carry the accuracy gate
+  }
 }
 ```
 
 Schema v2 renames `baseline_divergence_pct` to
 `raw_session_baseline_divergence_pct`. The raw-session metric is audit-only
 because it includes accepted upstream configuration gains.
+
+A banked fusion region is part of the run's own result like any accepted
+kernel: it is in `accepted_kernels` (`kind: "patch"`, `op_kind: "fusion"`, its
+`fusion_id`), or in `accepted_heads` under the head's `short_name` when it won
+a head's slot, and the run's `throughput_speedup` and final bundle include it.
+In `outcomes`, a region tried in a head's slot is `<head>:<region>`.
 
 `current_best_same_config_divergence_pct` is the primary cross-harness
 alignment metric. `measurement_divergence_pct` remains an exact compatibility

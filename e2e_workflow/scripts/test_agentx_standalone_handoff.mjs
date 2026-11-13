@@ -174,7 +174,7 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
       const pending = {...prepared, short_name: 'pending', prepared_ut: {...prepared.prepared_ut}};
       const env = {KERNEL_EXTRACT_ON: true, WORKFLOW_DIR: workflowDir, EVAL_DIR: f.evalDir,
         MODEL_PATH: '/model', GPU_LIST: ['0'], gpu: '0', WORKLOAD: {}, profile: {},
-        curOverlay: '', curFlags: '', curEnv: '', CONC: 32, EXTRACT_SCHEMA: {}, EXTRACT_OP_SCHEMA: {},
+        curOverlay: '', curFlags: '', curEnv: '', CONC: 32, EXTRACT_SCHEMA: {}, EXTRACT_OP_SCHEMA: {}, KF_ON: false,
         h: {...queued}, c: {...queued}, headQueue: [queued, pending], gemmSynthFor: () => false,
         safeAgent: () => { throw new Error('downstream authoring is forbidden'); }};
       return new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env;

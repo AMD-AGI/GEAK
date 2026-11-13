@@ -118,6 +118,9 @@ jobs:
             e2e_workflow/scripts/tests/test_parse_regime_sources.py \
             e2e_workflow/scripts/tests/test_gsm8k_eval.py \
             e2e_workflow/scripts/tests/test_parse_profile.py \
+            interface/test_run_e2e_kernel_fusion.py \
+            e2e_workflow/scripts/tests/test_fusion_overlay_check.py \
+            e2e_workflow/knowledge/kernel_fusion_skills/fusion-analysis/tests/test_kf_trace_digest.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
@@ -337,6 +340,11 @@ jobs:
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
         run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+      # KernelFusion is opt-in (kernel_fusion=true) and runs inside the existing stages. The whole workflow
+      # runs on the runtime with scripted agents and stubbed kernel_lane.js runs: a run without the switch
+      # sends and returns nothing of it, and every KernelFusion outcome leaves the run to finish. No GPU, no model.
+      - name: kernel fusion (off by default) regression
+        run: node e2e_workflow/scripts/test_kernel_fusion.js
       # The elapsed clock and the final reserve are the only thing standing between a
       # long run and a hard kill with no report (Hyperloom #1202). Only this job can
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.

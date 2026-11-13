@@ -4809,6 +4809,9 @@ def normalize_result(h: dict, wf: dict) -> dict:
     tuning_section = _tuning_skillset_section(wf, eval_dir)
     if tuning_section is not None:
         result["tuning_skillset"] = tuning_section
+    # Likewise the KernelFusion record, in the workflow return only when kernel_fusion was switched on.
+    if isinstance(wf.get("kernel_fusion"), dict):
+        result["kernel_fusion"] = wf["kernel_fusion"]
     return result
 
 
@@ -7850,6 +7853,15 @@ def _publish_protected_pgids() -> str:
 _RUN_REAPER: Any = None
 
 
+def _kf_args() -> Any:
+    """``interface/kernel_fusion_args.py`` (the KernelFusion switch and knobs), imported on first use."""
+    try:
+        from interface import kernel_fusion_args
+    except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
+        import kernel_fusion_args
+    return kernel_fusion_args
+
+
 def _run_reaper() -> Any:
     """``e2e_workflow/scripts/run_reaper.py``, loaded once: the workflow runs it as a script, the runner imports it."""
     global _RUN_REAPER
@@ -7997,7 +8009,7 @@ def main(argv: list[str]) -> int:
     if len(args) < 2:
         sys.stderr.write(
             "usage: run_e2e.py <handoff.json> <result.json> "
-            "[--timeout-s N] [--dry-run]\n"
+            "[--timeout-s N] [--dry-run] [--kernel-fusion|--no-kernel-fusion]\n"
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
@@ -8018,6 +8030,12 @@ def main(argv: list[str]) -> int:
         artifact_cutoff_ts=artifact_cutoff_ts,
         dry_run=is_dry_run,
     )
+    # KernelFusion lives in the e2e workflow, OFF by default: only its switch and knobs are forwarded,
+    # nothing at all when it is off. A knob it cannot use reaches the workflow as kf_config_errors.
+    try:
+        ps_args.update(_kf_args().workflow_args(h, flags))
+    except Exception as e:  # the switch must never stop the run
+        sys.stderr.write(f"kernel_fusion: switch not applied ({type(e).__name__}: {e})\n")
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]

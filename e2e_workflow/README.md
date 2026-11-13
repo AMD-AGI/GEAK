@@ -49,6 +49,14 @@ ConfigSweep(flags/env/backends, FIRST) → Re-profile →
 LOOP milestone[ plan → per kernel: Extract → recursive kernel_workflow.js → Overlay+e2e gate → ] → Re-profile → grow playbook →
 Finalize(overlay+patch+launch bundle) → Architect Report → Director Validation
 ```
+Optional **KernelFusion** (off by default; `kernel_fusion: "true"`, which `interface/run_e2e.py` sets
+from `--kernel-fusion`, `GEAK_KERNEL_FUSION=1` or handoff `"kernel_fusion": true`) adds no phase: Baseline
+Profile gets a fusion profile of the same trace (`knowledge/kernel_fusion_skills/fusion-analysis/`),
+Strategize routes fusion regions as kernel candidates, and the milestone loop extracts, optimizes and gates
+each one like any kernel (a region on a head's own kernel is one more candidate in that head's HeadKernel
+slot instead). See "Kernel fusion" below, `knowledge/kernel_fusion_integration.md` and
+`docs/reference/run-e2e-contract.md`.
+
 Setup runs a **preflight** (see `knowledge/preflight.md`) — a judgment-guided env self-check (not a
 rigid script): it confirms the chosen `backend` stack, the model, GPU visibility; verifies the
 caller-established structured product/ISA/CU identity, detects trace
@@ -141,6 +149,10 @@ Workflow({
                           //   No op budget: the tuning loop is uncapped (tuning ops are cheap and their
                           //   value is cumulative). See "Tuning skillset" below +
                           //   knowledge/tuning_skillset_integration.md.
+    kernel_fusion: "false", // KernelFusion on/off (default OFF): a fusion profile beside the Top-N, fusion regions
+                          //   routed by Strategize, each extracted, optimized (kernel_lane.js) and gated in the
+                          //   milestone loop like any kernel candidate. Off injects nothing.
+                          //   Knobs kf_*: see "Kernel fusion" below + knowledge/kernel_fusion_integration.md.
     analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
                           //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
                           //   expected e2e gain, so budget goes to the kernel with HEADROOM, not merely
@@ -386,6 +398,37 @@ Fast mode skips the phase; deep mode keeps it for fixed-load workloads. AgentX s
 it as described below. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
+## Kernel fusion (`kernel_fusion`, default OFF)
+
+Not a phase: KernelFusion is broken down into the stages above. **Profile** gets a fusion profile of
+the trace it just took: the `fusion-analysis` skill (`roles/fusion_analyst.md`) finds which kernels run
+back to back as one region and the one Python seam that launches each; the Top-N is left as it is.
+**Strategize** (and every `plan_milestone`) routes the regions worth a fused kernel as `kernel_candidates`
+that name a `fusion_id` (`roles/_fragments/fusion_strategy.md`, read only when `FUSION_STRATEGY` is an
+input). **The milestone loop** then treats a region like any kernel candidate: a region UT from
+`kernel_extractor` (on AgentX, prepared at KernelExtract by the kernel-extract skill) under
+`roles/_fragments/fusion_ut_contract.md`, one fused kernel from a `kernel_lane.js` run, and the integrate
+A/B on the overlay accepted so far, with its finish retries, speedup review, corrective re-author and
+Finalize-gate replay. A region on a head's own kernel (typically an L2 region on a GEMM or attention head) is built
+the same way in **HeadKernel** instead, as one more candidate in that head's slot: the head's A/B measures
+it against the reference its own candidates share and banks the best measured one, and a head HeadKernel
+never reaches leaves its region to the milestone loop. Off, it injects nothing: no prompt, log line, lane or return field changes
+(`scripts/test_kernel_fusion.js` runs the whole workflow both ways).
+
+**An accept is not taken on trust.** A region's A/B is held to task accuracy (a fused kernel reorders
+floating-point work), and its accepted overlay is checked on disk before it is banked
+(`scripts/fusion_overlay_check.py`: it compiles, every fused kernel it names exists, every file of the
+overlay it was built on is kept, and it is unchanged since its A/B). Once a region is banked, every later
+A/B and Validate carry the same accuracy gate.
+
+**It never takes the run down.** A failed fusion profile is recorded and the run goes on exactly as with
+the switch off. What runs ahead of the search (the fusion profile, AgentX region UTs) has at most a quarter
+of the search window under `time_budget_s`; everything in the milestone loop runs under the run's own
+budget and reserves. Fast and deep mode (no milestone loop) skip it. Results land in
+`EVAL_DIR/kernel_fusion/`, in `wfReturn.kernel_fusion` and in `result.json` under a purely additive
+`kernel_fusion` key, present only when the switch is on. Full contract:
+`knowledge/kernel_fusion_integration.md`.
+
 ## AgentX kernel extraction and UT delivery
 
 An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
@@ -514,20 +557,25 @@ Everything lands under `<exp_root>/e2e_<model>_<timestamp>/`:
 - `kernels/_exp/…` — the recursive single-kernel runs (each with its own verified result)
 - `overlay/…` — candidate + accepted reversible overlays
 - `tuning/{tuning_report.md, env_audit.txt, claims_report.json, bench_pre/, bench_post/, <op>/}` — the standalone tuning phase + its attributable pre/post A/B
+- `kernel_fusion/analysis/{topk.json, REPORT.md}` — the opt-in fusion profile (only when KernelFusion is switched on)
 - `final/{overlay, final_patch.diff, final_launch.sh}` — the deliverable bundle
 - `architect_report.md`, `director_e2e_validation.json` — the official verified throughput result
 
 ## Files
 ```
 e2e_workflow.js   orchestration (deterministic; recursively calls ../kernel_workflow/kernel_workflow.js)
-roles/                 director, system_architect, profiler, config_tuner, tuning_specialist, kernel_extractor, op_benchmarker, e2e_integrator
+roles/                 director, system_architect, profiler, config_tuner, tuning_specialist, kernel_extractor, op_benchmarker, e2e_integrator, fusion_analyst
+roles/_fragments/      shared prompt fragments; fusion_strategy.md, fusion_ut_contract.md + fused_kernel_task.md route, test and write a fusion region
 knowledge/             e2e_optimization, profile_parse, preflight (env self-check), backend_playbook + gemm_attention_backends (persistent), sglang_internals, shape_capture
 knowledge/analysis_skills/  pluggable profile-analysis skills (INDEX.md + one dir per skill; `roofline` ships by default)
 knowledge/tuning_skillset_integration.md  how the VENDORED ../tuning_skillset/ is wired in (+ its manifest)
+knowledge/kernel_fusion_skills/  the fusion-analysis skill the opt-in fusion profile follows (+ its trace digest, scripts/kf_trace_digest.py)
+knowledge/kernel_fusion_integration.md  how opt-in KernelFusion is wired into the stages (switch, knobs, record)
 scripts/               bench_e2e.sh (backend-agnostic dispatcher), adapters/{sglang,vllm,atom}.sh, parse_profile.py (Top-N), op_bench.py, capture_shapes.py, overlay_setup.py
 scripts/adapters/clients/  pluggable BENCH CLIENTS (the timed load): agentx.sh (AgentX trace replay via aiperf) + map_aiperf.py vendored beside it so a standalone run needs no InferenceX checkout
 scripts/agentx_smoke.sh  AgentX readiness check: run it BEFORE a trace-replay run (never launches a server). See "Standalone AgentX" above.
 scripts/tuning_skillset_sync.py  integrity gate on the vendored skillset (--verify / --update / --sync)
+scripts/fusion_overlay_check.py  the on-disk check of an accepted fusion region's overlay before it is banked
 scripts/server_teardown.sh  the shared server-kill contract (identity verified at LAUNCH: pid, pgid, /proc start time). Every script that launches a server, including role-authored capture scripts, must source it instead of hand-rolling a kill.
 ```
 
