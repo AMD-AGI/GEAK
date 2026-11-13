@@ -204,10 +204,13 @@ jobs:
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
-          # Every typed field an agent returns must be classified in the Eikos decision registry, and
-          # the registry must match the workflow sources both ways. A new yes/no, choice or rating
-          # field, or a new call site, fails here until it is classified.
-          python3 e2e_workflow/scripts/eikos_registry_lint.py
+          # Every typed field an agent returns is meant to be classified in the Eikos decision
+          # registry, and the registry should match the workflow sources both ways. Per PR #574
+          # review #5 this lint is ADVISORY (warn, never gate) until maintainers adopt the registry,
+          # so it cannot fail unrelated PRs for unclassified pre-existing main fields. It still runs
+          # and prints its findings; a non-zero exit is downgraded to a warning.
+          python3 e2e_workflow/scripts/eikos_registry_lint.py \
+            || echo "::warning title=Eikos registry lint::advisory findings reported above (non-blocking; see PR #574 review #5)"
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even

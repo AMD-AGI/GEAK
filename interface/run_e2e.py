@@ -133,7 +133,7 @@ RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
-CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-5-5")
+CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-4-8")
 # WebSearch/WebFetch are required by the Deep Research Agent (kernel_workflow's opt-in `Research`
 # phase, args.dra_enabled=true): its per-question research agents do native web research. They are
 # harmless when the DRA is off (nothing opts into them) — the reason v4 previously "had no websearch"
@@ -697,6 +697,24 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     return 1
 
 
+def _eikos_reachable(url: str, timeout_s: float = 3.0) -> bool:
+    """One startup reachability check for the Eikos carrier URL (PR #574 review #2). Any HTTP
+    answer -- even an error status -- proves the server is up; only a transport failure (connection
+    refused, timeout, DNS) counts as down. Proxies are disabled so an http_proxy variable cannot
+    mask a dead local carrier."""
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(url, timeout=timeout_s).close()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 - any transport failure means "not answering"
+        return False
+
+
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -1014,36 +1032,45 @@ def map_args(
     if tl_paths:
         ps_args["tracelens"] = tl_paths
     # --- ROUTING master switch (PR #574 review: amd-ethany) -------------------
-    # One toggle that wires the router for a Hyperloom+GEAK run. The reviewer found
-    # the routing knobs were never mapped here, so a HL+GEAK run could NEVER turn
-    # routing on -- it always stayed on the OFF default. This maps them. The switch
-    # is DEFAULT-ON (so routing is actually exercised in CI/CD and in HL+GEAK) and
-    # is explicit and documented, NOT a silent switch.
+    # One toggle that wires the router for a Hyperloom+GEAK run. Routing is
+    # DEFAULT-OFF: a run is byte-identical to the prior default-OFF behaviour
+    # unless it is EXPLICITLY opted in. (The reviewer's second review restored
+    # this default-OFF design; the earlier default-ON switch was conceded.)
     #
     # WHAT HYPERLOOM MUST SEND to control routing:
-    #   * ROUTING = "ON" (default) | "OFF"
-    #       env var ``ROUTING`` (preferred) or handoff field ``routing``.
-    #       ON  -> routing enabled: routing=true, decider=eikos, every route_*
-    #              forwarded, and (on a real run, see main()) GEAK_ROUTING /
-    #              GEAK_EIKOS_ROUTER exported plus GEAK_ENGINEER_ID /
-    #              GEAK_RECORDER_INV_ID forwarded from the handoff.
-    #       OFF -> nothing below is set; the run is byte-identical to the prior
-    #              default-OFF behaviour.
-    #   * route_decider = "p1" -- OPT-IN ONLY. When ON the decider DEFAULTS to
-    #       ``eikos`` (the control ladder); P1 is never defaulted. P1 still runs as
-    #       a shadow audit under eikos, so its decisions stay observable.
+    #   * To keep today's behaviour: send NOTHING. Unset / false / 0 / off / any
+    #       other value leaves ps_args byte-identical to the pre-routing default
+    #       (none of the routing / route_decider / route_* keys below are added).
+    #   * To OPT IN: a single EXPLICIT true value, from EITHER
+    #         - the ``GEAK_ROUTING`` env var, or
+    #         - the handoff field ``routing``
+    #       equal (case-insensitively) to ``1`` / ``true`` / ``on``. Then:
+    #       routing=true, decider defaults to ``eikos`` (the control ladder),
+    #       every route_* knob is forwarded, and (on a real run, see main())
+    #       GEAK_ROUTING / GEAK_EIKOS_ROUTER are exported plus GEAK_ENGINEER_ID /
+    #       GEAK_RECORDER_INV_ID are forwarded from the handoff.
+    #   * route_decider = "p1" -- OPT-IN ONLY. When routing is on the decider
+    #       DEFAULTS to ``eikos``; P1 is never defaulted. P1 still runs as a
+    #       shadow audit under eikos, so its decisions stay observable.
     #   * route_* knobs (all optional; forwarded verbatim from the handoff when
     #       present): route_conf_escalate, route_max_retries_per_lane,
     #       route_max_top_escalations, route_max_output_tokens, route_floors,
     #       route_episode_identity, route_output_cap, route_eikos_tau,
     #       route_eikos_max_consults, route_eikos_carrier_model,
     #       route_eikos_carrier_timeout_ms.
+    # GEAK's own CI/CD workflows must NOT set GEAK_ROUTING / routing: a default
+    # run stays on the OFF path. Routing is an operational opt-in carried by the
+    # Hyperloom handoff, outside this repo.
     # Reads only (never mutates h or os.environ); the env exports happen in main()
     # on a real run, so map_args stays side-effect-free for its unit tests.
-    _routing_master = os.environ.get("ROUTING")
-    if _routing_master is None:
-        _routing_master = h.get("routing")
-    if str(_routing_master if _routing_master is not None else "ON").strip().upper() != "OFF":
+    _routing_raw = os.environ.get("GEAK_ROUTING")
+    if _routing_raw is None:
+        _routing_raw = h.get("routing")
+    _routing_on = (
+        _routing_raw is not None
+        and str(_routing_raw).strip().lower() in ("1", "true", "on")
+    )
+    if _routing_on:
         ps_args["routing"] = "true"
         # Decider defaults to eikos; P1 only when the handoff explicitly asks for it.
         ps_args["route_decider"] = str(h.get("route_decider") or "eikos").strip().lower()
@@ -8011,12 +8038,31 @@ def main(argv: list[str]) -> int:
     # routing ON (ps_args["routing"]), export the switches the JS / recorder read
     # from the environment and forward the provenance ids from the handoff. Skipped
     # on --dry-run (wiring-only) and never written during map_args' own unit tests,
-    # so os.environ stays unpolluted. ROUTING=OFF -> map_args set no routing args ->
-    # this exports nothing either. (GEAK_EIKOS_ROUTER now only reaches the standalone
-    # scripts/eikos_router.py helper; its dead JS hook was removed in this PR.)
+    # so os.environ stays unpolluted. Routing DEFAULT-OFF (no explicit opt-in) ->
+    # map_args set no routing args -> this exports nothing either. (GEAK_EIKOS_ROUTER
+    # now only reaches the standalone scripts/eikos_router.py helper; its dead JS hook
+    # was removed in this PR.)
     if not is_dry_run and ps_args.get("routing") == "true":
         os.environ.setdefault("GEAK_ROUTING", "1")
-        os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
+        # Eikos availability (PR #574 review #2): when the active decider is eikos, probe the
+        # carrier URL ONCE here at startup. If it does not answer, log once and SKIP the consults
+        # for the whole run -- GEAK_EIKOS_ROUTER stays unset, so scripts/eikos_router.py returns the
+        # static, byte-identical decision -- instead of making a failing carrier call per decision.
+        # A non-eikos decider (p1) does not use the carrier, so it is never probed.
+        _decider = str(ps_args.get("route_decider") or "eikos").strip().lower()
+        _eikos_ok = True
+        if _decider == "eikos":
+            _eikos_url = (os.environ.get("GEAK_EIKOS_URL") or "http://127.0.0.1:8000").rstrip("/")
+            _eikos_ok = _eikos_reachable(_eikos_url)
+            if not _eikos_ok:
+                print(
+                    "[routing] Eikos carrier at %s did not answer at startup; skipping Eikos "
+                    "consults for this run (decisions fall back to the static control ladder)."
+                    % _eikos_url,
+                    file=sys.stderr, flush=True,
+                )
+        if _eikos_ok:
+            os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
         for _env_key, _handoff_key in (
             ("GEAK_ENGINEER_ID", "engineer_id"),
             ("GEAK_RECORDER_INV_ID", "recorder_inv_id"),
