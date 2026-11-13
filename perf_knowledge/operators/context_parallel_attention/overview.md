@@ -4,8 +4,8 @@ kind: operator_overview
 operator: context_parallel_attention
 gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
-regimes: [prefill]
-updated: 2026-06-08
+regimes: [prefill, decode]
+updated: 2026-11-13
 sources:
   - https://github.com/sgl-project/sglang/issues/22223
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -39,9 +39,20 @@ Standard attention `O = softmax(QKᵀ·scale + mask)V`, computed with the sequen
   outputs with their log-sum-exp, fp32.
 
 ## Shape regimes
-- **Prefill only** (TTFT for very long context, 128K–1M). Decode generally uses TP/paged KV, not CP.
-- The local tile is a normal FA prefill at `seq/cp`; the operator's new cost is the **ring P2P / all-to-all
-  + LSE merge** overlapped with compute. CP shines when `seq/cp` is still large (compute hides comm).
+- **Prefill** (TTFT for very long context, 128K–1M). The local tile is a normal FA prefill at
+  `seq/cp`; the operator's new cost is the **ring P2P / all-to-all + LSE merge** overlapped with
+  compute. CP shines when `seq/cp` is still large (compute hides comm).
+- **Decode is now a first-class CP path, not an exception.** vLLM exposes decode context parallelism
+  as `--decode-context-parallel-size` / `-dcp` for both MLA and GQA: the KV cache is sharded across
+  ranks, each rank attends its own shard, and the results are merged by LSE reduce. Constraints are
+  `tp >= dcp` and `tp % dcp == 0`, with `dcp <= tp / num_kv_heads`; `VLLM_DCP_Q_REPLICATE=1` switches
+  the query distribution mode. The comm is far cheaper than prefill CP because only a single query
+  token per request is gathered, so the shape is a **small-`N_Q`, sharded-`N_KV`** decode attention
+  rather than a long-sequence ring.
+- **Why decode CP is worth having on agentic workloads**: decode N_KV there runs to p50 228,352 and
+  p90 637,952, so KV capacity, not compute, is the binding constraint
+  ([[optimization/workload_shape_selection.md]]). When DCP is on, divide N_KV by the shard count
+  before reading a kernel shape off a profile.
 
 ## Where it matters (Amdahl)
 Long-context prefill is O(N²); CP is what makes 256K+ TTFT feasible when KV exhausts HBM. On MI300X the
@@ -75,3 +86,9 @@ See [tuning.md](tuning.md).
 - ROCm: stay within 8-GPU XGMI island (TP), `allgather_reducescatter` not NCCL all-to-all: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html ; vLLM ROCm guidance
 - aiter Iris GPU-initiated comm (reduce-scatter/all-gather), long-context up to 2×: https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
 - vLLM ROCm extend/chunked-context path, long-seq gap: https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+- vLLM decode context parallelism (`--decode-context-parallel-size`, MLA + GQA, `tp >= dcp`,
+  `tp % dcp == 0`, Q all-gather + LSE reduce, `VLLM_DCP_Q_REPLICATE`):
+  https://docs.vllm.ai/en/stable/serving/context_parallel_deployment/ ·
+  https://vllm.ai/blog/2026-08-07-decode-context-parallelism
+- Per-backend DCP support matrix:
+  https://github.com/vllm-project/vllm/blob/main/docs/design/attention_backends.md

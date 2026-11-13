@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 503 unique URLs across 656 docs
+# Sources index — 517 unique URLs across 699 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -136,6 +136,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://docs.sglang.ai/advanced_features/attention_backend.html
 
 ## docs.sglang.io
+- https://docs.sglang.io/advanced_features/server_arguments.html
 - https://docs.sglang.io/platforms/amd_gpu.html
 
 ## docs.vllm.ai
@@ -145,12 +146,15 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://docs.vllm.ai/en/latest/design/paged_attention/
 - https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/
 - https://docs.vllm.ai/en/latest/features/speculative_decoding/
+- https://docs.vllm.ai/en/stable/api/vllm/config/scheduler/
 - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/mamba/ops/causal_conv1d/
 - https://docs.vllm.ai/en/stable/api/vllm/model_executor/layers/rotary_embedding.html
 - https://docs.vllm.ai/en/stable/api/vllm/platforms/rocm/
 - https://docs.vllm.ai/en/stable/configuration/env_vars/
+- https://docs.vllm.ai/en/stable/configuration/optimization/
 - https://docs.vllm.ai/en/stable/design/custom_op/
 - https://docs.vllm.ai/en/stable/features/quantization/quark/
+- https://docs.vllm.ai/en/stable/serving/context_parallel_deployment/
 - https://docs.vllm.ai/en/v0.10.2/api/vllm/model_executor/layers/activation.html
 - https://docs.vllm.ai/en/v0.6.5/getting_started/amd-installation.html
 
@@ -209,6 +213,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/ROCm/issues/341
 - https://github.com/ROCm/TheRock/issues/2591
 - https://github.com/ROCm/aiter
+- https://github.com/ROCm/aiter.git
 - https://github.com/ROCm/aiter/blob/main/LICENSE
 - https://github.com/ROCm/aiter/issues/1455
 - https://github.com/ROCm/aiter/issues/1542
@@ -235,6 +240,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/gfx950-gluon-tutorials
 - https://github.com/ROCm/gfx950-gluon-tutorials.git
 - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/layout_plot
+- https://github.com/ROCm/hip-ep/pull/675
 - https://github.com/ROCm/hipBLASLt
 - https://github.com/ROCm/hipBLASLt/blob/develop/LICENSE.md
 - https://github.com/ROCm/iris
@@ -245,6 +251,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/rocWMMA
 - https://github.com/ROCm/rocWMMA/blob/develop/samples/simple_hgemm.cpp
 - https://github.com/ROCm/rocm-libraries
+- https://github.com/ROCm/rocm-systems/blob/1efd9a9c026cdc6e503607be0d20d5383fec166b/projects/rocprofiler-compute/CHANGELOG.md
 - https://github.com/ROCm/xformers
 - https://github.com/ROCmSoftwarePlatform/composable_kernel/pull/82
 - https://github.com/SakanaAI/robust-kbench
@@ -334,6 +341,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/skinny_gemms.cu
 - https://github.com/vllm-project/vllm/blob/main/csrc/rocm/torch_bindings.cpp
 - https://github.com/vllm-project/vllm/blob/main/csrc/torch_bindings.cpp
+- https://github.com/vllm-project/vllm/blob/main/docs/design/attention_backends.md
 - https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py
 - https://github.com/vllm-project/vllm/blob/main/vllm/envs.py
 - https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
@@ -375,6 +383,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
 - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/
 - https://gpuopen.com/learn/optimizing-gpu-occupancy-resource-usage-large-thread-groups/
+- https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/
 - https://gpuopen.com/learn/wmma_on_rdna3/
 
 ## guru3d.com
@@ -392,10 +401,14 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang
 - https://huggingface.co/cognition-ai/Kevin-32B
 - https://huggingface.co/datasets/GPUMODE/kernelbot-data
+- https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126
 - https://huggingface.co/docs/kernels/en/layers
 - https://huggingface.co/docs/kernels/index
 - https://huggingface.co/facebook/KernelLLM
 - https://huggingface.co/kernels-community
+
+## inferencex.semianalysis.com
+- https://inferencex.semianalysis.com/agentx/methodology
 
 ## instinct.docs.amd.com
 - https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/gpu-partitioning/mi300x/overview.html
@@ -522,6 +535,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-mxfp6-quantization/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-online-rotation/README.html
+- https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-triton-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-with-composable-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html
@@ -567,6 +581,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/fp8_quantization_quark_vllm.html
 - https://rocm.docs.amd.com/projects/ai-developer-hub/en/latest/notebooks/gpu_dev_optimize/triton_kernel_dev.html
 - https://rocm.docs.amd.com/projects/amdsmi/en/latest/
+- https://rocm.docs.amd.com/projects/atom/en/main/configuration_guide.html
 - https://rocm.docs.amd.com/projects/composable_kernel/en/develop/conceptual/ck_tile/hardware/gemm_optimization.html
 - https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/device__grouped__conv__fwd__multiple__d__multiple__r__xdl__cshuffle_8hpp.html
 - https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/structck_1_1_blockwise_gemm_xdlops__pipeline__v1__ab__scale_3_01_block_gemm_pipeline_scheduler_1f98d5cb27163c1a3364a8c8f61866821.html
@@ -650,6 +665,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://vllm.ai/blog/2025-09-11-qwen3-next
 - https://vllm.ai/blog/2026-02-27-rocm-attention-backend
 - https://vllm.ai/blog/2026-04-22-fp8-kvcache
+- https://vllm.ai/blog/2026-08-07-decode-context-parallelism
 - https://vllm.ai/blog/mrv2
 
 ## x.com

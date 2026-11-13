@@ -19,6 +19,9 @@ operator cards; for raw hardware numbers see `[[hardware/cdna3_mi300/arch.md]]` 
 
 ## The hierarchy of levers (apply top-down)
 
+0. **Decide which shapes to tune for** — `[[optimization/workload_shape_selection.md]]` (on agentic /
+   multi-turn serving the shapes are a distribution that moves with the serving config, so a single
+   profile window does not define the target).
 1. **Pick the right algorithm / fusion** — `[[optimization/kernel_fusion_strategy.md]]`,
    `[[optimization/roofline_and_bottlenecks.md]]` (classify the kernel first; do not tune a bandwidth-bound
    kernel as if it were compute-bound).
@@ -47,6 +50,7 @@ operator cards; for raw hardware numbers see `[[hardware/cdna3_mi300/arch.md]]` 
 | `[[optimization/roofline_and_bottlenecks.md]]` | compute vs bandwidth bound, ~45% sustained-of-peak reality, arithmetic intensity, classifying a kernel |
 | `[[optimization/kernel_fusion_strategy.md]]` | when to fuse (epilogue/prologue, norm+quant, rope+cache, comm+norm), fusion donors, when NOT to fuse |
 | `[[optimization/numerical_stability.md]]` | fp32 accumulate, online softmax, Welford, fp8 FNUZ vs OCP 2× trap, scaling |
+| `[[optimization/workload_shape_selection.md]]` | which shapes to tune for on agentic/multi-turn serving: decode-M and N_KV histograms vs concurrency / `max_num_seqs` / budget, N_KV from corpus not config, chunk quantisation, prefix-caching as the dominant lever, CUDA-graph re-quantisation, time-weighted sweep sets |
 
 ## On-box validated facts referenced throughout
 - `mfma_16x16x16` > `mfma_32x32x8` for LLM N/K on MI300X (occupancy/register pressure).

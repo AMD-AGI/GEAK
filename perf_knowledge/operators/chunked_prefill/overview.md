@@ -5,7 +5,7 @@ operator: chunked_prefill
 gens: [gfx90a, gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
 regimes: [prefill, decode, both]
-updated: 2026-06-08
+updated: 2026-11-13
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/chunked_pa_prefill.py
@@ -48,6 +48,21 @@ single decode token (`query_len = 1`), all against their cached context. The rag
 defining shape. Bridges [[../attention_prefill_fmha/overview.md]] and
 [[../attention_decode_paged/overview.md]].
 
+**On agentic multi-turn serving the chunk is neither the configured budget nor a round number.**
+Three things to tune against rather than assume:
+- **The observed cap sits below the configured budget.** With `max_num_batched_tokens=8192` the
+  largest chunk ever scheduled was **7,680** — the scheduler reserves room for the decode tokens it
+  packs alongside, and rounds down. Tune the value you observe, not the flag.
+- **Chunks are quantised.** 59.5% of one measured run's prefill steps landed on five values, all
+  multiples of 1536: 1,536 / 3,072 / 4,608 / 6,144 / 7,680. The rest are request tails at arbitrary M.
+- **A mixed step carries one prefill request**, 85–99% of the time depending on concurrency, because
+  with a high prefix-cache hit rate prefill arrivals are rare next to decode steps. So the chunk-size
+  distribution and the per-step prefill-token distribution are the same thing.
+
+Raising the budget does not scale the chunks up: past ~8k most requests have no more uncached suffix
+to give, so p90 *falls* while p99 grows as long prefills stop being split. Budget flag names per
+engine and the full distribution: [[optimization/workload_shape_selection.md]].
+
 ## Where it matters (Amdahl)
 Chunked prefill is the **scheduler-level** lever for throughput-vs-latency: it keeps decode latency bounded
 while a long prompt is ingested. The unified kernel removes per-step launch overhead — material at small
@@ -78,3 +93,7 @@ compare unified vs split at small/large batch; e2e throughput + TPOT + TTFT.
 - `chunked_prefill_paged_decode` (context_attention_fwd + paged decode): same repo `:aiter/ops/triton/attention/chunked_pa_prefill.py`.
 - sglang unified attn flag: https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/attention_registry.py
 - AITER FA mixed-serving TPS: https://vllm.ai/blog/2026-02-27-rocm-attention-backend
+- Observed chunk quantisation (multiples of 1536, 7,680 cap under a configured 8,192) and the
+  one-prefill-per-step result: AgentX v1.0 1M corpus,
+  https://inferencex.semianalysis.com/agentx/methodology ; derivation in
+  [[optimization/workload_shape_selection.md]].

@@ -5,7 +5,7 @@ operator: attention_decode_paged
 gens: [gfx90a, gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
 regimes: [decode]
-updated: 2026-06-08
+updated: 2026-11-13
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/paged_attn.py
   - https://github.com/vllm-project/vllm/tree/main/csrc/rocm
@@ -44,6 +44,15 @@ Decode: `sq=1`, `batch = running concurrency` (1..256+), KV length = context (1k
 `num_kv_heads ≪ num_q_heads` (see [[../gqa_mqa_attention/overview.md]]). Distinct from
 [[../attention_prefill_fmha/overview.md]] (long sq, GEMM-bound).
 
+**KV length is workload-dependent and 1k..128k only covers chat.** On agentic multi-turn traces the
+whole conversation is resent each turn, so N_KV is far larger: on the AgentX v1.0 1M corpus decode
+N_KV is **p50 228,352 / p90 637,952** (256k variant: p50 134,144 / p90 227,328) — i.e. **roughly 70% of
+all decode work attends beyond 128k**. Tune against {32k, 64k, 128k, 256k, 512k}, not a 128k ceiling.
+Two adjustments before reading a number off a profile: divide by the KV shard count if decode context
+parallel is on ([[../context_parallel_attention/overview.md]]), and note that `sq=1` becomes
+`sq = draft_len+1` under speculative decoding ([[../speculative_decode_verify/overview.md]]).
+How the range moves with serving config: [[optimization/workload_shape_selection.md]].
+
 ## Where it matters (Amdahl)
 Decode latency (TPOT) is what users feel in chat; paged-attn is a top-3 decode kernel alongside the
 skinny GEMMs. AITER FA / AITER MLA backends report **1.2–4.4× higher TPS** vs generic FA on AMD — most
@@ -77,3 +86,6 @@ median ≥3 warm reps; e2e via `--attention-backend` swap at the served concurre
 - vLLM custom HIP paged-attn (`paged_attention_ll4mi_*`), KV layout, shuffle: https://github.com/vllm-project/vllm/tree/main/csrc/rocm ; `backends/vllm_kernels/rocm_kernels.md`.
 - 1.2–4.4× TPS (vendor): https://vllm.ai/blog/2026-02-27-rocm-attention-backend
 - flash-decoding / online softmax: https://arxiv.org/abs/2205.14135
+- Agentic decode N_KV distribution (p50 228,352 / p90 637,952): AgentX v1.0 1M corpus,
+  https://inferencex.semianalysis.com/agentx/methodology ; derivation and sweep construction in
+  [[optimization/workload_shape_selection.md]].

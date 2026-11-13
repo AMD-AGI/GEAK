@@ -17,7 +17,7 @@ It has two jobs:
 2. **Be a SOTA registry** — for **every `operator × backend` cell**, point at the *best known
    implementation(s)* with source, measured performance, applicability, knobs, and pitfalls.
 
-> **~586 docs · ~43,900 lines · 0 broken links · every content file ends with `## Sources`.**
+> **~700 docs · ~66,500 lines · 0 broken links · every content file ends with `## Sources`.**
 > 14× the file count of the original `perf_knowledge`. Built P0→P4 + hot-path enrichment, 2026-06-08
 > (see [`index/changelog.md`](index/changelog.md)).
 
@@ -52,8 +52,9 @@ perf_knowledge/
 │                        · pytorch_inductor · sglang · vllm
 ├── operators/    (420)  ★ THE CARTESIAN CORE — 54 operators ×
 │                        {overview, tuning, numerics, fusion} + backends/<backend>.md (204 SOTA cards)
-├── optimization/  (12)  occupancy · LDS/bank-conflicts · MFMA scheduling · pipelining · vectorization
+├── optimization/  (13)  occupancy · LDS/bank-conflicts · MFMA scheduling · pipelining · vectorization
 │                        · XCD/L2 locality · grid sizing · autotuning · roofline · fusion · numerics
+│                        · workload shape selection
 ├── quantization/  (10)  formats · FNUZ-vs-OCP · MXFP block-scaling · scaling strategies · Quark
 │                        · accuracy gates · HW support matrix · KV quant · deployment recipes
 ├── profiling/     (10)  rocprofv3 / rocprof-compute / rocprof-sys · counters · bottleneck triage

@@ -5,7 +5,7 @@ operator: skinny_gemv_decode
 gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
 regimes: [decode]
-updated: 2026-06-05
+updated: 2026-11-13
 sources:
   - https://github.com/ROCm/aiter
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
@@ -25,9 +25,20 @@ sources:
 - Dominant decode GEMMs: QKV proj, O proj, MLP up/gate/down at batch≈1.
 
 ## Shape regimes
-- **Decode only**: M = batch (1..8 typical, up to ~16 with small batching). N,K = model hidden dims (large).
-  Arithmetic intensity is low → bandwidth bound. Large-batch/prefill uses dense GEMM instead
+- **Decode only**: M = batch, N,K = model hidden dims (large). Arithmetic intensity is low →
+  bandwidth bound. Large-batch/prefill uses dense GEMM instead
   ([../dense_gemm/overview.md](../dense_gemm/overview.md)).
+- **M is driven by concurrency and capped by `max_num_seqs`**, whichever binds first — concurrency
+  counts client sessions, not in-flight requests, and sub-agents fan out without taking their own slot,
+  so M runs above the configured concurrency by a factor that is itself not constant. M = 1..8 is the
+  low-concurrency corner only: decode M p50 runs **8 / 17 / 36 / 71 / 145** at concurrency
+  8 / 16 / 32 / 64 / 128, with p90 at **11 / 22 / 44 / 82 / 162**. Above ~M=64 the skinny path stops
+  being the right kernel; check the crossover to dense GEMM rather than assuming.
+- **Do not assume powers of two.** When `max_num_seqs` is not binding, M is spread, not concentrated:
+  at concurrency 64 it covers p10–p90 = 66..82 with 71/68/70 the most common values. When
+  `max_num_seqs` *is* binding it pins M exactly, and that is the only case where a single tuned M is
+  safe. Under speculative decoding multiply by `draft_len+1`. Sweep construction and the
+  time-weighting rule: [[optimization/workload_shape_selection.md]].
 
 ## Where it matters (Amdahl)
 - At batch≈1 decode, these projections are a large fraction of per-token latency and are bandwidth-limited;
@@ -58,3 +69,6 @@ sources:
 ## Sources
 - AITER (skinny GEMM path): https://github.com/ROCm/aiter
 - vLLM decode/GEMV custom kernels on ROCm: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
+- Decode-M vs concurrency (8/17/36/71/145) and the non-power-of-two spread: AgentX v1.0 1M corpus,
+  https://inferencex.semianalysis.com/agentx/methodology ; derivation and sweep construction in
+  [[optimization/workload_shape_selection.md]].
