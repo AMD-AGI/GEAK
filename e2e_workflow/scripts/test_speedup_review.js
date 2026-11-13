@@ -188,6 +188,33 @@ test('confirmed evidence already on disk avoids another review', async () => {
   assert.equal(h.calls.length, 1);
 });
 
+test("an integrator's own 'pending' flag does not block a gain within the coverage estimate", async () => {
+  const c = candidate({ pct_gpu_time: 13.6954, isolated_speedup: 1.5265, e2e_delta_pct: 12.79,
+    affected_gpu_time: coverage([13.6954, 3.2377, 2.2092]),
+    speedup_review: { status: 'pending', estimate: { amdahl_e2e_ceiling_pct: 4.96 } } });
+  const kernel = { ...inputs, KERNEL_RESULT: { pct_gpu_time: 13.6954, verified_isolated_speedup: 1.5265 } };
+  const h = harness(c);
+  assert.ok(Math.abs(h.speedupEstimate(13.6954, 1.5265, c).estimate_pct - 7.069) < 0.001);
+  assert.equal(h.speedupNeedsReview(13.6954, 1.5265, c), false, '+12.79% is within twice the coverage estimate');
+  const result = await h.runIntegrateBothLegs('test', kernel, 'h1', 'HeadKernel');
+  assert.equal('speedup_review' in result, false);
+  assert.equal(h.integAccepted(result, 13.6954, 1.5265), true);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.checkpoints[0].gate, 'accepted');
+  assert.equal(h.checkpoints[0].committed, true);
+  assert.equal(h.checkpoints[0].validation_status, 'accepted_intermediate');
+});
+
+test("an integrator's own 'pending' flag still gets the confirmation the estimate requires", async () => {
+  const h = harness(candidate({ speedup_review: { status: 'pending' } }));
+  const result = await h.runIntegrateBothLegs('test', inputs, 'h1', 'HeadKernel');
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[1].inputs.FORCE_FRESH_AB, true);
+  assert.equal(result.speedup_review.status, 'confirmed');
+  assert.equal(h.integAccepted(result, 7.18, 1.4596), true);
+  assert.equal(h.checkpoints[0].committed, true);
+});
+
 test('a resumed inconclusive review is not re-run and backend candidates keep distinct checkpoints', async () => {
   const pending = candidate({ speedup_review: { status: 'inconclusive', original_measurement: measurement('original') } });
   const resumed = harness(pending);

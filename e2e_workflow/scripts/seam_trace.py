@@ -72,6 +72,17 @@ def _capturing():
         return False
 
 
+def _compile_probe():
+    """``torch.compiler.is_compiling``, or a constant False where torch (or that query) is absent.
+
+    Resolved once by install(), so the marker never imports torch while Dynamo traces it."""
+    try:
+        import torch
+        return torch.compiler.is_compiling
+    except (ImportError, AttributeError):
+        return lambda: False
+
+
 def _record_install_markers():
     """Put proof of successful installation in every process-local trace."""
     import torch
@@ -212,9 +223,14 @@ def install(target):
     original = getattr(module, attr)
     if not _wrappable(original):
         raise RuntimeError(f"cannot safely mark non-Python callable {target}")
+    is_compiling = _compile_probe()
 
     @functools.wraps(original)
     def marked(*args, **kwargs):
+        if is_compiling():
+            # Dynamo folds this to True while tracing a compiled region (vLLM's fullgraph forward). It
+            # cannot trace the capture query below, which returns a bool, nor the profiler calls.
+            return original(*args, **kwargs)
         if _capturing():
             # Pure pass-through mid-capture: no profile lifecycle, no record_function node baked
             # into the captured graph.

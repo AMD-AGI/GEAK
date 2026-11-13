@@ -6699,8 +6699,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
             review = ir.get("speedup_review") or {}
             if not isinstance(review, dict):
                 review = {}
-            review_pending = (review.get("status") in
-                              ("pending", "inconclusive", "rejected")
+            # 'pending' is only ever the integrator's own flag, which the live workflow ignores
+            # (reviewSpeedup): the estimate alone decides whether a gain awaits confirmation.
+            review_pending = (review.get("status") in ("inconclusive", "rejected")
                               or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
