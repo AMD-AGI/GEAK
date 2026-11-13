@@ -153,6 +153,12 @@ UT receipts and source delivery use the same native `sourceSnapshot` owner.
 An independent driver digest made repeated qualification incompatible; scaffold
 the driver with its owner and freeze the helper set before running the UT.
 
+Weights count the operation that `cases.call` times. When that differs from GPU
+launches (chains, repeated launches or shared symbols), provide observed
+`invocation_counts` in the declaration; see [call weights](references/dynamic-workloads.md#call-weights).
+After changing a plan, regenerate the expanded manifest and synchronize meta
+from that same plan before freezing; retain the earlier cohort.
+
 Stop the probe server as soon as the evidence is collected. The CPU half of §3–§4
 (declaration review, source resolution inside the serving container, scaffold, case
 manifest, CPU lint) needs no GPU; run GPU gates only once the server's devices drained.
