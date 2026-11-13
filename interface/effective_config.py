@@ -138,6 +138,10 @@ def _looks_like_flag(token: str) -> bool:
     return False
 
 
+# Only these flags take several values; every other flag takes exactly one.
+LIST_VALUED_FLAGS = frozenset({"--cuda-graph-bs", "--cuda-graph-bs-decode"})
+
+
 def _parse_flags(text: Any) -> list[_Flag]:
     """Parse long/unknown flags, equals forms, booleans, and JSON values."""
 
@@ -155,6 +159,8 @@ def _parse_flags(text: Any) -> list[_Flag]:
             continue
         values: list[str] = []
         while index + 1 < len(tokens) and not _looks_like_flag(tokens[index + 1]):
+            if values and token not in LIST_VALUED_FLAGS:
+                raise ValueError(f"{token} takes one value, got extra {tokens[index + 1]!r}")
             values.append(_canonical_value(tokens[index + 1]))
             index += 1
         value: Optional[Union[str, tuple[str, ...]]] = None
