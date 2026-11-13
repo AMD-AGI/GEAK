@@ -32,7 +32,8 @@ import ut_contract as U  # noqa: E402
 
 SKILL_ROOT = os.path.dirname(HERE)
 SHARED_TOOLS = os.environ.get("SHARED_TOOLS") or os.path.join(SKILL_ROOT, "shared")
-SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py", "compile_watch.py")
+SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py", "compile_watch.py",
+                  "kernel_source_delivery.mjs")
 CONTRACT_HELPERS = ("ut_contract.py", "reference_f64.py", "ut_driver.py")
 
 
@@ -159,6 +160,8 @@ def cmd_new(a):
         "target_callable": a.target or "FILL.module:entry",
         "candidate_bind": {"kind": "module", "module": a.bind_module or "FILL.module",
                            "file": a.bind_file or "kernel_src/FILL.py"},
+        "kernel_extraction": {"source_delivery_files": [*SHARED_HELPERS, *CONTRACT_HELPERS,
+                                                        "run/ut_contract.json", "run/ut_cases.json"]},
         "random_draws": 3,
         "workload": {"kind": "agentx_trace_replay", "weighting": "observed",
                      "serving_weight_model": {"source": "observed_workload",

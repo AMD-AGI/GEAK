@@ -824,6 +824,7 @@ def _reuse_key(T):
     """Everything a gate's verdict depends on inside the task: helpers, contract, cases,
     server evidence and kernel_src. A gate may be reused only under the same key."""
     h = hashlib.sha256()
+    h.update(_snapshot(T).encode())  # Include every input declared to the native owner.
     rels = sorted(f for f in os.listdir(T.dir) if f.endswith((".py", ".json")))
     run = os.path.join(T.dir, "run")
     rels += sorted("run/" + f for f in os.listdir(run) if f in ("ut_cases.json", "ut_contract.json")
@@ -885,15 +886,11 @@ def _quick_subset(T, per_phase=3, calls=8):
 
 
 def _snapshot(T):
-    h = hashlib.sha256()
-    files = ["meta.json", "cases.py", "unittest.py", "run/ut_cases.json", "run/ut_contract.json"]
-    files += sorted(_tree_hashes(T))
-    for rel in files:
-        p = os.path.join(T.dir, rel)
-        if os.path.exists(p):
-            h.update(rel.encode())
-            h.update(_sha(p).encode())
-    return h.hexdigest()
+    """Use the delivery verifier's native owner, including its declared file set."""
+    owner = os.path.join(T.dir, "kernel_source_delivery.mjs")
+    result = subprocess.check_output([os.environ.get("KERNEL_EXTRACT_NODE") or "node", owner,
+                                      "snapshot", T.dir], text=True)
+    return json.loads(result)["snapshot_sha256"]
 
 
 def main(task=None, argv=None):
@@ -939,6 +936,7 @@ def main(task=None, argv=None):
         skip.add("timing")
         _quick_subset(T)
     a.gates = [g for g in a.gates.split(",") if g and g not in skip]
+    _snapshot(T)  # Resolve the native owner/runtime before spending GPU time.
     report, code = run_gates(T, a)
     report["snapshot_sha256"] = _snapshot(T)
     report["target_callable"] = T.meta.get("target_callable")

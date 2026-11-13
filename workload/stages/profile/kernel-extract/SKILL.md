@@ -149,6 +149,10 @@ a binding. Verify the live callable with `$SHARED_TOOLS/seam_trace.py` and
 keeping complete raw verdicts. If the declared boundary is wrong, fix `task_decls.json`
 with the evidence and rebuild; do not edit a failed verdict into a pass.
 
+UT receipts and source delivery use the same native `sourceSnapshot` owner.
+An independent driver digest made repeated qualification incompatible; scaffold
+the driver with its owner and freeze the helper set before running the UT.
+
 Stop the probe server as soon as the evidence is collected. The CPU half of §3–§4
 (declaration review, source resolution inside the serving container, scaffold, case
 manifest, CPU lint) needs no GPU; run GPU gates only once the server's devices drained.

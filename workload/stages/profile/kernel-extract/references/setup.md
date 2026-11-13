@@ -17,6 +17,8 @@ the capture/analysis processes, including remote/container commands.
 
 Use Python 3.10+ and Node.js 18+. Real tensor/GPU work requires the serving
 environment's PyTorch/backend. The helpers do not install or upgrade packages.
+Node must also be reachable in each UT container, on `PATH` or through
+`KERNEL_EXTRACT_NODE`; the driver checks its native source owner before GPU gates.
 
 For actual extraction, the user supplies an accessible serving environment,
 model and backend, appropriate native/JIT compilers, baseline logs and exports,
