@@ -247,6 +247,10 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 # that dies with the container. These two pieces of state let the run copy that
 # ledger into its own (durable) eval_dir as it goes. See claude_trace_mirror.
 _LAST_SDK_SESSION: dict[str, str] = {}
+# Every ResultMessage the session emitted: Claude Code's own cost for the session so far. The ledger
+# checks its computed cost against the last one (llm_ledger.sdk_check). Several can arrive: a
+# background workflow can outlive the first turn's result, which then covers only part of the run.
+_SDK_RESULTS: list[dict] = []
 _MIRROR_STATE: dict[str, float] = {"t": 0.0}
 _RUN_EXP_ROOT: dict[str, str] = {}
 
@@ -273,6 +277,45 @@ def _note_session_id(msg: object) -> None:
         sid = msg.get("session_id")
     if isinstance(sid, str) and sid.strip():
         _LAST_SDK_SESSION["session_id"] = sid.strip()
+
+
+def _note_sdk_result(msg: object) -> None:
+    """Record a ResultMessage's cost and per-model usage, stamped with when it arrived.
+
+    Accepts the SDK object or the CLI's ``--output-format json`` payload. Anything else, or a
+    payload without ``total_cost_usd``, is a no-op; nothing here can raise into the message loop.
+
+    Args:
+        msg: Any SDK message object or decoded CLI payload.
+    """
+    get = msg.get if isinstance(msg, dict) else (lambda k, d=None: getattr(msg, k, d))
+    try:
+        cost = get("total_cost_usd")
+        if not isinstance(cost, (int, float)):
+            return
+        _SDK_RESULTS.append({
+            "captured_at_unix": time.time(),
+            "session_id": get("session_id"),
+            "total_cost_usd": float(cost),
+            "model_usage": get("model_usage") or get("modelUsage") or {},
+            "num_turns": get("num_turns"),
+            "is_error": get("is_error"),
+            "subtype": get("subtype"),
+        })
+    except Exception:  # pragma: no cover - telemetry must not end a run
+        pass
+
+
+def _write_sdk_results(eval_dir: object) -> None:
+    """Persist ``_SDK_RESULTS`` to ``<eval_dir>/reports/sdk_results.json``. Never raises."""
+    if not eval_dir or not _SDK_RESULTS:
+        return
+    try:
+        out = Path(eval_dir) / "reports" / "sdk_results.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(_SDK_RESULTS, indent=2, default=str) + "\n", encoding="utf-8")
+    except Exception:  # pragma: no cover
+        pass
 
 
 BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
@@ -339,6 +382,7 @@ def _mirror_trace(eval_dir: object, *, throttle: bool = False) -> dict:
     """
     if not eval_dir:
         return {"status": "no_eval_dir"}
+    _write_sdk_results(eval_dir)
     if throttle:
         if TRACE_MIRROR_EVERY_S <= 0:
             return {"status": "disabled"}
@@ -652,6 +696,24 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     if recorded:
         return recorded
     return 1
+
+
+def _eikos_reachable(url: str, timeout_s: float = 3.0) -> bool:
+    """One startup reachability check for the Eikos carrier URL (PR #574 review #2). Any HTTP
+    answer -- even an error status -- proves the server is up; only a transport failure (connection
+    refused, timeout, DNS) counts as down. Proxies are disabled so an http_proxy variable cannot
+    mask a dead local carrier."""
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(url, timeout=timeout_s).close()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 - any transport failure means "not answering"
+        return False
 
 
 def map_args(
@@ -970,6 +1032,59 @@ def map_args(
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    # --- ROUTING master switch (PR #574 review: amd-ethany) -------------------
+    # One toggle that wires the router for a Hyperloom+GEAK run. Routing is
+    # DEFAULT-OFF: a run is byte-identical to the prior default-OFF behaviour
+    # unless it is EXPLICITLY opted in. (The reviewer's second review restored
+    # this default-OFF design; the earlier default-ON switch was conceded.)
+    #
+    # WHAT HYPERLOOM MUST SEND to control routing:
+    #   * To keep today's behaviour: send NOTHING. Unset / false / 0 / off / any
+    #       other value leaves ps_args byte-identical to the pre-routing default
+    #       (none of the routing / route_decider / route_* keys below are added).
+    #   * To OPT IN: a single EXPLICIT true value, from EITHER
+    #         - the ``GEAK_ROUTING`` env var, or
+    #         - the handoff field ``routing``
+    #       equal (case-insensitively) to ``1`` / ``true`` / ``on``. Then:
+    #       routing=true, decider defaults to ``eikos`` (the control ladder),
+    #       every route_* knob is forwarded, and (on a real run, see main())
+    #       GEAK_ROUTING / GEAK_EIKOS_ROUTER are exported plus GEAK_ENGINEER_ID /
+    #       GEAK_RECORDER_INV_ID are forwarded from the handoff.
+    #   * route_decider = "p1" -- OPT-IN ONLY. When routing is on the decider
+    #       DEFAULTS to ``eikos``; P1 is never defaulted. P1 still runs as a
+    #       shadow audit under eikos, so its decisions stay observable.
+    #   * route_* knobs (all optional; forwarded verbatim from the handoff when
+    #       present): route_conf_escalate, route_max_retries_per_lane,
+    #       route_max_top_escalations, route_max_output_tokens, route_floors,
+    #       route_episode_identity, route_output_cap, route_eikos_tau,
+    #       route_eikos_max_consults, route_eikos_carrier_model,
+    #       route_eikos_carrier_timeout_ms.
+    # GEAK's own CI/CD workflows must NOT set GEAK_ROUTING / routing: a default
+    # run stays on the OFF path. Routing is an operational opt-in carried by the
+    # Hyperloom handoff, outside this repo.
+    # Reads only (never mutates h or os.environ); the env exports happen in main()
+    # on a real run, so map_args stays side-effect-free for its unit tests.
+    _routing_raw = os.environ.get("GEAK_ROUTING")
+    if _routing_raw is None:
+        _routing_raw = h.get("routing")
+    _routing_on = (
+        _routing_raw is not None
+        and str(_routing_raw).strip().lower() in ("1", "true", "on")
+    )
+    if _routing_on:
+        ps_args["routing"] = "true"
+        # Decider defaults to eikos; P1 only when the handoff explicitly asks for it.
+        ps_args["route_decider"] = str(h.get("route_decider") or "eikos").strip().lower()
+        for _rk in (
+            "route_conf_escalate", "route_max_retries_per_lane",
+            "route_max_top_escalations", "route_max_output_tokens", "route_floors",
+            "route_episode_identity", "route_output_cap", "route_eikos_tau",
+            "route_eikos_max_consults", "route_eikos_carrier_model",
+            "route_eikos_carrier_timeout_ms",
+        ):
+            if h.get(_rk) is not None:
+                ps_args[_rk] = str(h[_rk])
+    # -------------------------------------------------------------------------
     return ps_args
 
 
@@ -2444,6 +2559,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
                     _note_session_id(msg)
+                    _note_sdk_result(msg)
                     name = type(msg).__name__
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
@@ -2532,6 +2648,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
                 _note_session_id(msg)
+                _note_sdk_result(msg)
         return "\n".join(chunks)
 
     return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
@@ -2567,6 +2684,7 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         wrapped = json.loads(out)
         if isinstance(wrapped, dict):
             _note_session_id(wrapped)
+            _note_sdk_result(wrapped)
             return str(wrapped.get("result") or wrapped.get("text") or out)
     except json.JSONDecodeError:
         pass
@@ -8028,6 +8146,42 @@ def main(argv: list[str]) -> int:
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+    # Router ENV for a real run (PR #574 review: amd-ethany). When map_args turned
+    # routing ON (ps_args["routing"]), export the switches the JS / recorder read
+    # from the environment and forward the provenance ids from the handoff. Skipped
+    # on --dry-run (wiring-only) and never written during map_args' own unit tests,
+    # so os.environ stays unpolluted. Routing DEFAULT-OFF (no explicit opt-in) ->
+    # map_args set no routing args -> this exports nothing either. (GEAK_EIKOS_ROUTER
+    # now only reaches the standalone scripts/eikos_router.py helper; its dead JS hook
+    # was removed in this PR.)
+    if not is_dry_run and ps_args.get("routing") == "true":
+        os.environ.setdefault("GEAK_ROUTING", "1")
+        # Eikos availability (PR #574 review #2): when the active decider is eikos, probe the
+        # carrier URL ONCE here at startup. If it does not answer, log once and SKIP the consults
+        # for the whole run -- GEAK_EIKOS_ROUTER stays unset, so scripts/eikos_router.py returns the
+        # static, byte-identical decision -- instead of making a failing carrier call per decision.
+        # A non-eikos decider (p1) does not use the carrier, so it is never probed.
+        _decider = str(ps_args.get("route_decider") or "eikos").strip().lower()
+        _eikos_ok = True
+        if _decider == "eikos":
+            _eikos_url = (os.environ.get("GEAK_EIKOS_URL") or "http://127.0.0.1:8000").rstrip("/")
+            _eikos_ok = _eikos_reachable(_eikos_url)
+            if not _eikos_ok:
+                print(
+                    "[routing] Eikos carrier at %s did not answer at startup; skipping Eikos "
+                    "consults for this run (decisions fall back to the static control ladder)."
+                    % _eikos_url,
+                    file=sys.stderr, flush=True,
+                )
+        if _eikos_ok:
+            os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
+        for _env_key, _handoff_key in (
+            ("GEAK_ENGINEER_ID", "engineer_id"),
+            ("GEAK_RECORDER_INV_ID", "recorder_inv_id"),
+        ):
+            _val = h.get(_handoff_key)
+            if _val:
+                os.environ[_env_key] = str(_val)
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     # Module B writes workflow_return.json before normalize_result runs. Send the same

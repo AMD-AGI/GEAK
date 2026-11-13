@@ -577,6 +577,13 @@ class TestCostBreakdown(unittest.TestCase):
         so a future dynamic router has a place to report its cost."""
         self.assertIn("router", L.cost_breakdown(self._row(), L.DEFAULT_RATES))
 
+    def test_the_eikos_carrier_is_router_cost_too(self):
+        """The route_decider=eikos carrier only relays Eikos's answer: every dollar of it chooses a model."""
+        row = dict(self._row(), role="route_carrier")
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["router"], L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertEqual(bd["uncached_input"] + bd["cache_read"] + bd["cache_write"] + bd["output"], 0.0)
+
     def test_uncached_input_is_the_fresh_bucket_only(self):
         """'uncached-context' is Anthropic's input_tokens — cache is already netted
         out of it, so it must not be re-derived from the total."""
@@ -591,6 +598,150 @@ class TestCostBreakdown(unittest.TestCase):
         sonnet = L.cost_breakdown(self._row("claude-sonnet-5"), rates)
         self.assertLess(sonnet["output"], opus["output"])             # 10 vs 25 per M
         self.assertAlmostEqual(sonnet["cache_read"], 0.40, places=6)  # 2M * 0.2
+
+    def test_router_bucket_holds_the_whole_classifier_call(self):
+        """A route_classifier call is spent choosing a model: all of it is router cost."""
+        row = dict(self._row("claude-sonnet-5"), role=L.ROUTER_ROLE)
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["router"], L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertEqual(bd["uncached_input"] + bd["cache_read"] + bd["cache_write"] + bd["output"], 0.0)
+
+
+class TestSdkCheck(unittest.TestCase):
+    """Our cost vs Claude Code's own ResultMessage: rates must reproduce it; coverage is reported."""
+
+    # The real ResultMessage from the 2026-09-15 ablation, arm control_r2 (sdk_messages.jsonl).
+    REAL = {"captured_at_unix": 1789496973.8563507, "session_id": "ef7c3aa4", "total_cost_usd": 25.460417749999998,
+            "model_usage": {"claude-opus-4-8": {"inputTokens": 744, "outputTokens": 373962,
+                                                "cacheReadInputTokens": 14726883,
+                                                "cacheCreationInputTokens": 1399073,
+                                                "costUSD": 25.460417749999998}}}
+
+    def _row(self, ts_s, model="claude-opus-4-8", out=1000):
+        return {"model": model, "ts_ms": int(ts_s * 1000), "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "cache_write_5m_tokens": 0, "cache_write_1h_tokens": 0,
+                "output_tokens": out}
+
+    def test_our_rates_reproduce_a_real_claude_code_total(self):
+        c = L.sdk_check([], [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["rate_ok"])
+        self.assertAlmostEqual(c["models"]["claude-opus-4-8"]["ours_on_sdk_tokens_usd"], 25.460418, places=5)
+
+    def test_a_wrong_rate_card_is_caught(self):
+        # Claude Code priced Sonnet 5 at a (hypothetical) $3/$15; our card says $2/$10.
+        u = {"inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+             "cacheCreationInputTokens": 0, "costUSD": 15.0}
+        c = L.sdk_check([], [{"captured_at_unix": 1.0, "total_cost_usd": 15.0,
+                              "model_usage": {"claude-sonnet-5": u}}], L.DEFAULT_RATES)
+        self.assertFalse(c["rate_ok"])
+        self.assertFalse(c["models"]["claude-sonnet-5"]["rate_ok"])
+
+    def _haiku55(self, rows, cost_usd, inp=200_000, out=2_000, extra=None):
+        u = {"inputTokens": inp, "outputTokens": out, "cacheReadInputTokens": 0,
+             "cacheCreationInputTokens": 0, "costUSD": cost_usd}
+        usage = dict({"claude-haiku-5-5": u}, **(extra or {}))
+        return L.sdk_check(rows, [{"captured_at_unix": 10.0, "total_cost_usd": cost_usd,
+                                   "model_usage": usage}], L.DEFAULT_RATES)
+
+    def _haiku55_rows(self):
+        short = dict(self._row(1.0, "claude-haiku-5-5", out=1_000), input_tokens=50_000)    # base price
+        long_ = dict(self._row(2.0, "claude-haiku-5-5", out=1_000), input_tokens=150_000)   # long-prompt price
+        return [short, long_]
+
+    def test_a_per_request_card_is_checked_per_request_when_the_ledger_has_every_call(self):
+        rows = self._haiku55_rows()
+        per_request = sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows)                   # $0.0830
+        c = self._haiku55(rows, per_request)
+        m = c["models"]["claude-haiku-5-5"]
+        self.assertIs(c["rate_ok"], True)
+        self.assertEqual(m["check"], "exact")
+        self.assertEqual(L._ours_cell(m), "$0.0830 (summed per request)")
+        # The old check priced the summed totals as ONE request: 200k > 100k, all long-prompt, $0.105.
+        summed = {"model": "claude-haiku-5-5", "input_tokens": 200_000, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0, "cache_write_5m_tokens": 0, "cache_write_1h_tokens": 0,
+                  "output_tokens": 2_000}
+        self.assertGreater(L.cost_of(summed, L.DEFAULT_RATES) - per_request, L.SDK_RATE_TOLERANCE_USD)
+
+    def test_totals_under_the_threshold_are_checked_exactly_without_the_calls(self):
+        """Astra's counterexample: 90k prompt tokens in total means no request can be long, so the price is
+        known exactly ($0.019) and a fivefold overcharge is a proven mismatch, not a value inside the bounds."""
+        right = self._haiku55([], 0.019, inp=90_000, out=20_000)
+        self.assertIs(right["rate_ok"], True)
+        self.assertEqual(right["models"]["claude-haiku-5-5"]["check"], "below_threshold")
+        wrong = self._haiku55([], 0.095, inp=90_000, out=20_000)
+        self.assertIs(wrong["rate_ok"], False)
+        self.assertIs(wrong["models"]["claude-haiku-5-5"]["rate_ok"], False)
+
+    def test_without_the_calls_bounds_are_not_a_match_but_a_cost_outside_them_is_a_mismatch(self):
+        per_request = sum(L.cost_of(r, L.DEFAULT_RATES) for r in self._haiku55_rows())
+        c = self._haiku55([], per_request)
+        m = c["models"]["claude-haiku-5-5"]
+        self.assertIsNone(c["rate_ok"])
+        self.assertIsNone(m["rate_ok"])
+        self.assertEqual((m["check"], m["ours_range_usd"]), ("bounded", [0.021, 0.105]))
+        self.assertIn("bounds only", L._ours_cell(m))
+        # Astra's second counterexample: $0.040 is no real mix of 200k-token requests, yet lies inside the bounds.
+        self.assertIsNone(self._haiku55([], 0.040, out=0)["rate_ok"])
+        self.assertIs(self._haiku55([], 0.50)["rate_ok"], False)          # outside the bounds: proven wrong
+
+    def test_a_proven_mismatch_wins_over_an_unconfirmed_model(self):
+        wrong_sonnet = {"claude-sonnet-5": {"inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+                                            "cacheCreationInputTokens": 0, "costUSD": 15.0}}
+        c = self._haiku55([], 0.083, extra=wrong_sonnet)
+        self.assertIs(c["rate_ok"], False)
+        self.assertIsNone(c["models"]["claude-haiku-5-5"]["rate_ok"])
+        self.assertIs(c["models"]["claude-sonnet-5"]["rate_ok"], False)
+
+    def _report(self, usage):
+        """build() + render_md() on an eval dir holding only Claude Code's result: JSON, Markdown, warnings."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "reports"))
+            os.makedirs(os.path.join(d, "empty"))
+            total = sum(u["costUSD"] for u in usage.values())
+            with open(os.path.join(d, "reports", "sdk_results.json"), "w") as fh:
+                json.dump([{"captured_at_unix": 10.0, "total_cost_usd": total, "model_usage": usage}], fh)
+            _rows, _agents, agg, meta = L.build(d, [os.path.join(d, "empty", "*.jsonl")], L.DEFAULT_RATES,
+                                                roots=[os.path.join(d, "empty")], scope="explicit")
+            return meta, L.render_md(agg, meta)
+
+    def test_report_status_and_warnings_agree_with_the_check(self):
+        def haiku(cost, inp=200_000, out=2_000):
+            return {"claude-haiku-5-5": {"inputTokens": inp, "outputTokens": out, "cacheReadInputTokens": 0,
+                                         "cacheCreationInputTokens": 0, "costUSD": cost}}
+        warn_wrong = "our rates do not reproduce"
+        warn_unconfirmed = "could not be confirmed"
+        meta, md = self._report(haiku(0.083))                                  # unconfirmed only
+        self.assertIsNone(meta["sdk_check"]["rate_ok"])
+        self.assertIn("tokens: **not confirmed", md)
+        self.assertNotIn("**match**", md)
+        self.assertIn("| not confirmed |", md)
+        self.assertTrue(any(warn_unconfirmed in w for w in meta["warnings"]))
+        self.assertFalse(any(warn_wrong in w for w in meta["warnings"]))
+        meta, md = self._report(haiku(0.095, inp=90_000, out=20_000))          # proven wrong, below threshold
+        self.assertIs(meta["sdk_check"]["rate_ok"], False)
+        self.assertIn("DO NOT MATCH", md)
+        self.assertIn("**MISMATCH**", md)
+        self.assertTrue(any(warn_wrong in w for w in meta["warnings"]))
+        self.assertFalse(any(warn_unconfirmed in w for w in meta["warnings"]))
+        meta, md = self._report(haiku(0.019, inp=90_000, out=20_000))          # exactly right
+        self.assertIs(meta["sdk_check"]["rate_ok"], True)
+        self.assertIn("tokens: **match**", md)
+        self.assertFalse(any(warn_wrong in w or warn_unconfirmed in w for w in meta["warnings"]))
+
+    def test_calls_after_the_result_mark_it_partial(self):
+        at = self.REAL["captured_at_unix"]
+        rows = [self._row(at - 10), self._row(at + 10), self._row(at + 20)]
+        c = L.sdk_check(rows, [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["partial"])
+        self.assertEqual(c["calls_after_result"], 2)
+        self.assertEqual(c["models"]["claude-opus-4-8"]["ledger_tokens_until_result"]["output_tokens"], 1000)
+
+    def test_the_last_result_is_the_one_compared(self):
+        early = dict(self.REAL, captured_at_unix=1.0, total_cost_usd=1.0)
+        self.assertAlmostEqual(L.sdk_check([], [self.REAL, early], L.DEFAULT_RATES)["sdk_total_usd"], 25.460418, places=5)
+
+    def test_no_results_means_no_check(self):
+        self.assertIsNone(L.sdk_check([], [], L.DEFAULT_RATES))
 
 
 class TestPerModelPricing(unittest.TestCase):
@@ -607,6 +758,7 @@ class TestPerModelPricing(unittest.TestCase):
         "claude-sonnet-5-5": (2, 2.50, 4, 0.20, 10),
         "claude-sonnet-5": (2, 2.50, 4, 0.20, 10), "claude-sonnet-4-6": (3, 3.75, 6, 0.30, 15),
         "claude-sonnet-4-5": (3, 3.75, 6, 0.30, 15), "claude-haiku-4-5": (1, 1.25, 2, 0.10, 5),
+        "claude-haiku-5-5": (0.10, 0.125, 0.20, 0.01, 0.50),   # prompts up to 100k (2026-10-09); long tier below
     }
 
     def _row(self, model, inp=0, read=0, w5=0, w1=0, out=0):
@@ -643,6 +795,27 @@ class TestPerModelPricing(unittest.TestCase):
         self.assertAlmostEqual(L.cost_of(self._row("claude-sonnet-5-5", inp=6, w5=30361, read=58690, out=1099),
                                          L.DEFAULT_RATES), 0.0986425, places=7)
         self.assertEqual(L.unpriced_models([self._row("claude-sonnet-5-5")], L.DEFAULT_RATES), [])
+
+    def test_haiku_5_5_is_priced_per_request_by_prompt_length(self):
+        """Pricing page 2026-10-09: prompts over 100,000 tokens pay $0.50 / $0.625 / $1 / $0.05 / $2.50.
+        Claude Code 2.1.295 prices it the same way (its `haiku_55` entry, `above_prompt_tokens: 1e5`),
+        counting input + cache reads + cache writes and switching only strictly above the threshold."""
+        lp = L.DEFAULT_RATES["claude-haiku-5-5"]["long_prompt"]
+        self.assertEqual((lp["above_prompt_tokens"], lp["input"], lp["cache_write_5m"], lp["cache_write_1h"],
+                          lp["cache_read"], lp["output"]), (100_000, 0.50, 0.625, 1.0, 0.05, 2.50))
+        at = self._row("claude-haiku-5-5", inp=100_000, out=1_000_000)            # exactly at it: base price
+        self.assertAlmostEqual(L.cost_of(at, L.DEFAULT_RATES), (100_000 * 0.10 + 1_000_000 * 0.50) / 1e6, places=9)
+        over = self._row("claude-haiku-5-5", inp=10, read=90_000, w5=10_000, out=1_000_000)  # 100,010: cache counts
+        self.assertAlmostEqual(L.cost_of(over, L.DEFAULT_RATES),
+                               (10 * 0.50 + 90_000 * 0.05 + 10_000 * 0.625 + 1_000_000 * 2.50) / 1e6, places=9)
+        self.assertAlmostEqual(sum(L.cost_breakdown(over, L.DEFAULT_RATES).values()),
+                               L.cost_of(over, L.DEFAULT_RATES), places=9)
+        self.assertEqual(L.unpriced_models([over], L.DEFAULT_RATES), [])
+
+    def test_a_partial_override_keeps_haiku_5_5s_long_prompt_tier(self):
+        r = L.merge_rates({"claude-haiku-5-5": {"output": 0.6}})
+        self.assertEqual(r["claude-haiku-5-5"]["output"], 0.6)
+        self.assertEqual(r["claude-haiku-5-5"]["long_prompt"], L.DEFAULT_RATES["claude-haiku-5-5"]["long_prompt"])
 
     def test_dated_and_context_tagged_ids_find_their_card(self):
         self.assertEqual(L.rate_key("claude-haiku-4-5-20251001", L.DEFAULT_RATES), "claude-haiku-4-5")
@@ -1046,11 +1219,19 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
         "e2e_workflow/e2e_workflow.js": {
             "const { spawn } = require('child_process');": 1,
             "const { execFileSync } = require('child_process');": 4,
+            # PR #574: the Expt-3 routing cascade's Path-B verifier (__routeReadFile) does a GUARDED
+            # require('fs') -- try/catch returns null where require is absent, so the seam suppresses
+            # routing (Path A) rather than failing. Intentional + reviewed; pinned here like the others.
+            "var fs = require('fs');": 1,
         },
         "kernel_workflow/kernel_workflow.js": {
             "const { spawn } = require('child_process');": 1,
         },
-        "kernel_workflow/kernel_lane.js": {},
+        "kernel_workflow/kernel_lane.js": {
+            # PR #574: P1 shadow audit's GUARDED fs probe (typeof require check + try/catch -> null),
+            # so it no-ops where require is absent. Intentional + reviewed; pinned like the others.
+            "try { if (typeof require === 'function') { __p1ShadowFS = require('fs'); } } catch (e) { __p1ShadowFS = null; }": 1,
+        },
     }
 
     @staticmethod
@@ -1860,3 +2041,111 @@ class TestLedgerCli(LedgerTestBase):
                 contextlib.redirect_stderr(err):
             self.assertEqual(L.main(["--eval-dir", self.eval_dir, "--quiet"]), 0)
         self.assertIn("run is unaffected", err.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# STEP 1 (eikos v2 observability): thinking/response output split + attribution
+# --------------------------------------------------------------------------- #
+def _bd_row(model="claude-opus-4-8", out=500_000, think=None, role=None, inp=0,
+            read=0, w5=0, w1h=0):
+    """A fully-formed ledger row for the cost functions (all token fields present)."""
+    row = {"model": model, "input_tokens": inp, "cache_read_input_tokens": read,
+           "cache_creation_input_tokens": w5 + w1h, "cache_write_5m_tokens": w5,
+           "cache_write_1h_tokens": w1h, "output_tokens": out,
+           "output_thinking_tokens": think,
+           "output_response_tokens": (None if think is None else max(0, out - think))}
+    if role is not None:
+        row["role"] = role
+    return row
+
+
+class TestThinkingTokens(unittest.TestCase):
+    def test_absent_details_is_unknown_not_zero(self):
+        self.assertIsNone(L.thinking_tokens({"output_tokens": 100}))
+        self.assertIsNone(L.thinking_tokens({"output_tokens": 100, "output_tokens_details": {}}))
+
+    def test_present_is_clamped_int(self):
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": 40}}), 40)
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": -5}}), 0)
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": "x"}}), None)
+
+
+class TestOutputSplit(unittest.TestCase):
+    def test_known_sub_buckets_sum_to_the_output_bucket(self):
+        row = _bd_row(out=500_000, think=200_000)
+        sp = L.output_split(row, L.DEFAULT_RATES)
+        self.assertTrue(sp["split_known"])
+        self.assertAlmostEqual(sp["output_thinking"] + sp["output_response"],
+                               L.cost_breakdown(row, L.DEFAULT_RATES)["output"], places=12)
+        self.assertEqual(sp["thinking_tokens"] + sp["response_tokens"], 500_000)
+
+    def test_unknown_split_is_none_never_zero(self):
+        sp = L.output_split(_bd_row(out=500_000, think=None), L.DEFAULT_RATES)
+        self.assertFalse(sp["split_known"])
+        self.assertIsNone(sp["output_thinking"])
+        self.assertIsNone(sp["output_response"])
+
+    def test_thinking_over_output_is_clamped(self):
+        sp = L.output_split(_bd_row(out=100, think=999), L.DEFAULT_RATES)
+        self.assertEqual(sp["thinking_tokens"], 100)
+        self.assertEqual(sp["response_tokens"], 0)
+
+    def test_router_role_has_no_work_output(self):
+        sp = L.output_split(_bd_row(out=500_000, think=None, role="route_carrier"), L.DEFAULT_RATES)
+        self.assertEqual(sp["output_thinking"], 0.0)
+        self.assertEqual(sp["output_response"], 0.0)
+        self.assertTrue(sp["split_known"])
+
+    def test_output_bucket_total_is_unchanged_by_the_split(self):
+        # The pinned invariant: cost_breakdown is untouched; 5 buckets still sum to cost_of.
+        row = _bd_row(out=500_000, think=200_000, inp=1_000_000, read=2_000_000, w5=3_000_000)
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(sum(bd.values()), L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertNotIn("output_thinking", bd)   # sub-buckets live apart from the 5-bucket dict
+
+
+class TestRowBuilderThinking(LedgerTestBase):
+    def test_row_extracts_thinking_and_preserves_output_tokens(self):
+        rec = asst_rec(1, "msg_x", out=100, model="claude-haiku-5-5")
+        rec["message"]["usage"]["output_tokens_details"] = {"thinking_tokens": 30}
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("profiler", "baseline", self.eval_dir), 0), rec])
+        rows, _, _, _ = self.build()
+        r = [x for x in rows if x["message_id"] == "msg_x"][0]
+        self.assertEqual(r["output_tokens"], 100)            # left whole
+        self.assertEqual(r["output_thinking_tokens"], 30)
+        self.assertEqual(r["output_response_tokens"], 70)
+
+    def test_row_without_details_is_unknown(self):
+        write_transcript(os.path.join(self.tdir, "b.jsonl"), [
+            user_rec(prompt_for("profiler", "baseline", self.eval_dir), 0),
+            asst_rec(1, "msg_y", out=100, model="claude-haiku-4-5")])
+        rows, _, _, _ = self.build()
+        r = [x for x in rows if x["message_id"] == "msg_y"][0]
+        self.assertEqual(r["output_tokens"], 100)
+        self.assertIsNone(r["output_thinking_tokens"])
+        self.assertIsNone(r["output_response_tokens"])
+
+
+class TestBucketAttribution(unittest.TestCase):
+    def test_five_buckets_sum_to_total_cost(self):
+        rows = [_bd_row("claude-opus-4-8", out=100, think=40, inp=1000, read=2000, w5=3000),
+                dict(_bd_row("claude-sonnet-5-5", out=200, think=None, read=5000), role="engineer"),
+                dict(_bd_row("claude-sonnet-5-5", out=10, role="route_carrier"))]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        total = sum(g["uncached_input"] + g["cache_read"] + g["cache_write"]
+                    + g["output"] + g["router"] for g in att)
+        self.assertAlmostEqual(total, sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows), places=12)
+
+    def test_unknown_split_is_tracked_separately(self):
+        rows = [dict(_bd_row("claude-sonnet-5-5", out=200, think=None), role="engineer")]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        g = att[0]
+        self.assertAlmostEqual(g["output_split_unknown"], g["output"], places=12)
+        self.assertEqual(g["output_thinking"], 0.0)
+
+    def test_router_cost_is_isolated_by_role(self):
+        rows = [dict(_bd_row("claude-sonnet-5-5", out=1000, role="route_carrier"))]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        self.assertGreater(att[0]["router"], 0.0)
+        self.assertEqual(att[0]["output"], 0.0)
