@@ -750,6 +750,18 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.canonical, "rev-list", "--all"), b"")
         self.assertFalse((self.canonical / ".git/index").exists())
 
+    def test_record_batch_refuses_report_bytes_that_differ_from_the_workflow_digest(self):
+        self.initialize()
+        self.save_patch()
+        report_json = json.dumps([self.report()])
+        before = (self.storage / "index.json").read_bytes()
+        self.assert_error("report_digest_mismatch", archive.record_batch, str(self.storage), str(self.canonical),
+                          report_json, archive.digest(report_json.replace("1.25", "1.26").encode("utf-8")))
+        self.assertEqual(before, (self.storage / "index.json").read_bytes())
+        result = archive.record_batch(str(self.storage), str(self.canonical), report_json,
+                                      archive.digest(report_json.encode("utf-8")))
+        self.assertFalse(result["has_failures"], result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -58,7 +58,9 @@ const exercise = new AsyncFunction('A', 'WORKFLOW_DIR', 'CANONICAL', 'EVAL_DIR',
   const evolution = createEvolution();
   assert.deepEqual(Object.keys(evolution).sort(),
     ['initialize', 'plannerInput', 'prepare', 'engineerInput', 'recordBatch', 'checkPatch', 'run', 'result'].sort());
-  await evolution.initialize();
+  // initialize() never throws: an unusable list or failed/invalid init receipt is recorded and the
+  // caller falls back to the ordinary lane. Surface that recorded reason as this witness's failure.
+  if (!(await evolution.initialize())) throw new Error(evolution.result().errors.at(-1).message);
   if (scenario === 'helper-error') return evolution.run('query', ['--entry', 'missing-parent']);
   assert.equal(evolution.result().archive, path.join(EVAL_DIR, 'evolution_archive'));
   assert.deepEqual(evolution.plannerInput().source_paths, ['kernel.py']);

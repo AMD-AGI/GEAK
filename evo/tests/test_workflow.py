@@ -69,8 +69,8 @@ class WorkflowWitness(unittest.TestCase):
             ("missing-result", "EVO init did not complete: no return"),
             ("missing-stdout", "EVO init did not complete: command failed"),
             ("non-string-stdout", "EVO init did not complete: command failed"),
-            ("malformed-stdout", "SyntaxError"),
-            ("empty-stdout", "SyntaxError"),
+            ("malformed-stdout", "EVO init returned an invalid receipt"),
+            ("empty-stdout", "EVO init returned an invalid receipt"),
             ("null-receipt", "EVO init returned an invalid receipt"),
         ):
             with self.subTest(scenario=scenario):

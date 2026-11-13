@@ -45,7 +45,8 @@ if (!WORKFLOW_DIR) {
 // kernel_workflow dir (…/<parent>/kernel_workflow -> …/<parent>/exp). Override with args.exp_root.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
-const EVO = OPTIMIZER === 'evo' ? createEvolution() : null;
+let EVO = OPTIMIZER === 'evo' ? createEvolution() : null;
+let EVO_FALLBACK = null;   // set when EVO could not start; the lane then runs as the ordinary lane
 const KERNEL_PATH_ORIG = A.kernel_path;
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
@@ -1495,7 +1496,13 @@ correctness check; only report committed=true if it still passes. Return JSON {c
   }
 }
 
-if (EVO) await EVO.initialize();
+if (EVO && !(await EVO.initialize())) {
+  EVO_FALLBACK = EVO.result();
+  EVO = null;
+  // The ordinary lane plans with the ordinary schema: drop the EVO-only lineage fields added above.
+  delete PLAN_SCHEMA.properties.directions.items.properties.parent_id;
+  delete PLAN_SCHEMA.properties.directions.items.properties.donor_ids;
+}
 
 let plannerStopReason = '';
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
@@ -2158,7 +2165,7 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
   : finalPrimary;
 
 return {
-  ...(EVO ? { evolution: EVO.result() } : {}),
+  ...(EVO ? { evolution: EVO.result() } : EVO_FALLBACK ? { evolution: EVO_FALLBACK } : {}),
   mode: MODE,
   // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
   // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.
@@ -2255,7 +2262,6 @@ function createEvolution() {
     }
     return paths;
   }
-  validateSourcePaths(sourcePaths);
   const helper = `${WORKFLOW_DIR}/../evo/archive.py`;
   const errors = [];
   let archive = '';
@@ -2285,7 +2291,8 @@ function createEvolution() {
       }
       throw new Error(`EVO ${operation} did not complete: ${diagnostic}`);
     }
-    const receipt = JSON.parse(result.stdout);
+    let receipt;
+    try { receipt = JSON.parse(result.stdout); } catch { receipt = null; }
     if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) ||
         receipt.ok !== true || receipt.command !== operation || receipt.archive !== archive) {
       throw new Error(`EVO ${operation} returned an invalid receipt`);
@@ -2293,16 +2300,26 @@ function createEvolution() {
     return receipt;
   }
 
-  function initialize() {
-    const editable = analysis && analysis.modifiable_files != null ? analysis.modifiable_files : [];
-    validateSourcePaths(editable);
-    sourcePaths = validateSourcePaths([...new Set([...editable, ...sourcePaths])].sort());
-    if (!sourcePaths.length) {
-      throw new Error('optimizer=evo requires source files from Analyze modifiable_files or evolution_source_paths');
+  // Returns the init receipt, or null when EVO cannot start (unusable source list or a failed/invalid
+  // init receipt). The caller then runs the ordinary lane; the reason is kept in result().errors.
+  async function initialize() {
+    try {
+      const editable = analysis && analysis.modifiable_files != null ? analysis.modifiable_files : [];
+      validateSourcePaths(editable);
+      validateSourcePaths(sourcePaths);
+      sourcePaths = validateSourcePaths([...new Set([...editable, ...sourcePaths])].sort());
+      if (!sourcePaths.length) {
+        throw new Error('optimizer=evo requires source files from Analyze modifiable_files or evolution_source_paths');
+      }
+      archive = `${String(EVAL_DIR).replace(/\/+$/, '')}/evolution_archive`;
+      return await run('init', ['--canonical', CANONICAL,
+        ...sourcePaths.flatMap(sourcePath => ['--source-path', sourcePath])]);
+    } catch (error) {
+      const message = String(error && error.message || error);
+      errors.push({ operation: 'init', message, fallback: 'ordinary_lane' });
+      log(`EVO could not start; continuing as the ordinary lane: ${message}`);
+      return null;
     }
-    archive = `${String(EVAL_DIR).replace(/\/+$/, '')}/evolution_archive`;
-    return run('init', ['--canonical', CANONICAL,
-      ...sourcePaths.flatMap(sourcePath => ['--source-path', sourcePath])]);
   }
 
   function plannerInput() {
@@ -2348,7 +2365,9 @@ function createEvolution() {
       patch: result.patch || `${result.d.out_dir}/best_patch.diff`, engineer: result.eng, verifier: result.ver,
     }));
     try {
-      const receipt = await run('record-batch', ['--canonical', CANONICAL, '--report-json', JSON.stringify(reports)]);
+      const reportJson = JSON.stringify(reports);
+      const receipt = await run('record-batch', ['--canonical', CANONICAL, '--report-json', reportJson,
+        '--report-sha256', sha256Hex(reportJson)]);
       if (receipt.has_failures) errors.push({ round, operation: 'record-batch', results: receipt.results });
       return receipt;
     } catch (error) {
@@ -2377,4 +2396,43 @@ function createEvolution() {
 
   return { initialize, plannerInput, prepare, engineerInput, recordBatch, checkPatch, run,
     result: () => ({ archive, errors }) };
+}
+
+// SHA-256 of a string's UTF-8 bytes (FIPS 180-4). The workflow sandbox has no crypto module; record-batch
+// passes this digest so archive.py can refuse report JSON that changed while an agent retyped the command.
+function sha256Hex(text) {
+  const bytes = [];
+  for (const character of unescape(encodeURIComponent(text))) bytes.push(character.charCodeAt(0));
+  const K = [];
+  for (let candidate = 2, found = 0; found < 64; candidate++) {
+    let prime = true;
+    for (let divisor = 2; divisor * divisor <= candidate; divisor++) if (candidate % divisor === 0) { prime = false; break; }
+    if (prime) { K.push((Math.cbrt(candidate) % 1) * 2 ** 32 >>> 0); found++; }
+  }
+  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const bitLength = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let shift = 56; shift >= 0; shift -= 8) bytes.push(Math.floor(bitLength / 2 ** shift) & 0xff);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  const W = new Array(64);
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      W[i] = (bytes[offset + 4 * i] << 24) | (bytes[offset + 4 * i + 1] << 16) |
+        (bytes[offset + 4 * i + 2] << 8) | bytes[offset + 4 * i + 3];
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotate(W[i - 15], 7) ^ rotate(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+      const s1 = rotate(W[i - 2], 17) ^ rotate(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+    }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + W[i]) | 0;
+      const t2 = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    [a, b, c, d, e, f, g, h].forEach((value, index) => { H[index] = (H[index] + value) | 0; });
+  }
+  return H.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
 }

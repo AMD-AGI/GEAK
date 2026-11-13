@@ -822,9 +822,11 @@ def observe_report(store, index, report, base_id, base, base_blobs):
     return entries
 
 
-def record_batch(archive, canonical, report_json):
+def record_batch(archive, canonical, report_json, report_sha256=None):
     if not isinstance(report_json, str) or len(report_json.encode("utf-8")) > MAX_REPORT_BYTES:
         fail("size_limit", "Batch JSON exceeds 1 MiB")
+    if report_sha256 is not None and digest(report_json.encode("utf-8")) != report_sha256:
+        fail("report_digest_mismatch", "Report JSON differs from the workflow's SHA-256; nothing was recorded")
     reports = parse_json(report_json)
     if not isinstance(reports, list) or not 1 <= len(reports) <= MAX_REPORTS:
         fail("invalid_reports", "Report JSON must be a list of 1 to 128 report objects")
@@ -910,6 +912,7 @@ def main(argv=None):
         record_parser.add_argument("--archive", required=True)
         record_parser.add_argument("--canonical", required=True)
         record_parser.add_argument("--report-json", required=True)
+        record_parser.add_argument("--report-sha256")
         check_parser = commands.add_parser("check-patch")
         check_parser.add_argument("--archive", required=True)
         check_parser.add_argument("--canonical", required=True)
@@ -925,7 +928,8 @@ def main(argv=None):
         elif arguments.command == "check-patch":
             result = check_patch(arguments.archive, arguments.canonical, arguments.patch)
         else:
-            result = record_batch(arguments.archive, arguments.canonical, arguments.report_json)
+            result = record_batch(arguments.archive, arguments.canonical, arguments.report_json,
+                                  arguments.report_sha256)
         result["archive"] = str(absolute_path(arguments.archive))
         print(json_bytes(result).decode("ascii"))
         return 0

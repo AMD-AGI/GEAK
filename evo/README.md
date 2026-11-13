@@ -115,16 +115,27 @@ provenance; the archive is not an evaluator. A best-patch report never qualifies
 different unfinished bytes. Archive failures are also visible in the workflow's
 `evolution.errors` result. Original logs and full final endpoints remain required.
 
+If EVO cannot start in a lane - the combined Analyze `modifiable_files` and
+supplemental `evolution_source_paths` list is empty or has an unsafe entry, or the
+archive `init` receipt fails or is invalid - the lane logs the reason, records it in
+`evolution.errors` with `fallback: "ordinary_lane"`, and continues as the ordinary
+main lane with the ordinary plan schema. One bad list therefore cannot stop every
+kernel lane of an E2E run. This covers EVO's own start-up only; failures that occur
+in ordinary main before EVO starts are unchanged. Bakeoff mode and a custom
+`kernel_lane_script` remain configuration errors. `record-batch` receives the
+SHA-256 of the exact report JSON and refuses to record if the agent-relayed bytes
+differ. Workflow scripts have no clock, so time and token cost of the `evo:*`
+helper calls are read from the ordinary LLM timeline under those labels.
+
 ## Validation
 
-No generated worker or build step is needed. CPU dispatch tests compare ordinary
-main behavior against `a48ac8bef9aeab299ba5ac9cb44164d997e94524`, including rendered
-prompts, schemas, calls, failures and terminal results. EVO uses the same lane
-and host-selection code with the flag enabled. Real-Git witnesses separately
-exercise archive/source custody and the existing workspace materializer.
+No generated worker or build step is needed. CPU dispatch tests compare EVO on with
+EVO off in the same tree (rendered prompts, schemas, calls, failures and terminal
+results). Real-Git witnesses separately exercise archive/source custody and the
+existing workspace materializer. These tests run in the L0 pytest job:
 
 ```bash
-python3 -m unittest discover -s evo/tests -v
+python3 -m pytest -q evo/tests/test_archive.py evo/tests/test_dispatch.py evo/tests/test_workflow.py
 ```
 
 CPU dispatch mocks and real-Git custody witnesses establish only their tested

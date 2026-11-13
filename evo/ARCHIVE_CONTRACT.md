@@ -25,7 +25,7 @@ python3 -B evo/archive.py init --archive ABS_NEW_DIR --canonical ABS_GIT_WORKSPA
 python3 -B evo/archive.py query --archive PATH [--entry ID]
 python3 -B evo/archive.py prepare --archive PATH --workspace ABS_EXISTING_WORKSPACE --canonical ABS_ROUND_CANONICAL [--parent ID] [--donor ID ...] [--initialize-index]
 python3 -B evo/archive.py check-patch --archive PATH --canonical ABS_ROUND_CANONICAL --patch ABS_PATCH_FILE
-python3 -B evo/archive.py record-batch --archive PATH --canonical ABS_ROUND_CANONICAL --report-json JSON_STRING
+python3 -B evo/archive.py record-batch --archive PATH --canonical ABS_ROUND_CANONICAL --report-json JSON_STRING [--report-sha256 HEX]
 ```
 
 1. Finish ordinary main canonical preparation and warmstart, then `init` before
@@ -59,7 +59,9 @@ python3 -B evo/archive.py record-batch --archive PATH --canonical ABS_ROUND_CANO
    against the new canonical if it changes.
 5. Call `record-batch` with the independent returned engineer/verifier values
    after results are available and before canonical promotion or workspace/patch
-   cleanup. Do not substitute unfinished workspace bytes for a best patch.
+   cleanup. When `--report-sha256` is supplied, the helper refuses
+   (`report_digest_mismatch`, nothing recorded) unless it equals the SHA-256 of the
+   UTF-8 report JSON it received. Do not substitute unfinished workspace bytes for a best patch.
 6. Main performs its own final canonical validation and promotion. An archive
    retention failure is not verification success or a promotion authorization.
 
