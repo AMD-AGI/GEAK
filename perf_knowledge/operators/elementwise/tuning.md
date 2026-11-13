@@ -32,7 +32,7 @@ instruction (the workload guide's "subgroup-contiguous 512 B" is the per-phase f
 - Vectorization **cuts instruction count ~4×** and is the difference between ~50% and ~80% of LDS/HBM
   peak.
 - **Cost: VGPR pressure.** A `float4` holds 4 regs; a wide grid-stride loop with several live vectors can
-  cross a 16-VGPR occupancy boundary (512 VGPR/EU, 16-granule) and drop waves/EU. If a kernel is already
+  cross a VGPR occupancy boundary (512 VGPR/EU, 8-granule, ArchVGPR + AGPR) and drop waves/EU. If a kernel is already
   register-heavy or low-parallelism, **scalar can win** — verify with `-Rpass-analysis=kernel-resource-usage`.
 - **Emit verification matters**: historically `uint4`/`ulonglong2` didn't always lower to `dwordx4`
   (ROCm#341); modern HIP handles `float4`/`int4` well but **always grep the ISA for `_dwordx4`** (Triton:
@@ -80,4 +80,4 @@ paying. See [fusion.md](fusion.md); on `torch.compile` this is automatic via
 - 16 B optimal access, 512 B subgroup-contiguous, block=256, ≥1024 grid: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 - float4/int4 vectorization, ~4× instruction reduction, register-pressure caveat, alignment: https://developer.nvidia.com/blog/cuda-pro-tip-increase-performance-with-vectorized-memory-access/
 - dwordx4 emission caveat for some HIP vector types: https://github.com/ROCm/ROCm/issues/341
-- 512 VGPR/EU, 16-granule occupancy math: [`../../languages/triton_amd/knobs.md`](../../languages/triton_amd/knobs.md)
+- 512 VGPR/EU, 8-granule occupancy math: [`../../languages/triton_amd/knobs.md`](../../languages/triton_amd/knobs.md)

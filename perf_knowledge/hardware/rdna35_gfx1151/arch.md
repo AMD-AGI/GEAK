@@ -7,7 +7,7 @@ regimes: [both]
 updated: 2026-11-06
 sources:
   - ../../../kernel_workflow/knowledge/amd_ryzen.md
-  - ../../expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json
+  - ../data/hw_constants.json
   - ../../../e2e_workflow/knowledge/analysis_skills/roofline/peaks.md
   - repro/README.md
 ---
@@ -17,7 +17,7 @@ sources:
 > Workflow agents should prefer [`kernel_workflow/knowledge/amd_ryzen.md`](../../../kernel_workflow/knowledge/amd_ryzen.md),
 > which is the summary; this directory is the measured detail behind it. The machine model,
 > occupancy and theoretical peaks live in `amd_ryzen.md`,
-> [`hw_constants.json`](../../expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json)
+> [`hw_constants.json`](../data/hw_constants.json)
 > and [`roofline/peaks.md`](../../../e2e_workflow/knowledge/analysis_skills/roofline/peaks.md), and are
 > not repeated here. Occupancy is in [occupancy.md](occupancy.md), pitfalls in [pitfalls.md](pitfalls.md).
 
