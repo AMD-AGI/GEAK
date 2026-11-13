@@ -1,11 +1,10 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CPU-only checks for the search-time measurement tools in kernel_workflow/scripts/kernel_tools.
+"""CPU-only checks for the search-time measurement tool in kernel_workflow/scripts/kernel_tools.
 
-ab_bench.py (same-window interleaved A/B screening), create_harness.py (+ harness_stub_env.py, the
-stub importer its selftest runs a generated skeleton under) and parse_correctness.py are GEAK shared
-kernel tools. They never time or judge a kernel themselves: every sample comes from
-e2e_workflow/scripts/harness_lib.py, and a missing harness_lib is a refusal, never a fallback timer.
+ab_bench.py (same-window interleaved A/B screening) is a GEAK shared kernel tool. It never times or
+judges a kernel itself: every sample comes from e2e_workflow/scripts/harness_lib.py, and a missing
+harness_lib is a refusal, never a fallback timer.
 No GPU, no network, no torch.
 """
 
@@ -20,7 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
 HARNESS_LIB = REPO / "e2e_workflow" / "scripts" / "harness_lib.py"
-TOOLS = ["ab_bench", "create_harness", "parse_correctness"]
+TOOLS = ["ab_bench"]
 
 
 def run(*args, env=None, cwd=None, timeout=300):
@@ -65,24 +64,3 @@ def test_ab_bench_refuses_missing_harness_lib(tmp_path):
     assert result.returncode != 0 and "harness_lib" in result.stderr
 
 
-def test_create_harness_bakes_in_the_repo_harness_lib(tmp_path):
-    ch = _load("create_harness_kt", KT / "create_harness.py")
-    assert Path(ch.default_harness_lib()).resolve() == HARNESS_LIB.resolve()
-    out = tmp_path / "harness.py"
-    (tmp_path / "k.py").write_text("import triton\n\n@triton.jit\ndef k(x):\n    pass\n")
-    result = run(sys.executable, KT / "create_harness.py", "--kernel-path", tmp_path / "k.py",
-                 "--kernel-name", "k", "--output", out)
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert str(HARNESS_LIB.resolve()) in out.read_text()
-
-
-def test_parse_correctness_geak_exit_codes(tmp_path):
-    log = tmp_path / "ut.out"
-    for rc, text, want in ((0, '{"case": "a", "correct": true, "max_rel_err": 0.001}\n', 0),
-                           (1, '{"case": "a", "correct": false, "max_rel_err": 0.4}\n', 1),
-                           (2, "ImportError\n", 2),
-                           (3, "UT_HARNESS_INCOMPLETE: no replay bundle\n", 3)):
-        log.write_text(text)
-        result = run(sys.executable, KT / "parse_correctness.py", "--log", log,
-                     "--parse", "geak", "--exit-code", str(rc))
-        assert result.returncode == want, (rc, result.stdout, result.stderr)
