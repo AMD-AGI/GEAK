@@ -167,17 +167,25 @@ def _seg(name, tag):
 # EXTEND and DRAFT_EXTEND_V2 are context shapes; DECODE (the EAGLE draft forward)
 # and TARGET_VERIFY are generation shapes -- the same split
 # step_span_utils.build_detailed_annotation_suffix makes with its c_/g_ prefixes.
+# Newer builds label the target-verify forward VERIFY, and every draft-worker forward
+# DRAFT whatever mode it ran. Only EXTEND carries toks=, so a DRAFT step with a token
+# count is the draft model's prefill; one without is read as a generation step.
 _SGLANG_STEP_RE = re.compile(
     r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?\]")
 _SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True,
-                        "DECODE": False, "TARGET_VERIFY": False}
+                        "DECODE": False, "TARGET_VERIFY": False, "VERIFY": False}
+_SGLANG_MODE_SHAPED_BY_TOKS = {"DRAFT"}
 
 
 def _parse_sglang_step(name):
     m = _SGLANG_STEP_RE.search(name)
     if not m:
         return None
-    is_prefill = _SGLANG_MODE_PREFILL.get(m.group("mode"))
+    mode = m.group("mode")
+    if mode in _SGLANG_MODE_SHAPED_BY_TOKS:
+        is_prefill = m.group("toks") is not None
+    else:
+        is_prefill = _SGLANG_MODE_PREFILL.get(mode)
     if is_prefill is None:
         return None
     bs = int(m.group("bs"))
