@@ -7,12 +7,15 @@ ISA/IR evidence, changes the kernel and verifies it through the existing workflo
 | Tool | Purpose | Runtime needs |
 | --- | --- | --- |
 | `asm_loop_audit.py` | Matrix/VALU/memory/wait mix, hot loop, register and LDS context | Python; AMD assembly or disassembly |
+| `deep_mfma_analysis.py` | Matrix bursts and instructions strictly between bursts | Python; AMD assembly |
+| `mfma_efficiency.py` | Observed matrix cadence and intervening issue intervals | Python; already decoded wave/code JSON |
 | `ab_bench.py` | Interleaved, controlled A/B screening | Kernel's runtime + GEAK `harness_lib` |
 
 `amd_artifacts.py` and `amd_resources.py` share kernel identity and resource parsing.
 Use Python 3.10+. Static tools have no GPU requirement. No matrix-layout,
 rocprof, ATT decoder or new mandatory GEAK dependency is required by these CLIs.
-Native roofline/calibration remains owned by TraceLens.
+The wave reader consumes existing decoded artifacts; collection stays in the profiling
+workflow (`capture.sh`, `rocprofv3_safe.sh --att`). Native roofline/calibration remains owned by TraceLens.
 
 ## Typical calls
 
@@ -20,6 +23,7 @@ Run from the GEAK checkout (replace the example paths and kernel name):
 
 ```bash
 python kernel_workflow/scripts/kernel_tools/asm_loop_audit.py kernel.s --kernel my_kernel
+python kernel_workflow/scripts/kernel_tools/deep_mfma_analysis.py kernel.s --kernel my_kernel
 python kernel_workflow/scripts/kernel_tools/ab_bench.py --module adapter.py --baseline base --control auto --cells 6 --permute --json screen.json
 ```
 
@@ -53,9 +57,13 @@ unrecognizable stripped excerpts cannot supply a trusted kernel identity.
   legacy `--cycles` option uses heuristic weights, not measured or arch-specific cycles.
   `s_nop` counts and raw immediates are encoding observations, not measured stall time
   or evidence of a specific hazard or remedy.
+  The wave reader cannot infer stall causality or chip utilization from issue intervals.
+  Dtype-only hardware constants cannot establish a shape-specific ideal cadence; supply
+  `--ideal-cadence` only with evidence for the actual instruction and architecture.
 - **Loop scope:** The audit prefers innermost loops, then most matrix instructions and
   the shortest body; `--loop-label` selects an explicit back-edge. With no loop,
   `asm_loop_audit.py` can report a bounded whole-kernel body, labelled as per-thread totals.
+  `deep_mfma_analysis.py` requires a back-edge loop.
 
 The existing [Gluon script paths](../../../perf_knowledge/expert_skills/skills/gluon_authoring/scripts/)
 forward to these shared tools. This layer adds no automatic Claude Code routing; skill
@@ -67,6 +75,7 @@ selection and invocation guidance belong to the skill/workflow integration layer
 python -m pytest -q kernel_workflow/scripts/tests/test_kernel_tools_bench.py \
   kernel_workflow/scripts/tests/test_kernel_tools_isa.py \
   kernel_workflow/scripts/tests/test_kernel_tools_regressions.py \
+  kernel_workflow/scripts/tests/test_kernel_tools_mfma.py \
   kernel_workflow/scripts/tests/test_shared_amd_tools.py
 ```
 

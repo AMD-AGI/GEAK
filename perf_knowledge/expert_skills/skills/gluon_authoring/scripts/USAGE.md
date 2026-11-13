@@ -295,7 +295,9 @@ points at files the package does not carry:
   that the track continues past it.
 - Several docstrings and `cmd` fields cite files this package does not carry (`compiler-contract.md`,
   `transcribe.md`, `experiment-records.md`, `lever-cards.json`, `opt_swp_test.py`, `bench.py`,
-  `prof_driver.py`, `mfma_efficiency.py`). Dead by design — do not go looking for them.
+  `prof_driver.py`). These legacy workflow drivers are not used.
+  `mfma_efficiency.py` is an optional shared reader of already decoded wave/code artifacts;
+  it reports observed intervals without selecting optimization tactics.
   **`champion_gate.py`, `parity_gate.py`, `ab_bench.py`, `asm_loop_audit.py`, `gpu_lock.sh` and
   `locus.sh` are NO LONGER on that list — they now ship here** (see `## Gates` below), so a docstring
   citing them is live, not dead.
