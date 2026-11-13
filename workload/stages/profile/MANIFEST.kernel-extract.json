@@ -1,8 +1,8 @@
 {
-  "file_count": 99,
+  "file_count": 100,
   "files": {
-    "PROVENANCE.json": "0cbc54cf926356f84b5b1e2a3f2d5dbc26541c173edf30d1beadb3316efa5d14",
-    "SKILL.md": "52ed56dd4d3061f700f01082fa4529231b4736a17762076e8df67be816aaa253",
+    "PROVENANCE.json": "578b8cb677f1f1977909a432a87d003e0f089e2c96d7edda90408a3e8d0dcf8a",
+    "SKILL.md": "c845e53b476ff605874b4e59a695b6c8b66d3b7c5cdab64e91ac474d2e7962f3",
     "references/capture.md": "f0dabdade2fbcf889ab714716fbb6514d516de554e046e68dab144c36d06da07",
     "references/collective-ut.md": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
     "references/delivery-contract.md": "97e8044049e9993a1dec51ffe77606d50d427a2b6f6b03e796b7d6621d812355",
@@ -11,7 +11,7 @@
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
     "references/pipeline-handoff.md": "cda150ee35d9e4b08574a982f196b91fc934b6b651e940141ab97a2ca7a71f92",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
-    "references/setup.md": "40f6a3f07f1e93d9b3b8981acb378574eb3e372afc3bb14a02dbb16321eb5f2b",
+    "references/setup.md": "ea81bc098427e17282ed9bd9b0ce4399699293ab32e2350ac43e2162943ac74e",
     "references/source-delivery-records.md": "16f00490c765d0144745192b6325a21f586e2be781048390696aa8c82f0db5d6",
     "references/source-extraction.md": "ee4e841dd5030014faee5519f3ac5b4728ee950aa77cb674a37ccf6ed4abec05",
     "references/task-authoring.md": "9baa42f616733c670f9c0f04f2a94e3b5ff4241ed2fba24cbe2e64ba1d06fa88",
@@ -92,19 +92,20 @@
     "ut_contracts/families/topk.json": "c2413d63b15908352addc6c7ba8692c1d14a5ab73037fe5e3bc148243cfc0421",
     "ut_contracts/families/varlen_attention.json": "0065078dd8dcbe74e41f582b6fac7aaaeffe08f01682216a78ac949d0c4f3e6d",
     "ut_contracts/reference_f64.py": "7ff415bf816984a951728cc4c82a8de7b79074a099e5ecc70b5c4e1d4f050ad2",
-    "ut_contracts/scaffold_ut.py": "bc74f4bd2e723a86ce1219c5db22b02cb57396fc1238a8084f79a73bc45e98b0",
+    "ut_contracts/scaffold_ut.py": "1b9138e74cc5f4a23c31d262f8376ffeebbdc6b31feaa55b08b3e91ac26cc749",
     "ut_contracts/templates/cases.py.tmpl": "e103c854a426cabd86ad2cbd5e71a454a18c519cb7f5b9f0b40891373a9b8a79",
     "ut_contracts/templates/unittest.py.tmpl": "1c05c01a3dbfdd085d89378084d4fc374e8d9138480e087682e543c72672eaee",
     "ut_contracts/tests/test_parallel_gates.py": "b3438be664209f821b9e33f750cfed0129a4fbf906188e50e9f1d9d9b2ded5e2",
     "ut_contracts/tests/test_server_evidence.py": "440c691c1eefaaa94056aed2420fa334d8932e45f0171c413c757e8670c79613",
+    "ut_contracts/tests/test_source_identity.py": "68989ae7bd10f43e0a9f646296b25055c1550f57172d54a64d32985d9b754a97",
     "ut_contracts/tests/test_ut_contracts.py": "77aa302cdc2b180740cc6f49895c08ef4239c7770cd0bda7854e97c77b4e0d70",
     "ut_contracts/ut_contract.py": "7f727eaa37ac45ab93c64069b9276d187f3bd7f4d9694152f8f06785cd91c75d",
-    "ut_contracts/ut_driver.py": "f8fa5adc957e77fb8350c9e09f9a5e5715127f6af174b595ae86dae6484afe3d"
+    "ut_contracts/ut_driver.py": "e22123811e21125aa0f9425759ccf9fc807994bfff025d31c1f3fb53fc2390a8"
   },
   "modified_from_origin": false,
-  "note": "Explicit integration of native mixed dispatch-chain proof from the received geak-x source lineage. The skill bytes are exactly source commit 79880832794bd07393fb019b9244d0f81fdb2c9d; historical e2e_workflow derivation and prior integrations remain in PROVENANCE.json. No deployed experiment is repinned by this change.",
-  "origin": "AMD-AGI/GEAK geak-x@79880832794bd07393fb019b9244d0f81fdb2c9d:workload/stages/profile/kernel-extract",
+  "note": "Explicit integration of UT/scaffold delegation to the unchanged native sourceSnapshot owner. Skill bytes match source commit c54fb2978c50750683a3f4519bc9ee2f84926eff; historical source lineage remains in PROVENANCE.json. Existing experiments and task cohorts are not repinned by this change.",
+  "origin": "AMD-AGI/GEAK geak-x@c54fb2978c50750683a3f4519bc9ee2f84926eff:workload/stages/profile/kernel-extract",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "2ef0b1ca4d3823ee6e0a49d99f206b26a12f8a57b657a2c4f466a30be2fd7c81"
+  "tree_sha256": "72097cc9af267eea4f071f1aae607bd75bcc9f21ce0c0134c8833ebd601ccf2e"
 }
