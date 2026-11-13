@@ -845,23 +845,36 @@ async function agentT(p, o) {
 // that GPU (GEAK #606). So before the lane ENDS on an agent that returned nothing, it stops everything
 // still running under its EVAL_DIR and blocks gpu_lock.sh there (scripts/stop_lane_work.py). Only on
 // lane-ending paths: the stop file blocks every later GPU command under EVAL_DIR. Non-fatal.
+// The standalone runtime exposes a host hook that bypasses the saturated agent queue. Native
+// Workflow hosts without that capability retain the best-effort, one-command agent fallback.
 const STOP_LANE_SCHEMA = obj({ ok: { type: 'boolean' }, blocked: { type: 'boolean' },
   stopped: { type: 'array', items: { type: 'object', additionalProperties: true } },
-  survivors: { type: 'array', items: { type: 'object', additionalProperties: true } } }, []);
+  survivors: { type: 'array', items: { type: 'object', additionalProperties: true } } },
+  ['ok', 'blocked', 'stopped', 'survivors']);
 async function stopLaneWork(evalDir, reason, phaseName) {
   if (!evalDir) return null;
-  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  const cmd = `python3 ${q(`${WORKFLOW_DIR}/scripts/stop_lane_work.py`)} --eval-dir ${q(evalDir)} --block --reason ${q(reason)}`;
-  const r = await agentT(
-    'You are the kernel lane\'s GPU release step. Run EXACTLY this command, once, and return its JSON ' +
-    'stdout verbatim as StructuredOutput. It stops only processes inside this lane\'s EVAL_DIR and never ' +
-    'signals your own shell or its ancestors. Do not edit it, retry it, or act on what it reports; a ' +
-    'non-zero exit is a valid answer, so return what it printed.\n```bash\n' + cmd + '\n```',
-    { phase: phaseName, label: 'stop:lane', schema: STOP_LANE_SCHEMA });
+  let r;
+  if (typeof agent.stopLaneWork === 'function') {
+    try {
+      r = await agent.stopLaneWork(evalDir, reason);
+    } catch (e) {
+      log(`  [lane-stop] ${reason}: host cleanup failed (${String(e)}; NON-FATAL).`);
+      return null; // Do not fall back into the queue we are trying to unblock.
+    }
+  } else {
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const cmd = `python3 ${q(`${WORKFLOW_DIR}/scripts/stop_lane_work.py`)} --eval-dir ${q(evalDir)} --block --reason ${q(reason)}`;
+    r = await agentT(
+      'You are the kernel lane\'s GPU release step. Run EXACTLY this command, once, and return its JSON ' +
+      'stdout verbatim as StructuredOutput. It stops only processes inside this lane\'s EVAL_DIR and never ' +
+      'signals your own shell or its ancestors. Do not edit it, retry it, or act on what it reports; a ' +
+      'non-zero exit is a valid answer, so return what it printed.\n```bash\n' + cmd + '\n```',
+      { phase: phaseName, label: 'stop:lane', schema: STOP_LANE_SCHEMA });
+  }
   if (!r) { log(`  [lane-stop] ${reason}: the stop step returned nothing (NON-FATAL).`); return null; }
   const n = Array.isArray(r.stopped) ? r.stopped.length : 0;
   const left = Array.isArray(r.survivors) ? r.survivors.length : 0;
-  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under EVAL_DIR${left ? `, ${left} still up` : ''}; gpu_lock.sh blocked there.`);
+  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under EVAL_DIR${left ? `, ${left} still up` : ''}; gpu_lock.sh ${r.blocked ? 'blocked' : 'NOT blocked'} there.`);
   return r;
 }
 
