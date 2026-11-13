@@ -228,7 +228,7 @@ async function run(body, overrides = {}, reply = selection()) {
         integrated.push(inputs);
         return {e2e_throughput_tok_s: 110};
       },
-      integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
+      integAccepted: () => true, beatsCurTput: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
     await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
     return integrated;
