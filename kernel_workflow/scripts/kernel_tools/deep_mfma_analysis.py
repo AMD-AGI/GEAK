@@ -62,7 +62,11 @@ def sub_class(mn):
 
 
 def hot_ops(path, loop_label, kernel=None):
-    lines, _ = _A.select_kernel(Path(path).read_text().splitlines(), kernel)
+    try:
+        lines, _ = _A.select_kernel(Path(path).read_text().splitlines(), kernel)
+    except ValueError as exc:   # inconsistent descriptors/metadata/code, e.g. modules concatenated
+        raise SystemExit(f"{path}: cannot identify one kernel: {exc}. Analyze a single module's "
+                         f"assembly.")
     loops = _A.find_loops(lines)
     picked = _A.pick_loop(lines, loops, loop_label)
     if picked is None:

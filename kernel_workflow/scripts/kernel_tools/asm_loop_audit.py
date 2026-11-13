@@ -877,7 +877,13 @@ def main() -> None:
     # `.amdgcn_target` precedes the first kernel, so read the arch from the whole module
     # BEFORE narrowing -- it is a property of the build, not of the kernel picked.
     _arch = (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None) or a.arch
-    lines, kname = select_kernel(lines, a.kernel)
+    try:
+        lines, kname = select_kernel(lines, a.kernel)
+    except ValueError as exc:
+        # Inconsistent descriptors/metadata/code (e.g. several modules concatenated into one
+        # file) leave no trustworthy kernel identity; refuse with a message, not a traceback.
+        ap.error(f"cannot identify one kernel in {a.asm}: {exc}. Audit a single module's "
+                 f"assembly (one dump_ir.sh output or one llvm-objdump of a code object).")
     print(f"=== asm loop audit: {a.asm}"
           + (f"  [kernel: {kname}]" if kname else "  [single unnamed object]") + " ===\n")
     print_kd_regs(lines, _arch)

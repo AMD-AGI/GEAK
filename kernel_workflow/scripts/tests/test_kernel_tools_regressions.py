@@ -135,6 +135,18 @@ def multi_kernel_text():
     return text + '.end_amdgpu_metadata\n'
 
 
+def test_inconsistent_module_is_refused_without_traceback(tmp_path):
+    # Two complete modules concatenated: code names the second kernel, metadata blocks disagree.
+    one = multi_kernel_text().replace('second', 'other')
+    asm = tmp_path / 'cat.s'
+    asm.write_text(multi_kernel_text() + one)
+    for extra in ([], ['--kernel', 'first']):
+        p = subprocess.run([sys.executable, str(KT / 'asm_loop_audit.py'), str(asm), *extra],
+                           capture_output=True, text=True, check=False)
+        assert p.returncode == 2, (p.stdout, p.stderr)
+        assert 'Traceback' not in p.stderr and 'cannot identify one kernel' in p.stderr
+
+
 def test_multi_kernel_identity_and_cli(tmp_path):
     asm = tmp_path / 'two.s'
     asm.write_text(multi_kernel_text())
