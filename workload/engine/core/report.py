@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
-"""Render one run-level REPORT.md from what the stages already wrote.
+"""Render the sequential driver's native stage receipts and reports.
 
-Nothing here is retyped. Every figure is read back from `STATE.json` and the stages'
-own artifacts, so the report cannot disagree with the run -- and a stage that did not
-run simply has no section rather than a stale one.
-
-This file knows no individual stage and no individual skill. It renders two things: the
-target the run declared, and the stage contract -- status, skill, metrics, notes, which
-every stage must produce whatever implements it. Everything below that is the stage's
-own `$OUT/REPORT.md`, concatenated verbatim.
-
-That division is PRINCIPLES R3 and R6 together. The connector passes paths and reads
-`result.json`; the moment it starts knowing that `optimize` writes `optimized.json` with
-a `kernels` list, or that only the cold-verified column counts, that knowledge belongs to
-the slot that enforces it -- and it used to live in both places, which is two copies of a
-rule and therefore a rule that drifts. A slot owns what it accepts, so it owns what it
-reports. A replacement skill inherits the section by writing the file; one that writes
-nothing still appears in the table.
-
-It is also the renderer `engine/core/watch.py` calls on every tick, so the report an
-unattended run leaves behind mid-flight is the same document as the one it finishes
-with -- and a campaign that never reaches `applyback` still has a readable one. That is
-why `stage_rows` exists as a function rather than as a loop inside `main`: one mapping
-from artifacts to a row, used by both.
-
-Usage:
-    python3 report.py --run-root <dir> [--out REPORT.md]
+Order follows the resolved config; retained driver/native rejection takes precedence
+over stale success. The legacy applyback summary check remains until its producer
+publishes every rejection through result.json. watch.py and the CLI share this renderer.
 """
 import argparse, json, os
 
@@ -61,10 +39,13 @@ def stage_rows(root, state=None):
     validation succeeds. Retained result.json must not turn that rejection into `ok`.
     """
     state = (rj(root, "STATE.json") or {}) if state is None else state
-    stages = state.get("stages") or state
-    order = ["baseline", "profile", "roofline", "optimize", "applyback"]
+    stages = state.get("stages", state)
+    order = (rj(root, "config.resolved.json") or {}).get("order", [])
+    discovered = [name for name in sorted(os.listdir(root))
+                  if os.path.isfile(os.path.join(root, name, "out", "result.json"))] if os.path.isdir(root) else []
+    order = list(dict.fromkeys([*order, *stages, *discovered]))
     rows = []
-    for name in order + [k for k in stages if k not in order]:
+    for name in order:
         st = stages.get(name)
         res = rj(root, name, "out", "result.json")
         if not isinstance(st, dict):

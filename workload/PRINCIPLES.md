@@ -1,7 +1,7 @@
 # Principles
 
 This is a **skill**, not a product and not a framework: an agent chooses bounded
-experiments through modules and their implementations. The five-stage standard recipe
+experiments through modules and their implementations. The configured starting route
 remains available with its existing budgets. `README.md` says how it works.
 This file says how it is designed and maintained, and is what a PR here is read against.
 If a rule is wrong, change *it* here, with the reason.
@@ -13,14 +13,14 @@ A `SKILL.md`, a `README.md`, or a JSON field beats a module. Code is for what mu
 checked mechanically; everything else is instructions to an agent.
 
 **R2 — Modularity is contracts, not a framework.**
-`stages/CONTRACT.md` and `runners/CONTRACT.md` are the whole mechanism. A module defines
+`reasoning/SKILL.md` controls the campaign; `stages/CONTRACT.md` defines module calls. A module defines
 a capability and its input/output/acceptance contract; implementation skills or tools
 provide the method. Call them by path or configuration. No registry, DSL, workflow
 engine or base classes. Module selection and implementation selection are separate.
 
 **R3 — The glue stays thin.**
 Each module does one thing and says so in one file; the layer that connects them only
-passes paths and reads `result.json`. If the connector starts knowing about a specific
+passes paths and reads native evidence and reports. The sequential driver uses `result.json`. If the connector starts knowing about a specific
 stage, that knowledge belongs in the stage.
 
 **R4 — Nothing hardcoded.**
@@ -42,8 +42,9 @@ one party able to act on it.
 **R6 — The module owns the criterion; the implementation owns the work.**
 Changing the method must not change what counts as passing, including whether the
 requested configuration took effect. Reuse the native test or validation owner for the
-claim being made; the loop cannot redefine its verdict. Standard-recipe stages retain
-their unconditional `finalize.py`, checked by `run.py --dry-run`. A scoped observation
+claim being made; the loop cannot redefine its verdict. Sequential-driver stages retain
+their unconditional `finalize.py`, checked by `run.py --dry-run`; their protocol lives
+in `engine/core/README.md`, not in the general module contract. A scoped observation
 need not pretend to be a full stage or ship another validator. **The criterion is
 written once**: prose points at its owner instead of restating its numbers.
 

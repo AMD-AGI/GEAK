@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write `$OUT/result.json` — a stage's only outward interface (see ../CONTRACT.md §3).
+"""Write `$OUT/result.json` — a stage's only outward interface (see engine/core/README.md).
 
 It is both a library and a CLI, so Python implementations can `from emit_result import
 emit` while shell implementations simply call it:

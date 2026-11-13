@@ -1,84 +1,37 @@
-# The `baseline` slot — pin down what the number was before any optimization
+# Baseline
 
-**Input** none (first stage).
-**Output** `$OUT/baseline.json`, the single reference every downstream comparison uses.
+Establish or revalidate a measured reference under the
+[invocation contract](../CONTRACT.md#direct-module-calls).
+[Setup](../setup/README.md) prepares resources; preparation alone is not a baseline.
+
+**Input:** the named reference system, scenario and compatible measured receipt or runtime.
+**Output:** `baseline.json` and supporting native receipts.
+**Acceptance:** [finalize.py](finalize.py) owns receipt validity, configured alignment
+and drift admission. Run it with this invocation's `OUT` and resolved `PARAMS` before
+accepting a reference.
 
 ## Implementations
 
-| Skill | Shape | Notes |
-| --- | --- | --- |
-| `adopt/` | script | **default**. Reuse an already-measured serving receipt. No GPUs, no tokens, replayable |
-| `measure/` | agent | measure on this machine. Which benchmark runs is config (`bench_e2e.sh` against a running service, or the site's own CI harness in a fresh container), and whether a reproduction target is *proven* is `params.pins` |
+| Skill | Use |
+| --- | --- |
+| [adopt](adopt/SKILL.md) | Reuse a compatible, trusted measured receipt |
+| [measure](measure/SKILL.md) | Measure the named runtime; prove configured reproduction pins |
 
-Choose by what the baseline has to withstand. `adopt` is right when the number is already
-trusted and the question is only "what was it". `measure` with `pins` is right when **this
-machine's ability to hit the reference point is itself in question** — before a long
-campaign, after a node or image change, or whenever a previous baseline and the reference
-figure disagree and nobody can say which pin drifted.
+A changed environment needs matching evidence, not a relabelled receipt.
+Keep the reference distinct from candidates, including when the reference is itself optimized.
 
-`measure` is **agent-shape** (contract §2B): there is no `run.sh`. Starting a container
-and running somebody else's harness is a handful of commands; what makes the stage hard is
-knowing which pin silently produces a believable number, and that is prose. It used to be
-1,520 lines across three directories, two of which differed only in which benchmark
-command ran and whether pins were checked.
+## Artifact
 
-The default reuses rather than re-measures because the reference run has already been
-reproduced in full, to within a fraction of a percent. The run id, the CI figure and the
-measured one live in the scenario config and in the run's own receipt, not in this
-document. Spending another GPU-hour × 8 reproduces the same number plus noise.
+Both methods produce `baseline.json` with `metric`, `unit`, `throughput`,
+`higher_is_better`, `noise_band`, `config`, `measured` and `provenance`.
+`reference`, when present, records the named comparison value and ratio.
+Provenance names the receipt, its hash, node and measurement mode; pinned reproductions
+also retain the alignment checks and observed stack/cache identities.
 
-## The shared artifact, `baseline.json`
+`noise_band` is configured E2E decision policy, not measured variability or kernel
+KEEP policy. [Evaluate](../evaluate/README.md) owns its use.
+Comparisons require matching node and measurement mode; a reference from another
+environment does not substitute for a fresh control.
 
-Both skills emit the same schema; downstream (roofline's expected gain, applyback's A/B)
-reads only this file.
-
-```json
-{
-  "metric": "output_token_throughput",
-  "unit": "tok/s",
-  "throughput": 446.87889,
-  "higher_is_better": true,
-  "noise_band": 1.01,
-  "config": {"tp": 8, "ep": 1, "gpus": 8, "concurrency": 10},
-  "reference": {"name": "ci_output_tokens_per_second", "value": 446.56324, "ratio": 1.00071},
-  "measured": true,
-  "provenance": {"method": "adopt", "receipt": "...", "receipt_sha256": "...", "node": "..."}
-}
-```
-
-`noise_band` records the E2E decision threshold from `stages.baseline.params` in
-`config/default.json` or the scenario override. It is policy, not a measured noise
-estimate or the kernel `keep_threshold`. [Evaluate](../evaluate/README.md) owns its use;
-report repeat variability separately.
-
-`measure` fills the same schema and additionally records every pin plus the check-by-check
-alignment result under `provenance` (`alignment_verdict`, `alignment_checks`,
-`image_digest`, `benchmark_id`, `cpu_binding`, `cold_cache_dirs`, `measurement_mode`).
-
-## Artifacts → `result.json`
-
-`finalize.py` writes it, for either shape. `metrics` carries `throughput`, `noise_band`,
-`node`, `drift_pct` and `reference_ratio` when a reference is recorded, and `alignment`
-when the baseline was a pinned reproduction.
-
-## What is judged, and where
-
-`finalize.py` is the verdict (`stages/CONTRACT.md` 3.1) and the rules are written only
-there: that the number is measured, that the harness's own validity flags hold, that drift
-stays inside the configured `max_drift_pct`, that a node name is recorded, and that a
-scenario declaring `pins` carries a proven alignment. Read that file rather than looking
-for a second copy here — the same four rules were once written out three times, and
-`agentx-trace-replay` checked none of them.
-
-Scenario config supplies whatever a particular receipt or harness calls its fields —
-`throughput_key`, `reference_key`, `valid_flags`, `pins`, `env_map`, `isolation`,
-`harness` — because those are one harness's JSON key names, which are data, not skill.
-
-## Two measurement rules
-
-- **An A/B must be same-node.** On this workload the same configuration varies by
-  fractions of a percent across nodes, so a baseline taken on node A against a candidate
-  measured on node B reports nothing but the node difference. `finalize.py` requires the
-  node name; applyback checks it.
-- **`REUSE_SERVER=1` and `REUSE_SERVER=0` are not comparable.** `provenance.measurement_mode`
-  records which was used, and applyback must use the same one.
+The [driver](../../engine/core/README.md) runs `finalize.py` to emit `result.json`
+and its measured metrics for either implementation.

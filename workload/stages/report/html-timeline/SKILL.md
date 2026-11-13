@@ -5,7 +5,7 @@ description: Summarize a workload campaign's actual decisions, module calls and 
 
 # HTML timeline report
 
-Follow the [direct-call contract](../../CONTRACT.md#direct-module-calls). Read the run's
+Read the [Report contract](../README.md) and the run's
 brief, state, invocation plans/reports and native timestamps. Write a standalone
 `timeline.html` in the requested output directory; link it from the campaign report.
 Native receipts own results and time accounting; this module presents existing evidence.

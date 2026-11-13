@@ -34,7 +34,7 @@
       "skill": "kernel-extract",
       "mode": "agent",
       "params": {
-        "selection": "Broader candidate discovery through the profile slot; plan complete operators up to the task limit and retain every deferred candidate with its reason.",
+        "selection": "Broader candidate discovery through the profile slot; plan complete operators from the evidence and retain every deferred candidate with its reason.",
         "_note_selection": "Top 10 and overall >0.5% are heuristic discovery cutoffs requested to explore beyond Muse's former three UTs, not calibrated performance thresholds. The unchanged skill selector takes these explicit arguments; kernel KEEP and E2E bands are unchanged.",
         "selection_top_k": 10,
         "selection_overall_pct_gt": 0.5,
@@ -63,7 +63,7 @@
         "time_budget_sec": 172800,
         "require_full_budget": false,
         "checkpoint_reserve_sec": 600,
-        "_note_full_budget": "When a fixed target does not fit the current allocation, require_full_budget keeps the per-task target unchanged and checkpoints remaining work. The 600-second cleanup margin is a conservative operational allowance for owned-container shutdown and state writes, not a performance threshold. Cold/E2E are admitted only after search targets are complete and their window is available.",
+        "_note_full_budget": "require_full_budget preserves the per-task target across allocations. checkpoint_reserve_sec is a planning allowance: the controller must arrange worker checkpoint/cleanup and reserve cold/E2E time; the scheduler wall limit does not stop workers.",
         "attempt_cap_sec": 1500,
         "attempt_min_sec": 600,
         "budget": 4,
@@ -76,7 +76,7 @@
         "bad_node_limit": 2,
         "keep_threshold": 1.045,
         "apply_to_original": true,
-        "_note_task_limit": "This stage's in-flight capacity for an eight-GPU campaign, not a performance threshold and not a cap on extraction: optimize the first eight tasks in roofline order and carry the rest in optimized.json as capacity_deferred, each with its rank and reason, for a later wave. A whole-node collective still needs its real GPU group. Profile extracts as far as the evidence goes -- the same skill run by hand delivered ten complete tasks -- so a surplus is scheduling, not a defect, and is never silently truncated by max_tasks or exclusions.",
+        "_note_task_limit": "In-flight task capacity, not an extraction cap. Queue the complete declared task set in priority order; only work not admitted to a partial dispatch is capacity_deferred. Each task retains its declared GPU width.",
         "task_limit": 8,
         "max_tasks": null
       }
