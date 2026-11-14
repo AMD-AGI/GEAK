@@ -1889,6 +1889,60 @@ if (MODE === 'mega' &&
     'must be checked and resumes only inside STATE_DIR/candidates; a legacy STATE_DIR/best must never ' +
     'replace the frozen base.');
 }
+// A grown registry (about 120 KB after 18 rounds) does not fit in the director's setup reply: one reply
+// left it out (the run resumed with zero candidates and the next STATE write erased them), another
+// dropped the score evidence from every row (no row passed selection). The registry is therefore read
+// from STATE.json a chunk at a time and the director's rows are laid over it (they carry its lane
+// manifest updates and rows STATE.json does not have yet); insights and ledger are read only when the
+// reply left them out.
+if (MEGA_RESUME_STATE && setup.resumed && setup.prior_state) {
+  const stateFile = `${STATE_DIR}/STATE.json`;
+  const chunkTool = `python3 ${MEGA_DIR}/tools/state_chunks.py ${stateFile}`;
+  const runChunk = (cmd, label, props) => agent(
+    `Run exactly: ${cmd}\nIt prints one JSON object. Return its fields verbatim. If the command ` +
+    `fails, return error with its last output lines. Do nothing else.`,
+    { phase: 'Setup', label, schema: { type: 'object', additionalProperties: true,
+      properties: { ...props, error: { type: 'string' } }, required: [] } });
+  for (const field of ['candidate_registry', 'insights', 'ledger']) {
+    const replied = setup.prior_state[field];
+    if (field !== 'candidate_registry' && Array.isArray(replied)) continue;
+    const head = (await runChunk(`${chunkTool} ${field}`, `state:${field}`,
+      { length: { type: 'number' }, chunks: { type: 'number' } })) || {};
+    if (head.error || !Number.isInteger(head.chunks)) {
+      throw new Error(`MEGA RESUME REFUSED: reading ${field} from ${stateFile} failed: ` +
+        `${head.error || 'no output'}`);
+    }
+    const values = [];
+    for (let i = 0; i < head.chunks; i++) {
+      const part = (await runChunk(`${chunkTool} ${field} --chunk ${i}`, `state:${field}:${i}`,
+        { chunk: { type: 'number' }, items: { type: 'array' } })) || {};
+      if (part.error || part.chunk !== i || !Array.isArray(part.items)) {
+        throw new Error(`MEGA RESUME REFUSED: reading ${field} chunk ${i} from ${stateFile} failed: ` +
+          `${part.error || 'bad reply'}`);
+      }
+      values.push(...part.items);
+    }
+    if (values.length !== head.length) {
+      throw new Error(`MEGA RESUME REFUSED: ${field} in ${stateFile} has ${head.length} entries, ` +
+        `${values.length} were read back.`);
+    }
+    if (field === 'candidate_registry' && Array.isArray(replied)) {
+      const byId = new Map(values.map((r) => [r && r.id, r]));
+      const merged = values.map((r) => ({ ...r }));
+      for (const r of replied) {
+        const i = merged.findIndex((m) => r && m.id === r.id);
+        if (i >= 0) merged[i] = { ...merged[i], ...r };
+        else merged.push(r);
+      }
+      setup.prior_state[field] = merged;
+      log(`Resume: read ${values.length} candidate rows from STATE.json; setup returned ` +
+        `${replied.length} (${replied.filter((r) => r && !byId.has(r.id)).length} not in STATE.json).`);
+    } else {
+      setup.prior_state[field] = values;
+      log(`Resume: read ${values.length} ${field} entries from STATE.json.`);
+    }
+  }
+}
 if (STRICT_AUTONOMY && setup.resumed) {
   throw new Error(
     'STRICT AUTONOMY REFUSED: director seeded this run from STATE_DIR/best. A proof run must start ' +
