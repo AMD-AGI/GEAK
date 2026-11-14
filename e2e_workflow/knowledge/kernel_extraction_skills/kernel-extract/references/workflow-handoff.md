@@ -11,6 +11,7 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 |---|---|
 | `SKILL_ROOT` | Skill instructions and the additional extraction tools |
 | `SHARED_TOOLS` | Shared capture, trace, harness and delivery helpers; vendor task helpers from here |
+| `BASELINE_ITERATION_DIR` | vLLM worker observation JSONL from the baseline; see [vLLM](vllm.md) |
 | `WORKFLOW_DIR` | GEAK e2e directory; used only for the final handoff adapter |
 | `EVAL_DIR`, `EVIDENCE_DIR` | Allowed output root and this round's evidence directory |
 | `BASELINE_LOG`, `BASELINE_BENCH_DIR`, `BASELINE_SUMMARY` | Completed measured baseline evidence; exclude warmup/discarded intervals |

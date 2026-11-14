@@ -368,7 +368,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "beats_orchestrator_same_config": true,
     "intermediate_win_not_confirmed": null, // true => Validate did not confirm an accepted A/B
     "validate_final_missing": null,         // true => the final number came from a disk A/B
-    "acceptance": {                        // ONLY when the handoff states a KEEP rule; decides "ok"
+    "acceptance": {                        // ONLY when a KEEP rule applies (see below); decides "ok"
       "objective": "e2e_norm_intvty_p50", "measured_basis": "e2e_norm_intvty_p50",
       "gain_pct": 4.4, "min_gain_pct": 3.0,
       "guards": { "e2e_norm_intvty_p90": { "reference": 81.9, "candidate": 80.7,
@@ -416,7 +416,7 @@ all) falls back to the best accepted intermediate A/B on disk.
 something loadable — a diff with at least one hunk, an overlay with importable
 code. Finalize writes both unconditionally, so their existence proves nothing.
 
-### The caller's KEEP rule decides "ok" when the handoff states one
+### A KEEP rule decides "ok": the caller's, or GEAK's own on AgentX
 
 Without a rule, `status` is `ok` whenever the published final beats the published
 baseline. A caller that re-measures and keeps only bigger wins can hand its own
@@ -442,7 +442,43 @@ legs, cannot pass. When the rule does not keep the pair, `status` is `no_gain`
 and `validation_evidence.acceptance.reasons` says why. The throughput numbers and
 the speedup are reported unchanged. Per-kernel gates keep GEAK's own noise band,
 so small wins can still stack up to the caller's bar. A block that does not parse
-is ignored, with a warning on stderr.
+is ignored, with a warning on stderr, and GEAK's own rule is not put in its place.
+
+An AgentX handoff (`workload_spec.kind` `agentx_trace_replay`) that states no rule
+is held to GEAK's own, on Hyperloom's bars. Whatever axis the run is graded on,
+except total token throughput itself, the objective must gain 3% and each guard
+`bench_summary.json` carries beside it may fall at most 5% below the reference. On
+the default axis that is Hyperloom's rule plus total token throughput:
+
+```jsonc
+"acceptance": {
+  "objective": "e2e_norm_intvty_p50",      // the graded axis: declared, else E2E_METRIC, else this default
+  "min_gain_pct": 3.0,
+  "guard_max_drop_pct": {
+    "e2e_norm_intvty_p90": 5.0,
+    "aggregate_output_tok_s": 5.0,
+    "aggregate_total_token_tok_s": 5.0
+  }
+}
+```
+
+On `e2e_norm_intvty_p90` and `p90_intvty_inferencex` the guards are output and
+total tok/s; on output, total alone. The trace fixes the work each request asks
+for, so every other axis can rise while the server completes less of it: the
+decode-only axis by shedding prefill, any of them by finishing short requests in
+place of long ones. A trace replay's `bench_summary.json` carries
+`guard_aggregate_total_token_tok_s_median` beside every axis but total for this,
+and the KB write waits for the verdict as it does for a caller's rule. A synthetic
+run has no rule of its own.
+
+Unlike a caller's rule, GEAK's own does not fail a guard it cannot read. A recovered
+intermediate win is judged on its own A/B legs (`overlay/cand_<name>/ref` and
+`/cand`) when their medians are the published pair. Otherwise, as for a leg
+summarized before a guard existed, the guard is listed in
+`validation_evidence.acceptance.not_checked`, the verdict rests on the objective,
+and the KB records nothing (`e2e_store.win_gate`). Only this interface applies the
+rule. A direct `Workflow` call gets the guards as an instruction to the Director at
+Validate, where the gain bar is the run's noise band.
 
 ### Choosing a headline out of a candidate pool
 
