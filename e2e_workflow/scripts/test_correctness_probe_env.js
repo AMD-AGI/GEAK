@@ -5,6 +5,8 @@
 //      the unmodified reference irreproducible, so every greedy-parity probe fails and every candidate
 //      is rejected on the simulator rather than on the change. run_e2e forwards the switch names as
 //      correctness_unset_env; the roles that run correctness probes are told to serve them without.
+//      vLLM's form is a "synthetic" sampler in --speculative-config; run_e2e forwards the verifying
+//      config as correctness_speculative_config, and those roles serve their probes with it.
 //   2. The hung-agent guard is a Promise.race: it stops WAITING, it cannot stop the agent. Retrying
 //      after it fires starts a second agent beside the first, on the same GPUs and eval dirs.
 //      agent_timeout_retry=false returns null instead, and inside the final reserve so does the default,
@@ -33,20 +35,26 @@ console.log('\n# correctness_unset_env is parsed into plain variable names');
 const envSrc = between('const CORRECTNESS_UNSET_ENV', '// The AMD authoring knowledge base');
 ok(!!envSrc, 'CORRECTNESS_UNSET_ENV / CORRECTNESS_PROBE_ROLES located');
 if (!envSrc) process.exit(1);
-const parse = (A) => new Function('A', `${envSrc}\nreturn { CORRECTNESS_UNSET_ENV, CORRECTNESS_PROBE_ROLES };`)(A);
+const parse = (A) => new Function('A',
+  `${envSrc}\nreturn { CORRECTNESS_UNSET_ENV, CORRECTNESS_SPEC_CONFIG, CORRECTNESS_PROBE_ROLES };`)(A);
 ok(parse({}).CORRECTNESS_UNSET_ENV.length === 0, 'unset => no names');
 ok(JSON.stringify(parse({ correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN, $(touch x),SGLANG_SIMULATE_ACC_METHOD,' })
   .CORRECTNESS_UNSET_ENV) === JSON.stringify(['SGLANG_SIMULATE_ACC_LEN', 'SGLANG_SIMULATE_ACC_METHOD']),
 'only identifier-shaped names survive, so nothing else can reach an `env -u` command line');
+const VERIFYING = '{"method":"dspark","num_speculative_tokens":7,"rejection_sample_method":"block"}';
+ok(parse({ correctness_speculative_config: VERIFYING.replace(/,/g, ', ') }).CORRECTNESS_SPEC_CONFIG === VERIFYING,
+  'correctness_speculative_config is re-serialized compact, one word for the word-splitting adapter');
+ok(['', '[1]', '"s"', '{not json'].every((v) => parse({ correctness_speculative_config: v }).CORRECTNESS_SPEC_CONFIG === '')
+  && parse({}).CORRECTNESS_SPEC_CONFIG === '', 'anything but a JSON object => no probe config');
 
 console.log('\n# the probe block reaches the probing roles only, and only when the switches are set');
 const blockSrc = (src.match(/function correctnessEnvBlock\(role\) \{[\s\S]*?\n\}/) || [])[0];
 ok(!!blockSrc, 'correctnessEnvBlock(role) located');
 if (!blockSrc) process.exit(1);
 const blockFor = (A) => {
-  const { CORRECTNESS_UNSET_ENV, CORRECTNESS_PROBE_ROLES } = parse(A);
-  return new Function('CORRECTNESS_UNSET_ENV', 'CORRECTNESS_PROBE_ROLES', `${blockSrc}\nreturn correctnessEnvBlock;`)(
-    CORRECTNESS_UNSET_ENV, CORRECTNESS_PROBE_ROLES);
+  const { CORRECTNESS_UNSET_ENV, CORRECTNESS_SPEC_CONFIG, CORRECTNESS_PROBE_ROLES } = parse(A);
+  return new Function('CORRECTNESS_UNSET_ENV', 'CORRECTNESS_SPEC_CONFIG', 'CORRECTNESS_PROBE_ROLES',
+    `${blockSrc}\nreturn correctnessEnvBlock;`)(CORRECTNESS_UNSET_ENV, CORRECTNESS_SPEC_CONFIG, CORRECTNESS_PROBE_ROLES);
 };
 const on = blockFor({ correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD' });
 for (const role of ['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']) {
@@ -61,10 +69,24 @@ for (const role of ['profiler', 'system_architect', 'kernel_author']) {
 const off = blockFor({});
 ok(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist', 'profiler'].every((r) => off(r) === ''),
   'no switches => every role prompt is byte-identical');
+const vllm = blockFor({ correctness_speculative_config: VERIFYING });
+for (const role of ['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']) {
+  ok(vllm(role).includes(`\`--speculative-config ${VERIFYING}\` in place of the seed's`),
+    `${role} is told to serve its correctness probes with the verifying --speculative-config`);
+}
+ok(/same other flags, same env, same overlay/.test(vllm('director')) && !/env -u/.test(vllm('director')),
+  'a vLLM stack keeps its env for the probes: only the speculative config changes');
+ok(/Throughput legs keep the simulation/.test(vllm('e2e_integrator')),
+  'and its throughput legs keep the synthetic sampler');
+ok(['profiler', 'system_architect', 'kernel_author'].every((r) => vllm(r) === ''),
+  'roles that run no correctness probe see nothing');
+const both = blockFor({ correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN', correctness_speculative_config: VERIFYING });
+ok(both('director').includes('env -u SGLANG_SIMULATE_ACC_LEN') && both('director').includes(VERIFYING)
+  && /same other flags, same overlay/.test(both('director')), 'both forms at once: both changes, nothing else');
 ok(/return base \+ expertSkillsBlock\(role\)[^;]*\+ correctnessEnvBlock\(role\);/.test(src),
   'roleAgent appends the block after base (additive, never rewrites it)');
-ok(/\.\.\.\(correctnessEnvBlock\(role\) \? \{ CORRECTNESS_UNSET_ENV: /.test(src),
-  'the Inputs block names the switches only where the prompt explains them');
+ok(/\.\.\.\(correctnessEnvBlock\(role\) \? \{\s*\.\.\.\(CORRECTNESS_UNSET_ENV\.length \? \{ CORRECTNESS_UNSET_ENV: [^\n]*\n\s*\.\.\.\(CORRECTNESS_SPEC_CONFIG \? \{ CORRECTNESS_SPECULATIVE_CONFIG: CORRECTNESS_SPEC_CONFIG \} : \{\}\),/.test(src),
+  'the Inputs block names the switches and the probe config only where the prompt explains them');
 
 console.log('\n# the task-accuracy gate reaches every integration A/B, the tuning agent and the Director');
 const withTuning = between('const withTuning = {', '};');

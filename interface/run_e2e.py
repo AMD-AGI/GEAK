@@ -867,6 +867,9 @@ def map_args(
     simulated = _simulated_acceptance_env(initial_env)
     if simulated:
         ps_args["correctness_unset_env"] = ",".join(simulated)
+    probe_spec = _probe_speculative_config(initial_server_args)
+    if probe_spec:
+        ps_args["correctness_speculative_config"] = probe_spec
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -4224,9 +4227,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
     #   disk_director_validation — rebuilt from director_e2e_validation.json.
     #   disk_intermediate_win  — best accepted integrate A/B (no final Validate).
     #   disk_no_gain_synthesis — baseline measured, nothing accepted (do-no-harm).
+    #   disk_validation_legs   — Validate's finished base/final legs, no Director verdict.
     checkpoint_level = str(wf.get("recovered_e2e_checkpoint_level") or "")
     tuning_recovery_source = str(wf.get("recovered_tuning_source") or "")
-    if checkpoint_level:
+    if wf.get("recovered_validation_legs"):
+        result_source = "disk_validation_legs"
+    elif checkpoint_level:
         result_source = f"disk_e2e_checkpoint_{checkpoint_level}"
     elif tuning_recovery_source:
         result_source = f"disk_tuning_skillset_{tuning_recovery_source}_provisional"
@@ -6344,6 +6350,98 @@ def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
     }
 
 
+def _recover_without_verdict(eval_dir: Path) -> dict | None:
+    """The salvage ladder for a run whose Director wrote no verdict (see _recover_workflow_return)."""
+    checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
+    if checkpoint_win is not None:
+        return checkpoint_win
+    tuning_result_win = _recover_tuning_result(eval_dir)
+    if tuning_result_win is not None:
+        return tuning_result_win
+    tuning_report_win = _recover_tuning_report(eval_dir)
+    if tuning_report_win is not None:
+        return tuning_report_win
+    tuning_win = _recover_tuning_legacy_composite(eval_dir)
+    if tuning_win is not None:
+        return tuning_win
+    win = _recover_best_intermediate_win(eval_dir)
+    if win is not None:
+        return win
+    #   1b. no accepted kernel, but the sweep adopted a winning serving config
+    #       (warm-start recall / ck_tune) — recover it as the final floor so a
+    #       validated config gain is not flattened to the default baseline.
+    cfg_win = _recover_accepted_config_win(eval_dir)
+    if cfg_win is not None:
+        return cfg_win
+    return _recover_completed_no_gain(eval_dir)
+
+
+VALIDATION_LEGS = ("base", "final")
+
+
+def _finished_validation_legs(eval_dir: Path) -> tuple[dict, dict] | None:
+    """Validate's base and final summaries when a trace replay finished both, else ``None``.
+
+    Both must be complete, usable for acceptance, measured for validation, on one axis, and
+    written after the latest final-phase fence, so a resumed run's earlier Validate does not
+    count. Only a trace replay records ``warmup_protocol``, so a fixed-ISL/OSL run never qualifies.
+    """
+    paths = [eval_dir / "validation" / leg / "bench_summary.json" for leg in VALIDATION_LEGS]
+    legs = [_read_json(path) for path in paths]
+    for leg in legs:
+        if not (leg.get("status") == "complete" and leg.get("usable_for_acceptance") is True
+                and leg.get("measurement_purpose") == "validation" and leg.get("warmup_protocol")
+                and _positive_finite_float(leg.get("throughput_tok_s_median")) > 0.0):
+            return None
+    base, final = legs
+    if not base.get("metric_basis") or base.get("metric_basis") != final.get("metric_basis"):
+        return None
+    fence = eval_dir / FINAL_PHASE_FENCE_FILE
+    try:
+        fenced_at = fence.stat().st_mtime if fence.is_file() else 0.0
+        if any(path.stat().st_mtime < fenced_at for path in paths):
+            return None
+    except OSError:
+        return None
+    return base, final
+
+
+def _adopt_validation_legs(eval_dir: Path, recovered: dict | None) -> dict | None:
+    """``recovered`` with a trace replay's finished Validate pair as its numbers.
+
+    Validate measures a trace replay in canonical-window legs, so a run can be killed before the
+    Director returns yet after ``validation/base`` and ``validation/final`` both finished: the
+    same-session pair of the final stack, which outranks any number a salvage tier carries. The
+    pair becomes the result, and normalize_result judges the KEEP rule on those two legs; the
+    stack and its evidence stay the tier's. A no-gain salvage has no stack and is left alone.
+    """
+    if not recovered or recovered.get("recovered_no_gain"):
+        return recovered
+    legs = _finished_validation_legs(eval_dir)
+    if legs is None:
+        return recovered
+    base, final = legs
+    base_tput = _positive_finite_float(base.get("throughput_tok_s_median"))
+    final_tput = _positive_finite_float(final.get("throughput_tok_s_median"))
+    return {
+        **recovered,
+        "baseline_throughput_tok_s": base_tput,
+        "final_throughput_tok_s": final_tput,
+        "throughput_speedup": final_tput / base_tput,
+        "ttft_ms": final.get("ttft_ms_median"),
+        "tpot_ms": final.get("tpot_ms_median"),
+        "validation_status": "recovered_validation_legs",
+        "recovered_intermediate": False,
+        "recovered_validation_legs": True,
+        "recovery_evidence": {
+            **(recovered.get("recovery_evidence") or {}),
+            "validation_legs": [str(eval_dir / "validation" / leg / "bench_summary.json")
+                                for leg in VALIDATION_LEGS],
+            "salvage_validation_status": recovered.get("validation_status"),
+        },
+    }
+
+
 def _recover_workflow_return(exp_root: Path) -> dict | None:
     """Rebuild the workflow return from on-disk artifacts (scrape-independent).
 
@@ -6380,28 +6478,9 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         #   5. the best gate==accepted intermediate win (a real measured gain),
         #   6. else, if a baseline was measured but nothing was accepted, a
         #      legitimate NO_GAIN run (the optimizer correctly did no harm).
-        checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
-        if checkpoint_win is not None:
-            return checkpoint_win
-        tuning_result_win = _recover_tuning_result(eval_dir)
-        if tuning_result_win is not None:
-            return tuning_result_win
-        tuning_report_win = _recover_tuning_report(eval_dir)
-        if tuning_report_win is not None:
-            return tuning_report_win
-        tuning_win = _recover_tuning_legacy_composite(eval_dir)
-        if tuning_win is not None:
-            return tuning_win
-        win = _recover_best_intermediate_win(eval_dir)
-        if win is not None:
-            return win
-        #   1b. no accepted kernel, but the sweep adopted a winning serving config
-        #       (warm-start recall / ck_tune) — recover it as the final floor so a
-        #       validated config gain is not flattened to the default baseline.
-        cfg_win = _recover_accepted_config_win(eval_dir)
-        if cfg_win is not None:
-            return cfg_win
-        return _recover_completed_no_gain(eval_dir)
+        # A trace replay killed after Validate's base and final legs finished
+        # then takes its numbers from those legs (_adopt_validation_legs).
+        return _adopt_validation_legs(eval_dir, _recover_without_verdict(eval_dir))
     serving = validation.get("serving_config") or {}
     accepted_config = {
         "flags": serving.get("final_flags") or serving.get("baseline_flags") or "",
@@ -7965,6 +8044,43 @@ def _simulated_acceptance_env(extra_env: str) -> list[str]:
     names.update(t.split("=", 1)[0] for t in tokens
                  if "=" in t and t.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX))
     return sorted(names)
+
+
+SPECULATIVE_CONFIG_FLAGS = ("--speculative-config", "--speculative_config")
+
+
+def _probe_speculative_config(server_args: str) -> str:
+    """The seed's vLLM ``--speculative-config`` with real verification, or ``""``.
+
+    vLLM simulates acceptance inside that JSON: ``"rejection_sample_method": "synthetic"`` with a
+    ``synthetic_acceptance_length``. The sampler becomes ``block`` and the length goes, as InferenceX
+    does for a run that verifies for real. ``""`` when the last ``--speculative-config`` is absent,
+    unreadable, or simulates nothing. The seed reaches the adapter word-split, so its JSON is read
+    from plain whitespace tokens first and from shell tokens second (a ``shlex.join``-ed seed).
+    """
+    for split in (str.split, shlex.split):
+        try:
+            tokens = split(str(server_args or ""))
+        except ValueError:
+            continue
+        raw = None
+        for i, token in enumerate(tokens):
+            flag, eq, value = token.partition("=")
+            if flag in SPECULATIVE_CONFIG_FLAGS:
+                raw = value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+        try:
+            spec = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if isinstance(spec, dict):
+            break
+    else:
+        return ""
+    if spec.get("rejection_sample_method") != "synthetic" and "synthetic_acceptance_length" not in spec:
+        return ""
+    spec["rejection_sample_method"] = "block"
+    spec.pop("synthetic_acceptance_length", None)
+    return json.dumps(spec, separators=(",", ":"), ensure_ascii=False)
 
 
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:

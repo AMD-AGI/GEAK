@@ -528,6 +528,139 @@ def test_recover_workflow_return_prefers_validation(tmp_path):
     assert not wf.get("recovered_intermediate")
 
 
+# ── a trace replay killed mid-Validate ──────────────────────────────────────
+# Validate measures a trace replay in canonical-window legs, so a run can be killed
+# after validation/base and validation/final finished but before the Director
+# returned. Those two legs are the same-session pair of the final stack.
+def _validation_leg(eval_dir: Path, leg: str, median: float, **fields) -> Path:
+    summary = {
+        "metric_basis": "e2e_norm_intvty_p50", "throughput_tok_s_median": median,
+        "guard_e2e_norm_intvty_p90_median": 40.0, "guard_aggregate_output_tok_s_median": 160.0,
+        "guard_aggregate_total_token_tok_s_median": 22800.0,
+        "ttft_ms_median": 450.0, "tpot_ms_median": 6.6,
+        "warmup_protocol": "replay_per_lane", "measurement_purpose": "validation",
+        "status": "complete", "usable_for_acceptance": True,
+    }
+    summary.update(fields)
+    path = eval_dir / "validation" / leg / "bench_summary.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({k: v for k, v in summary.items() if v is not None}),
+                    encoding="utf-8")
+    return path
+
+
+def _agentx_handoff(eval_dir: Path) -> dict:
+    return {**_handoff(eval_dir),
+            "workload_spec": {"kind": "agentx_trace_replay", "duration_s": 3600}}
+
+
+def test_finished_validate_legs_are_the_result_of_a_killed_run(tmp_path, monkeypatch):
+    """A Kimi K3.1 run was killed in a repeat pair after the prescribed pair had finished
+    at +2.1%, and reported its search A/B instead. The Validate pair is the result now,
+    judged by the KEEP rule on those two legs; the stack stays the salvage tier's."""
+    monkeypatch.delenv("E2E_METRIC", raising=False)
+    eval_dir = _make_eval_dir(tmp_path)
+    base = _validation_leg(eval_dir, "base", 122.374)
+    final = _validation_leg(eval_dir, "final", 125.0, ttft_ms_median=451.0)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf["validation_status"] == "recovered_validation_legs"
+    assert wf["recovered_from_disk"] is True and wf["recovered_intermediate"] is False
+    assert wf["accepted_config"]["flags"] == "--max-num-batched-tokens 16384"
+    assert wf["recovery_evidence"]["validation_legs"] == [str(base), str(final)]
+    assert wf["recovery_evidence"]["salvage_validation_status"] == "recovered_intermediate"
+
+    out = rx.normalize_result(_agentx_handoff(eval_dir), wf)
+    assert out["result_source"] == "disk_validation_legs"
+    assert out["baseline_throughput_tok_s"] == pytest.approx(122.374)
+    assert out["final_throughput_tok_s"] == pytest.approx(125.0)
+    assert out["throughput_speedup"] == pytest.approx(125.0 / 122.374)
+    assert out["baseline_basis"]["baseline_basis_source"] == "validation_base_bench_summary"
+    assert out["ttft_ms"] == pytest.approx(451.0)
+    assert out["validation_evidence"]["validation_status"] == "recovered_validation_legs"
+    acceptance = out["validation_evidence"]["acceptance"]
+    assert acceptance["keep"] is False and acceptance["not_checked"] == []
+    assert out["status"] == "no_gain"
+
+
+def test_validate_legs_that_keep_ship_ok_but_unverified(tmp_path, monkeypatch):
+    """No Director arbitrated the pair, so the KB records it without promoting it."""
+    monkeypatch.delenv("E2E_METRIC", raising=False)
+    eval_dir = _make_eval_dir(tmp_path)
+    _validation_leg(eval_dir, "base", 100.0)
+    _validation_leg(eval_dir, "final", 110.0)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    out = rx.normalize_result(_agentx_handoff(eval_dir), wf)
+    assert out["status"] == "ok" and out["throughput_speedup"] == pytest.approx(1.1)
+    assert out["validation_evidence"]["acceptance"]["keep"] is True
+    seen = _kb_store(monkeypatch)
+    rx._kb_write_back(_kb_eval_dir(tmp_path / "kb"), wf, {})
+    assert "--no-promote" in seen["cmd"]
+
+
+@pytest.mark.parametrize("leg, fields", [
+    ("final", {"status": "incomplete"}),
+    ("final", {"usable_for_acceptance": False}),
+    ("base", {"measurement_purpose": "parity"}),
+    ("base", {"warmup_protocol": None}),            # a fixed ISL/OSL leg
+    ("final", {"metric_basis": "aggregate_output_tok_s"}),
+    ("final", {"throughput_tok_s_median": 0}),
+])
+def test_validate_legs_that_did_not_both_finish_change_nothing(tmp_path, leg, fields):
+    eval_dir = _make_eval_dir(tmp_path)
+    for name, median in (("base", 100.0), ("final", 110.0)):
+        _validation_leg(eval_dir, name, median, **(fields if name == leg else {}))
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf["validation_status"] == "recovered_intermediate"
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 461.314)
+    assert not wf.get("recovered_validation_legs")
+
+
+def test_validate_legs_from_before_the_latest_fence_are_stale(tmp_path):
+    """A resumed run keeps its eval dir: legs older than the fence its own final phase wrote
+    belong to an earlier Validate, not to the stack this run salvaged."""
+    eval_dir = _make_eval_dir(tmp_path)
+    legs = [_validation_leg(eval_dir, "base", 100.0), _validation_leg(eval_dir, "final", 110.0)]
+    fence = eval_dir / rx.FINAL_PHASE_FENCE_FILE
+    fence.write_text(json.dumps({"stage": "validate"}), encoding="utf-8")
+    os.utime(legs[0], (fence.stat().st_mtime + 60,) * 2)
+    os.utime(legs[1], (fence.stat().st_mtime - 60,) * 2)
+    assert not rx._recover_workflow_return(eval_dir.parent).get("recovered_validation_legs")
+    os.utime(legs[1], (fence.stat().st_mtime + 120,) * 2)
+    assert rx._recover_workflow_return(eval_dir.parent)["recovered_validation_legs"] is True
+
+
+def test_validate_legs_whose_age_cannot_be_read_change_nothing(tmp_path, monkeypatch):
+    """A leg it cannot stat leaves the salvage standing instead of failing the recovery."""
+    eval_dir = _make_eval_dir(tmp_path)
+    _validation_leg(eval_dir, "base", 100.0)
+    _validation_leg(eval_dir, "final", 110.0)
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "bench_summary.json":
+            raise PermissionError(str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert rx._finished_validation_legs(eval_dir) is None
+
+
+def test_a_missing_final_leg_changes_nothing(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path)
+    _validation_leg(eval_dir, "base", 100.0)
+    assert rx._recover_workflow_return(eval_dir.parent)["validation_status"] == \
+        "recovered_intermediate"
+
+
+def test_a_director_verdict_outranks_the_validate_legs(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, with_validation=True)
+    _validation_leg(eval_dir, "base", 100.0)
+    _validation_leg(eval_dir, "final", 90.0)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert not wf.get("recovered_validation_legs")
+    assert wf["final_throughput_tok_s"] == pytest.approx(535.352)
+
+
 # ── completed-but-no-gain recovery (the Kimi-K2.6 20260621 failure) ──────────
 def _make_no_gain_eval_dir(tmp_path: Path) -> Path:
     """Mimic a run that COMPLETED but accepted nothing: a measured baseline,
@@ -590,6 +723,15 @@ def test_recover_workflow_return_no_gain_not_parse_error(tmp_path):
     assert out["ttft_ms"] == pytest.approx(1892.889)
     # final_launch_script falls back to the real on-disk bundle.
     assert out["final_launch_script"].endswith("final/final_launch.sh")
+
+
+def test_a_no_gain_salvage_has_no_stack_to_credit_validate_legs_to(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    _validation_leg(eval_dir, "base", 600.0)
+    _validation_leg(eval_dir, "final", 660.0)
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    assert wf.get("recovered_no_gain") is True and not wf.get("recovered_validation_legs")
+    assert wf["throughput_speedup"] == pytest.approx(1.0)
 
 
 def test_a_run_cut_off_before_finalize_is_not_no_gain(tmp_path):

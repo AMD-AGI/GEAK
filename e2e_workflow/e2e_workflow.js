@@ -599,6 +599,14 @@ const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
 // that run parity/accuracy probes are told to serve those probes with these names unset.
 const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
   .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+// vLLM simulates inside the seed's --speculative-config instead (a "synthetic" rejection sampler);
+// run_e2e forwards the same config with real verification, which is what those probes serve with.
+const CORRECTNESS_SPEC_CONFIG = (() => {
+  try {
+    const spec = JSON.parse(String(A.correctness_speculative_config || ''));
+    return spec && typeof spec === 'object' && !Array.isArray(spec) ? JSON.stringify(spec) : '';
+  } catch (_) { return ''; }
+})();
 const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -1640,18 +1648,29 @@ function beatsCurTput(integ, curTput) {
 }
 
 function correctnessEnvBlock(role) {
-  if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
+  const env = CORRECTNESS_UNSET_ENV.length > 0, spec = !!CORRECTNESS_SPEC_CONFIG;
+  if (!(env || spec) || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
+  const what = [], how = [];
+  if (env) {
+    what.push(CORRECTNESS_UNSET_ENV.join(', '));
+    how.push(`with these variables removed, from the process env (\`env ${unset} ...\`) and from EXTRA_ENV`);
+  }
+  if (spec) {
+    what.push('the "synthetic" rejection sampler in the seed\'s --speculative-config');
+    how.push(`with \`--speculative-config ${CORRECTNESS_SPEC_CONFIG}\` in place of the seed's (its sampler ` +
+      '"block", without synthetic_acceptance_length)');
+  }
+  const same = !spec ? 'same flags' : env ? 'same other flags' : 'same other flags, same env';
   return `\n\n## CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE\n` +
-    `This stack serves with simulated speculative-decoding acceptance (${CORRECTNESS_UNSET_ENV.join(', ')}). ` +
+    `This stack serves with simulated speculative-decoding acceptance (${what.join('; ')}). ` +
     `It keeps throughput comparable, but what it serves is neither deterministic nor the model's own ` +
     `output: the unmodified reference does not reproduce itself, so a greedy-parity or task-accuracy probe ` +
     `run under it measures the simulator, not the change. For EVERY correctness probe, launch BOTH servers ` +
-    `(the TRUE baseline and the candidate) with these variables removed, from the process env ` +
-    `(\`env ${unset} ...\`) and from EXTRA_ENV, and change nothing else: same flags, same overlay, same ` +
-    `TP/GPU. Throughput legs keep them, because those legs ARE the measurement, so a correctness server ` +
-    `is never one of the throughput servers. Say in your notes that the probe ran with simulated ` +
-    `acceptance off.`;
+    `(the TRUE baseline and the candidate) ${how.join(', and ')}, and change nothing else: ${same}, same ` +
+    `overlay, same TP/GPU. Throughput legs keep ${spec ? 'the simulation' : 'them'}, because those legs ARE ` +
+    `the measurement, so a correctness server is never one of the throughput servers. Say in your notes ` +
+    `that the probe ran with simulated acceptance off.`;
 }
 
 // Optimization roles consume the skill's delivery; only the extractor loads its full procedure.
@@ -1676,7 +1695,10 @@ function roleAgent(role, phase, intro, inputs) {
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
     // Only surfaced on a trace replay.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
-    ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
+    ...(correctnessEnvBlock(role) ? {
+      ...(CORRECTNESS_UNSET_ENV.length ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
+      ...(CORRECTNESS_SPEC_CONFIG ? { CORRECTNESS_SPECULATIVE_CONFIG: CORRECTNESS_SPEC_CONFIG } : {}),
+    } : {}),
     ...inputs,
     ...(standaloneExtraction ? {
       SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
@@ -2992,6 +3014,25 @@ async function laneDeadlineArgs(label, phaseName) {
 }
 // Backstop: never wait for a lane past the boundary.
 const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
+// Validate's blocks are canonical windows and the reserve holds one pair of them, so the Director gets
+// the epoch it must return by and what a block costs, and starts nothing that cannot finish
+// (roles/director.md). After it, the workflow keeps AGENTX_POST_VALIDATE_S to return.
+const AGENTX_POST_VALIDATE_S = 600;
+async function validateDeadlineArgs() {
+  if (!IS_AGENTX || TIME_BUDGET_MS == null) return {};
+  const now = await epochNow('Validate');
+  if (now == null) {
+    log('[time-budget] Validate: wall clock unreadable, so the Director gets no deadline.');
+    return {};
+  }
+  const leftS = Math.floor(remainingMs() / 1000) - AGENTX_POST_VALIDATE_S;
+  log(`[time-budget] Validate: the Director returns within ~${Math.max(0, Math.round(leftS / 60))}min and ` +
+    'starts no block or probe that cannot finish by then.');
+  return {
+    VALIDATE_DEADLINE_EPOCH: now + leftS,
+    VALIDATE_BLOCK_S: (AGENTX_VALIDATION_LEGS / 2) * agentxLegS(RESERVE_DURATION_S),
+  };
+}
 
 // GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
 // leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
@@ -6048,6 +6089,7 @@ if (want('final')) {
       // status/parity) to its own, so they never disagree. Defaults are the standard EVAL_DIR names.
       ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
+      ...(await validateDeadlineArgs()),
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
   // Trust the Director's number only when it is a real positive measurement; a Validate with no

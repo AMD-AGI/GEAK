@@ -190,7 +190,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `SKILL_DIR`, `GPU_ID`, `BASELINE_THROUGHPUT`, 
 `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `BASELINE_OVERLAY`, the candidate final
 overlay `FINAL_OVERLAY` (dir) + `FINAL_FLAGS` (json), the Architect/Integrator's claimed throughput,
 `APPLY_TO_ORIGINAL`, and the already-written report files `ARCHITECT_REPORT`
-(`architect_report.md`) + `FINAL_REPORT` (`final_report.md`) to reconcile in step 7.
+(`architect_report.md`) + `FINAL_REPORT` (`final_report.md`) to reconcile in step 7. A trace replay
+under a time budget also passes `VALIDATE_DEADLINE_EPOCH` and `VALIDATE_BLOCK_S` (see before step 1).
 
 **Do NOT trust the claimed throughput — re-measure it yourself, in a fresh server lifecycle.**
 
@@ -216,6 +217,15 @@ your own. It is one of:
   internal kernel/graph warmups but skips the outer full-round replay, then records one cache-cold
   measured request set; never replace a failed replica with another repeat on the same server. The
   spread bounds boot-to-boot variance. Most faithful, but `REPLICAS` cold boots per leg.
+
+**When `VALIDATE_DEADLINE_EPOCH` is in your inputs**, it is the `date +%s` by which you must have
+returned: the run is killed shortly after it, and nothing you have not written by then counts. The
+final reserve is sized for step 1's two blocks and holds no repeats. Before you start each block or
+probe server (those, and any repeat, reversed or longer leg you add), check that `date +%s` plus its
+cost (a block: `VALIDATE_BLOCK_S` seconds, or what your own blocks took; a probe: its server's boot
+plus the probe) plus 900s for steps 4–7 is still before the deadline. If it is not, start nothing
+more: arbitrate on what you measured, say in `arbitration_note` what you did not run and why, and
+finish steps 6–7.
 
 1. Measure baseline AND final: a reference block (the TRUE baseline current-best stack) and a final
    block (full overlay + flags), each with `REPLICAS` samples in the lifecycle `MEASUREMENT_MODE`
