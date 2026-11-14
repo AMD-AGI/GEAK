@@ -46,6 +46,15 @@ python3 -c "import vllm; print('vllm', vllm.__version__)" && vllm --help >/dev/n
 Confirm the matching adapter exists: `ls "$SKILL_DIR/scripts/adapters/${BACKEND}.sh"`. If the chosen
 backend is absent but the other is present, note it and (only if the task is backend-agnostic) switch.
 
+All launches through `scripts/adapters/vllm.sh`, including fixed ISL/OSL and AgentX
+runs, default `PYTHONSAFEPATH` to `1` when it is unset. On Python 3.11+, this excludes
+the implicit current directory from the server's Python child processes and the
+profiler capability probe. The adapter also joins profile, overlay, and inherited
+`PYTHONPATH` values without introducing empty path components. This prevents a
+task-local `unittest.py` from shadowing the standard library. Explicit inherited
+path entries are preserved; custom imports that need the task directory should
+declare that directory in `PYTHONPATH`.
+
 **2. Model.** `MODEL` must be set and resolvable. For a local path, check it exists and has a
 `config.json`; for an HF id, note that first launch will download (and may be slow / need auth).
 ```bash

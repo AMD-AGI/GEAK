@@ -99,15 +99,32 @@ _BASES = {
 #: Interactivity basis -> the guards Hyperloom's KEEP verdict holds beside it, as guard basis ->
 #: rows to read. A median gain is kept only while the P90 tail and output throughput each stay
 #: inside the noise band, so a candidate that buys the median by shedding either is not a win;
-#: each guard is summarized from the same rows as the objective. Total token throughput is
-#: measured, not guarded. The throughput bases carry none: there the objective IS the guard.
-#: A guard lands as ``guard_<basis>_median``, so a handoff naming a guard by its basis (see
+#: each guard is summarized from the same rows as the objective. On a trace replay
+#: _guard_table adds total token throughput beside every axis but total itself. A guard lands
+#: as ``guard_<basis>_median``, so a KEEP rule naming a guard by its basis (see
 #: ``workload_spec.acceptance``) finds the field without a table of its own.
 _GUARDS = {
     INTVTY_P50_BASIS: {INTVTY_BASIS: INTVTY_KEYS, OUTPUT_BASIS: OUTPUT_KEYS},
     INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
     P90_INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
 }
+
+
+def _guard_table(basis, trace_replay):
+    """The guards summarized beside *basis*: ``_GUARDS``, plus total tok/s on a trace replay.
+
+    A trace replay's corpus fixes the work each request asks for, so any axis but total can rise
+    while the server completes less of it: the decode-only axis by shedding prefill, any of them by
+    finishing short requests in place of long ones. Total token throughput is that work, so it
+    rides beside every other axis there. GEAK's own KEEP rule for an AgentX run whose caller
+    states none holds every guard this returns (``interface/run_e2e.py`` default_acceptance). A
+    synthetic sweep serves one shape, where total is a fixed multiple of output, so its summaries
+    keep their field set.
+    """
+    table = dict(_GUARDS.get(basis, {}))
+    if trace_replay and basis is not None and basis != TOTAL_BASIS:
+        table[TOTAL_BASIS] = TOTAL_KEYS
+    return table
 
 
 def _basis():
@@ -187,7 +204,8 @@ def _emit(summary, out_path, tail):
 
 def from_runs(args):
     keys, basis, transform = _basis()
-    is_output, guard_keys = basis == OUTPUT_BASIS, _GUARDS.get(basis, {})
+    is_output = basis == OUTPUT_BASIS
+    guard_keys = _guard_table(basis, os.environ.get("BENCH_CLIENT") == "agentx")
 
     def read(path):
         xs = []
@@ -252,8 +270,8 @@ def from_runs(args):
         "throughput_tok_s_spread_pct": spread,
         "output_throughput_tok_s_median": med if is_output else None,
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
-        # The guards Hyperloom holds beside an interactivity objective (see _GUARDS); none on the
-        # throughput bases, so those keep their exact field set.
+        # The guards held beside the objective (see _guard_table); a synthetic sweep's throughput
+        # bases carry none, so those keep their exact field set.
         **_guard_fields(guards),
         "ttft_ms_median": _med3(ttft),
         "tpot_ms_median": _med3(tpot),
@@ -326,7 +344,11 @@ def from_replicas(args):
     bases = {s.get("metric_basis") for s in summaries if s.get("metric_basis")}
     basis = next(iter(bases)) if len(bases) == 1 else None
     is_output = basis == OUTPUT_BASIS
-    guards = {name: col("guard_" + name + "_median") for name in _GUARDS.get(basis, {})}
+    # Like the basis, read off the replicas: a leg whose replicas measured the total guard (a
+    # trace replay's, see _guard_table) carries it through the aggregate.
+    trace_replay = any("guard_" + TOTAL_BASIS + "_median" in s for s in summaries)
+    guards = {name: col("guard_" + name + "_median")
+              for name in _guard_table(basis, trace_replay)}
     summary = {
         "requested": args.requested,
         "successful": args.successful,

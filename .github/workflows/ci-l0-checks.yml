@@ -125,9 +125,11 @@ jobs:
             e2e_workflow/scripts/tests/test_overlay_installers.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
+            e2e_workflow/scripts/tests/test_seam_trace_compiled.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
             e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_vllm_profile.py \
             e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
@@ -146,6 +148,9 @@ jobs:
             kernel_workflow/scripts/tests/test_experience_store.py \
             kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kernel_workflow/scripts/tests/test_workspace_sources.py \
+            evo/tests/test_archive.py \
+            evo/tests/test_dispatch.py \
+            evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             kb/tests/test_store_local.py \
@@ -344,6 +349,8 @@ jobs:
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
+      - name: GPU family table (identical in every workflow)
+        run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy

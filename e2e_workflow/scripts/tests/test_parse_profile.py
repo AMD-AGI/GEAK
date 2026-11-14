@@ -738,6 +738,33 @@ class TestParseTorchTrace(_TmpMixin, unittest.TestCase):
         agg, _, _, _ = self._parse()
         self.assertEqual(agg["triton_rms_norm_kernel"]["by_phase"]["prefill"]["m"], {512: 1})
 
+    def test_mixed_step_query_tokens_are_counted_once_in_top_n(self):
+        cases = [
+            ("execute_201_context_1(sq200sk1200)_generation_1(sq1sk406)", 201),
+            ("execute_206_context_1(sq200sk1200)_generation_6(sq6sk406)", 206),
+            # Speculative decode: one request contributes six query tokens.
+            ("execute_206_context_1(sq200sk1200)_generation_1(sq6sk406)", 206),
+            ("execute_model context_1(200) generation_6(6)", 206),
+            ("execute_200_context_1(sq200sk1200)_generation_0(sq0sk0)", 200),
+            ("step[EXTEND bs=2 toks=200]", 200),
+        ]
+        for annotation, expected_m in cases:
+            with self.subTest(annotation=annotation):
+                events = [
+                    {"cat": "gpu_user_annotation", "name": annotation, "ts": 0, "dur": 100},
+                    {"cat": "kernel", "name": GEMM, "ts": 10, "dur": 20},
+                ]
+                agg, total, launches, meta = self._parse(events=events)
+                self.assertEqual((total, launches), (20, 1))
+                self.assertEqual(meta["prefill_tokens"], expected_m)
+                self.assertEqual(meta["n_prefill_steps"], 1)
+                self.assertEqual(meta["n_decode_steps"], 0)
+                self.assertEqual(agg[GEMM]["by_phase"]["prefill"]["m"], {expected_m: 1})
+                summary = pp.build_summary(agg, total, launches, "torch-trace", 10,
+                                           phase_meta=meta)
+                self.assertEqual(summary["top_kernels"][0]["est_shape"]["prefill"]["M"],
+                                 expected_m)
+
     def test_launches_outside_every_window_have_no_phase(self):
         # ts=50 precedes the first window and ts=250 sits in the gap between windows; a launch with
         # no ts at all (Memcpy) also has nowhere to land. Guessing a phase here would fabricate

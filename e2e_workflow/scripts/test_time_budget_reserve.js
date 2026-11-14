@@ -343,6 +343,40 @@ console.log('\n# a trace replay skips only a Validate that has nothing to measur
     'the COMPLETE line prints the status the run returns, so a skipped Validate no longer reads "status ?"');
 }
 
+console.log("\n# a trace replay keeps a same-window win for Validate, whatever the canonical baseline reads");
+// A trace replay's integrate A/B read +8.119% on the 900s window (ref 70.257, cand 75.962) while curTput
+// was still Setup's 3600s 85.608. The absolute check dropped the win, so nothing was adopted and Validate
+// was skipped as final_is_baseline: the canonical A/B that could judge the win never ran.
+{
+  const slice = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  const helpersSrc = [
+    slice('const FINAL_RESERVE_CAP_FRAC', 'const TIME_BUDGET_EFFECTIVE_MS'),
+    src.slice(src.indexOf('const WORKLOAD_SPEC ='), src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'))),
+    slice('function agentxFinalizeNote()', 'function correctnessEnvBlock('),
+    'return { agentxAdoptedNothing, agentxValidateSkip, beatsCurTput };',
+  ].join('\n');
+  const helpersFor = (A) => new Function('A', 'TIME_BUDGET_MS', helpersSrc)(A, 12 * 3600 * 1000);
+  const ax = helpersFor({ workload_kind: 'agentx_trace_replay' }), fixed = helpersFor({});
+  const win = { gate: 'accepted', ab_complete: true, output_parity: 'pass',
+    ref_med: 70.257, cand_med: 75.962, e2e_throughput_tok_s: 75.962, e2e_delta_pct: 8.119 };
+  ok(ax.beatsCurTput(win, 85.608), 'an accepted same-window win is kept though its search-window number is below the canonical baseline');
+  ok(!ax.beatsCurTput({ ...win, gate: 'stack' }, 85.608) && ax.beatsCurTput({ ...win, gate: 'stack', e2e_throughput_tok_s: 85.7 }, 85.608),
+    'a sub-threshold stack result still has to beat the carried number');
+  ok(!fixed.beatsCurTput(win, 85.608) && fixed.beatsCurTput({ ...win, e2e_throughput_tok_s: 85.7 }, 85.608)
+    && !fixed.beatsCurTput({ ...win, e2e_throughput_tok_s: 85.608 }, 85.608),
+  'a fixed-ISL/OSL run keeps the absolute check exactly');
+  const SETUP = { flags: '--max-running-requests 16', env: '', overlay: '' };
+  const kept = { setup: SETUP, accepted: 1, tput: 75.962, baseline: 85.608, ...SETUP };
+  ok(ax.agentxValidateSkip(ax.agentxAdoptedNothing(kept), 121 * 60000) === '',
+    "so the kept win reaches Validate's canonical A/B");
+  ok(ax.agentxValidateSkip(ax.agentxAdoptedNothing({ ...kept, accepted: 0, tput: 85.608 }), 600 * 60000) === 'final_is_baseline',
+    'and a run that kept nothing still skips it');
+  const sites = src.match(/integAccepted\([^;{]*&& beatsCurTput\(integ2?, curTput\)/g) || [];
+  const outside = src.replace(/function beatsCurTput\([\s\S]*?\n\}\n/, '');
+  ok(sites.length === 6 && !/e2e_throughput_tok_s > curTput/.test(outside),
+    `all six banking sites apply it after integAccepted, and none compares with curTput itself (${sites.length} found)`);
+}
+
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
 ok(/let TIME_FINAL_DEADLINE_HIT = false;/.test(src), 'TIME_FINAL_DEADLINE_HIT exists');
 ok(/TIME_FINAL_DEADLINE_HIT = true;/.test(src) && /}, TIME_BUDGET_EFFECTIVE_MS\);/.test(src),

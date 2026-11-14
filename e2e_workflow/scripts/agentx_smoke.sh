@@ -13,7 +13,7 @@
 #   MODEL=/models/Kimi-K3 bash .../agentx_smoke.sh             # also check weights
 #   BASE_URL=http://127.0.0.1:8000 bash .../agentx_smoke.sh    # also replay for real
 #   E2E_METRIC=total bash .../agentx_smoke.sh                  # grade another axis (default
-#                                                              #   p90_intvty_inferencex)
+#                                                              #   e2e_norm_intvty_p50)
 #
 # With BASE_URL pointing at a SERVER THAT IS ALREADY RUNNING, the last check
 # replays a handful of corpus entries for AGENTX_SMOKE_DURATION_S (default 60)
@@ -37,7 +37,7 @@ fix()  { printf '          -> %s\n' "$1"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # The axis the run grades on; unset means the workflow's standalone default.
-GRADED_AXIS="${E2E_METRIC:-p90_intvty_inferencex}"
+GRADED_AXIS="${E2E_METRIC:-e2e_norm_intvty_p50}"
 # _graded FILE -> "<metric_basis> <value|none>" for a mapped result (JSON or JSONL, last row),
 # read through bench_summarize.py's own axis table so this check cannot disagree with the
 # summary about which field an axis needs.

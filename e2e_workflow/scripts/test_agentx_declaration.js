@@ -99,7 +99,7 @@ function build(args, env) {
   if (env && env.E2E_METRIC != null) process.env.E2E_METRIC = env.E2E_METRIC;
   try {
     return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
-      `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_METRIC_SOURCE, AGENTX_E2E_METRIC, CONC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, workloadIdentityBlock };`
+      `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_METRIC_SOURCE, AGENTX_E2E_METRIC, CONC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, AGENTX_GUARD_DROP_PCT, workloadIdentityBlock };`
     )(args, islDeclared, oslDeclared);
   } finally {
     delete process.env.E2E_METRIC;
@@ -150,9 +150,9 @@ ok(sc.AGENTX.scenario === 'inferencex-agentx-mvp', 'canonical scenario');
 // ~256k-context servers; the campaign serves at 1048576, so replaying it would
 // measure a lighter workload and produce a baseline nothing can be compared to.
 ok(sc.AGENTX.corpus === 'semianalysis_cc_traces_weka_062126', 'canonical full-context weka corpus');
-ok(sc.AGENTX_METRIC_BASIS === 'p90_intvty_inferencex',
-  'graded on InferenceX P90 interactivity by default');
-ok(sc.AGENTX_E2E_METRIC === 'p90_intvty_inferencex',
+ok(sc.AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50',
+  "graded on Hyperloom's axis, TTFT-inclusive P50 interactivity, by default");
+ok(sc.AGENTX_E2E_METRIC === 'e2e_norm_intvty_p50',
   'the default basis is selected by its own E2E_METRIC token');
 ok(sc.AGENTX_METRIC_SOURCE === 'the standalone default', 'and the run says where the axis came from');
 ok(sc.CONC === 8 && sc.WORKLOAD.conc === 8, 'args.conc still sets the concurrency when the spec has none');
@@ -180,8 +180,8 @@ ok(sc.AGENTX_ENV.startsWith('#!/usr/bin/env bash'), 'the body is a sourceable ba
 console.log('\n# the declaration sets what bench_e2e.sh and the client adapter read');
 const has = (name, val) => new RegExp(`\\[ -n "\\$\\{${name}:-\\}" \\] \\|\\| ${name}='${val}'$`, 'm').test(sc.AGENTX_ENV);
 ok(has('BENCH_CLIENT', 'agentx'), 'BENCH_CLIENT=agentx (the trace-replay client, not a synthetic sweep)');
-ok(has('E2E_METRIC', 'p90_intvty_inferencex'), 'E2E_METRIC=p90_intvty_inferencex (the axis bench_e2e.sh medians)');
-ok(has('GEAK_METRIC_BASIS', 'p90_intvty_inferencex'), 'GEAK_METRIC_BASIS records the declared basis');
+ok(has('E2E_METRIC', 'e2e_norm_intvty_p50'), 'E2E_METRIC=e2e_norm_intvty_p50 (the axis bench_e2e.sh medians)');
+ok(has('GEAK_METRIC_BASIS', 'e2e_norm_intvty_p50'), 'GEAK_METRIC_BASIS records the declared basis');
 ok(has('GEAK_ISL_OSL_INACTIVE', '1'), 'GEAK_ISL_OSL_INACTIVE=1 (adapters refuse to treat isl/osl as the load)');
 ok(has('GEAK_WORKLOAD_KIND', 'agentx_trace_replay'), 'GEAK_WORKLOAD_KIND names the workload');
 // An explicit REPEATS outranks REPLICAS in bench_e2e.sh, so declaring one here collapsed isolated
@@ -320,15 +320,36 @@ ok(/Do NOT set/.test(blk) && /BENCH_CLIENT/.test(blk), 'roles are told not to se
 ok(/ISL=<isl> OSL=<osl> CONC=<conc>/.test(blk),
   'roles are told to keep their existing bench line unchanged (no role-file churn needed)');
 ok(/throughput_tok_s_median/.test(blk), 'the metric-neutral summary key is named');
-ok(/InferenceX P90 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
-  && /guard_aggregate_output_tok_s_median/.test(blk),
-  'on the default axis the prompt names its unit and the output-throughput guard beside it');
+ok(/TTFT-inclusive P50 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
+  && /guard_e2e_norm_intvty_p90_median/.test(blk) && /guard_aggregate_output_tok_s_median/.test(blk),
+  "on the default axis the prompt names its unit and Hyperloom's two guards beside it");
+const AGENTX_VERDICT = `more than ${sc.AGENTX_GUARD_DROP_PCT}% below the base leg`;
+ok(sc.AGENTX_GUARD_DROP_PCT === 5 && /guard_aggregate_total_token_tok_s_median/.test(blk)
+  && blk.includes(AGENTX_VERDICT) && /validated_no_win/.test(blk),
+  'with no KEEP rule from the caller, total tok/s is a guard too, and Validate holds every guard to the band');
 const p50Blk = axisOf('e2e_norm_intvty_p50').workloadIdentityBlock();
 ok(/P50 interactivity/.test(p50Blk) && /guard_e2e_norm_intvty_p90_median/.test(p50Blk)
   && /guard_aggregate_output_tok_s_median/.test(p50Blk) && !/guard_total/.test(p50Blk),
   'the p50 objective names both KEEP guards and never requests the removed total guard');
+ok(/guard_aggregate_total_token_tok_s_median/.test(p50Blk) && p50Blk.includes(AGENTX_VERDICT),
+  'and, declared with no KEEP rule, holds total tok/s beside them');
+const ixBlk = axisOf('p90_intvty_inferencex').workloadIdentityBlock();
+ok(/InferenceX P90 interactivity/.test(ixBlk) && /guard_aggregate_output_tok_s_median/.test(ixBlk)
+  && !/guard_e2e_norm_intvty_p90_median/.test(ixBlk) && ixBlk.includes(AGENTX_VERDICT),
+  'a declared InferenceX P90 axis names its unit and output guard, and holds total tok/s too');
+const outBlk = axisOf('aggregate_output_tok_s').workloadIdentityBlock();
+ok(/OUTPUT tok\/s/.test(outBlk) && /guard_aggregate_total_token_tok_s_median/.test(outBlk)
+  && outBlk.includes(AGENTX_VERDICT),
+  'the output axis holds it too: short requests finished in place of long ones raise output tok/s');
+const hlRule = { objective: 'e2e_norm_intvty_p50', min_gain_pct: 3.0,
+  guard_max_drop_pct: { e2e_norm_intvty_p90: 5.0, aggregate_output_tok_s: 5.0 } };
+const hlBlk = build({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: 'e2e_norm_intvty_p50',
+  acceptance: hlRule } }).workloadIdentityBlock();
+ok(hlBlk === p50Blk.slice(0, p50Blk.indexOf('\n  Report `guard_aggregate_total_token_tok_s_median`'))
+  + p50Blk.slice(p50Blk.indexOf('`arbitration_note`.') + '`arbitration_note`.'.length),
+  "a caller that states its KEEP rule gets exactly the note before this guard: its rule names its guards");
 const totalBlk = axisOf('aggregate_total_token_tok_s').workloadIdentityBlock();
-ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_total/.test(totalBlk),
+ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_/.test(totalBlk),
   'a declared throughput axis keeps the throughput wording, with no guard to report');
 ok(blk.includes(String(sc.AGENTX.geak_loop_duration_s)) && blk.includes(String(sc.AGENTX.duration_s)),
   'both measurement windows are stated so phases can budget');
