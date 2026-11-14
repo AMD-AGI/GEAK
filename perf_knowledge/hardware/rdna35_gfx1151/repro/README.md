@@ -42,4 +42,4 @@ before relying on them:
 - the leaked-process figures in `clocks_power.md`.
 
 The occupancy table these pages point to is computed by
-`../../../expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py`, which is not duplicated here.
+[`amd_occupancy.py`](../../../../kernel_workflow/scripts/kernel_tools/amd_occupancy.py), which is not duplicated here.
