@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
-    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck (only with args.profile=on; off by default)' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
     { title: 'WarmStart', detail: 'search the experience KB by canonical id (geak:kernel:*) — the shared service when credentialed, else the on-disk store, brought level with kb_artifacts/ first — for the best curated patch per optimization direction for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
@@ -854,6 +854,44 @@ async function agentT(p, o) {
   return null;
 }
 
+// LANE STOP. A null from agentT does not stop the agent: a timed-out benchmark_engineer kept its UT
+// runs on the GPU for 2+ hours after its lane had failed, and the retried lane timed out waiting for
+// that GPU (GEAK #606). So before the lane ENDS on an agent that returned nothing, it stops everything
+// still running under its EVAL_DIR and blocks gpu_lock.sh there (scripts/stop_lane_work.py). Only on
+// lane-ending paths: the stop file blocks every later GPU command under EVAL_DIR. Non-fatal.
+// The standalone runtime exposes a host hook that bypasses the saturated agent queue. Native
+// Workflow hosts without that capability retain the best-effort, one-command agent fallback.
+const STOP_LANE_SCHEMA = obj({ ok: { type: 'boolean' }, blocked: { type: 'boolean' },
+  stopped: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  survivors: { type: 'array', items: { type: 'object', additionalProperties: true } } },
+  ['ok', 'blocked', 'stopped', 'survivors']);
+async function stopLaneWork(evalDir, reason, phaseName) {
+  if (!evalDir) return null;
+  let r;
+  if (typeof agent.stopLaneWork === 'function') {
+    try {
+      r = await agent.stopLaneWork(evalDir, reason);
+    } catch (e) {
+      log(`  [lane-stop] ${reason}: host cleanup failed (${String(e)}; NON-FATAL).`);
+      return null; // Do not fall back into the queue we are trying to unblock.
+    }
+  } else {
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const cmd = `python3 ${q(`${WORKFLOW_DIR}/scripts/stop_lane_work.py`)} --eval-dir ${q(evalDir)} --block --reason ${q(reason)}`;
+    r = await agentT(
+      'You are the kernel lane\'s GPU release step. Run EXACTLY this command, once, and return its JSON ' +
+      'stdout verbatim as StructuredOutput. It stops only processes inside this lane\'s EVAL_DIR and never ' +
+      'signals your own shell or its ancestors. Do not edit it, retry it, or act on what it reports; a ' +
+      'non-zero exit is a valid answer, so return what it printed.\n```bash\n' + cmd + '\n```',
+      { phase: phaseName, label: 'stop:lane', schema: STOP_LANE_SCHEMA });
+  }
+  if (!r) { log(`  [lane-stop] ${reason}: the stop step returned nothing (NON-FATAL).`); return null; }
+  const n = Array.isArray(r.stopped) ? r.stopped.length : 0;
+  const left = Array.isArray(r.survivors) ? r.survivors.length : 0;
+  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under EVAL_DIR${left ? `, ${left} still up` : ''}; gpu_lock.sh ${r.blocked ? 'blocked' : 'NOT blocked'} there.`);
+  return r;
+}
+
 // ---------------------------------------------------------------------------
 // WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
 //   DEADLINE_EPOCH  unix seconds after which NO new optimization round may start.
@@ -1066,6 +1104,7 @@ if (MODE === 'author') {
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
     log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no seed to optimize).`);
+    if (!authored) await stopLaneWork(EVAL_DIR, `author:${TARGET_LANGUAGE} returned nothing`, 'Author');
     return {
       mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
       eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
@@ -1096,6 +1135,13 @@ const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
 const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
 const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
 
+// PROFILING is OFF by default; args.profile='on' restores it. Off: no baseline profile, no reprofile
+// after a commit or a warm-start adopt, and neither the benchmark engineer nor the engineers run the
+// profiler. On a prepared extract UT one profiled run costs 20-40 min, and on the AgentX stacks
+// rocprofv3 aborts outright (LLVM option clash with FlyDSL), so every profile agent spent 10-30 min
+// on the fault ladder before falling back (GEAK #606). Every consumer already tolerates a null summary.
+const PROFILE_ON = String(A.profile != null ? A.profile : 'off').trim().toLowerCase() === 'on';
+
 // ===========================================================================
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
@@ -1103,29 +1149,34 @@ phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
+    ANALYSIS: analysis, PROFILING: PROFILE_ON ? 'on' : 'off',
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
-if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+if (!bench || !bench.baseline_per_case) {
+  await stopLaneWork(EVAL_DIR, 'benchmark_engineer returned no baseline', 'Benchmark');
+  throw new Error('Benchmark setup failed: no baseline recorded');
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
 // ===========================================================================
-// PHASE: Baseline profile (Profile Engineer)
+// PHASE: Baseline profile (Profile Engineer) — only with args.profile='on' (see PROFILE_ON).
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agentT(
+let profileSummary = !PROFILE_ON ? null : await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
-log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+log(PROFILE_ON
+  ? `Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`
+  : 'Profile: skipped (args.profile is off).');
 
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
@@ -1446,14 +1497,16 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.exp_dir = c.exp_dir || '';
             if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
-            profileSummary = await agentT(
-              roleAgent('profile_engineer', 'reprofile',
-                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
-                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-              }),
-              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
-            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (PROFILE_ON) {
+              profileSummary = await agentT(
+                roleAgent('profile_engineer', 'reprofile',
+                  'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                  WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
+                  COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+                }),
+                { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+              if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            }
             if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
             break;
           }
@@ -1684,6 +1737,7 @@ ${cfg({
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        PROFILING: PROFILE_ON ? 'on' : 'off',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
@@ -1828,13 +1882,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     finalWinner = winner;
     roundsCommitted += 1;
 
-    // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    // --- (f) Re-profile the new best (only with args.profile='on') -------
+    if (PROFILE_ON) {
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;

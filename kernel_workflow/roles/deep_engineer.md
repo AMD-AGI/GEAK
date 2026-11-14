@@ -129,7 +129,8 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
    re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
    exists in a lost return is gone.
-4. **Self-profile to re-steer**: every few accepted changes, re-run
+4. **Self-profile to re-steer** (skip this step entirely when `PROFILING` is `off`; steer by the
+   per-case timings instead): every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
    to find the NEW dominant bottleneck, and attack that next. This is the core of going deep.
    If the report shows a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in

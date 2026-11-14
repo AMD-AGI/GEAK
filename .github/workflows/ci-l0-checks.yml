@@ -152,6 +152,8 @@ jobs:
             evo/tests/test_dispatch.py \
             evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
+            kernel_workflow/scripts/tests/test_stop_lane_work.py \
+            kernel_workflow/scripts/tests/test_read_extraction_baseline.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
@@ -349,6 +351,8 @@ jobs:
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
+      - name: lane cleanup under a saturated agent queue
+        run: node --test interface/runtime/engine/test_lane_stop.mjs
       - name: GPU family table (identical in every workflow)
         run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression

@@ -41,6 +41,20 @@ if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
     exit 2
 fi
 
+# A lane that gave up on an agent cannot cancel it; it writes .geak_stop into its EVAL_DIR instead
+# (stop_lane_work.py --block). The abandoned agent must not take a GPU again, or the next lane queues
+# behind work whose result nobody will read.
+_stop_dir="$PWD"
+while :; do
+    if [ -e "$_stop_dir/.geak_stop" ]; then
+        echo "GEAK_LANE_STOPPED: $_stop_dir was stopped by its kernel lane ($(head -c 200 "$_stop_dir/.geak_stop" 2>/dev/null))." >&2
+        echo "       The lane no longer waits for this work. Run nothing more and return now." >&2
+        exit 87
+    fi
+    [ "$_stop_dir" = "/" ] && break
+    _stop_dir="$(dirname "$_stop_dir")"
+done
+
 # Source provenance is checked before executing any command and again on exit:
 # generated builders can recreate a stale overlay during the command itself.
 # Exit 86 invalidates all output from that invocation, even if it printed PASS.

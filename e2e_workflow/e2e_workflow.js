@@ -155,6 +155,9 @@ const laneArgs = (wfArgs) => {
       ...(A.evolution_source_paths != null ? { evolution_source_paths: A.evolution_source_paths } : {}) } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+    // The lane's own per-agent guard (lane default 60min), separate from this workflow's
+    // agent_timeout_ms. Forwarded only when set, so the lane default stays unless asked (GEAK #606).
+    ...(A.lane_agent_timeout_ms != null ? { agent_timeout_ms: String(A.lane_agent_timeout_ms) } : {}),
     ...wfArgs,
   };
   if (GPU_FAMILY.isolate) {
@@ -5396,7 +5399,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             apply_to_original: 'false',
           }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
-        const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
+        // A lane that could not record a baseline will not record one on a retry either: the UT is
+        // the same, so is its run time. In GEAK #606 each such retry cost another 60+ min.
+        const noBaseline = !!(al && /Benchmark setup failed/.test(String(al.reason || '')));
+        const transient = !noBaseline &&
+          (!al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null));
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
