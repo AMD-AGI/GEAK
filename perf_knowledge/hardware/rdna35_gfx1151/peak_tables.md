@@ -36,6 +36,12 @@ sources:
 Mixed traffic reaches about the read rate. The read kernel writes one int32 per program, so its
 bytes are reads only.
 
+The shared [`sku.json`](../data/sku.json) retains an older 212 GB/s `rocm_bandwidth_test`
+report for `AI_MAX_395`, with an unrecorded tool version and a source that is no longer available.
+This campaign is separate evidence with the conditions and reproduction scripts above; it does
+not replace the catalog default or a TraceLens calibration. Use a measurement from the target
+box and matching workload for an attainable ceiling.
+
 ## Sustained reality
 Dense square GEMM, `value @ gfx1151 (Radeon 8060S), ROCm 7.2.3, torch 2.11.0, Triton 3.6.0,
 2026-11-06`. Each cell is the median over three runs of the best implementation in that run
