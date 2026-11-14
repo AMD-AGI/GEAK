@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# _kt_common.sh -- shared helpers for the kernel_tools bash wrappers (sourced, never run).
+#
+# GEAK conventions every profiler wrapper here follows:
+#   * GPU work runs under GEAK's gpu_lock.sh (kernel_workflow/scripts/gpu_lock.sh). A wrapper started
+#     outside the lock re-execs itself under it when given a GPU id, and refuses otherwise. Inside
+#     the lock (GEAK_GPU_LOCK_HELD set) it never locks again: a nested gpu_lock.sh on the same id would
+#     deadlock on its own flock.
+#   * No inline HIP_VISIBLE_DEVICES: the device is whatever gpu_lock.sh exported.
+#   * No `rm`: stale artifact dirs are moved aside (kt_move_aside), as profile_kernel.sh does.
+#   * The profiled command may be argv (`-- cmd args...`) or one shell string (`--cmd "<string>"`,
+#     run as `bash -c "<string>"`), matching profile_kernel.sh's <benchmark_cmd>.
+#   * Execution locus: shared locus.sh supports an optional external container.
+#     Embedded GEAK runs already inside their workload container use host passthrough.
+
+KT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KT_GPU_LOCK="$(cd "$KT_DIR/.." && pwd)/gpu_lock.sh"
+KT_REPO="$(cd "$KT_DIR/../../.." && pwd)"
+
+# kt_move_aside <path>: move an existing file/dir out of the way (never delete).
+kt_move_aside() {
+  local p="${1:?kt_move_aside <path>}"
+  [ -e "$p" ] || [ -L "$p" ] || return 0
+  mv "$p" "${p%/}.old_$(date +%s)_$$_${RANDOM}" 2>/dev/null || true
+}
+
+# kt_under_lock: rc 0 when this process already runs inside gpu_lock.sh.
+kt_under_lock() { [ -n "${GEAK_GPU_LOCK_HELD:-}" ] || [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; }
+
+# kt_ensure_lock <gpu_id|""> <self> <args...>: return if already under the lock; else re-exec
+# `bash <self> <args...>` under gpu_lock.sh <gpu_id>; with no id, refuse (exit 2).
+kt_ensure_lock() {
+  local gpu="$1" self="$2"; shift 2
+  local ownership_rc=0
+  python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "$gpu" || ownership_rc=$?
+  case "$ownership_rc" in
+    0)
+      python3 "$KT_DIR/../workspace_sources.py" check --workspace "$PWD" || exit 2
+      return 0 ;;
+    1) ;;  # No inherited ownership: acquire the outer lock below.
+    *) exit 2 ;;  # Never bypass a conflicting allocation, even in test mode.
+  esac
+  if [ "${KT_ALLOW_UNLOCKED:-0}" = "1" ]; then
+    echo "[$(basename "$self")] WARNING: KT_ALLOW_UNLOCKED=1 -- running WITHOUT gpu_lock.sh; any number" \
+         "this produces is unserialized against other tenants (tests / profiler-less dry runs only)." >&2
+    return 0
+  fi
+  if [ -n "$gpu" ]; then
+    exec bash "$KT_GPU_LOCK" "$gpu" bash "$self" "$@"
+  fi
+  echo "[$(basename "$self")] REFUSING: GPU work must run under GEAK's gpu_lock.sh. Either" >&2
+  echo "  cd <workspace> && bash $KT_GPU_LOCK <gpu_id> bash $self ..." >&2
+  echo "  or pass the GPU id this run was allocated (--dev/--gpu <id>) and this script locks itself." >&2
+  exit 2
+}
+
+# kt_att_decoder_dir: print the directory holding the ATT decoder library (rocprof-trace-decoder),
+# rc 1 when absent. GEAK does not vendor it; ROCPROF_ATT_LIBRARY_PATH (colon list) names it, else the
+# ROCm lib dirs are searched (KT_ATT_SYSTEM_DIRS overrides that list, for tests). Callers DEGRADE the
+# ATT layer when this fails -- they never fail the profile.
+kt_att_decoder_dir() {
+  python3 "$KT_DIR/profiler_deps.py" --decoder-path
+}
+
+# Set KT_ATT_ARGS in the calling shell. The optional report path is host-visible.
+# Legacy candidate libraries must load and export V1; newer SDK-managed decoders
+# are allowed to attempt capture, whose decoded output remains the real check.
+kt_att_prepare() {
+  local where="${1:-local}" report="${2:-}" data script="$KT_DIR/profiler_deps.py"
+  KT_ATT_ARGS=()
+  KT_ATT_STATUS=dependency_probe_failed
+  if [ "$where" = locus ]; then
+    data="$(locus_run python3 "$(locus_path "$script")" --att-only)" || return 1
+  else
+    data="$(python3 "$script" --att-only)" || return 1
+  fi
+  [ -z "$report" ] || printf '%s\n' "$data" > "$report"
+  KT_ATT_STATUS="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["att"]["status"])')" || return 1
+  case "$KT_ATT_STATUS" in
+    external_candidate)
+      local dir
+      dir="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["att"]["directory"])')" || return 1
+      KT_ATT_ARGS=(--att-library-path "$dir") ;;
+    sdk_managed_unverified) ;;
+    *) echo "[ATT] $KT_ATT_STATUS; see kernel_tools/profiling-dependencies.md" >&2; return 1 ;;
+  esac
+}
+
+# Shared helpers never depend on a language pack. KT_NO_PACK_LOCUS remains a
+# compatibility switch for explicit host passthrough in existing callers/tests.
+if [ "${KT_NO_PACK_LOCUS:-0}" != "1" ]; then
+  source "$KT_DIR/locus.sh"
+fi
+declare -F locus_active >/dev/null || locus_active() { return 1; }
+declare -F locus_run >/dev/null || locus_run() { "$@"; }
+declare -F locus_timeout >/dev/null || locus_timeout() { local s="${1:?}"; shift; timeout "$s" "$@"; }
+declare -F locus_path >/dev/null || locus_path() { printf '%s' "${1:?}"; }
+declare -F locus_fetch >/dev/null || locus_fetch() { return 0; }
+declare -F locus_push >/dev/null || locus_push() { return 0; }
+declare -F locus_workdir_shared >/dev/null || locus_workdir_shared() { [ -d "${1:?}" ]; }
+declare -F locus_have >/dev/null || locus_have() { command -v "${1:?}" >/dev/null 2>&1; }
+declare -F locus_preflight >/dev/null || locus_preflight() { LOCUS_DEGRADE_CAUSE=""; [ -z "${TILE_KERNEL_CONTAINER:-}" ]; }

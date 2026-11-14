@@ -10,7 +10,7 @@ divisor, the bank-conflict stride, the MFMA shape set, whether async copy lowers
 limitation announces itself or degrades silently. All of it is one table:
 [`skill.md ## Arch dispatch`](skill.md#arch-dispatch-gfx942-cdna3-vs-gfx950-cdna4). **Read it before
 trusting a figure or asserting a digest across generations**, and take the values from
-`hardware/hw_constants.json` below rather than from prose.
+[`shared hardware constants`](../../../hardware/data/hw_constants.json) below rather than from prose.
 
 ## Start above this skill, not in it
 
@@ -57,7 +57,7 @@ upstream:
 
 | you need | read |
 | --- | --- |
-| the machine-readable per-arch table the occupancy probe reads — LDS/CU and banking, VGPR file and the wave-step table, MFMA cadence and layout family, `ds_read_tr` / `scaled_mfma` / direct-to-LDS widths | `hardware/hw_constants.json` |
+| the machine-readable per-arch table the occupancy probe reads — LDS/CU and banking, VGPR file and the wave-step table, MFMA cadence and layout family, `ds_read_tr` / `scaled_mfma` / direct-to-LDS widths | [`shared hardware constants`](../../../hardware/data/hw_constants.json) |
 
 Prefer it over a figure quoted in prose, and **pass the arch rather than defaulting it**: the LDS/CU
 divisor differs by 2.5× across the two generations this skill claims, and one applied to the other is a

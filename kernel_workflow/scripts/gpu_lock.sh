@@ -64,7 +64,9 @@ _check_sources_on_exit() {
 }
 trap _check_sources_on_exit EXIT
 
-LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
+# ONE team-wide namespace: two runs serialize only if they flock the SAME file. GEAK_GPU_LOCK_DIR
+# (also read by gpu_lease.py) exists for hermetic tests and must stay unset in real runs.
+LOCK_DIR="${GEAK_GPU_LOCK_DIR:-${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}}"
 mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------
@@ -275,6 +277,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # Pool mode: (1) this process ALREADY holds the lane exclusively (and verified it idle).
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
+    export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@"
@@ -307,6 +310,7 @@ else
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
+        export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         "$@"
