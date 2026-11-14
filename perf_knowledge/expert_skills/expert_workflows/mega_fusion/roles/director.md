@@ -253,8 +253,10 @@ Inputs: `CANDIDATES`, `BASELINE_TREE`, `FROZEN_KERNEL_PATH`, `COMMANDMENT`, `GPU
 optional `EXPERT_SKILL_ID`, `EXPERT_SKILL_REVISION`, `EXPERT_SKILL_FILE`, `EXPERT_SKILL_PLAYBOOK`,
 `EXPERT_SKILL_CONTRACT`, `EXPERT_SKILL_VALIDATION`,
 `EXPERT_SKILL_ACCURACY_CASES`, `EXPERT_SKILL_SOURCE_FILES`, and `SELECTED_WORKSPACE`.
-`GRAPH_CONTRACT_TOOL` and `GRAPH_CONTRACT_REPLAYS` provide the executable direct-graph and
-arrival-jitter contract.
+`GRAPH_CONTRACT_TOOL` and `GRAPH_CONTRACT_REPLAYS` provide the executable direct-graph contract;
+with an Expert Skill it also injects arrival jitter. The generic graph contract has no jitter: report
+`arrival_jitter:false` there, never true. Each candidate row's `replay_results` has one row per guard
+in `TARGET_GUARDS` and `REGRESSION_GUARDS`, named exactly as given.
 
 This is the final portfolio arbitration, not another optimization round:
 

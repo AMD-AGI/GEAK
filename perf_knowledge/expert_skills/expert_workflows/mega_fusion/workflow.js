@@ -348,6 +348,9 @@ if (USE_EXPERT_SKILLS && PINNED_MEGA_SKILL) {
 const GRAPH_CONTRACT_TOOL = PINNED_MEGA_SKILL
   ? `${MEGA_DIR}/tools/expert_skill_runtime.py` : String(A.graph_contract_tool ||
     (MODE === 'mega' && !USE_EXPERT_SKILLS ? `${MEGA_DIR}/tools/generic_graph_contract.py` : ''));
+// Only the skill runtime injects arrival jitter into graph replays; generic_graph_contract.py does not,
+// so a generic finalist cannot report jittered replays and is not asked to.
+const ARRIVAL_JITTER_CONTRACT = PINNED_MEGA_SKILL;
 const FAST_TEST_KEY_TOOL = `${MEGA_DIR}/tools/fast_test_key.py`;
 const BENCH_HARNESS = String(A.benchmark_harness || '');
 const CANDIDATE_IMPORT_MODULES = Object.freeze(argList(
@@ -1652,10 +1655,12 @@ const MEGA_SELECTION_SCHEMA = obj({
       },
     }, []),
     correctness: { type: 'string' }, guards_pass: { type: 'boolean' },
-    path_marker: { type: 'string' }, path_marker_count: { type: 'number' },
+    path_marker: { type: 'string', description: 'The path marker line the candidate printed.' },
+    path_marker_count: { type: 'number', description: 'Ranks that printed path_marker.' },
     world_size: { type: 'number' },
     launches: { type: 'number' }, launches_base: { type: 'number' },
-    graph_safe: { type: 'string' }, artifact_distinct: { type: 'string' },
+    graph_safe: { type: 'string', enum: ['pass', 'fail'] },
+    artifact_distinct: { type: 'string', enum: ['yes', 'no'] },
     artifact_hash_base: { type: 'string' }, artifact_hash_candidate: { type: 'string' },
     overlap_measured: { type: 'string' }, overlap_fraction: { type: 'number' },
     overlap_cu_fraction: { type: 'number' },
@@ -1674,20 +1679,25 @@ const MEGA_SELECTION_SCHEMA = obj({
       method: { type: 'string' },
     }, ['metric', 'value', 'guard']) },
     liveness_replays: { type: 'number' }, claim_complete: { type: 'boolean' },
-    replay_results: { type: 'array', items: obj({
+    replay_results: { type: 'array',
+      description: 'One row per guard in TARGET_GUARDS and REGRESSION_GUARDS, named exactly as given.',
+      items: obj({
       guard: { type: 'string' }, count: { type: 'number' },
-      status: { type: 'string' }, graph_safe: { type: 'string' },
-      arrival_jitter: { type: 'boolean' },
-    }, ['guard', 'count', 'status']) },
+      status: { type: 'string', enum: ['pass', 'fail'] },
+      graph_safe: { type: 'string', enum: ['pass', 'fail'] },
+      arrival_jitter: { type: 'boolean',
+        description: 'True only when the graph contract injected arrival jitter (Expert Skill runtime).' },
+    }, ['guard', 'count', 'status', 'graph_safe', 'arrival_jitter']) },
     paired_readings: { type: 'array', items: obj({
       guard: { type: 'string' }, base: { type: 'number' }, cand: { type: 'number' },
     }, ['guard', 'base', 'cand']) },
     null_arm_pct: { type: 'number' },
     per_case: perCase,
     reason: { type: 'string' },
-  }, ['candidate_id', 'claim_complete']) },
+  }, ['candidate_id', 'claim_complete', 'path_marker', 'path_marker_count', 'graph_safe',
+    'artifact_distinct', 'replay_results']) },
   notes: { type: 'string' },
-}, ['claim_complete', 'selected_candidate_id', 'selected_tree']);
+}, ['claim_complete', 'attempt_id', 'evidence_manifest', 'selected_candidate_id', 'selected_tree']);
 
 const MEGA_IDENTITY_SCHEMA = obj({
   passed: { type: 'boolean' },
@@ -3555,7 +3565,9 @@ function megaFinalSelectionVerdict(selection, finalists, opts) {
       if (!replay || Number(replay.count || 0) < needed ||
           String(replay.status || '').toLowerCase() !== 'pass' ||
           String(replay.graph_safe || '').toLowerCase() !== 'pass' ||
-          replay.arrival_jitter !== true) fail.push(`replay ${guard}`);
+          (o.requireArrivalJitter !== false && replay.arrival_jitter !== true)) {
+        fail.push(`replay ${guard}`);
+      }
     }
     if (Number(r.liveness_replays || 0) < Number(o.requiredReplays || 0)) fail.push('liveness depth');
     if (String(r.accuracy_metric || '') !== String(o.accuracyMetric || '') ||
@@ -7850,6 +7862,7 @@ if (MODE === 'mega') {
         requiredPairsByGuard: REQUIRED_PAIRS_BY_GUARD,
         accuracyMetric: ACCURACY_METRIC, accuracyThreshold: ACCURACY_THRESHOLD,
         requireOverlap: REQUIRE_OVERLAP, requireAttribution: REQUIRE_ATTRIBUTION,
+        requireArrivalJitter: ARRIVAL_JITTER_CONTRACT,
         tieNoisePct: MEGA_TIE_NOISE_PCT,
       });
       finalists = batch;
@@ -7906,6 +7919,7 @@ if (MODE === 'mega') {
       requiredPairsByGuard: REQUIRED_PAIRS_BY_GUARD,
       accuracyMetric: ACCURACY_METRIC, accuracyThreshold: ACCURACY_THRESHOLD,
       requireOverlap: REQUIRE_OVERLAP, requireAttribution: REQUIRE_ATTRIBUTION,
+      requireArrivalJitter: ARRIVAL_JITTER_CONTRACT,
       tieNoisePct: MEGA_TIE_NOISE_PCT,
     });
   }
