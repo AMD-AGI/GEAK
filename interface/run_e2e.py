@@ -127,6 +127,8 @@ BENCH_SUMMARIZE_SCRIPT = E2E_DIR / "scripts" / "bench_summarize.py"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
+# ISAs whose E2E backend is vLLM-only (E2E_FAMILY vllmOnly in e2e_workflow.js): the RDNA 3.5 APUs.
+VLLM_ONLY_ISA_RE = re.compile(r"gfx115\d")
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
@@ -732,7 +734,10 @@ def map_args(
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] in RDNA4_SERVING_PRODUCTS else "sglang"
+            "vllm" if gpu_identity and (
+                gpu_identity["target"] in RDNA4_SERVING_PRODUCTS
+                or VLLM_ONLY_ISA_RE.fullmatch(gpu_identity["gfx"])
+            ) else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
@@ -1915,7 +1920,7 @@ def _magpie_script_from_recipe(h: dict) -> str:
     return ""
 
 
-def apply_bench_launcher(h: dict) -> str:
+def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
     """Align the SERVER LAUNCH recipe with the external orchestrator (Magpie).
 
     A "completely-aligned" throughput number needs the SERVER launched the SAME
@@ -1950,7 +1955,7 @@ def apply_bench_launcher(h: dict) -> str:
     requested = str(
         h.get("bench_launcher") or os.environ.get("BENCH_LAUNCHER", "") or ""
     ).strip().lower()
-    backend = str(h.get("framework", "sglang") or "sglang").strip().lower()
+    backend = str(backend or h.get("framework") or "sglang").strip().lower()  # map_args' resolved backend
     # Discover the Magpie launch script, most explicit source first: handoff,
     # generic env, per-backend env (MAGPIE_SGLANG_SCRIPT / MAGPIE_VLLM_SCRIPT),
     # then derived from the launch recipe the handoff points at. The recipe is
@@ -8053,7 +8058,7 @@ def main(argv: list[str]) -> int:
     ps_args["kb_defer_to_interface"] = (
         handoff_acceptance(h) or default_acceptance(h)
     ) is not None
-    bench_launcher = apply_bench_launcher(h)
+    bench_launcher = apply_bench_launcher(h, ps_args["backend"])
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
     workload_refusal = agentx_refusal(h)

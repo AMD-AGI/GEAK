@@ -117,6 +117,11 @@ class TestPeaks(unittest.TestCase):
         self.assertEqual(p["source"], "table")
         self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 60.0e12, delta=1e11)
         self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 30.0e12, delta=1e11)
+        # One ISA ships as the 40-CU 8060S, 32-CU 8050S and 16-CU 8040S: only the row's count resolves.
+        for cu in (40, "40", " 40 "):
+            self.assertIsNotNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=cu), cu)
+        for cu in (32, 16, 20, 0, 40.5, float("inf"), True, None, "abc"):
+            self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1151", cu=cu), cu)
 
     def test_gfx1151_metrics_see_both_axes(self):
         """Both roofs must be live, not just the memory one. A high-AI kernel at 67% of the WMMA
@@ -239,6 +244,10 @@ class TestPeaks(unittest.TestCase):
             called.clear()
             self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
             self.assertEqual(called, [])
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1152", cu=40))
+            self.assertEqual(called, [])  # an RDNA 3.5 APU's "memory clock" is system DRAM
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100"))
+            self.assertEqual(called, [0])
         finally:
             rt.derive_peaks_from_props = original
 

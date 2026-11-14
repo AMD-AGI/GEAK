@@ -10,6 +10,9 @@ backends) **the kernel code itself** — cheapest first.
 > Why this exists: e2e is Amdahl-dominated. A GEMM at ~78% of GPU time only needs **1.15x** to give
 > ~+10% e2e. That is a far better bet than a 1.3x on a 2% kernel. Spend budget on the head first.
 
+> **Not every GPU is an MI-series part.** When the run passes `ARCH_CONSTRAINTS` (gfx115x), it
+> overrides the MFMA, fp8 and aiter levers below.
+
 > **On sglang/gfx942, dense-GEMM Tier-B = aiter's per-shape DB; Tier-C = an authored Triton GEMM.**
 > The live dense-GEMM path is aiter `tuned_gemm.py` (seam `aiter.tuned_gemm:gemm_a16w16`). Tune it via
 > `AITER_TUNE_GEMM=1` capture → `gradlib/gemm_tuner.py` → deploy `AITER_CONFIG_GEMM_BF16`, and verify

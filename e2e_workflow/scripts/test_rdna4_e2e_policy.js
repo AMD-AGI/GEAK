@@ -81,7 +81,7 @@ function build(argsObj, opts) {
     pipeline: async (items) => items,
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
   };
-  const fn = new Function(...Object.keys(g), `return (async () => { ${BODY} })();`);
+  const fn = new Function(...Object.keys(g), `return (async () => { ${o.body || BODY} })();`);
   return { run: () => fn(...Object.values(g)), trace };
 }
 
@@ -313,7 +313,7 @@ const R9700 = {
     }
   }
 
-  console.log('\n# G. RDNA 3.5 (gfx115x): isolated lanes from the ISA alone; no E2E model mode yet');
+  console.log('\n# G. RDNA 3.5 (gfx115x), from the ISA alone: isolation, vLLM, fp8 wording, ARCH_CONSTRAINTS');
   {
     // gfx1151 has no product key (it ships as the 8060S, 8050S and 8040S); rocminfo gives it an
     // empty marketing name. A bare gfx1150 must isolate too, without an invented product.
@@ -321,8 +321,9 @@ const R9700 = {
       expected_gfx: 'gfx1151', expected_target: 'unknown',
       expected_device_name: '', expected_physical_cu_count: 40,
     };
+    // A kernel pass-through starts no server, so its backend is not checked.
     for (const identity of [HALO, { expected_gfx: 'gfx1150' }]) {
-      const { run, trace } = build({ kernel_path: '/tmp/k', ...identity });
+      const { run, trace } = build({ kernel_path: '/tmp/k', backend: 'sglang', ...identity });
       await run();
       const a = (trace.workflowCalls[0] || {}).args || {};
       ok(a.use_learned_kb === 'false' && a.use_expert_skills === 'false' && a.perf_knowledge_dir === ''
@@ -330,13 +331,49 @@ const R9700 = {
       ok(a.expected_target === identity.expected_target, `${identity.expected_gfx} product forwarded as given`,
         JSON.stringify(a.expected_target));
     }
-    // Model mode has no validated serving or prompt policy for the family yet: refused before any phase.
-    for (const identity of [HALO, { expected_gfx: 'gfx1150', expected_target: 'unknown' }]) {
-      const { run, trace } = build({ model_path: '/models/m', ...identity }, { stopAtFirstPhase: true });
-      let msg = '';
-      try { await run(); } catch (e) { msg = e.message; }
-      ok(new RegExp(`${identity.expected_gfx} E2E is not supported yet`).test(msg) && trace.phases.length === 0,
-        `${identity.expected_gfx} model mode is refused before any phase`, msg || 'no throw');
+    const { run, trace } = build({ model_path: '/models/m', ...HALO }, {
+      stopAtPhase: 2, setupIdentity: { gfx: 'gfx1151', target: 'unknown', name: '', cu: 40 },
+    });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(msg === PROBE_STOP, 'gfx1151 setup reached the next phase', msg || 'no throw');
+    const directorPrompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
+    ok(/E2E_LEARNED_KB: off/.test(directorPrompt), 'gfx1151 role inputs disable the E2E learned KB');
+    ok(/BACKEND=vllm/.test(directorPrompt), 'gfx1151 defaults to vllm');
+    const refused = build({ model_path: '/models/m', backend: 'sglang', ...HALO }, { stopAtFirstPhase: true });
+    let refusal = '';
+    try { await refused.run(); } catch (e) { refusal = e.message; }
+    ok(/gfx1151 E2E is vLLM-only \(got backend=sglang\)/.test(refusal), 'gfx1151 refuses sglang', refusal || 'no throw');
+    // The fused-fp8 prompts, rendered: gfx115x has no fp8 matrix instruction; every other family
+    // keeps its words. fp8 meets the core name only in FP8_MMA, so a new site cannot skip it.
+    const probe = BODY.replace(/(\nconst GRAPH_REQ = [\s\S]*?\n\) : '';\n)/, '$1return { GRAPH_REQ, FP8_MMA };\n');
+    for (const [identity, words] of [[HALO, 'fp8-weight (upcast in registers)'], [R9700, 'fp8 WMMA'],
+      [{ expected_gfx: 'gfx950', expected_target: 'unknown' }, 'fp8 MFMA']]) {
+      const r = await build({ model_path: '/models/m', backend: 'vllm', ...identity }, { body: probe }).run();
+      ok(r && r.FP8_MMA === words && r.GRAPH_REQ.includes(`fused quant (one ${words}, kill the dequant)`),
+        `${identity.expected_gfx} fused-fp8 prompts say "${words}"`, r && r.FP8_MMA);
+    }
+    ok((BODY.match(/fp8 \$\{MATRIX_CORE_NAME\}/g) || []).length === 1, 'fp8 meets the core name only in FP8_MMA');
+    // Every E2E role prompt on gfx115x carries ARCH_CONSTRAINTS (so do the three hand-built DEEP
+    // prompts); R9700 and Instinct prompts get none.
+    const rolePrompts = async (identity) => {
+      const { run, trace } = build({ model_path: '/models/m', ...identity }, { setupIdentity: {
+        gfx: identity.expected_gfx, target: identity.expected_target,
+        name: identity.expected_device_name, cu: identity.expected_physical_cu_count,
+      } });
+      try { await run(); } catch (e) { /* the stubbed flow ends wherever it ends */ }
+      return trace.agentPrompts.filter((p) => /E2E_LEARNED_KB: (on|off)/.test(p.prompt || ''));
+    };
+    const halo = await rolePrompts(HALO);
+    const roles = new Set(halo.map((p) => p.label)).size;
+    ok(roles >= 5 && halo.every((p) => p.prompt.includes('ARCH_CONSTRAINTS: gfx1151: WMMA and wave32')),
+      `every gfx1151 role prompt carries ARCH_CONSTRAINTS (${halo.length} prompts, ${roles} roles)`);
+    ok((BODY.match(/\$\{DEEP_ARCH_NOTE\}/g) || []).length === 3, 'the three DEEP prompts splice in the note');
+    for (const identity of [R9700, { expected_gfx: 'gfx950', expected_target: 'unknown',
+      expected_device_name: 'AMD Instinct MI355X', expected_physical_cu_count: 256 }]) {
+      const ps = await rolePrompts(identity);
+      ok(ps.length > 0 && ps.every((p) => !p.prompt.includes('ARCH_CONSTRAINTS')),
+        `no ${identity.expected_gfx} role prompt carries ARCH_CONSTRAINTS (${ps.length} prompts)`);
     }
   }
 

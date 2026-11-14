@@ -32,7 +32,7 @@ const make = new Function('A', 'process', `
   const MODEL_PATH = A.kernel_path && !A.model_path ? '' : (A.model_path || '/models/test');
   const logs = [], log = msg => logs.push(msg), BACKEND = A.backend || 'sglang', SERVING_TP = 8, SERVING_GPU = '0,1,2,3,4,5,6,7';
   const GPU_IDS = SERVING_GPU, EFFECTIVE_CONFIG_DIGEST = '';
-  const E2E_LEARNED_KB_ENABLED = false, cfg = o => JSON.stringify(o);
+  const E2E_LEARNED_KB_ENABLED = false, ARCH_CONSTRAINTS = '', cfg = o => JSON.stringify(o);
   const expertSkillsBlock = () => '', warmStartBlock = () => '';
   const correctnessEnvBlock = () => '', workloadIdentityBlock = () => '';
   ${settings}

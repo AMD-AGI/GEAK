@@ -352,18 +352,23 @@ class TestMapArgs(_RunE2ECase):
         os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
         self.assertEqual(rx._expected_gpu_identity({}), expected)
 
-    def test_r9600d_defaults_to_vllm_like_r9700(self):
-        for target, name, cus in (
-            ("r9700", "AMD Radeon AI PRO R9700", 64),
-            ("r9600d", "AMD Radeon AI PRO R9600D", 48),
+    def test_vllm_only_identities_default_to_vllm(self):
+        # R9700 / R9600D by product; gfx115x by ISA (no product key; ROCm 7.2.3 reports
+        # an empty name on gfx1151). Discrete RDNA3 keeps the global default.
+        for gfx, target, name, cus, backend in (
+            ("gfx1201", "r9700", "AMD Radeon AI PRO R9700", 64, "vllm"),
+            ("gfx1201", "r9600d", "AMD Radeon AI PRO R9600D", 48, "vllm"),
+            ("gfx1151", "unknown", "", 40, "vllm"),
+            ("gfx1150", "unknown", "", 16, "vllm"),
+            ("gfx1100", "unknown", "AMD Radeon RX 7900 XTX", 96, "sglang"),
         ):
-            with self.subTest(target=target):
+            with self.subTest(gfx=gfx, target=target):
                 mapped = rx.map_args(self._handoff(
-                    eval_dir=str(self.tmp / f"e2e_{target}_default"),
-                    expected_gfx="gfx1201", expected_target=target,
+                    eval_dir=str(self.tmp / f"e2e_{gfx}_{target}_default"),
+                    expected_gfx=gfx, expected_target=target,
                     expected_device_name=name, expected_physical_cu_count=cus,
                 ))
-                self.assertEqual(mapped["backend"], "vllm")
+                self.assertEqual(mapped["backend"], backend)
 
     def test_r9600d_identity_rejects_wrong_isa(self):
         with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
@@ -3114,6 +3119,26 @@ class TestMain(_RunE2ECase):
         self.assertEqual(rc, 2)
         self.assertIn("empty/invalid handoff", err.getvalue())
         self.assertFalse(self.result_path.exists())
+
+    def test_dry_run_gfx1151_default_backend_reaches_the_launcher(self):
+        # map_args resolves vllm from the identity; the launcher must use the same
+        # backend, or a vllm run is handed the sglang launch script.
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
+        os.environ["MAGPIE_VLLM_SCRIPT"] = "/magpie/vllm.sh"
+        os.environ.pop("MAGPIE_LAUNCH_SCRIPT", None)
+        os.environ.pop("BENCH_LAUNCHER", None)
+        handoff = self._handoff(
+            framework="", expected_gfx="gfx1151", expected_target="unknown",
+            expected_device_name="", expected_physical_cu_count=40,
+        )
+        rc, stdout = self._run(handoff, "--dry-run")
+        self.assertEqual(rc, 0)
+        plan = json.loads(stdout)
+        self.assertEqual(plan["mapped_args"]["backend"], "vllm")
+        self.assertEqual(plan["bench_launcher"], "magpie")
+        self.assertEqual(plan["magpie_launch_script"], "/magpie/vllm.sh")
 
     def test_dry_run_reports_the_full_dispatch_plan_without_invoking(self):
         """--dry-run is the only way an operator can audit what GEAK is about to

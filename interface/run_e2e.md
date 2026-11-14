@@ -198,6 +198,8 @@ Product identity selects product data, not separate logic. `r9700` and
 isolation) and differ only in the `product:` block of
 `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
 holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.
+gfx115x (Strix Halo) has no product key: the ISA alone selects `vllm`, and the workflow refuses any
+other backend. Only a gfx1151 Radeon 8060S has been run; other gfx115x parts get the same policy.
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.
 
