@@ -5984,7 +5984,9 @@ async function runMegaCandidateTurn(currentRound, remaining) {
       (baseHead
         ? `Export exact parent commit ${baseHead} from ${baseTree} with git archive into the lane. `
         : `Copy ${baseTree} into it with a tar pipe excluding .git/build/__pycache__/.torch_ext/*.so/*.o. `) +
-      `then initialize a fresh git repository and commit "candidate base ${baseCandidateId}". ` +
+      `then initialize a fresh git repository, add .rocprofv3/ to .git/info/exclude, remove any ` +
+      `tracked .rocprofv3/ from the index (profiler dumps are not candidate source), and commit ` +
+      `"candidate base ${baseCandidateId}". ` +
       `Before any long-running command, atomically write ${laneManifest} with candidate_id/source/` +
       `base_candidate_id/tree/attempt_id so a ` +
       `timed-out first attempt is discoverable on resume. ` +
