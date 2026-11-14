@@ -106,6 +106,7 @@ The mapping is owned by `run_e2e.py:map_args`.
 | (derived from `exp_root`) | `tracelens` | Auto-discovered upstream TraceLens artifacts; only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client`, `inferencex_path` | env `BENCH_CLIENT`, `INFERENCEX_PATH` | Exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.*` | env `RANDOM_RANGE_RATIO`, `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED` | `run_e2e.py:apply_bench_protocol` exports only the provided keys; absent keys keep `bench_e2e.sh` defaults |
+| `head_threshold_pct`, `head_budget`, `kernel_budget` | same names | Head-track admission bar (% of GPU time), head queue depth, rounds per kernel; absent keys keep the workflow defaults (5, 3, 6; fast mode: queue max(3, GPU count), 3 rounds) |
 | — | `config_tune="false"` | Caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
 
@@ -238,7 +239,9 @@ disk. `run_e2e.py` removes that fragility in four layers:
    `workflow_return.json` if present, else reconstructed from
    `director_e2e_validation.json` with accepted-kernel names recovered from the
    stable `overlay/cand_*` layout. Recovery returns nothing only when no completed
-   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`.
+   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`;
+   when the workflow call failed, they also carry `handoff_error_class`,
+   `handoff_error`, `handoff_elapsed_s` and `handoff_budget_s`.
 
 ## `kernel_journey.json`
 

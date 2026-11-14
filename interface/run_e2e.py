@@ -41,6 +41,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+from subprocess import TimeoutExpired as _TimeoutExpired  # survives tests stubbing `subprocess`
 import sys
 import tempfile
 import time
@@ -927,6 +928,18 @@ def map_args(
     # of deriving it.
     if h.get("tuning_kb") is not None:
         ps_args["tuning_kb"] = "true" if _as_bool(h["tuning_kb"]) else "false"
+    # Head-track bounds: the admission bar, the queue it is sliced to, and the rounds per kernel.
+    # Omitted keys keep the workflow defaults. A value the workflow would parse to NaN, and so
+    # silently skip the head track with, is refused here.
+    for _k, _parse in (("head_threshold_pct", float), ("head_budget", int), ("kernel_budget", int)):
+        if h.get(_k) is not None:
+            try:
+                if isinstance(h[_k], bool):
+                    raise ValueError
+                _parse(str(h[_k]))
+            except ValueError:
+                raise ValueError(f"{_k} must be a number, got {h[_k]!r}") from None
+            ps_args[_k] = str(h[_k])
     # No op budget is forwarded: the tuning loop is uncapped by design (see e2e_workflow.js).
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
@@ -2798,8 +2811,9 @@ def _classify_error(exc: BaseException) -> str:
     attribute *why* an e2e run missed. Keep these values stable; unknown
     failures fall back to ``runner_error``.
     """
-    # anyio.fail_after raises builtins.TimeoutError on budget expiry.
-    if isinstance(exc, TimeoutError):
+    # anyio.fail_after raises builtins.TimeoutError on budget expiry; the CLI path's
+    # subprocess.run(timeout=...) raises TimeoutExpired, which is not a TimeoutError.
+    if isinstance(exc, (TimeoutError, _TimeoutExpired)):
         return "timeout"
     msg = str(exc)
     # The CLI turns a failed API call into an "API Error: ..." reply, so an outage
@@ -5908,7 +5922,9 @@ def _tuning_recovery_return(
         "throughput_speedup": speedup,
         "baseline_throughput_tok_s": pre,
         "final_throughput_tok_s": post,
-        "output_parity": tuning.get("correctness_gate") or "unknown",
+        # correctness_gate is an op-level tolerance check, not e2e output parity; it stays in
+        # tuning_skillset.
+        "output_parity": "",
         "final_overlay": overlay,
         "final_launch_script": launcher,
         "accepted_config": {
@@ -7622,8 +7638,12 @@ def build_kernel_journey(wf: dict, normalized: dict) -> dict:
         if kid in seen:
             continue
         seen.add(kid)
+        # A recovered tuning return claims no output parity; its op gate is the kernel verdict.
+        parity = (_parity_passed(wf["tuning_skillset"].get("correctness_gate"))
+                  if k.get("from_tuning_skillset") and wf.get("recovered_tuning_source")
+                  else overall_parity)
         kernels.append(_journey_return_entry(
-            eval_dir_str, k, idx, wf, geak_sha, overall_parity,
+            eval_dir_str, k, idx, wf, geak_sha, parity,
             kernel_id_override=kid))
         synth_hot.append({
             "kernel_id": kid, "name": (m["name"] if m else name),
@@ -7738,9 +7758,13 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
 
     parts: list[str] = []
     parts.append("# GEAK e2e — final report (SYNTHESIZED)\n")
+    why = ""
+    if normalized.get("handoff_error_class"):
+        why = (f" (its call failed after {normalized['handoff_elapsed_s']:.0f}s of "
+               f"{normalized['handoff_budget_s']}s: `{normalized['handoff_error_class']}`)")
     parts.append(
         "> **This report was not written by the Report phase.** The workflow did not reach\n"
-        "> Finalize/Report/Validate before its wall-clock budget expired, so `run_e2e.py`\n"
+        f"> Finalize/Report/Validate{why}, so `run_e2e.py`\n"
         "> synthesized this file from the artifacts already on disk. Every number below was\n"
         "> really measured, but there was **no independent Director re-measurement**, so treat\n"
         "> the headline as provisional and re-bench before promoting it.\n"
@@ -7762,7 +7786,7 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     ]))
 
     parts.append("\n\n## Accepted work\n")
-    if not kernels and not heads:
+    if not kernels and not heads and not (config.get("flags") or config.get("env")):
         parts.append("\nNothing was accepted — the run is a do-no-harm no-gain.\n")
     for label, entries in (("kernels", kernels), ("heads", heads)):
         if not entries:
@@ -8114,7 +8138,7 @@ def main(argv: list[str]) -> int:
     _emit_state: dict[str, Any] = {"done": False, "out": {}}
 
     def _emit(wf: dict | None = None, *, error: object = None,
-              error_class: str | None = None) -> dict:
+              error_class: str | None = None, handoff: dict | None = None) -> dict:
         if _emit_state["done"]:
             return _emit_state["out"]
         # A second SIGTERM must not interrupt the flush we are about to do.
@@ -8132,6 +8156,7 @@ def main(argv: list[str]) -> int:
                 out = normalize_result(h, wf)
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
+                out.update(handoff or {})
             else:
                 phase = _phase_reached(eval_dir_hint)
                 message = str(error or "")
@@ -8307,25 +8332,37 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    handoff: dict | None = None
     run = _mark_run(eval_dir_hint)
+    started = time.time()
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)
+        # Why the call failed, for a result recovered from disk (_emit). The tail of the message:
+        # TimeoutExpired's starts with the whole prompt.
+        handoff = {
+            "handoff_error_class": err_class,
+            "handoff_error": f"{type(e).__name__}: {str(e)[-800:]}",
+            "handoff_elapsed_s": round(time.time() - started, 1),
+            "handoff_budget_s": timeout_s,
+        }
         try:
             wf = _recover_workflow_return(exp_root)
         except Exception:
             wf = None
         if wf is not None:
             sys.stderr.write(
-                f"GEAK e2e: workflow handoff failed [{err_class}]; "
+                f"GEAK e2e: workflow handoff failed [{err_class}] after "
+                f"{handoff['handoff_elapsed_s']:.0f}s of {timeout_s}s; "
                 f"recovered from disk artifacts ({wf.get('eval_dir')}).\n"
+                f"GEAK e2e:   cause: {handoff['handoff_error']}\n"
             )
         else:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
-        out = _emit(wf=wf, error=err, error_class=err_class)
+        out = _emit(wf=wf, error=err, error_class=err_class, handoff=handoff)
         _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),
