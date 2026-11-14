@@ -1,5 +1,8 @@
 # AgentX workload measurement
 
+For vLLM, use the [iteration-observer and probe commands](vllm.md); the SGLang
+`server.log` / `decode_log_interval` examples below are not vLLM inputs.
+
 Use the sections matching the current run. The [core skill](../SKILL.md) owns
 activation, ranking artifacts and the weighting contract.
 

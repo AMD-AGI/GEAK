@@ -36,10 +36,11 @@ SEAM_TRACE = os.path.join(SCRIPTS, "seam_trace.py")
 class _FakeTorch(types.ModuleType):
     """Minimal torch surface: a flippable capture flag, plus recording profiler objects."""
 
-    def __init__(self, capturing=False, has_capture_query=True):
+    def __init__(self, capturing=False, has_capture_query=True, compiling=None):
         super().__init__("torch")
         self.entered = []          # record_function labels entered, and EXPORT: paths
         self.profiles_started = 0
+        self.capture_queries = 0
         self._capturing = capturing
         outer = self
 
@@ -76,7 +77,13 @@ class _FakeTorch(types.ModuleType):
         self.cuda = types.SimpleNamespace(synchronize=lambda *a, **k: None,
                                           is_available=lambda: True)
         if has_capture_query:
-            self.cuda.is_current_stream_capturing = lambda: self._capturing
+            self.cuda.is_current_stream_capturing = self._capture_query
+        if compiling is not None:
+            self.compiler = types.SimpleNamespace(is_compiling=lambda: compiling)
+
+    def _capture_query(self):
+        self.capture_queries += 1
+        return self._capturing
 
     def set_capturing(self, value):
         self._capturing = value
@@ -199,6 +206,47 @@ class TestMarkerIsPassThroughDuringCapture(unittest.TestCase):
             mod.work(1)
             self.assertTrue(any(target in entry for entry in torch.entered),
                             f"marker never resumed after capture ended; entered={torch.entered}")
+
+
+class TestMarkerIsPassThroughWhileCompiling(unittest.TestCase):
+    """Under torch.compile the marker must not reach the capture query, which Dynamo cannot trace."""
+
+    def _call_while_compiling(self, neutralise_check=False):
+        with fake_torch(capturing=False, compiling=True) as torch:
+            seam = load_seam()
+            if neutralise_check:
+                seam._compile_probe = lambda: (lambda: False)
+            mod, calls, target = make_target()
+            seam.install(target)
+            result = mod.work(2, y=3)
+            return result, torch, seam, calls
+
+    def test_wrapped_function_still_runs_and_returns_correctly(self):
+        result, _torch, _seam, calls = self._call_while_compiling()
+        self.assertEqual(result, 5)
+        self.assertEqual(calls, [(2, 3)])
+
+    def test_neither_the_capture_query_nor_a_marker_runs(self):
+        _r, torch, seam, _c = self._call_while_compiling()
+        self.assertEqual(torch.capture_queries, 0,
+                         "the capture query ran while compiling: Dynamo rejects it and the engine dies")
+        self.assertEqual(torch.entered, [])
+        self.assertEqual(torch.profiles_started, 0)
+        self.assertEqual(seam._PROFILE["active_calls"], 0)
+
+    def test_without_the_check_the_capture_query_runs(self):
+        _r, torch, _seam, _c = self._call_while_compiling(neutralise_check=True)
+        self.assertGreater(torch.capture_queries, 0,
+                           "NON-DISCRIMINATING: the capture query was skipped even with the check "
+                           "neutralised, so these tests do not cover the check")
+
+    def test_torch_without_the_compiler_query_is_treated_as_not_compiling(self):
+        with fake_torch(capturing=False) as torch:
+            seam = load_seam()
+            mod, _calls, target = make_target()
+            seam.install(target)
+            mod.work(1)
+            self.assertTrue(any(target in entry for entry in torch.entered))
 
 
 class TestProfileLifecycleGuards(unittest.TestCase):

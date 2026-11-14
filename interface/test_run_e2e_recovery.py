@@ -386,6 +386,32 @@ def test_recovery_reads_workflow_review_checkpoint_only_for_the_same_measurement
         assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
 
 
+def test_an_integrator_pending_flag_does_not_block_a_gain_within_the_coverage_estimate(tmp_path):
+    eval_dir = tmp_path / "e2e_flagged_within_estimate"
+    _candidate(eval_dir, "h1", parity_kind="accuracy", pct_gpu_time=13.6954, isolated_speedup=1.5265,
+               e2e_delta_pct=12.79, ref_med=50.467, cand_med=56.921, e2e_throughput_tok_s=56.921,
+               measurement_evidence=_measurement("original"),
+               affected_gpu_time={
+                   "candidate_digest": "candidate-content",
+                   "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+                   "kernels": [{"id": name, "pct_gpu_time": pct} for name, pct in
+                               (("gemm_0", 13.6954), ("gemm_1", 3.2377), ("gate", 2.2092))],
+               },
+               speedup_review={"status": "pending", "estimate": {"amdahl_e2e_ceiling_pct": 4.96}})
+    record = rx._integrate_candidates(eval_dir)[0]
+    assert record["speedup_estimate"]["estimate_pct"] == pytest.approx(7.069, abs=0.001)
+    assert record["speedup_review_pending"] is False
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_throughput_tok_s"] == pytest.approx(56.921)
+
+
+def test_an_integrator_pending_flag_keeps_a_surprising_gain_awaiting_review(tmp_path):
+    eval_dir = tmp_path / "e2e_flagged_surprising"
+    _issue522_candidate(eval_dir, speedup_review={"status": "pending"})
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+    assert rx._integrate_candidates(eval_dir)[0]["speedup_review_pending"] is True
+
+
 def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):
     """The ceiling comes from an imperfect profile, so a hard correctness
     guarantee outranks it — the guard only applies where parity was waived."""
