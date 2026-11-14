@@ -1,0 +1,184 @@
+schema_version: expert-skill-planner-extension-v1
+skill_id: megamoe_small_mtpr_fusion
+plan_version: mega-plan-v2
+
+applicability:
+  mode: mega
+  operator: moe_dispatch_combine
+  architecture: gfx950
+  parallelism: EP8
+  framework: MegaMoE_v2
+  regime: weight_streaming
+  validated_tokens_per_rank: 64
+  intended_mtpr_range: 32-128
+  evidence_profile:
+    ranks: 8
+    experts_per_rank: 48
+    topk: 6
+    hidden_dim: 7168
+    inter_dim: 3072
+    swiglu_limit: 10
+    external_dtype: bf16
+    activation_quant: mxfp8_per_1x32_e8m0
+    weight_quant: mxfp4_e8m0
+    p2p_quant: none
+
+binding_policy:
+  authority: analyze
+  names_are_normative: false
+  discovery: call_dataflow_type_shape_address_space_and_launch_sites
+  report_mismatches_to: planner
+  roles:
+    - input_quantization
+    - route_plan_and_payload
+    - first_expert_compute
+    - dependent_expert_compute
+    - output_reduction
+    - host_selection_and_state
+  record_in:
+    - modifiable_files
+    - task_graph
+    - mega_plan_ir.regions
+    - mega_plan_ir.abi
+    - mega_plan_ir.compiler_constraints
+
+selection_policy:
+  continue_existing_lane_first: true
+  preferred_template: single_persistent_kernel
+  seed_recipe: true
+  search_after_reproduction: true
+  do_not_measure_partial_source: false
+  intermediate_wip:
+    lane: same_candidate_required
+    commit_each_turn: true
+    candidate_status: authoring
+    claim_complete_for_committed_turn_artifact: true
+    runtime_flags: false
+    benchmark_or_promote_before_required_checks_pass: false
+    continue_head_lineage: true
+  required_failure_order:
+    - plan
+    - correctness
+    - lifecycle
+    - resource
+    - schedule
+    - performance
+
+ir_bindings:
+  target:
+    # Upper bound. Quantization may stay a separate launch; fusing it is an optional lever.
+    launch_count: 2
+    required_regions:
+      - dispatch_plan
+      - first_compute
+      - second_compute
+      - output_reduce
+    required_queues:
+      - compute_queue
+      - output_reduce_queue
+    required_capabilities:
+      - item_level_overlap
+      - monotone_cross_rank_readiness
+      - graph_replay_safe
+      - whole_grid_residency
+  work_domains:
+    - {id: input_tokens, unit: token, extent: run_tokens, index_type: i32}
+    - {id: routed_rows, unit: routed_row, extent: num_valid, index_type: i32}
+    - {id: compute_units, unit: g1_tile_then_g2_unit_per_xcd, extent: g1_tiles + g2_units, index_type: i32}
+    - {id: combine_items, unit: token_chunk, extent: run_tokens * hidden_chunks, index_type: i32}
+  regions:
+    - {id: input_quantize, role: producer, work_domain: input_tokens}
+    - {id: dispatch_plan, role: producer, work_domain: routed_rows}
+    - {id: first_compute, role: producer_consumer, work_domain: compute_units}
+    - {id: second_compute, role: producer_consumer, work_domain: compute_units}
+    - {id: output_reduce, role: consumer, work_domain: combine_items}
+  queues:
+    - {id: compute_queue, work_domain: compute_units, claim_unit: tile}
+    - {id: output_reduce_queue, work_domain: combine_items, claim_unit: exit_ticket_wave_item}
+  schedule:
+    primary_loop:
+      kind: per_xcd_g1_then_g2_then_combine_tail
+      carried_state: [next_unit, b_queue]
+      queue_selection: per_xcd_counter_g1_units_then_g2_units_then_exit_ticket
+    policies:
+      g1_partition: xcd_contiguous_m_major
+      g1_load_order: rows_ascale_b_then_a_gather_lookahead_2
+      g1_cross_tile_b: claim_at_k_step_24_of_28_issue_next_b_last_2_steps
+      g2_readiness: per_m_tile_counter_64b_line_threshold_sets_epoch_ready
+      g2_ready_wait: inside_tile_after_b_and_metadata_l1_invalidate_only
+      g2_b_pipeline: half_tile_ring_of_3
+      g2_tail: last_m_tile_per_xcd_bn_half_when_bn_256
+      combine_transition: exit_ticket_last_signals_peers_last_256_reduce
+      launch_protocol: no_handshake_parity_double_buffered_preplan_buffers
+      plan_publication: i64_epoch_num_valid_per_xcd_acquire_forward
+      front_end: route_prefetch_dedup_payload_early_route_counts_optional_fused_quant
+      lds_control_words: private_work_word_per_wave_has_work
+  evidence_requirements:
+    activation: path=MEGA on all eight ranks for the target operator; path=MEGA or path=FALLBACK elsewhere
+    accuracy: relL2 below the workflow threshold at 128, 512, 8192 and every mtpr case
+    launch_count: the same 1..2 launches per call on every rank for the target operator (a separate quantize launch plus one persistent kernel is acceptable; the seed recipe fuses quantization and emits 1)
+    liveness: graph replay with route mutation including moving-hot-rank; mixed token counts on one operator
+    resources: emitted kernel metadata; whole grid resident (2 workgroups per CU at <=256 VGPR)
+    performance: frozen-relative rank-max speedup on the target guard above the workflow minimum and above 1.0x
+
+candidate_templates:
+  - id: single_persistent_kernel
+    priority: 100
+    candidate_source: search
+    target_topology:
+      launch_count: 2
+      included_regions:
+        - dispatch_plan
+        - first_compute
+        - second_compute
+        - output_reduce
+      included_queues:
+        - compute_queue
+        - output_reduce_queue
+      capabilities:
+        - item_level_overlap
+        - monotone_cross_rank_readiness
+        - graph_replay_safe
+        - whole_grid_residency
+      # Speed and launch count are the acceptance evidence here; no overlap meter build.
+      require_overlap: false
+      parameters:
+        fusion_switch: AITER_MEGAMOE_FUSE_ALL=1
+        fallback_marker_outside_range: path=FALLBACK
+        quantization_in_kernel: optional_lever_seed_true
+        combine_is_in_kernel: true
+        grid: two_workgroups_per_cu
+        g1_tile_m_n_k: 32x128x256
+        g1_lookahead: 2
+        g2_bn_bk: 256x256
+        g2_b_half_tiles_in_flight: 3
+        combine_reducers: 256
+        timed_diagnostics: false
+    checkpoints:
+      - fused_host_path
+      - single_kernel_correct
+      - launch_protocol
+      - front_end
+      - hbm_pipelining
+      - hardware_acceptance
+    completion_rule: one candidate runs dispatch, GEMM1, GEMM2 and combine in one persistent kernel (quantization fused or as a separate launch, 1..2 launches), passes every acceptance gate, then continues searching
+
+failure_routes:
+  - id: repair_single_kernel
+    match:
+      categories: [plan, correctness, lifecycle, resource, schedule, performance]
+      check_ids:
+        - fusion_switch_read
+        - path_markers_present
+        - residency_asserted
+        - work_word_private
+    repair_intent: return the earliest failure to the same lane, fix it with one coherent commit per turn, re-measure with paired graph A/B; consult the Skill's rejected ledger before trying a new idea; applicability stays workflow-owned
+    checkpoint: single_kernel_correct
+    topology: single_persistent_kernel
+    terminal_when: all_required_checks_pass
+    focus_roles:
+      - host_selection_and_state
+      - route_plan_and_payload
+      - first_expert_compute
+      - dependent_expert_compute
+      - output_reduction

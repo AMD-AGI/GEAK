@@ -1,0 +1,16 @@
+{
+  "mfma": "^v_mfma",
+  "barrier": "^s_barrier",
+  "waitcnt": "^s_waitcnt",
+  "priority_or_sleep": "^s_(setprio|nop|sleep)",
+  "lds_read": "^ds_read",
+  "lds_write": "^ds_write",
+  "lds_other": "^ds_",
+  "vmem_read": "^(buffer_load|global_load|flat_load|scratch_load)",
+  "vmem_write": "^(buffer_store|global_store|flat_store|scratch_store)",
+  "valu_fp32_scale": "^v_(pk_)?(fma_f32|fmac_f32|mac_f32|mul_f32|add_f32|dot)",
+  "valu_convert_pack": "^v_(cvt|pack|perm|pk_)",
+  "valu_other": "^v_",
+  "scalar_load": "^s_load",
+  "scalar_alu_branch": "^s_"
+}
