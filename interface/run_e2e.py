@@ -867,6 +867,9 @@ def map_args(
     simulated = _simulated_acceptance_env(initial_env)
     if simulated:
         ps_args["correctness_unset_env"] = ",".join(simulated)
+    probe_spec = _probe_speculative_config(initial_server_args)
+    if probe_spec:
+        ps_args["correctness_speculative_config"] = probe_spec
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -7965,6 +7968,43 @@ def _simulated_acceptance_env(extra_env: str) -> list[str]:
     names.update(t.split("=", 1)[0] for t in tokens
                  if "=" in t and t.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX))
     return sorted(names)
+
+
+SPECULATIVE_CONFIG_FLAGS = ("--speculative-config", "--speculative_config")
+
+
+def _probe_speculative_config(server_args: str) -> str:
+    """The seed's vLLM ``--speculative-config`` with real verification, or ``""``.
+
+    vLLM simulates acceptance inside that JSON: ``"rejection_sample_method": "synthetic"`` with a
+    ``synthetic_acceptance_length``. The sampler becomes ``block`` and the length goes, as InferenceX
+    does for a run that verifies for real. ``""`` when the last ``--speculative-config`` is absent,
+    unreadable, or simulates nothing. The seed reaches the adapter word-split, so its JSON is read
+    from plain whitespace tokens first and from shell tokens second (a ``shlex.join``-ed seed).
+    """
+    for split in (str.split, shlex.split):
+        try:
+            tokens = split(str(server_args or ""))
+        except ValueError:
+            continue
+        raw = None
+        for i, token in enumerate(tokens):
+            flag, eq, value = token.partition("=")
+            if flag in SPECULATIVE_CONFIG_FLAGS:
+                raw = value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+        try:
+            spec = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if isinstance(spec, dict):
+            break
+    else:
+        return ""
+    if spec.get("rejection_sample_method") != "synthetic" and "synthetic_acceptance_length" not in spec:
+        return ""
+    spec["rejection_sample_method"] = "block"
+    spec.pop("synthetic_acceptance_length", None)
+    return json.dumps(spec, separators=(",", ":"), ensure_ascii=False)
 
 
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
