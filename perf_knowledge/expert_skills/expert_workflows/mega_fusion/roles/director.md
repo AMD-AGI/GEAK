@@ -324,8 +324,10 @@ batch may contain all finalists for one exhaustive comparison.
    excluding `.git`, build outputs and caches, commit the selected source, and write a cumulative
    `selected.patch` from root commit to selected commit. All deletion/mirroring must stay under
    `SELECTED_WORKSPACE`; never mutate baseline or a candidate.
-   Return the materialized git HEAD as `selected_head` and the source candidate commit as
-   `materialized_from_head`.
+   Return `SELECTED_WORKSPACE` itself as `selected_tree` (never the candidate's own tree), the
+   materialized git HEAD as `selected_head` and the source candidate commit as
+   `materialized_from_head`. The orchestrator rejects a selection whose `selected_tree` is not
+   `SELECTED_WORKSPACE`.
 6. Write the evidence JSON atomically and set `claim_complete:true` only after every log, candidate
    row, selected workspace and patch is complete. A timeout/force-emit returns
    `claim_complete:false` and selects nothing.
