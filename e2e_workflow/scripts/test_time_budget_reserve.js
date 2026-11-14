@@ -519,7 +519,7 @@ const guardHarnessSrc = [
   src.slice(gStart, gEnd),
   'ELAPSED_MS = TIME_BUDGET_MS == null ? 0 : TIME_BUDGET_MS - FINAL_RESERVE_MS - WINDOW_MS;',
   'return { abWindowShort, laneWindowShort, searchWindowShort, laneDeadlineArgs, laneReserveCapMs, agentxAbMs,',
-  '  agentxLaneTailMs, abLegs, advance: (ms) => { ELAPSED_MS += ms; } };',
+  '  agentxLaneTailMs, abLegs, validateDeadlineArgs, remainingMs, advance: (ms) => { ELAPSED_MS += ms; } };',
 ].join('\n');
 const EPOCH = 1800000000;
 const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12 * 3600 * 1000, windowMin = 0,
@@ -783,6 +783,43 @@ const verdict = { gate: 'accepted', ab_complete: true, e2e_delta_pct: 23.99 };
   const synth = guardsFor({ A: {}, windowMin: 300 });
   ok(Object.keys(await synth.laneDeadlineArgs('x', 'HeadKernel')).length === 0 && synth.reads.length === 0,
     'a synthetic run never reads the clock and passes the lane nothing new');
+
+  console.log("\n# Validate's deadline: the Director starts no block that cannot finish");
+  // The Kimi K3.1 run: the reserve held one canonical pair, the Director started a repeat pair with
+  // 81min left, and the run was killed inside it, before the Director returned.
+  const vd = guardsFor({ finalStarted: true });
+  vd.advance(vd.remainingMs() - 200 * 60000);
+  const v = await vd.validateDeadlineArgs();
+  ok(v.VALIDATE_DEADLINE_EPOCH === EPOCH + 190 * 60 && v.VALIDATE_BLOCK_S === 4800,
+    'with 200min left the Director must return within 190min (the workflow keeps 10min to return), and a ' +
+    'block is one 3600s window plus 20min');
+  ok(vd.reads.length === 1 && vd.reads[0].opts.phase === 'Validate' && vd.reads[0].opts.label === 'clock'
+    && /the Director returns within ~190min/.test(vd.logs.join('\n')), 'one clock read, and the log says it');
+  const cached = guardsFor({ windowMin: 300 });
+  await cached.laneDeadlineArgs('lane k', 'HeadKernel');
+  cached.advance((300 + 35) * 60000);
+  const vc = await cached.validateDeadlineArgs();
+  ok(cached.reads.length === 1 && vc.VALIDATE_DEADLINE_EPOCH === EPOCH + (335 + 190) * 60,
+    "a clock read during the search is reused: the deadline is the run's end less 10min, wherever it was read");
+  const iso = guardsFor({ A: { workload_kind: 'agentx_trace_replay', validation_measurement_mode: 'isolated_server',
+    validation_replicas: 3 }, finalStarted: true });
+  ok((await iso.validateDeadlineArgs()).VALIDATE_BLOCK_S === 3 * 4800,
+    'under isolated_server a block is one fresh server per replica');
+  const blindV = guardsFor({ finalStarted: true, clock: () => null });
+  ok(Object.keys(await blindV.validateDeadlineArgs()).length === 0
+    && /wall clock unreadable, so the Director gets no deadline/.test(blindV.logs.join('\n')),
+  'an unreadable clock gives the Director no deadline, and says so');
+  const fixed = guardsFor({ A: {}, finalStarted: true });
+  const unbudgeted = guardsFor({ budgetMs: null, finalStarted: true });
+  ok(Object.keys(await fixed.validateDeadlineArgs()).length === 0 && fixed.reads.length === 0
+    && Object.keys(await unbudgeted.validateDeadlineArgs()).length === 0 && unbudgeted.reads.length === 0,
+  'a synthetic or unbudgeted run reads no clock and adds nothing to the Director brief');
+  const brief = src.slice(src.indexOf("roleAgent('director', 'validate', "), src.indexOf("label: 'director:validate'"));
+  ok(/\n      \.\.\.\(await validateDeadlineArgs\(\)\),\n    \}\),\n    \{ phase: 'Validate', $/.test(brief),
+    'the Director brief spreads the deadline into its inputs, last, so {} leaves the prompt unchanged');
+  const directorRole = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', 'director.md'), 'utf8');
+  ok(/\*\*When `VALIDATE_DEADLINE_EPOCH` is in your inputs\*\*/.test(directorRole)
+    && directorRole.includes('`VALIDATE_BLOCK_S` seconds'), 'roles/director.md says what both inputs are for');
 
   const rbwStart = src.indexOf('async function reserveBoundedWorkflow(');
   const rbwEnd = src.indexOf('\n}', src.indexOf('function logLaneAtReserve(')) + 2;

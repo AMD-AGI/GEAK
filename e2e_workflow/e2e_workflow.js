@@ -3014,6 +3014,25 @@ async function laneDeadlineArgs(label, phaseName) {
 }
 // Backstop: never wait for a lane past the boundary.
 const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
+// Validate's blocks are canonical windows and the reserve holds one pair of them, so the Director gets
+// the epoch it must return by and what a block costs, and starts nothing that cannot finish
+// (roles/director.md). After it, the workflow keeps AGENTX_POST_VALIDATE_S to return.
+const AGENTX_POST_VALIDATE_S = 600;
+async function validateDeadlineArgs() {
+  if (!IS_AGENTX || TIME_BUDGET_MS == null) return {};
+  const now = await epochNow('Validate');
+  if (now == null) {
+    log('[time-budget] Validate: wall clock unreadable, so the Director gets no deadline.');
+    return {};
+  }
+  const leftS = Math.floor(remainingMs() / 1000) - AGENTX_POST_VALIDATE_S;
+  log(`[time-budget] Validate: the Director returns within ~${Math.max(0, Math.round(leftS / 60))}min and ` +
+    'starts no block or probe that cannot finish by then.');
+  return {
+    VALIDATE_DEADLINE_EPOCH: now + leftS,
+    VALIDATE_BLOCK_S: (AGENTX_VALIDATION_LEGS / 2) * agentxLegS(RESERVE_DURATION_S),
+  };
+}
 
 // GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
 // leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
@@ -6070,6 +6089,7 @@ if (want('final')) {
       // status/parity) to its own, so they never disagree. Defaults are the standard EVAL_DIR names.
       ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
+      ...(await validateDeadlineArgs()),
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
   // Trust the Director's number only when it is a real positive measurement; a Validate with no
