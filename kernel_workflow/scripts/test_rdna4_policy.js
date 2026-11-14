@@ -306,6 +306,8 @@ function mustInclude(hay, needle, msg) {
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   mustInclude(e2e, 'E2E is vLLM-only');
   mustInclude(e2e, 'RDNA4_PRODUCT_E2E');
+  mustInclude(e2e, 'R9700 E2E is vLLM or SGLang only');
+  mustInclude(e2e, 'R9700_E2E');
 
   const rdna = fs.readFileSync(path.join(wfDir, 'knowledge/amd_rdna4.md'), 'utf8');
   mustInclude(rdna, 'rocprofv3-avail list --pmc');

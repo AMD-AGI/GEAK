@@ -50,7 +50,7 @@ class EffectiveConfig:
 @dataclass(frozen=True)
 class _Flag:
     name: str
-    value: Optional[str]
+    value: Optional[Union[str, tuple[str, ...]]]
 
 
 def _protect_bare_json(text: str) -> tuple[str, dict[str, str]]:
@@ -138,6 +138,10 @@ def _looks_like_flag(token: str) -> bool:
     return False
 
 
+# Only these flags take several values; every other flag takes exactly one.
+LIST_VALUED_FLAGS = frozenset({"--cuda-graph-bs", "--cuda-graph-bs-decode"})
+
+
 def _parse_flags(text: Any) -> list[_Flag]:
     """Parse long/unknown flags, equals forms, booleans, and JSON values."""
 
@@ -153,10 +157,17 @@ def _parse_flags(text: Any) -> list[_Flag]:
             flags.append(_Flag(name, _canonical_value(value)))
             index += 1
             continue
-        value: Optional[str] = None
-        if index + 1 < len(tokens) and not _looks_like_flag(tokens[index + 1]):
-            value = _canonical_value(tokens[index + 1])
+        values: list[str] = []
+        while index + 1 < len(tokens) and not _looks_like_flag(tokens[index + 1]):
+            if values and token not in LIST_VALUED_FLAGS:
+                raise ValueError(f"{token} takes one value, got extra {tokens[index + 1]!r}")
+            values.append(_canonical_value(tokens[index + 1]))
             index += 1
+        value: Optional[Union[str, tuple[str, ...]]] = None
+        if len(values) == 1:
+            value = values[0]
+        elif values:
+            value = tuple(values)
         flags.append(_Flag(token, value))
         index += 1
     return flags
@@ -188,7 +199,9 @@ def _render_flags(flags: Iterable[_Flag]) -> str:
     tokens: list[str] = []
     for flag in flags:
         tokens.append(flag.name)
-        if flag.value is not None:
+        if isinstance(flag.value, tuple):
+            tokens.extend(flag.value)
+        elif flag.value is not None:
             tokens.append(flag.value)
     return shlex.join(tokens)
 
