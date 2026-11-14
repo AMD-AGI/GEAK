@@ -515,6 +515,24 @@ class TestStepSpans(unittest.TestCase):
         self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
         self.assertIsNone(pp._classify_step("step[malformed]"))
 
+    def test_sglang_verify_and_draft_labels(self):
+        self.assertEqual(pp._classify_step("step[VERIFY bs=6]"), (False, 0, 6, 0))
+        self.assertEqual(pp._classify_step("step[DRAFT bs=1 toks=6702]"), (True, 6702, 0, 0))
+        self.assertEqual(pp._classify_step("step[DRAFT bs=6]"), (False, 0, 6, 0))
+        self.assertEqual(pp._classify_step("step[DECODE bs=3]"), (False, 0, 3, 0))
+        self.assertEqual(pp._classify_step("step[DRAFT_EXTEND_V2 bs=3]"), (True, 0, 0, 0))
+
+    def test_verify_steps_next_to_extend_steps_keep_their_decode_windows(self):
+        # Strict mode raises only when nothing parses, so an unreadable decode label beside
+        # parsed EXTEND steps would drop out of the split without an error.
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=1 toks=512]", "ts": 0, "dur": 50},
+            {"cat": "gpu_user_annotation", "name": "step[DRAFT bs=1 toks=512]", "ts": 60, "dur": 10},
+            {"cat": "gpu_user_annotation", "name": "step[VERIFY bs=4]", "ts": 100, "dur": 20},
+        ]
+        self.assertEqual(pp._collect_step_spans(events, strict=True),
+                         [(0, 50, "P", 512, 0), (60, 70, "P", 512, 0), (100, 120, "D", 0, 4)])
+
     def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):
         from unittest.mock import patch
         events = [{"cat": "gpu_user_annotation", "name": "step[NEW_MODE bs=4]", "ts": 1, "dur": 5}]
