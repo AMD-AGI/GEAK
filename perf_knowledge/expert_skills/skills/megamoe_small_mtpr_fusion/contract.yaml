@@ -1,0 +1,84 @@
+schema_version: expert-skill-contract-v1
+skill_id: megamoe_small_mtpr_fusion
+
+source:
+  include:
+    - '**/*moe*.py'
+    - '**/gemm*.py'
+    - '**/dispatch*.py'
+    - '**/communication_ops_utils.py'
+  exclude:
+    - '3rdparty/**'
+
+binding_policy:
+  authority: analyze
+  names_are_normative: false
+  source_checks_are_profile_adapter_hints: true
+  adapter_hint_failures_block_applicability: false
+  adapter_scope: validated_megamoe_ep8_gfx950_profile_only
+  adapter_selection: analyze_discovered_semantic_bindings
+  applicability_owner: workflow
+  applicability_failures_block_compatibility: false
+
+activation:
+  scope: post_selection_claimed_complete_structural_checkpoint
+  requires_selected_or_pinned_skill: true
+  required_checks_define_claimed_implementation_completeness: true
+
+provenance:
+  require_manifest: true
+
+plan:
+  required: true
+  assertions:
+    - {id: plan_v2, path: plan_version, op: eq, value: mega-plan-v2}
+    - {id: at_most_two_launches, path: target.launch_count, op: lte, value: 2}
+    - {id: target_arch, path: resources.arch, op: eq, value: gfx950}
+    - {id: group_segment_within_gfx950, left: {path: resources.local_memory.total_bytes}, op: lte, right: {path: resources.local_memory.limit_bytes}}
+
+# This Skill is a seed recipe, not a normative implementation. The required
+# checks cover only the host contract the runtime validator relies on (switch
+# and path markers). The advisory checks point at the validated adapter's
+# spelling of two liveness/correctness invariants; another spelling that keeps
+# the invariant is equally valid.
+checks:
+  - id: fusion_switch_read
+    category: plan
+    tier: surface
+    severity: required
+    kind: regex
+    file: aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py
+    patterns:
+      - 'AITER_MEGAMOE_FUSE_ALL'
+
+  - id: path_markers_present
+    category: plan
+    tier: surface
+    severity: required
+    kind: regex
+    file: aiter/ops/flydsl/kernels/mega_moe/mega_moe_v2.py
+    patterns:
+      - '\[megamoe\] path=MEGA'
+      - '\[megamoe\] path=FALLBACK'
+
+  - id: residency_asserted
+    category: resource
+    tier: semantic
+    severity: advisory
+    kind: regex
+    file: aiter/ops/flydsl/kernels/mega_moe/mega_moe_stage1.py
+    match: any
+    patterns:
+      - 'assert[^\n]*grid_mult\s*<=\s*2'
+      - 'assert[^\n]*160\s*\*\s*1024'
+      - 'assert[^\n]*resident'
+
+  - id: work_word_private
+    category: correctness
+    tier: semantic
+    severity: advisory
+    kind: regex
+    file: aiter/ops/flydsl/kernels/mega_moe/mega_moe_stage1.py
+    match: any
+    patterns:
+      - 'work_word'

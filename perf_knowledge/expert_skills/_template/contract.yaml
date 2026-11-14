@@ -1,0 +1,45 @@
+schema_version: expert-skill-contract-v1
+skill_id: REPLACE
+revision: v1
+description: Optional declarative source and PlanIR preflight.
+
+source:
+  include: ["src/**/*.py"]
+  required: []
+  core_identity: []
+
+pins:
+  enforce: false
+  baseline_tree_sha256: ""
+  reference_tree_sha256: ""
+  reference_revision: ""
+
+provenance:
+  require_manifest: true
+
+plan:
+  required: false
+  assertions:
+    # - id: target_shape
+    #   path: target_launches
+    #   op: eq
+    #   value: 1
+
+checks:
+  - id: implementation_present
+    kind: regex
+    file: src/kernel.py
+    match: all
+    patterns: ["def kernel"]
+
+# Supported generic check kinds:
+# - regex: AST-normalized all/any/none patterns, optionally scoped to a qualified function.
+# - regex_sequence: require related AST-normalized patterns in declaration order.
+# - call_keywords: require keyword-expression identities on any/every matching call.
+# - forbid_methods: reject named method calls on matching receivers in a scope.
+# - assignment_value: relate a matching assignment target to its own RHS.
+# - parameter_loads: require declared runtime values to be consumed in a function scope.
+# - publication_placement: follow local helper calls and reject completion RMWs anywhere
+#   in a configured hot loop while allowing owner stores or a post-loop phase.
+# - owned_completion_protocol: prove m-tile ownership, all-stripe compute, ordered
+#   thread-owner system store, and transitive absence of completion-address RMWs.

@@ -1,0 +1,48 @@
+schema_version: expert-skill-validation-v1
+skill_id: megamoe_small_mtpr_fusion
+status: experimental
+reference_evidence:
+  status: measured
+constraint_validation:
+  status: static_validated
+usage:
+  auto_apply: false
+  explicit_pin_modes:
+  - authoring
+  - candidate_validation
+measured:
+  target: 64_uniform_mtpr64_rank_max
+  token_range:
+    validated_mtpr: [64]
+    graph_ab_64: 1.19
+    not_runnable_v35_build: ['128', '256']
+    not_measured: ['32']
+  frozen_baseline_ms: 0.3458
+  official_median_ms: 0.2946
+  isolated: 1.174
+  reference_speedup: 1.174
+  graph_time_us: 290.9
+  parity: pass
+  relL2_official: 0.053172
+  deterministic_output: true
+  launches: 1
+  quantization_in_kernel: true
+  combine_in_kernel: true
+  grid_workgroups: 512
+  workgroups_per_cu: 2
+  vgpr: 250
+  vgpr_spills: 0
+  group_segment: 40304
+  stage1_64:
+    sort_block_m: 32
+    tile_n: 128
+    tile_k: 256
+    waves: 8
+    lookahead: 2
+  stage2_64:
+    bn: 256
+    bk: 256
+    b_half_tiles_in_flight: 3
+    tail_bn_half: true
+  combine_reducers: 256
+  timed_diagnostics: false

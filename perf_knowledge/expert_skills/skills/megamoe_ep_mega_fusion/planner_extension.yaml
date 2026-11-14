@@ -1,0 +1,236 @@
+schema_version: expert-skill-planner-extension-v1
+skill_id: megamoe_ep_mega_fusion
+plan_version: mega-plan-v2
+
+applicability:
+  mode: mega
+  operator: moe_dispatch_combine
+  architecture: gfx950
+  parallelism: EP8
+  framework: MegaMoE_v2
+  evidence_profile:
+    ranks: 8
+    experts_per_rank: 48
+    topk: 6
+    hidden_dim: 7168
+    inter_dim: 3072
+    swiglu_limit: 10
+    external_dtype: bf16
+    activation_quant: mxfp8_per_1x32_e8m0
+    weight_quant: mxfp4_e8m0
+    large_transport: block_fp8_per_1x32
+
+binding_policy:
+  authority: analyze
+  names_are_normative: false
+  discovery: call_dataflow_type_shape_address_space_and_launch_sites
+  report_mismatches_to: planner
+  roles:
+    - input_quantization
+    - route_plan_and_payload
+    - first_expert_compute
+    - dependent_expert_compute
+    - weighted_peer_publication
+    - output_reduction
+    - host_selection_and_state
+  record_in:
+    - modifiable_files
+    - task_graph
+    - mega_plan_ir.regions
+    - mega_plan_ir.abi
+    - mega_plan_ir.compiler_constraints
+
+selection_policy:
+  continue_existing_lane_first: true
+  preferred_template: full_persistent_pipeline
+  do_not_measure_partial_source: true
+  intermediate_wip:
+    lane: same_candidate_required
+    commit_each_turn: true
+    candidate_status: authoring
+    claim_complete_for_committed_turn_artifact: true
+    runtime_flags: false
+    benchmark_or_promote_before_required_checks_pass: false
+    continue_head_lineage: true
+  required_failure_order:
+    - plan
+    - correctness
+    - abi
+    - lifecycle
+    - resource
+    - compiler
+    - schedule
+    - performance
+
+ir_bindings:
+  target:
+    launch_count: 2
+    required_regions:
+      - input_quantize
+      - dispatch_plan
+      - first_compute
+      - second_compute_transport
+      - output_reduce
+    required_queues:
+      - first_compute_queue
+      - second_compute_queue
+      - output_reduce_queue
+    required_capabilities:
+      - item_level_overlap
+      - monotone_cross_rank_readiness
+      - graph_replay_safe
+  work_domains:
+    - {id: input_tokens, unit: token, extent: run_tokens, index_type: i32}
+    - {id: routed_rows, unit: routed_row, extent: num_valid, index_type: i32}
+    - {id: g1_output_stripes, unit: m_tile_n_stripe, extent: g1_m_tiles * g1_n_stripes, index_type: i32}
+    - {id: g2_output_tiles, unit: m_block_n_block, extent: g2_m_blocks * g2_n_blocks, index_type: i32}
+    - {id: combine_items, unit: output_token_partition, extent: run_tokens * combine_partitions, index_type: i32}
+  regions:
+    - {id: input_quantize, role: producer, work_domain: input_tokens}
+    - {id: dispatch_plan, role: producer, work_domain: routed_rows}
+    - {id: first_compute, role: producer_consumer, work_domain: g1_output_stripes}
+    - {id: second_compute_transport, role: producer_consumer, work_domain: g2_output_tiles}
+    - {id: output_reduce, role: consumer, work_domain: combine_items}
+  queues:
+    - {id: first_compute_queue, work_domain: g1_output_stripes, claim_unit: stripe}
+    - {id: second_compute_queue, work_domain: g2_output_tiles, claim_unit: tile}
+    - {id: output_reduce_queue, work_domain: combine_items, claim_unit: block_wave_items}
+  schedule:
+    primary_loop:
+      kind: unified_g1_g2_then_combine
+      carried_state: [g2_next_unit, g2_units_remaining]
+      queue_selection: continuation_then_gated_g2_then_g1_then_blocking_g2
+    policies:
+      g1_completion: stripe_system_atomic_threshold
+      g1_store_visibility: sc0_sc1_then_waitcnt_barrier_system_add
+      g2_preempt_cohort: ticket_mod_6_eq_0
+      g2_preempt_skew: max_expert_tiles_times_epr_times_tile_m_times_4_gt_valid_rows_times_5
+      g2_chunk: contiguous_compile_time_1_with_column_grouped_order_16_only_with_m_major_reference
+      g2_claim_order: column_grouped_gm32_bijection_with_gated_skew_interleave
+      g2_continuation: two_block_uniform_scalars_no_atomic_poll_or_lds_handoff
+      scheduler_semantics: continuation_then_skew_mod6_ready_g2_else_g1_then_blocking_g2_contiguous_c1_c16
+      stage2_geometry: one_native_stage1_wave_cohort_one_slab
+      stage2_resources: single_shared_body_local_descriptors
+      p2p_visibility: sc0_sc1_nt_19_then_workgroup_release
+      tile_close: local_mblock_agent_add_broadcast_parallel_remote_rows
+      combine_transition: after_local_g1_g2_drain_without_grid_barrier
+      combine_claim: agent_add_one_then_claim_times_waves_plus_wave
+      combine_partitions: runtime_ceildiv_nominal_waves_tokens_capped_only_for_block_fp8
+      combine_item_jit_frame: direct_decorated_item_no_extra_wrapper
+      combine_reducer_vectorization: pressure_guarded_u1_u2_u4
+      combine_payload_visibility: system_scope_loads_without_per_item_acquire
+      combine_output_cache: rank_local_nt_2
+      combine_semantics: runtime_p_direct_per_wave_wait_block_claim_one_system19_u1_u2_u4
+      token_readiness: combine_generation_monotone_topk_with_omitted_padding
+      jit_identity: complete_compile_specs_and_all_codegen_switches
+  evidence_requirements:
+    activation: path=MEGA on all eight ranks
+    accuracy: relL2 below 0.10 at 128, 512 and 8192
+    launch_count: exactly two BF16-path launches on the shared large-token operator; at most two for an _mtpr target built at its own capacity
+    shared_fallback: with an _mtpr target, a shared operator declared FALLBACK prints path=FALLBACK on every rank and still owes accuracy and replay; the target's marker, launch ceiling and resources carry the claim
+    liveness: same-instance smaller-to-larger graph replay with route mutation
+    resources: emitted envelopes and one resident workgroup per CU
+    performance: paired rank-max speedup on the target guard, 8192-uniform at least 1.03x unless the workflow names another target and minimum, always above 1.0x
+
+candidate_templates:
+  - id: full_persistent_pipeline
+    priority: 100
+    candidate_source: search
+    target_topology:
+      launch_count: 2
+      included_regions:
+        - input_quantize
+        - dispatch_plan
+        - first_compute
+        - second_compute_transport
+        - output_reduce
+      included_queues:
+        - first_compute_queue
+        - second_compute_queue
+        - output_reduce_queue
+      capabilities:
+        - item_level_overlap
+        - monotone_cross_rank_readiness
+        - graph_replay_safe
+      require_overlap: true
+      parameters:
+        quantization_remains_separate: true
+        combine_is_in_kernel: true
+        timed_diagnostics: false
+        persistent_grid_ctas_8192: 256
+        swiglu_limit: 10
+        g2_preempt_modulus: 6
+        g2_preempt_skew_ratio: 5/4
+        g2_chunk_small: 1
+        g2_chunk_large: 1
+        g2_chunk_large_m_major_reference: 16
+        g2_claim_order: column_grouped
+        g2_claim_group_m: 32
+        g2_skew_interleave_gate: max_expert_tiles_times_4_gt_num_m_tiles
+        g2_chunks_are_contiguous: true
+        g2_continuation_scalars: 2
+        g1_store_cache: 17
+        p2p_store_cache: 19
+        combine_load_cache: 19
+        combine_output_cache: 2
+        stage2_8192_bm_bn_bk_nw: 64x512x256x8
+        stage2_8192_halves: 1
+        combine_8192_partitions: 1
+        combine_8192_reduce_u: 4
+        combine_8192_total_items: 8192
+    checkpoints:
+      - complete_host_path
+      - complete_persistent_pipeline
+      - static_contract
+      - hardware_acceptance
+    completion_rule: one candidate contains every required region and passes every acceptance gate
+
+failure_routes:
+  - id: repair_complete_persistent_pipeline
+    match:
+      categories: [plan, correctness, abi, lifecycle, resource, compiler, schedule, performance]
+      check_ids:
+        - complete_host_path
+        - selected_fused_host_bindings
+        - fused_bundle_flow
+        - fused_host_abi
+        - persistent_kernel_abi
+        - fused_launch_abi
+        - stage2_active_compile_flow
+        - flat_stripe_completion
+        - g1_cache_builder_flow
+        - g1_cache_epilogue_flow
+        - g1_cache_store_sink
+        - unified_g1_g2_loop
+        - g2_scheduler_cfg
+        - g2_skew_orientation
+        - shared_stage2_body
+        - scheduler_counter_domain_separation
+        - nontrivial_stage2_body
+        - stage2_descriptor_flow
+        - stage2_standalone_shared_body
+        - stage2_nw8_geometry
+        - combine_emitter_wired
+        - combine_readiness_is_strict
+        - p2p_visibility
+        - p2p_cache_selection
+        - p2p_cache_store_sink
+        - p2p_close_protocol
+        - progressive_token_readiness
+        - generation_lifecycle
+        - combine_output_work_item
+        - combine_launch_bindings
+        - combine_block_fp8_decode
+        - combine_u_selection
+        - block_claimed_combine
+        - bucket_512_payload_rows
+    repair_intent: return required failures in category order to the same candidate lane, commit one coherent subset per turn, and continue its head lineage using Analyze-discovered bindings; never classify remaining work as dead_end or too-large-for-one-turn; applicability remains workflow-owned
+    checkpoint: complete_persistent_pipeline
+    topology: full_persistent_pipeline
+    terminal_when: all_required_checks_pass
+    focus_roles:
+      - host_selection_and_state
+      - first_expert_compute
+      - dependent_expert_compute
+      - weighted_peer_publication
+      - output_reduction
