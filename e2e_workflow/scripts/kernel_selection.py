@@ -161,12 +161,31 @@ def _template_arguments(value):
     return re.sub(r"[^a-z0-9]+", "_", text[start + 1:].lower()), False
 
 
+# Tensile (rocBLAS/hipBLASLt) picks a solution per shape and glues these knobs to their names
+# (ScheduleIterAlg, StaggerU, StaggerUStride, WorkGroupMapping: SIA3, SU32, SUS256, WGM8). Two Cijk
+# symbols that differ only in them are one kernel; dtype, layout, tile and ISA tokens must agree.
+_TENSILE_SOLUTION_KNOB = re.compile(r"(sia|su|sus|wgm)\d+")
+
+
+def _tensile_solution_variants(want, got):
+    want, got = want.split("_"), got.split("_")
+    if want[0] != "cijk" or got[0] != "cijk" or len(want) != len(got):
+        return False
+    for left, right in zip(want, got):
+        if left != right:
+            knobs = [_TENSILE_SOLUTION_KNOB.fullmatch(token) for token in (left, right)]
+            if not (all(knobs) and knobs[0].group(1) == knobs[1].group(1)):
+                return False
+    return True
+
+
 def kernel_matches(expected, observed):
     want = canonical_kernel_name(expected)
     got = canonical_kernel_name(observed)
     if not want or not got:
         return False
-    if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
+    if (want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want)
+            and not _tensile_solution_variants(want, got)):
         return False
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring

@@ -366,6 +366,22 @@ def _gemm_fn(torch, A, B, bias, transpose_b):
     return lambda: torch.addmm(bias, A, B) if A.dim() == 2 else (torch.matmul(A, B) + bias)
 
 
+_LIVE_BLAS_DEFAULT = None
+
+
+def _live_blas_default(torch):
+    """The BLAS library serving uses: torch's preference before _set_prefer_blas changes it.
+    ``Cublas`` is rocBLAS (the gfx1151 default), ``Cublaslt`` hipBLASLt; "" when unknown."""
+    global _LIVE_BLAS_DEFAULT
+    if _LIVE_BLAS_DEFAULT is None:
+        try:
+            name = str(torch.backends.cuda.preferred_blas_library()).rsplit(".", 1)[-1].lower()
+        except Exception:
+            name = ""
+        _LIVE_BLAS_DEFAULT = {"cublas": "rocblas", "cublaslt": "hipblaslt"}.get(name, "")
+    return _LIVE_BLAS_DEFAULT
+
+
 def _set_prefer_blas(torch, lib):
     """Best-effort switch of torch's BLAS backend (ROCm: hipblaslt vs rocblas). Returns True if applied."""
     try:
@@ -481,6 +497,10 @@ def _bench_gemm_at(args, meta, m_override=None):
     # kernel-squad rewrite, not a bake-off candidate). Request it explicitly with --backends if wanted.
     want = [b.strip() for b in args.backends.split(",") if b.strip()] if args.backends else \
         ["hipblaslt", "tunableop", "rocblas", "ck", "aiter", "flydsl"]
+    # main() scores against the live BLAS default, so bench it even when --backends omits it.
+    live_default = _live_blas_default(torch)
+    if live_default and live_default not in want:
+        want.append(live_default)
     results = []
 
     def record(name, fn, note="", artifact=""):
@@ -795,7 +815,9 @@ def main():
 
     correct = [r for r in results if r.get("correct") and r.get("ms")]
     correct.sort(key=lambda r: r["ms"])
-    baseline = next((r for r in results if r["backend"] in ("hipblaslt", "current", "aiter_blockscale") and r.get("ms")), None)
+    live_default = _LIVE_BLAS_DEFAULT or "hipblaslt"  # assumed when it could not be read
+    baseline = next((r for b in (live_default, "hipblaslt", "current", "aiter_blockscale")
+                     for r in results if r["backend"] == b and r.get("ms")), None)
     winner = correct[0] if correct else None
 
     # ---- Harness self-fault signal (for op_benchmarker self-repair + orchestrator dominant-head guard).
@@ -833,14 +855,13 @@ def main():
     apply_env, apply_flags, kind = "", "", "none"
     if wb in ("tunableop",):
         apply_env = f"PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=0 PYTORCH_TUNABLEOP_FILENAME={art}"; kind = "env"
-    elif wb == "rocblas":
-        apply_env = "TORCH_BLAS_PREFER_HIPBLASLT=0"; kind = "env"
+    elif wb in ("rocblas", "hipblaslt"):
+        if wb != live_default:  # the live default needs no change to deploy
+            apply_env = f"TORCH_BLAS_PREFER_HIPBLASLT={int(wb == 'hipblaslt')}"; kind = "env"
     elif wb == "ck":
         apply_env = ""; kind = "flag"   # ck deploy path is build/flag-dependent; integrate must verify
     elif editable:
         kind = "patch_candidate"
-    elif wb == "hipblaslt":
-        kind = "none"  # default already; no change to deploy
 
     # Amdahl ceiling: the MAX e2e delta this isolated speedup can produce given the kernel's GPU-time
     # share (from the Architect/meta). The e2e Integrator uses this to refuse crediting an e2e delta
@@ -864,6 +885,7 @@ def main():
         "winner_ms": winner["ms"] if winner else None,
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
+        "live_blas_default": _LIVE_BLAS_DEFAULT or None,
         "measured": measured,
         "isolated_speedup": round(speedup, 4) if speedup is not None else None,
         "pct_gpu_time": pct_gpu,
@@ -875,14 +897,30 @@ def main():
         "apply_flags": apply_flags,
         "deployable_note": ("env loaded at server startup is captured into the cuda-graph (deployable)"
                             if kind == "env" else
-                            "hipblaslt default already in use; nothing to deploy" if wb == "hipblaslt" else
+                            f"{wb} default already in use; nothing to deploy" if wb == live_default else
                             "verify deployability at the e2e gate"),
     }
+    # One timed arm is a harness smoke test, not a bake-off: its "winner" is whatever ran, and
+    # "1.0x, nothing to deploy" would read as a verdict. The blockscale path benches its own plan.
+    timed = [r for r in results if r.get("ms") is not None]
+    summary["smoke_only"] = (op_kind == "gemm" and len(timed) == 1 and winner is not None
+                             and not _is_blockscale_gemm(meta))
+    if summary["smoke_only"]:
+        summary["verdict_withheld_reason"] = (
+            f"only {timed[0]['backend']} produced a timing: no bake-off -- rerun with >=2 --backends "
+            "that time here")
+        for k in ("winner_backend", "winner_ms", "baseline_backend", "baseline_ms",
+                  "isolated_speedup", "amdahl_ceiling_e2e_pct", "winner_editable", "winner_kind",
+                  "tuning_artifact", "apply_env", "apply_flags", "deployable_note"):
+            summary[k] = None
     out = json.dumps(summary, indent=2, default=str)
     if a.out:
         with open(a.out, "w") as fh:
             fh.write(out)
     print(out)
+    if summary["smoke_only"]:
+        print(f"OPBENCH smoke_only=True NO_VERDICT reason={summary['verdict_withheld_reason']!r}")
+        return
     print(f"OPBENCH winner={summary['winner_backend']} speedup={summary['isolated_speedup']}x "
           f"editable={summary['winner_editable']} kind={summary['winner_kind']} "
           f"harness_suspect={summary['harness_suspect']}"

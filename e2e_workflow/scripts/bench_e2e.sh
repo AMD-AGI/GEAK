@@ -638,8 +638,9 @@ PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-sca
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
-mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
+# Both server paths need it: adapters/vllm.sh writes its result JSON here even at PROFILE=0.
+mkdir -p "$OUT_DIR" "$PROFILE_DIR"
 # On ROCm 10.0 with torch 2.12 and vLLM 0.27 (gfx1201), vLLM's EngineCore inherits
 # ROCPROFILER_REGISTER_LIBRARY from its parent, and its torch profiler then records no GPU events.
 # The adapters/profile_env shim drops it at interpreter start-up. The vllm adapter and the magpie
@@ -732,7 +733,6 @@ fi
 # shows up as SILENCE, while a legitimately slow cold start keeps printing. CEILING is only a backstop
 # against a server that spins printing forever, not a per-purpose budget.
 if [ "$REUSE_SERVER" != "1" ]; then
-  mkdir -p "$PROFILE_DIR"
   STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
   case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
 
