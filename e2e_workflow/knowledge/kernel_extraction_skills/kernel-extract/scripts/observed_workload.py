@@ -168,6 +168,46 @@ def parse_log(paths, rank=0, window=None):
     return pre, dec
 
 
+def parse_vllm_iterations(paths, rank=0, window=None, accept_len=1.0):
+    """Read one structural observation per worker step; mixed steps are owned once."""
+    if not math.isfinite(accept_len) or accept_len <= 0:
+        raise ValueError("accept_len must be finite and positive")
+    pre, dec = [], []
+    for path in paths:
+        with open(path) as fh:
+            for line in fh:
+                d = json.loads(line)
+                if d["rank"] != rank:
+                    continue
+                ts = dt.datetime.fromtimestamp(d["time"], dt.timezone.utc).replace(tzinfo=None)
+                if window and not window[0] <= ts <= window[1]:
+                    continue
+                if "error" in d:
+                    raise ValueError(d["error"])
+                reqs = d["requests"]
+                if any(r.get("phase") not in ("PREFILL", "DECODE") or
+                       not isinstance(r.get("query"), int) or r["query"] < 0 or
+                       not isinstance(r.get("computed"), int) or r["computed"] < 0 for r in reqs):
+                    raise ValueError("invalid vLLM request geometry")
+                total = sum(r["query"] for r in reqs)
+                if total != d["scheduled_tokens"]:
+                    raise ValueError("vLLM observation does not conserve scheduled tokens")
+                ctx = [r for r in reqs if r["phase"] == "PREFILL"]
+                gen = [r for r in reqs if r["phase"] == "DECODE"]
+                common = dict(rank=rank, ts=ts, queue=0, cuda_graph=None,
+                              request_geometry=reqs, scheduled_tokens=total)
+                if ctx:
+                    pre.append(dict(common, kind="prefill", new_seq=len(ctx),
+                                    new_token=total, cached_token=sum(r["computed"] for r in reqs),
+                                    running=len(reqs), mixed_decode_requests=len(gen),
+                                    context_query_tokens=sum(r["query"] for r in ctx)))
+                elif gen:
+                    dec.append(dict(common, kind="decode", running=len(gen),
+                                    token=sum(r["computed"] + r["query"] for r in gen),
+                                    accept_len=accept_len, gen_tps=0.0))
+    return pre, dec
+
+
 # --------------------------------------------------------------------------- #
 # Decode iteration expansion.
 # --------------------------------------------------------------------------- #
@@ -343,6 +383,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--log", nargs="+", required=True,
                     help="serving/scheduler log(s) of the measured run")
+    ap.add_argument("--log-format", choices=["scheduler", "vllm-iterations"], default="scheduler")
+    ap.add_argument("--accept-len", type=float, default=1.0,
+                    help="measured acceptance for the decode-only cross-check")
     ap.add_argument("--rank", type=int, default=0,
                     help="which rank's scheduler log to read; ranks log redundantly")
     ap.add_argument("--decode-log-interval", type=int, default=None,
@@ -363,15 +406,21 @@ def main():
     info = {}
     if args.server_info and os.path.exists(args.server_info):
         info = json.load(open(args.server_info))
-    interval = args.decode_log_interval or info.get("decode_log_interval")
+    interval = (1 if args.log_format == "vllm-iterations" else
+                args.decode_log_interval or info.get("decode_log_interval"))
     if not interval:
         raise SystemExit(
             "observed_workload: decode_log_interval is unknown. Every decode row stands "
             "for that many iterations, so guessing it scales the whole decode mass. "
-            "Pass --decode-log-interval or --server-info.")
+            "For SGLang pass --decode-log-interval or --server-info. For vLLM use "
+            "--log-format vllm-iterations with the worker observer JSONL; aggregate "
+            "throughput logs do not contain iteration shapes. See references/vllm.md.")
 
     window = read_window(args)
-    pre, dec = parse_log(args.log, rank=args.rank, window=window)
+    if args.log_format == "vllm-iterations":
+        pre, dec = parse_vllm_iterations(args.log, args.rank, window, args.accept_len)
+    else:
+        pre, dec = parse_log(args.log, rank=args.rank, window=window)
     if not pre and not dec:
         raise SystemExit(
             "observed_workload: 0 batch lines for rank %d%s. Check --rank and the window."
@@ -414,12 +463,26 @@ def main():
         "raw_prefill_rows": [dict(p, ts=p["ts"].isoformat()) for p in pre],
         "raw_decode_rows": expanded,
     }
+    if args.log_format == "vllm-iterations":
+        out["log_format"] = args.log_format
+        out["prefill"]["prefix_cache_hit_pct"] = None
+        out["prefill"]["cuda_graph_any"] = None
+        out["decode"]["cuda_graph_all"] = None
+        out["mixed_batches"] = sum(bool(p["mixed_decode_requests"]) for p in pre)
+        out["measurement_notes"] = [
+            "Each worker iteration is recorded exactly once; no logging-interval expansion.",
+            "Mixed steps belong to PREFILL with their total scheduled M; request geometry is retained.",
+            "cached_token is prior context extent, not a prefix-cache hit counter.",
+            "Graph execution mode must be established from runtime evidence, not scheduler geometry.",
+            "accept_len is supplied for the cross-check; mixed-step generation is outside its decode-only total.",
+        ]
     with open(args.out, "w") as fh:
         json.dump(out, fh, indent=1, default=str)
 
     d = check.get("disagreement_pct")
-    print("prefill batches %d (%d new tok, %.1f%% prefix-cache hit) | decode %d iterations"
-          % (len(pre), new_tok, out["prefill"]["prefix_cache_hit_pct"],
+    hit = out["prefill"]["prefix_cache_hit_pct"]
+    print("prefill batches %d (%d new tok, %s prefix-cache hit) | decode %d iterations"
+          % (len(pre), new_tok, "unavailable" if hit is None else "%.1f%%" % hit,
              out["counts"]["decode_iterations"]))
     if d is None:
         print("!! decode expansion is UNCHECKED: pass --completed-output-tokens")

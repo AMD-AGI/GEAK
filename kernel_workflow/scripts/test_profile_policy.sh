@@ -16,6 +16,10 @@ unknown="$(profiler_priority_for_arch gfx9999)"
 for priority in "$gfx950" "$gfx942" "$gfx90a" "$unknown"; do
     [[ "$priority" == "rocprof-compute omniperf rocprofv3 rocprof metrix" ]]
 done
+# The RDNA 3.5 APUs take the gfx1201 order (rocprof-compute 3.4.0, ROCm 7.2.3, refuses gfx1151);
+# discrete RDNA3 and the gfx1103 iGPU keep the default.
+for arch in gfx1150 gfx1151; do [[ "$(profiler_priority_for_arch "$arch")" == "$rdna" ]]; done
+for arch in gfx1100 gfx1103; do [[ "$(profiler_priority_for_arch "$arch")" == "$gfx950" ]]; done
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -40,4 +44,4 @@ chmod +x "$tmp/rocminfo"
 detected="$(PATH="$tmp:$PATH" PYTORCH_ROCM_ARCH= profile_detect_arch)"
 [[ "$detected" == "gfx1201" ]]
 
-echo "PASS: gfx1201, gfx950, gfx942, gfx90a, and unknown policies are explicit."
+echo "PASS: gfx1201, gfx115x, gfx950, gfx942, gfx90a, gfx1100, gfx1103, and unknown policies are explicit."

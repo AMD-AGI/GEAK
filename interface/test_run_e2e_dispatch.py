@@ -3157,6 +3157,32 @@ class TestMain(_RunE2ECase):
         self.assertEqual(mapped["gpu_identity_status"], "unavailable_dry_run")
         self.assertNotIn("expected_gfx", mapped)
 
+    def test_a_keep_rule_defers_the_kb_write_to_the_interface(self):
+        """The rule is applied after Normalize, so the workflow must leave the KB write to it.
+        An AgentX run that states none is held to GEAK's own on every axis but total."""
+        os.environ.pop("E2E_METRIC", None)
+
+        def deferred(spec):
+            env = dict(os.environ)
+            try:
+                extra = {"workload_spec": spec} if spec else {}
+                _rc, stdout = self._run(self._handoff(**extra), "--dry-run")
+            finally:
+                os.environ.clear()
+                os.environ.update(env)
+            return json.loads(stdout)["mapped_args"]["kb_defer_to_interface"]
+
+        agentx = {"kind": "agentx_trace_replay"}
+        hl_rule = {"objective": "e2e_norm_intvty_p50", "min_gain_pct": 3.0,
+                   "guard_max_drop_pct": {"e2e_norm_intvty_p90": 4.0}}
+        self.assertIs(deferred(agentx), True)
+        self.assertIs(deferred({**agentx, "metric_basis": "e2e_norm_intvty_p50",
+                                "acceptance": hl_rule}), True)
+        for basis in ("e2e_norm_intvty_p50", "aggregate_output_tok_s"):
+            self.assertIs(deferred({**agentx, "metric_basis": basis}), True, basis)
+        self.assertIs(deferred({**agentx, "metric_basis": "aggregate_total_token_tok_s"}), False)
+        self.assertIs(deferred(None), False)
+
     def test_protected_pgids_are_published_before_any_launch(self):
         """Pins the CALL SITE, not just the helper: the veto must be in the
         environment before main() can reach a bench, so it is set even on the
