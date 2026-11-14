@@ -840,6 +840,19 @@ def test_win_gate_refuses_a_result_with_no_final_number(final):
         == "no final throughput measured"
 
 
+def test_win_gate_refuses_a_pair_whose_guards_went_unchecked():
+    """GEAK's own KEEP rule keeps a pair no bench summary carries a guard for, so the caller still
+    gets its win; a record is permanent, so it needs the guards read."""
+    result = {"throughput_speedup": 1.1, "final_throughput_tok_s": 900.0,
+              "validation_status": "recovered_intermediate",
+              "validation_evidence": {"acceptance": {
+                  "keep": True, "reasons": [], "not_checked": ["aggregate_total_token_tok_s"]}}}
+    assert e2e_store.win_gate(result) == ("KEEP rule could not check aggregate_total_token_tok_s: "
+                                          "no bench summary of the pair carries it")
+    result["validation_evidence"]["acceptance"]["not_checked"] = []
+    assert e2e_store.win_gate(result) == ""
+
+
 def test_require_win_declines_the_write_without_failing_the_caller(tmp_path):
     """A refused write is `ok: True, applied: False` — a no-win is a normal outcome, not an error,
     and a caller that treated it as one would fail every honest run."""

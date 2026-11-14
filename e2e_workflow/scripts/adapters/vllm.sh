@@ -25,7 +25,7 @@ adapter_launch() {
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
     local _prof_fields
-    _prof_fields="$(python3 - <<'PY' 2>/dev/null
+    _prof_fields="$(PYTHONSAFEPATH="${PYTHONSAFEPATH-1}" python3 - <<'PY' 2>/dev/null
 names=set()
 try:
     from vllm.config import ProfilerConfig
@@ -62,14 +62,26 @@ PY
       _prof_env=(VLLM_TORCH_PROFILER_DIR="$PROFILE_DIR")   # <0.19: no flag; the time window is the only bound
     fi
   fi
+  # Empty path components add CWD to sys.path. A leased task directory contains
+  # unittest.py, which then shadows the stdlib package imported by torch.
+  local _pythonpath="${PYTHONPATH:-}"
+  if [ -n "${OVERLAY_PYTHONPATH:-}" ]; then
+    _pythonpath="${OVERLAY_PYTHONPATH}${_pythonpath:+:$_pythonpath}"
+  fi
+  if [ -n "${PROFILE_PYTHONPATH:-}" ]; then
+    _pythonpath="${PROFILE_PYTHONPATH}${_pythonpath:+:$_pythonpath}"
+  fi
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
+  # vLLM also starts python -m model-inspection workers: on Python 3.11+, keep
+  # their implicit CWD out of sys.path too. Explicit PYTHONPATH entries still work.
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
+    PYTHONSAFEPATH="${PYTHONSAFEPATH-1}" \
     "${_prof_env[@]}" \
-    PYTHONPATH="${PROFILE_PYTHONPATH:+$PROFILE_PYTHONPATH:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    PYTHONPATH="$_pythonpath" \
     vllm serve "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \

@@ -43,11 +43,15 @@ if (require.main === module) (async () => {
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   const laneArgsSource = e2e.match(/const laneArgs = \(wfArgs\) => \{[\s\S]*?^\};/m)[0];
   for (const setting of ['auto', 'false']) {
-    const deps = {LANE_USE_LEARNED_KB:'false', USE_GLUON_SKILL:setting, A:{}, RDNA4_ISOLATE:false,
+    const deps = {LANE_USE_LEARNED_KB:'false', USE_GLUON_SKILL:setting, A:{}, OPTIMIZER:'default', GPU_FAMILY:{isolate:false},
       EXPECTED_GFX:'', EXPECTED_TARGET:'', EXPECTED_DEVICE_NAME:'', EXPECTED_PHYSICAL_CU_COUNT:0,
       ablLaneArgs:()=>({})};
     const laneArgs = new Function(...Object.keys(deps), laneArgsSource+'; return laneArgs;')(...Object.values(deps));
     assert.strictEqual(laneArgs({target_language:'gluon'}).use_gluon_skill, setting);
+    // An isolated GPU family (RDNA4, RDNA 3.5) never receives the CDNA Gluon method.
+    const isolated = new Function(...Object.keys(deps), laneArgsSource+'; return laneArgs;')(
+      ...Object.values({...deps, GPU_FAMILY:{isolate:true}}));
+    assert.strictEqual(isolated({target_language:'gluon'}).use_gluon_skill, 'false');
   }
   console.log('PASS: actual lane prompts route Triton/Gluon guidance by target/GPU, default off, preserve draft and opt-in, including Optimize.');
 })().catch(e => { console.error(e); process.exit(1); });

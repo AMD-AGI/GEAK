@@ -9,7 +9,7 @@ Triton kernels are fundamentally block-based. The tiling scheme determines perfo
 
 **Key decisions:**
 - Choose block dimensions that maximize data reuse
-- Ensure BLOCK_SIZE is a multiple of the **wavefront size** (64 on Instinct CDNA gfx942/gfx950; **32** on RDNA4 gfx1201)
+- Ensure BLOCK_SIZE is a multiple of the **wavefront size** (64 on Instinct CDNA gfx942/gfx950; **32** on RDNA4 gfx1201 and RDNA 3.5 gfx115x)
 - Balance tile size vs register pressure vs shared memory usage
 
 ```python
@@ -102,19 +102,20 @@ def kernel(N, BLOCK: tl.constexpr, NUM_STAGES: tl.constexpr):
         ...
 ```
 
-### Dot Product → MFMA (CDNA) / WMMA (RDNA4)
+### Dot Product → MFMA (CDNA) / WMMA (RDNA4, RDNA 3.5)
 On AMD, `tl.dot` maps to the matrix ISA of the **detected** gfx:
 
 - **gfx942 / gfx950 (CDNA):** MFMA (Matrix Fused Multiply-Add). Input types fp16/bf16/fp32/int8;
   typical min 16×16 tiles; fp32 accumulator. gfx950 also has scaled MX MFMA — see `amd_instinct.md` §3.
 - **gfx1201 (RDNA4):** **WMMA**, not MFMA. No scaled MFMA / MX. See `amd_rdna4.md` §3.
+- **gfx115x (RDNA 3.5):** **WMMA**, not MFMA, and no fp8 matrix instruction at all. See `amd_ryzen.md` §1–2.
 
 ### Mixed Precision
 Load in fp16/bf16, compute in fp32 for bandwidth savings with precision.
 
 ```python
 x = tl.load(ptr + offsets).to(tl.float16)  # Load as fp16
-acc += tl.dot(x, y)  # fp32 acc via MFMA (CDNA) or WMMA (RDNA4)
+acc += tl.dot(x, y)  # fp32 acc via MFMA (CDNA) or WMMA (RDNA4, RDNA 3.5)
 ```
 
 ## P3: AMD-Specific Optimizations
@@ -135,8 +136,9 @@ Control occupancy via the `waves_per_eu` parameter in `@triton.autotune`.
 ### Wavefront width (detect gfx — do not assume 64)
 - **Instinct CDNA (gfx942 / gfx950):** 64-thread wavefronts. Triton's `num_warps` is in wave64 units;
   coalescing width is 64 threads × 4 B = 256 B per access.
-- **RDNA4 (gfx1201):** **32-thread** wavefronts. `num_warps` is in wave32 units. See
-  `amd_rdna4.md`. Do not copy CDNA `num_warps` / `waves_per_eu` tables onto this box.
+- **RDNA4 (gfx1201) and RDNA 3.5 (gfx115x):** **32-thread** wavefronts. `num_warps` is in wave32
+  units. See `amd_rdna4.md` / `amd_ryzen.md`. Do not copy CDNA `num_warps` / `waves_per_eu` tables
+  onto these boxes.
 
 ### MFMA tile sizes (CDNA only)
 Match `BLOCK_M/N/K` to the hardware MFMA tile shapes for best utilization (detect the arch with
@@ -158,6 +160,12 @@ autotune:
 
 See `amd_rdna4.md` only. Do not follow CDNA attention FMHA Triton cards on R9700 — those are MFMA/FNUZ
 recipes (gens gfx90a/gfx942/gfx950) and are not rewritten for gfx1201.
+
+### WMMA / RDNA 3.5 tiles (gfx115x)
+Do **not** use the MFMA table above; `matrix_instr_nonkdim` / `kpack` are accepted and silently
+ignored here (`amd_ryzen.md` §2). The levers measured on gfx1151 are operand-path levers (128-bit LDS
+operand loads, an M tile sized for decode, a K block decoupled from the quantization group); see
+`$SKILL_DIR/../perf_knowledge/hardware/rdna35_gfx1151/` `matrix_core.md`. Do not follow CDNA attention FMHA Triton cards here either.
 
 ## P4: Autotune Configurations
 
@@ -187,7 +195,7 @@ Choose autotune keys that capture shape-dependent behavior. Include dimensions t
 ## Compound Strategy Compatibility
 
 Compose well:
-- Tiling + matrix-dot (`tl.dot` → MFMA on CDNA, WMMA on RDNA4) → excellent (standard matmul pattern)
+- Tiling + matrix-dot (`tl.dot` → MFMA on CDNA, WMMA on RDNA4 / RDNA 3.5) → excellent (standard matmul pattern)
 - Fused ops + Coalesced loading → excellent
 - Autotune + Multiple tile sizes → excellent (let runtime decide)
 - Mixed precision + matrix-dot → excellent (higher matrix throughput)

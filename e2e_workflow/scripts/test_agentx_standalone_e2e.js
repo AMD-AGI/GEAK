@@ -86,12 +86,14 @@ adapter_bench() {
 }
 `);
 
-// Call n reports P90 ITL = 20+n ms, so a test can tell exactly which replay a summary reports.
+// Call n reports P50 interactivity = 30+n tok/s/user, so a test can tell exactly which replay a
+// summary reports.
 const OUT_TPUT = 150.0;
 const IN_TPUT = 21000.0;
 const ISL_AVG = 52500;
 const OSL_AVG = 375;
-const p90For = (call) => 1000 / (20 + call);
+const TAIL_INTVTY = 9.0;
+const p50For = (call) => 30 + call;
 const AIPERF = path.join(FIX, 'bin', 'aiperf');
 fs.writeFileSync(AIPERF, `#!/usr/bin/env python3
 import json, os, sys
@@ -115,7 +117,7 @@ export = {
         "total_output_tokens": rc * ${OSL_AVG},
         "time_to_first_token": {"avg": 900.0, "p50": 850.0, "p90": 2400.0, "p99": 5000.0},
         "inter_token_latency": {"avg": 18.0, "p50": 17.0, "p90": 20.0 + n, "p99": 60.0},
-        "e2e_output_token_throughput": {"p10": 9.0, "p50": 30.0},
+        "e2e_output_token_throughput": {"p10": ${TAIL_INTVTY}, "p50": 30.0 + n},
     },
 }
 json.dump(export, open(os.path.join(art, "profile_export_aiperf.json"), "w"))
@@ -190,8 +192,8 @@ try {
   const ARGS = { workload_kind: 'agentx_trace_replay', workload_spec: { concurrency: 4 }, conc: 64 };
   const wf = workflow(ARGS);
   ok(wf.AGENTX_ENV.length > 0, 'a trace replay declares a bench_env.sh body');
-  ok(wf.AGENTX_METRIC_BASIS === 'p90_intvty_inferencex',
-    'graded on InferenceX P90 interactivity when nothing else is declared');
+  ok(wf.AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50',
+    "graded on Hyperloom's TTFT-inclusive P50 interactivity when nothing else is declared");
   ok(wf.WORKLOAD.conc === 4, 'the declared concurrency is the one the Director puts on bench lines');
 
   // ── 2. The eval dir, laid out as director.md step 3 says ──────────────────────────────────────
@@ -215,9 +217,12 @@ try {
     "no outer round: the replay warms itself per lane, then its window is the number (Hyperloom's AgentX protocol)");
   ok(s.warmup_protocol === 'replay_per_lane', `and the summary says how it was warmed (${s.warmup_protocol})`);
   ok(s.metric_basis === wf.AGENTX_METRIC_BASIS, `the summary is on the declared axis (${s.metric_basis})`);
-  ok(near(s.throughput_tok_s_median, p90For(1)),
-    `the graded number is 1000 / P90 ITL of that replay (${s.throughput_tok_s_median})`);
-  ok(near(s.guard_aggregate_output_tok_s_median, OUT_TPUT), 'output tok/s rides beside it as the guard');
+  ok(near(s.throughput_tok_s_median, p50For(1)),
+    `the graded number is the P50 interactivity of that replay (${s.throughput_tok_s_median})`);
+  ok(near(s.guard_e2e_norm_intvty_p90_median, TAIL_INTVTY), 'the P90 tail rides beside it as a guard');
+  ok(near(s.guard_aggregate_output_tok_s_median, OUT_TPUT), 'and so does output tok/s');
+  ok(near(s.guard_aggregate_total_token_tok_s_median, IN_TPUT + OUT_TPUT),
+    'and total tok/s, the guard GEAK adds when the caller states no KEEP rule');
   ok(!('guard_total_tok_s_median' in s) && !('guard_basis' in s),
     'the removed total-throughput guard fields stay absent');
   ok(near(s.observed_isl, ISL_AVG) && near(s.observed_osl, OSL_AVG), 'the served request shape is reported');
@@ -284,9 +289,11 @@ try {
     'REPLICAS=3 is three fresh servers with one replay each -- bench_env.sh does not collapse it to one');
   ok(v.requested_replicas === 3 && v.successful_replicas === 3 && v.status === 'complete',
     'and the aggregate reports all three');
-  ok(near(v.throughput_tok_s_median, p90For(2)), 'its number is the median replica, on the declared axis');
-  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_aggregate_output_tok_s_median, OUT_TPUT),
-    'with the guard carried through the aggregate');
+  ok(near(v.throughput_tok_s_median, p50For(2)), 'its number is the median replica, on the declared axis');
+  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_e2e_norm_intvty_p90_median, TAIL_INTVTY)
+    && near(v.guard_aggregate_output_tok_s_median, OUT_TPUT)
+    && near(v.guard_aggregate_total_token_tok_s_median, IN_TPUT + OUT_TPUT),
+  'with every guard carried through the aggregate');
 
   // ── 7. Legacy gives a trace replay one timed round unless asked for more ──────────────────────
   // The lifecycle PROFILE=1 / REPEATS=0 fall back to; each round is a full measured window.
@@ -307,6 +314,8 @@ try {
   ok(syn.proc.status === 0 && aiperfCalls(syn).length === 0
     && syn.events.filter((e) => e.event === 'native_bench').length === 4 && (syn.summary || {}).runs === 3,
   'with no bench_env.sh the synthetic client keeps its warmup + three rounds');
+  ok(syn.summary && !Object.keys(syn.summary).some((k) => k.startsWith('guard_')),
+    'and its summary carries no guard: a synthetic sweep keeps its field set');
   const synWarm = bench(SYN_DIR, { isl: 1024, osl: 1024, conc: 64 },
     { OUT_DIR: path.join(SYN_DIR, 'warm_server_leg') });
   ok(synWarm.proc.status === 0 && synWarm.events.filter((e) => e.event === 'native_bench').length === 2
@@ -325,7 +334,7 @@ try {
     { GEAK_AGENTX_OUTER_WARMUP: '1', OUT_DIR: path.join(EVAL_DIR, 'outer_opt_in') });
   ok(optIn.proc.status === 0 && aiperfCalls(optIn).length === 2
     && (optIn.summary || {}).warmup_protocol === 'outer_round'
-    && near((optIn.summary || {}).throughput_tok_s_median, p90For(2)),
+    && near((optIn.summary || {}).throughput_tok_s_median, p50For(2)),
   'GEAK_AGENTX_OUTER_WARMUP=1 restores the discarded full replay, and the timed one is still the number');
   const atom = bench(EVAL_DIR, wf.WORKLOAD, { BACKEND: 'atom', OUT_DIR: path.join(EVAL_DIR, 'atom_leg') });
   ok(atom.proc.status === 0 && aiperfCalls(atom).length === 2
@@ -340,6 +349,8 @@ try {
   const inherited = bench(inheritedDir, wf.WORKLOAD, { E2E_METRIC: 'total' });
   ok((inherited.summary || {}).metric_basis === 'aggregate_total_token_tok_s',
     'an E2E_METRIC the bench inherited outranks bench_env.sh ...');
+  ok(!Object.keys(inherited.summary || {}).some((k) => k.startsWith('guard_')),
+    '(on total the objective is the guard, so none rides beside it)');
   ok(/not comparable/.test(setupError(ARGS, inheritedDir)), '... and Setup refuses that baseline');
   const forgotDir = stage('eval_forgot_env', '');
   bench(forgotDir, wf.WORKLOAD);
