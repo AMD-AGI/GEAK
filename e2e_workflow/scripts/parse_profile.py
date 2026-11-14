@@ -997,6 +997,8 @@ def main():
                          "(for the kernel_workflow harness; needs --torch-trace for shapes)")
     ap.add_argument("--target", default="",
                     help="optional kernel-name substring filter for --workload-out")
+    ap.add_argument("--render-md", default="",
+                    help="re-render <json>.md from an edited Top-N JSON (no trace needed)")
     ap.add_argument("--annotate", default="",
                     help="annotate an existing Top-N JSON with profiler-backed entity kinds")
     ap.add_argument("--annotate-out", default="",
@@ -1012,6 +1014,15 @@ def main():
     ap.add_argument("--capture-sizes", default="",
                     help="comma list of cudagraph_capture_sizes (to snap decode est_shape M)")
     args = ap.parse_args()
+
+    if args.render_md:
+        with open(args.render_md) as fh:
+            md = to_markdown(json.load(fh))
+        dest = os.path.splitext(args.render_md)[0] + ".md"
+        with open(dest, "w") as fh:
+            fh.write(md)
+        sys.stderr.write(f"wrote {dest}\n")
+        return
 
     if not args.torch_trace and not args.rocprof_dir:
         ap.error("provide --torch-trace and/or --rocprof-dir")

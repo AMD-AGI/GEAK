@@ -1017,7 +1017,9 @@ if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
 // side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
-const KERNEL_NAME = String(setup.kernel_name || '').replace(/_task$/, '') || setup.kernel_name;
+// A note the Director appends ("<name> (triton, author mode; ...)") is dropped the same way.
+const KERNEL_NAME = String(setup.kernel_name || '').trim().split(/[\s(;]/)[0]
+  .replace(/_task$/, '') || setup.kernel_name;
 const COMMANDMENT = `${EVAL_DIR}/COMMANDMENT.md`;
 log(`Setup done. EVAL_DIR=${EVAL_DIR}`);
 

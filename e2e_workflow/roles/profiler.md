@@ -105,7 +105,7 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   `<br>` args, `classification`←map from `kernel_category`/`bound_type` (MoE/grouped-GEMM→library_gemm
   or triton per `kernel_kind`; attention→library_attn; etc.), `editable`←`op_to_source_patchable`. Carry
   `source_file`/`kernel_path` into each entry's `notes` (the Architect/Extractor reuse them). Write
-  `profile_topN.json` + `.md` via your own Write and set `source:"tracelens"`.
+  `profile_topN.json` via your own Write, set `source:"tracelens"`, and render the `.md` from it (step 5).
   **Then annotate the assembled rows from profiler evidence; never hand-write `entity_kind`:**
   ```bash
   TLT=$(ls -1 "$TRACELENS_TRACE_FILE"/*rank0*.pt.trace.json.gz 2>/dev/null | head -1)
@@ -138,8 +138,8 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   are MORE RELIABLE than the `<br>` shapes in `analysis.md` — **prefer the parser shapes for any kernel
   that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
   the TraceLens ranking/`%gpu` as the primary impact signal, but cross-check that the same heads top both
-  views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json`/`.md` with
-  `source:"tracelens+trace"`.
+  views; note any disagreement in `notes`. Emit the final reconciled `profile_topN.json` with
+  `source:"tracelens+trace"` and re-render the `.md` from it (step 5).
 - **If `TRACELENS_ANALYSIS_MD` is empty/missing (or the file does not exist) → ignore TraceLens entirely
   and run the normal collection (steps 1–5) unchanged.** Likewise, for ANY reprofile round the TraceLens
   prior is stale (it reflects the baseline config) — ignore it and re-collect.
@@ -255,6 +255,8 @@ PY
    inconsistent and will under-rank the real targets. If the trace can't be sampled, degrade to a
    qualitative flag (high avg+calls collective → "likely spin-inflated, discount"; one giant first-call →
    "JIT warmup, discount"; large-M+small-M same name → "split regimes") — never fail or block the Top-N.
+   Whenever you change `profile_topN.json`, regenerate the `.md` from it; never edit the table by hand:
+   `python3 "$EVAL_DIR/parse_profile.py" --render-md "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"`.
 6. **Analysis skill (ONLY if `ANALYSIS_SKILL_DIR` is a non-empty path that EXISTS — else skip entirely
    and return `profile_roofline_json: ""`).** Read `ANALYSIS_SKILL_DIR/SKILL.md` and execute it against
    the Top-N you just wrote, producing the artifact it specifies (for `roofline`:
