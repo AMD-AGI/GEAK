@@ -1,6 +1,7 @@
 """Install safe profiler markers on candidate live call seams."""
 
 import atexit
+import collections
 import functools
 import importlib
 import inspect
@@ -12,6 +13,7 @@ import types
 
 MARKER_PREFIX = "GEAK_TARGET::"
 INSTALL_PREFIX = "GEAK_INSTALLED::"
+COMPILED_PREFIX = "GEAK_COMPILED::"
 _INSTALLED = {}
 _TLS = threading.local()
 _PROFILE = {
@@ -26,6 +28,18 @@ _PROFILE = {
     "trace_index": 0,
     "atexit_registered": False,
 }
+
+
+class _Compiled:
+    """Made at install(), set inside the traced frame. Dynamo replays an attribute store after the
+    compiled call; a dict store would put `update` in that frame, which vLLM rejects at startup when
+    CUDA graphs are on (the bytecode hook of its compile wrapper)."""
+    seen = False
+
+
+# target -> _Compiled, for seams torch.compile traced through (they leave no span, so each trace names
+# them). A defaultdict: a frame from vLLM's compile cache can replay a target this process never marked.
+_COMPILED = collections.defaultdict(_Compiled)
 
 
 def _rank():
@@ -83,11 +97,13 @@ def _compile_probe():
         return lambda: False
 
 
-def _record_install_markers():
-    """Put proof of successful installation in every process-local trace."""
+def _record_install_markers(installed=True):
+    """Put proof of successful installation, and the seams compiled so far, in every process-local trace."""
     import torch
-    for target in sorted(_INSTALLED):
-        with torch.profiler.record_function(INSTALL_PREFIX + target):
+    labels = ([INSTALL_PREFIX + t for t in sorted(_INSTALLED)] if installed else []) + \
+        [COMPILED_PREFIX + t for t in sorted(_COMPILED) if _COMPILED[t].seen]
+    for label in labels:
+        with torch.profiler.record_function(label):
             pass
 
 
@@ -155,6 +171,10 @@ def _finish_profile():
         _PROFILE.update(active=False, done=_PROFILE["trace_index"] >= budget,
                         owner=None, profiler=None)
         try:
+            _record_install_markers(installed=False)   # seams compiled while this trace was open
+        except Exception as exc:
+            sys.stderr.write(f"[seam_trace] compiled-seam record failed: {exc!r}\n")
+        try:
             profiler.__exit__(None, None, None)
             os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
             root, ext = os.path.splitext(out)
@@ -220,16 +240,22 @@ def install(target):
     if target in _INSTALLED:
         return
     module, attr = _resolve_owner(target)
-    original = getattr(module, attr)
+    # An alias an earlier install() rebound already holds that target's marker: wrap the function
+    # itself, or one call would leave both spans, nested, and read as a deeper live candidate.
+    original = getattr(getattr(module, attr), "_geak_seam_original", getattr(module, attr))
     if not _wrappable(original):
         raise RuntimeError(f"cannot safely mark non-Python callable {target}")
     is_compiling = _compile_probe()
+    # Made here, not in the traced frame: an insert there replays as `update` too (torch 2.11).
+    _COMPILED[target] = _Compiled()
 
     @functools.wraps(original)
     def marked(*args, **kwargs):
         if is_compiling():
             # Dynamo folds this to True while tracing a compiled region (vLLM's fullgraph forward). It
             # cannot trace the capture query below, which returns a bool, nor the profiler calls.
+            # The seam leaves no span here, so record that it was compiled.
+            _COMPILED[target].seen = True
             return original(*args, **kwargs)
         if _capturing():
             # Pure pass-through mid-capture: no profile lifecycle, no record_function node baked
@@ -253,6 +279,20 @@ def install(target):
         marked.__signature__ = inspect.signature(original)
     except (TypeError, ValueError):
         pass
+    marked._geak_seam_original = original
     _INSTALLED[target] = original
     setattr(module, attr, marked)
-    sys.stderr.write(f"[seam_trace] marked {target}\n")
+    # A caller that did `from module import attr` holds its own reference; repoint those too.
+    aliases = []
+    for name, other in list(sys.modules.items()):
+        if other is module:
+            continue
+        for alias, value in list(getattr(other, "__dict__", {}).items()):
+            if value is original:
+                try:
+                    setattr(other, alias, marked)
+                    aliases.append(f"{name}.{alias}")
+                except Exception:
+                    aliases.append(f"{name}.{alias} (NOT rebound)")
+    sys.stderr.write(f"[seam_trace] marked {target}"
+                     + (f" (aliases: {', '.join(aliases)})" if aliases else "") + "\n")

@@ -26,6 +26,7 @@ import sys
 
 MARKER_PREFIX = "GEAK_TARGET::"
 INSTALL_PREFIX = "GEAK_INSTALLED::"
+COMPILED_PREFIX = "GEAK_COMPILED::"
 _SPEC_RE = re.compile(
     r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:"
     r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$"
@@ -403,9 +404,16 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     unobserved_candidates = sorted(
         candidate for candidate in installed_candidates
         if candidate != target_callable and not (evidence.get(candidate) or {}).get("spans"))
+    # A candidate reached inside a torch.compile region leaves no span (the marker forwards there), so
+    # it can never show up in `deeper`: while a non-target one is listed, the target cannot be verified
+    # deepest. The target itself compiled-only already fails above (capture_compiled_unobservable).
+    compiled_candidates = sorted(
+        c for c in candidates if _complete_spans(trace_events, COMPILED_PREFIX + c))
+    if any(c != target_callable for c in compiled_candidates):
+        failed.append("candidate_compiled_unobservable")
     deepest_verified = bool(
         spans and matched and not deeper and not invalid_candidates
-        and not missing_candidate_markers)
+        and not missing_candidate_markers and "candidate_compiled_unobservable" not in failed)
 
     return {
         "contract": "kernel_selection",
@@ -427,6 +435,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         "deeper_live_candidates": sorted(deeper),
         "missing_candidate_markers": missing_candidate_markers,
         "installed_but_never_live_candidates": unobserved_candidates,
+        "compiled_passthrough_candidates": compiled_candidates,
         "deepest_verified": deepest_verified,
         "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
         "failed": failed,
@@ -594,6 +603,8 @@ def main(argv=None):
     ]
     verdict["installed_but_never_live_candidates"] = sorted(
         set.intersection(*unobserved_sets) if unobserved_sets else set())
+    verdict["compiled_passthrough_candidates"] = sorted({
+        target for item in all_verdicts for target in item["compiled_passthrough_candidates"]})
     for field in (
             "total_calls_observed", "target_marker_calls", "matched_kernel_calls",
             "correlated_external_ids", "correlated_launch_correlations"):

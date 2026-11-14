@@ -41,12 +41,15 @@ A triton/hip/ck `code_patch` against an installed source file. Inject **only** t
 submodule into the overlay (manifest `add-module`) — **NEVER copy a package subtree**, that
 shadows the whole install:
 ```bash
-CAND="$EVAL_DIR/overlay/cand_<short>"; cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
+CAND="$EVAL_DIR/overlay/cand_<short>"; rm -rf "$CAND/_patched" "$CAND/_overlay_manifest.json"
+cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"
 python3 overlay_setup.py add-module --overlay "$CAND" \
   --module "<dotted.module.of.patched.file>" \
   --patch "<code_patch>" --src-file "<installed source file>"
 PYTHONPATH="$CAND" python3 overlay_setup.py check --module "<dotted.module>"
 ```
+`add-module` builds on a `_patched/<module>.py` the overlay already has, so a re-run into the same
+`$CAND` would re-apply the patch and fail: the `rm` starts it clean.
 **Engagement proof:** an injected load banner / marker, or confirm the patched module is the
 one imported.
 

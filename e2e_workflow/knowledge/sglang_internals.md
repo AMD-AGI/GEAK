@@ -61,11 +61,14 @@ compound via `_overlay_manifest.json`:
 
 ### (a) `add-module` — inject a single patched submodule (preferred for a code change)
 ```bash
+rm -rf "$EVAL_DIR/overlay/cand_X/_patched" "$EVAL_DIR/overlay/cand_X/_overlay_manifest.json"
 python3 scripts/overlay_setup.py add-module \
   --overlay "$EVAL_DIR/overlay/cand_X" \
   --module "sglang.srt.layers.attention.fla.chunk_fwd" \
   --patch  "<final_patch.diff>" --src-file "<installed chunk_fwd.py>"
 ```
+`add-module` builds on a `_patched/<module>.py` the overlay already has, so a re-run into the same
+`cand_X` would re-apply the patch and fail: the `rm` starts it clean.
 At startup the sitecustomize loads the patched file via `importlib.util.spec_from_file_location`, puts
 it in `sys.modules[<dotted>]`, and binds it as an attribute on its parent — so both `import a.b` and
 `from a.b import c` see the patch, while `import sglang` and all siblings still resolve from the

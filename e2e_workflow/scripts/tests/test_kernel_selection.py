@@ -45,6 +45,11 @@ def trace(kernel=KERNEL, under_target=True):
     return events
 
 
+def compiled_marker(target, prefix="GEAK_COMPILED::"):
+    """seam_trace names a seam torch.compile traced through, since it leaves no span."""
+    return {"cat": "user_annotation", "name": prefix + target, "ph": "X", "pid": 1, "tid": 2, "ts": 93, "dur": 1}
+
+
 class TestJointChainSelection(unittest.TestCase):
     joint = "pkg.indexer:joint"
     score = "pkg.indexer:score"
@@ -613,6 +618,17 @@ class TestSelectionVerdict(unittest.TestCase):
         self.assertIn("device_kernel_not_under_target", verdict["failed"])
         self.assertNotIn("capture_compiled_unobservable", verdict["failed"])
 
+    def test_a_candidate_seen_only_under_torch_compile_fails_the_selection(self):
+        # It leaves no span, so it can never show up as deeper: the target cannot be verified deepest.
+        other = "vllm.model_executor.layers.utils:dispatch_unquantized_gemm"
+        events = trace() + [compiled_marker(other, ks.INSTALL_PREFIX), compiled_marker(other)]
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events, [other])
+        self.assertFalse(verdict["ok"])
+        self.assertFalse(verdict["deepest_verified"])
+        self.assertEqual(verdict["failed"], ["candidate_compiled_unobservable"])
+        self.assertEqual(verdict["compiled_passthrough_candidates"], [other])
+        self.assertEqual(verdict["installed_but_never_live_candidates"], [other])
+
     def test_cli_writes_the_same_machine_verdict(self):
         with tempfile.TemporaryDirectory() as root:
             meta_path = os.path.join(root, "meta.json")
@@ -910,6 +926,21 @@ class TestCaptureStorageReclaim(unittest.TestCase):
         with open(trace_path, "w") as fh:
             json.dump({"traceEvents": trace()}, fh)
         return meta_path, trace_path
+
+    def test_a_seam_compiled_in_any_process_is_listed(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111)
+            meta_b, trace_b = self._write_capture(root, 222)
+            with open(trace_b, "w") as fh:
+                json.dump({"traceEvents": trace() + [compiled_marker(TARGET)]}, fh)
+            out_path = os.path.join(root, "selection.json")
+            ks.main(["--target", TARGET, "--device-kernel", KERNEL, "--capture-meta", meta_a, meta_b,
+                     "--torch-trace", trace_a, trace_b, "--out", out_path, "--no-reclaim-captures"])
+            with open(out_path) as fh:
+                verdict = json.load(fh)
+            self.assertEqual(verdict["compiled_passthrough_candidates"], [TARGET])
+            # The target itself was also observed eagerly: only another candidate fails the selection.
+            self.assertTrue(verdict["ok"] and verdict["deepest_verified"], verdict["failed"])
 
     def test_infer_task_dir_from_process_local_metas(self):
         with tempfile.TemporaryDirectory() as root:
