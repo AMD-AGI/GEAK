@@ -40,6 +40,19 @@ def test_registry_round_trips_without_notes(tmp_path, capsys):
     assert rows == [{k: v for k, v in r.items() if k != "notes"} for r in state["candidate_registry"]]
 
 
+def test_contract_failures_keep_ids_without_messages(tmp_path, capsys):
+    failure = {"id": "fused_host_abi", "category": "abi", "severity": "required", "tier": "semantic",
+               "messages": ["m" * 1000, "second"]}
+    row = {"id": "c0", "source": "search", "contract_failures": [failure] * 40,
+           "working_snapshot": {"head": "abc", "notes": "n" * 3000, "contract_failures": [failure] * 40}}
+    path = tmp_path / "STATE.json"
+    path.write_text(json.dumps({"candidate_registry": [row]}))
+    [got] = _read(path, "candidate_registry", capsys)
+    short = {k: v for k, v in failure.items() if k != "messages"}
+    assert got["contract_failures"] == [short] * 40
+    assert got["working_snapshot"] == {"head": "abc", "contract_failures": [short] * 40}
+
+
 def test_other_fields_round_trip_verbatim(tmp_path, capsys):
     path, state = _state(tmp_path)
     assert _read(path, "insights", capsys) == state["insights"]
