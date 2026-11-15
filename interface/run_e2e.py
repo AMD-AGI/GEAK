@@ -8201,6 +8201,12 @@ def main(argv: list[str]) -> int:
                 # falls back to the static control ladder (ROUTE_EIKOS_PROBE_DOWN -> __routeReduce
                 # estimates-null path; __routeReduce byte-identical).
                 os.environ["GEAK_EIKOS_PROBE_FAILED"] = "1"
+                # iraj465 (CHANGES_REQUESTED) Fix 1 (bug 1): the env above only reaches the standalone
+                # runtime. The native Workflow child (Path A) has no `process`, so also thread the flag
+                # through the workflow ARGS -- kernel_lane.js reads A.route_eikos_probe_failed arg-first
+                # and e2e_workflow.js / kernel_workflow.js forward it to every child lane, exactly as
+                # routing is threaded -- so the skip is honoured on BOTH runtimes.
+                ps_args["route_eikos_probe_failed"] = "1"
         if _eikos_ok:
             os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
         for _env_key, _handoff_key in (

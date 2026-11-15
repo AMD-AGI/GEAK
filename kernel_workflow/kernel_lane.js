@@ -1172,11 +1172,19 @@ function __routeReport() {
 // occurrence is one frozen card (`seq`); replaying it reuses it, and a new attempt after a completed one
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
-// iraj465 (CHANGES_REQUESTED): run_e2e.py probes the Eikos carrier ONCE at startup; if it is down it
-// exports GEAK_EIKOS_PROBE_FAILED=1. Read it here (guarded: the native Workflow child, Path A, has no
-// `process`) so the live eikos:route carrier is SKIPPED per decision instead of dispatched and failing;
-// the pick then falls back to the static control ladder via __routeReduce's estimates-null path.
+// iraj465 (CHANGES_REQUESTED) Fix 1 (bug 1): run_e2e.py probes the Eikos carrier ONCE at startup; if it
+// is down it BOTH exports GEAK_EIKOS_PROBE_FAILED=1 AND sets the route_eikos_probe_failed workflow arg.
+// Read the ARG first, exactly as ROUTING_ON reads A.routing: the native Workflow child (Path A) has no
+// `process`, so the env export alone is invisible there, but the arg is threaded through the workflow
+// args and forwarded parent->child (e2e_workflow.js / kernel_workflow.js) the same way routing is, so
+// the failed-probe state is seen on BOTH the standalone (`process`) and native-Workflow runtimes. The
+// env stays as the standalone-runtime fallback (arg unset). When down, the live eikos:route carrier is
+// SKIPPED per decision instead of dispatched and failing; the pick then falls back to the static control
+// ladder via __routeReduce's estimates-null path.
 const ROUTE_EIKOS_PROBE_DOWN = (function () {
+  const a = String(A.route_eikos_probe_failed != null ? A.route_eikos_probe_failed : '').trim().toLowerCase();
+  if (a === '1' || a === 'true' || a === 'on') return true;
+  if (a !== '') return false;               // any explicit false-ish arg stays OFF (args-off beats env-on, like ROUTING_ON)
   try { return String(process.env.GEAK_EIKOS_PROBE_FAILED || '').trim() === '1'; } catch (e) { return false; }
 })();
 // eikos v2 (E1): P1 is the DETERMINISTIC measured-signal host router (no model, no d3). OFF by default:
@@ -1535,16 +1543,23 @@ function __routeEikosPick(p, o, scope) {
       // A registered direction too long for the card is condensed first, and only when Eikos will be asked.
       const reg = __routeTasks[label];
       let fit = null;
-      if (!none && reg && reg.prompt.length > ROUTE_CARD_PROMPT_CHARS) {
+      // iraj465 (CHANGES_REQUESTED) Fix 1 (bug 2): the failed-probe gate runs BEFORE every carrier --
+      // both the eikos:condense condensation here AND the eikos:route consultation below. Condensation
+      // was itself a carrier dispatch, so an overlong card under a down probe used to still call one;
+      // now a probe-down run makes ZERO carrier calls. Condensation runs only when Eikos will actually
+      // be asked: a feasible lane exists AND the probe is up.
+      if (!none && !ROUTE_EIKOS_PROBE_DOWN && reg && reg.prompt.length > ROUTE_CARD_PROMPT_CHARS) {
         const short = await __routeCondense(reg, scope, (o && o.phase) || '');
         if (short) fit = { direction: short, from_chars: reg.prompt.length };
       }
       const c = __routeCard(p, o, scope, cls, occ, fit);
-      // iraj465 (CHANGES_REQUESTED): a failed startup probe skips the carrier itself -- 'probe_down' is
-      // a no-answer, so __routeReduce (estimates null) takes the cheapest feasible allowed lane (the
-      // static control ladder), instead of dispatching a doomed eikos:route carrier once per decision.
-      const res = c.ineligible ? { status: 'ineligible' } : none ? { status: 'not_asked_no_feasible_lane' }
-        : ROUTE_EIKOS_PROBE_DOWN ? { status: 'probe_down' }
+      // A failed startup probe is a no-answer: the pick falls back to the static control ladder
+      // (__routeReduce estimates-null path; __routeReduce byte-identical), dispatching NO eikos:route
+      // carrier. Gated ahead of BOTH the ineligible check and the consultation so a probe-down run is
+      // recorded as 'probe_down' (or 'not_asked_no_feasible_lane' when no lane is feasible at all),
+      // never a carrier status. With the probe UP this chain is byte-identical to before.
+      const res = ROUTE_EIKOS_PROBE_DOWN ? (none ? { status: 'not_asked_no_feasible_lane' } : { status: 'probe_down' })
+        : c.ineligible ? { status: 'ineligible' } : none ? { status: 'not_asked_no_feasible_lane' }
         : await __routeEikosConsult(c.card, host);
       // Other scopes may have reserved the top lane while this one waited: reduce on the current inputs.
       const now = __routeHostInput(scope, cls);

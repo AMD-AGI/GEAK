@@ -78,7 +78,7 @@ function lane(args, opts) {
     '__routeParseEstimates', '__routeHostInput', '__routeLadder', '__routeAudit', '__routeTasks', '__routeSkipped',
     '__routeDispatches', '__routeDispatchById', '__routeConfigErrors', 'ROUTE_EIKOS_ON', 'ROUTE_EIKOS_TAU', 'ROUTE_EIKOS_MAX_CONSULTS',
     'ROUTE_PRICE_ORDER', 'ROUTE_LANES', 'ROUTE_CLASS_FLOOR', 'agentT', 'eikosSha256', 'eikosCanonical',
-    'EIKOS_DECISION_FIELDS', 'ROUTE_DECIDER'];
+    'EIKOS_DECISION_FIELDS', 'ROUTE_DECIDER', 'ROUTE_EIKOS_PROBE_DOWN'];
   const ret = 'return {' + names.map((s) => `${s}: (typeof ${s} !== 'undefined' ? ${s} : undefined)`).join(', ') +
     ', setClock: (v) => { __routeClock = v; }, topUsed: () => __routeTopUsed, consults: () => __routeConsults };';
   const f = new Function('A', 'log', 'process', 'require', 'setTimeout', 'agent', 'budget', 'tlAgent', 'WORKFLOW_DIR',
@@ -87,8 +87,11 @@ function lane(args, opts) {
     'AGENT_TIMEOUT_MS', 'AGENT_RETRIES', 'CANDIDATE_FLOOR',
     SHADOW + '\n' + ROUTING + '\n' + AGENT_T + '\n' + ret);
   const coreCalls = [];
+  // `process` is injected like the real runtimes: the standalone path gets an object with `env`; the
+  // native Workflow path (Path A) has none, which a test models by passing opts.process === undefined.
+  const proc = ('process' in opts) ? opts.process : { env: {} };
   const api = f(Object.assign({ routing: 'true', route_decider: 'eikos' }, args || {}), (m) => logs.push(String(m)),
-    { env: {} }, () => { throw new Error('no require'); }, opts.setTimeout || setTimeout, agent, opts.budget, null, KDIR,
+    proc, () => { throw new Error('no require'); }, opts.setTimeout || setTimeout, agent, opts.budget, null, KDIR,
     evalDir, opts.deadline || 0, 3, 6, async (p, o) => { coreCalls.push({ p, o }); return agent(p, o); },
     1, 1, 0, 2, 600, 0, 3, 0.01, 0.01, 1800000, 2, 1.05);
   return Object.assign(api, { logs, carried, workers, evalDir, coreCalls });
@@ -685,9 +688,51 @@ async function main() {
       L.__routeScopeClass('mystery') === 'code_change');
   }
 
+  // ---- iraj465 Fix 1 (bug 1): the failed-probe flag is seen on the NATIVE Workflow runtime (Path A) ---
+  // run_e2e.py exports GEAK_EIKOS_PROBE_FAILED=1 AND sets the route_eikos_probe_failed arg. The native
+  // Workflow child has no `process`, so only the ARG can carry the state there. These assert the arg is
+  // honoured with `process` ABSENT, the env is still read on the standalone path, and an explicit
+  // false-ish arg beats the env (the ROUTING_ON precedence).
+  {
+    ok('process ABSENT + route_eikos_probe_failed arg set: the probe-down flag is still seen (native path)',
+      lane({ route_eikos_probe_failed: '1' }, { process: undefined }).ROUTE_EIKOS_PROBE_DOWN === true);
+    ok('process ABSENT + no arg: nothing is seen (the env it would otherwise read is unreachable there)',
+      lane({}, { process: undefined }).ROUTE_EIKOS_PROBE_DOWN === false);
+    ok('the standalone runtime still reads GEAK_EIKOS_PROBE_FAILED from the env when the arg is unset',
+      lane({}, { process: { env: { GEAK_EIKOS_PROBE_FAILED: '1' } } }).ROUTE_EIKOS_PROBE_DOWN === true &&
+      lane({}, { process: { env: {} } }).ROUTE_EIKOS_PROBE_DOWN === false);
+    ok('an explicit false-ish arg stays OFF even when the env is set (args-off beats env-on, like routing)',
+      lane({ route_eikos_probe_failed: '0' }, { process: { env: { GEAK_EIKOS_PROBE_FAILED: '1' } } }).ROUTE_EIKOS_PROBE_DOWN === false);
+  }
+
+  // ---- iraj465 Fix 1 (bug 2): a probe-down run dispatches ZERO carrier calls (incl. no eikos:condense) ---
+  // The gate now runs BEFORE both condensation and consultation, so even an overlong card (which used to
+  // dispatch an eikos:condense carrier BEFORE the gate) makes no carrier call. The pick falls back to the
+  // static control ladder (estimates-null), recorded as probe_down.
+  {
+    server.probs = P(0.99, 0.99, 0.99);      // would qualify a lane if the carrier were ever asked
+    server.seen = [];
+    const L = lane({ route_eikos_probe_failed: '1' });
+    direction(L, 'r1_d0', 'memory', { prompt: 'y'.repeat(9000) });   // overlong: pre-fix this condensed first
+    const p = await L.__routePick('optimize prompt', W(ENG('r1_d0')));
+    const condense = L.workers.filter((w) => String(w.o.label).indexOf('eikos:condense') === 0);
+    ok('probe down, overlong card: no eikos:route AND no eikos:condense carrier is dispatched; nothing reaches the server',
+      L.carried.length === 0 && condense.length === 0 && L.consults() === 0 && server.seen.length === 0);
+    ok('probe down, overlong card: the pick falls back to the static control ladder, recorded as probe_down (estimates null)',
+      p.model === S5 && last(L, 'decide').backend === 'probe_down' && last(L, 'decide').decided === S5 &&
+      last(L, 'decide').estimates === null);
+    server.seen = [];
+    const L2 = lane({ route_eikos_probe_failed: '1' });
+    direction(L2, 'r1_d1', 'memory', { prompt: 'Tile K by 64.' });  // a fitting card is also never asked
+    const p2 = await L2.__routePick('p', W(ENG('r1_d1')));
+    ok('probe down, fitting card: still zero carriers of any kind, static-ladder pick, probe_down recorded',
+      L2.carried.length === 0 && L2.workers.length === 0 && L2.consults() === 0 && server.seen.length === 0 &&
+      p2.model === S5 && last(L2, 'decide').backend === 'probe_down');
+  }
+
   // ---- the standalone and nested paths forward every setting ---------------------------------------
   const KEYS = ['route_decider', 'route_eikos_tau', 'route_eikos_max_consults', 'route_eikos_carrier_model',
-    'route_eikos_carrier_timeout_ms'];
+    'route_eikos_carrier_timeout_ms', 'route_eikos_probe_failed'];
   const kw = fs.readFileSync(path.join(KDIR, 'kernel_workflow.js'), 'utf8');
   const e2e = fs.readFileSync(path.join(ROOT, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   const e2eLane = e2e.slice(e2e.indexOf('const laneArgs = (wfArgs) => {'), e2e.indexOf('return out;', e2e.indexOf('const laneArgs = (wfArgs) => {')));

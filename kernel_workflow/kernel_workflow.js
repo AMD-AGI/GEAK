@@ -621,7 +621,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // ...and the cost-ladder knobs (thresholds, caps, floors, decider), each only when set.
       ...Object.fromEntries(['route_conf_escalate', 'route_max_retries_per_lane', 'route_max_top_escalations',
         'route_max_output_tokens', 'route_floors', 'route_decider', 'route_eikos_tau', 'route_eikos_max_consults',
-        'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms']
+        'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms', 'route_eikos_probe_failed']
         .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
