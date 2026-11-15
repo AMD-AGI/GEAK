@@ -25,7 +25,8 @@ SUMMARIZE = os.path.join(SCRIPTS_DIR, "bench_summarize.py")
 #: Env this module reads. Scrubbed before every call so a caller's shell cannot change
 #: what a test measures; `env=` re-adds the ones a test is actually about.
 _LIFECYCLE_ENV = ("E2E_METRIC", "WARM_SERVER_ROUNDS", "GEAK_ISOLATED_REPLICA",
-                  "MEASUREMENT_PURPOSE", "EFFECTIVE_CONFIG_DIGEST", "BENCH_WARMUP_PROTOCOL")
+                  "MEASUREMENT_PURPOSE", "EFFECTIVE_CONFIG_DIGEST", "BENCH_WARMUP_PROTOCOL",
+                  "BENCH_CLIENT")
 
 
 def _load_summarize():
@@ -244,6 +245,41 @@ class FromRunsTest(unittest.TestCase):
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
         self.assertNotIn("guard_total_tok_s_median", s)
 
+    def test_a_trace_replay_guards_every_other_axis_on_total_throughput(self):
+        """The corpus fixes the work each request asks for, so any axis but total can rise while
+        the server completes less of it. Total rides beside each, next to Hyperloom's guards."""
+        hl_guards = {"output": set(), "e2e_norm_intvty_p50": {"e2e_norm_intvty_p90",
+                                                              "aggregate_output_tok_s"},
+                     "intvty": {"aggregate_output_tok_s"},
+                     "p90_intvty_inferencex": {"aggregate_output_tok_s"}}
+        for metric, guards in hl_guards.items():
+            with self.subTest(metric=metric):
+                s, _ = self.summarize([100.0, 110.0],
+                                      env={"E2E_METRIC": metric, "BENCH_CLIENT": "agentx"})
+                self.assertEqual(s["guard_aggregate_total_token_tok_s_median"], 945.0)
+                self.assertEqual(s["guard_aggregate_total_token_tok_s_spread_pct"], 9.52)
+                self.assertEqual({k[len("guard_"):-len("_median")] for k in s
+                                  if k.startswith("guard_") and k.endswith("_median")},
+                                 guards | {"aggregate_total_token_tok_s"})
+
+    def test_a_trace_replay_on_total_carries_no_guard(self):
+        """There the objective IS the guard."""
+        s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "total", "BENCH_CLIENT": "agentx"})
+        self.assertEqual(s["metric_basis"], "aggregate_total_token_tok_s")
+        self.assertEqual([k for k in s if k.startswith("guard_")], [])
+
+    def test_a_synthetic_sweep_keeps_its_field_set(self):
+        """One shape, where total is a fixed multiple of output: no client but the trace replay
+        adds the total guard, on any axis."""
+        for client in (None, "native", "inferencex"):
+            for metric in (None, "output", "p90_intvty_inferencex"):
+                env = {k: v for k, v in (("BENCH_CLIENT", client), ("E2E_METRIC", metric)) if v}
+                with self.subTest(env=env):
+                    s, _ = self.summarize([100.0, 110.0], env=env)
+                    self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
+                    if metric != "p90_intvty_inferencex":
+                        self.assertEqual([k for k in s if k.startswith("guard_")], [])
+
     def test_spread_is_expressed_in_the_graded_units(self):
         """Transforming per row, not after the median, keeps spread in the compared units."""
         s, _ = self.summarize([100.0, 110.0],
@@ -353,14 +389,16 @@ class FromReplicasTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="summarize_reps_")
 
-    def add(self, index, tput, basis="aggregate_output_tok_s", attempt=1):
+    def add(self, index, tput, basis="aggregate_output_tok_s", attempt=1, total=None):
         rdir = os.path.join(self.dir, "replica_%d" % index)
         os.makedirs(rdir, exist_ok=True)
+        # A trace-replay replica measured the total guard; a synthetic one never has the field.
+        trace_replay = {} if total is None else {"guard_aggregate_total_token_tok_s_median": total}
         with open(os.path.join(rdir, "selected_summary.json"), "w", encoding="utf-8") as fh:
             json.dump({"throughput_tok_s_median": tput, "ttft_ms_median": 40.0 + index,
                        "tpot_ms_median": 8.0 + index, "metric_basis": basis,
                        "guard_aggregate_output_tok_s_median": tput * 9,
-                       "guard_e2e_norm_intvty_p90_median": tput / 2}, fh)
+                       "guard_e2e_norm_intvty_p90_median": tput / 2, **trace_replay}, fh)
         with open(os.path.join(rdir, "selected_attempt"), "w", encoding="utf-8") as fh:
             fh.write(str(attempt))
 
@@ -443,6 +481,29 @@ class FromReplicasTest(unittest.TestCase):
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("p90_intvty_inferencex=108.0", line)
+
+    def test_a_trace_replay_leg_aggregates_the_total_guard(self):
+        """Like the basis, the aggregate reads it off its replicas: a leg whose replicas measured
+        the total guard carries it, on every axis but total."""
+        for basis in ("aggregate_output_tok_s", "e2e_norm_intvty_p50", "p90_intvty_inferencex"):
+            with self.subTest(basis=basis):
+                for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+                    self.add(i, t, basis=basis, total=t * 500)
+                s, _ = self.summarize(3, 3)
+                self.assertEqual(s["guard_aggregate_total_token_tok_s_median"], 54000.0)
+                self.assertEqual(s["guard_aggregate_total_token_tok_s_spread_pct"], 7.41)
+
+    def test_a_leg_whose_replicas_carry_no_total_guard_has_none(self):
+        for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+            self.add(i, t, basis="p90_intvty_inferencex")
+        s, _ = self.summarize(3, 3)
+        self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
+
+    def test_a_total_leg_carries_no_guard(self):
+        for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+            self.add(i, t, basis="aggregate_total_token_tok_s", total=t)
+        s, _ = self.summarize(3, 3)
+        self.assertEqual([k for k in s if k.startswith("guard_")], [])
 
     def test_no_replicas_at_all(self):
         s, _ = self.summarize(3, 0)

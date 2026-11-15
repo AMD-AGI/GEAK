@@ -131,6 +131,7 @@ jobs:
             e2e_workflow/scripts/tests/test_overlay_installers.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
+            e2e_workflow/scripts/tests/test_seam_trace_compiled.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
             e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
@@ -153,8 +154,14 @@ jobs:
             kernel_workflow/scripts/tests/test_experience_store.py \
             kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kernel_workflow/scripts/tests/test_workspace_sources.py \
+            evo/tests/test_archive.py \
+            evo/tests/test_dispatch.py \
+            evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_planner_extension.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_validation.py \
+            perf_knowledge/expert_skills/expert_workflows/*/tests \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -180,7 +187,9 @@ jobs:
           for skill in \
             flydsl_decode_moe_stage1_blkmap \
             flydsl_prefill_moe_stage2_fp8partial \
-            flydsl_fp8_blockscale_gemm
+            flydsl_fp8_blockscale_gemm \
+            megamoe_ep_mega_fusion \
+            megamoe_small_mtpr_fusion
           do
             python perf_knowledge/expert_skills/_contribute/validate_skill.py "$skill" --static
           done
@@ -359,6 +368,8 @@ jobs:
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
+      - name: GPU family table (identical in every workflow)
+        run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
@@ -376,6 +387,10 @@ jobs:
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       - name: kernel_workflow multi-GPU job resolution
         run: node kernel_workflow/scripts/test_gpu_request.js
+      - name: expert workflow regression tests (perf_knowledge/expert_skills/expert_workflows)
+        run: |
+          set -e
+          for t in perf_knowledge/expert_skills/expert_workflows/*/tests/test_*.js; do node "$t"; done
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

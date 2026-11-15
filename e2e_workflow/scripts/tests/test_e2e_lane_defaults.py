@@ -46,12 +46,12 @@ check("one injection point, not one per call site",
       "laneArgs is where the default is applied")
 
 check("gfx1201 disables the E2E learned-card corpus",
-      "const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE" in s
+      "const E2E_LEARNED_KB_ENABLED = !GPU_FAMILY.isolate" in s
       and "E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off'" in s,
       "every role prompt must receive one architecture-gated switch")
 
 check("RDNA4 matrix-core guidance is WMMA, not hard-coded MFMA",
-      "const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA'" in s
+      "const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore" in s
       and "one fp8 MFMA" not in s,
       "R9700-reachable task strings must use MATRIX_CORE_NAME")
 
