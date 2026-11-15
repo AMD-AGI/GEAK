@@ -224,12 +224,21 @@ RESTORE
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
 ### GPU requirement (both sub-modes)
-Decide how many GPUs ONE run of this task's correctness test / benchmark needs; every later GPU
+Always (also when the GPU count is given explicitly) run
+`python3 "$SKILL_DIR/scripts/detect_gpu_requirement.py" --declaration "$KERNEL_PATH_ORIG"` and return
+its JSON output verbatim as `"task_declaration"` (`required_gpu_count`, `ut_total_s`, `evidence`): the
+GPU count the task itself declares (`null` when it declares none) and its whole-UT time limit. Do not
+edit, recompute or drop it; the lane reads it.
+
+Then decide how many GPUs ONE run of this task's correctness test / benchmark needs; every later GPU
 command leases that many together. Skip this if `OP_SPEC.resource` already sets `gpus_per_job`.
 1. Run `python3 "$SKILL_DIR/scripts/detect_gpu_requirement.py" <files>` on the task's own test and
    benchmark entry files plus its `meta.json` (a small task dir may be passed whole; never a whole
    repository).
-2. `single` → return it as is. Otherwise read the code it cites and find the rank count the test runs
+2. `single` → return it as is. A count the task declares (`required_gpu_count` in
+   `run/requested_kernel.json` / `run/RETURN.json`, `capabilities.multi_rank.world_size` in
+   `meta.json`; the evidence says "declared") → return it as is too: dispatch sizes the job by it.
+   Otherwise read the code it cites and find the rank count the test runs
    with as written: torchrun `--nproc_per_node`, a `mp.spawn`/`Pool` process count, a count passed in
    code (e.g. `run_test(8, ...)`), or a fixed parallel layout (e.g. EP8). Several counts → the largest.
    A count that follows the visible GPUs → `scalable`. Ignore counts in capture files
@@ -270,7 +279,11 @@ bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit bo
 Inputs: `KERNEL_PATH_ORIG`, `EVAL_DIR`, `WORKSPACE` (=EVAL_DIR/workspace), `SKILL_DIR`, `GPU_ID`,
 `APPLY_TO_ORIGINAL`, and the COMMANDMENT path `EVAL_DIR/COMMANDMENT.md`, the final patch
 `EVAL_DIR/final_patch.diff`, the TechLead's claimed numbers, and `BASELINE_TIMING` (the per-case
-baseline latencies recorded at benchmark setup).
+baseline latencies recorded at benchmark setup). A multi-rank UT task delivered by the UT module also
+gets `GPUS_PER_JOB` (> 1) in its `## Inputs`: then the MULTI-GPU RECEIPT in step 6 applies. A
+multi-GPU job whose prompt only has the `## Multi-GPU job (GPUS_PER_JOB=n)` lease note, with no
+`GPUS_PER_JOB` listed in `## Inputs` (e.g. a test started by torchrun), does not write the MULTI-GPU
+RECEIPT: validate it as before.
 
 **Do NOT trust the TechLead's reported speedup — reproduce it from the TRUE baseline.**
 
@@ -354,7 +367,8 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
      and note in `arbitration_note` that the baseline came from this lane's own `baseline_timing.json`.
      Do NOT set `status: "flagged"` on this basis — go straight to the comparisons above and let
      correctness / patch-install / arbitration decide status on their own merits. A missing receipt here
-     is the SHAPE of the route, not a fault in the run.
+     is the SHAPE of the route, not a fault in the run. Exception: when `GPUS_PER_JOB` is listed in your
+     `## Inputs`, still copy the UT's per-rank receipt into `timing_receipt` — see MULTI-GPU RECEIPT below.
 
    `FROZEN_ORACLE=true` → a receipt is expected and its absence IS a fault. Parse `GEAK_TIMING_RECEIPT`
    out of the FULL_BENCHMARK output (see `oracle_freezer.md` step 4) and copy it verbatim into
@@ -392,6 +406,36 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    still carry the label. Never fold different cache bases into one campaign-level speedup.
    `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
    receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
+
+   **MULTI-GPU RECEIPT — only when `GPUS_PER_JOB` (> 1) is listed in your `## Inputs`; skip it
+   otherwise: on single-GPU validation, and on a multi-GPU job whose prompt only has the
+   `## Multi-GPU job (GPUS_PER_JOB=n)` lease note (e.g. a torchrun test), validated as before.**
+   It applies whatever `FROZEN_ORACLE` says. A multi-rank UT merges its ranks' times into one
+   number per case, and without each rank's time and the alignment method nobody can tell whether that
+   number measured the kernel or the ranks' start skew. From the output of YOUR FULL_BENCHMARK run, write
+   `timing_receipt` (and the same object into `director_validation.json`):
+   ```json
+   {"world_size": <GPUS_PER_JOB>, "source": "<the line or file you read>",
+    "alignment": {<how the ranks are aligned before every timed sample, and how per-rank times are merged>},
+    "cases": {"<case>": {"baseline": {"ms": <merged>, "rank_ms": [<one ms value per rank>]},
+                         "current":  {"ms": <merged>, "rank_ms": [<one ms value per rank>]}}}}
+   ```
+   - Generated task (`unittest.py` starts with `# GEAK-GENERATED unittest.py`): copy the
+     `GEAK_TIMING_RECEIPT:` JSON (or `receipt` in the `run/ut_result.json` the run rewrites) verbatim;
+     it already has this shape (`current` = the candidate leg).
+   - Older hand-written multi-rank UT: build it from the `GEAK_PER_RANK_TIMING=` /
+     `GEAK_TIMING_ALIGNMENT=` stdout lines, or from `timing` in the `run/ut_runs/<stamp>/summary.json`
+     your run wrote (the same layout as `timing` in the task's `run/ut_result.json`): `rank_ms` =
+     `per_rank_us` / 1000, `ms` = `step_us` / 1000, the UT's `candidate` leg as `current`, and
+     `alignment` = `timing.alignment` verbatim. The task's own `run/ut_result.json` is the
+     extraction-time record, not your measurement.
+   The `baseline` leg is required for every timed case; the `current` leg as well whenever
+   `FINAL_PATCH` is non-empty (record it whenever your run measured it). Also give each `per_case` row
+   its `baseline_rank_ms` / `optimized_rank_ms` and `alignment`. If the UT reports no per-rank times or
+   no alignment method → `validation_status: "flagged"`, `timing_receipt` = the complete part (`null`
+   when a baseline leg is missing), and name what is missing in `arbitration_note`. Never report one
+   merged time as a multi-rank result and never spread one number over the ranks. `timing_basis`
+   follows the rules of this step (`not_applicable` when `FROZEN_ORACLE` is not `true`).
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
    cd "$KERNEL_PATH_ORIG"
@@ -431,6 +475,8 @@ Return JSON:
   "final_patch": "<EVAL_DIR>/final_patch.diff"
 }
 ```
+(When `GPUS_PER_JOB` is listed in your `## Inputs`: `timing_receipt` is the MULTI-GPU RECEIPT object
+of step 6, and `per_case` rows carry `baseline_rank_ms` / `optimized_rank_ms` / `alignment`.)
 
 If status is `flagged` because the result is reproducible-but-lower (not a correctness failure),
 still report the verified numbers — the script may accept the verified result as official. Only

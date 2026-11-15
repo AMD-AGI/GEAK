@@ -45,14 +45,20 @@ Run every GPU command from its task directory under a lease:
 ```bash
 cd "$TASK_DIR"
 bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "$GPU_ID" python3 unittest.py
-# For actual multi-rank tests or serving captures, lease the whole allocated set:
+# A multi-rank UT (capabilities.multi_rank.world_size > 1), its verify_ut.py and its mutation runs
+# lease SERVING_GPU, the serving GPU set, as ONE group; the group lease stops the run after
+# GEAK_GPU_RUN_TIMEOUT seconds (default 900: set it) and reaps what it left:
+GEAK_GPU_RUN_TIMEOUT=<meta.timeouts.total_s> \
+  bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "group:$SERVING_GPU" -- python3 unittest.py
+# For serving captures, lease the whole allocated set:
 python3 "$SHARED_TOOLS/gpu_lock_set.py" "$GPU_SET" -- <foreground-command>
 ```
 
-A single-lock comma list is a pool that leases ONE device; a set lock holds every
-requested device. Reconcile device IDs with the physical allocation. Serialize captures
-and UTs if isolation cannot be established, and let no detached GPU child outlive the
-lease.
+A single-lock comma list is a pool that leases ONE device; a group/set lease holds every
+requested device. Never nest leases: the generated multi-rank UT starts its own rank
+processes inside the one group lease. Reconcile device IDs with the physical allocation.
+Serialize captures and UTs if isolation cannot be established, and let no detached GPU
+child outlive the lease.
 
 All participating processes/containers must share the same
 `/tmp/team_gpu_locks` lock directory (bind-mount it when necessary), or set

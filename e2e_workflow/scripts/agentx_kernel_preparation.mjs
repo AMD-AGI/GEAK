@@ -3,8 +3,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { checkPreparedUT } from './kernel_extraction_delivery.mjs';
+import { perRankTimingDefect, readUtResult } from './kernel_source_delivery.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+// A multi-GPU count is declared when the request or the result writes required_gpu_count and every
+// written one is the same positive integer (gpuCount). The collective default of 2 GPUs is an
+// assumption, not a declaration. Returns '' when declared, else what is missing.
+export function gpuCountUndeclared(kernel, result, gpuCount) {
+  const written = [['request', kernel.required_gpu_count], ['result', result.required_gpu_count]]
+    .filter(([, n]) => n !== undefined && n !== null);
+  if (!written.length)
+    return `no required_gpu_count in the request or the result (the collective default of ${gpuCount} GPUs is not a declaration)`;
+  return written.every(([, n]) => n === gpuCount) ? '' : 'the request and the result do not declare one ' +
+    `positive-integer GPU count: ${written.map(([where, n]) => `${where} required_gpu_count ${JSON.stringify(n)}`).join(', ')}`;
+}
 // Keep whole-op routing consistent with the head consumer's vocabulary.
 function opKind(kernel, result) {
   const canonical = value => value === 'attention' ? 'attn' : value;
@@ -88,16 +100,26 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
       // lanes exactly what passed the gate instead of a promise to re-read it later.
       candidate.prepared_ut = { phase: task.phase, result_path: resultPath,
         sha256: sha256(bytes), result };
-      // Existing optimization lanes lease one GPU. A validated multi-rank UT
-      // remains a deliverable, but cannot be dispatched to that single-card lane.
+      // A multi-GPU task enters its queue with required_gpu_count when its UT result times every
+      // case per rank with a recorded alignment (timing receipt, or the older per_rank_us +
+      // alignment) and its GPU count is declared consistently; e2e_workflow.js decides whether a
+      // GPU pool can hold it. Otherwise it stays deferred, naming what is missing.
       const gpuCount = kernel.required_gpu_count ?? result.required_gpu_count ??
         (candidate.op_kind === 'collective' ? 2 : 1);
       if (!Number.isInteger(gpuCount) || gpuCount < 1) throw new Error('invalid required_gpu_count');
       if (gpuCount > 1) {
-        output.deferred_tasks.push({ ...candidate, task_dir: result.task_dir,
-          result_path: resultPath, required_gpu_count: gpuCount,
-          reason: 'UT validated; optimization requires a multi-GPU lane, current head/milestone lanes lease one GPU' });
-        continue;
+        // A UT result it cannot read is a missing per-rank timing, not a failed delivery (main defers it).
+        const timing = await readUtResult(result).then(ut => perRankTimingDefect(ut, gpuCount),
+          e => `the UT result cannot be read: ${e.message}`);
+        const missing = [gpuCountUndeclared(kernel, result, gpuCount), timing].filter(Boolean);
+        if (missing.length) {
+          output.deferred_tasks.push({ ...candidate, task_dir: result.task_dir,
+            result_path: resultPath, required_gpu_count: gpuCount,
+            reason: `UT validated; multi-GPU optimization needs a declared GPU count and per-rank time and ` +
+              `alignment for every timed case: ${missing.join('; ')}` });
+          continue;
+        }
+        candidate.required_gpu_count = gpuCount;
       }
       const queue = task.phase === 'extract_op' && ['gemm', 'attn', 'moe'].includes(candidate.op_kind)
         ? 'head_candidates' : 'kernel_candidates';
