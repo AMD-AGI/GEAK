@@ -689,19 +689,18 @@ async function main() {
   }
 
   // ---- iraj465 Fix 1 (bug 1): the failed-probe flag is seen on the NATIVE Workflow runtime (Path A) ---
-  // run_e2e.py exports GEAK_EIKOS_PROBE_FAILED=1 AND sets the route_eikos_probe_failed arg. The native
-  // Workflow child has no `process`, so only the ARG can carry the state there. These assert the arg is
-  // honoured with `process` ABSENT, the env is still read on the standalone path, and an explicit
-  // false-ish arg beats the env (the ROUTING_ON precedence).
+  // run_e2e.py sets the route_eikos_probe_failed ARG when the startup probe fails. kernel_lane runs on the
+  // native Workflow host (no `process`) and reads ONLY the arg — reading process.env in lane code is a
+  // native-forbidden construct the conformance guard rejects — so the arg is what carries the state here.
   {
     ok('process ABSENT + route_eikos_probe_failed arg set: the probe-down flag is still seen (native path)',
       lane({ route_eikos_probe_failed: '1' }, { process: undefined }).ROUTE_EIKOS_PROBE_DOWN === true);
-    ok('process ABSENT + no arg: nothing is seen (the env it would otherwise read is unreachable there)',
+    ok('process ABSENT + no arg: nothing is seen',
       lane({}, { process: undefined }).ROUTE_EIKOS_PROBE_DOWN === false);
-    ok('the standalone runtime still reads GEAK_EIKOS_PROBE_FAILED from the env when the arg is unset',
-      lane({}, { process: { env: { GEAK_EIKOS_PROBE_FAILED: '1' } } }).ROUTE_EIKOS_PROBE_DOWN === true &&
-      lane({}, { process: { env: {} } }).ROUTE_EIKOS_PROBE_DOWN === false);
-    ok('an explicit false-ish arg stays OFF even when the env is set (args-off beats env-on, like routing)',
+    ok('the lane reads ONLY the arg: process.env is NOT consulted in lane code (native host has no process)',
+      lane({}, { process: { env: { GEAK_EIKOS_PROBE_FAILED: '1' } } }).ROUTE_EIKOS_PROBE_DOWN === false &&
+      lane({ route_eikos_probe_failed: '1' }, { process: { env: {} } }).ROUTE_EIKOS_PROBE_DOWN === true);
+    ok('an explicit false-ish arg stays OFF (unset/false -> OFF)',
       lane({ route_eikos_probe_failed: '0' }, { process: { env: { GEAK_EIKOS_PROBE_FAILED: '1' } } }).ROUTE_EIKOS_PROBE_DOWN === false);
   }
 

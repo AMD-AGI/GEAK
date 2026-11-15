@@ -869,10 +869,13 @@ const ROUTE_TIER_MAP = (function () {
   return m;
 })();
 const ROUTING_ON = (function () {
+  // kernel_lane runs ONLY as a native-Workflow child lane (no `process`); A.routing is forwarded in from
+  // the parent (e2e_workflow.js / kernel_workflow.js), so it is the single enable source here. The
+  // GEAK_ROUTING env fallback for a standalone harness lives on the top-level e2e_workflow.js copy;
+  // reading process.env here would be dead on the native host AND a native-forbidden construct the
+  // conformance guard rejects (evo/tests/test_dispatch.py::test_lane_script_uses_no_native_forbidden_constructs).
   const a = String(A.routing != null ? A.routing : '').trim().toLowerCase();
-  if (a === 'true' || a === '1' || a === 'on') return true;
-  if (a === '') { try { return String(process.env.GEAK_ROUTING || '').trim() === '1'; } catch (e) { return false; } }
-  return false;                             // any explicit false-ish value stays OFF (args-off beats env-on)
+  return a === 'true' || a === '1' || a === 'on';   // anything else (incl. unset) stays OFF — default-OFF
 })();
 // Thresholds and caps. CODE owns them: the decider never sees or moves them. Each is a per-run arg so an
 // operator-approved proposal from route_review.py applies without a code change.
@@ -1062,15 +1065,15 @@ async function __routePick(p, o) {
   // dispatched here (not a later same-scope dispatch's mutable last_dispatch_model). This mirrors the
   // eikos/live-P1 per-dispatch binding; it is P1-shadow observability and never alters the legacy ladder
   // (`__routeLadder[scope]` still keys only on scope, exactly as before) or the live pick above.
-  // eikos v2 E1 (R8 / Astra re-review #9 item 5): CREATE the dispatch id BEFORE the shadow emit so the
-  // Sonnet-carrier __p1Shadow threads the REAL dispatch id into the durable p1_shadow.jsonl record (was
-  // dispatch_id:null). Pure telemetry threading — it does NOT change the live pick or the reduction.
+  // eikos v2 E1 (R8 / Astra re-review #9 item 5): CREATE the per-dispatch id so the Sonnet-carrier
+  // dispatch record binds to the model ACTUALLY dispatched here. Pure telemetry — it does NOT change the
+  // live pick or the reduction.
   const __p1Did = `d${++__routeDispatchSeq}`;
   const __p1Rec = { id: __p1Did, label: (o && o.label) || '', scope, seq: __routeDispatchSeq, model: ROUTE_LANES[lane],
                     outcome: null, p1Outcome: null, decider: 'sonnet' };
   __routeDispatchById[__p1Did] = __p1Rec;
   (__routeDispatches[(o && o.label) || ''] = __routeDispatches[(o && o.label) || ''] || []).push(__p1Rec);
-  __p1Shadow('sonnet', scope, (o && o.label) || '', ROUTE_LANES[lane], __p1TopUsedPre, __p1Did);   // item 5: threads the real dispatch id; never changes the pick above
+  __p1Shadow('sonnet', scope, (o && o.label) || '', ROUTE_LANES[lane], __p1TopUsedPre);   // never changes the pick above
   return { model: ROUTE_LANES[lane], scope, dispatch_id: __p1Did };
 }
 // Deterministic outcome of one cycle for a worker scope. ok=false queues a re-classification before the
@@ -1173,19 +1176,17 @@ function __routeReport() {
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
 // iraj465 (CHANGES_REQUESTED) Fix 1 (bug 1): run_e2e.py probes the Eikos carrier ONCE at startup; if it
-// is down it BOTH exports GEAK_EIKOS_PROBE_FAILED=1 AND sets the route_eikos_probe_failed workflow arg.
-// Read the ARG first, exactly as ROUTING_ON reads A.routing: the native Workflow child (Path A) has no
-// `process`, so the env export alone is invisible there, but the arg is threaded through the workflow
-// args and forwarded parent->child (e2e_workflow.js / kernel_workflow.js) the same way routing is, so
-// the failed-probe state is seen on BOTH the standalone (`process`) and native-Workflow runtimes. The
-// env stays as the standalone-runtime fallback (arg unset). When down, the live eikos:route carrier is
-// SKIPPED per decision instead of dispatched and failing; the pick then falls back to the static control
-// ladder via __routeReduce's estimates-null path.
+// is down it sets the route_eikos_probe_failed workflow ARG (and, for the standalone top-level only, also
+// exports GEAK_EIKOS_PROBE_FAILED=1). This lane reads ONLY the ARG, exactly as ROUTING_ON reads A.routing:
+// kernel_lane runs on the native Workflow host (no `process`), and the arg is threaded through the
+// workflow args and forwarded parent->child (e2e_workflow.js / kernel_workflow.js) the same way routing
+// is, so the failed-probe state is seen here on the native runtime. (Reading process.env here would be
+// dead AND a native-forbidden construct the conformance guard rejects.) When down, the live eikos:route
+// carrier is SKIPPED per decision; the pick falls back to the static control ladder via __routeReduce's
+// estimates-null path.
 const ROUTE_EIKOS_PROBE_DOWN = (function () {
   const a = String(A.route_eikos_probe_failed != null ? A.route_eikos_probe_failed : '').trim().toLowerCase();
-  if (a === '1' || a === 'true' || a === 'on') return true;
-  if (a !== '') return false;               // any explicit false-ish arg stays OFF (args-off beats env-on, like ROUTING_ON)
-  try { return String(process.env.GEAK_EIKOS_PROBE_FAILED || '').trim() === '1'; } catch (e) { return false; }
+  return a === '1' || a === 'true' || a === 'on';   // anything else (incl. unset) stays OFF
 })();
 // eikos v2 (E1): P1 is the DETERMINISTIC measured-signal host router (no model, no d3). OFF by default:
 // route_decider stays 'sonnet'/'eikos' and P1 only runs in SHADOW (a 'p1_shadow' audit beside the live
@@ -1627,7 +1628,7 @@ function __routeEikosPick(p, o, scope) {
                         model: tk.model, served_model: 'unverified', capped: false });
     // eikos v2 E1 (bug 4): ONE shadow event per actual dispatch (fresh or repeat), on the dispatched
     // model and the pre-reservation quota snapshot — a faithful dispatch-level disagreement rate.
-    __p1Shadow('eikos', scope, label, tk.model, __p1TopUsedPre, id);   // never changes the live pick/dispatch above
+    __p1Shadow('eikos', scope, label, tk.model, __p1TopUsedPre);   // never changes the live pick/dispatch above
     return { model: tk.model, scope, dispatch_id: id };
   });
 }
@@ -1757,34 +1758,17 @@ function __p1Observe(scope, liveModel, ok, kind) {
   }
   // invalid_measurement / no_result: not worker-attributable — neither excludes a lane nor stagnates.
 }
-// eikos v2 E1 (durable shadow telemetry — ADDITIVE insurance, v8): a best-effort, append-only, WRITE-ONLY
-// durable sink that MIRRORS each per-dispatch P1 shadow verdict to <EVAL_DIR>/reports/trace/p1_shadow.jsonl
-// (the dir the ledger/llm_calls.jsonl live in). The in-memory __routeAudit + __routeReport() ->
-// run_result.json path is UNCHANGED and remains the PRIMARY source; this exists only so a mid-run death that
-// never writes run_result.json (e.g. the SHADOW_FAILURE2 commit-abort) still leaves the dispatch-level shadow
-// events on disk. It NEVER changes a routing decision or the live pick, and ANY fault is swallowed. fs is
-// acquired best-effort: require() when the runtime exposes it. If require is unavailable, __p1ShadowFS stays
-// null and __p1ShadowFlush() silently no-ops -- the PRIMARY run_result.json audit (via __routeReport ->
-// run_result.json) remains the source. FIX ROUND 10: a deferred dynamic node:fs loader fallback was REMOVED
-// here because the native Workflow runtime rejects dynamic ES-module loading at script-load (a parse-time
-// ban that made this ENTIRE script fail to load, before any agent ran). Astra re-review #11 accepted the
-// no-op-sink fallback for exactly this "native filesystem access unavailable" case.
-var __p1ShadowFS = null;
-try { if (typeof require === 'function') { __p1ShadowFS = require('fs'); } } catch (e) { __p1ShadowFS = null; }
-function __p1ShadowFlush(line) {
-  try {
-    var fs = __p1ShadowFS;
-    if (!fs || typeof fs.appendFileSync !== 'function') { return; }        // no fs in this runtime -> no-op
-    if (typeof EVAL_DIR !== 'string' || !EVAL_DIR) { return; }             // eval dir not ready -> skip
-    var dir = EVAL_DIR + '/reports/trace';                                  // co-located with llm_calls.jsonl
-    try { if (typeof fs.mkdirSync === 'function') { fs.mkdirSync(dir, { recursive: true }); } } catch (e) {}
-    fs.appendFileSync(dir + '/p1_shadow.jsonl', JSON.stringify(line) + String.fromCharCode(10));
-  } catch (e) { /* best-effort: a write error NEVER affects the run */ }
-}
+// eikos v2 E1: the durable P1-shadow telemetry sink (a best-effort append-only mirror of each p1_shadow
+// verdict to <EVAL_DIR>/reports/trace/p1_shadow.jsonl) was REMOVED. It needed require('fs') and a
+// new Date() timestamp — both native-forbidden on the Workflow host (no fs, no clock) and rejected by the
+// merged-in conformance guard (evo/tests/test_dispatch.py::test_lane_script_uses_no_native_forbidden_constructs).
+// It was ADDITIVE insurance only: the in-memory __routeAudit -> __routeReport() -> run_result.json path is
+// and always was the PRIMARY source of the p1_shadow events and is UNCHANGED, so removing the mirror
+// NEVER affects a routing decision or the live pick.
 // Shadow emission (observability only). Ensures P1's scope state exists, computes P1's would-be pick on the
 // CURRENT measured signals and records {live_pick, p1_pick, differ, signals} as a 'p1_shadow' audit event
 // WITHOUT changing the live pick. Returns the P1 reduction.
-function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot, liveDispatchId) {
+function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot) {
   if (!__p1Ladder[scope]) __p1Ladder[scope] = __p1NewState(__routeScopeClass(scope));
   const st = __p1Ladder[scope];
   const cls = st.scope_class;
@@ -1802,16 +1786,6 @@ function __p1Shadow(decider, scope, label, liveModel, topUsedSnapshot, liveDispa
                fails_by_lane: Object.assign({}, st.fails_by_lane), stagnation: x.stagnation,
                excluded: red.excluded, top_quota_left: x.top_quota_left, allowed: red.allowed, feasible: red.feasible },
     p1_reason: red.reason });
-  // eikos v2 E1 (durable shadow telemetry, v8): MIRROR the p1_shadow event just pushed to the durable side
-  // file (additive; the in-memory audit + run_result.json path is UNCHANGED and remains primary). It reuses
-  // the exact event fields so the durable line can never disagree with the audit, threads the live dispatch
-  // id for correlation, and is best-effort — any fault is swallowed and NEVER affects the run or the pick.
-  try {
-    var __p1ev = __routeAudit[__routeAudit.length - 1];
-    __p1ShadowFlush({ ts: new Date().toISOString(),
-      dispatch_id: (liveDispatchId == null ? null : liveDispatchId),
-      live_pick: __p1ev.live_pick, p1_pick: __p1ev.p1_pick, differ: __p1ev.differ, signals: __p1ev.signals });
-  } catch (e) { /* best-effort: never affects the run */ }
   return red;
 }
 // GATED LIVE path (route_decider=p1). NOT the default and NOT reached unless explicitly selected; a later
