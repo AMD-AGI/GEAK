@@ -1172,6 +1172,13 @@ function __routeReport() {
 // occurrence is one frozen card (`seq`); replaying it reuses it, and a new attempt after a completed one
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
+// iraj465 (CHANGES_REQUESTED): run_e2e.py probes the Eikos carrier ONCE at startup; if it is down it
+// exports GEAK_EIKOS_PROBE_FAILED=1. Read it here (guarded: the native Workflow child, Path A, has no
+// `process`) so the live eikos:route carrier is SKIPPED per decision instead of dispatched and failing;
+// the pick then falls back to the static control ladder via __routeReduce's estimates-null path.
+const ROUTE_EIKOS_PROBE_DOWN = (function () {
+  try { return String(process.env.GEAK_EIKOS_PROBE_FAILED || '').trim() === '1'; } catch (e) { return false; }
+})();
 // eikos v2 (E1): P1 is the DETERMINISTIC measured-signal host router (no model, no d3). OFF by default:
 // route_decider stays 'sonnet'/'eikos' and P1 only runs in SHADOW (a 'p1_shadow' audit beside the live
 // pick). Selecting route_decider=p1 (a later E1 canary; separate go) flips the gated __p1Pick live. With
@@ -1533,7 +1540,11 @@ function __routeEikosPick(p, o, scope) {
         if (short) fit = { direction: short, from_chars: reg.prompt.length };
       }
       const c = __routeCard(p, o, scope, cls, occ, fit);
+      // iraj465 (CHANGES_REQUESTED): a failed startup probe skips the carrier itself -- 'probe_down' is
+      // a no-answer, so __routeReduce (estimates null) takes the cheapest feasible allowed lane (the
+      // static control ladder), instead of dispatching a doomed eikos:route carrier once per decision.
       const res = c.ineligible ? { status: 'ineligible' } : none ? { status: 'not_asked_no_feasible_lane' }
+        : ROUTE_EIKOS_PROBE_DOWN ? { status: 'probe_down' }
         : await __routeEikosConsult(c.card, host);
       // Other scopes may have reserved the top lane while this one waited: reduce on the current inputs.
       const now = __routeHostInput(scope, cls);

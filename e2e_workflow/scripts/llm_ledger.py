@@ -923,8 +923,9 @@ def sdk_check(rows, sdk_results, rates):
         return None
     last = max(sdk_results, key=lambda d: d.get("captured_at_unix") or 0)
     at_ms = (last.get("captured_at_unix") or 0) * 1000 or None
+    model_usage = last.get("model_usage") or {}
     models, rate_ok = {}, True
-    for m, u in (last.get("model_usage") or {}).items():
+    for m, u in model_usage.items():
         tok = {"input_tokens": int(u.get("inputTokens") or 0),
                "cache_read_input_tokens": int(u.get("cacheReadInputTokens") or 0),
                "cache_creation_input_tokens": int(u.get("cacheCreationInputTokens") or 0),
@@ -969,6 +970,11 @@ def sdk_check(rows, sdk_results, rates):
         models[m] = dict({"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
                           "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
                           "ledger_usd_until_result": round(ledger_usd, 6)}, **check)
+    if not model_usage:
+        # iraj465 (CHANGES_REQUESTED): total_cost_usd is present but the SDK reported no per-model
+        # usage, so there is NOTHING to price our rate cards against. Keep the reported total but mark
+        # the rate check UNKNOWN (None) instead of a vacuous "match" (True) with nothing compared.
+        rate_ok = None
     after = [r for r in rows if at_ms is not None and (r.get("ts_ms") or 0) > at_ms]
     return {"results_seen": len(sdk_results), "session_id": last.get("session_id"),
             "sdk_total_usd": round(float(last["total_cost_usd"]), 6), "rate_ok": rate_ok,

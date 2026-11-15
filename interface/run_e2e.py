@@ -1094,7 +1094,13 @@ def map_args(
             "route_eikos_carrier_timeout_ms",
         ):
             if h.get(_rk) is not None:
-                ps_args[_rk] = str(h[_rk])
+                _rv = h[_rk]
+                # iraj465 (CHANGES_REQUESTED): structured knobs such as
+                # route_floors={"eng:memory": 2} and route_eikos_tau={"code_change": 0.99} must reach
+                # the lane as JSON, not a Python repr ("{'eng:memory': 2}") that the lane's JSON.parse
+                # rejects -> the floor/tau is silently dropped. JSON-encode dict/list values; scalar
+                # knobs stay plain strings (byte-identical to before for the scalar cases).
+                ps_args[_rk] = json.dumps(_rv) if isinstance(_rv, (dict, list)) else str(_rv)
     # -------------------------------------------------------------------------
     if optimizer == "evo":
         ps_args["optimizer"] = "evo"
@@ -8188,6 +8194,13 @@ def main(argv: list[str]) -> int:
                     % _eikos_url,
                     file=sys.stderr, flush=True,
                 )
+                # iraj465 (CHANGES_REQUESTED): leaving GEAK_EIKOS_ROUTER unset is NOT enough -- the
+                # live routing seam's eikos carrier keys off route_decider (ROUTE_EIKOS_ON), not that
+                # env, so eikos:route carriers would still dispatch (and fail) once per decision.
+                # Thread the failed probe explicitly so kernel_lane.js skips the carrier itself and
+                # falls back to the static control ladder (ROUTE_EIKOS_PROBE_DOWN -> __routeReduce
+                # estimates-null path; __routeReduce byte-identical).
+                os.environ["GEAK_EIKOS_PROBE_FAILED"] = "1"
         if _eikos_ok:
             os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
         for _env_key, _handoff_key in (
