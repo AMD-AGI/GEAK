@@ -33,7 +33,11 @@
     "Bound every UT-wave GPU pool to workload serving.json:gpus: explicit --gpus can only narrow the workload set, even under a larger scheduler allocation. Reject malformed workload GPU declarations instead of bypassing them; retain scheduler fences and physical-to-logical device mapping.",
     "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain.",
     "UT cleanup: one CPU-author/on-demand-GPU correctness wave, without fixed GPU lanes or timing-tail scheduling. Retire persistent reference_io capture/regeneration, shape-by-M noise diagnostics, overlay capture installation/reclamation and the parallel hand-written correctness suite. Fixed family gates, bounded seeded baseline/candidate batches, replay/negative controls and optimizer weighted timing remain. Existing task helpers stay frozen; generic legacy baseline overlays with no active capture hooks are recognized by source hash during merge.",
-    "process_state gate (2026-11-07, menghongtao): leg_runner snapshots process-wide state (environment, torch backend/BLAS/precision/determinism switches, TunableOp, identities of shared torch callables) before and after a leg when PROCESS_STATE_OUT is set; ut_driver gate_process_state runs each phase's smallest and largest case in both legs and fails on any change the candidate makes that the baseline does not, unless declared in ut_contract.process_state_allow [{prefix, why}]. A UT runs the op alone, so such a change passes every other gate while changing every other op of a server: a gemm_a8w8 candidate that enabled TunableOp for its own GEMM passed cold verification and faulted all four serving ranks on the first agentic prefill (Muse Spark, 2026-11-06). GATES gains process_state after isolation (twelve non-timing gates); docs updated to match."
+    "process_state gate (2026-11-07, menghongtao): leg_runner snapshots process-wide state (environment, torch backend/BLAS/precision/determinism switches, TunableOp, identities of shared torch callables) before and after a leg when PROCESS_STATE_OUT is set; ut_driver gate_process_state runs each phase's smallest and largest case in both legs and fails on any change the candidate makes that the baseline does not, unless declared in ut_contract.process_state_allow [{prefix, why}]. A UT runs the op alone, so such a change passes every other gate while changing every other op of a server: a gemm_a8w8 candidate that enabled TunableOp for its own GEMM passed cold verification and faulted all four serving ranks on the first agentic prefill (Muse Spark, 2026-11-06). GATES gains process_state after isolation (twelve non-timing gates); docs updated to match.",
+    "Mixed singleton/chain dispatch: the received geak-x@b68537d kernel-extract source already owns joint/dispatch delivery and strict-launch selection beyond the historical e2e_workflow copies. Extend that native owner with explicit dispatch-chain scope; preserve every marker call and reject any partial/orphan member. The workload manifest pins the source revision separately; historical origin fields below are retained, not a claim that this file can be regenerated from the older checkout.",
+    "UT receipt identity delegates to the unchanged native kernel_source_delivery.mjs sourceSnapshot CLI. Scaffold copies that owner byte-for-byte beside the driver and declares its frozen helper/input set. This removes the independent rolling digest that repeatedly disagreed with source delivery; no criterion is reimplemented.",
+    "Optional reviewed operator-invocation counts in task declarations separate timed-call mass from GPU launch inventory. The native planner preserves instance/bucket accounting, rejects incomplete opted-in scope, and retains count provenance in the task source identity. Motivated by the Attention weight audit and the independent prepare shared-symbol scope mismatch; no fixed multiplicity or model-specific conversion.",
+    "Merge with geak-x 4d1c1191 (2026-11-16): plan_ut_cases.py reconciles geak-x's observed entry-call counts (task invocation_counts, 59a829d2) with this branch's exactly-once invocation_anchors: invocation_counts wins, anchors next, else the legacy leaf-launch sum; declaring both is an error. Every case keeps launches_per_instance as the GPU launch inventory (geak-x semantics) plus invocations_per_instance, kernel_launches_per_instance and invocation_count_basis; operator_calls_per_instance is added when invocation_counts is declared. references/dynamic-workloads.md documents both. UT identity: geak-x's ut_driver._snapshot now returns the delivery verifier's sourceSnapshot (c54fb297), so new receipts take the verifier's main path; the ut_driver/path_sha256_concat/v1 contract and utDriverSnapshot remain for older receipts, and test_kernel_source_delivery.mjs pins that legacy algorithm to the original Python _snapshot/_reuse_key and checks the current driver against sourceSnapshot. kernel_selection's retired --no-reclaim-captures flag is dropped from geak-x's new dispatch-chain test."
   ],
   "files": [
     {
@@ -633,6 +637,59 @@
     },
     {
       "file": "ut_contracts/tests/test_process_state.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/kernel_self_noise.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/kernel_self_noise.py",
+      "source_sha256": "850fd5c32e90567c20e136f14f58c01f40690013a1d9117e45e536a68083cbea",
+      "modified": false
+    },
+    {
+      "file": "scripts/oracle_power.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/oracle_power.py",
+      "source_sha256": "ab81cafcbd5320bae5569ef936f76dad4004c6f86602ee3c68567967aaea3084",
+      "modified": true
+    },
+    {
+      "file": "scripts/plan_sampling_points.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
+      "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
+      "modified": false
+    },
+    {
+      "file": "scripts/regen_reference.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/regen_reference.py",
+      "source_sha256": "f918cfccf766b5f19a5745a95e09382ab57a20b3e9df39618508e52e99eb012d",
+      "modified": true
+    },
+    {
+      "file": "scripts/selftest_structure_only.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/selftest_structure_only.py",
+      "source_sha256": "442d7ec6b6aac25df1c39a5185c416ae93f45af685c7b05f5d2a200cbb45d62c",
+      "modified": true
+    },
+    {
+      "file": "shared/capture_shapes.py",
+      "source": "e2e_workflow/scripts/capture_shapes.py",
+      "source_sha256": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
+      "modified": false
+    },
+    {
+      "file": "shared/parse_profile.py",
+      "source": "e2e_workflow/scripts/parse_profile.py",
+      "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
+      "modified": true
+    },
+    {
+      "file": "shared/tests/test_capture_shapes.py",
+      "source": "e2e_workflow/scripts/tests/test_capture_shapes.py",
+      "source_sha256": "0ba60e2e25fc965806a967b42c498edab29021f7fb842b53ec9f8ae290a9a0ed",
+      "modified": false
+    },
+    {
+      "file": "scripts/plan_points_budget.py",
       "source": null,
       "added_here": true
     }

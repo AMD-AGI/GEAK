@@ -32,6 +32,39 @@ Record both call mass and baseline-time mass. Configured caps and graph capture
 lists constrain possible shapes; runtime evidence establishes their mass and
 served eager fallbacks. Keep unobserved envelope probes at zero observed weight.
 
+## Call weights
+
+GPU launches weight a directly timed launch. When `cases.call` instead times a
+complete operation, supply this optional field on its `task_decls.json` task:
+
+```json
+{"invocation_counts": {"target_callable": "pkg:op", "points": {
+  "p1": {"ok": true, "phase": "DECODE", "shape": 128, "calls": 6, "instances": 2,
+         "evidence": {"path": "scoped-call-evidence.json", "sha256": "<file SHA-256>"}}
+}}}
+```
+
+Derive counts from the existing capture/selection helpers: collapse duplicate
+host markers, retain phase/achieved shape/rank and the matching instance scope.
+`ok` means that scope was reviewed; preserve the scoped record and raw trace
+references. An entire mixed-phase trace or a lifetime capture count is not a
+point's rate. Shared symbols, repeated launches and overlapping groups need
+observed calls or proven multiplicities, never max/min or group-size guesses.
+Missing or ambiguous records block an opted-in task; no launch-count fallback.
+
+The planner uses `calls / instances` while retaining GPU launch inventory and
+the existing bucket interpolation. The complete input survives in the task's
+frozen case plan. After regeneration, expanded timed cases and meta must conserve
+that plan's operator-call mass. Custom task authors must also declare
+`run/ut_case_plan.json` in `source_delivery_files` before freezing.
+
+The other way to count complete calls is `invocation_anchors`: leaves that launch exactly
+once per call, `{"kernels": ["leaf"], "why": "source-backed reason"}` (several anchors need
+`mutually_exclusive: true`; see `scripts/plan_ut_cases.py`). A task declares one or the
+other, never both.
+Every case keeps `launches_per_instance` as the GPU launch inventory and records
+`invocations_per_instance` and `invocation_count_basis`.
+
 ## One sampling path for one or many configs
 
 Each input config directory holds `serving.json`, `runtime_identity.json` and

@@ -6,12 +6,14 @@ case, each labelled:
 
   point     one per counted sampling point of a phase the task owns where its kernels or
             companions launched. effective_calls = complete op invocations per instance
-            x the instances the point represents. A task may declare invocation_anchors:
-            {"kernels": ["one_leaf_per_call"], "why": "source-backed exactly-once reason"}.
-            Multiple anchors require mutually_exclusive=true: they are alternative leaves,
-            exactly one per call, whose observed counts are summed (never max). Without
-            anchors, the legacy sum of all selected/companion leaf launches is retained
-            and reported explicitly as invocation_count_basis.
+            x the instances the point represents. Invocations come from, in this order:
+            observed entry calls (invocation_counts: reviewed per-point entry-call counts);
+            exactly-once leaves (invocation_anchors: {"kernels": ["one_leaf_per_call"],
+            "why": "source-backed exactly-once reason"}; several anchors need
+            mutually_exclusive=true and their observed counts are summed, never max);
+            otherwise the legacy sum of all selected/companion leaf launches, reported as
+            invocation_count_basis. launches_per_instance always stays the GPU launch
+            inventory; declaring both invocation_counts and invocation_anchors is an error.
             coverage_ledger.py credits a point's census mass only through such a case.
   bucket    an unrepresented band from relabel_points.py (observed weight, no point
             within tolerance) whose share of its phase is at least --min-band-share, up
@@ -29,6 +31,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -98,6 +101,25 @@ def context_of(p):
     return int(round(((p.get("cached_tokens") or 0) + (p.get("new_tokens") or 0)) / n))
 
 
+def invocation_rate(task, point):
+    """An explicit, reviewed entry-call count; never infer it from member cardinality."""
+    counts = task.get("invocation_counts")
+    points = counts.get("points") if isinstance(counts, dict) else None
+    row = points.get(point["point_id"]) if isinstance(points, dict) else None
+    row = row if isinstance(row, dict) else {}
+    evidence = row.get("evidence") or {}
+    if (not isinstance(counts, dict) or not task.get("target_callable")
+            or counts.get("target_callable") != task["target_callable"]
+            or row.get("ok") is not True or row.get("phase") != point["phase"]
+            or type(row.get("shape")) is not int or row["shape"] != point["achieved_shape"]
+            or any(type(row.get(k)) is not int or row[k] <= 0 for k in ("calls", "instances"))
+            or not isinstance(evidence, dict) or not isinstance(evidence.get("path"), str)
+            or not evidence["path"].strip() or not re.fullmatch(r"[a-f0-9]{64}", str(evidence.get("sha256", "")))):
+        raise ValueError("%s/%s: missing or ambiguous invocation counts for this entry/phase/shape"
+                         % (task.get("label"), point["point_id"]))
+    return row["calls"] / row["instances"]
+
+
 def plan(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
     """Single-config: as below. Multi-config (`points_final["configs"]`, written by the profile
     slot's multi_config.py merge): each config is planned on its own points and its own
@@ -151,6 +173,14 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
         kernels = list(t["kernels"]) + [c["kernel"] for c in t.get("companions") or []
                                         if c.get("kernel")]
         basis = invocation_basis(t)
+        observed = "invocation_counts" in t
+        if observed:
+            if "invocation_anchors" in t:
+                raise ValueError("%s: declare invocation_counts (observed entry calls) or "
+                                 "invocation_anchors (exactly-once leaves), not both" % label)
+            basis = {"kind": "observed_entry_calls",
+                     "target_callable": (t.get("invocation_counts") or {}).get("target_callable"),
+                     "kernels": basis["kernels"]}
         # A shared dependency can run for unrelated operators. With explicit
         # anchors, only selected leaves or exactly-once anchors establish ownership;
         # a companion anchor can still identify another dispatch branch/phase.
@@ -164,7 +194,8 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
                           else (lpi(shapes[p["point_id"]], kernels) or 0) > 0)]
             if not owned:
                 continue
-            counts = {p["point_id"]: invocation_lpi(shapes[p["point_id"]], basis, label, p["point_id"])
+            counts = {p["point_id"]: (invocation_rate(t, p) if observed
+                      else invocation_lpi(shapes[p["point_id"]], basis, label, p["point_id"]))
                       for p in owned}
             owned_ids = {p["point_id"] for p in owned}
             bands = [b for b in summary.get(phase, {}).get("unrepresented_bands", [])
@@ -180,9 +211,10 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
                     "case_id": "%s__%s" % (label, p["point_id"]), "kind": "point",
                     "point_id": p["point_id"], "phase": phase, "shape": p["achieved_shape"],
                     "context": context_of(p),
-                    # Keep the old field as an alias for downstream case transformers.
-                    "launches_per_instance": n, "invocations_per_instance": n,
+                    "launches_per_instance": lpi(shapes[p["point_id"]], kernels),
                     "kernel_launches_per_instance": lpi(shapes[p["point_id"]], kernels),
+                    "invocations_per_instance": n,
+                    **({"operator_calls_per_instance": n} if observed else {}),
                     "invocation_count_basis": basis, "instances_represented": inst,
                     "effective_calls": int(round(n * inst)), "cost_basis": "measured",
                     "census": p.get("census"),
@@ -193,6 +225,7 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
                 ns = [counts[r] for r in ref]
                 n = round(sum(ns) / len(ns), 4) if ns else 0.0
                 leaf_ns = [lpi(shapes[r], kernels) for r in ref]
+                launches = round(sum(leaf_ns) / len(leaf_ns), 4) if leaf_ns else 0.0
                 ctx = ([b["context"]] if b.get("context") else
                        [context_of(pts[r]) for r in ref if context_of(pts[r])])
                 cases.append({
@@ -202,8 +235,9 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
                     "kind": "bucket", "phase": phase, "shape": b["shape"],
                     "range": [b["lo"], b["hi"]], "cost_reference_points": ref,
                     "context": int(round(sum(ctx) / len(ctx))) if ctx else None,
-                    "launches_per_instance": n, "invocations_per_instance": n,
-                    "kernel_launches_per_instance": round(sum(leaf_ns) / len(leaf_ns), 4) if leaf_ns else 0.0,
+                    "launches_per_instance": launches, "kernel_launches_per_instance": launches,
+                    "invocations_per_instance": n,
+                    **({"operator_calls_per_instance": n} if observed else {}),
                     "invocation_count_basis": basis, "instances_represented": b["instances"],
                     "effective_calls": int(round(n * b["instances"])),
                     "cost_basis": "interpolated",
@@ -220,6 +254,7 @@ def _plan_one(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6
         out[label] = {"cases": cases,
                       "invocation_anchors": t.get("invocation_anchors"),
                       "invocation_count_basis": basis,
+                      **({"invocation_counts": t["invocation_counts"]} if observed else {}),
                       "proxy_mass_outside_every_case_pct": residual}
     return {"contract": "kernel_extract/ut_case_plan/v1",
             "shape_tolerance": points_final.get("shape_tolerance"),

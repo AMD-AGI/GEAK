@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The optimize slot's verdict: account for every extracted task, judge no measurement.
 
-It belongs to the slot, not to any implementation (`stages/CONTRACT.md` section 3.1), and
+It belongs to the slot, not to any implementation (`engine/core/README.md`), and
 the driver runs it after every session. What it checks is *accounting*: that the wave
 covered every task profile delivered, that capacity deferrals name a task and a reason,
 and that the campaign budget was actually spent. **It never re-derives whether a kernel is

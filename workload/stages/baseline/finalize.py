@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The baseline slot's verdict on the number every later comparison is measured against.
 
-It belongs to the slot, not to any implementation (`stages/CONTRACT.md` section 3.1), and
+It belongs to the slot, not to any implementation (`engine/core/README.md`), and
 the driver runs it after every session. Until it existed the slot had no verdict at all:
 each `run.sh` wrote its own `result.json`, so the same four rules were written out three
 times, `agentx-trace-replay` checked none of them, and a baseline that nothing had

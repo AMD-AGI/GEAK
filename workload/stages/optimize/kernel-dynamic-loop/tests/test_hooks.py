@@ -99,13 +99,15 @@ printf 'CPU fixture completed\n' > "$3"
                 self.sources(3, 3)
                 work = self.base / ("invalid-work" if broken else "valid-work")
                 env = dict(self.env, SKILL_ROOT=str(METHOD), RUNNER=str(runner),
-                           WORK_ROOT=str(work), TARGET="1", ATTEMPT_MIN="1",
+                           # Allow startup/receipt IO without exhausting the smoke budget before dispatch.
+                           WORK_ROOT=str(work), TARGET="3", ATTEMPT_MIN="1",
                            BREAK_HARNESS=str(int(broken)))
                 result = self.call(ROOT / "workload/engine/campaign/worker.sh",
                                    "task", "cpu-fixture", env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 state = json.loads((work / "state/task.status.json").read_text())
-                self.assertEqual(state["best_speedup"], 1.0 if broken else 1.2)
+                self.assertEqual(state["best_speedup"], 1.0 if broken else 1.2,
+                                 (work / "logs/task/worker.log").read_text())
                 self.assertEqual((self.task / "cases.py").read_text(), "EXPECTED = 6\n")
                 self.assertEqual((self.task / "kernel_src/main.py").read_text(),
                                  "3" if broken else "2")

@@ -16,7 +16,7 @@ UNITTEST = '''\
 import os, re, sys
 src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel_src", "mod.py")
 text = open(src).read()
-m = re.search(r"^LEVEL\\s*=\\s*([0-9.]+)", text, re.M)
+m = re.search(r"^LEVEL\\s*=\\s*(-?[0-9.]+)", text, re.M)
 level = float(m.group(1)) if m else 0.0
 # Fake correctness: a negative LEVEL means the code was broken. CHEAT=1 simulates the
 # "PASS while hot / FAIL from cold" cheat.

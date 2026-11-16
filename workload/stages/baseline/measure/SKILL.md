@@ -113,7 +113,7 @@ renders as a tick.
 Write `$OUT/baseline.json` in the canonical schema (`../README.md`), carrying every pin,
 the per-check alignment result and `provenance.alignment_verdict`. Then stop:
 `../finalize.py` writes `result.json` and it is the stage's conclusion
-(`stages/CONTRACT.md` 3.1). A run that completed but drifted outside the band is
+(`engine/core/README.md`). A run that completed but drifted outside the band is
 `blocked`, not `ok` — a baseline that is not the CI point silently relabels every
 downstream delta — and that rule is written there, not here. You can run it early to see
 what it will say.

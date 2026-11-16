@@ -33,11 +33,12 @@ result from the standard UT and complete the gates in the main contract.
 
 ### Existing `ut_driver.py` receipts
 
-The standard Python UT driver uses a different snapshot algorithm from the
-canonical source-delivery snapshot: it hashes relative paths followed by their
-file SHA-256 strings, in a fixed order. Do not rewrite its receipt, replace the
+The current Python UT driver reports the canonical `sourceSnapshot` itself (it runs the
+task's `kernel_source_delivery.mjs snapshot`), so new deliveries need nothing here.
+Drivers before that change used a different snapshot algorithm: relative paths followed
+by their file SHA-256 strings, in a fixed order. Do not rewrite such a receipt, replace the
 canonical `snapshot_sha256`, or accept two unrelated digests merely because
-both are present. For an existing driver receipt, explicitly add this field to
+both are present. For an existing receipt from such a driver, explicitly add this field to
 the **source-delivery manifest**:
 
 ```json

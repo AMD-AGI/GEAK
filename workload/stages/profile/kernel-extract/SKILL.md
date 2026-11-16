@@ -121,6 +121,12 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   before authoring. It first builds the provisional plan consumed by `merge_policy.py`,
   then applies the policy and rebuilds the final plan. Preserve every dispatch branch
   and record each application in `decisions.json`.
+- **Mixed dispatch.** A branch can itself be a mandatory chain. Declare
+  `selection_scope: "dispatch"` and keep each branch's `required_kernels` together.
+  Verify chain rows with `--dispatch-chain`: every call containing any member must
+  contain all members; keep other calls in the evidence as inapplicable. Shared
+  companions leave this scope ambiguous: keep it blocked and refine the evidence.
+  Never discard partial calls or split a chain into independent leaves.
 - Selected indexer score/top-k is one task covering both served prefill and decode
   branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
   [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)
@@ -151,6 +157,16 @@ a binding. Verify the live callable with `$SHARED_TOOLS/seam_trace.py` and
 `python3 "$SHARED_TOOLS/kernel_selection.py" --strict-launch` (`--help` for its inputs),
 keeping complete raw verdicts. If the declared boundary is wrong, fix `task_decls.json`
 with the evidence and rebuild; do not edit a failed verdict into a pass.
+
+UT receipts and source delivery use the same native `sourceSnapshot` owner.
+An independent driver digest made repeated qualification incompatible; scaffold
+the driver with its owner and freeze the helper set before running the UT.
+
+Weights count the operation that `cases.call` times. When that differs from GPU
+launches (chains, repeated launches or shared symbols), provide observed
+`invocation_counts` in the declaration; see [call weights](references/dynamic-workloads.md#call-weights).
+After changing a plan, regenerate the expanded manifest and synchronize meta
+from that same plan before freezing; retain the earlier cohort.
 
 Stop the probe server as soon as the evidence is collected. The CPU half of §3–§4
 (declaration review, source resolution inside the serving container, scaffold, case

@@ -251,11 +251,14 @@ def joint_ut(t, rank, depth=None):
     rows, single = [], []
     js = t.get("joint_phases") or []
     branches = {k for j in js for k in j.get("required_kernels") or []}
-    if js and all(len(j.get("required_kernels") or []) == 1 for j in js) and len(branches) > 1:
-        # Every row one kernel, the kernels distinct: mutually exclusive branches of one
-        # whole op, which the delivery contract declares as dispatch_ut, never joint_ut.
+    if js and (t.get("selection_scope") == "dispatch" or
+               all(len(j.get("required_kernels") or []) == 1 for j in js) and len(branches) > 1):
+        # Dispatch is still one complete operator; a branch may itself be a chain.
         return None, [], {"phases": [
-            {"regime": j["regime"], "device_kernel": j["required_kernels"][0],
+            {"regime": j["regime"],
+             "device_kernel": max(j["required_kernels"], key=lambda k: rank.get(k, {}).get("mass_us", 0)),
+             **({"required_device_kernels": j["required_kernels"]}
+                if len(j["required_kernels"]) > 1 else {}),
              "served_phase": j.get("phase"), "owned_point_ids": j.get("points"),
              "seam_candidates": seam(t, j["required_kernels"], depth)} for j in js]}
     for j in js:
@@ -380,6 +383,10 @@ def stamp_meta(tdir, ev, waivers, expected=None):
         meta["server_evidence"] = ev["server_evidence"]
     if waivers is not None:
         meta.setdefault("ut_contract", {})["compile_variant_waivers"] = waivers
+    if "invocation_counts" in load(os.path.join(tdir, "run", "ut_case_plan.json"), {}):
+        files = meta.setdefault("kernel_extraction", {}).setdefault("source_delivery_files", [])
+        if "run/ut_case_plan.json" not in files:
+            files.append("run/ut_case_plan.json")
     dump(meta, path, indent=2)
     return True
 
@@ -422,6 +429,11 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
     shapes_dir = ev("evidence", "shapes")
     launched = launched_at(shapes_dir)
     errs, warns = lint(decls, targets, launched, accept_draft)
+    if not errs and check_only and any("invocation_counts" in t for t in decls["tasks"]):
+        try:
+            plan_cases(load(ev("sampling_points_final.json"), {}), shapes_dir, decls["tasks"])
+        except (KeyError, ValueError, TypeError) as exc:
+            errs.append(str(exc))
     if errs or check_only:
         return {"errors": errs, "warnings": warns}
 
