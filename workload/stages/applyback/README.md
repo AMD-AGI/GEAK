@@ -28,12 +28,7 @@ routing to the owning module; do not rewrite frozen tests to make integration pa
 
 The sequential `applyback` stage composes kernel integration and Evaluate.
 It consumes `optimize/out/optimized.json`, the qualified Profile task metadata and
-`baseline/out/baseline.json` under `RUN_ROOT`. Split scenarios read task metadata from
-`$TASKS_DIR` (`task_source_stage: "ut"`); legacy invocations fall back to
-`$RUN_ROOT/profile/out/tasks`. With an `adopt-ci-artifacts` baseline, `points.py` selects
-every CI point a UT covered and `ci_point_leg.sh` measures each in that point's own CI
-configuration (`ci_config.py` alignment, `_shared/ci_pins.py` pins, `_shared/serving_watch.py`)
-against its CI number (`reference: ci`); `aggregate_points.py` combines the points.
+`baseline/out/baseline.json` under `RUN_ROOT`.
 
 | Artifact | Purpose |
 | --- | --- |

@@ -16,7 +16,6 @@ accepting a reference.
 | --- | --- |
 | [adopt](adopt/SKILL.md) | Reuse a compatible, trusted measured receipt |
 | [measure](measure/SKILL.md) | Measure the named runtime; prove configured reproduction pins |
-| [adopt-ci-artifacts](adopt-ci-artifacts/SKILL.md) | Adopt an official InferenceX CI run, every config of it: one baseline per CI point from the run's own artifacts, grouped by EP and kernel-path launch settings (multi-config) |
 
 A changed environment needs matching evidence, not a relabelled receipt.
 Keep the reference distinct from candidates, including when the reference is itself optimized.
