@@ -1039,7 +1039,8 @@ the Director-materialized selected candidate, not a mutable global floor.
    ```bash
    export GIT_PAGER=cat
    cd "$WORKSPACE"
-   git --no-pager diff "$(git rev-list --max-parents=0 HEAD)..HEAD" > "$EVAL_DIR/final_patch.diff"
+   # --binary: a candidate tree can carry binary files, and a text diff of them does not apply.
+   git --no-pager diff --binary "$(git rev-list --max-parents=0 HEAD)..HEAD" > "$EVAL_DIR/final_patch.diff"
    mkdir -p "$EVAL_DIR/optimized" && cp <kernel + wrapper + binding files> "$EVAL_DIR/optimized/" 2>/dev/null || true
    ```
 2. Write `EVAL_DIR/tech_lead_report.md`. Keep it concise but COMPLETE. Required sections:
