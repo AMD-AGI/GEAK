@@ -126,10 +126,14 @@ def code_only(src):
 
 
 def used_in_code(path):
-    """ALL-CAPS identifiers in CODE position: comments, strings and object keys removed first."""
+    """ALL-CAPS identifiers in CODE position: comments, strings and object keys removed first.
+
+    A name right after a dot (`process.env.GEAK_ROUTING`) is a property read on an object, not a
+    binding lookup, so it can never throw the ReferenceError this test exists to catch.
+    """
     s = code_only(open(path).read())
     keys = set(re.findall(r'\b([A-Z][A-Z0-9_]{2,})\s*:', s))   # {KEY: value} is a key, not a read
-    return set(re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', s)) - keys
+    return set(re.findall(r'(?<![.\w])([A-Z][A-Z0-9_]{2,})\b', s)) - keys
 
 
 BUILTINS = {'JSON', 'Math', 'Object', 'Array', 'String', 'Number', 'Boolean', 'Promise',

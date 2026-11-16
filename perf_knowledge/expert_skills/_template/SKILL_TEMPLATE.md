@@ -4,6 +4,13 @@ title: "REPLACE — one line: operator + scenario + (migration from->to)"
 kind: expert_skill
 authors: [REPLACE]
 scope: kernel            # kernel | e2e  — decides validation harness AND consuming layer
+revision: v1
+playbook_file: ""        # optional detailed implementation guide in this skill directory
+planner_extension_file: ""  # optional machine-readable Analyze/Plan bindings for mode=mega
+contract_file: ""        # optional declarative source/PlanIR preflight
+validation_file: validation.yaml
+validation_schema: expert-skill-validation-v2
+runtime_validation_file: ""  # optional operator-specific runtime verifier
 # ---- selector: the workflow matches these against the live bottleneck ----
 match:
   operator: REPLACE                 # MUST exist in ../index/capability_index.yaml (validated by scaffold)
@@ -21,20 +28,12 @@ expects:
   isolated_speedup_min: 1.10        # kernel scope: isolated A/B vs the immutable oracle
   e2e_delta_min_pct: 1.0            # e2e scope: Director same-session e2e delta
   parity: required                  # required | relaxed(<tol)
-# ---- validation: AUTO-FILLED by validate_skill.py — do NOT hand-edit ----
-validation:
-  status: draft                     # draft | validated | stale | failed
-  last_verified: ""
-  gpu: ""
-  model: ""
-  measured: {isolated: "", e2e_pct: "", parity: ""}
-  artifact: ""                      # path to the validation eval dir
 role: advisory_prior                # the consuming workflow treats this as advisory, never a mandate
 supersedes: []
 ---
 
 ## When to use
-<!-- 1-2 sentences: the exact bottleneck/shape/arch where this recipe applies. -->
+<!-- 1-2 sentences: the exact bottleneck/shape/arch where this playbook applies. -->
 
 ## Mechanism
 <!-- WHY it works: the hardware / numerics / scheduling reason. This is what lets an agent transfer it. -->

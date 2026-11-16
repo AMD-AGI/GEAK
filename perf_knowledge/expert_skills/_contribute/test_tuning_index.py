@@ -58,7 +58,9 @@ class TestTuningSkillsAreInTheSelector(unittest.TestCase):
     def test_they_share_the_schema_the_index_declares(self):
         # The point of the merge is that a consumer filtering index.yaml needs no special case.
         for s in self.tuning:
-            self.assertEqual(set(s) - {"expects"}, {"id", "file", "scope", "match", "validation_status"})
+            self.assertEqual(set(s) - {"expects"},
+                             {"id", "file", "scope", "match", "validation_status", "auto_apply"})
+            self.assertEqual(s["auto_apply"], s["validation_status"] == "validated")
             self.assertIn("gens", s["match"])
             self.assertIn("dtypes", s["match"])
             self.assertIn("operator", s["match"])

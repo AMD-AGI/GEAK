@@ -215,19 +215,29 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
-def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+def is_client_rdna35(gfx):
+    """True for the RDNA 3.5 APUs (gfx1150-gfx1153), not gfx110x RDNA3."""
+    return bool(re.fullmatch(r"gfx115\d", str(gfx or "").lower()))
+
+
+def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None):
+    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA.
 
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
-    and its GDDR clock interpretation is toolchain-dependent. An absent table
-    entry on gfx120x is therefore a hard unknown rather than a low-confidence
-    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
-    is not in that family and may derive.
+    and its GDDR clock interpretation is toolchain-dependent; an RDNA 3.5 APU's
+    "memory clock" is system DRAM. An absent table entry on gfx120x or gfx115x is
+    therefore a hard unknown rather than a low-confidence numeric denominator.
+    R9700 peaks require product='r9700'. A gfx115x row also requires ``cu``, the
+    physical CU count, to equal the row's: one ISA ships with several CU counts.
+    CDNA5 gfx1250 is in neither family and may derive.
     """
     peaks = load_peaks(peaks_md_path, gfx, product=product)
+    # On gfx115x the row holds only for its own whole CU count (40.5 or True is not 40).
+    if peaks and is_client_rdna35(gfx) and str(cu).strip() != "%d" % (peaks.get("cu") or -1):
+        peaks = None
     if peaks:
         return peaks
-    if is_client_rdna4(gfx):
+    if is_client_rdna4(gfx) or is_client_rdna35(gfx):
         return None
     return derive_peaks_from_props(device)
 
@@ -518,11 +528,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="reproduce the SKILL.md worked example")
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
+    ap.add_argument("--cu", type=int, default=None, help="physical CU count (rocminfo); required on gfx115x")
     a = ap.parse_args()
     if a.peaks:
         p = resolve_peaks(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
             a.peaks,
+            cu=a.cu,
         )
         print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)
