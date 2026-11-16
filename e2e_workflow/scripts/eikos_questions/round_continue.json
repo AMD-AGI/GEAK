@@ -1,0 +1,50 @@
+{
+  "decision": "round_continue",
+  "version": "round_continue.v1",
+  "purpose": "Shadow-only plumbing pilot: at the start of a kernel-lane round, would Eikos continue or stop? Recorded, never applied. See research/eikos_decision_audit_20261001.md sec 5.",
+  "required_state": [
+    "round",
+    "directions_used",
+    "directions_budget",
+    "tracked_incumbent_speedup",
+    "best_seen_speedup",
+    "rounds_without_improvement",
+    "rounds_without_improvement_limit",
+    "last_round_outcome",
+    "specialties_dispatched",
+    "minutes_left",
+    "minutes_left_source",
+    "noise_band",
+    "min_improve",
+    "progress_delta"
+  ],
+  "primary_question": "next_step",
+  "options": [
+    "continue",
+    "stop"
+  ],
+  "questions": {
+    "next_step": {
+      "type": "choice",
+      "instructions": "This is the state of a GPU kernel-optimization run at the start of a new round. Should the run spend another optimization round, or stop now? tracked_incumbent_speedup is the run's tracked best (its commit is not independently confirmed); best_seen_speedup is the best verified candidate. Fields marked unknown were not measured; do not assume a value for them.",
+      "criteria": {
+        "continue": "Budget remains and another round has a realistic chance of a verified improvement over the committed best.",
+        "stop": "Another round is unlikely to produce a verified improvement, or the remaining budget is too small to use."
+      }
+    },
+    "stalled": {
+      "type": "noul",
+      "instructions": "Has the run's progress stalled?",
+      "criteria": {
+        "true": "Recent rounds added no verified improvement to the tracked best.",
+        "false": "The most recent round improved the tracked best."
+      }
+    }
+  },
+  "policy": {
+    "version": "round_continue.policy.v1",
+    "act_on": "next_step",
+    "min_confidence": 0.8,
+    "note": "would_be_action = the choice when its probability >= min_confidence, else abstain. Shadow pilot: recorded only, never applied. Threshold is a starting point, not calibrated."
+  }
+}

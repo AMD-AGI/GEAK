@@ -1833,6 +1833,43 @@ def test_a_second_sync_keeps_the_verdicts_the_store_earned_between_them(tmp_path
     assert value["reproductions"] == 1
 
 
+LANE = "gate_up_proj_gemm_bf16_N19456_K2560"
+DRIFTED = "gemm_triton_gate_up_proj_bf16_N19456_K2560"
+
+
+@pytest.mark.parametrize("ask, kernels, entries, filtered", [
+    (LANE, [DRIFTED], 1, 0),                                   # same tokens, plus `triton`
+    ("rmsnorm_d4096", ["rmsnorm_hip_kernel_d4096"], 1, 0),     # carrier words anywhere
+    (LANE, ["gemm_triton_gate_up_proj_bf16_N4096_K2560", "gemm_triton", "gemm"], 0, 3),
+    ("gemm_bf16", ["gemm_bf16_N19456_K2560", "gemm_bf16_N4096_K2560"], 0, 2),   # no shape
+    ("rmsnorm_d4096", ["fused_add_rmsnorm_fp8_quant_d4096"], 0, 1),             # containment
+    ("gate_up_proj_gemm_fp8_N19456_K2560", ["gemm_N19456_K2560"], 0, 1),
+])
+def test_sync_matches_a_drifted_kernel_name_by_its_tokens(tmp_path, ask, kernels, entries, filtered):
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    for i, kernel in enumerate(kernels):
+        write_entry(root, f"20260101_000000_{i}", kernel=kernel, gfx="gfx1151")
+    summary = _sync(root, store, "--kernel-name", ask, "--gfx", "gfx1151")
+    assert summary["ok"] and summary["entries"] == entries
+    assert summary["skipped"]["filtered"] == filtered
+    assert summary["skipped"]["matched_loose"] == entries
+
+
+def test_a_loose_match_is_read_back_under_the_name_the_lane_asks_for(tmp_path):
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", kernel=DRIFTED, gfx="gfx1151", speedup=2.0)
+    summary = _sync(root, store, "--kernel-name", LANE, "--gfx", "gfx1151")
+    assert summary["ok"] and summary["new_sessions"] == 1      # one entry, counted once
+
+    def read(name, refs):
+        return run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name", name,
+                   "--language", "triton", "--gfx", "gfx1151", "--refs-dir", str(tmp_path / refs))
+    for name in (LANE, DRIFTED):
+        assert [round(c["speedup"], 2) for c in read(name, name)["candidates"]] == [2.0]
+    records, _ = export(root, "--kernel-name", LANE, "--gfx", "gfx1151")   # own name only
+    assert records and {r["canonical_id"].split(":")[3] for r in records} == {DRIFTED.lower()}
+
+
 def test_a_retired_entry_arrives_as_a_tombstone_and_not_as_a_live_win(tmp_path):
     """`retained: false` travels on its own — `remote_value` copies it — and that is precisely the
     inert half-retraction kb/retract.py warns about. What has to travel with it is the zeroed
