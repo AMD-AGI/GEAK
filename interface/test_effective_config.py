@@ -316,6 +316,27 @@ def test_a_value_with_no_flag_is_rejected_by_name() -> None:
         ec._parse_flags("8192 --max-model-len")
 
 
+def test_a_multi_value_flag_keeps_every_value() -> None:
+    flags = ec._flag_map("--cuda-graph-bs-decode 1 2 4 8 --dtype bfloat16")
+    assert flags["--cuda-graph-bs-decode"].value == ("1", "2", "4", "8")
+    assert flags["--dtype"].value == "bfloat16"
+
+
+def test_a_multi_value_flag_renders_each_value_as_its_own_argument() -> None:
+    text = (
+        "--language-only --cuda-graph-bs-decode 1 2 4 8 12 15 16 24 32 40 48 56 64 "
+        "--max-running-requests 64"
+    )
+    assert shlex.split(ec._render_flags(ec._parse_flags(text))) == shlex.split(text)
+
+
+def test_a_scalar_flag_rejects_a_second_value() -> None:
+    with pytest.raises(ValueError, match="--ep-size takes one value, got extra '16'"):
+        ec._parse_flags("--ep-size 8 16")
+    with pytest.raises(ValueError, match="--dtype takes one value"):
+        ec._parse_flags("--dtype bfloat16 float16")
+
+
 def test_an_environment_entry_must_be_a_pair() -> None:
     with pytest.raises(ValueError, match="KEY=VALUE"):
         ec._parse_env("JUST_A_NAME")
