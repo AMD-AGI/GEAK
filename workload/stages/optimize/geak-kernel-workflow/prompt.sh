@@ -222,7 +222,7 @@ apply_to_original must be "true": changes have to land back in kernel_src/ so th
 next attempt starts from your result and builds on it.
 
 kernel_path is the whole task directory, not a file under kernel_src/: the workspace must
-carry the profile stage's unittest.py, cases.py and meta.json, and that unittest.py is the
+carry the UT stage's unittest.py, cases.py and meta.json, and that unittest.py is the
 benchmark. Do not write another harness.
 
 ## Task

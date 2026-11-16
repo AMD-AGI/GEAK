@@ -20,7 +20,7 @@
     "scripts/probe_server.py": "8fc6b536ae029f3a5e750550286ebb111274f8d81d1b04495eca383ef69121f7",
     "scripts/relabel_points.py": "821551bf30a46a0c16ed4f62cf73011c84da7264d438819654711c81d7199b95",
     "scripts/run_points.py": "8b60c818e15689a6990ff7e7b4722289c0836885a21f70b562e3a987d234d152",
-    "scripts/select_targets.py": "3c00adb5f0d31c21cded922b25bc2418aca012b65c1641ae518a0c78df332374",
+    "scripts/select_targets.py": "2132a0d627086a06ff8739736e10dbdf08deaad3307525f4948e013d33e38b86",
     "scripts/serving_probe.py": "72b16aedebff3eca32ad740f97ac13be4dbbd59ef4330386f69845b66414dd92",
     "scripts/source_map.py": "336add2cca2dbf599b95396bb67f2bf7fdb5235583f7cf458f986a585d498cc9",
     "scripts/trace_scan.py": "90bbe6117f9cf20d5be9c9a2e98c451d6c7a3af88106fc6226e55dff3e8b075c",
@@ -42,5 +42,5 @@
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: profile half of kernel-extract",
   "skill": "kernel-profile",
   "stage": "profile",
-  "tree_sha256": "9a607764828370ac99e2a843558771786c7564c2c79d6fddd9b1ba5fa0a9a2c6"
+  "tree_sha256": "00b2dc3d75fed55a2d443908c858ab318f69e8a406fb3938769adbbc76da200a"
 }

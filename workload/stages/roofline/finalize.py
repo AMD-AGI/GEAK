@@ -330,7 +330,7 @@ def main(argv=None):
         status = "blocked"
         notes.append("these analysis entries have no matching UT directory under the "
                      "upstream tasks/, so the optimize stage cannot claim them: %s. Fill in "
-                     "the profile stage's task directories first." % ", ".join(missing_task))
+                     "the UT stage's task directories first." % ", ".join(missing_task))
     incomplete = [name for name, analysis in analyses.items() if not analysis["processed"]]
     if incomplete or not kernels:
         status = "blocked"

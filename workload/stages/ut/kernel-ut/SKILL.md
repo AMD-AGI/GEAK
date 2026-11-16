@@ -158,7 +158,7 @@ shape/layout/quantization, phase and call weights. Routing, indices, page tables
 sequence metadata must retain valid semantics and the observed work/access pattern:
 reuse or reconstruct them from existing metadata where reliable; capture only the
 missing structural state. Synthetic structural cases may extend correctness coverage,
-but do not claim they reproduce serving performance without evidence. Missing structural evidence goes back to the profile stage.
+but do not claim they reproduce serving performance without evidence. Missing structural evidence is a blocker for the request author, who may ask the profile stage for it.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness (the driver's timing gate does). Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and

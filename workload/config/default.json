@@ -13,10 +13,12 @@
   "order": [
     "baseline",
     "profile",
+    "ut",
     "roofline",
     "optimize",
     "applyback"
   ],
+  "task_source_stage": "ut",
   "stages": {
     "baseline": {
       "skill": "adopt",
@@ -31,10 +33,10 @@
       }
     },
     "profile": {
-      "skill": "kernel-extract",
+      "skill": "kernel-profile",
       "mode": "agent",
       "params": {
-        "selection": "Broader candidate discovery through the profile slot; plan complete operators from the evidence and retain every deferred candidate with its reason.",
+        "selection": "Broader candidate discovery through the profile slot; select complete operators from the evidence and retain every deferred candidate with its reason in kernels.json.",
         "_note_selection": "Top 10 and overall >0.5% are heuristic discovery cutoffs requested to explore beyond Muse's former three UTs, not calibrated performance thresholds. The unchanged skill selector takes these explicit arguments; kernel KEEP and E2E bands are unchanged.",
         "selection_top_k": 10,
         "selection_overall_pct_gt": 0.5,
@@ -45,6 +47,15 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null
+      }
+    },
+    "ut": {
+      "skill": "kernel-ut",
+      "mode": "agent",
+      "params": {
+        "_note_request": "The UT stage writes the tasks a ut_request.json names (brain/tools/build_ut_request.py from the profile's kernels.json and a reviewed task_decls.json). Without a request it is blocked: task boundaries are not drafted inside UT.",
+        "request": null,
+        "minimum_qualified_tasks": 0
       }
     },
     "roofline": {

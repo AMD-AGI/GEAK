@@ -206,6 +206,13 @@ def stage_env(cfg, lay):
         "PARAMS": os.path.join(lay["out"], "params.json"),
         "RUNNER": lay["runner"],
     })
+    # Task consumers resolve the configured task producer, independent of which skill
+    # produced the tasks.
+    task_source = cfg.get("task_source_stage")
+    if task_source is not None:
+        if not isinstance(task_source, str) or task_source not in cfg["order"]:
+            raise SystemExit("task_source_stage must name a stage in order")
+        env["TASKS_DIR"] = os.path.join(lay["run_root"], task_source, "out", "tasks")
     # runner_env knobs are exported as WORKLOAD_AGENT_* by convention; the runner reads
     # them itself. No credential appears here — only the path to an env file outside the
     # repository.
