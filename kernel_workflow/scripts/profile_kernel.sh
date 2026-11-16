@@ -19,6 +19,7 @@
 #                      plus "--disable-signal-handlers true" for multi-GPU specs)
 #   RPROF_ARGS         args passed to legacy rocprof (default: "--stats")
 #   METRIX_ARGS        args passed to metrix (default: ""; override per `metrix --help` for this toolchain)
+#   ROCPROF_SIGNAL_HANDLERS  rocprofv3's own signal handlers in the profiled process (default: 0, off)
 #
 # Fault tolerance: a profiler that fails (e.g. a flag was renamed across toolchain versions) no longer
 # degrades silently. The failure + a self-heal pointer (which env var to override, where the recipe is)
@@ -56,6 +57,10 @@ case "$GPU_ID" in
     group:*|pool:*:*) RPV3_TRACE_ARGS_DEFAULT="$RPV3_TRACE_ARGS_DEFAULT --disable-signal-handlers true" ;;
 esac
 RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:-$RPV3_TRACE_ARGS_DEFAULT}"
+# The same deadlock hits a single process that aborts (e.g. while it loads), and the tools that run
+# rocprofv3 underneath (rocprof-compute, metrix) take no such flag. The flag only sets this variable
+# for the profiled process, and a toolchain that does not read it ignores it.
+export ROCPROF_SIGNAL_HANDLERS="${ROCPROF_SIGNAL_HANDLERS:-0}"
 RPROF_ARGS="${RPROF_ARGS:---stats}"
 METRIX_ARGS="${METRIX_ARGS:-}"
 
@@ -115,14 +120,17 @@ profiler_artifacts_ok() {  # true when the tool left a non-empty csv/json (not j
 
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
     local tool="$1"
-    local workload="$OUTPUT_DIR/${tool}_workload"
+    # -n is only a label: rocprof-compute refuses "/" in it, and omniperf also refuses "-", "." and
+    # more than 35 characters. An explicit -p is written to as given, and a path with ".." is refused.
+    local workload
+    workload="$(cd "$OUTPUT_DIR" && pwd)/${tool}_workload"
     # NO `rm` (prompts + blocks autonomous runs): move any stale profiler dir aside, then make fresh.
     [ -e "$workload" ] && mv "$workload" "${workload}.old_$(date +%s)_$$" 2>/dev/null || true
     mkdir -p "$workload"
     echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
     local rc=0
     bash "$GPU_LOCK" "$GPU_ID" \
-        "$tool" profile $RPC_PROFILE_ARGS -n "$workload" -- bash -c "$BENCHMARK_CMD" \
+        "$tool" profile $RPC_PROFILE_ARGS -n workload -p "$workload" -- bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; return 1; fi
     if [ -d "$workload" ]; then
