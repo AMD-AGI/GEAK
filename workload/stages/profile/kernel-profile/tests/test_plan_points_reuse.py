@@ -88,6 +88,13 @@ class ReuseTest(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("runtime identity", p.stderr)
 
+    def test_a_row_without_context_is_counted_not_guessed(self):
+        obs = observed([(8, 1000, 50), (16, 1000, 50)])
+        obs["raw_decode_rows"].append({"running": 2, "token": 0, "iterations": 40})   # `#token: 0`
+        doc = plan_points.plan(SERVING, IDENTITY, obs, 8, target_pct=100)
+        self.assertEqual(doc["rows_without_context"], {"DECODE": {"rows": 1, "instances": 40, "proxy_mass": 40}})
+        self.assertEqual(sorted(c["point"]["batch_size"] for c in doc["captures"]), [8, 16])
+
     def test_without_reuse_the_plan_is_unchanged(self):
         doc = plan_points.plan(SERVING, IDENTITY, observed([(8, 1000, 50), (16, 1000, 50)]), 8, target_pct=100)
         self.assertEqual(doc["reused"], [])

@@ -98,7 +98,9 @@ def require_identity(identity, where):
         raise ValueError("reuse needs a runtime identity with %s (%s)" % (", ".join(missing), where))
 
 
-def observations(obs):
+def observations(obs, skipped=None):
+    """Usable rows. A row whose log reports no context (sglang logs `#token: 0` on some decode
+    rows) cannot be placed in a context band; it is counted in `skipped`, never guessed."""
     rows = []
     for phase, key in (("PREFILL", "raw_prefill_rows"), ("DECODE", "raw_decode_rows")):
         for index, r in enumerate(obs.get(key, [])):
@@ -110,9 +112,14 @@ def observations(obs):
                 raise ValueError("observed shapes must be integers")
             seqs = max(1, r.get("new_seq") or 1) if phase == "PREFILL" else int(shape)
             total = (r.get("cached_token", 0) + shape) if phase == "PREFILL" else r.get("token")
-            if not total:
-                raise ValueError("context is missing from an observed " + phase + " row")
             inst = 1 if phase == "PREFILL" else (r.get("iterations") or obs.get("decode_log_interval") or 1)
+            if not total:
+                if skipped is not None:
+                    gap = skipped.setdefault(phase, {"rows": 0, "instances": 0, "proxy_mass": 0})
+                    gap["rows"] += 1
+                    gap["instances"] += inst
+                    gap["proxy_mass"] += shape if phase == "PREFILL" else inst
+                continue
             positive(inst, "observed instances")
             rows.append({"phase": phase, "shape": int(shape), "sequences": seqs,
                          "context": positive(total / seqs, "observed context"),
@@ -199,7 +206,8 @@ def plan(serving, identity, observed, budget, tolerance=1.5, target_pct=90.0, re
     dep = deployment(serving, identity)
     gid = digest(dep)[:16]
     cells, totals = {}, {}
-    for row in observations(observed):
+    skipped = {}
+    for row in observations(observed, skipped):
         part = partition(row["phase"], row["shape"], row["sequences"], row["cuda_graph"])
         key = digest([part, band(row["context"], tolerance)])
         c = cells.setdefault(key, {"key": key, "partition": part,
@@ -250,7 +258,7 @@ def plan(serving, identity, observed, budget, tolerance=1.5, target_pct=90.0, re
     return {"contract": "kernel_extract/sampling_plan/v3", "deployment_id": gid,
             "budget_points": budget, "context_tolerance": tolerance, "target_pct": target_pct,
             "coverage_basis": "planning proxy: prefill new tokens / decode iterations; not measured GPU time",
-            "phases": phases, "capture_count": len(selected),
+            "phases": phases, "rows_without_context": skipped, "capture_count": len(selected),
             "captures": [strip(c) for c in selected],
             "reused": [dict(strip(c), reused_from=c["reused_from"]) for c in reused],
             "unselected": [strip(c) for c in remaining],
