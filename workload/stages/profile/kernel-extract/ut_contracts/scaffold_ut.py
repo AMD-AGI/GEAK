@@ -95,9 +95,13 @@ def _hook_stubs(doc):
 
 
 def workload_cases(manifest):
-    return [{"sig": c["sig"], "regime": c["regime"], "m": c.get("m"),
-             "effective_calls": c.get("effective_calls")}
-            for c in manifest.get("cases", []) if c.get("timed")]
+    out = []
+    for c in manifest.get("cases", []):
+        if not c.get("timed"):
+            continue
+        out.append({"sig": c["sig"], "regime": c["regime"], "m": c.get("m"),
+                    "effective_calls": c.get("effective_calls")})
+    return out
 
 
 def cmd_list(a):
@@ -120,6 +124,7 @@ def cmd_new(a):
         with open(a.override) as f:
             overrides = json.load(f)
     doc = U.freeze_task_contract(family, attrs=_kv(a.attr), const_axes=_kv(a.axis), overrides=overrides)
+    doc.setdefault("input_generation", {"protocol": "weight_substreams/v1", "weight_cache_bytes": 2 << 30})
     task = os.path.abspath(a.task)
     name = os.path.basename(task)
     os.makedirs(os.path.join(task, "run"), exist_ok=True)

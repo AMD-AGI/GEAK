@@ -21,7 +21,7 @@ sys.path.insert(0, str(SCRIPTS.parent / "shared"))
 
 import trace_scan  # noqa: E402
 import point_census  # noqa: E402
-import parse_profile  # noqa: E402
+import trace_names  # noqa: E402
 
 RANKS = 2
 COLL = "aiter::cross_device_reduce_1stage<bf16>"
@@ -295,23 +295,11 @@ class TraceScanTest(unittest.TestCase):
 
 class PointCensusTest(unittest.TestCase):
     def test_detailed_annotations_preserve_phase_costs(self):
-        events = [
-            ("gpu_user_annotation", "step[EXTEND bs=1 toks=128 c_sq=128 c_sk=256]", 100, 50),
-            ("kernel", "prefill", 110, 20),
-            ("gpu_user_annotation", "step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sk=512]", 200, 50),
-            ("kernel", "verify", 210, 30),
-            ("gpu_user_annotation", "step[DRAFT bs=2 g_sq=2 g_sk=514]", 300, 50),
-            ("kernel", "draft", 310, 10),
-        ]
-        with tempfile.TemporaryDirectory() as d:
-            path = str(Path(d) / "1-TP-0.trace.json.gz")
-            write_trace(path, events)
-            agg, total, launches, phases = parse_profile.parse_torch_trace(path)
-        self.assertEqual((total, launches), (60, 3))
-        self.assertEqual(agg["prefill"]["by_phase"]["prefill"]["total_us"], 20)
-        self.assertEqual(agg["verify"]["by_phase"]["decode"]["total_us"], 30)
-        self.assertEqual(phases["decode_batches"], [2])  # bs is not the query-token sum
-        self.assertEqual(agg["draft"]["by_phase"], {})  # bare DRAFT has no phase
+        c = trace_names._classify_step
+        self.assertEqual(c("step[EXTEND bs=1 toks=128 c_sq=128 c_sk=256]"), (True, 128, 0, 0))
+        # decode's shape is the batch, not the query-token sum
+        self.assertEqual(c("step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sk=512]"), (False, 0, 2, 0))
+        self.assertIsNone(c("step[DRAFT bs=2 g_sq=2 g_sk=514]"))  # bare DRAFT has no phase
 
     def test_prefill_does_not_own_a_later_generation_draft(self):
         events = [
@@ -435,6 +423,9 @@ class RunPointsTest(unittest.TestCase):
         mla = sh["kernels"]["sparse_mla_attn"]["variants"][0]["samples"][0]
         self.assertEqual(mla["resolved_by"], "launch_correlation")
         self.assertEqual(mla["py_frames"][0], MLA_FRAME)
+        self.assertFalse((ev / "task_decls.json").exists())
+        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         decls = json.loads((ev / "task_decls.json").read_text())
         groups = {tuple(sorted(t["kernels"])): t for t in decls["tasks"]}
         moe = groups[("gemm_a4w4_moe", "moe_sort_kernel")]
@@ -548,6 +539,38 @@ class RunPointsTest(unittest.TestCase):
         self.assertTrue(att[0]["graph_hidden"])
         self.assertIn("--disable-cuda-graph", att[0]["reason"])
 
+    def test_graph_server_defers_decode_to_eager_without_a_capture(self):
+        graph = FakeServer(graph=True)
+        self.addCleanup(graph.close)
+        state = self.root / "probe_server.json"
+        state.write_text(json.dumps({"base_url": graph.url, "trace_root": str(self.root / "traces"),
+                                     "expect_files": RANKS, "decode_capture": "profile_cuda_graph",
+                                     "decode_eager": False}))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "run_points.py"), "--points", str(self.root / "points.json"),
+             "--server-state", str(state), "--eval-dir", str(self.root / "eval"), *FAST],
+            capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(p.returncode, 0)
+        ev = self.root / "eval"
+        run = json.loads((ev / "profile_run.json").read_text())
+        self.assertEqual(run["status"], "decode deferred to eager")
+        for pid in ("de_1", "de_2"):
+            (att,) = run["points"][pid]["attempts"]
+            self.assertEqual((att["status"], att["graph_hidden"]), ("deferred", True))
+        self.assertEqual(len(graph.profile_bodies), 2)            # the two prefill windows only
+        self.assertFalse((ev / "kernel_ranking.json").exists())   # no ranking without decode
+        sys.path.insert(0, str(SCRIPTS))
+        import probe_server
+        self.assertEqual(sorted(probe_server.graph_hidden_points(["--eval-dir", str(ev)])),
+                         ["de_1", "de_2"])
+        # What probe_server.py does next: the eager server redoes exactly those points.
+        eager = FakeServer()
+        self.addCleanup(eager.close)
+        p = self.run_points(eager, "--decode-eager", "--no-evidence", "--redo", "de_1", "de_2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len(eager.profile_bodies), 2)            # decode only; prefill resumed
+        self.assertTrue((ev / "kernel_ranking.json").exists())
+
     def test_server_rejecting_record_shapes_still_captures(self):
         server = FakeServer(reject_shapes=True)
         self.addCleanup(server.close)
@@ -571,6 +594,7 @@ class RunPointsTest(unittest.TestCase):
 class EagerEvidenceTest(unittest.TestCase):
     setUp = RunPointsTest.setUp
     run_points = RunPointsTest.run_points
+    script = RunPointsTest.script
 
     def test_graph_replayed_decode_gets_one_eager_evidence_window(self):
         graph = FakeServer(replay=True)
@@ -594,6 +618,9 @@ class EagerEvidenceTest(unittest.TestCase):
         sm = json.loads((ev / "evidence" / "source_map.json").read_text())
         self.assertFalse(sm["kernels"]["sparse_mla_attn"]["graph_replayed_only"])
         self.assertEqual(sm["kernels"]["sparse_mla_attn"]["frames"][0]["frame"], MLA_FRAME)
+        self.assertFalse((ev / "task_decls.json").exists())
+        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         decls = json.loads((ev / "task_decls.json").read_text())
         groups = {tuple(sorted(t["kernels"])) for t in decls["tasks"]}
         self.assertIn(("gemm_a4w4_moe", "moe_sort_kernel"), groups)
@@ -602,7 +629,7 @@ class EagerEvidenceTest(unittest.TestCase):
         self.assertEqual({p["point_id"] for p in cov["phases"]["DECODE"]["points"]}, {"de_1", "de_2"})
 
 
-class BudgetPlannerTest(unittest.TestCase):
+class SharedPlannerContextTest(unittest.TestCase):
     """Prefill coverage is two-dimensional: the same extend on a short and on a long
     cached prefix are different workloads."""
 
@@ -614,15 +641,13 @@ class BudgetPlannerTest(unittest.TestCase):
             (d / "obs.json").write_text(json.dumps({
                 "decode_log_interval": 10, "raw_prefill_rows": pre,
                 "raw_decode_rows": [{"running": 2, "token": 200000, "iterations": 10}] * 5}))
-            p = subprocess.run([sys.executable, str(SCRIPTS / "plan_points_budget.py"),
-                                "--observed", str(d / "obs.json"), "--time-budget-s", "300",
-                                "--out", str(d / "pts.json")], capture_output=True, text=True)
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            plan = json.loads((d / "pts.json").read_text())
-            pre_pts = [x for x in plan["points"] if x["phase"] == "PREFILL"]
+            import plan_points
+            plan = plan_points.plan({"model": "test", "tp": 1}, {},
+                                    json.loads((d / "obs.json").read_text()), 3, target_pct=100)
+            pre_pts = [x["point"] for x in plan["captures"] if x["point"]["phase"] == "PREFILL"]
             self.assertEqual(sorted(x["context_tokens"] for x in pre_pts), [4000, 121000])
             self.assertTrue(all(x["new_tokens"] == 1000 and x["running"] == 1 for x in pre_pts))
-            self.assertEqual(plan["phase_summary"]["PREFILL"]["mass_outside_tolerance_pct"], 0.0)
+            self.assertEqual(plan["phases"]["PREFILL"]["planned_proxy_coverage_pct"], 100)
             # Relabel with only the short-context point measured: the long-context half of
             # the workload is outside tolerance in 2-D, though its token count matches.
             sys.path.insert(0, str(SCRIPTS))

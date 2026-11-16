@@ -5,15 +5,6 @@ This is step one of turning a completed AgentX baseline into profile sampling po
 It answers "what did this deployment actually execute", in instances, from the log of
 the run being attributed -- not from a parametric ISL/OSL model.
 
-Why this is not optional
-------------------------
-The alternative is `parse_profile.analytic_regime_calls`, which assumes every request
-has the same length and decode runs OSL steps. On a conversational agentic corpus that
-is wrong by whole multiples: it cannot see prefix-cache hits (routinely >90% of prefill
-tokens), speculative accept length, or the batch-size distribution. Every downstream
-number -- which shapes to sample, what mass each sample stands for, what coverage a
-unit test achieves -- inherits that error. So the counts come from the log.
-
 What it produces (`observed_workload.json`)
 -------------------------------------------
   prefill   one record per logged batch (they are logged 1:1), plus histograms over
@@ -24,7 +15,7 @@ What it produces (`observed_workload.json`)
             tokens divided by mean accept length. Both numbers are reported with their
             disagreement; a reader who does not believe the expansion can see the check
             rather than take it on faith.
-  joint     the (phase, shape, occupancy) distribution `plan_sampling_points.py` samples.
+  joint     the (phase, shape, occupancy) distribution the shared sampling planner samples.
 
 Dialects
 --------

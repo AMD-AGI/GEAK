@@ -36,7 +36,7 @@ python3 "$UTC/scaffold_ut.py" new --family gemm_a8w8_blockscale --task "$EVAL_DI
 # meta.json evidence_path and negative_controls, run/ut_cases.json if no --manifest
 python3 "$UTC/scaffold_ut.py" sync-meta --task "$EVAL_DIR/tasks/<name>"
 python3 "$EVAL_DIR/tasks/<name>/ut_contract.py" "$EVAL_DIR/tasks/<name>"     # CPU lint, exit 0/1
-cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py
+cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py --validation-mode correctness
 ```
 
 With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the driver shards
@@ -44,15 +44,93 @@ its correctness legs by case and spreads timing buckets over them. `--quick` run
 but timing on the smallest, middle and largest case of each phase (one draw, a few server
 calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
 `--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
-e.g. `--skip timing` in a lane, then `--reuse` alone to time it.
+including correctness receipts reused later by performance validation.
+
+UT extraction runs `--validation-mode correctness`: all twelve non-timing gates are
+required, and no timing gate executes. Reports explicitly name the validation contract,
+mode, required gates and `performance_measured: false`; a pass certifies the UT.
+Optimization runs `--validation-mode performance --reuse` (performance remains the
+bare command's default for existing optimizer callers). It requires all thirteen gates,
+measures timing, and only then reports a weighted speedup. Preserve `timed: true` cases
+and their workload weights even when extraction does not measure them.
 
 The lint needs no GPU and no torch; run it before every GPU session. `unittest.py` writes
 `run/ut_report.json` (every gate's measures) and `run/ut_result.json` (verdict, exit code,
 snapshot hash, gate statuses), prints `UT_GATE <gate> <status>` lines and, when timing ran,
-`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate passed; 1 = a gate failed or did not
+`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate required by the validation mode passed; 1 = a required gate failed or did not
 run (`--skip` makes the verdict `partial`, never `pass`); 3 = `UT_HARNESS_INCOMPLETE`, the UT
 itself is missing something (a graph phase without a replay bundle) — fix the UT, do not
 blame the candidate.
+
+## Temporary tensor lifecycle
+
+New scaffolds freeze `input_generation.protocol: "weight_substreams/v1"` in
+`run/ut_contract.json`. Built-in read-only `lifetime: "weight"` operands use a named
+random stream keyed by round seed, input name, resolved shape/dtype/distribution.
+Changing activation shape does not redraw the same weight. A per-process LRU cache
+holds at most `input_generation.weight_cache_bytes` (default 2 GiB). Every caller
+receives a private copy, so kernel writes cannot poison the cached original. Writable
+state, active layout hooks and custom/produced distributions remain independently
+constructed. Different draw seeds still produce different weights. A zero cache budget
+retains exactly the same random-stream recipe while disabling retention.
+
+This explicit generation recipe applies to newly scaffolded tests. Existing frozen
+contracts/helpers keep their previous inputs; do not retrofit completed experiments.
+After deliberately changing a contract, sync metadata and qualify it again.
+
+Input reproducibility builds twice and returns the second set for layout/value checks.
+Checks compare exact tensor bytes on-device where possible, including NaN payloads and
+signed zero. Snapshots use at most 256 MiB of GPU storage; larger operands fall back to
+CPU snapshots with chunked comparison. Isolation reuses its first execution for the
+output-independence check instead of invoking the kernel again.
+
+Correctness compares all cases/draws in bounded batches, controlled
+by `meta.ut_contract.oracle_batch_cases` (default 32) and `oracle_batch_bytes` (default
+256 MiB of estimated output across the legs). A single larger case stays whole and is
+reported; the output budget is not a total host/GPU-memory guarantee. Baseline/candidate
+workers keep separate, unchanged overlays across batches, so batching does not pay a new
+Torch import for every case. Controls get their own worker lifetime; workers stop before
+source restoration. Each batch's temporary `.pt` files are loaded and removed before
+the next batch. Negative controls regenerate bounded baseline batches instead of retaining
+suite-wide oracles. Each negative control searches for a numerical witness as described
+below; its rejection margin is unchanged.
+
+`ut_report.json.data_handling` records worker starts, batches, peak temporary oracle-file
+bytes and weight-cache statistics. Unneeded input copies are omitted from comparisons;
+reference operands and top-k score inputs retain their original comparison semantics.
+Only completed batches contribute results; missing case/draw outputs fail validation.
+
+## Negative-control witness search
+
+A mutation needs a completed numerical comparison that fails by at least the configured
+`min_control_margin`. It does not need to fail every case. The driver first tries a small
+case, then bounded batches of every remaining random case until it finds that witness.
+Stop applies only to the current control; every other declared control still runs.
+Correctness, input checks and replay keep their existing coverage.
+
+An author can optionally order known leaf/branch probes in the control declaration:
+
+```json
+{"leaf": "kernel_src/op.py", "find": "...", "replace": "...",
+ "expect": "...", "probe_sigs": ["DECODE_m4", "PREFILL_m200"]}
+```
+
+These must be unique random-case signatures from the manifest. They are tried one at a
+time, followed by the remaining cases if needed; they never narrow the fallback scope.
+Without a hint, the first probe has the smallest estimated output. A quick run stays
+within its own selected cases and still cannot qualify a UT. A hint is not proof of leaf
+execution: retain the normal source/binding and per-leaf delivery evidence.
+
+Weak numerical deviations continue the search. Import/build/launch failure, missing
+batch outputs and missing/incorrectly shaped returns cannot themselves qualify a
+control. If no sufficiently strong numerical witness exists, all eligible cases are
+checked and the control fails. Workers stop and the original source is restored and
+hashed on both success and failure.
+
+Each control reports `available_cases`, `checked_cases`, `early_stopped` and
+`witness_case`, alongside the existing margin and completed case comparisons. Early
+stopping happens after a completed batch; cases already executed in that batch remain
+in the report. The full UT manifest and workload weights are never reduced.
 
 ## The case manifest (`run/ut_cases.json`)
 
@@ -134,8 +212,9 @@ baseline leg, the candidate leg and the driver rebuild identical operands.
 | `launches` | baseline, every case once under `torch.profiler` (`meta.expected_launches` only) | a phase never launches a task kernel the server launched in it -- a stage, a dispatch branch or the other phase the UT does not reach -- unless waived (`launch_waivers: [{kernel, phase, why}]`); `seen` records what it did launch |
 | `correctness` | baseline + candidate oracle legs (fresh processes, deployment compile mode applied) | any random case/draw violates its output bound; with `bitwise` determinism, two candidate runs differ |
 | `isolation` | candidate | `call()` modified an input, or two calls share an output buffer |
+| `process_state` | baseline + candidate oracle legs on each phase's smallest and largest case, with a snapshot of process-wide state before and after (`leg_runner._process_state`) | the candidate changes process-wide state the baseline leaves alone: an environment variable, a torch backend/BLAS/precision/determinism switch, TunableOp, or the identity of a shared torch callable. A UT runs the op alone; in a server every other op then runs under that change (a candidate that enabled TunableOp for its own GEMM passed every other gate and faulted all serving ranks, 2026-11-06). A deliberate change is declared in `process_state_allow: [{prefix, why}]` |
 | `replay` | baseline eager refs, candidate graph replay | a graph phase lacks a bundle (exit 3), capture fails, or a replayed case violates its bound |
-| `server_calls` | baseline + candidate replay of `run/server_calls.json` (server evidence only) | the candidate raises or differs from the baseline (beyond `server_call_tol`, default `replay_tol`) on a call the baseline replays; calls the baseline cannot rebuild are listed, and their variants fall to `compile_variants` |
+| `server_calls` | baseline + candidate replay of `run/server_calls.json` (server evidence only) | the candidate raises or differs from the baseline (beyond `server_call_tol`, default `replay_tol`) on a call the baseline replays; calls the baseline cannot rebuild are listed, and their variants fall to `compile_variants`. `server_call_postprocess: true` (with `server_call_postprocess_why`) applies the task's `cases.server_call_postprocess(call, args, kwargs, ret)` to the return in BOTH legs before the compare, for an entry whose return is only partly defined -- a routed expert kernel allocates its output with `torch.empty` and writes only this rank's rows, the deployed caller masks the rest by the same routing and never reads them, and those elements differ between two identical calls of the unmodified entry. The hook is frozen task source outside the candidate overlay, so it reduces both legs identically and cannot hide a difference in what the caller reads |
 | `compile_variants` | the baseline legs above, under `compile_watch` | a Triton variant in `run/server_variants.json` is built by no baseline leg and not waived (`compile_variant_waivers: [{id, why}]`), or the legs' Triton/torch namespaces differ from the server's (`server_preimports`) |
 | `negative_controls` | candidate oracle per mutation | a mutation passes the compare, fails by < `min_control_margin` (default 10x the bound), or does not run at all; the source is restored and re-hashed either way |
 | `restore` | driver | any `kernel_src` byte differs from the start of the run |
