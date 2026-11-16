@@ -75,8 +75,10 @@ vocabulary and test it before adding a custom checker.
 `expert_workflows/<id>/` holds an expert workflow: a whole workflow that a skill alone cannot express,
 packaged with everything it reads, entry point included. Launch `<id>/workflow.js` directly; nothing in
 `kernel_workflow/` or `e2e_workflow/` refers to it. Today: `expert_workflows/mega_fusion/` (mode=mega,
-multi-rank fused kernels; see its README). L0 CI runs every package's `<id>/tests/` (`test_*.js` with
-node, `test_*.py` with pytest).
+multi-rank fused kernels; see its README) and `expert_workflows/gluon_authoring/` (the
+`skills/gluon_authoring` method — port / incumbent / fresh Gluon on gfx942/gfx950 — as a gated stage
+machine; see its README). L0 CI runs every package's `<id>/tests/` (`test_*.js` with node, `test_*.py`
+with pytest).
 
 `tuning/` is the one skill family that does not follow that layout, because it is not ours to lay
 out: it is vendored from upstream and pinned byte-for-byte by
