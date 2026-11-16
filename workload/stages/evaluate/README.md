@@ -4,6 +4,11 @@ Compare the declared reference and candidate systems using their native serving 
 [Native E2E](native-e2e/SKILL.md) is the initial implementation; another implementation
 must satisfy the same workload, quality and comparison contract.
 
+Declare the decision this comparison supports. A scoped native screen may return matched
+selection evidence under the [direct-call contract](../CONTRACT.md#direct-module-calls);
+its restricted protocol and coverage are not full task acceptance. Complete comparisons
+still use the finalizer below; a screen cannot replace required adoption evidence.
+
 `finalize.py` owns the shared A/B calculation and receipt admission. It consumes the
 existing `e2e/bench_summary.json` convention, including an admissible fresh `stock_control`
 (the unchanged reference for this comparison), and the configured `native_validation`.

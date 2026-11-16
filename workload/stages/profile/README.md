@@ -18,6 +18,12 @@ Use traces, native telemetry and CPU/device, queue, cache or communication evide
 as the question requires. Hand computation boundaries needing qualification to
 [UT](../ut/README.md); use Roofline when a bound would help the next decision.
 
+For an unqualified capture path or a collection defect, establish capture, export and
+readable evidence within a bounded call before expanding the census; reuse a qualified
+path without another admission stage. Traffic, profiler acknowledgement and process exit
+do not prove capture success. Keep changed-mode diagnostic evidence distinct from
+deployed timing, and report the remaining attribution/coverage gap through the contract.
+
 ## Candidate scope
 
 The scenario's selection parameters override the extractor's defaults.

@@ -7,7 +7,9 @@ transferring a result; retain negative and inconclusive findings too.
 For a Docker/image evolution, follow the source and build revisions behind each image:
 identify the changed mechanism, when it became available, and whether the current launch
 actually enables it. An image diff suggests a hypothesis; a controlled measurement
-establishes its benefit. Do not infer individual contributions from a bundled change.
+establishes its benefit. An incompatible implementation does not rule out its mechanism:
+identify what current-workload evidence would qualify a useful adaptation. Do not infer
+individual contributions from a bundled change.
 
 Keep detailed evidence with its campaign. When a finding is reusable, add a short,
 evidence-linked entry here: **conditions → mechanism → observed result → limits**,
