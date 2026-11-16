@@ -53,7 +53,8 @@ ok(src.includes('while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_I
   'round loop is bounded by MAX_ROUNDS');
 ok((src.match(/FAST_MODE && \(dispatched >= BUDGET \|\| round >= MAX_ROUNDS\)/g) || []).length === 2,
   'final re-profile and memory update are skipped only under FAST_MODE on the last round');
-ok(src.includes("expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + fastModeEngineerBlock(d.out_dir),"),
+// Other optional blocks may sit next to it (e.g. the EVO note); what matters is that it is appended.
+ok(/expertSkillsBlock\(isDeep \? 'deep_engineer' : 'engineer'\)[^,]*?\+\s*fastModeEngineerBlock\(d\.out_dir\),/.test(src),
   'engineer prompt appends fastModeEngineerBlock (empty when off)');
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
