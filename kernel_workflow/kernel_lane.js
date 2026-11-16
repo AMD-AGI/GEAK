@@ -262,14 +262,6 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
-// Language-method discovery is independent of validated expert-recipe selection.
-// Opt-in (auto|true enables it on supported Triton/Gluon lanes); default false leaves prompts unchanged.
-const USE_GLUON_SKILL = String(A.use_gluon_skill != null ? A.use_gluon_skill : 'false').toLowerCase();
-if (!['auto', 'true', 'false'].includes(USE_GLUON_SKILL)) throw new Error('use_gluon_skill must be auto, true or false');
-const GLUON_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer', 'profile_engineer']);
-let GLUON_SKILL_GFX = EXPECTED_GFX;
-let GLUON_SOURCE_LANGUAGE = '';
-
 // Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared isolated run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
 let SKILLS_ISOLATE = gpuFamily(EXPECTED_GFX).isolate;
@@ -2268,21 +2260,6 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
-// Provide language guidance without promoting a draft to a validated optimization recipe.
-function gluonSkillBlock(role) {
-  if (USE_GLUON_SKILL === 'false' || !GLUON_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR ||
-      !['gfx942', 'gfx950'].includes(GLUON_SKILL_GFX) || !['triton', 'gluon'].includes(TARGET_LANGUAGE)) return '';
-  const route = TARGET_LANGUAGE === 'triton' && (A.target_language != null || GLUON_SOURCE_LANGUAGE !== 'gluon')
-    ? 'Keep the requested Triton backend. Inspect the tuned plain champion and use applicable diagnostics; a Gluon migration needs an explicitly selected Gluon direction.'
-    : 'Inspect the actual source: tuned plain Triton uses the port entry; existing Gluon uses the incumbent entry and skips transcription/parity gates. For fresh authoring use the API references; do not invent a champion.';
-  return `\n\n## Triton/Gluon method (automatic language reference)\n` +
-    `Read ${EXPERT_SKILLS_DIR}/skills/gluon_authoring/skill.md and its reference.md router. ` +
-    `Read validation.status: draft means unvalidated guidance, not a proven speedup recipe. ` +
-    `${route} Use existing GEAK roles and rounds, GPU leases, oracle and measured acceptance. ` +
-    `Roofline/full-counter analysis belongs to the native kernel-roofline skill; preserve its evidence and report unavailable coverage. ` +
-    `Load only the reference needed for the current stage. use_gluon_skill=false disables this language reference.`;
-}
-
 // Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
@@ -2307,7 +2284,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + gluonSkillBlock(role) + multiGpuBlock(role);
+  return base + expertSkillsBlock(role) + multiGpuBlock(role);
 }
 
 // ===========================================================================
@@ -2375,7 +2352,6 @@ const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 
   : TABULATED_CU[GFX] === Number(PHYSICAL_CU_COUNT) ? `tabulated-${GFX}`
   : GPU_FAMILY.isolate ? `unknown-${GFX}-not-tabulated`
   : 'non-rdna';
-GLUON_SKILL_GFX = GFX;
 if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // an isolating family (GPU_FAMILIES) gets the dedicated in-tree hardware guide but no CDNA-biased cards.
@@ -2472,7 +2448,6 @@ log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'}`);
 // no operator card applies (e.g. point-cloud HIP ops) or KERNEL_KNOWLEDGE_DIR is unset → no change.
 const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
 const KK_LANGUAGE = (analysis && analysis.kk_language) || '';
-GLUON_SOURCE_LANGUAGE = KK_LANGUAGE;
 const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
 
 // ===========================================================================
@@ -3099,7 +3074,7 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + gluonSkillBlock(isDeep ? 'deep_engineer' : 'engineer') +
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') +
       (EVO ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/engineer.md for the selected-parent and donor contract.` : ''),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }, route
     ).then((eng) => ({ d, eng, route }));
