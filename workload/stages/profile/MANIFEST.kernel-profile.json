@@ -1,7 +1,7 @@
 {
-  "file_count": 36,
+  "file_count": 29,
   "files": {
-    "PROVENANCE.json": "5d5458b82688553f877ec744c016d64ea1ed977e6101b737462b5d42162df6e4",
+    "PROVENANCE.json": "6ead3ecb99e38a5110da4dba5117b28a1123143b1534f552e82db3820df7c5ab",
     "SKILL.md": "a1a76a48d088eb4e9edbbed18672b8041b2c29fbcb0ba89e1cf3a489da753423",
     "references/capture.md": "e1c7d8d3f2ca541853103ae57c701c13ed7ed7aae1391912a33873279cfbb001",
     "references/dynamic-workloads.md": "1ecb71f979d0e145e251cfcddb6b244eb4ab4619b82d6264c35546adb60a5c40",
@@ -27,21 +27,14 @@
     "scripts/vllm_observer/geak_vllm_observer.py": "90ae4d8e3d2976ae65241eab4ac63d751a12b549302c1b9157c7915098adb0cf",
     "scripts/vllm_observer/sitecustomize.py": "f18f510938d52f91e014c4516c6dbf899a28055491ce04f4fba8e94ed1d3e784",
     "shared/trace_names.py": "bc52b4535a68f15050cca138b19888a49746a052ebbdf9cb8e285e9181beb19d",
-    "tests/test_decode_prefix_warmup.py": "2fc10558f12c0ca212d5efeec265f0d6277286b919aed03a90e71058e810da6d",
-    "tests/test_kernel_extract_targets.py": "cc80ab42c770cacc46b6cd83c190f64c0d2b54649ca0d7ed846ec0fcad5da5e8",
-    "tests/test_mixed_capture_ranking.py": "ddf26b3d623e0583727e616c2b12c10ce0549b2593d3744b7bf59964d22f88fa",
     "tests/test_plan_points_reuse.py": "197f441a0d8c628808a4afc1096c99ed3824c0a12a891dcf29538c79f7507d43",
-    "tests/test_probe_exhaustion.py": "1e4ee355ce88d419687cf261250527f1cd141d0814a3b4d657dbb0c96dba16df",
-    "tests/test_probe_stop.py": "5c58160c9a32ed3af8f3aafbdbf023f0e59bbf0e95458a3ff30e6e66ecc810c5",
     "tests/test_profile_fast_path.py": "93834a0614435bff2ae5194a774be3a9a76a68ec8ed4bfaa63772627d06a778f",
-    "tests/test_run_points_graph_hidden.py": "5990d5dd84515644f731d6dcadce78dc421167cc65a36630b59a0abba58b70b5",
-    "tests/test_sampling_pipeline.py": "3229f3d62a2e2c7bc1f3b65466189af07204c447368e05d78bc607c348506c5e",
     "tests/test_vllm_profile.py": "d601f4820648062580eda4e32c2a0586a1464b2ea05127cfbc59fce77f2cfdd5"
   },
   "modified_from_origin": false,
-  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py. Task boundaries and UTs are not part of this skill.",
+  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py.",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: profile half of kernel-extract",
   "skill": "kernel-profile",
   "stage": "profile",
-  "tree_sha256": "754ea005d9305e441c72031ae3f485f555498a66469fd9099977ecef9f58b279"
+  "tree_sha256": "d17bb6437c00024feb7cbca154490174014d9ecd91d86dd4bba0264a41354732"
 }
