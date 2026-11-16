@@ -220,7 +220,7 @@ measured under the others -- the correctness probe is their first check there, s
 ## 4. Do not grade yourself
 
 `../finalize.py` writes `result.json`, after this session, and it is the stage's
-conclusion (`stages/CONTRACT.md` 3.1). It checks the shadow proof, the source hashes
+conclusion (`engine/core/README.md`). It checks the shadow proof, the source hashes
 against optimize's record, whatever native-validity fields the scenario configured, that
 both legs share a metric basis, and the A/B itself. What it requires is written only
 there. You can run it early to see what it will say.

@@ -1,4 +1,23 @@
-# Stage `ut` — generate and qualify standalone kernel tests
+# UT
+
+Define and qualify the computation boundary for an optimization task under the
+[invocation contract](../CONTRACT.md#direct-module-calls).
+
+**Input:** selected workload evidence, source/callable identities, planned scope and runtime.
+**Output:** independently runnable frozen tasks, editable-source declarations, native
+qualification/delivery receipts and the covered or deferred identities.
+**Acceptance:** the native task and delivery gates pass for representative inputs,
+the actual device width and the declared edit boundary. CPU preflight alone is incomplete.
+
+Implementation: [kernel-extract](kernel-extract/SKILL.md), reusing the vendored extractor.
+A boundary, harness or case change produces a new qualified delivery. Preserve the old
+version and report which dependent tasks need replacement; unrelated tasks stay valid.
+
+## `kernel-ut`: UTs from a profile handoff (split route)
+
+[kernel-ut](kernel-ut/SKILL.md) is the implementation for the split `profile` → `ut` route
+(multi-config scenarios); [kernel-extract](kernel-extract/SKILL.md) above serves direct
+module calls and Brain-planned repairs. Both qualify tasks with the same native gates.
 
 **Input** `$IN/profile_handoff.json` from the profile stage.
 **Output** `$OUT/tasks/`, `task_plan.json`, per-task GPU/source receipts and `result.json`.

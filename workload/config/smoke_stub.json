@@ -12,7 +12,7 @@
   ],
   "stages": {
     "optimize": {
-      "skill": "subagent-raw",
+      "skill": "oob",
       "mode": "agent",
       "params": {
         "time_budget_sec": 20,

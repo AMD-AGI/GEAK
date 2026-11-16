@@ -4,7 +4,7 @@
     python3 merge_policy.py --group-dir "$OUT" [--baseline "$RUN_ROOT/baseline/out/baseline.json"] \
         [--source-root /sgl-workspace/sglang/python=/path/to/the/same/tree] --out "$OUT/merge_policy.json"
 
-The rule (stages/profile/README.md "Merging across concurrency"): an operator dispatched by
+The rule (stages/profile/MULTI_CONFIG.md "Merging across concurrency"): an operator dispatched by
 batch size is ONE UT. Whether it is one is decided strictly; once it is, it is merged --
 how hard the harness is to write never keeps it apart.
 

@@ -174,7 +174,7 @@ test('performance validation still needs timing after correctness-only extractio
   assert.equal((await verifySourceDelivery(f.kernel, await f.pack())).ok, false);
 });
 
-test('UT driver hashes match the independent Python _snapshot and _reuse_key implementations', async t => {
+test('legacy UT driver digests match the original Python _snapshot and _reuse_key (path_sha256_concat/v1)', async t => {
   const f = await driverFixture(t);
   await fs.mkdir(path.join(f.task, 'kernel_src/nested'));
   await fs.mkdir(path.join(f.task, 'kernel_src/__pycache__'));
@@ -184,21 +184,79 @@ test('UT driver hashes match the independent Python _snapshot and _reuse_key imp
   await fs.writeFile(path.join(f.task, '\u{10000}.py'), '# supplementary code point\n');
   await fs.symlink('score.py', path.join(f.task, 'kernel_src/alias.py'));
   await fs.symlink('nested', path.join(f.task, 'kernel_src/dir_alias'));
-  const driver = path.resolve(import.meta.dirname, '../../ut_contracts/ut_driver.py');
+  // The algorithm UT drivers used before they delegated to sourceSnapshot (geak-x c54fb297),
+  // kept verbatim: old receipts are still verified through ut_snapshot / utDriverSnapshot.
+  const legacy = String.raw`
+def _sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def _tree_hashes(T):
+    out = {}
+    root = os.path.join(T.dir, "kernel_src")
+    for d, _, files in os.walk(root):
+        for f in files:
+            p = os.path.join(d, f)
+            if "__pycache__" not in p:
+                out[os.path.relpath(p, T.dir)] = _sha(p)
+    return out
+
+def _reuse_key(T):
+    """Everything a gate's verdict depends on inside the task: helpers, contract, cases,
+    server evidence and kernel_src. A gate may be reused only under the same key."""
+    h = hashlib.sha256()
+    rels = sorted(f for f in os.listdir(T.dir) if f.endswith((".py", ".json")))
+    run = os.path.join(T.dir, "run")
+    rels += sorted("run/" + f for f in os.listdir(run) if f in ("ut_cases.json", "ut_contract.json")
+                   or f.startswith("server_")) if os.path.isdir(run) else []
+    calls = os.path.join(run, "server_calls")
+    rels += sorted("run/server_calls/" + f for f in os.listdir(calls)) if os.path.isdir(calls) else []
+    rels += sorted(_tree_hashes(T))
+    for rel in rels:
+        p = os.path.join(T.dir, rel)
+        if os.path.isfile(p):
+            h.update(rel.encode())
+            h.update(_sha(p).encode())
+    return h.hexdigest()
+
+def _snapshot(T):
+    h = hashlib.sha256()
+    files = ["meta.json", "cases.py", "unittest.py", "run/ut_cases.json", "run/ut_contract.json"]
+    files += sorted(_tree_hashes(T))
+    for rel in files:
+        p = os.path.join(T.dir, rel)
+        if os.path.exists(p):
+            h.update(rel.encode())
+            h.update(_sha(p).encode())
+    return h.hexdigest()
+`;
   const python = spawnSync('python3', ['-c', `
-import ast, hashlib, json, os, sys, types
-tree = ast.parse(open(sys.argv[1]).read())
-names = {'_sha', '_tree_hashes', '_snapshot', '_reuse_key'}
-subset = ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[])
-assert len(subset.body) == 4
+import hashlib, json, os, sys, types
 namespace = {'hashlib': hashlib, 'os': os}
-exec(compile(subset, sys.argv[1], 'exec'), namespace)
+exec(sys.argv[1], namespace)
 task = types.SimpleNamespace(dir=sys.argv[2])
-print(json.dumps({k: namespace[f](task) for k, f in [('snapshot_sha256', '_snapshot'), ('reuse_key', '_reuse_key')]}))
-`, driver, f.task], { encoding: 'utf8' });
+print(json.dumps({'snapshot_sha256': namespace['_snapshot'](task), 'reuse_key': namespace['_reuse_key'](task)}))
+`, legacy, f.task], { encoding: 'utf8' });
   assert.equal(python.status, 0, python.stderr);
   const actual = await utDriverSnapshot(f.task);
   assert.deepEqual({ snapshot_sha256: actual.snapshot_sha256, reuse_key: actual.reuse_key }, JSON.parse(python.stdout));
+});
+
+test('the current UT driver reports the canonical sourceSnapshot as its identity', async t => {
+  const f = await driverFixture(t);
+  await fs.copyFile(path.resolve(import.meta.dirname, '../kernel_source_delivery.mjs'),
+    path.join(f.task, 'kernel_source_delivery.mjs'));
+  const driver = path.resolve(import.meta.dirname, '../../ut_contracts/ut_driver.py');
+  const python = spawnSync('python3', ['-c', `
+import ast, hashlib, json, os, subprocess, sys, types
+tree = ast.parse(open(sys.argv[1]).read())
+subset = ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_snapshot'], type_ignores=[])
+namespace = {'json': json, 'os': os, 'subprocess': subprocess}
+exec(compile(subset, sys.argv[1], 'exec'), namespace)
+print(namespace['_snapshot'](types.SimpleNamespace(dir=sys.argv[2])))
+`, driver, f.task], { encoding: 'utf8', env: { ...process.env, KERNEL_EXTRACT_NODE: process.execPath } });
+  assert.equal(python.status, 0, python.stderr);
+  assert.equal(python.stdout.trim(), (await sourceSnapshot(f.task)).snapshot_sha256);
 });
 
 test('legacy UT digest requires explicit compatibility and a hashed full report', async t => {

@@ -2,7 +2,7 @@ You are running one stage of an unattended pipeline. No one will answer a
 question, and nothing after this message is interactive: decide, act, and record what you
 did. Work until the stage is finished or genuinely blocked.
 
-THE CONTRACT (stages/CONTRACT.md), which is the whole of what this stage owes anybody:
+THE CONTRACT (engine/core/README.md), which is the whole of what this stage owes anybody:
 
   1. Read $IN (the previous stage's output directory) and $PARAMS (this stage's
      parameters). Neither is advisory. Where $PARAMS and the skill's SKILL.md disagree --
