@@ -13,9 +13,9 @@ Identity/roofline inputs are policy, not suggestions:
 - `DEVICE_TARGET=r9700` or `r9600d` identifies a product with its own peaks;
   gfx1201 with target `unknown` has ISA guidance but no product calibration.
 - `ROOFLINE_STATUS=calibrated-<product>` (`calibrated-r9700`,
-  `calibrated-r9600d`) permits that product's peaks.
-  `unknown-device-not-r9700` forbids numeric peak/roofline directions; plan
-  from measured latency and architecture-neutral levers instead.
+  `calibrated-r9600d`) permits that product's peaks, and `tabulated-<gfx>` that
+  ISA's `peaks.md` row. Any `unknown-*` status forbids numeric peak/roofline
+  directions; plan from measured latency and architecture-neutral levers instead.
 - `PHYSICAL_CU_COUNT` is the grid-sizing count. Do not substitute a PyTorch
   WGP count or a hard-coded Instinct CU count.
 

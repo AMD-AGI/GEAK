@@ -198,6 +198,8 @@ Product identity selects product data, not separate logic. `r9700` and
 isolation) and differ only in the `product:` block of
 `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
 holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.
+gfx115x (Strix Halo) has no product key: the ISA alone selects `vllm`, and the workflow refuses any
+other backend. Only a gfx1151 Radeon 8060S has been run; other gfx115x parts get the same policy.
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.
 
@@ -504,6 +506,23 @@ mirror what `e2e_workflow.js` requires before it banks a candidate live:
 
 `validation_evidence.recovery` records the pool size, the pick, its gate, its
 delta-over-ceiling ratio, and anything excluded, so the choice is auditable.
+
+### A trace replay killed during Validate
+
+Validate measures a trace replay in canonical-window legs, so a run can be
+killed after `validation/base` and `validation/final` both finished but before
+the Director returned. That pair is the same-session measurement of the final
+stack, so it replaces the number the salvage above carried: `result_source` is
+`"disk_validation_legs"`, `validation_evidence.validation_status` is
+`"recovered_validation_legs"`, the baseline comes from
+`validation_base_bench_summary`, and the KEEP rule judges those two legs. The
+stack and its evidence stay the salvage tier's, and `validation_evidence.recovery`
+adds the two leg paths and the status the salvage had. Both legs must be
+complete, usable for acceptance, measured for validation, on one axis and newer
+than the eval dir's `.final_phase_fence` (a resumed run's earlier Validate does
+not count), and only a trace replay's leg records the `warmup_protocol` this
+requires; otherwise, and for a no-gain salvage, nothing changes. No Director
+arbitrated the pair, so the KB records it unverified and does not promote it.
 
 ### `tuning_skillset` (additive)
 
