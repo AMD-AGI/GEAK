@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Cross-over comparison of two candidate workspaces X and Y on two GPUs: each pair runs X on GPU g1 and Y
-# on g2 at the same time, then swapped, so GPU bias and drift cancel in the mean. Each side is a full
+# Cross-over comparison of two candidate workspaces X and Y: with two GPUs each pair runs X on g1 and Y on
+# g2 at the same time, then swapped; with one GPU the order alternates (XY, YX). Bias and drift cancel in the mean. Each side is a full
 # paired measurement against the baseline (bin/ab.sh + bin/score.py).
 # Usage: xover.sh <RUN|cmd.env> <ws_base|-> <ws_X> <ws_Y> <out_dir> [pairs=2] [reps=1]
 #   GPUs: the first two ids of GPU in cmd.env (e.g. pool:1:0,1 -> 0 and 1). ws_base "-" = in-process harness.
@@ -10,7 +10,7 @@ ENVF="${1:?RUN}"; [[ -d "$ENVF" ]] && ENVF="$ENVF/cmd.env"; ENVF="$(readlink -f 
 BASE="$2"; X="$(cd "$3" && pwd)"; Y="$(cd "$4" && pwd)"; OUT="${5:?out}"; PAIRS="${6:-2}"; REPS="${7:-1}"
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 source "$ENVF"
-IFS=, read -r G1 G2 _ <<<"${GPU##*:}"; [[ -n "${G2:-}" ]] || { echo "xover: need two GPU ids in GPU=$GPU" >&2; exit 2; }
+IFS=, read -r G1 G2 _ <<<"${GPU##*:}"   # one GPU only: the pair runs X then Y, the next pair Y then X
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 side() {  # side <label> <ws> <gpu>
   AB_GPU=$3 bash "$HERE/ab.sh" "$ENVF" "$BASE" "$2" "$OUT/$1" "$REPS" >"$OUT/$1.log" 2>&1 || echo "rc=$?" >>"$OUT/$1/errors"
@@ -18,7 +18,9 @@ side() {  # side <label> <ws> <gpu>
 }
 for k in $(seq 1 "$PAIRS"); do
   if (( k % 2 )); then gx=$G1; gy=$G2; else gx=$G2; gy=$G1; fi
-  side "p${k}_x" "$X" "$gx" & side "p${k}_y" "$Y" "$gy" & wait
+  if [[ -n "${G2:-}" ]]; then side "p${k}_x" "$X" "$gx" & side "p${k}_y" "$Y" "$gy" & wait
+  elif (( k % 2 )); then side "p${k}_x" "$X" "$G1"; side "p${k}_y" "$Y" "$G1"
+  else side "p${k}_y" "$Y" "$G1"; side "p${k}_x" "$X" "$G1"; fi
 done
 python3 - "$OUT" "$PAIRS" <<'PY'
 import json, sys, statistics
