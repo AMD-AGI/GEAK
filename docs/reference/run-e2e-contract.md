@@ -238,7 +238,9 @@ disk. `run_e2e.py` removes that fragility in four layers:
    `workflow_return.json` if present, else reconstructed from
    `director_e2e_validation.json` with accepted-kernel names recovered from the
    stable `overlay/cand_*` layout. Recovery returns nothing only when no completed
-   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`.
+   `eval_dir` exists. Recovered runs set `result.recovered_from_disk = true`. A
+   trace replay killed after Validate's `validation/base` and `validation/final`
+   legs finished reports that pair (`result_source: "disk_validation_legs"`).
 
 ## `kernel_journey.json`
 

@@ -198,6 +198,21 @@ def _match_key(kernel_name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", canon_name(kernel_name).lower())
 
 
+# Words that say how a kernel is written, not which kernel it is (`gemm_triton_gate_up...`).
+_CARRIER_TOKENS = frozenset(p.rstrip("_") for p in _NAME_PREFIXES) | {"kernel"}
+# A shape token is one dimension letter and its size: `n19456`, `k2560`, `d4096`.
+_SHAPE_TOKEN = re.compile(r"[mnkbhdse][0-9]+")
+
+
+def _loose_name_match(a: str, b: str) -> bool:
+    """The same kernel spelled differently: equal token sets once carrier words are dropped, in a
+    name that states a shape. Equality, not containment: `rmsnorm_d4096` is not
+    `fused_add_rmsnorm_fp8_quant_d4096`, and a shapeless name (`gemm`) never loose-matches."""
+    ta, tb = ({t for t in re.split(r"[^a-z0-9]+", canon_name(n).lower())
+               if t and t not in _CARRIER_TOKENS} for n in (a, b))
+    return ta == tb and any(_SHAPE_TOKEN.fullmatch(t) for t in ta)
+
+
 def make_slug(kernel_name: str, language: str, gfx: str) -> str:
     return f"{_safe(canon_name(kernel_name))}__{_safe(language)}__{_norm_gfx(gfx) or 'unknown'}"
 
@@ -1781,7 +1796,7 @@ def _carrying_plane(store, recs, local_reproduced: bool):
     return out, merged
 
 
-def _tree_entries(root: str, want_gfx: str, want_name: str, include_retired: bool):
+def _tree_entries(root: str, want_gfx: str, kernel_name: str, include_retired: bool):
     """Every publishable entry in the slug tree as (exp_dir, meta), plus what was passed over.
 
     Shared by the two readers that take the tree and speak canonical ids back — `export-remote`,
@@ -1790,7 +1805,9 @@ def _tree_entries(root: str, want_gfx: str, want_name: str, include_retired: boo
     redundant for READING, and it can only do that if it carries across everything the first
     would have offered.
     """
-    scanned, skipped = 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0}
+    scanned, skipped = 0, {"retired": 0, "no_patch": 0, "unreadable": 0, "filtered": 0,
+                           "matched_loose": 0}
+    want_name = _match_key(kernel_name) if kernel_name else ""
     entries = []
     for dirpath, _dirs, files in sorted(os.walk(root)):
         if "meta.yaml" not in files:
@@ -1801,9 +1818,17 @@ def _tree_entries(root: str, want_gfx: str, want_name: str, include_retired: boo
             skipped["unreadable"] += 1
             continue
         gfx = _norm_gfx(meta.get("gfx") or (meta.get("metric") or {}).get("gpu_arch") or "")
-        if (want_gfx and gfx != want_gfx) or (want_name and _match_key(meta.get("kernel_name")) != want_name):
+        if want_gfx and gfx != want_gfx:
             skipped["filtered"] += 1
             continue
+        # The name on an entry is whatever its write was given, so one kernel can be filed under
+        # another spelling (`gemm_triton_gate_up_proj_bf16_N19456_K2560` for the lane's
+        # `gate_up_proj_gemm_bf16_N19456_K2560`). Keep such an entry, counted apart.
+        if want_name and _match_key(meta.get("kernel_name")) != want_name:
+            if not _loose_name_match(kernel_name, meta.get("kernel_name")):
+                skipped["filtered"] += 1
+                continue
+            skipped["matched_loose"] += 1
         # Retired entries are dominated duplicates, not negative knowledge, and the service ranks on
         # the speedup we declare — offering them would put a retired win in someone's top-N.
         if _is_retired(meta) and not include_retired:
@@ -1834,8 +1859,7 @@ def cmd_export_remote(a) -> dict:
     if not os.path.isdir(root):
         return {"ok": False, "reason": "no_such_root: " + root}
     entries, scanned, skipped = _tree_entries(
-        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
-        bool(a.include_retired))
+        root, _norm_gfx(a.gfx) if a.gfx else "", a.kernel_name or "", bool(a.include_retired))
     records = []
     for dirpath, meta in entries:
         records.extend(remote_records(meta, dirpath, a.producer, a.gpu))
@@ -1935,11 +1959,16 @@ def cmd_sync_local(a) -> dict:
     if store is None:
         return {"ok": False, "reason": why or "no_store"}
     entries, scanned, skipped = _tree_entries(
-        root, _norm_gfx(a.gfx) if a.gfx else "", _match_key(a.kernel_name) if a.kernel_name else "",
-        include_retired=True)
+        root, _norm_gfx(a.gfx) if a.gfx else "", a.kernel_name or "", include_retired=True)
+    # A loose match is also filed under the name the lane reads by (`resolve-remote --kernel-name`),
+    # or it would be synced and still read as a cold start. Counters count each entry once.
+    want_key = _match_key(a.kernel_name) if a.kernel_name else ""
+    filings = [(d, m, False) for d, m in entries] + [
+        (d, dict(m, kernel_name=a.kernel_name), True) for d, m in entries
+        if want_key and _match_key(m.get("kernel_name")) != want_key]
 
     synced, fresh, retired, promoted, errors = [], 0, 0, [], []
-    for exp_dir, meta in entries:
+    for exp_dir, meta, second in filings:
         # One bad entry must not stop the catch-up: the read that follows is better off with the
         # rest of the backlog, and the failure is named here rather than leaving a page thin for a
         # reason nothing recorded. Broad on purpose — hash, identity and write all fail differently.
@@ -1977,6 +2006,8 @@ def cmd_sync_local(a) -> dict:
             continue
         if error:
             errors.append({"exp_dir": exp_dir, "reason": error})
+            continue
+        if second:
             continue
         retired += 1 if retire_now else 0
         fresh += 0 if already else 1
