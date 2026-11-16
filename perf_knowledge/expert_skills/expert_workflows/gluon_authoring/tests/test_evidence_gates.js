@@ -158,6 +158,10 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
     const reask = x.calls.find(c => c.label === 'gluon_engineer:evidence r1 (reask 1)').prompt;
     ok(/audit: g3 re-run/.test(reask), 'the finding is quoted in the re-ask');
     ok(x.result.rounds[0].status === 'verified', 'verified after the clean audit');
+    const y = await launch(climbOnly, (label) =>
+      /^evidence_audit/.test(label) ? { ok: false, findings: [] } : undefined, { entry: 'incumbent' });
+    ok(y.result.rounds[0].status === 'rejected_missing_evidence' && !y.labels.includes('verify r1'),
+      'a failed audit that names nothing still rejects the round', y.result.rounds[0]);
   }
 
   console.log('\n# 9. incumbent: parity_gate may only be a diagnostic');

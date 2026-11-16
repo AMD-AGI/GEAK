@@ -588,7 +588,10 @@ for (let round = 1; round <= BUDGET && !stoppedBy; round++) {
           EVIDENCE: r, STAGE: stage, GFX, SKILL, KT, OUTPUT_DIR: OUT, TRACK, ROUND_TAG: `r${round}`,
         }, { stage: 'audit' }),
         { phase: STAGE_PHASE[stage], label: `evidence_audit r${round}`, effort: 'low', schema: AUDIT_SCHEMA });
-      if (audit && audit.ok === false) missing = (audit.findings || []).map(f => `audit: ${f}`);
+      if (audit && audit.ok === false) {
+        missing = (audit.findings || []).map(f => `audit: ${f}`);
+        if (!missing.length) missing = ['audit: failed without naming a finding; re-check every cited artifact'];
+      }
       if (!audit) missing = [];   // a lost audit never blocks a complete round; the gap is logged
       if (!audit) log(`  [audit] round ${round}: auditor returned nothing; structural check stands.`);
     }

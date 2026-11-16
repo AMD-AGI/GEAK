@@ -47,7 +47,10 @@ field names the command you ran, its exit code and where its output is.
   not state is `null` with `missing_reason`, never 0.
 - `g4_screen` (G4): `python3 $KT/ab_bench.py --module <adapter>.py --permute --json OUTPUT_DIR/ab/ab.json`
   under `gpu_lock.sh`, candidate vs `TRACK_START` (each arm its own kernel object and cache dir, a
-  `fingerprint()` hook). Return `exit_code`, `json_path`, `delta_pct`, `noise_band_pct`, `resolved`
+  `fingerprint()` hook). Write the adapter once (`variants()`, `oracle()` or `outputs()`+`reference()`,
+  `fingerprint()` — the contract is in `ab_bench.py --help`; `$KT/create_harness.py` scaffolds a
+  harness_lib-timed harness it can import) under `$EVAL_DIR/gluon/ab_adapter/` and reuse it in later
+  rounds; never edit the task's own harness. Return `exit_code`, `json_path`, `delta_pct`, `noise_band_pct`, `resolved`
   (false = inside the band, `NOT RESOLVED`) and `valid` (the json's `validity.valid`). A screen is not
   acceptance; verify is.
 - `att` — required for layers 1.5, 4 and 4+ (and a `lost_pipeline` repayment): instruction-level
