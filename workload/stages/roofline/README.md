@@ -5,8 +5,7 @@ or search priority. Provide explicit task/case evidence and a separate analysis 
 a scoped input view preserves its original ownership and whole-workload shares.
 The report informs Brain; it does not force a search or establish E2E gain.
 
-**Input** `$IN` = UT output in the split pipeline, or combined profile output in legacy
-scenarios (`selection_targets.json` for shares, `tasks/<name>/` for
+**Input** `$IN` = profile's out (`selection_targets.json` for shares, `tasks/<name>/` for
 runnable unit tests).
 **Output** `$OUT/roofline.json`: per-kernel `roofline_pct`, `attainable_speedup` and
 `bound_type`, plus the **ranking key `expected_e2e_gain_pct`**.

@@ -10,10 +10,6 @@ missing coverage stays visible. A diagnostic observation need not produce UTs.
 
 Implementation: the observation and attribution parts of
 [kernel-extract](kernel-extract/SKILL.md), or a profiler explicitly named in the plan.
-[kernel-profile](kernel-profile/SKILL.md) is the split route's implementation: sampling, dispatch,
-shapes and a hashed `profile_handoff.json` ([HANDOFF.md](HANDOFF.md)) consumed by
-[UT `kernel-ut`](../ut/README.md); set `params.output_kind="dispatch_evidence"`. Several CI
-configs of one group follow [MULTI_CONFIG.md](MULTI_CONFIG.md).
 Use traces, native telemetry and CPU/device, queue, cache or communication evidence
 as the question requires. Hand computation boundaries needing qualification to
 [UT](../ut/README.md); use Roofline when a bound would help the next decision.

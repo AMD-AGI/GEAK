@@ -10,7 +10,4 @@ Read the task, scenario and [module catalogue](README.md#modules), then follow
 Modules return evidence to this controller; changing a module or implementation does
 not change the task's acceptance criteria or budget.
 
-Multi-config scenarios use the split profile → ut route; see
-[README.md](README.md#multi-config-scenarios).
-
 Read [PRINCIPLES.md](PRINCIPLES.md) before changing this skill.
