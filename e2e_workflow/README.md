@@ -172,7 +172,7 @@ graded but total itself; another axis keeps the guards summarized beside it, tot
 is there because the corpus fixes the work each request asks for, so a candidate that completes less
 of it can still raise the graded number. `interface/run_e2e.py` enforces the rule on a handoff. A
 direct `Workflow` call gets the guards as an instruction to the Director at Validate, where the gain
-bar is the run's noise band (4% on a trace replay unless `noise_band_pct` sets it). The output-only
+bar is the run's noise band (0.5% unless the Director or `noise_band_pct` widens it). The output-only
 axis a sweep uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large
 change in work.
 
@@ -246,10 +246,11 @@ Three parts of that object do more than they look:
   environment decides, since an exported value outranks `bench_env.sh` and is what the bench would
   measure anyway. A declared basis that disagrees with an exported `E2E_METRIC`, or an exported value
   `bench_summarize.py` cannot measure, is refused at start rather than an hour into the baseline. The
-  acceptance noise band on a trace replay defaults to 4%, and the band the Director reports can only
-  widen it: two same-config baseline replicas differed by 3.86% on P90 interactivity (3.43% on total
-  tok/s). `noise_band_pct` sets that floor instead; the TTFT-inclusive `e2e_norm_intvty_p90` moved
-  17% on the same pair, so pass one if you grade on it.
+  acceptance noise band defaults to 0.5% on a trace replay too, though two same-config baseline
+  replicas differed by 3.86% on P90 interactivity (3.43% on total tok/s): one kernel rarely moves e2e
+  that far, so each A/B gates on the smaller band and `interface/run_e2e.py` holds the final pair to
+  the KEEP rule. `noise_band_pct` sets a floor the Director's band can only widen; the TTFT-inclusive
+  `e2e_norm_intvty_p90` moved 17% on the same pair, so pass one if you grade on it.
 - **The reference.** Overriding `corpus`, `num_entries` or `duration_s` does not move what a result is
   stamped canonical against, so a replay of anything else comes back `submission_valid=false`. To
   change the reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /

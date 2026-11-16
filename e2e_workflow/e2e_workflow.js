@@ -90,6 +90,16 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
 // Call the single-language worker lane directly: going through the kernel_workflow.js dispatcher
 // would nest e2e -> dispatcher -> worker (3 levels), which the runtime forbids.
+if (A.optimizer != null && typeof A.optimizer !== 'string') {
+  throw new Error('optimizer must be greedy or evo (a string)');
+}
+const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error('optimizer must be greedy or evo');
+}
+if (OPTIMIZER === 'evo' && A.evolution_source_paths != null && !Array.isArray(A.evolution_source_paths)) {
+  throw new Error('evolution_source_paths must be an optional list of supplemental source files');
+}
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
@@ -141,8 +151,18 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
+    ...(OPTIMIZER === 'evo' ? { optimizer: 'evo',
+      ...(A.evolution_source_paths != null ? { evolution_source_paths: A.evolution_source_paths } : {}) } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+    // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
+    // the child lane's helper scopes instead of the experiment silently covering the parent alone.
+    ...(A.routing != null ? { routing: String(A.routing) } : {}),
+    // ...and, like kernel_workflow.js, the cost-ladder knobs and the decider (Eikos included), each only when set.
+    ...Object.fromEntries(['route_conf_escalate', 'route_max_retries_per_lane', 'route_max_top_escalations',
+      'route_max_output_tokens', 'route_floors', 'route_decider', 'route_eikos_tau', 'route_eikos_max_consults',
+      'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms', 'route_eikos_probe_failed']
+      .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
     ...wfArgs,
   };
   if (GPU_FAMILY.isolate) {
@@ -587,6 +607,14 @@ const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
 // that run parity/accuracy probes are told to serve those probes with these names unset.
 const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
   .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+// vLLM simulates inside the seed's --speculative-config instead (a "synthetic" rejection sampler);
+// run_e2e forwards the same config with real verification, which is what those probes serve with.
+const CORRECTNESS_SPEC_CONFIG = (() => {
+  try {
+    const spec = JSON.parse(String(A.correctness_speculative_config || ''));
+    return spec && typeof spec === 'object' && !Array.isArray(spec) ? JSON.stringify(spec) : '';
+  } catch (_) { return ''; }
+})();
 const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -1030,14 +1058,13 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%): 0.5 for a fixed-shape workload (identical work per replica, isolated
-// measurements, non-overlap and engagement proof). A trace replay varies with which trajectories a
-// replica completes, so it gets a 4% floor; a TTFT-inclusive axis needs an explicit noise_band_pct.
-const NOISE_BAND_AGENTX = 4.0;
-const NOISE_BAND_DEFAULT = parseFloat(
-  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
-// The gate band from the Director's value. The Director starts at 0.5, so on a trace replay it may
-// only raise the band above the workload floor; a fixed-shape run uses the Director's value.
+// Acceptance noise band (%): 0.5 unless the Director or an explicit noise_band_pct widens it. A trace
+// replay's replicas spread a few percent, but that is not its default: one kernel's A/B rarely moves
+// e2e that far, and run_e2e.py holds the final pair to the KEEP rule. A TTFT-inclusive axis needs an
+// explicit noise_band_pct.
+const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// The gate band from the Director's value. On a trace replay an explicit noise_band_pct is a floor
+// the Director can only widen; a fixed-shape run uses the Director's value.
 function gateNoiseBand(reported) {
   const r = parseFloat(reported);
   const director = Number.isFinite(r) && r > 0 ? r : 0;
@@ -1621,20 +1648,37 @@ function agentxValidateSkip(adoptedNothing, leftMs) {
   if (adoptedNothing) return 'final_is_baseline';
   return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
 }
+// A trace replay benches its A/Bs on the search window but curTput starts at Setup's canonical number,
+// and the two are not comparable: an accepted same-window win is kept for Validate's canonical A/B to
+// judge. A sub-threshold `stack` result still has to beat curTput.
+function beatsCurTput(integ, curTput) {
+  return (IS_AGENTX && integ.gate === 'accepted') || integ.e2e_throughput_tok_s > curTput;
+}
 
 function correctnessEnvBlock(role) {
-  if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
+  const env = CORRECTNESS_UNSET_ENV.length > 0, spec = !!CORRECTNESS_SPEC_CONFIG;
+  if (!(env || spec) || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
+  const what = [], how = [];
+  if (env) {
+    what.push(CORRECTNESS_UNSET_ENV.join(', '));
+    how.push(`with these variables removed, from the process env (\`env ${unset} ...\`) and from EXTRA_ENV`);
+  }
+  if (spec) {
+    what.push('the "synthetic" rejection sampler in the seed\'s --speculative-config');
+    how.push(`with \`--speculative-config ${CORRECTNESS_SPEC_CONFIG}\` in place of the seed's (its sampler ` +
+      '"block", without synthetic_acceptance_length)');
+  }
+  const same = !spec ? 'same flags' : env ? 'same other flags' : 'same other flags, same env';
   return `\n\n## CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE\n` +
-    `This stack serves with simulated speculative-decoding acceptance (${CORRECTNESS_UNSET_ENV.join(', ')}). ` +
+    `This stack serves with simulated speculative-decoding acceptance (${what.join('; ')}). ` +
     `It keeps throughput comparable, but what it serves is neither deterministic nor the model's own ` +
     `output: the unmodified reference does not reproduce itself, so a greedy-parity or task-accuracy probe ` +
     `run under it measures the simulator, not the change. For EVERY correctness probe, launch BOTH servers ` +
-    `(the TRUE baseline and the candidate) with these variables removed, from the process env ` +
-    `(\`env ${unset} ...\`) and from EXTRA_ENV, and change nothing else: same flags, same overlay, same ` +
-    `TP/GPU. Throughput legs keep them, because those legs ARE the measurement, so a correctness server ` +
-    `is never one of the throughput servers. Say in your notes that the probe ran with simulated ` +
-    `acceptance off.`;
+    `(the TRUE baseline and the candidate) ${how.join(', and ')}, and change nothing else: ${same}, same ` +
+    `overlay, same TP/GPU. Throughput legs keep ${spec ? 'the simulation' : 'them'}, because those legs ARE ` +
+    `the measurement, so a correctness server is never one of the throughput servers. Say in your notes ` +
+    `that the probe ran with simulated acceptance off.`;
 }
 
 // Optimization roles consume the skill's delivery; only the extractor loads its full procedure.
@@ -1659,7 +1703,10 @@ function roleAgent(role, phase, intro, inputs) {
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
     // Only surfaced on a trace replay.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
-    ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
+    ...(correctnessEnvBlock(role) ? {
+      ...(CORRECTNESS_UNSET_ENV.length ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
+      ...(CORRECTNESS_SPEC_CONFIG ? { CORRECTNESS_SPECULATIVE_CONFIG: CORRECTNESS_SPEC_CONFIG } : {}),
+    } : {}),
     ...inputs,
     ...(standaloneExtraction ? {
       SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
@@ -1860,14 +1907,130 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
-  const prompt = withProcessSafety(rawPrompt);
-  const ablEffort = ablEffortFor(opts, ablAttempt || 0);
+// ---------------------------------------------------------------------------
+// B5 static-effort route for a dispatch. (PR #574 review, amd-ethany: the opt-in
+// Eikos router hook that used to live here -- eikosEnv / EIKOS_ROUTER_ON /
+// eikosRouteFor -- was REMOVED. It needed require('child_process'), which NEITHER
+// supported runtime provides: the native Workflow tool has no require()/process,
+// and the standalone runtime runs scripts as ES-module AsyncFunctions without
+// require(). So the switch always read off and the helper never ran in any real run;
+// making it live needs a supported host-side evaluator boundary, which does not
+// exist yet. Until then the dead code is gone. Complexity routing lives in the
+// ROUTING-INLINE region below.)
+//
+// Only labels the static router already deems cheap-eligible reach this hook;
+// eligibility is deterministic, never a model's opinion. Returns the host's own B5
+// static effort route when one applies, else the caller's options untouched.
+function routeOptsFor(opts, attempt, prompt) {
+  const ablEffort = ablEffortFor(opts, attempt);
   if (ablEffort) {
-    opts = { ...(opts || {}), effort: ablEffort };
     ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
+    return { ...(opts || {}), effort: ablEffort };
   }
-  const timeoutMs = timeoutFor();
+  return opts;
+}
+
+// --- Expt-3 complexity routing (INLINE; canonical + tested source: routing/tier_map.js) ------
+// A thrown agentTimeoutFor() must NOT silently disarm the hung-agent guard (return 0). Fall back to the
+// un-budgeted AGENT_TIMEOUT_MS -- a known >0 bound -- so a hung cheap attempt is still caught and escalated.
+function __routeAgentTimeoutMs() { try { return agentTimeoutFor(); } catch (e) { return AGENT_TIMEOUT_MS; } }
+// <<ROUTING-INLINE-START>> (routing/routing_dryrun.js extracts between these sentinels and runs it;
+// this region is BYTE-IDENTICAL in e2e_workflow.js and kernel_workflow/kernel_lane.js. Contract,
+// mirroring routing/tier_map.js — unit-tested in routing/tier_map.test.js:
+//   * OFF unless A.routing is truthy (or GEAK_ROUTING=1 for a harness) -> __routeDecide() returns
+//     null for every scope -> no opts.model is set -> the run is BYTE-IDENTICAL to a non-routing build.
+//   * ON + un-mapped scope -> null -> pinned strong model (fall through).
+//   * ON + mapped scope + an in-runtime deterministic verifier available (real fs on the standalone
+//     Node runtime, Path B) -> a cheap Sonnet attempt, a machine-checked artifact GATE, and ONE strong
+//     (Opus) fallback that BYPASSES the cheap map on gate failure. Every attempt is recorded in
+//     __routeAttempts; hard cap of 2 attempts (1 cheap + 1 strong).
+//   * ON + mapped scope + NO verifier available (native Workflow child, Path A: no require()/fs, no
+//     host verifier bound yet) -> routing SUPPRESSED: stay on the pinned strong model. A cheap attempt
+//     that can never be gated must NOT be accepted (weak != pass), and running it then always
+//     escalating would be strictly MORE expensive -> we do not route until a verifier exists. Whether
+//     the native child CAN be given a host verifier is the Gate-2 question.
+// Native Workflow scripts get no require()/fs, so this is inlined, not imported; the .js module is the
+// reviewable, unit-tested source of truth. __routeAgentTimeoutMs() is a per-file shim (defined just
+// above this region) so the guarded single attempt reuses each lane's own timeout.
+const ROUTE_MODEL_STRONG = 'claude-opus-5-5';
+const ROUTE_MODEL_CHEAP = 'claude-sonnet-5-5';
+const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in source, U+0000 at runtime
+const ROUTE_TIER_MAP = (function () {
+  const m = {};
+  // e2e_workflow.js persists canonical workflow_return.json (non-fatal; run_e2e recovers from disk).
+  m['Validate' + ROUTE_SEP + 'persist-workflow-return'] = { tier: 'cheap', kind: 'verbatim_write' };
+  // e2e_workflow.js writes measured_on_this_box.md, a verbatim markdown table.
+  m['WarmStart' + ROUTE_SEP + 'warm_start:record-measurements'] = { tier: 'cheap', kind: 'verbatim_write' };
+  return m;
+})();
+const ROUTE_TIER_MODEL = { cheap: ROUTE_MODEL_CHEAP, strong: ROUTE_MODEL_STRONG };
+const ROUTING_ON = (function () {
+  const a = String(A.routing != null ? A.routing : '').trim().toLowerCase();
+  if (a === 'true' || a === '1' || a === 'on') return true;
+  // args win; only consult env when args left it unset, and only if process exists (Path A may not).
+  if (a === '') { try { return String(process.env.GEAK_ROUTING || '').trim() === '1'; } catch (e) { return false; } }
+  return false;                             // any explicit false-ish value stays OFF (args-off beats env-on)
+})();
+const __routeAttempts = [];                 // every routed attempt (model, ok, verified) for the ledger / dry-run
+function __routeLabelPrefix(label) {
+  const s = String(label == null ? '' : label);
+  const sp = s.indexOf(' ');                // colon is part of the static identity; a space starts dynamic text
+  return sp >= 0 ? s.slice(0, sp) : s;
+}
+function __routeReadFile() {
+  // A deterministic in-runtime verifier: real fs on the standalone Node runtime (Path B); absent on the
+  // native Workflow child (Path A) until a host verifier is bound (Gate-2). Returns a
+  // readFile(path)->string|null, or null when no verifier is available in this runtime.
+  try {
+    var fs = require('fs');
+    if (fs && typeof fs.readFileSync === 'function') {
+      return function (p) { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return null; } };
+    }
+  } catch (e) {}
+  return null;
+}
+function __routeDecide(opts) {
+  if (!ROUTING_ON) return null;
+  const key = ((opts && opts.phase) || '') + ROUTE_SEP + __routeLabelPrefix(opts && opts.label);
+  const entry = ROUTE_TIER_MAP[key];
+  if (!entry) return null;                  // un-mapped -> pinned strong (fall through)
+  const model = ROUTE_TIER_MODEL[entry.tier];
+  if (!model || model === ROUTE_MODEL_STRONG) return null;   // strong tier == no override
+  const readFile = __routeReadFile();
+  return { model: model, kind: entry.kind, gated: !!readFile, readFile: readFile };
+}
+const __ROUTE_PATH_RE = /create the file\s+"([^"]+)"/i;
+// Fence-length aware: capture the FIRST run of >=3 backticks and match the SAME-length closing run, so
+// a ````markdown outer block is not truncated by an inner ``` block.
+const __ROUTE_FENCE_RE = /(`{3,})[a-zA-Z0-9]*\r?\n([\s\S]*?)\r?\n\1(?:\r?\n|$)/;
+function __routeExpected(prompt) {
+  const p = String(prompt == null ? '' : prompt);
+  const pm = __ROUTE_PATH_RE.exec(p);
+  const fm = __ROUTE_FENCE_RE.exec(p);
+  return { path: pm ? pm[1] : null, content: fm ? fm[2] : null };
+}
+function __routeCheckVerbatim(prompt, result, readFile, expected) {
+  const want = (expected && expected.content != null) ? expected : __routeExpected(prompt);
+  if (!want.path || want.content == null) return { ok: false, verified: false, reason: 'no expected path/content' };
+  if (result && result.path && String(result.path) !== want.path) return { ok: false, verified: false, reason: 'receipt path != expected' };
+  if (typeof readFile !== 'function') return { ok: false, verified: false, weak: true, reason: 'no verifier' };
+  var onDisk; try { onDisk = readFile(want.path); } catch (e) { onDisk = null; }
+  if (onDisk == null) return { ok: false, verified: true, reason: 'artifact absent' };
+  var got = String(onDisk);
+  var ok = got === String(want.content) || got === String(want.content) + '\n';   // declared trailing-newline tolerance
+  return { ok: ok, verified: true, reason: ok ? 'artifact matches' : 'artifact differs' };
+}
+function __routeValidate(kind, prompt, result, readFile, expected) {
+  if (kind === 'verbatim_write') return __routeCheckVerbatim(prompt, result, readFile, expected);
+  return { ok: !!result, verified: false, reason: result ? 'nonempty (no validator)' : 'empty' };
+}
+function __agentGuarded(prompt, opts, onHung, timeoutFor) {
+  // A single hung-agent-guarded agent() call (each routed attempt reuses it). Timeout via the caller's
+  // timeoutFor() when supplied (main's per-lane timeout), else the per-file shim __routeAgentTimeoutMs().
+  // A timeout resolves null -> the attempt reads as a failed attempt; onHung (main's abandon-and-adopt)
+  // receives the still-running promise so safeAgent can adopt its eventual verdict from the reserve.
+  var timeoutMs = 0;
+  try { timeoutMs = (typeof timeoutFor === 'function') ? timeoutFor() : __routeAgentTimeoutMs(); } catch (e) { timeoutMs = 0; }
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const run = agent(prompt, opts);
@@ -1883,6 +2046,76 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTim
     guard,
   ]);
 }
+async function __routeEscalate(prompt, opts, decision, onHung, timeoutFor) {
+  // eikos v2 E1 (R8 / Astra re-review #9 item 7): thread the reserve hooks through the GATED routed branch so
+  // it matches the ORDINARY path — main's abandon-and-adopt `onHung` + per-lane `timeoutFor` were DROPPED here
+  // (every physical dispatch called __agentGuarded(p, o) with no reserve args). SCOPED: the direct
+  // kernel_workflow.js E1 entry does NOT traverse this helper, so this is a correctness fix, not an E1 blocker.
+  // cheap attempt -> deterministic gate -> ONE strong fallback that BYPASSES the cheap map. Records
+  // EVERY physical dispatch, at a fixed cap of 2 per cascade (1 cheap + 1 strong; a throw on the cheap
+  // attempt propagates and the strong one is never made, so the cap is a ceiling, never exceeded). A
+  // cheap attempt that TIMES OUT resolves null via __agentGuarded, fails the gate, and escalates; a
+  // cheap attempt that THROWS (transport error / aborted child) is recorded here too, then re-thrown so
+  // the caller's transport-retry policy is preserved. Residual for the live gates (needs the runtime
+  // abort signal): a timed-out cheap child could still write AFTER the strong fallback; the post-strong
+  // gate below DETECTS a divergent artifact, but true prevention is aborting the cheap child.
+  const lbl = (opts && opts.label) || 'agent';
+  const ph = (opts && opts.phase) || '';
+  const readFile = decision.readFile;
+  const expected = __routeExpected(prompt);
+  let __seq = 0;
+  // One physical dispatch. On a THROW we still stamp an audit row -- otherwise a rejected agent()
+  // leaves no trace and the cascade under-reports the calls it actually made. We record the exception
+  // CLASS and a short correlation id ONLY, never the message: an error string can carry prompt text or
+  // credentials. Then re-throw unchanged so nothing downstream sees swallowed transport errors.
+  const dispatch = async (p, o, attempt, extra) => {
+    const cid = `${ph || 'wf'}:${lbl}:a${attempt}#${++__seq}`;
+    try {
+      return await __agentGuarded(p, o, onHung, timeoutFor);   // R8 item 7: reserve hooks now reach the gated path
+    } catch (e) {
+      const cls = (e && e.name) || (e && e.constructor && e.constructor.name) || 'Error';
+      __routeAttempts.push(Object.assign(
+        { label: lbl, phase: ph, model: o.model, attempt: attempt, ok: false, verified: false,
+          reason: `dispatch threw (${cls})`, cid: cid, threw: true }, extra || {}));
+      throw e;
+    }
+  };
+  const cheapOpts = Object.assign({}, opts, { model: decision.model });
+  try { log(`  [route] ${lbl} @${ph} -> ${decision.model} (cheap attempt 1/2)`); } catch (e) {}
+  const r1 = await dispatch(prompt, cheapOpts, 1);
+  const v1 = __routeValidate(decision.kind, prompt, r1, readFile, expected);
+  __routeAttempts.push({ label: lbl, phase: ph, model: decision.model, attempt: 1, ok: !!v1.ok, verified: !!v1.verified, reason: v1.reason });
+  if (v1.ok) return r1;
+  const strongOpts = Object.assign({}, opts, { model: ROUTE_MODEL_STRONG });
+  try { log(`  [route] ${lbl} cheap failed gate (${v1.reason}) — escalating to ${ROUTE_MODEL_STRONG} (2/2, bypassing cheap map)`); } catch (e) {}
+  const r2 = await dispatch(prompt, strongOpts, 2, { escalated: true });
+  const v2 = __routeValidate(decision.kind, prompt, r2, readFile, expected);
+  __routeAttempts.push({ label: lbl, phase: ph, model: ROUTE_MODEL_STRONG, attempt: 2, ok: !!v2.ok, verified: !!v2.verified, reason: v2.reason, escalated: true });
+  // Return the strong result unconditionally: it is the SAME model a non-routing build pins, which it
+  // runs UNGATED -- nulling a failed-gate strong result would make routing-ON stricter than routing-OFF
+  // and regress a result the baseline would have accepted. The failed gate is not swallowed: it is
+  // recorded above (attempt 2, ok=false) and surfaced here for the operator (cf. tier_map.js's
+  // 'strong-unverified' accepted-state).
+  if (!v2.ok) { try { log(`  [route] ${lbl} strong fallback ALSO failed the gate (${v2.reason}) — returning it UNVERIFIED (matches non-routing baseline, recorded as strong-unverified).`); } catch (e) {} }
+  return r2;
+}
+// <<ROUTING-INLINE-END>>
+
+// Two seams meet here. With routing OFF the dispatch takes feat/geak-jev's path unchanged: the B5
+// static effort route (routeOptsFor; the opt-in Eikos router hook was removed in PR #574). With routing ON, Expt-3 routing
+// supersedes both, as on expt/3-routing: mapped scopes go through __routeDecide/__routeEscalate and every
+// other scope runs on the caller's options. Either way the call is hung-agent guarded by __agentGuarded.
+function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
+  const prompt = withProcessSafety(rawPrompt);
+  if (!ROUTING_ON) return __agentGuarded(prompt, routeOptsFor(opts, ablAttempt || 0, prompt), onHung, timeoutFor);
+  const decision = __routeDecide(opts);
+  if (!decision) return __agentGuarded(prompt, opts, onHung, timeoutFor);          // un-mapped: caller's options
+  if (!decision.gated) {                                       // mapped but no in-runtime verifier -> SUPPRESS
+    try { log(`  [route] ${(opts && opts.label) || 'agent'} @${(opts && opts.phase) || ''} SUPPRESSED (no in-runtime verifier; staying on ${ROUTE_MODEL_STRONG})`); } catch (e) {}
+    return __agentGuarded(prompt, opts, onHung, timeoutFor);
+  }
+  return __routeEscalate(prompt, opts, decision, onHung, timeoutFor);   // cheap-first + artifact gate + strong fallback; R8 item 7: threads onHung/timeoutFor (reserve) like the ordinary path
+}
 
 // Attempts the hung-agent guard abandoned inside the reserve, by label. Each is still running; an
 // integrator's eventual return is its A/B verdict (adoptAbandonedVerdict).
@@ -1892,9 +2125,13 @@ async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) 
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      // B5-EFFORT is a cascade: the escalated retry sees the cheap attempt's failure (both are
-      // charged to the task). Inert for every other arm.
-      const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
+      // B5-EFFORT is a CASCADE, not a coin flip: the escalated attempt must see what the
+      // cheap attempt actually produced, or it is just an independent retry at a higher
+      // tier. Both attempts are charged to the task. Inert for every other arm, so A1's
+      // retry prompt stays byte-identical. With routing ON, routing supersedes B5 (agentBounded
+      // never applies its effort route), so the B5 retry prompt would describe a cheaper-effort
+      // attempt that never happened; it is added only when routing is OFF.
+      const p2 = (!ROUTING_ON && ABL('B5') && i > 0 && typeof prompt === 'string')
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
@@ -2771,7 +3008,7 @@ async function tryCorrectiveReauthor(spec) {
       `integrate ${spec.short_name} corrective`, spec.phase_name || 'HeadKernel');
     const ab2 = !!(integ2 && integ2.gate !== 'incomplete' && integ2.ab_complete !== false);
     const pctForGuard = spec.pct_gpu_time || (spec.base_inputs && spec.base_inputs.KERNEL_RESULT && spec.base_inputs.KERNEL_RESULT.pct_gpu_time) || 0;
-    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && integ2.e2e_throughput_tok_s > curTput) {
+    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean) && beatsCurTput(integ2, curTput)) {
       // Carry the corrected patch out to bankAccepted: the call site's KERNEL_RESULT still holds the
       // rejected one.
       return { banked: true, integ: integ2, isolated: fix.final_geomean, patch: fix.final_patch,
@@ -2975,6 +3212,25 @@ async function laneDeadlineArgs(label, phaseName) {
 }
 // Backstop: never wait for a lane past the boundary.
 const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
+// Validate's blocks are canonical windows and the reserve holds one pair of them, so the Director gets
+// the epoch it must return by and what a block costs, and starts nothing that cannot finish
+// (roles/director.md). After it, the workflow keeps AGENTX_POST_VALIDATE_S to return.
+const AGENTX_POST_VALIDATE_S = 600;
+async function validateDeadlineArgs() {
+  if (!IS_AGENTX || TIME_BUDGET_MS == null) return {};
+  const now = await epochNow('Validate');
+  if (now == null) {
+    log('[time-budget] Validate: wall clock unreadable, so the Director gets no deadline.');
+    return {};
+  }
+  const leftS = Math.floor(remainingMs() / 1000) - AGENTX_POST_VALIDATE_S;
+  log(`[time-budget] Validate: the Director returns within ~${Math.max(0, Math.round(leftS / 60))}min and ` +
+    'starts no block or probe that cannot finish by then.');
+  return {
+    VALIDATE_DEADLINE_EPOCH: now + leftS,
+    VALIDATE_BLOCK_S: (AGENTX_VALIDATION_LEGS / 2) * agentxLegS(RESERVE_DURATION_S),
+  };
+}
 
 // GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
 // leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
@@ -3320,7 +3576,7 @@ if (want('setup')) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
       `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
       `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
-      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+      `${A.noise_band_pct != null ? 'noise_band_pct' : 'default'} ${NOISE_BAND_DEFAULT}%).`);
   }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
@@ -4858,7 +5114,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
+        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && beatsCurTput(integ, curTput)) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
@@ -5176,7 +5432,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const integ = await runIntegrateBothLegs(
         'Apply the head-op winner; gate on e2e throughput.', headWinnerInputs,
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && beatsCurTput(integ, curTput)) {
         curOverlay = integ.accepted_overlay || curOverlay;
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
@@ -5445,7 +5701,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && beatsCurTput(integ, curTput);
       // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
         e2e_delta_pct: integ ? (integ.e2e_delta_pct || 0) : 0,
@@ -5670,7 +5926,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
     // Three-state gate: null (timeout/hang) or an explicit incomplete => PENDING, not rejected.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && beatsCurTput(integ, curTput)) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
       bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
@@ -5859,7 +6115,7 @@ if (want('final')) {
       // Measured against the latest accepted baseline (current overlay/flags/env/throughput).
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
-    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && beatsCurTput(integ, curTput)) {
       curOverlay = integ.accepted_overlay || curOverlay;
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
@@ -6031,6 +6287,7 @@ if (want('final')) {
       // status/parity) to its own, so they never disagree. Defaults are the standard EVAL_DIR names.
       ARCHITECT_REPORT: (report && report.report_path) || `${EVAL_DIR}/architect_report.md`,
       FINAL_REPORT: `${EVAL_DIR}/final_report.md`,
+      ...(await validateDeadlineArgs()),
     }),
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
   // Trust the Director's number only when it is a real positive measurement; a Validate with no
@@ -6317,9 +6574,16 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
 // renders the run report (role-execution-tree HTML + MD).
 if (EVAL_DIR && LLM_STATS) {
   try {
-    // `instance` (this run's eval dir) lets the parser dedupe a nested timeline reached twice
-    // without collapsing distinct lanes of the same shape; needs no Date/random.
-    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
+    // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
+    // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
+    // that happen to share a shape. Unique per run, and available with no Date/random.
+    // `route_attempts` surfaces the routing seam's per-attempt record (model/ok/verified/escalated)
+    // into the persisted artifact -- otherwise __routeAttempts is collected and never emitted, leaving
+    // the cheap-vs-strong routing decisions invisible in the run's timeline. Empty ([]) when routing is
+    // OFF, so the OFF artifact is unchanged in substance. Token COST still comes from the transcripts
+    // (both attempts each open their own conversation); this is the decision/attribution audit trail.
+    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR,
+      ...(typeof __routeAttempts !== 'undefined' && __routeAttempts.length ? { route_attempts: __routeAttempts } : {}) });
     const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
     await safeAgent(
       `You are the file_writer. PHASE=persist_llm_stats.\n` +
