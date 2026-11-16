@@ -63,6 +63,12 @@ jobs:
       # module degrades to JSON without pyyaml, but then the test would be
       # asserting a format the real store never uses).
       - run: pip install pytest pytest-cov coverage pyyaml
+      # Node is required, not incidental: the Eikos decision-registry lint evaluates the workflow
+      # schema expressions in a node vm context. Pinned here rather than relying on whatever the
+      # runner image happens to ship.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       # CPU-only tests (no claude_agent_sdk / GPU); the expert-skill test also uses PyYAML.
       # Files are listed explicitly rather than discovered, so that adding a test
       # under examples/ (torch/triton + GPU) can never silently break this job.
@@ -153,6 +159,9 @@ jobs:
             evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_planner_extension.py \
+            perf_knowledge/expert_skills/_contribute/test_expert_skill_validation.py \
+            perf_knowledge/expert_skills/expert_workflows/*/tests \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -168,6 +177,10 @@ jobs:
             e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
+            e2e_workflow/scripts/tests/test_eikos_registry_lint.py \
+            e2e_workflow/scripts/tests/test_eikos_decide.py \
+            e2e_workflow/scripts/tests/test_eikos_router.py \
+            e2e_workflow/routing/test_route_review.py \
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
             geak/test_bootstrap.py
@@ -177,7 +190,9 @@ jobs:
           for skill in \
             flydsl_decode_moe_stage1_blkmap \
             flydsl_prefill_moe_stage2_fp8partial \
-            flydsl_fp8_blockscale_gemm
+            flydsl_fp8_blockscale_gemm \
+            megamoe_ep_mega_fusion \
+            megamoe_small_mtpr_fusion
           do
             python perf_knowledge/expert_skills/_contribute/validate_skill.py "$skill" --static
           done
@@ -201,6 +216,13 @@ jobs:
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
+          # Every typed field an agent returns is meant to be classified in the Eikos decision
+          # registry, and the registry should match the workflow sources both ways. Per PR #574
+          # review #5 this lint is ADVISORY (warn, never gate) until maintainers adopt the registry,
+          # so it cannot fail unrelated PRs for unclassified pre-existing main fields. It still runs
+          # and prints its findings; a non-zero exit is downgraded to a warning.
+          python3 e2e_workflow/scripts/eikos_registry_lint.py \
+            || echo "::warning title=Eikos registry lint::advisory findings reported above (non-blocking; see PR #574 review #5)"
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
@@ -357,10 +379,31 @@ jobs:
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
       - name: caller-pinned eval_dir regression
         run: node e2e_workflow/scripts/test_pinned_eval_dir.js
+      # ROUTING-INLINE drift guard (PR #574 review, amd-ethany): the routing model/lane
+      # identity contract is duplicated across routing/tier_map.js (canonical), the
+      # e2e_workflow.js cascade inline region and the kernel_lane.js ladder inline region.
+      # Fails when any copy's model identities or the U+0000 scope separator drift from the
+      # canonical module. (Deeper per-seam map drift: routing/routing_dryrun.js.)
+      - name: routing-inline drift guard
+        run: node e2e_workflow/routing/test_routing_inline_drift.js
+      # Active routing tests (PR #574): canonical tier_map unit tests, the full offline dry-run of
+      # the SHIPPED inline seams (default-OFF byte-identical + ON cost-ladder), and the eikos
+      # decider/shadow contract. Each exits non-zero on failure (process.exit), so they gate like
+      # the other node checks. (The matching Python suites run in the pytest job above.)
+      - name: routing tests (canonical + dry-run + eikos)
+        run: |
+          node e2e_workflow/routing/tier_map.test.js
+          node e2e_workflow/routing/routing_dryrun.js
+          node kernel_workflow/scripts/test_eikos_route.js
+          node kernel_workflow/scripts/test_eikos_shadow.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       - name: kernel_workflow multi-GPU job resolution
         run: node kernel_workflow/scripts/test_gpu_request.js
+      - name: expert workflow regression tests (perf_knowledge/expert_skills/expert_workflows)
+        run: |
+          set -e
+          for t in perf_knowledge/expert_skills/expert_workflows/*/tests/test_*.js; do node "$t"; done
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract
