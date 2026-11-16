@@ -38,7 +38,8 @@
     "UT receipt identity delegates to the unchanged native kernel_source_delivery.mjs sourceSnapshot CLI. Scaffold copies that owner byte-for-byte beside the driver and declares its frozen helper/input set. This removes the independent rolling digest that repeatedly disagreed with source delivery; no criterion is reimplemented.",
     "Optional reviewed operator-invocation counts in task declarations separate timed-call mass from GPU launch inventory. The native planner preserves instance/bucket accounting, rejects incomplete opted-in scope, and retains count provenance in the task source identity. Motivated by the Attention weight audit and the independent prepare shared-symbol scope mismatch; no fixed multiplicity or model-specific conversion.",
     "Merge with geak-x 4d1c1191 (2026-11-16): plan_ut_cases.py reconciles geak-x's observed entry-call counts (task invocation_counts, 59a829d2) with this branch's exactly-once invocation_anchors: invocation_counts wins, anchors next, else the legacy leaf-launch sum; declaring both is an error. Every case keeps launches_per_instance as the GPU launch inventory (geak-x semantics) plus invocations_per_instance, kernel_launches_per_instance and invocation_count_basis; operator_calls_per_instance is added when invocation_counts is declared. references/dynamic-workloads.md documents both. UT identity: geak-x's ut_driver._snapshot now returns the delivery verifier's sourceSnapshot (c54fb297), so new receipts take the verifier's main path; the ut_driver/path_sha256_concat/v1 contract and utDriverSnapshot remain for older receipts, and test_kernel_source_delivery.mjs pins that legacy algorithm to the original Python _snapshot/_reuse_key and checks the current driver against sourceSnapshot. kernel_selection's retired --no-reclaim-captures flag is dropped from geak-x's new dispatch-chain test.",
-    "Rebase on geak-x 88a5cf4 after the #609/#610 revert (2026-11-16): restore #609's kernel-extract behaviour -- correctness-only UT qualification with timing left to optimize, command-scoped GPU leases (ut_gpu_queue.py), no persisted serving reference I/O (capture_shapes, parse_profile, oracle_power, regen_reference, kernel_self_noise, selftest_structure_only removed), the process_state gate, server_call_postprocess, tensor lifecycle bounds, negative-control witness search, inline structural compile_watch calls, decode captured on the eager server and the editable-install source_map fix -- without multi-config: merge_policy.py, config_id cases and harness_lib's config weighting are removed and every case weight is one effective_calls basis. Sampling is single-config plan_points.py (from #609's shared planner) with optional --reuse-capture of an identical deployment's signed censuses. geak-x 7963667's detailed step-annotation regex is ported from parse_profile.py to trace_names.py."
+    "Rebase on geak-x 88a5cf4 after the #609/#610 revert (2026-11-16): restore #609's kernel-extract behaviour -- correctness-only UT qualification with timing left to optimize, command-scoped GPU leases (ut_gpu_queue.py), no persisted serving reference I/O (capture_shapes, parse_profile, oracle_power, regen_reference, kernel_self_noise, selftest_structure_only removed), the process_state gate, server_call_postprocess, tensor lifecycle bounds, negative-control witness search, inline structural compile_watch calls, decode captured on the eager server and the editable-install source_map fix -- without multi-config: merge_policy.py, config_id cases and harness_lib's config weighting are removed and every case weight is one effective_calls basis. Sampling is single-config plan_points.py (from #609's shared planner) with optional --reuse-capture of an identical deployment's signed censuses. geak-x 7963667's detailed step-annotation regex is ported from parse_profile.py to trace_names.py.",
+    "mono_layer family + rank_chain timing (2026-11-11, menghongtao): whole-layer monokernels with in-kernel peer exchanges (sgl-amd-mono Muse Spark target/draft layer) cannot be timed by time_op(call) -- the first Muse Spark target-layer UT timed ~100 ms of host-side rank-harness work around a ~0.15 ms launch and still passed the timing gate. families/mono_layer.json declares timing.kind rank_chain; scaffold_ut writes meta.timing, copies shared/rank_timing.py and appends templates/rank_chain.py.tmpl (cases.rank_chain). rank_timing.py is the Muse Spark layer team's frozen bench method (bench_worker.target_chain, after sgl-amd-mono test/kernels): one process per rank, a chain of distinct layers captured as CUDA graphs, (T[chain]-T[bootstrap])/n replays after a barrier, bucket = max over ranks, guard words checked. leg_runner routes rank_chain tasks there and now carries primed/host_ms on every time row; measure_legs runs rank_chain buckets serially on the whole device set and attaches per-leg timing receipts; ut_driver gate_timing fails a graph-deployed phase timed by a non-graph timer, a host-bound (primed False) or unreceipted leg; the lint checks meta.timing and cases.rank_chain for rank_chain families. Ported from feat/mono-ut-template (17 commits on geak-x-multiconfig 5be9cce, with yueliu14's follow-ups: split-oracle comparison, finite poisoned outputs, every-oracle-leg correctness, interleave replay case, package-__init__ bind, meta.leg_env before the process_state snapshot, fallback-path variant waivers, leaf_control_waivers, whole-package bind diffs). The mono oracle fixture stubs the native delivery snapshot, which geak-x's ut_driver now takes from kernel_source_delivery.mjs."
   ],
   "files": [
     {
@@ -302,6 +303,11 @@
       "modified": false
     },
     {
+      "file": "shared/rank_timing.py",
+      "source": null,
+      "added_here": true
+    },
+    {
       "file": "shared/schema.mjs",
       "source": "interface/runtime/engine/schema.mjs",
       "source_sha256": "19ba9273c7a443138eaf0ae0d072e278ec6f10e4477f2ee5e70b85f5b00454e3",
@@ -387,6 +393,11 @@
       "source": "e2e_workflow/scripts/tests/test_overlay_setup.py",
       "source_sha256": "811529a5abd6ee923e700d5e2831d4dfde84efc62725cd5bd3c8c3e3250a5042",
       "modified": false
+    },
+    {
+      "file": "shared/tests/test_rank_timing.py",
+      "source": null,
+      "added_here": true
     },
     {
       "file": "shared/tests/test_registered_identity.py",
@@ -527,6 +538,11 @@
       "added_here": true
     },
     {
+      "file": "ut_contracts/families/mono_layer.json",
+      "source": null,
+      "added_here": true
+    },
+    {
       "file": "ut_contracts/families/paged_attention_decode.json",
       "source": null,
       "added_here": true
@@ -577,12 +593,32 @@
       "added_here": true
     },
     {
+      "file": "ut_contracts/templates/rank_chain.py.tmpl",
+      "source": null,
+      "added_here": true
+    },
+    {
       "file": "ut_contracts/templates/unittest.py.tmpl",
       "source": null,
       "added_here": true
     },
     {
+      "file": "ut_contracts/tests/test_leaf_control_waivers.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/tests/test_mono_layer_lint.py",
+      "source": null,
+      "added_here": true
+    },
+    {
       "file": "ut_contracts/tests/test_negative_control_search.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/tests/test_package_diff.py",
       "source": null,
       "added_here": true
     },
@@ -593,6 +629,11 @@
     },
     {
       "file": "ut_contracts/tests/test_process_state.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/tests/test_rank_chain.py",
       "source": null,
       "added_here": true
     },

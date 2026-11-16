@@ -739,6 +739,9 @@ class MonoOracleCorrectnessTest(unittest.TestCase):
         self.task = os.path.join(self.tmp, "task")
         os.makedirs(os.path.join(self.task, "run"))
         shutil.copy(os.path.join(UTC, "ut_contract.py"), self.task)
+        # run_gates keys its reuse on the native delivery snapshot of a complete task
+        # (cases.py, unittest.py, kernel_src/); this fixture is only a correctness harness
+        self.D._snapshot = lambda T: "fixture"
         doc = U.freeze_task_contract(U.load_family("mono_layer"),
                                      attrs={"layer_kind": "routed_moe", "stream_dtype": "float32"},
                                      const_axes={"hidden": 16, "world": 2, "launches": 2, "pools": 2,
