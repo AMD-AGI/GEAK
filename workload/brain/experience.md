@@ -3,6 +3,8 @@
 Consult relevant campaign reports and supplied version histories when choosing a plan.
 Match workload, hardware, runtime, quality constraints and measurement basis before
 transferring a result; retain negative and inconclusive findings too.
+Record information exclusions separately from allowed implementation/runtime changes in
+`BRIEF.md`; withholding a history does not itself narrow the permitted implementation set.
 
 For a Docker/image evolution, follow the source and build revisions behind each image:
 identify the changed mechanism, when it became available, and whether the current launch

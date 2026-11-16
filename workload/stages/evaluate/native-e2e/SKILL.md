@@ -10,6 +10,9 @@ Read the [invocation contract](../../CONTRACT.md#direct-module-calls) and
 identities, integration/effect evidence, workload, quality requirements, budget and
 comparison policy. Resolve them before launching measured traffic.
 
+For a scoped screen, follow Evaluate's screening contract and return matched native
+observations. The complete receipt and finalization steps below apply to full comparisons.
+
 Use the native harness already selected for the task. Run the reference and candidate
 on comparable isolated resources with matching workload and conditioning. Give each arm
 its own runtime/cache identity; retain raw receipts and failed or slow runs. Quality and

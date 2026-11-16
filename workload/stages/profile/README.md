@@ -16,9 +16,15 @@ as the question requires. Hand computation boundaries needing qualification to
 
 For an unqualified capture path or a collection defect, establish capture, export and
 readable evidence within a bounded call before expanding the census; reuse a qualified
-path without another admission stage. Traffic, profiler acknowledgement and process exit
-do not prove capture success. Keep changed-mode diagnostic evidence distinct from
-deployed timing, and report the remaining attribution/coverage gap through the contract.
+path without another admission stage. Keep traffic, its capture trigger, stop/export and
+verification in the same owned invocation; a prepared command is not an issued request.
+Observe scheduler progress as well as frontend health. A timed-out control request leaves
+capture state unknown: preserve logs and inspect owned workers before rearming; return
+necessary runtime recovery to Setup. Choose a bounded follow-up from the installed
+backend's capabilities and the observed failure, rather than repeating an unchanged call.
+Traffic, profiler acknowledgement and process exit do not prove capture success.
+Keep changed-mode diagnostic evidence distinct from deployed timing, and report the
+remaining attribution/coverage gap through the contract.
 
 ## Candidate scope
 
