@@ -34,6 +34,11 @@ number. `aiperf` and InferenceX are on neither `$PATH` nor `/opt` on this machin
 
 ## 2. When `pins` are declared: refuse before you spend an hour
 
+For a point adopted from a CI run (`adopt-ci-artifacts`), `stages/_shared/ci_pins.py` reads the
+pins from the run's own records -- digest-pinned image, the commit of every HF repo its server
+loaded, the client's recorded `CLI Command:` -- checks a hub before the run (`hub`) and proves a
+leg held them afterwards (`prove`). applyback's CI comparison uses the same code.
+
 Each check below costs milliseconds; the run it guards costs an hour on eight GPUs and is
 the reference every later comparison is measured against. Report **every** blocker at
 once, not the first. Write the plan to `$OUT/alignment.json` before launching anything.

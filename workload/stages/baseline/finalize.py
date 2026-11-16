@@ -121,7 +121,10 @@ def main():
                                                         "named", band))
 
     # 4. An A/B is same-node or it is nothing.
-    node = find(baseline, "node") or find(baseline, "node_name") or find(baseline, "host")
+    # An adopted CI receipt names the runner pool it was measured on (`hw`); applyback's
+    # fresh stock control, not this number, is then the A/B denominator.
+    node = (find(baseline, "node") or find(baseline, "node_name") or find(baseline, "host")
+            or find(baseline, "hw"))
     if not str(node or "").strip():
         problems.append("no node name is recorded, so applyback cannot prove the "
                         "candidate was measured on the same machine")

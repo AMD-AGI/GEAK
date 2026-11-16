@@ -31,14 +31,18 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 
 ### Multi-config scenarios
 
-A multi-config scenario (`multi_config: true`) optimizes every CI point of one EP group in one
-campaign along the split route `baseline → profile → ut → roofline → optimize → applyback`:
+A multi-config scenario (`adopt-ci-artifacts` baseline, `multi_config: true`) optimizes every CI
+point of one EP group in one campaign along the split route `baseline → profile → ut → roofline → optimize → applyback`:
 `profile: kernel-profile` locates runtime dispatch and shapes and freezes a hashed
 `profile_handoff.json`; `ut: kernel-ut` consumes it and generates/qualifies the fixed-template
 UTs, one UT per task pooling every config (`kernel-extract/scripts/merge_policy.py` decides
 what pools). Set `task_source_stage: "ut"` so consumers use the separate task output, and
 run or retry `ut` without repeating captures. See [profile/HANDOFF.md](stages/profile/HANDOFF.md)
 and [the UT module](stages/ut/README.md). Existing combined-profile configs remain supported.
+Applyback measures every CI point a UT covered (`stages/applyback/points.py`), each in that
+point's own CI configuration, and judges it against that point's official CI number
+(`reference: ci`, see [Evaluate](stages/evaluate/README.md)); a covered point left unmeasured
+makes the verdict incomplete.
 
 ## Where things live
 

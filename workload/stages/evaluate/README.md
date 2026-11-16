@@ -25,3 +25,19 @@ it keeps its existing output envelope and does not calculate a second verdict.
 `ok` means the comparison is admissible, not that the candidate won or met the task's
 performance floor. The controller reads all required objectives and the uncertainty
 policy before adoption. Preserve the reference when the candidate is worse or inconclusive.
+
+## Reference modes
+
+- **stock control** (default): the A/B denominator is the fresh unchanged arm the benchmark
+  measured in the same comparison (`e2e/bench_summary.json` `stock_control`, admissible).
+- **`reference: ci`** (multi-config scenarios, which never re-measure a baseline): the
+  denominator is the official number of the CI point the leg reproduced
+  (`APPLYBACK_BASELINE`, else the baseline stage's `baseline.json`). The leg must show
+  `alignment.json` aligned=true (it launched exactly the CI's image, args and env) and
+  `pins.json` proven=true (`stages/_shared/ci_pins.py`), at the CI's duration. A stock control,
+  when present, is kept beside it as information.
+
+In both modes a leg whose server died (`server_watch.json` from `stages/_shared/serving_watch.py`,
+or for older legs a fatal line in its saved `server.log`) or whose measured window is under
+98% of the configured one is refused.
+
