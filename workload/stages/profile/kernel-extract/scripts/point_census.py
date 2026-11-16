@@ -18,9 +18,10 @@ be per one of those, not per span:
 * DECODE: the interval between the starts of consecutive target-forward anchors
   (`step[VERIFY|TARGET_VERIFY bs=N]` under speculation, `step[DECODE bs=N]` without).
   It holds exactly one verify, one draft extend and one draft loop, plus the per-step
-  copies and broadcasts; N anchors give N-1 instances.
+  copies and broadcasts; intervals crossing a target EXTEND are omitted.
 * PREFILL: one target `step[EXTEND ...]` plus the draft extend that follows it. A draft
-  named `DRAFT`/`DRAFT_EXTEND*` attaches to the preceding EXTEND. Older sglang names the
+  named `DRAFT`/`DRAFT_EXTEND*` attaches only before another target forward. Work outside
+  these spans is not established as prefill by this census. Older sglang names the
   draft extend identically to the target (`step[EXTEND bs=1 toks=T]` twice); pass
   `--draft-shares-name` for a speculative server of that kind and consecutive identical
   spans are paired. Without it they are separate instances, which is right for a
@@ -94,21 +95,23 @@ def kernels_in(dev, starts, ts, te):
 def prefill_steps(spans, draft_shares_name):
     """Target EXTEND spans, each with the draft extend that belongs to it."""
     steps = []
+    cur = None
     for s in spans:
         mode = s[3]
-        cur = steps[-1] if steps else None
         if mode in DRAFT_MODES:
             if cur is not None and not cur["has_draft"]:
                 cur["end"], cur["has_draft"] = s[1], True
             continue
         if mode not in PREFILL_TARGET:
+            cur = None
             continue
         if (draft_shares_name and cur is not None and not cur["has_draft"]
                 and cur["name"] == s[2]):
             cur["end"], cur["has_draft"] = s[1], True
             continue
-        steps.append({"name": s[2], "start": s[0], "end": s[1], "shape": s[5],
-                      "mode": mode, "has_draft": False})
+        cur = {"name": s[2], "start": s[0], "end": s[1], "shape": s[5],
+               "mode": mode, "has_draft": False}
+        steps.append(cur)
     return steps
 
 
@@ -179,8 +182,10 @@ def instance_windows(gpu, cpu, phase, draft_shares_name=False):
             "with the decode CUDA graph enabled and the replayed kernels are not traced. "
             "Re-capture with --enable-profile-cuda-graph, or on a server started with "
             "--disable-cuda-graph." if hidden else "The window holds no complete decode step."))
+    boundaries = [s for s in gpu if s[3] == mode or s[3] in PREFILL_TARGET]
     return ([{"start": a[0], "end": nxt[0], "shape": a[4], "mode": a[3], "paired": True}
-             for a, nxt in zip(anchors, anchors[1:])], anchor, None)
+             for a, nxt in zip(boundaries, boundaries[1:])
+             if a[3] == nxt[3] == mode], anchor, None)
 
 
 def scan_rank(job):

@@ -153,6 +153,9 @@ Properties of this path worth knowing before you deviate from it:
   Under eager decode that wait is ~90% of a step; `build_ranking.py --eager-captured
   DECODE` takes it out of the denominator (it does not exist under the graph) and reports
   how much it was. `__untracked_tail__` and `__collective_wait__` are never rankable.
+  A draft joins a prefill only before the next target forward; decode intervals crossing
+  a target EXTEND are excluded. Inspect phase coverage before using sampled costs: work
+  outside model-forward spans needs its own observed boundary, not a later draft span.
 
 
 - `parse_profile.py` phase-classifies forwards from the step-span dialect its

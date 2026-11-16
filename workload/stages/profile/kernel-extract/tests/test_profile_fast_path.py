@@ -17,9 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(SCRIPTS.parent / "shared"))
 
 import trace_scan  # noqa: E402
 import point_census  # noqa: E402
+import parse_profile  # noqa: E402
 
 RANKS = 2
 COLL = "aiter::cross_device_reduce_1stage<bf16>"
@@ -292,6 +294,58 @@ class TraceScanTest(unittest.TestCase):
 
 
 class PointCensusTest(unittest.TestCase):
+    def test_detailed_annotations_preserve_phase_costs(self):
+        events = [
+            ("gpu_user_annotation", "step[EXTEND bs=1 toks=128 c_sq=128 c_sk=256]", 100, 50),
+            ("kernel", "prefill", 110, 20),
+            ("gpu_user_annotation", "step[VERIFY bs=2 g_sq=16 g_sqsq=128 g_sk=512]", 200, 50),
+            ("kernel", "verify", 210, 30),
+            ("gpu_user_annotation", "step[DRAFT bs=2 g_sq=2 g_sk=514]", 300, 50),
+            ("kernel", "draft", 310, 10),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d) / "1-TP-0.trace.json.gz")
+            write_trace(path, events)
+            agg, total, launches, phases = parse_profile.parse_torch_trace(path)
+        self.assertEqual((total, launches), (60, 3))
+        self.assertEqual(agg["prefill"]["by_phase"]["prefill"]["total_us"], 20)
+        self.assertEqual(agg["verify"]["by_phase"]["decode"]["total_us"], 30)
+        self.assertEqual(phases["decode_batches"], [2])  # bs is not the query-token sum
+        self.assertEqual(agg["draft"]["by_phase"], {})  # bare DRAFT has no phase
+
+    def test_prefill_does_not_own_a_later_generation_draft(self):
+        events = [
+            ("gpu_user_annotation", "step[EXTEND bs=1 toks=128]", 100, 50),
+            ("kernel", "prefill", 110, 20),
+            ("gpu_user_annotation", "step[VERIFY bs=1]", 200, 50),
+            ("kernel", "verify", 210, 30),
+            ("gpu_user_annotation", "step[DRAFT bs=1]", 300, 50),
+            ("kernel", "draft", 310, 10),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            write_trace(str(Path(d) / "1-TP-0.trace.json.gz"), events)
+            out = point_census.census(d, "PREFILL", workers=1)
+        self.assertEqual(out["prefill_steps_without_draft"], 1)
+        self.assertEqual(out["per_rank"]["0"], {"prefill": 20})
+
+    def test_decode_census_excludes_interleaved_prefill_interval(self):
+        events = [
+            ("gpu_user_annotation", "step[VERIFY bs=1]", 100, 50),
+            ("kernel", "verify", 110, 20),
+            ("gpu_user_annotation", "step[EXTEND bs=1 toks=128]", 200, 50),
+            ("kernel", "prefill", 210, 30),
+            ("gpu_user_annotation", "step[VERIFY bs=1]", 300, 50),
+            ("kernel", "verify", 310, 20),
+            ("gpu_user_annotation", "step[DRAFT bs=1]", 350, 40),
+            ("kernel", "draft", 360, 10),
+            ("gpu_user_annotation", "step[VERIFY bs=1]", 400, 50),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            write_trace(str(Path(d) / "1-TP-0.trace.json.gz"), events)
+            out = point_census.census(d, "DECODE", workers=1)
+        self.assertEqual(out["instances"], 1)
+        self.assertEqual(out["per_rank"]["0"], {"verify": 20, "draft": 10})
+
     def test_decode_instances_and_per_launch_collective_split(self):
         with tempfile.TemporaryDirectory() as d:
             for r in range(RANKS):
