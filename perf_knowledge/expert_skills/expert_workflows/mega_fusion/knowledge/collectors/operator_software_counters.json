@@ -1,0 +1,72 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "operator_software_counters",
+  "maturity": "contract_only_not_implemented",
+  "tool": "temporary MegaMoEV2 instrumentation + rank JSON export",
+  "purpose": "Collect exact logical bytes, readiness/wait, useful/padded work, and publication counts unavailable from profilers",
+  "capability_probe": [
+    "instrumented build declares geak-software-counters-v1",
+    "zero-work replay produces zero payload/useful-row counters",
+    "analytical tiny case matches every per-peer/per-expert counter exactly"
+  ],
+  "command_template": "{instrumented_ep8_command} --geak-counter-output {output_dir}",
+  "required_record_fields": {
+    "identity": [
+      "case_id",
+      "repetition",
+      "rank",
+      "world_size"
+    ],
+    "communication": [
+      "payload_bytes_by_peer",
+      "metadata_bytes_by_peer",
+      "publication_count_by_peer"
+    ],
+    "work": [
+      "useful_rows_by_expert",
+      "padded_rows_by_expert",
+      "gemm1_tiles_by_expert",
+      "gemm2_tiles_by_expert"
+    ],
+    "synchronization": [
+      "readiness_polls_by_edge",
+      "wait_cycles_by_edge",
+      "barrier_count_by_edge",
+      "termination_polls"
+    ]
+  },
+  "preconditions": [
+    "counter storage is rank-private or atomically updated with documented scope",
+    "counter reset and publication obey the same stream/epoch ordering as the measured replay",
+    "counter overhead is measured against an otherwise identical build",
+    "counters never alter work assignment, publication granularity, or synchronization behavior",
+    "retain raw per-rank/per-repetition records before reduction"
+  ],
+  "outputs": [
+    {
+      "artifact": "rank_{rank}_repetition_{repetition}.json",
+      "information": "exact raw counters under geak-software-counters-v1"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "instrumentation revision, command, counter scope, overhead and raw paths"
+    }
+  ],
+  "helps_diagnose": [
+    "logical versus physical communication amplification",
+    "route imbalance and expert padding",
+    "which dependency edges wait",
+    "publication/signal frequency",
+    "termination and polling pressure"
+  ],
+  "not_measured": [
+    "hardware instruction stalls",
+    "physical XGMI traffic without a hardware cross-check",
+    "unperturbed E2E latency",
+    "causal speedup"
+  ],
+  "provenance": {
+    "reference": "MegaMoE Step-2 measurement contract",
+    "notes": "This collector is intentionally not marked ready until instrumentation and analytical counter tests exist."
+  }
+}
