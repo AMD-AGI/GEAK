@@ -89,6 +89,9 @@ ok(retryFor({ agent_timeout_retry: 'false' }) === false, "agent_timeout_retry='f
 ok(retryFor({ agent_timeout_retry: 'true' }) === true, "agent_timeout_retry='true' keeps it on");
 
 const loopSrc = between('function agentBounded(', '// --- FlyDSL provisioning gate');
+const offPathSrc =
+  src.slice(src.indexOf('function routeOptsFor('), src.indexOf('\n}', src.indexOf('function routeOptsFor(')) + 2) + '\n' +
+  src.slice(src.indexOf('function __agentGuarded('), src.indexOf('\n}', src.indexOf('function __agentGuarded(')) + 2);
 ok(!!loopSrc && loopSrc.includes('async function safeAgent('), 'agentBounded + safeAgent located');
 if (!loopSrc) process.exit(1);
 const harness = (retry, agentImpl, inReserve = false) => {
@@ -96,11 +99,11 @@ const harness = (retry, agentImpl, inReserve = false) => {
   const logs = [];
   const { safeAgent, ABANDONED_RUNS } = new Function(
     'withProcessSafety', 'ablEffortFor', 'ablEvent', 'agentTimeoutFor', 'agent', 'log', 'ABL', 'tlAgent',
-    'LLM_TL', 'AGENT_TIMEOUT_RETRY', 'atReserveFloor',
-    `${loopSrc}\nreturn { safeAgent, ABANDONED_RUNS };`)(
+    'LLM_TL', 'AGENT_TIMEOUT_RETRY', 'atReserveFloor', 'ROUTING_ON',
+    `${offPathSrc}\n${loopSrc}\nreturn { safeAgent, ABANDONED_RUNS };`)(
     (p) => p, () => null, () => {}, () => 5,
     (...a) => { calls.agent++; return agentImpl(...a); },
-    (m) => logs.push(m), () => false, () => null, { nested: [] }, retry, () => inReserve);
+    (m) => logs.push(m), () => false, () => null, { nested: [] }, retry, () => inReserve, false);
   return { safeAgent, ABANDONED_RUNS, calls, logs };
 };
 const never = () => new Promise(() => {});
