@@ -123,6 +123,7 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+BENCH_SUMMARIZE_SCRIPT = E2E_DIR / "scripts" / "bench_summarize.py"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
@@ -246,6 +247,10 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 # that dies with the container. These two pieces of state let the run copy that
 # ledger into its own (durable) eval_dir as it goes. See claude_trace_mirror.
 _LAST_SDK_SESSION: dict[str, str] = {}
+# Every ResultMessage the session emitted: Claude Code's own cost for the session so far. The ledger
+# checks its computed cost against the last one (llm_ledger.sdk_check). Several can arrive: a
+# background workflow can outlive the first turn's result, which then covers only part of the run.
+_SDK_RESULTS: list[dict] = []
 _MIRROR_STATE: dict[str, float] = {"t": 0.0}
 _RUN_EXP_ROOT: dict[str, str] = {}
 
@@ -272,6 +277,45 @@ def _note_session_id(msg: object) -> None:
         sid = msg.get("session_id")
     if isinstance(sid, str) and sid.strip():
         _LAST_SDK_SESSION["session_id"] = sid.strip()
+
+
+def _note_sdk_result(msg: object) -> None:
+    """Record a ResultMessage's cost and per-model usage, stamped with when it arrived.
+
+    Accepts the SDK object or the CLI's ``--output-format json`` payload. Anything else, or a
+    payload without ``total_cost_usd``, is a no-op; nothing here can raise into the message loop.
+
+    Args:
+        msg: Any SDK message object or decoded CLI payload.
+    """
+    get = msg.get if isinstance(msg, dict) else (lambda k, d=None: getattr(msg, k, d))
+    try:
+        cost = get("total_cost_usd")
+        if not isinstance(cost, (int, float)):
+            return
+        _SDK_RESULTS.append({
+            "captured_at_unix": time.time(),
+            "session_id": get("session_id"),
+            "total_cost_usd": float(cost),
+            "model_usage": get("model_usage") or get("modelUsage") or {},
+            "num_turns": get("num_turns"),
+            "is_error": get("is_error"),
+            "subtype": get("subtype"),
+        })
+    except Exception:  # pragma: no cover - telemetry must not end a run
+        pass
+
+
+def _write_sdk_results(eval_dir: object) -> None:
+    """Persist ``_SDK_RESULTS`` to ``<eval_dir>/reports/sdk_results.json``. Never raises."""
+    if not eval_dir or not _SDK_RESULTS:
+        return
+    try:
+        out = Path(eval_dir) / "reports" / "sdk_results.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(_SDK_RESULTS, indent=2, default=str) + "\n", encoding="utf-8")
+    except Exception:  # pragma: no cover
+        pass
 
 
 BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
@@ -338,6 +382,7 @@ def _mirror_trace(eval_dir: object, *, throttle: bool = False) -> dict:
     """
     if not eval_dir:
         return {"status": "no_eval_dir"}
+    _write_sdk_results(eval_dir)
     if throttle:
         if TRACE_MIRROR_EVERY_S <= 0:
             return {"status": "disabled"}
@@ -653,6 +698,24 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     return 1
 
 
+def _eikos_reachable(url: str, timeout_s: float = 3.0) -> bool:
+    """One startup reachability check for the Eikos carrier URL (PR #574 review #2). Any HTTP
+    answer -- even an error status -- proves the server is up; only a transport failure (connection
+    refused, timeout, DNS) counts as down. Proxies are disabled so an http_proxy variable cannot
+    mask a dead local carrier."""
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(url, timeout=timeout_s).close()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 - any transport failure means "not answering"
+        return False
+
+
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -661,6 +724,17 @@ def map_args(
     dry_run: bool = False,
 ) -> dict:
     workload = h.get("workload") or {}
+    if h.get("optimizer") is not None and not isinstance(h["optimizer"], str):
+        raise ValueError("optimizer must be greedy or evo (a string)")
+    optimizer = str(h.get("optimizer") or "").strip().lower()
+    if optimizer and optimizer not in {"greedy", "evo"}:
+        raise ValueError("optimizer must be greedy or evo")
+    if optimizer == "evo" and h.get("evolution_source_paths") is not None:
+        source_paths = h.get("evolution_source_paths")
+        if not isinstance(source_paths, list) or any(
+            not isinstance(source_path, str) or not source_path for source_path in source_paths
+        ):
+            raise ValueError("evolution_source_paths must be an optional list of supplemental source files")
     tp = int(h.get("tp", 1) or 1)
     has_explicit_identity = bool(
         str(h.get("expected_gfx") or "").strip()
@@ -855,6 +929,9 @@ def map_args(
     simulated = _simulated_acceptance_env(initial_env)
     if simulated:
         ps_args["correctness_unset_env"] = ",".join(simulated)
+    probe_spec = _probe_speculative_config(initial_server_args)
+    if probe_spec:
+        ps_args["correctness_speculative_config"] = probe_spec
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -969,6 +1046,69 @@ def map_args(
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    # --- ROUTING master switch (PR #574 review: amd-ethany) -------------------
+    # One toggle that wires the router for a Hyperloom+GEAK run. Routing is
+    # DEFAULT-OFF: a run is byte-identical to the prior default-OFF behaviour
+    # unless it is EXPLICITLY opted in. (The reviewer's second review restored
+    # this default-OFF design; the earlier default-ON switch was conceded.)
+    #
+    # WHAT HYPERLOOM MUST SEND to control routing:
+    #   * To keep today's behaviour: send NOTHING. Unset / false / 0 / off / any
+    #       other value leaves ps_args byte-identical to the pre-routing default
+    #       (none of the routing / route_decider / route_* keys below are added).
+    #   * To OPT IN: a single EXPLICIT true value, from EITHER
+    #         - the ``GEAK_ROUTING`` env var, or
+    #         - the handoff field ``routing``
+    #       equal (case-insensitively) to ``1`` / ``true`` / ``on``. Then:
+    #       routing=true, decider defaults to ``eikos`` (the control ladder),
+    #       every route_* knob is forwarded, and (on a real run, see main())
+    #       GEAK_ROUTING / GEAK_EIKOS_ROUTER are exported plus GEAK_ENGINEER_ID /
+    #       GEAK_RECORDER_INV_ID are forwarded from the handoff.
+    #   * route_decider = "p1" -- OPT-IN ONLY. When routing is on the decider
+    #       DEFAULTS to ``eikos``; P1 is never defaulted. P1 still runs as a
+    #       shadow audit under eikos, so its decisions stay observable.
+    #   * route_* knobs (all optional; forwarded verbatim from the handoff when
+    #       present): route_conf_escalate, route_max_retries_per_lane,
+    #       route_max_top_escalations, route_max_output_tokens, route_floors,
+    #       route_episode_identity, route_output_cap, route_eikos_tau,
+    #       route_eikos_max_consults, route_eikos_carrier_model,
+    #       route_eikos_carrier_timeout_ms.
+    # GEAK's own CI/CD workflows must NOT set GEAK_ROUTING / routing: a default
+    # run stays on the OFF path. Routing is an operational opt-in carried by the
+    # Hyperloom handoff, outside this repo.
+    # Reads only (never mutates h or os.environ); the env exports happen in main()
+    # on a real run, so map_args stays side-effect-free for its unit tests.
+    _routing_raw = os.environ.get("GEAK_ROUTING")
+    if _routing_raw is None:
+        _routing_raw = h.get("routing")
+    _routing_on = (
+        _routing_raw is not None
+        and str(_routing_raw).strip().lower() in ("1", "true", "on")
+    )
+    if _routing_on:
+        ps_args["routing"] = "true"
+        # Decider defaults to eikos; P1 only when the handoff explicitly asks for it.
+        ps_args["route_decider"] = str(h.get("route_decider") or "eikos").strip().lower()
+        for _rk in (
+            "route_conf_escalate", "route_max_retries_per_lane",
+            "route_max_top_escalations", "route_max_output_tokens", "route_floors",
+            "route_episode_identity", "route_output_cap", "route_eikos_tau",
+            "route_eikos_max_consults", "route_eikos_carrier_model",
+            "route_eikos_carrier_timeout_ms",
+        ):
+            if h.get(_rk) is not None:
+                _rv = h[_rk]
+                # iraj465 (CHANGES_REQUESTED): structured knobs such as
+                # route_floors={"eng:memory": 2} and route_eikos_tau={"code_change": 0.99} must reach
+                # the lane as JSON, not a Python repr ("{'eng:memory': 2}") that the lane's JSON.parse
+                # rejects -> the floor/tau is silently dropped. JSON-encode dict/list values; scalar
+                # knobs stay plain strings (byte-identical to before for the scalar cases).
+                ps_args[_rk] = json.dumps(_rv) if isinstance(_rv, (dict, list)) else str(_rv)
+    # -------------------------------------------------------------------------
+    if optimizer == "evo":
+        ps_args["optimizer"] = "evo"
+        if h.get("evolution_source_paths") is not None:
+            ps_args["evolution_source_paths"] = source_paths
     return ps_args
 
 
@@ -2443,6 +2583,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
                     _note_session_id(msg)
+                    _note_sdk_result(msg)
                     name = type(msg).__name__
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
@@ -2531,6 +2672,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
                 _note_session_id(msg)
+                _note_sdk_result(msg)
         return "\n".join(chunks)
 
     return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
@@ -2566,6 +2708,7 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         wrapped = json.loads(out)
         if isinstance(wrapped, dict):
             _note_session_id(wrapped)
+            _note_sdk_result(wrapped)
             return str(wrapped.get("result") or wrapped.get("text") or out)
     except json.JSONDecodeError:
         pass
@@ -3982,6 +4125,74 @@ def handoff_acceptance(h: dict) -> dict | None:
     return None
 
 
+#: The axis an AgentX run is graded on when nothing else is declared (e2e_workflow.js
+#: AGENTX_DEFAULTS.metric_basis): the median Hyperloom keeps AgentX candidates on.
+DEFAULT_AGENTX_OBJECTIVE = "e2e_norm_intvty_p50"
+#: The bars Hyperloom's AgentX KEEP rule holds an orchestrated run to (its 3% median gain and
+#: default 5% noise band), so a run that states no rule is judged alike. The guard band is also
+#: e2e_workflow.js AGENTX_GUARD_DROP_PCT.
+DEFAULT_AGENTX_MIN_GAIN_PCT = 3.0
+DEFAULT_AGENTX_GUARD_DROP_PCT = 5.0
+
+_BENCH_SUMMARIZE: Any = None
+
+
+def _bench_summarize() -> Any:
+    """``e2e_workflow/scripts/bench_summarize.py``, loaded once: the bench runs it as a script,
+    GEAK's own KEEP rule reads its axis and guard tables."""
+    global _BENCH_SUMMARIZE
+    if _BENCH_SUMMARIZE is None:
+        spec = importlib.util.spec_from_file_location("geak_bench_summarize", BENCH_SUMMARIZE_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BENCH_SUMMARIZE = module
+    return _BENCH_SUMMARIZE
+
+
+def default_acceptance(h: dict) -> dict | None:
+    """GEAK's own KEEP rule for an AgentX handoff that states none; None leaves GEAK's verdict.
+
+    A trace replay graded on any axis but total token throughput, with no rule from the caller,
+    is kept only when that axis gains at least 3% and each guard bench_summarize.py summarizes
+    beside it (``_guard_table``) falls no more than 5% below the reference. On the default P50
+    axis that is Hyperloom's own rule (the P90 tail and output tok/s) plus total token
+    throughput. The corpus fixes the work each request asks for, so every other axis can rise
+    while the server completes less of it: the decode-only axis by shedding prefill, any of them
+    by finishing short requests in place of long ones. A declared ``acceptance`` block, even one
+    handoff_acceptance ignores, is the caller's own rule and keeps this one out.
+
+    Only this interface applies it. A direct ``Workflow`` call never reaches it: its Director is
+    given the guards as a Validate instruction (e2e_workflow.js agentxAxisNote), and the run's
+    noise band is the gain bar there.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    if spec.get("acceptance") is not None:
+        return None
+    summarize = _bench_summarize()
+    basis_of_token = {token: entry[1] for token, entry in summarize._BASES.items()}
+    # The axis e2e_workflow.js resolveAgentxMetric grades: the declared basis or its token, else
+    # an exported E2E_METRIC token, else the default. One it cannot resolve fails the run there.
+    declared = str(spec.get("metric_basis") or "").strip().lower()
+    inherited = str(os.environ.get("E2E_METRIC") or "").strip().lower()
+    if declared:
+        objective = (declared if declared in basis_of_token.values()
+                     else basis_of_token.get(declared))
+    elif inherited:
+        objective = basis_of_token.get(inherited)
+    else:
+        objective = DEFAULT_AGENTX_OBJECTIVE
+    guards = summarize._guard_table(objective, True)
+    if not guards:
+        return None
+    return {
+        "objective": objective,
+        "min_gain_pct": DEFAULT_AGENTX_MIN_GAIN_PCT,
+        "guard_max_drop_pct": {basis: DEFAULT_AGENTX_GUARD_DROP_PCT for basis in guards},
+    }
+
+
 def acceptance_verdict(
     rule: dict,
     *,
@@ -3990,16 +4201,19 @@ def acceptance_verdict(
     final: float,
     reference: dict,
     candidate: dict,
+    unmeasured_fails: bool = True,
 ) -> dict:
-    """Apply the caller's KEEP rule to the pair this run publishes.
+    """Apply a KEEP rule to the pair this run publishes.
 
     Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
     objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
     (1 - max_drop_pct / 100)``. Guards are read from the ``guard_<basis>_median`` fields of the
-    two legs' bench summaries, and one missing from either leg fails: a guard nobody measured
-    is not one the candidate held. Hyperloom also refuses rounds of unequal length or with more
-    failed requests and applies its latency budget; the summaries carry neither, so Hyperloom's
-    re-measurement keeps the last word.
+    two legs' bench summaries. Under a caller's rule one missing from either leg fails: a guard
+    nobody measured is not one the candidate held. GEAK's own rule (``unmeasured_fails=False``)
+    lists it under ``not_checked`` instead: the verdict then rests on the objective, and
+    ``e2e_store.win_gate`` declines to record the pair in the KB. Hyperloom also
+    refuses rounds of unequal length or with more failed requests and applies its latency
+    budget; the summaries carry neither, so Hyperloom's re-measurement keeps the last word.
     """
     objective = rule["objective"]
     gain_pct = (final - baseline) / baseline * 100.0 if baseline > 0.0 and final > 0.0 else None
@@ -4011,6 +4225,7 @@ def acceptance_verdict(
     elif gain_pct < rule["min_gain_pct"]:
         reasons.append(f"{objective} gained {gain_pct:.3f}%, below {rule['min_gain_pct']}%")
     guards = {}
+    not_checked = []
     for basis, max_drop_pct in rule["guard_max_drop_pct"].items():
         ref = _positive_finite_float(reference.get(f"guard_{basis}_median"))
         cand = _positive_finite_float(candidate.get(f"guard_{basis}_median"))
@@ -4020,9 +4235,11 @@ def acceptance_verdict(
             "reference": ref or None,
             "candidate": cand or None,
             "max_drop_pct": max_drop_pct,
-            "holds": holds,
+            "holds": holds if measured or unmeasured_fails else None,
         }
-        if not measured:
+        if not measured and not unmeasured_fails:
+            not_checked.append(basis)
+        elif not measured:
             reasons.append(f"guard {basis} was not measured on both legs")
         elif not holds:
             reasons.append(f"guard {basis} fell {(1.0 - cand / ref) * 100.0:.3f}%, "
@@ -4033,9 +4250,30 @@ def acceptance_verdict(
         "gain_pct": round(gain_pct, 3) if gain_pct is not None else None,
         "min_gain_pct": rule["min_gain_pct"],
         "guards": guards,
+        "not_checked": not_checked,
         "keep": not reasons,
         "reasons": reasons,
     }
+
+
+def _recovered_pair_legs(wf: dict, baseline: float, final: float) -> tuple[dict, dict]:
+    """The bench summaries a recovered win's pair was read from, or two empty dicts.
+
+    Only an integrate A/B leaves them (``recovered_pair_dir``: its ``ref`` and ``cand`` legs), and
+    they count only while their medians are the published pair: once the baseline is re-based
+    (a config restacked over the default, say), the legs on disk measured some other pair.
+    """
+    pair_dir = str(wf.get("recovered_pair_dir") or "")
+    if not pair_dir:
+        return {}, {}
+    legs = (_read_json(Path(pair_dir) / "ref" / "bench_summary.json"),
+            _read_json(Path(pair_dir) / "cand" / "bench_summary.json"))
+    for summary, published in zip(legs, (baseline, final)):
+        median = _positive_finite_float(summary.get("throughput_tok_s_median"))
+        # An integrator that rounds the medians it copies still matches; another leg does not.
+        if not (median > 0.0 and published > 0.0 and abs(median - published) <= 0.01 * published):
+            return {}, {}
+    return legs
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -4080,7 +4318,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         if recovered is not None and float(recovered.get("throughput_speedup") or 0.0) > 1.0:
             merged = dict(wf)
             for k in ("throughput_speedup", "baseline_throughput_tok_s",
-                      "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms"):
+                      "final_throughput_tok_s", "output_parity", "ttft_ms", "tpot_ms",
+                      "recovered_pair_dir"):
                 if recovered.get(k) is not None:
                     merged[k] = recovered[k]
             # The recovered win's own overlay (C7); "" means config-only, in
@@ -4112,9 +4351,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
     #   disk_director_validation — rebuilt from director_e2e_validation.json.
     #   disk_intermediate_win  — best accepted integrate A/B (no final Validate).
     #   disk_no_gain_synthesis — baseline measured, nothing accepted (do-no-harm).
+    #   disk_validation_legs   — Validate's finished base/final legs, no Director verdict.
     checkpoint_level = str(wf.get("recovered_e2e_checkpoint_level") or "")
     tuning_recovery_source = str(wf.get("recovered_tuning_source") or "")
-    if checkpoint_level:
+    if wf.get("recovered_validation_legs"):
+        result_source = "disk_validation_legs"
+    elif checkpoint_level:
         result_source = f"disk_e2e_checkpoint_{checkpoint_level}"
     elif tuning_recovery_source:
         result_source = f"disk_tuning_skillset_{tuning_recovery_source}_provisional"
@@ -4512,8 +4754,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
-    # The one exception is ``acceptance``, added below only when the handoff states
-    # the caller's KEEP rule.
+    # The one exception is ``acceptance``, added below only when a KEEP rule applies:
+    # the one the handoff states, or GEAK's own for an AgentX run that states none.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
     # The metric-neutral spread first: the output_*-named alias is only written on the output
     # basis, so on any other axis it would leave both legs' scatter unknown.
@@ -4585,23 +4827,35 @@ def normalize_result(h: dict, wf: dict) -> dict:
         or "aggregate_output_tok_s"
     )
 
-    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # ── the KEEP rule ────────────────────────────────────────────────────────
     # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
     # interactivity grading), "ok" means that rule keeps the published pair, not merely
-    # that the final beat the baseline. Guards come from the two legs the pair was read
-    # from; a pair with no such legs (a recovered win) cannot show its guards held.
-    acceptance = handoff_acceptance(h)
+    # that the final beat the baseline. An AgentX run that states none is held to GEAK's
+    # own rule on Hyperloom's bars, with total tok/s among its guards. Guards come from the
+    # two legs the pair was read from. Under the caller's rule a recovered win has none and
+    # cannot pass; GEAK's own reads its A/B's legs when they are on disk, and leaves a guard
+    # it cannot read unchecked.
+    caller_rule = handoff_acceptance(h)
+    acceptance = caller_rule or default_acceptance(h)
     if acceptance is not None:
+        if not wf.get("recovered_intermediate"):
+            reference = {
+                "validation_base_bench_summary": base_leg_summary,
+                "setup_baseline": baseline_summary,
+            }.get(baseline_basis_source, {})
+            candidate = final_summary
+        elif caller_rule is None:
+            reference, candidate = _recovered_pair_legs(wf, geak_baseline, promoted_final)
+        else:
+            reference, candidate = {}, {}
         verdict = acceptance_verdict(
             acceptance,
             measured_basis=metric_basis,
             baseline=geak_baseline,
             final=promoted_final,
-            reference={
-                "validation_base_bench_summary": base_leg_summary,
-                "setup_baseline": baseline_summary,
-            }.get(baseline_basis_source, {}),
-            candidate={} if wf.get("recovered_intermediate") else final_summary,
+            reference=reference,
+            candidate=candidate,
+            unmeasured_fails=caller_rule is not None,
         )
         validation_evidence["acceptance"] = verdict
         if status == "ok" and not verdict["keep"]:
@@ -6220,6 +6474,98 @@ def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
     }
 
 
+def _recover_without_verdict(eval_dir: Path) -> dict | None:
+    """The salvage ladder for a run whose Director wrote no verdict (see _recover_workflow_return)."""
+    checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
+    if checkpoint_win is not None:
+        return checkpoint_win
+    tuning_result_win = _recover_tuning_result(eval_dir)
+    if tuning_result_win is not None:
+        return tuning_result_win
+    tuning_report_win = _recover_tuning_report(eval_dir)
+    if tuning_report_win is not None:
+        return tuning_report_win
+    tuning_win = _recover_tuning_legacy_composite(eval_dir)
+    if tuning_win is not None:
+        return tuning_win
+    win = _recover_best_intermediate_win(eval_dir)
+    if win is not None:
+        return win
+    #   1b. no accepted kernel, but the sweep adopted a winning serving config
+    #       (warm-start recall / ck_tune) — recover it as the final floor so a
+    #       validated config gain is not flattened to the default baseline.
+    cfg_win = _recover_accepted_config_win(eval_dir)
+    if cfg_win is not None:
+        return cfg_win
+    return _recover_completed_no_gain(eval_dir)
+
+
+VALIDATION_LEGS = ("base", "final")
+
+
+def _finished_validation_legs(eval_dir: Path) -> tuple[dict, dict] | None:
+    """Validate's base and final summaries when a trace replay finished both, else ``None``.
+
+    Both must be complete, usable for acceptance, measured for validation, on one axis, and
+    written after the latest final-phase fence, so a resumed run's earlier Validate does not
+    count. Only a trace replay records ``warmup_protocol``, so a fixed-ISL/OSL run never qualifies.
+    """
+    paths = [eval_dir / "validation" / leg / "bench_summary.json" for leg in VALIDATION_LEGS]
+    legs = [_read_json(path) for path in paths]
+    for leg in legs:
+        if not (leg.get("status") == "complete" and leg.get("usable_for_acceptance") is True
+                and leg.get("measurement_purpose") == "validation" and leg.get("warmup_protocol")
+                and _positive_finite_float(leg.get("throughput_tok_s_median")) > 0.0):
+            return None
+    base, final = legs
+    if not base.get("metric_basis") or base.get("metric_basis") != final.get("metric_basis"):
+        return None
+    fence = eval_dir / FINAL_PHASE_FENCE_FILE
+    try:
+        fenced_at = fence.stat().st_mtime if fence.is_file() else 0.0
+        if any(path.stat().st_mtime < fenced_at for path in paths):
+            return None
+    except OSError:
+        return None
+    return base, final
+
+
+def _adopt_validation_legs(eval_dir: Path, recovered: dict | None) -> dict | None:
+    """``recovered`` with a trace replay's finished Validate pair as its numbers.
+
+    Validate measures a trace replay in canonical-window legs, so a run can be killed before the
+    Director returns yet after ``validation/base`` and ``validation/final`` both finished: the
+    same-session pair of the final stack, which outranks any number a salvage tier carries. The
+    pair becomes the result, and normalize_result judges the KEEP rule on those two legs; the
+    stack and its evidence stay the tier's. A no-gain salvage has no stack and is left alone.
+    """
+    if not recovered or recovered.get("recovered_no_gain"):
+        return recovered
+    legs = _finished_validation_legs(eval_dir)
+    if legs is None:
+        return recovered
+    base, final = legs
+    base_tput = _positive_finite_float(base.get("throughput_tok_s_median"))
+    final_tput = _positive_finite_float(final.get("throughput_tok_s_median"))
+    return {
+        **recovered,
+        "baseline_throughput_tok_s": base_tput,
+        "final_throughput_tok_s": final_tput,
+        "throughput_speedup": final_tput / base_tput,
+        "ttft_ms": final.get("ttft_ms_median"),
+        "tpot_ms": final.get("tpot_ms_median"),
+        "validation_status": "recovered_validation_legs",
+        "recovered_intermediate": False,
+        "recovered_validation_legs": True,
+        "recovery_evidence": {
+            **(recovered.get("recovery_evidence") or {}),
+            "validation_legs": [str(eval_dir / "validation" / leg / "bench_summary.json")
+                                for leg in VALIDATION_LEGS],
+            "salvage_validation_status": recovered.get("validation_status"),
+        },
+    }
+
+
 def _recover_workflow_return(exp_root: Path) -> dict | None:
     """Rebuild the workflow return from on-disk artifacts (scrape-independent).
 
@@ -6256,28 +6602,9 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
         #   5. the best gate==accepted intermediate win (a real measured gain),
         #   6. else, if a baseline was measured but nothing was accepted, a
         #      legitimate NO_GAIN run (the optimizer correctly did no harm).
-        checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
-        if checkpoint_win is not None:
-            return checkpoint_win
-        tuning_result_win = _recover_tuning_result(eval_dir)
-        if tuning_result_win is not None:
-            return tuning_result_win
-        tuning_report_win = _recover_tuning_report(eval_dir)
-        if tuning_report_win is not None:
-            return tuning_report_win
-        tuning_win = _recover_tuning_legacy_composite(eval_dir)
-        if tuning_win is not None:
-            return tuning_win
-        win = _recover_best_intermediate_win(eval_dir)
-        if win is not None:
-            return win
-        #   1b. no accepted kernel, but the sweep adopted a winning serving config
-        #       (warm-start recall / ck_tune) — recover it as the final floor so a
-        #       validated config gain is not flattened to the default baseline.
-        cfg_win = _recover_accepted_config_win(eval_dir)
-        if cfg_win is not None:
-            return cfg_win
-        return _recover_completed_no_gain(eval_dir)
+        # A trace replay killed after Validate's base and final legs finished
+        # then takes its numbers from those legs (_adopt_validation_legs).
+        return _adopt_validation_legs(eval_dir, _recover_without_verdict(eval_dir))
     serving = validation.get("serving_config") or {}
     accepted_config = {
         "flags": serving.get("final_flags") or serving.get("baseline_flags") or "",
@@ -6575,8 +6902,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
             review = ir.get("speedup_review") or {}
             if not isinstance(review, dict):
                 review = {}
-            review_pending = (review.get("status") in
-                              ("pending", "inconclusive", "rejected")
+            # 'pending' is only ever the integrator's own flag, which the live workflow ignores
+            # (reviewSpeedup): the estimate alone decides whether a gain awaits confirmation.
+            review_pending = (review.get("status") in ("inconclusive", "rejected")
                               or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
@@ -6881,6 +7209,8 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         "accepted_heads": [],
         "recovered_from_disk": True,
         "recovered_intermediate": True,
+        # Its ref/ and cand/ legs carry the guards a KEEP rule reads (_recovered_pair_legs).
+        "recovered_pair_dir": str(best["dir"]),
         # No candidate cleared the integrator's own bar for a standalone win.
         "recovered_stack_provisional": stack_only or None,
         # How the headline was chosen, so picking a maximum out of N noisy
@@ -7840,6 +8170,43 @@ def _simulated_acceptance_env(extra_env: str) -> list[str]:
     return sorted(names)
 
 
+SPECULATIVE_CONFIG_FLAGS = ("--speculative-config", "--speculative_config")
+
+
+def _probe_speculative_config(server_args: str) -> str:
+    """The seed's vLLM ``--speculative-config`` with real verification, or ``""``.
+
+    vLLM simulates acceptance inside that JSON: ``"rejection_sample_method": "synthetic"`` with a
+    ``synthetic_acceptance_length``. The sampler becomes ``block`` and the length goes, as InferenceX
+    does for a run that verifies for real. ``""`` when the last ``--speculative-config`` is absent,
+    unreadable, or simulates nothing. The seed reaches the adapter word-split, so its JSON is read
+    from plain whitespace tokens first and from shell tokens second (a ``shlex.join``-ed seed).
+    """
+    for split in (str.split, shlex.split):
+        try:
+            tokens = split(str(server_args or ""))
+        except ValueError:
+            continue
+        raw = None
+        for i, token in enumerate(tokens):
+            flag, eq, value = token.partition("=")
+            if flag in SPECULATIVE_CONFIG_FLAGS:
+                raw = value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+        try:
+            spec = json.loads(raw) if raw else None
+        except ValueError:
+            continue
+        if isinstance(spec, dict):
+            break
+    else:
+        return ""
+    if spec.get("rejection_sample_method") != "synthetic" and "synthetic_acceptance_length" not in spec:
+        return ""
+    spec["rejection_sample_method"] = "block"
+    spec.pop("synthetic_acceptance_length", None)
+    return json.dumps(spec, separators=(",", ":"), ensure_ascii=False)
+
+
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     """Split argv into positionals + flags, and resolve the wall-clock budget.
 
@@ -7916,14 +8283,65 @@ def main(argv: list[str]) -> int:
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+    # Router ENV for a real run (PR #574 review: amd-ethany). When map_args turned
+    # routing ON (ps_args["routing"]), export the switches the JS / recorder read
+    # from the environment and forward the provenance ids from the handoff. Skipped
+    # on --dry-run (wiring-only) and never written during map_args' own unit tests,
+    # so os.environ stays unpolluted. Routing DEFAULT-OFF (no explicit opt-in) ->
+    # map_args set no routing args -> this exports nothing either. (GEAK_EIKOS_ROUTER
+    # now only reaches the standalone scripts/eikos_router.py helper; its dead JS hook
+    # was removed in this PR.)
+    if not is_dry_run and ps_args.get("routing") == "true":
+        os.environ.setdefault("GEAK_ROUTING", "1")
+        # Eikos availability (PR #574 review #2): when the active decider is eikos, probe the
+        # carrier URL ONCE here at startup. If it does not answer, log once and SKIP the consults
+        # for the whole run -- GEAK_EIKOS_ROUTER stays unset, so scripts/eikos_router.py returns the
+        # static, byte-identical decision -- instead of making a failing carrier call per decision.
+        # A non-eikos decider (p1) does not use the carrier, so it is never probed.
+        _decider = str(ps_args.get("route_decider") or "eikos").strip().lower()
+        _eikos_ok = True
+        if _decider == "eikos":
+            _eikos_url = (os.environ.get("GEAK_EIKOS_URL") or "http://127.0.0.1:8000").rstrip("/")
+            _eikos_ok = _eikos_reachable(_eikos_url)
+            if not _eikos_ok:
+                print(
+                    "[routing] Eikos carrier at %s did not answer at startup; skipping Eikos "
+                    "consults for this run (decisions fall back to the static control ladder)."
+                    % _eikos_url,
+                    file=sys.stderr, flush=True,
+                )
+                # iraj465 (CHANGES_REQUESTED): leaving GEAK_EIKOS_ROUTER unset is NOT enough -- the
+                # live routing seam's eikos carrier keys off route_decider (ROUTE_EIKOS_ON), not that
+                # env, so eikos:route carriers would still dispatch (and fail) once per decision.
+                # Thread the failed probe explicitly so kernel_lane.js skips the carrier itself and
+                # falls back to the static control ladder (ROUTE_EIKOS_PROBE_DOWN -> __routeReduce
+                # estimates-null path; __routeReduce byte-identical).
+                os.environ["GEAK_EIKOS_PROBE_FAILED"] = "1"
+                # iraj465 (CHANGES_REQUESTED) Fix 1 (bug 1): the env above only reaches the standalone
+                # runtime. The native Workflow child (Path A) has no `process`, so also thread the flag
+                # through the workflow ARGS -- kernel_lane.js reads A.route_eikos_probe_failed arg-first
+                # and e2e_workflow.js / kernel_workflow.js forward it to every child lane, exactly as
+                # routing is threaded -- so the skip is honoured on BOTH runtimes.
+                ps_args["route_eikos_probe_failed"] = "1"
+        if _eikos_ok:
+            os.environ.setdefault("GEAK_EIKOS_ROUTER", "1")
+        for _env_key, _handoff_key in (
+            ("GEAK_ENGINEER_ID", "engineer_id"),
+            ("GEAK_RECORDER_INV_ID", "recorder_inv_id"),
+        ):
+            _val = h.get(_handoff_key)
+            if _val:
+                os.environ[_env_key] = str(_val)
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     # Module B writes workflow_return.json before normalize_result runs. Send the same
     # comparability calculation into that return while the selected client is known.
     ps_args["comparability"] = _workload_comparability(h)
-    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # A KEEP rule's verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
     # until then; _kb_write_back handles successful runs too when Module B left no receipt.
-    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
+    ps_args["kb_defer_to_interface"] = (
+        handoff_acceptance(h) or default_acceptance(h)
+    ) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)

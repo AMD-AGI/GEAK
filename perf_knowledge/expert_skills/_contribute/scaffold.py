@@ -13,20 +13,25 @@ Usage:
   python tuning/validate/claims.py --json /tmp/claims.json
   python _contribute/scaffold.py --reindex --claims-report /tmp/claims.json
 
-The index is AUTO-GENERATED from each skill file's frontmatter, so contributors only ever edit one
-markdown file; the selector stays consistent and merge-conflict-free.
+The index is AUTO-GENERATED from each skill's frontmatter plus its validation file, so the selector
+stays consistent and merge-conflict-free.
 
 The vendored tuning skillset (`tuning/`) is the one exception, and only in *where* the frontmatter
 lives: that tree is hash-pinned byte-for-byte against upstream, so its selector metadata sits outside it
 in `tuning_index.yaml` and is merged in here. Same schema, same filter, same validation gate.
 """
-import argparse, glob, os, re, sys
+import argparse, glob, os, re, shutil, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from validate_skill import validation_errors  # noqa: E402
+
 ROOT = os.path.dirname(HERE)                       # .../expert_skills
 SKILLS_DIR = os.path.join(ROOT, "skills")
 TEMPLATE = os.path.join(ROOT, "_template", "SKILL_TEMPLATE.md")
+VALIDATION_TEMPLATE = os.path.join(ROOT, "_template", "validation.yaml")
 INDEX = os.path.join(ROOT, "index.yaml")
 TUNING_INDEX = os.path.join(ROOT, "tuning_index.yaml")
 CAP_INDEX = os.path.normpath(os.path.join(ROOT, "..", "index", "capability_index.yaml"))
@@ -52,21 +57,90 @@ def known_operators():
     return {c["operator"] for c in (data.get("candidates") or []) if "operator" in c}
 
 
-def skill_index_entry(sub, fm):
+def validation_metadata(skill_path, fm):
+    relative = str(fm.get("validation_file") or "").strip()
+    if relative:
+        path = os.path.join(os.path.dirname(skill_path), relative)
+        if os.path.isfile(path):
+            data = yaml.safe_load(open(path)) or {}
+        else:
+            data = {}
+    else:
+        data = fm.get("validation") or {}
+    errors = validation_errors(fm, data, os.path.dirname(skill_path))
+    if errors:
+        raise ValueError(
+            f"{skill_path}: invalid validation metadata: {'; '.join(errors)}"
+        )
+    status = str(data.get("status") or "draft")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    requested_auto = usage.get("auto_apply")
+    return {
+        "validation_status": status,
+        "reference_evidence_status": str(
+            (data.get("reference_evidence") or {}).get("status") or ""
+        ),
+        "constraint_validation_status": str(
+            (data.get("constraint_validation") or {}).get("status") or ""
+        ),
+        "auto_apply": (
+            status == "validated"
+            and (
+                requested_auto is True
+                if data.get("schema_version") == "expert-skill-validation-v2"
+                else (True if requested_auto is None else requested_auto is True)
+            )
+        ),
+        "explicit_pin_modes": [
+            str(value) for value in usage.get("explicit_pin_modes") or []
+        ],
+    }
+
+
+def _component_file(sub, fm, key, component):
+    if fm.get(key):
+        return f"skills/{sub}/{fm[key]}"
+    if component in (fm.get("embedded_components") or []):
+        return f"skills/{sub}/skill.md"
+    return ""
+
+
+def skill_index_entry(sub, fm, skill_md=None):
     """Build one selector entry, including non-profile dependency skills."""
     scope = fm.get("scope", "kernel")
-    entry = {
+    skill_md = skill_md or os.path.join(SKILLS_DIR, sub, "skill.md")
+    if scope == "dependency":
+        return {
+            "id": fm["id"],
+            "file": f"skills/{sub}/skill.md",
+            "scope": scope,
+            "match": fm.get("match", {}),
+            "validation_status": "n/a",
+        }
+    return {
         "id": fm["id"],
         "file": f"skills/{sub}/skill.md",
         "scope": scope,
+        "revision": fm.get("revision", ""),
+        "playbook_file": (
+            f"skills/{sub}/{fm['playbook_file']}" if fm.get("playbook_file")
+            else f"skills/{sub}/skill.md"
+        ),
+        "planner_extension_file": _component_file(
+            sub, fm, "planner_extension_file", "planner_extension"),
+        "contract_file": _component_file(sub, fm, "contract_file", "contract"),
+        "validation_file": (
+            f"skills/{sub}/{fm['validation_file']}" if fm.get("validation_file")
+            else (f"skills/{sub}/skill.md" if fm.get("validation") else "")
+        ),
+        "validation_schema": fm.get("validation_schema", ""),
+        "runtime_validation_file": _component_file(
+            sub, fm, "runtime_validation_file", "runtime_validation"),
+        "embedded_components": fm.get("embedded_components", []),
         "match": fm.get("match", {}),
+        "expects": fm.get("expects", {}),
+        **validation_metadata(skill_md, fm),
     }
-    if scope == "dependency":
-        entry["validation_status"] = "n/a"
-    else:
-        entry["expects"] = fm.get("expects", {})
-        entry["validation_status"] = (fm.get("validation") or {}).get("status", "draft")
-    return entry
 
 
 def claims_status(tree_dir, report=None):
@@ -130,6 +204,7 @@ def tuning_index_entries(report=None):
             # Unknown to claims.py means nothing has been run against it, which is not validation.
             "validation_status": status.get(s.get("claims_skill") or s["dir"], "unvalidated"),
         })
+        entries[-1]["auto_apply"] = entries[-1]["validation_status"] == "validated"
     return entries
 
 
@@ -148,18 +223,22 @@ def reindex(claims_report=None):
             if ops is not None and one != "*" and one not in ops:
                 print(f"  WARN: {sub}/skill.md: operator '{one}' not in capability_index.yaml",
                       file=sys.stderr)
-        entries.append(skill_index_entry(sub, fm))
+        entries.append(skill_index_entry(sub, fm, skill_md))
     entries.extend(tuning_index_entries(claims_report))
     header = (
         "# index.yaml — expert_skills selector (AUTO-MAINTAINED by _contribute/scaffold.py + "
         "validate_skill.py).\n"
         "# Regenerate with:  python _contribute/scaffold.py --reindex\n"
-        "# NOT a ranking. Filter by (operator, gen, arch_class, [from->to], status==validated) -> MEASURE.\n"
+        "# NOT a ranking. Filter by operator/gen/arch/backend, status==validated, auto_apply==true.\n"
         "# scope: kernel | e2e | dependency | tuning. 'tuning' entries describe the VENDORED tree under\n"
         "# tuning/ and are declared in tuning_index.yaml (the tree is hash-pinned, so its metadata is\n"
         "# outside it); their status comes from tuning/validate/claims.py, not from a hand-typed field.\n"
         "# Only 'validated' skills are auto-applied by the workflows (advisory priors, never override A/B).\n\n"
-        "schema: {id, file, scope, match, expects, validation_status}\n\n"
+        "schema: {id, file, scope, revision, playbook_file, planner_extension_file, contract_file, "
+        "validation_file, validation_schema, runtime_validation_file, embedded_components, "
+        "match, expects, validation_status, "
+        "reference_evidence_status, constraint_validation_status, auto_apply, "
+        "explicit_pin_modes}\n\n"
     )
     with open(INDEX, "w") as f:
         f.write(header)
@@ -190,12 +269,21 @@ def create(args):
     if args.arch:    fm["match"]["arch_class"] = args.arch.split(",")
     if args.from_backend: fm["match"]["from_backend"] = args.from_backend
     if args.to_backend:   fm["match"]["to_backend"] = args.to_backend
-    fm.setdefault("validation", {})["status"] = "draft"
+    fm.pop("validation", None)
+    fm["validation_file"] = "validation.yaml"
     with open(dest, "w") as f:
         f.write("---\n")
         f.write(yaml.safe_dump(fm, sort_keys=False, allow_unicode=True, width=100))
         f.write("---\n")
         f.write(body)
+    validation_path = os.path.join(skill_dir, "validation.yaml")
+    shutil.copyfile(VALIDATION_TEMPLATE, validation_path)
+    validation = yaml.safe_load(open(validation_path)) or {}
+    validation["skill_id"] = args.id
+    validation["revision"] = fm.get("revision", "v1")
+    validation["status"] = "draft"
+    with open(validation_path, "w") as f:
+        yaml.safe_dump(validation, f, sort_keys=False, allow_unicode=True, width=100)
     print(f"created {os.path.relpath(dest, ROOT)} (status: draft)")
     print("Next: fill in When-to-use / Mechanism / Procedure / Do-no-harm, then run "
           "_contribute/make_pr.sh " + args.id)

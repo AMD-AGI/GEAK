@@ -65,6 +65,12 @@ _check_sources_on_exit() {
 trap _check_sources_on_exit EXIT
 
 LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
+# Correlation ids for the use-log, set by an OUTER inv_record.py (Eikos phase 2a). They are passed in,
+# never derived from time or PID, and only well-formed values are written. Unset -> the log line is
+# byte-identical to before.
+_ID_FIELDS=""
+[[ "${GEAK_ENGINEER_ID:-}" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] && _ID_FIELDS+=",\"engineer_id\":\"$GEAK_ENGINEER_ID\""
+[[ "${GEAK_RECORDER_INV_ID:-}" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] && _ID_FIELDS+=",\"recorder_inv_id\":\"$GEAK_RECORDER_INV_ID\""
 mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------
@@ -155,6 +161,25 @@ _gpu_settle_idle() {
     done
 }
 
+# Name the processes that have GPU $1's lock file open: the holder and any other waiter. flock is
+# held by an open file description, which children inherit, so this finds the holder even after the
+# process that took the lock is gone. Builtins only, and the caller is skipped: a pinned waiter has
+# the file open on fd 200 itself.
+_gpu_lock_holders() {   # $1 = gpu id -> lines on stdout
+    local target="${LOCK_DIR}/gpu_${1}.lock" p f k v argv
+    for p in /proc/[0-9]*; do
+        [ "${p#/proc/}" = "$BASHPID" ] && continue
+        for f in "$p"/fd/*; do
+            [ "$f" -ef "$target" ] || continue
+            v=""; while read -r k v; do [ "$k" = PPid: ] && break; done < "$p/status"
+            mapfile -d '' -t argv < "$p/cmdline"
+            f="${argv[*]//$'\n'/ }"
+            echo "  GPU $1 lock is open in pid ${p#/proc/} (ppid $v): ${f:0:200}"
+            break
+        done
+    done 2>/dev/null
+}
+
 case "$GPU_SPEC" in
   group:*|pool:*:*)
     # Multi-GPU lease: gpu_lease.py acquires the whole group or nothing, after compile setup below.
@@ -172,6 +197,7 @@ case "$GPU_SPEC" in
     _deadline=$(( _wait_t0 + ${GEAK_GPU_POOL_WAIT:-1200} ))
     GPU_ID=""
     while [ -z "$GPU_ID" ]; do
+        _locked=""
         for _g in $POOL; do
             # (1) flock: exclusive lane. Held until this process exits.
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
@@ -194,14 +220,20 @@ case "$GPU_SPEC" in
                 # backward-compatible with logs written before it existed. Nothing is added inside
                 # the timed region -- the arithmetic runs after the GPU is already won.
                 [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
-                    echo "{\"t\":$(date +%s),\"gpu\":$_g,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pool\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+                    echo "{\"t\":$(date +%s),\"gpu\":$_g,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pool\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                         >> "$GEAK_GPU_USE_LOG" 2>/dev/null
                 break
             fi
+            _locked="$_locked $_g"
             exec {_fd}>&-
         done
         if [ -z "$GPU_ID" ]; then
             [ "$SECONDS" -ge "$_deadline" ] && { echo "ERROR: no free+idle GPU in pool [$GPU_SPEC] after ${GEAK_GPU_POOL_WAIT:-1200}s" >&2; exit 1; }
+            if [ -z "${_announced:-}" ]; then
+                _announced=1
+                echo "NOTE: no free+idle GPU in pool [$GPU_SPEC]; waiting up to ${GEAK_GPU_POOL_WAIT:-1200}s" >&2
+                for _g in $_locked; do _gpu_lock_holders "$_g" >&2 || true; done
+            fi
             sleep 0.2
         fi
     done
@@ -301,7 +333,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested gpu_lock.sh calls reuse this lane (see Re-entrancy)
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
-    "$@"
+    "$@" {POOL_FD}>&-   # this shell's copy holds the lane; see `200>&-` below
 else
     # Single-GPU mode BLOCKS TOO, and its wait must be measured for the same reason the pool's is.
     # Pinning does not mean "no contention": with 4 engineers over 2 pinned GPUs, two engineers share
@@ -311,7 +343,11 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        if ! flock -n -x 200; then
+            echo "NOTE: GPU $GPU_ID lock is busy; waiting up to 1200s" >&2
+            _gpu_lock_holders "$GPU_ID" >&2 || true
+            flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        fi
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
@@ -329,11 +365,13 @@ else
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
-            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested gpu_lock.sh calls reuse this GPU (see Re-entrancy)
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
-        "$@"
+        # Not inherited by the command: bash sets no close-on-exec here, so any descendant that
+        # outlived it would keep the lock held. This subshell's fd 200 holds it while "$@" runs.
+        "$@" 200>&-
     ) 200>"$LOCK_FILE"
 fi
