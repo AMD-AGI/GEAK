@@ -83,6 +83,18 @@ omit = [
     # completion by definition) and hides real gaps in the code under test.
     "*/tests/*",
     "*/test_*.py",
+    # PR #574 review #5 (conceded): the Eikos router/decider/registry-lint tooling
+    # is DEFERRED -- advisory, not yet adopted (see the advisory CI lint step and the
+    # non-blocking whole-source reconciliation test). Its modules are excluded from
+    # the coverage gate until maintainers adopt the registry, at which point they and
+    # their tests fold back in. Their dedicated tests (test_eikos_*.py) are not wired
+    # into the no-GPU unit job today, so the modules would otherwise read as 0%.
+    "e2e_workflow/scripts/eikos_decide.py",
+    "e2e_workflow/scripts/eikos_router.py",
+    "e2e_workflow/scripts/eikos_registry_lint.py",
+    # GPU lock management runs only on a real GPU (like examples/ above), so it reads
+    # as 0% in the no-GPU unit job; excluded from that job's gate.
+    "e2e_workflow/scripts/gpu_lock_set.py",
 ]
 
 [tool.coverage.report]
