@@ -151,15 +151,21 @@ def test_skill_md_is_the_entry_and_routes_nowhere_superseded():
         assert f"references/method/{stage}.md" in text
 
 
-def test_no_agents_and_the_method_maps_onto_existing_geak_roles():
-    # GEAK consumes expert skills through its existing kernel_workflow roles; this skill adds none.
+def test_no_agents_and_the_roles_in_geak_resolve():
+    # GEAK runs this pack through the gluon_authoring expert workflow: the pack ships no agents, and
+    # every role skill.md names exists in that workflow or in kernel_workflow.
     assert not (PACK / "agents").exists()
     text = (PACK / "skill.md").read_text()
     assert "## Roles in GEAK" in text
-    for role in ("deep_engineer", "deep_explore", "verify_engineer", "benchmark_engineer", "profile_engineer"):
-        assert role in text, role
-    roles_dir = PACK.parents[3] / "kernel_workflow" / "roles"
-    for role in ("deep_engineer", "verify_engineer", "benchmark_engineer", "profile_engineer", "tech_lead", "director"):
+    for role in ("gluon_lead", "gluon_engineer", "evidence_auditor", "verify_engineer", "benchmark_engineer",
+                 "profile_engineer", "director"):
+        assert f"`{role}`" in text, role
+    workflow_dir = EXPERT_SKILLS_ROOT / "expert_workflows" / "gluon_authoring"
+    assert (workflow_dir / "workflow.js").is_file()
+    for role in ("gluon_lead", "gluon_engineer", "evidence_auditor"):
+        assert (workflow_dir / "roles" / f"{role}.md").is_file(), role
+    roles_dir = GEAK_ROOT / "kernel_workflow" / "roles"
+    for role in ("verify_engineer", "benchmark_engineer", "profile_engineer", "director"):
         assert (roles_dir / f"{role}.md").is_file(), role
 
 

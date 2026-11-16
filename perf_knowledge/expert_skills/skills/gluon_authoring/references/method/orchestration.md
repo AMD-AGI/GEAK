@@ -9,47 +9,47 @@ affordable. It decides nothing about the kernel: no lever, gate or verdict lives
 measurement needs a GPU, when a round ends and its result must be handed back, and when a long session
 needs to stay cheap.
 
-This skill follows GEAK's usage of expert skills: it is **injected into GEAK's existing
-`kernel_workflow` roles** and adds no roles and no agents. GEAK's phases (`kernel_workflow/kernel_lane.js`:
-Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine; the
-method's stages ([`index.md`](index.md)) are the work one GEAK role does inside them. The pack's record
-tools (`toolctl.py`, stage cards, context lease, `canonical_record.py`, `round_record.py`,
-`close_audit.py`) are **optional bookkeeping** the deep_engineer may use for its own records — they are not
-a run mode ([`## Optional bookkeeping tools`](#optional-bookkeeping-tools)).
+GEAK runs this method as the **gluon_authoring expert workflow**
+([`expert_workflows/gluon_authoring/workflow.js`](../../../../expert_workflows/gluon_authoring/README.md)):
+the stage machine — entry → budget → transcribe → recover → climb → close, with the gates between them —
+is code, and each stage is one role call that opens with the references it needs. GEAK's own roles keep
+setup, measurement and validation. The pack's record tools (`toolctl.py`, stage cards, context lease,
+`canonical_record.py`, `round_record.py`, `close_audit.py`) are **optional bookkeeping** the engineer may
+use for its own records — they are not a run mode
+([`## Optional bookkeeping tools`](#optional-bookkeeping-tools)).
 
 ---
 
 ## Who does which stage
 
-**Injection.** With `use_gluon_skill=auto` (default `false`), Triton/Gluon lanes on gfx942/gfx950
-receive this method as language reference. The declared draft status remains visible.
-Validated expert recipes remain separately opt-in with `use_expert_skills=true`. See
-[geak-integration.md](geak-integration.md) for the role and backend routing contract.
-
-| method stage | GEAK phase | GEAK role | what this skill asks of it |
+| method stage | workflow phase | role | what the workflow holds it to |
 | --- | --- | --- | --- |
-| entry (comparator) | Setup, Benchmark | Director (`PHASE=setup`, isolated workspace, `mode: optimize`); `benchmark_engineer` (harness, `COMMANDMENT`, baseline timing) | the comparator is the tuned plain champion (`champion_ms`), pinned before any Gluon edit ([`entry.md`](entry.md)) |
-| budget, baseline evidence | Profile | `profile_engineer` (`kernel_workflow/scripts/profile_kernel.sh`, baseline) | the four dials ([`profile.md`](profile.md)); `hw_budget.py` before authoring ([`budget.md`](budget.md)) |
-| launch | Optimize — plan | `tech_lead` | gate **G0** launch args ([`index.md`](index.md), [`entry.md`](entry.md)); dispatch **one** `deep_explore` direction for the port, no specialists beside it |
-| entry assertion → transcribe → recover → evidence → climb | Optimize — execute | `deep_engineer` (`specialty=deep_explore`) | the whole track in one engineer's own measure → profile → rewrite loop ([`## The deep_engineer's method boundary`](#the-deep_engineers-method-boundary)) |
-| measure (acceptance) | Verify | `verify_engineer` | independent re-benchmark of `best_patch.diff` in a clean workspace using frozen `COMMANDMENT.md` commands; its number is the round result |
-| commit | Merge | `tech_lead` commit gate | `MIN_IMPROVE` (default 2%) over the cumulative best; noise checks belong to supplementary screening before verification |
-| re-profile, memory | Optimize — after merge | `profile_engineer` (`reprofile`), `tech_lead` (`update_memory`) | the next round plans from the new bottleneck and from the deep_engineer's notes (requests, closure self-review) |
-| close | Report, Validate | the deep_engineer states the verdict and writes the closure self-review; Director validates and arbitrates | [`close.md`](close.md); Director quotes the self-review's strongest counter-evidence |
+| setup, comparator | Setup, Benchmark | GEAK `director` (PHASE=setup), `benchmark_engineer` | isolated workspace, frozen baseline, `COMMANDMENT` |
+| baseline evidence | Profile | GEAK `profile_engineer` (PHASE=baseline) | the four dials ([`profile.md`](profile.md)) |
+| entry | Entry | `gluon_lead` | mode, champion bundle, **G1** exit code; a non-zero exit stops the run before any edit ([`entry.md`](entry.md)) |
+| budget | Budget | `gluon_lead` | `hw_budget.py` before authoring ([`budget.md`](budget.md)) |
+| transcribe / author → recover → climb | Transcribe, Recover, Climb | `gluon_engineer`, one round per call | equivalence; **G2** (port) before any climb; **G3**, **G4** and ATT on pipeline/scheduling layers every round — checked in code, re-asked once, else rejected |
+| evidence audit | every round | `evidence_auditor` | the cited artifacts exist and CPU-only re-runs agree |
+| measure (acceptance) | every round | GEAK `verify_engineer` | independent re-benchmark of the round's `best_patch.diff` in a clean workspace using frozen `COMMANDMENT.md` commands; its number is the round result |
+| commit | every round | the workflow | `MIN_IMPROVE` (default 2%) over the accepted best |
+| close | Close, Validate | `gluon_lead`; GEAK `director` (PHASE=validate) | outcome decided by the workflow; closure self-review on a non-win ([`close.md`](close.md)); Director validates the delivered patch |
 
-**GEAK owns the loop.** `Setup → Analyze → Benchmark (COMMANDMENT + baseline) → Profile → [Research] →
-LOOP[ plan round → (Optimize ‖ Verify, pipelined) → Merge → re-profile → update memory ] → Report →
-Validate`. The budget is GEAK's (directions; a `deep_explore` direction costs `DEEP_COST`, default 2, and
-always runs in a dedicated round), not a pack round count; acceptance is GEAK's verify + commit gate +
-Director, against `geomean(baseline_ms / optimized_ms)` in absolute latency.
+**The workflow owns the loop.** `Setup → Benchmark → Profile → Entry → Budget → [champion verify] →
+LOOP[ round: engineer → evidence check (+re-ask) → audit → verify → keep / commit gate / parity ] →
+Close → Validate`. The budget counts engineer rounds; the deadline, the token budget, `max_no_improve`,
+G1 and `parity_unreached` stop it in code. Acceptance is GEAK's verify + commit gate + Director, against
+the frozen baseline in absolute latency; for a port the outcome is additionally quoted against the
+champion.
 
-**The evidence obligations do not lapse because GEAK drives.** Budget/roofline before authoring
-([`budget.md`](budget.md)) and a re-profile every round with the four dials ([`profile.md`](profile.md)),
-through `kernel_workflow/scripts/profile_kernel.sh` under `gpu_lock.sh`.
+**The evidence obligations are part of the round's return.** Budget/roofline before authoring
+([`budget.md`](budget.md)) and a re-profile every climb round with the four dials
+([`profile.md`](profile.md)), through `kernel_workflow/scripts/profile_kernel.sh` or `$KT/capture.sh`
+under `gpu_lock.sh`.
 
 ### The deep_engineer's method boundary
 
-The deep_engineer in the single `deep_explore` direction owns entry → climb. Its input is an asserted
+In the expert workflow this engineer is `gluon_engineer`, called once per round; `gluon_lead` owns
+the entry assertion. The engineer owns transcribe → climb. Its input is an asserted
 `plain_champion.json` (or, on an incumbent entry, the measured explicit kernel), not a plain kernel to
 retune.
 
@@ -63,28 +63,18 @@ retune.
 4. **Climb one coupled explicit-tile layer at a time** ([`climb.md`](climb.md)), keeping only oracle-gated,
    same-boundary evidence with lowered-code support.
 5. **No config sweep, no branch, no re-derived front-end structure.** A suspect structure or config is
-   returned as `structure_suspect` / `resweep_request` in the result; tech_lead turns it into the next
-   round's direction (a tile retune goes to GEAK's own plain tuning).
+   returned as `structure_suspect` / `resweep_request` in the result; the workflow carries it to the close
+   (a tile retune goes to GEAK's own plain tuning).
 6. **A result slower than `champion_ms` is a negative** (`negative_revert_plain`); it does not revise the
    plain champion.
 
 ### Required return
 
-The return is GEAK's `worker_result` (`ENG_SCHEMA` in `kernel_lane.js`: `status`, `speedup_geomean`,
-`measurement_valid`, `per_case`, `patch_file`, `strategy`, `strategies_tried`, `notes`), written to
-`OUTPUT_DIR/worker_result.json` and returned as StructuredOutput, plus `best_patch.diff` and `report.md`
-([`kernel_workflow/roles/deep_engineer.md`](../../../../../../kernel_workflow/roles/deep_engineer.md)). The
-skill adds these to its `notes` and artifacts:
-
-- champion / gate refs (`plain_champion.json`, the `champion_gate.py` result);
-- anchor and best measurements against `champion_ms`;
-- recovery state — `parity` or `parity_unreached` with the attributed residual split;
-- checkpoint (path of the last confirmed-kept diff + metrics);
-- rounds spent against the direction's budget;
-- `structure_suspect` / `resweep_request` (with evidence paths), blocker, deferred work;
-- at a ceiling / keep-baseline / negative close: the closure self-review (`closure_review.md` path,
-  verdict, strongest counter-evidence, recommended next —
-  [close.md `## Closure challenge (self-review before a ceiling / keep-baseline / negative close)`](close.md)).
+The return is the workflow's round object (`ROUND_SCHEMA` in `workflow.js`, field list in the expert
+workflow's README): stage, layer / suspect, the references read, `track_tag` and `patch_file`
+(`git diff geak_base <tag>`), correctness, and the gate records — `equivalence`, `parity_gate` (G2),
+`g3_occupancy`, `g4_screen`, `att` — each with its command, exit code and output path. Requests
+(`resweep_request`, `structure_suspect`) ride in the same object and are carried to the close.
 
 An unmeasured or unverified candidate is a blocker / unknown, not a win. Director performs final
 arbitration.
@@ -149,8 +139,8 @@ comparator is `champion_ms` from the bundle, never a `plain_baseline` computed i
 sequential because each layer's output is the next layer's input, and half-built coupled candidates cannot be
 compared fairly. Transcription is deterministic — parallel arms measure the same layouts and share the same
 bug. Splitting the track would fork the checkpoint, break the enabling-step look-ahead, and corrupt
-attribution. So tech_lead dispatches the Gluon port as a single `deep_explore` direction (the lane runs it in
-a dedicated round anyway) and never pairs it with specialist directions expecting a merge. Decision rule for
+attribution. So the expert workflow runs the track as one engineer's sequence of rounds in one workspace
+and never pairs it with parallel directions expecting a merge. Decision rule for
 anything else: **split only what is independent; keep coupled work whole** — when in doubt, treat it as
 coupled; the cost of wrongly parallelizing coupled work is corrupted evidence, not just lost speed.
 
@@ -175,22 +165,18 @@ no in-process `cache_tag` interleave ([`benchmark-hygiene.md`](benchmark-hygiene
 
 ## Round budget
 
-The budget is GEAK's: `budget` counts directions across rounds and a `deep_explore` direction costs
-`DEEP_COST` (2). A port needs the G0 launch args (`candidate_floor`, `max_no_improve`, `budget`,
-`progress_delta`) so recovery below the comparator is not read as a stall ([`entry.md`](entry.md)). Within
-its round the deep_engineer follows its role's stop rule (target reached; ~6–8 iterations each < 1 %; a hard
-cap of ~40 measured iterations), and the pack's thresholds govern how it spends that round
-([climb.md `Self-monitoring`](climb.md)): warn **70 %** / wrap-up **85 %** / timeout **95 %** of the
-iteration budget; stall 10/15/20; ceiling = 3 profiles within 1 %; a regression budget of 2–3 steps, then
-back to the checkpoint. Budget left is not a stop ([`close.md`](close.md#hard-stops)).
-
----
+The budget is the workflow's: `budget` counts engineer rounds (transcribe/author, recover and climb),
+`max_recover_rounds` bounds the recovery, and the loop shape follows the entry mode (G0 by construction:
+a port tolerates 6 non-improving rounds and an `enabling_step` within −5 % of the track best; an
+incumbent keeps the ordinary shape). Within its round the engineer follows the pack's self-monitoring
+([climb.md `Self-monitoring`](climb.md)) and returns before `ROUND_DEADLINE_EPOCH`. Budget left is not a
+stop ([`close.md`](close.md#hard-stops)).
 
 ## Records and resumability
 
-GEAK's layout governs: `<exp_root>/team_<kernel>_<ts>/<kernel>/round_N/engineer_i/`, i.e. the
-deep_engineer's private `KERNEL_PATH` workspace and its `OUTPUT_DIR`. The pack's ledgers
-([`records.md`](records.md)) live inside them:
+The workflow's layout governs: `EVAL_DIR/gluon/track` is the one track workspace (a git checkout,
+tagged `geak_base` and `r<N>` per kept round) and `EVAL_DIR/gluon/round_N/` is the round's `OUTPUT_DIR`.
+The pack's ledgers ([`records.md`](records.md)) live inside them:
 
 ```text
 OUTPUT_DIR/                      # GEAK-owned path, written by the deep_engineer
@@ -201,16 +187,15 @@ OUTPUT_DIR/                      # GEAK-owned path, written by the deep_engineer
   profile_rN/  ir/  budget/  exp_<id>/              # per-round evidence; bounded experiments
 ```
 
-- **Two channels.** The StructuredOutput `worker_result` is what the lane harvests and enters tech_lead's
-  context; the on-disk files are the full-fidelity record. Keep the return compact (paths + conclusions);
+- **Two channels.** The StructuredOutput round object is what the workflow checks and carries into the
+  next round's `HISTORY`; the on-disk files are the full-fidelity record. Keep the return compact (paths + conclusions);
   the reader opens a file only when it needs the detail.
-- **Save `best_patch.diff` the moment a new best is set**, not at the end: if the return is lost, the lane
-  re-measures whatever patch is on disk, and verify is the source of truth.
-- **Resume.** The checkpoint is authoritative for *what was tried* (diff, metrics, round log). When a
-  `deep_explore` round ends `partial` and tech_lead issues a follow-on direction, the prior `OUTPUT_DIR`'s
-  checkpoint and round log come forward through GEAK's cross-round `INSIGHTS` / the direction prompt; the
-  next deep_engineer reloads them instead of re-deriving the track, and coupled work is resumed as the same
-  line, never re-split. A cold resume works from the on-disk ledger alone
+- **Commit and tag the candidate, then write `best_patch.diff`** before returning: verify measures the patch
+  on disk, and the next round starts from the last tag the workflow kept (`TRACK_START`).
+- **Resume.** The checkpoint is authoritative for *what was tried* (diff, metrics, round log). Each round
+  receives the workflow's `HISTORY` (stage, layer, verify status, both comparators, kept/accepted) and the
+  previous rounds' `OUTPUT_DIR`s stay on disk; the next round reloads them instead of re-deriving the
+  track, and coupled work is resumed as the same line, never re-split. A cold resume works from the on-disk ledger alone
   ([records.md `## 1d. Residual / Deferred-Task & Resume ledger`](records.md)).
 
 ## Isolation + safety
@@ -359,7 +344,8 @@ read — the largest single tool result was 51 KB while sessions reached 355 K t
 - [`climb.md`](climb.md) `Self-monitoring` — thresholds, checkpoint.
 - [`records.md`](records.md) — the ledger templates; the Experiment contract.
 - [`close.md`](close.md) — hard stops, the closure self-review, `final_report` schema.
-- `kernel_workflow/roles/{tech_lead,deep_engineer,verify_engineer,director}.md`, `kernel_workflow/kernel_lane.js`.
+- `expert_workflows/gluon_authoring/` (`workflow.js`, `README.md`, `roles/`) and
+  `kernel_workflow/roles/{director,benchmark_engineer,profile_engineer,verify_engineer}.md`.
 - `kernel_workflow/scripts/gpu_lock.sh` — shared GPU ownership (`scripts/gpu_lock.sh` shim),
   backed by `gpu_lease.py` for group allocations.
 

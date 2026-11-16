@@ -44,12 +44,12 @@ does not automatically combine that value with these noise estimates.
 
 ### Who owns what in GEAK
 
-GEAK's `kernel_workflow` injects this skill into its existing roles; GEAK's phases are the stage machine
-(`orchestration.md` maps stages to GEAK roles).
+GEAK runs this skill as the gluon_authoring expert workflow; its code is the stage machine and GEAK's
+roles keep measurement and acceptance (`orchestration.md` maps stages to roles).
 
 | | in GEAK |
 | --- | --- |
-| who owns the round loop / acceptance | GEAK: round loop (tech_lead plans, the deep_engineer runs the `deep_explore` direction), `verify_engineer` re-benchmark + Director validation, `MIN_IMPROVE` commit gate |
+| who owns the round loop / acceptance | the expert workflow's round loop (`gluon_engineer`, one round per call), `verify_engineer` re-benchmark + Director validation, `MIN_IMPROVE` commit gate |
 | harness / baseline | `benchmark_engineer` (COMMANDMENT, baseline timing); `scripts/create_harness.py` emits a `harness_lib`-timed harness when one has to be authored |
 | acceptance numbers come from | `verify_engineer` executing the frozen task commands; extracted-task runners use `measure_legs`. A/B screening is supplementary |
 | `scripts/ab_bench.py`, `plain_autotune.py`, in-process sweeps | **search / screening only** in the deep_engineer's own loop — rank, reject early, measure the window's noise band |

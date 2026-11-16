@@ -52,9 +52,9 @@ answer you want, the move is **to stay in plain Triton**, not to escalate and re
 
 ### The order to reach for these in
 
-**This is the one place the order is defined.** GEAK's `kernel_workflow` round loop injects this
-skill and owns acceptance (`verify_engineer`, Director); that decides who accepts a round, not which
-rung the deep_engineer tries first. The order an agent infers from mechanism-page word counts is close
+**This is the one place the order is defined.** GEAK's gluon_authoring expert workflow runs this
+skill and GEAK owns acceptance (`verify_engineer`, Director); that decides who accepts a round, not which
+rung the engineer tries first. The order an agent infers from mechanism-page word counts is close
 to the reverse of what production writes; nothing here changes a mechanism's gate — it changes which
 gate you go and check first.
 

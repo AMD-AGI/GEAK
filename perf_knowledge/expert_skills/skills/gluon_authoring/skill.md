@@ -1,6 +1,6 @@
 ---
 id: gluon_authoring
-title: "Author Gluon on AMD CDNA — gfx950 first, gfx942 as the downgrade: assert the champion, budget it, transcribe faithfully, recover the debt by hand, climb a hand-written pipeline — inside GEAK's own roles and round loop"
+title: "Author Gluon on AMD CDNA — gfx950 first, gfx942 as the downgrade: assert the champion, budget it, transcribe faithfully, recover the debt by hand, climb a hand-written pipeline — run as GEAK's gluon_authoring expert workflow"
 kind: expert_skill
 authors: [qiongz]
 scope: kernel
@@ -55,12 +55,13 @@ supersedes: []
 
 ## When to use
 
-**GEAK discovery:** with `use_gluon_skill=auto` (default `false`), Triton/Gluon lanes on gfx942/gfx950
-receive this method as a language reference.
-This does not promote `validation.status: draft` to a validated recipe. Triton lanes keep Triton
-unless a Gluon migration direction is explicitly chosen. Read
-[`references/method/geak-integration.md`](references/method/geak-integration.md) for the Claude Code
-Workflow call chain, entry modes, script contracts and TraceLens handoff.
+**How GEAK runs it:** as the expert workflow
+[`expert_workflows/gluon_authoring/workflow.js`](../../expert_workflows/gluon_authoring/README.md),
+launched directly. The workflow drives the stages below as code, opens every stage prompt with the
+references this file routes to, and refuses a round whose gate evidence is missing. GEAK's default
+kernel and e2e workflows do not load this skill, and `validation.status: draft` stays draft. Read
+[`references/method/geak-integration.md`](references/method/geak-integration.md) for the role mapping,
+script contracts and TraceLens handoff.
 
 You are taking a GPU kernel to peak in **Gluon** (`triton.experimental.gluon`, explicit tile programming)
 on AMD CDNA. **gfx950 (CDNA4 — MI355X / MI350X) is the main line** of everything below; **gfx942 (CDNA3 —
@@ -71,7 +72,7 @@ downgrade notes next to the mechanism they affect.
 This skill is the complete upstream `tile-programming-gluon` method, reorganized for GEAK: a hardware
 budget, a champion assertion, a faithful transcription, an attributed recovery of what transcription lost,
 and a climb through explicit layers whose pipeline is **written by hand**. It carries the Gluon API surface,
-the do-not-write lists and the tools, mapped onto GEAK's existing roles (`## Roles in GEAK`).
+the do-not-write lists and the tools, run by GEAK's gluon_authoring expert workflow (`## Roles in GEAK`).
 
 **Three entry modes** — settle which one you are in before anything else
 ([`references/method/entry.md`](references/method/entry.md)):
@@ -84,13 +85,12 @@ the do-not-write lists and the tools, mapped onto GEAK's existing roles (`## Rol
 
 Neither a bundle nor a measured incumbent is a **return to the front end** — this skill has no plain tier.
 
-**How it runs in GEAK — existing roles, no extra agents**
-([`references/method/orchestration.md`](references/method/orchestration.md)). GEAK's `kernel_workflow`
-provides this method to its existing roles when `use_gluon_skill=auto`; validated expert recipes remain
-separately opt-in (`use_expert_skills=true`); GEAK owns the round loop, the GPU lock,
-timing (`harness_lib`) and acceptance (`verify_engineer`, Director, `MIN_IMPROVE`). The skill is an
-**advisory prior**: follow its stages and evidence rules inside GEAK's rounds; it never overrides an on-box
-measurement. Who does what is in `## Roles in GEAK` below.
+**How it runs in GEAK — the gluon_authoring expert workflow**
+([`references/method/orchestration.md`](references/method/orchestration.md)). The workflow owns the stage
+machine and its gates; GEAK owns setup, the GPU lock, timing (`harness_lib`, the frozen COMMANDMENT) and
+acceptance (`verify_engineer`, the `MIN_IMPROVE` commit gate, Director). The skill is an **advisory
+prior** about tactics; its gates and records are the workflow's contract, and it never overrides an
+on-box measurement. Who does what is in `## Roles in GEAK` below.
 
 **Whether Gluon pays.** Gluon pays when the residual is something plain Triton cannot express: an explicit
 LDS swizzle/padding choice, LDS dedup, per-operand buffering, an authored pipeline or wave schedule, an
@@ -105,37 +105,29 @@ poisons every later delta), **never mixing transcription with optimization in on
 comparator** (re-tune plain before the track or after it, never during). Everything else is a route chosen
 from measurement.
 
-**Run the track as one `deep_explore` direction, not a fan-out.** Transcription is deterministic —
-parallel arms measure the same layouts and share the same bug — and the climb is stateful: what to try next
-comes from the IR and profile of the anchor the same engineer just built. So tech_lead dispatches **one**
-`deep_explore` direction and the `deep_engineer` carries the whole track in its own loop; bounded
-measurements (a timing, a knob probe, an anomaly check) are run by that engineer itself under `gpu_lock.sh`
-(`references/method/records.md ## 9. Experiment / hypothesis-test contract`).
+**One engineer carries the track, one round at a time — not a fan-out.** Transcription is
+deterministic — parallel arms measure the same layouts and share the same bug — and the climb is
+stateful: what to try next comes from the IR and profile of the anchor just built. So the workflow's
+`gluon_engineer` (the role the method files call the deep_engineer) works one tagged track workspace,
+one attributable round after another; bounded measurements (a timing, a knob probe, an anomaly check)
+are its own, under `gpu_lock.sh` (`references/method/records.md ## 9. Experiment / hypothesis-test
+contract`).
 
-**Tell the loop the track's shape.** A port lands **below** the comparator and climbs back; at
-the harness defaults that phase is invisible (no candidate, no saved patch, no verify, the loop stops two
-rounds in). There is no port mode — there are four launch args, checked as gate **G0** before dispatch:
-
-| arg | default | pass on a port (mode A) | why the default breaks a port |
-| --- | --- | --- | --- |
-| `candidate_floor` | `1.0` | from the debt `parity_gate.py` reports | a faithful anchor is below the comparator by construction and never enters the candidate list |
-| `max_no_improve` | `2` | `6` | ends the run before recovery finishes |
-| `budget` | `6` | `20` | counts directions; a `deep_explore` direction costs 2, so 20 ≈ 10 rounds |
-| `progress_delta` | `+min_improve` | `-0.05` | a port that gives ground while exploring reads as a stall |
-
-On mode B leave all four at their defaults — the mirror-image mistake keeps a stalled search alive. Run a
-port at **`mode: optimize`** (author mode would overwrite the source being transcribed), steer the round to
-a single **`deep_explore`** direction, and never let a ground-up rewrite replace the transcription. The
-measured calibration behind these values: `references/method/entry.md`.
+**The loop's shape follows the entry (G0).** A port lands **below** the comparator and climbs back;
+an ordinary optimize loop would never see that phase (no candidate, no verify, a stall two rounds in).
+The expert workflow sets the shape from the entry mode instead of from launch args: a port's anchor is
+kept on the track below the comparator but never accepted, it may give ground (`progress_delta`
+−0.05) and tolerates 6 non-improving rounds; an incumbent keeps the ordinary shape (the mirror-image
+mistake keeps a stalled search alive). The measured calibration behind these values:
+`references/method/entry.md`.
 
 ```js
 Workflow({
-  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
+  scriptPath: "<REPO>/perf_knowledge/expert_skills/expert_workflows/gluon_authoring/workflow.js",
   args: {
     kernel_path: "<TASK_DIR>", workflow_dir: "<REPO>/kernel_workflow",
-    mode: "optimize", target_language: "gluon", use_gluon_skill: "auto",
-    budget: 20, max_no_improve: 6, candidate_floor: 0.5 /* reset from parity_gate */, progress_delta: -0.05,
-    gpu_ids: "0",
+    gpu_ids: "0", budget: 6, entry_mode: "auto", target_arch: "gfx950",
+    deadline_epoch: 1794830000,   // optional, unix seconds
   },
 })
 ```
@@ -278,15 +270,17 @@ holds" is not a gate; it is the claim the gate tests.
 | --- | --- | --- | --- | --- |
 | G0 | loop shape matches the entry | inspect the four launch args | PORT shape set | defaults — setting them is the mirror-image mistake |
 | G1 | **champion** — the comparator can support a claim | `$SKILL/scripts/champion_gate.py --champion <bundle>` | on `plain_champion.json` | on an incumbent bundle |
-| G2 | **equivalence** — the anchor is the champion | `ttgir_bridge.py verify` + oracle + determinism + asm parity | before recovery | n/a (nothing transcribed) |
-| G3 | **parity** — the debt is paid, and if not, who owes it | `$SKILL/scripts/parity_gate.py …` | before the first climb | **must not be run as a gate**; diagnostic only, say so |
-| G4 | occupancy is not already lost | `$KT/probe.py measure --dir ir/<tag>/ --arch gfx950` | yes | yes |
-| G5 | **attribution** — the number is a number | `ab_bench.py` screen in the engineer's loop; acceptance = `verify_engineer` executing frozen task commands | every kept round | every kept round |
+| — | **equivalence** — the anchor is the champion | `ttgir_bridge.py verify` + oracle + determinism + asm parity | before recovery | n/a (nothing transcribed) |
+| G2 | **parity** — the debt is paid, and if not, who owes it | `$SKILL/scripts/parity_gate.py …` | before the first climb | **must not be run as a gate**; diagnostic only, say so |
+| G3 | occupancy is not already lost | `$KT/probe.py measure --dir ir/<tag>/ --arch gfx950` | yes | yes |
+| G4 | **attribution** — the number is a number | `ab_bench.py --permute` screen in the engineer's loop; acceptance = `verify_engineer` executing frozen task commands | every kept round | every kept round |
 
 On failure: **G0** stop before dispatch. **G1** stop, edit nothing, report `blocked` — a gate failure is the
-front end's to fix. **G2** do not recover on a wrong anchor. **G3** exit 2 = **do not climb**; the round's
-outcome is `recovery` against the suspect it closed. **G4** read **both** limiters (registers and LDS each
-cap workgroups per CU). **G5** a delta inside the measured spread or under `MIN_IMPROVE` is not a result.
+front end's to fix. **Equivalence** do not recover on a wrong anchor. **G2** exit 2 = **do not climb**; the
+round's outcome is `recovery` against the suspect it closed. **G3** read **both** limiters (registers and
+LDS each cap workgroups per CU). **G4** a delta inside the measured spread or under `MIN_IMPROVE` is not a
+result. The numbering is the method's (`references/method/index.md ### The four gates`); the expert
+workflow checks each one's evidence in code.
 
 **Two comparators, both carried in every result.** Correctness and equivalence are versus the **anchor**;
 performance is versus the **champion**. `vs_anchor` alone hides the question — the anchor is a regression you
@@ -305,7 +299,7 @@ that was not settled — return a `resweep_request` with the evidence rather tha
 **The comparator is the champion at its own best config, and the anchor is bound to that config** — the
 recovered layouts carry literal `warps_per_cta` and tile extents, so per-bucket best configs mean per-bucket
 dumps and anchors. Config knobs are not rounds and not this skill's job: a tile change re-recovers the whole
-layout set, so a suspect config is a `resweep_request` (returned to tech_lead, which hands it to GEAK's tuning), a suspect
+layout set, so a suspect config is a `resweep_request` (carried to the close for GEAK's plain tuning), a suspect
 structure is `structure_suspect.json`. Full contract, modes, the depth contract for coupled directions:
 [`references/method/entry.md`](references/method/entry.md).
 
@@ -337,7 +331,7 @@ python3 "$SKILL/scripts/ttgir_bridge.py" recover --ttgir ir/plain/plain.ttgir --
 python3 "$SKILL/scripts/recover_gluon.py" …  --with-skeleton                # anchor assembly
 python3 "$SKILL/scripts/ttgir_bridge.py" verify --plain ir/plain/plain.ttgir \
         --anchor ir/anchor/anchor.ttgir --arch gfx950                    # layout diff — never skipped
-python3 "$KT/probe.py" measure --dir ir/anchor/ --arch gfx950             # occupancy, compile-only (G4)
+python3 "$KT/probe.py" measure --dir ir/anchor/ --arch gfx950             # occupancy, compile-only (G3)
 ```
 
 Follow [`references/method/transcribe.md`](references/method/transcribe.md) — recover, **apply**, compile,
@@ -348,7 +342,7 @@ verify, record, attribute. What decides the stage:
 - **Declaring a layout is not applying it.** The recovered `gl.constexpr` preamble and the skeleton body are
   not connected; a body left on `AutoLayout` compiles, passes the oracle and is several times slower, and
   `verify` reports exactly the unapplied layouts as `missing`.
-- **Equivalence is four checks, all recorded (G2):** layout diff (`ttgir_bridge verify` — `PASS`, or
+- **Equivalence is four checks, all recorded:** layout diff (`ttgir_bridge verify` — `PASS`, or
   `RECONCILED` where every difference has a named structural cause), the numeric oracle at tolerance,
   determinism over ~40 launches, and asm parity (instruction mix **and** sequence). Budget several verify
   passes — it is a diff you converge on.
@@ -481,11 +475,10 @@ correctly diagnosed residual may not move because a second resource binds at the
 `deferred[]` on `partial`). `structure_suspect` and `resweep_request` are artifacts beside an honest outcome,
 never outcome values; `parity_unreached` goes in `caveats[]`. A Gluon result slower than the champion is
 `negative_revert_plain`. Budget left is not a stop — closing with rounds unspent and a climb below the floor is
-a finding against the close. Before an at-ceiling / keep-baseline / negative close, the deep_engineer writes the **closure
-self-review** (`closure_review.md` in its OUTPUT_DIR: strongest counter-evidence, untried alternatives,
-gotcha checks — advisory, on-disk evidence only) and returns it with its result; tech_lead reads it before
-planning the next round and Director quotes its strongest counter-evidence when arbitrating. Acceptance is
-GEAK's: `verify_engineer` re-benchmarks, Director validates.
+a finding against the close. Before an at-ceiling / keep-baseline / negative close, the workflow's
+`gluon_lead` writes the **closure self-review** (`closure_review.md`: strongest counter-evidence, untried
+alternatives, gotcha checks — advisory, on-disk evidence only); the workflow re-asks a non-win close that
+lacks it. Acceptance is GEAK's: `verify_engineer` re-benchmarks, Director validates.
 [`references/method/close.md`](references/method/close.md).
 
 ## Knobs & pitfalls
@@ -586,24 +579,29 @@ infrastructure owns locking, profiling entry and timing.
 
 ## Roles in GEAK
 
-No new roles and no extra agents: the method maps onto `kernel_workflow`'s existing roles and phases
-(`kernel_workflow/kernel_lane.js`), the same way GEAK's other expert skills are consumed.
+The method runs as the expert workflow
+[`expert_workflows/gluon_authoring/`](../../expert_workflows/gluon_authoring/README.md) (its README is the
+contract). It reuses the `kernel_workflow` roles that own correctness and acceptance and adds three for
+the method's own stages; the method files' "deep_engineer" (the one engineer carrying the track, the
+`deep_explore` direction of a plain GEAK run) is the workflow's `gluon_engineer`, and their "tech_lead"
+planning duties belong to `gluon_lead`.
 
-| stage | GEAK phase / role | what this skill asks of it |
+| stage | role (where its file lives) | what it is held to |
 | --- | --- | --- |
-| entry | Setup / Benchmark — `benchmark_engineer` (harness, `COMMANDMENT`, baseline); tech_lead | pin the comparator at the tuned plain config; G0 launch args; the champion assertion (G1) |
-| budget, evidence | Profile — `profile_engineer` (`kernel_workflow/scripts/profile_kernel.sh`); the deep_engineer re-profiles in its own loop | `hw_budget.py` before authoring; the four dials every round |
-| transcribe → recover → climb | Optimize — tech_lead dispatches **one** `deep_explore` direction; `deep_engineer` runs it | the whole track in one engineer's loop: faithful anchor + equivalence, attributed recovery to parity, one coupled layer per round, hand-written pipeline; no config sweep, no branch — a suspect structure/config comes back as `structure_suspect` / `resweep_request` in its result for tech_lead's next round |
-| measure | in-loop screening by the deep_engineer (`ab_bench.py`, under `gpu_lock.sh`); Verify — `verify_engineer` | acceptance numbers from independent verification of the frozen `COMMANDMENT.md` commands |
-| close | Report / Validate — tech_lead, Director | the closure self-review travels with the result; Director arbitrates and quotes it |
+| setup, baseline | `director` PHASE=setup, `benchmark_engineer` (kernel_workflow/roles) | isolated workspace, frozen baseline, `COMMANDMENT` |
+| evidence (baseline) | `profile_engineer` PHASE=baseline (kernel_workflow/roles) + `references/method/profile.md` | the four dials |
+| entry, budget | `gluon_lead` (expert workflow) | mode, champion bundle, G1 exit code, `hw_budget.py`, the track workspace |
+| transcribe → recover → climb | `gluon_engineer` (expert workflow), one round per call | equivalence, G2 (port), G3, G4, ATT on pipeline/scheduling layers — checked in code, re-asked once, else the round is rejected |
+| evidence audit | `evidence_auditor` (expert workflow) | cited artifacts exist; CPU-only re-runs of `probe.py measure` / `parity_gate.py` agree |
+| measure | `verify_engineer` (kernel_workflow/roles) | the only number that counts, from the frozen `COMMANDMENT.md` commands; commit gate `MIN_IMPROVE` |
+| close | `gluon_lead` (report, closure self-review); `director` PHASE=validate | outcome decided by the workflow; Director validates the delivered patch |
 
-The deep_engineer's return is GEAK's worker result, carrying in its notes and artifacts: champion/gate
-references, anchor and best measurements vs `champion_ms`, recovery state (`parity` / `parity_unreached`),
-checkpoint, rounds spent, and any `structure_suspect` / blocker / deferred work. The pack's record tools
-(`toolctl.py`, `canonical_record.py`, `round_record.py`, `close_audit.py`; stage cards in `runtime/`) are
-**optional bookkeeping** the engineer may use for those records — not a separate run mode. GPU access is
-always GEAK's `kernel_workflow/scripts/gpu_lock.sh` and existing multi-GPU leases (shared lock
-directory `/tmp/team_gpu_locks`). This pack does not provide a separate GPU scheduler.
+Each round leaves under `EVAL_DIR/gluon/round_N/`: `best_patch.diff` (vs the frozen baseline), its round notes,
+the gate outputs, IR, profile and ATT; the workflow's result carries both comparators for every round.
+The pack's record tools (`toolctl.py`, `canonical_record.py`, `round_record.py`, `close_audit.py`; stage
+cards in `runtime/`) stay **optional bookkeeping** for the engineer. GPU access is always GEAK's
+`kernel_workflow/scripts/gpu_lock.sh` (shared lock directory `/tmp/team_gpu_locks`). This pack does not
+provide a separate GPU scheduler.
 
 ## Sources
 

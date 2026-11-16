@@ -1018,95 +1018,62 @@ graded against. Reserve the coupled direction's rounds in the brief, before the 
 
 ## 7. How the entry modes map onto GEAK's launch
 
-GEAK `kernel_workflow` injects this skill (with `use_gluon_skill: "auto"`, `target_language: "gluon"`) into its
-existing roles; GEAK owns the round loop, the commit gate (`MIN_IMPROVE` 2%) and acceptance, and the skill
-is advisory (`orchestration.md`). Entry differs by mode only in how the round loop is told about it:
+GEAK runs this skill as the gluon_authoring expert workflow
+([`expert_workflows/gluon_authoring/`](../../../../expert_workflows/gluon_authoring/README.md)); GEAK's
+roles own setup, measurement and acceptance (`verify_engineer`, the `MIN_IMPROVE` 2% commit gate,
+Director), and the skill is advisory about tactics (`orchestration.md`). Entry differs by mode in which
+stages run and in the loop's shape:
 
 | | in GEAK |
 | --- | --- |
-| who runs the track | tech_lead dispatches one `deep_explore` direction; the deep_engineer runs entry → climb in its own loop |
-| how the port shape is set | **the four launch args** (G0, §7.1) |
-| champion bundle | GEAK's plain rounds produce it (same schema as the triton pack's `champion_emit.py`); `champion_gate.py` still runs |
-| `resweep_request` / `structure_suspect` | returned in the deep_engineer's result; tech_lead turns it into the next round's direction |
-| on a gate failure | report `blocked` (no edit); GEAK records it |
+| who runs the track | `gluon_lead` settles the mode and asserts the bundle; `gluon_engineer` runs transcribe → climb, one round per call |
+| how the port shape is set | by the workflow, from the entry mode (G0, §7.1) |
+| champion bundle | `gluon_lead` writes it from GEAK's frozen baseline (same schema as the triton pack's `champion_emit.py`); `champion_gate.py` runs and its exit code is checked in code |
+| `resweep_request` / `structure_suspect` | returned in the round object; carried to the close |
+| on a gate failure | the run stops before any edit and closes `blocked` |
 
 ### 7.1 GEAK: how these modes map onto GEAK's entry states, and G0
 
 | GEAK entry state (`skill.md ## When to use`, gate table) | mode | G1 bundle |
 | --- | --- | --- |
-| **PORT** — `from_backend: triton`: a tuned plain Triton kernel exists and is transcribed to Gluon | **A. Converted anchor** — the mode §6 is written for | `plain_champion.json` |
+| **PORT** — `from_backend: triton`: a tuned plain Triton kernel exists and is transcribed to Gluon (or the task ships the transcription with the plain kernel as its golden copy) | **A. Converted anchor** — the mode §6 is written for | `plain_champion.json` |
 | **IN-PLACE** — `from_backend: gluon`: the source is already explicit Gluon and already measured | **B. Incumbent anchor** | an *incumbent* bundle, read per §4 mode B |
 | resuming a checkpointed variant | **C. Re-entry** | re-assert whichever bundle the interrupted run used |
 
-**"Round shape" is GEAK's harness loop shape, and gate G0 checks it before anything is dispatched.**
-This skill owns no budget model, but a port has a shape the round loop has to be told about: a
-transcription lands **below** the comparator and climbs back, and at the stock defaults that phase is
-not representable at all — the transcription round produces no candidate, so no patch is saved, no
-verify runs, and the loop stops two rounds in. There is no "port mode" to switch on; there are
-**launch args**, and a port is a set of values for four of them. Pass them explicitly on the
-`kernel_workflow` launch:
+**"Round shape" is the loop's shape, and gate G0 is that it matches the entry.** A transcription lands
+**below** the comparator and climbs back; an ordinary optimize loop does not represent that phase at
+all — the transcription round produces no candidate, no verify runs, and the loop stops two rounds in.
+In GEAK's plain `kernel_workflow` the remedy was four launch args; the expert workflow encodes the same
+values from the entry mode:
 
-| arg | default | pass on a PORT | why the default breaks a port |
+| plain-loop arg | default | PORT value | how the expert workflow carries it |
 | --- | --- | --- | --- |
-| `candidate_floor` | `1.0` | from the measured debt (below) | a faithful anchor is below the comparator **by construction**, so it never enters the candidate list: no patch saved, no verify, `winner = null` |
-| `max_no_improve` | `2` | `6` | ends the run two rounds in, which is before the recovery round has finished |
-| `budget` | `6` | `20` | `budget` counts **directions**, and a `deep_explore` direction costs 2 — so `budget/2` is the achievable round count. 20 gives 10 rounds; 6 gives 3 |
-| `progress_delta` | `+min_improve` | `-0.05` | progress is measured against the best candidate ever seen, so a monotone climb never stalls at any value — but a port that **gives ground** while exploring reads as a stall. On the measured `pa_decode` run, leaving this at the default ends it at round 7 with 1.04× instead of round 10 with 1.25× |
+| `candidate_floor` | `1.0` | from the measured debt | the track keeps any verified-correct anchor and every verified improvement on it, however far below the comparator; only the commit gate (`MIN_IMPROVE` over the accepted best, starting at the frozen baseline) can accept — a sub-baseline candidate is **tracked**, never **banked** |
+| `max_no_improve` | `2` | `6` | `max_no_improve` defaults to 6 on a port (measured on `pa_decode`: wins at rounds 1, 8, 8, 9, 10) |
+| `budget` | `6` | `20` | `budget` counts engineer rounds directly — no direction cost to divide by |
+| `progress_delta` | `+min_improve` | `-0.05` | an `enabling_step` within −5 % of the track best is kept on a port |
 
-On a PORT all four must be set; on IN-PLACE **none of them may be** — the harness defaults are already
-right there, and a candidate floor below 1.0 plus a negative progress delta keep a genuinely stalled
-search alive, burning exactly the budget the port shape exists to protect. On a G0 failure, stop
-before dispatching: the loop will terminate two rounds into a port that is working exactly as
-designed. **G0 has silently cost three runs — all three of them ports.**
+On IN-PLACE none of these apply — a negative progress delta keeps a genuinely stalled search alive,
+burning exactly the budget the port shape exists to protect, so an incumbent gets `max_no_improve` 2
+and `progress_delta` 0. **G0 silently cost three runs of the plain loop — all three of them ports.**
 
-**Run the port at `mode: optimize`.** Author mode writes a fresh seed that *replaces* the source —
-which would overwrite the very kernel being transcribed, since the port needs that kernel's own
-`.ttgir`. So `mode` cannot tell the loop this is a port; nothing does except the four args, and
-omitting them is indistinguishable from an ordinary run. `kernel_lane.js`'s own comment on
-`CANDIDATE_FLOOR` describes the consequence:
-
-> *"a TRANSCRIPTION (plain Triton -> Gluon / TileLang / HIP) lands BELOW the comparator by
-> construction and climbs back, so at 1.0 its whole recovery phase is invisible -- no patch is saved,
-> no verify runs, `winner` is null every round, and the loop stalls on a run that is working as
-> designed."*
-
-A run that does not pass the four args behaves exactly as it always has. The commit gate is untouched
-by all of this and still requires beating the cumulative best by `min_improve`, so a sub-baseline
-candidate can be **tracked** but can never be **banked**.
-
-The whole launch, with the two measured values at their opening guesses — replace both once you have
-numbers (§7.2):
+The transcription is the anchor every later number is attributed against, so the track never lets a
+ground-up rewrite replace it: the transcribe round may not optimize, and every later round is one
+attributable change.
 
 ```js
 Workflow({
-  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
+  scriptPath: "<REPO>/perf_knowledge/expert_skills/expert_workflows/gluon_authoring/workflow.js",
   args: {
     kernel_path: "<TASK_DIR>",
     workflow_dir: "<REPO>/kernel_workflow",
-    mode: "optimize",              // NOT author — author would overwrite the source being transcribed
-    target_language: "gluon",
-    use_gluon_skill: "auto",      // opt in to the language reference (default false)
-    budget: 20,
-    max_no_improve: 6,             // measured on pa_decode; 4 ends one round before the payoff
-    candidate_floor: 0.5,          // opening guess — reset from the debt parity_gate.py reports
-    progress_delta: -0.05,
     gpu_ids: "0",
+    budget: 10,                    // engineer rounds; size the wall clock to them (§7.4)
+    entry_mode: "auto",           // or port | incumbent | fresh
+    target_arch: "gfx950",
   },
 })
 ```
-
-**Steer the round toward a single `deep_explore` direction rather than a specialist fan-out** — the
-harness cannot infer that from the args, so say it in `task`. In `kernel_workflow` terms the port is
-the **`deep_explore` track**: it runs alone in its own round, carries its own long
-measure→self-profile→rewrite loop, and has authority over kernel plus wrapper — which is the shape the
-transcribe→recover→climb track needs. Two reasons it is one track held by one agent, and they are
-different: the porting moves are *deterministic* (parallel arms do not explore alternatives, they all
-measure the same transcription, and share a bug in it identically), and the continuation is
-*stateful* (what to try next is chosen from the IR and profile of the anchor just built, which the
-agent that built it is holding and a fresh agent would have to rebuild). One mismatch to steer around:
-that track is documented as a minimally-steered ground-up rewrite, and here the opening is the
-opposite. **Do not let a ground-up rewrite replace the transcription** — the transcription *is* the
-anchor every later number is attributed against.
 
 ### 7.2 Set two of the four from measurement rather than taste
 
@@ -1119,7 +1086,8 @@ actually took — `parity_gate.py` reports it — rather than picking a round nu
 *(The deeper point, worth sending upstream rather than working around: on a port, "is this a
 candidate" is the question `parity_gate.py` answers properly, as a recovery verdict with an
 attribution. A fixed ratio floor is a proxy for it, and the right proxy value is not knowable before
-the anchor is measured.)*
+the anchor is measured.)* The expert workflow takes that route: its track has no ratio floor, and
+parity is decided by `parity_gate.py`'s exit code together with verify's measured ratio to the champion.
 
 ### 7.3 Why the gates are executable
 

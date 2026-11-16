@@ -1,47 +1,56 @@
 # GEAK integration and execution contracts
 
-## Claude Code Workflow discovery
+## How GEAK runs this pack
 
 GEAK runs deterministic JavaScript Workflows inside Claude Code. This pack is an in-repository
-expert-skill resource (`skill.md`), not a separately installed `.claude/skills` plugin. No global
-Claude settings, extra agent or duplicate skill installation is required.
+expert-skill resource (`skill.md`), not a separately installed `.claude/skills` plugin. GEAK runs it
+through one entry point, the **gluon_authoring expert workflow**
+([`expert_workflows/gluon_authoring/workflow.js`](../../../../expert_workflows/gluon_authoring/README.md)),
+launched directly. Nothing in `kernel_workflow/` or `e2e_workflow/` loads this pack: their default
+runs are unchanged, and `use_expert_skills=true` still selects only `validated` recipes, so this
+`draft` is never applied there.
 
-The call chain is `e2e_workflow.js` → `kernel_workflow.js` → `kernel_lane.js`, or a direct call to
-`kernel_workflow.js`. The dispatcher forwards `use_gluon_skill` to normal and bakeoff lanes; the e2e
-workflow forwards it through its central lane-argument builder. The interface `run_e2e.py` also
-preserves an explicit handoff value. After Setup resolves the actual GPU, the lane appends
-`gluonSkillBlock` to tech_lead, author_engineer, engineer, deep_engineer and profile_engineer prompts,
-including the inline Optimize prompt. Each role reads the entry and only the current stage reference.
+The workflow is the stage machine; this pack is the method it runs:
 
-| Condition | Behavior |
-| --- | --- |
-| `use_gluon_skill=auto` (or `true`), gfx942/gfx950, Triton/Gluon target | Load the method as language guidance |
-| `use_gluon_skill=false` (default) | No method injection, including nested/bakeoff lanes |
-| Other backend or architecture | No Gluon method injection |
-| Triton target | Keep Triton; inspect champion/config and applicable diagnostic guidance; migrate only when explicitly selected |
-| Gluon target with Triton source | Port admission, tuned champion, transcription, recovery, climb |
-| Gluon target with Gluon source | Incumbent baseline, skip transcription and parity gate, optimize in place |
-| Fresh authoring | API/layout guidance; do not invent champion or parity evidence |
+| workflow stage | role | reads (opened at the top of its prompt) |
+| --- | --- | --- |
+| Setup, Benchmark | GEAK `director`, `benchmark_engineer` | their own role files (frozen baseline, `COMMANDMENT`) |
+| Profile | GEAK `profile_engineer` | [profile.md](profile.md) `## 3.1` |
+| Entry | `gluon_lead` | [`skill.md`](../../skill.md), [entry.md](entry.md) (modes, Stage-Entry, bundle) |
+| Budget | `gluon_lead` | [budget.md](budget.md), `../workloads/index.md` |
+| Transcribe / Author | `gluon_engineer` | [transcribe.md](transcribe.md) / `../gluon/index.md` |
+| Recover | `gluon_engineer` | [recover.md](recover.md), `../tile-programming/pipeline.md`, the repaid layer's files |
+| Climb | `gluon_engineer` | [climb.md](climb.md), [profile.md](profile.md), [benchmark-hygiene.md](benchmark-hygiene.md), the layer's files |
+| (every round) | `evidence_auditor` | [index.md](index.md) `### The four gates` |
+| Measure | GEAK `verify_engineer` | its own role file |
+| Close, Validate | `gluon_lead`; GEAK `director` | [close.md](close.md) |
 
-Inspect actual imports and kernel bodies to identify the source backend; a filename is insufficient.
+Entry modes are settled from the bodies, not the names (a filename is insufficient):
+
+| source / frozen baseline | mode | what runs |
+| --- | --- | --- |
+| tuned plain Triton | port | champion bundle + G1, transcribe, recover to parity (G2), climb |
+| Gluon transcription, plain Triton golden copy | port (`source_is_anchor`) | champion measured by verify, provided anchor verified, recover, climb |
+| explicit Gluon, nothing converted | incumbent | incumbent bundle + G1, climb; no parity gate |
+| no Triton champion (torch / HIP / library) | fresh | author the first Gluon kernel from the API references, climb; no champion or parity evidence is invented |
+
 The method is currently `draft`: structural/script checks do not prove its expected speedup.
-`use_expert_skills=true` remains a separate opt-in for validated recipe selection. Read the registry's
-status and selector, honor wildcard/list matches, and never promote a draft or bypass measured gates.
 
 ## Calling from Claude Code
 
 ```javascript
 Workflow({
-  scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
+  scriptPath: "<REPO>/perf_knowledge/expert_skills/expert_workflows/gluon_authoring/workflow.js",
   args: { kernel_path: "<TASK>", workflow_dir: "<REPO>/kernel_workflow",
-          mode: "optimize", target_language: "gluon", use_gluon_skill: "auto",
-          gpu_ids: "<allocated-pool>" }
+          gpu_ids: "<allocated-pool>", budget: 6, entry_mode: "auto", target_arch: "gfx950",
+          deadline_epoch: 1794830000 /* optional */ }
 })
 ```
 
-For a port, set the recovery budget/candidate-floor arguments described in [entry.md](entry.md).
-The default discovery does not rewrite those launch arguments. GEAK owns planning, scheduling,
-acceptance and the immutable oracle. `toolctl` is optional bookkeeping inside the existing role.
+The workflow sets the loop shape (G0) from the entry mode; there are no port launch args to pass.
+GEAK owns setup, the immutable oracle, GPU locking, measurement and acceptance; the workflow owns the
+stage order and refuses a round whose gate evidence is missing. `toolctl` is optional bookkeeping
+inside the engineer's round.
 
 ## Script boundaries
 
@@ -161,15 +170,13 @@ it does not silently select another kernel.
 From the repository root:
 
 ```bash
-node kernel_workflow/scripts/test_gluon_flow_smoke.js
-node kernel_workflow/scripts/test_gluon_skill_routing.js
+for t in perf_knowledge/expert_skills/expert_workflows/gluon_authoring/tests/test_*.js; do node "$t"; done
 python3 -m pytest -q perf_knowledge/expert_skills/_contribute/test_gluon_flow_smoke.py
 ```
 
-The JavaScript smoke executes the real workflow with synthetic role responses:
-Setup, optional Author, Analyze, Benchmark, Profile, Engineer, Verify, Commit,
-Reprofile, Report and Director validation. Author/verification failures stop
-adoption; a verified, committed winner updates the incumbent and triggers reprofile.
-The Python smoke runs real stage/context/tool CLIs and payload capture with CPU
-fixtures. These checks establish control flow and artifact handoff, not model
-behavior, numerical correctness, GPU speedup or promotion of this draft method.
+The JavaScript tests execute the real expert workflow with synthetic role responses: stage order per
+entry mode, the required references at the top of each prompt, evidence re-ask/reject, acceptance by
+verify and the commit gate, and the parity / G1 / deadline / budget stops. The Python smoke runs real
+stage/context/tool CLIs and payload capture with CPU fixtures. These checks establish control flow and
+artifact handoff, not model behavior, numerical correctness, GPU speedup or promotion of this draft
+method.

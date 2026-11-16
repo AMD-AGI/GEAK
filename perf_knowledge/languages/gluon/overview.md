@@ -74,9 +74,10 @@ of warp-specialization as the route to peak.
   climb → close; a **hand-written pipeline** first, re-injecting plain's pipeliner only as a diagnostic or
   last resort); [`reference.md`](../../expert_skills/skills/gluon_authoring/reference.md) routes each stage
   and layer to one file under `references/` (method, gluon API, tile-programming layers, hardware,
-  workloads, pitfalls / do-not-write lists). Advisory, automatically supplied on supported Triton/Gluon lanes (`use_gluon_skill=auto`);
-  it runs inside GEAK's existing roles (one `deep_explore` direction carried by `deep_engineer`, acceptance by
-  `verify_engineer` and Director) — no extra roles or agents.
+  workloads, pitfalls / do-not-write lists). Advisory about tactics; GEAK runs it as the
+  [`gluon_authoring` expert workflow](../../expert_skills/expert_workflows/gluon_authoring/README.md)
+  (launched directly; stages and gates in code, acceptance by `verify_engineer` and Director). The default
+  kernel and e2e workflows do not load it.
 
 ## Sources
 - From Naive to Near-Peak: GEMM Kernels with Gluon (MI350/MI355, ROCm 7.0): https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html

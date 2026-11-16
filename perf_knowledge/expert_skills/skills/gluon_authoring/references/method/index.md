@@ -21,11 +21,11 @@ merely because they exist.
 
 | | |
 | --- | --- |
-| who drives | GEAK `kernel_workflow` injects this skill (when `use_gluon_skill=auto`, on supported Triton/Gluon lanes) into its existing roles; GEAK's phases (Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine. tech_lead dispatches **one** `deep_explore` direction; the deep_engineer carries entry → climb in its own loop |
+| who drives | the gluon_authoring expert workflow ([`expert_workflows/gluon_authoring/workflow.js`](../../../../expert_workflows/gluon_authoring/README.md)): its code is the stage machine (Setup → Benchmark → Profile → Entry → Budget → Transcribe → Recover → Climb → Close → Validate) and checks every gate's evidence; `gluon_lead` runs entry/budget/close, `gluon_engineer` (this pack's "deep_engineer") one round of the track per call |
 | the skill's role | advisory: what to measure, which layer, which gate a round owes, the record contract |
 | acceptance timing | `verify_engineer` / `measure_legs` via `e2e_workflow/scripts/harness_lib.py`; commit gate `MIN_IMPROVE` = 2% (a measured noise band only stricter); Director validates and arbitrates; `ab_bench.py` is screening only |
-| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; existing multi-GPU leases when the task requires them |
-| requests (`resweep_request`, `structure_suspect`) and the closure self-review | in the deep_engineer's `worker_result`; tech_lead turns a request into the next round's direction, Director quotes the self-review when arbitrating |
+| GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`); one track, one GPU command at a time |
+| requests (`resweep_request`, `structure_suspect`) and the closure self-review | in the round's return; the workflow carries requests to the close, where `gluon_lead` writes the closure self-review for any non-win |
 
 The evidence owed is the same in every round: **budget / roofline before authoring**, and a **re-profile
 every round**. Detail: [`orchestration.md`](orchestration.md).
@@ -149,7 +149,7 @@ command's output, because "the precondition holds" is the claim the gate exists 
 
 | gate | fires | what it refuses | GEAK |
 | --- | --- | --- | --- |
-| — | before anything is dispatched | a port launched with the ordinary loop shape: at the stock defaults a transcription lands below the comparator, never becomes a candidate, and the loop stops two rounds in | **G0** — the `kernel_workflow` launch args. PORT: `candidate_floor` (from the measured debt; opening guess 0.5), `max_no_improve` 6, `budget` 20, `progress_delta` −0.05, `mode: optimize`. IN-PLACE (incumbent): leave the defaults — setting them is the mirror-image mistake |
+| — | before anything is dispatched | a port launched with the ordinary loop shape: at the stock defaults a transcription lands below the comparator, never becomes a candidate, and the loop stops two rounds in | **G0** — the loop shape. The expert workflow sets it from the entry mode: PORT keeps the below-comparator anchor on its track (never accepted), `max_no_improve` 6, `progress_delta` −0.05; IN-PLACE (incumbent) keeps the ordinary shape — the port shape there is the mirror-image mistake ([`entry.md`](entry.md) §7.1) |
 | **champion** (`champion_gate.py`) | before the first round | a bundle whose numbers cannot be re-checked — an unpinned source, a TTGIR from the wrong config, a strawman comparator ([`entry.md`](entry.md) Stage-Entry) | **G1** — on `plain_champion.json` (port) or an incumbent bundle; failure ⇒ stop, edit nothing, report `blocked` |
 | **equivalence** | at the end of transcription | an anchor that is not the champion: layout-diff (`ttgir_bridge verify`), numeric oracle at tolerance, determinism (~40 launches, race), asm parity — all four, names-independent ([`transcribe.md`](transcribe.md)) | no G-number: part of the transcription round; its four results are recorded in the round log |
 | **parity** (`parity_gate.py`) | between RECOVER and CLIMB | calling a recovery a win, and climbing on top of an unattributed transcription defect ([`recover.md`](recover.md) Stage-Recover) | **G2** — port only, before the FIRST climb; exit 2 ⇒ DO NOT CLIMB, the round is `recovery`. Incumbent: must **not** be run as a gate (equal sides → a vacuous CLEARED); usable as a diagnostic, say which |
