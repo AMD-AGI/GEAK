@@ -6,7 +6,8 @@ description: Optimize a frozen-harness unit-test task with GEAK's own kernel_wor
 # geak-kernel-workflow
 
 The **default** implementation of the optimize stage. It hands each task directory
-extracted by the profile stage (`tasks/<kernel>/`, containing `unittest.py`, `meta.json`,
+extracted by the UT stage (or legacy combined profile) under `$TASKS_DIR`
+(`tasks/<kernel>/`, containing `unittest.py`, `meta.json`,
 `cases.py` and `kernel_src/`) to GEAK's `kernel_workflow/kernel_workflow.js`, which edits
 the task's declared kernel sources.
 

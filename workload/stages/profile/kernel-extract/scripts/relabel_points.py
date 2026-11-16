@@ -45,6 +45,15 @@ def observed_rows(obs, phase):
             for r in obs.get("raw_decode_rows", []) if r.get("running")]
 
 
+def observation_partitions(obs, phase):
+    """Discrete shared-sampling domains; legacy plans do not request this check."""
+    if phase == "PREFILL":
+        return [[phase, r["new_token"], max(1, r.get("new_seq") or 1), r.get("cuda_graph")]
+                for r in obs.get("raw_prefill_rows", []) if r.get("new_token")]
+    return [[phase, r["running"], r["running"], r.get("cuda_graph")]
+            for r in obs.get("raw_decode_rows", []) if r.get("running")]
+
+
 def point_context(p):
     if p["phase"] == "PREFILL":
         if p.get("context_tokens"):
@@ -52,6 +61,51 @@ def point_context(p):
         n = max(1, int(p.get("running") or 1))
         return max(1.0, ((p.get("cached_tokens") or 0) + (p.get("new_tokens") or 0)) / n)
     return float(p.get("context_tokens") or 1.0)
+
+
+def prefill_probe_context(probe):
+    """Recover per-request KV length from the requests actually sent by the probe.
+
+    The planner's context is an annotation: a zero-prefix request may be longer,
+    and prefix-page alignment changes the achieved query length without changing
+    its prompt total. Never add the achieved query onto the planned cached count.
+    For split probes retain the per-sequence totals and use their mean, matching
+    the context axis used by observed_rows(). Warm-up requests are not evidence
+    for the measured request.
+    """
+    journal = probe.get("journal") or []
+    planned = None
+    for i, event in enumerate(journal):
+        if event.get("event") != "prefill_plan":
+            continue
+        new = event.get("per_sequence_new") or []
+        cached = event.get("per_sequence_cached") or []
+        if new and len(new) == len(cached):
+            totals = [int(n) + int(c) for n, c in zip(new, cached)]
+            if all(n > 0 for n in totals):
+                planned = (totals, i)
+    requests = {}
+    for i, event in enumerate(journal):
+        label = event.get("label", "")
+        if (event.get("event") == "request_done" and label.startswith("prefill_seq")
+                and label[len("prefill_seq"):].isdigit() and event.get("prompt_tokens")):
+            requests[int(label[len("prefill_seq"):])] = (int(event["prompt_tokens"]), i)
+    expected = len(planned[0]) if planned else len(requests)
+    if expected and set(requests) == set(range(expected)):
+        totals, indices = zip(*(requests[n] for n in range(expected)))
+        basis = "probe_request_prompt_tokens"
+    elif planned:
+        totals, index = planned
+        indices = [index]
+        basis = "probe_prefill_plan"
+    else:
+        return None
+    return sum(totals) / len(totals), {
+        "basis": basis,
+        "journal_entries": list(indices),
+        "per_sequence_prompt_tokens": list(totals),
+        "aggregation": "mean_per_sequence",
+    }
 
 
 def bands_2d(rows, tol, tol_ctx, phase, live):
@@ -114,12 +168,18 @@ def relabel(obs, plan, census_dir, probe_dir, tol, tol_ctx=None):
             continue
         c = json.load(open(cpath))
         key = "new_tokens" if p["phase"] == "PREFILL" else "batch_size"
+        planned_context = point_context(p)
         p["planned_shape"] = p.get(key)
         p["achieved_shape"] = c["achieved_shape"]
         p[key] = c["achieved_shape"]
+        if p.get("sampling_partition"):
+            p["sampling_partition"] = list(p["sampling_partition"])
+            p["sampling_partition"][1] = c["achieved_shape"]
+            if p["phase"] == "DECODE":
+                p["sampling_partition"][2] = c["achieved_shape"]
         if p["planned_shape"]:
             p["achieved_over_planned"] = round(c["achieved_shape"] / p["planned_shape"], 4)
-        p["achieved_context"] = point_context(p)
+        p["achieved_context"] = planned_context
         p["census"] = os.path.abspath(cpath)
         p["census_instances"] = c["instances"]
         for tag in ("_r2", ""):
@@ -127,6 +187,14 @@ def relabel(obs, plan, census_dir, probe_dir, tol, tol_ctx=None):
             if os.path.exists(jp):
                 j = json.load(open(jp))
                 p["probe_status"], p["probe_result"] = j.get("status"), os.path.abspath(jp)
+                if p["phase"] == "PREFILL":
+                    context = prefill_probe_context(j)
+                    if context is not None:
+                        p["achieved_context"], evidence = context
+                        p["achieved_context_evidence"] = dict(
+                            evidence, probe_result=os.path.abspath(jp))
+                        if p.get("sampling_partition"):
+                            p["sampling_partition"][2] = len(evidence["per_sequence_prompt_tokens"])
                 break
         p["counted"] = True
         pts.append(p)
@@ -135,21 +203,26 @@ def relabel(obs, plan, census_dir, probe_dir, tol, tol_ctx=None):
     for phase in ("PREFILL", "DECODE"):
         live = [p for p in pts if p["phase"] == phase and p.get("counted")]
         rows = observed_rows(obs, phase)
+        partitions = observation_partitions(obs, phase)
         if not live:
             if rows:
                 summary[phase] = {"total_instances": sum(r[1] for r in rows),
                                   "note": "no counted point: this phase has no measured cost"}
             continue
         acc = {p["point_id"]: {"instances": 0, "max_ratio": 1.0} for p in live}
-        far, total = [], 0
+        far, total, outside_partition = [], 0, 0
         lt, lc = math.log(tol), math.log(tol_ctx) if tol_ctx else None
-        for shape, n, ctx in rows:
+        for (shape, n, ctx), partition in zip(rows, partitions):
             if lc:
                 d = lambda p: max(abs(math.log(shape / p["achieved_shape"])) / lt,  # noqa: E731
                                   abs(math.log(ctx / p["achieved_context"])) / lc)
             else:
                 d = lambda p: abs(math.log(shape / p["achieved_shape"])) / lt  # noqa: E731
-            best = min(live, key=d)
+            compatible = [p for p in live if not p.get("sampling_partition")
+                          or p["sampling_partition"] == partition]
+            best = min(compatible or live, key=d)
+            if not compatible:
+                outside_partition += n
             ratio = math.exp(abs(math.log(shape / best["achieved_shape"])))
             if lc:
                 ratio = max(ratio, math.exp(abs(math.log(ctx / best["achieved_context"]))))
@@ -157,7 +230,7 @@ def relabel(obs, plan, census_dir, probe_dir, tol, tol_ctx=None):
             e["instances"] += n
             e["max_ratio"] = max(e["max_ratio"], ratio)
             total += n
-            if d(best) > 1.0:
+            if not compatible or d(best) > 1.0:
                 far.append((shape, n, best["point_id"], ctx))
         for p in live:
             e = acc[p["point_id"]]
@@ -184,6 +257,7 @@ def relabel(obs, plan, census_dir, probe_dir, tol, tol_ctx=None):
             "points": [p["point_id"] for p in live],
             "total_instances": total,
             "instances_outside_tolerance": out_n,
+            "instances_outside_sampled_partition": outside_partition,
             "instances_outside_tolerance_pct": round(100.0 * out_n / total, 3) if total else 0.0,
             "proxy_mass_outside_tolerance_pct": round(
                 100.0 * sum(b["proxy_mass"] for b in ub) / mass, 3) if mass else 0.0,

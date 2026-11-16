@@ -140,7 +140,7 @@ actual signature and math; do not replace unresolved calls with `torch.mm`.
 The unmodified extraction should preserve baseline dispatch and output behavior
 on equivalent inputs through the shared harness's separate legs. Expect bitwise identity
 for deterministic unchanged code; where it does not hold, establish the real floor with
-`kernel_self_noise.py` rather than asserting a contract — on this deployment one MoE gemm
+the fixed driver's repeated baseline outputs (`noise_relative` bounds) — on this deployment one MoE gemm
 is byte-exact across repeats while its `epilog='atomic'` sibling carries a genuine 2-ULP
 accumulation-order noise floor, and only a measurement tells them apart. Optimized code may
 change names/grids/counts: validate its intended execution independently while preserving

@@ -1,42 +1,10 @@
 #!/usr/bin/env python3
-"""Shared harness measurement library for GEAK e2e kernel tasks.
+"""Frozen task utilities: device execution, output isolation, overlays and weighted timing.
 
-This is the SINGLE source of truth for how an isolated kernel task measures speedup and checks
-correctness. Both the shared bake-off (`op_bench.py`) and every per-task `unittest.py` the Kernel
-Extractor generates MUST import these helpers instead of hand-rolling a timing loop / correctness
-check. Vendored (copied) into each `<short_name>_task/` at extract time so the task stays
-self-contained + immutable + sha-checkable.
-
-It exists to close two systematic "isolated win / e2e loss" holes that a naive per-op harness has:
-
-(a) DEPLOYMENT-REPRESENTATIVE TIMING — score device work, not host launch/dispatch overhead, and read
-    memory-bound kernels COLD from HBM like the live server does.
-    The classic exploit: time the launcher in a tight `for _ in range(50): fn(); sync()` wall-clock loop.
-    For decode shapes (small M) the wall clock is floored by per-call Python dispatch, NOT the GEMM. A
-    candidate then wraps the op in a CUDA graph and `graph.replay()` — collapsing a dispatch floor that
-    in the LIVE server is ALREADY gone (decode runs inside the server's own CUDA graph). Result: a huge
-    isolated "speedup" that evaporates on integration.
-    Fix: `time_op` scores CUDA-EVENT DEVICE time (the GPU timeline between two events), which excludes
-    host launch/dispatch — so collapsing dispatch buys nothing and no `inner` amortization is
-    needed (inner=1). That exclusion is CONDITIONAL, so `time_op` also reports `primed`/`host_ms` saying
-    how far it holds (the receipt `oracle_freezer` prints and `director` gates on).
-    WALL time is measured alongside as a reference only. It also FLUSHES the last-level/
-    Infinity cache before each sample so a memory-bound decode kernel reads its weights cold from HBM,
-    matching deployment (the model working set >> cache, evicted between decode steps). `graph=True` times
-    a captured-graph replay (the exact decode deployment context) with the same event+flush method.
-
-(b) MULTI-ACCESS CORRECTNESS + AMDAHL SANITY.
-    - `check_correct_multi` runs several DISTINCT-input cases, keeps ALL returned tensors live, and
-      only THEN compares each to its oracle. A candidate that returns a persistent/shared `static_out`
-      buffer (the graph-replay shortcut) is caught: the later call overwrites the earlier return, so
-      the earlier comparison fails. It also asserts distinct output storage + no cross-call mutation
-      (`assert_independent_outputs`). A launcher whose contract is "callable(args) -> fresh out" must
-      not alias.
-    - `amdahl_ceiling` / `amdahl_check` bound the e2e delta a kernel at `pct_gpu` GPU-time can produce
-      given its isolated speedup. `amdahl_ceiling` is surfaced by op_bench as `amdahl_ceiling_e2e_pct`
-      so the isolated bake-off already reports the MAX plausible e2e win. `amdahl_check` is the verdict
-      form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
-      the ceiling is box drift / measurement error, not the kernel.
+UT correctness is owned by ut_contracts/ut_driver.py and its family contract. This
+module supplies the shared primitives and optimizer timing; it has no second UT
+suite or persistent captured-oracle format. Scaffolds copy it into each task so
+existing tasks retain their reviewed helper snapshot.
 """
 import json
 import math
@@ -594,124 +562,6 @@ def flatten_outputs(out):
     return []      # scalars/None carry no tolerance semantics and are not compared
 
 
-def to_device_like(ref, dev):
-    """Move a recorded oracle entry (tensor or container of tensors) onto `dev`."""
-    if isinstance(ref, dict):
-        return {k: to_device_like(v, dev) for k, v in ref.items()}
-    if isinstance(ref, tuple) and hasattr(ref, "_fields"):
-        return type(ref)(*(to_device_like(o, dev) for o in ref))
-    if isinstance(ref, (tuple, list)):
-        return type(ref)(to_device_like(o, dev) for o in ref)
-    return ref.to(dev) if hasattr(ref, "to") else ref
-
-
-def reconstruct_captured(obj, device="cpu"):
-    """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
-    if isinstance(obj, dict) and obj.get("__needs_regen__"):
-        # structure_only capture: the recorded output came from the real operands, which the
-        # file no longer holds, so there is nothing here to compare against. Raising is the
-        # point -- a placeholder that reached a correctness gate would pass it vacuously.
-        raise ValueError(
-            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
-            "output has not been regenerated. Run scripts/regen_reference.py against it "
-            "inside the serving container and point the task at the regenerated file.")
-    if isinstance(obj, dict) and obj.get("__synth__"):
-        raise ValueError(
-            "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
-            "first with capture_shapes.materialize_synth(...), which rebuilds it from the "
-            "recorded seed; do NOT rebuild operands through the serving stack at UT time.")
-    if isinstance(obj, dict) and obj.get("__tensor__"):
-        t = obj["data"]
-        return t.to(device) if hasattr(t, "to") else t
-    if isinstance(obj, dict) and set(obj.keys()) == {"__repr__"}:
-        return obj["__repr__"]
-    if isinstance(obj, dict):
-        return {k: reconstruct_captured(v, device) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(reconstruct_captured(v, device) for v in obj)
-    return obj
-
-
-def load_reference_io(path, map_location="cpu"):
-    """Load a capture_shapes oracle blob (supports optional ``shared`` weight pool)."""
-    torch = _torch()
-    try:
-        blob = torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        blob = torch.load(path, map_location=map_location)
-    if not isinstance(blob, dict):
-        raise TypeError(f"reference_io.pt must be a dict, got {type(blob)}")
-    return blob
-
-
-def resolve_oracle_shared(obj, shared):
-    """Expand ``{"__shared__": key}`` refs written by capture_shapes share_large/moe_slim."""
-    if isinstance(obj, dict) and set(obj.keys()) == {"__shared__"}:
-        key = obj["__shared__"]
-        if key not in shared:
-            raise KeyError(f"oracle shared ref missing: {key!r}")
-        return shared[key]
-    if isinstance(obj, dict):
-        return {k: resolve_oracle_shared(v, shared) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(resolve_oracle_shared(v, shared) for v in obj)
-    return obj
-
-
-def iter_eager_cases_from_oracle(path, device="cpu"):
-    """Yield ``{args, ref, sig, regime}`` one record at a time (memory-friendly for multi-GiB MoE)."""
-    blob = load_reference_io(path, map_location="cpu")
-    shared = blob.get("shared") or {}
-    for record in blob.get("records") or []:
-        kwargs = resolve_oracle_shared(record.get("kwargs") or {}, shared)
-        args_pos = resolve_oracle_shared(record.get("args") or (), shared)
-        kwargs = reconstruct_captured(kwargs, device=device)
-        args_pos = reconstruct_captured(args_pos, device=device)
-        ref = reconstruct_captured(
-            resolve_oracle_shared(record.get("output"), shared), device=device)
-        args = kwargs if isinstance(kwargs, dict) and kwargs else args_pos
-        if isinstance(args, dict) and isinstance(args_pos, (list, tuple)) and args_pos:
-            names = ["hidden_states", "w1", "w2", "topk_weight", "topk_ids"]
-            for name, value in zip(names, args_pos):
-                args.setdefault(name, value)
-        yield {
-            "args": args,
-            "ref": ref,
-            "sig": record.get("sig", ""),
-            "regime": record.get("regime", ""),
-        }
-
-
-def eager_cases_from_oracle(path, device="cpu"):
-    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
-    return list(iter_eager_cases_from_oracle(path, device=device))
-
-
-def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
-    """Like ``check_correct_multi`` but only keeps ``max_keep_live`` outputs resident."""
-    per_case = []
-    all_ok = True
-    live = []
-    first_two_args = []
-    for case in case_iter:
-        out = call(case["args"])
-        ok, err = correct(out, case["ref"], tol)
-        all_ok = all_ok and ok
-        per_case.append({"case": case.get("sig", ""), "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
-        if len(first_two_args) < 2:
-            first_two_args.append(case["args"])
-        live.append(out)
-        if len(live) > max(1, int(max_keep_live)):
-            live.pop(0)
-    if len(first_two_args) >= 2:
-        ok, reason = assert_independent_outputs(call, first_two_args[0], first_two_args[1])
-        all_ok = all_ok and ok
-        per_case.append({"case": "output_independence", "correct": ok,
-                         "max_rel_err": None, "note": reason})
-    return all_ok, per_case
-
-
 def correct(out, ref, tol):
     """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
 
@@ -791,7 +641,10 @@ def _correct_one_nonfinite(out, ref, tol):
         return False, float("inf")
 
 
-def assert_independent_outputs(call, args_a, args_b):
+_NO_OUTPUT = object()
+
+
+def assert_independent_outputs(call, args_a, args_b, *, first_output=_NO_OUTPUT):
     """Catch a candidate that returns a shared/persistent buffer (the graph-replay `static_out`
     shortcut). Call with two DIFFERENT inputs and verify:
       1. the first output is NOT mutated by the second call (snapshot compare), and
@@ -803,7 +656,7 @@ def assert_independent_outputs(call, args_a, args_b):
     raise AttributeError here and fail an otherwise-correct multi-output op."""
     torch = _torch()
     try:
-        parts_a = flatten_outputs(call(args_a))
+        parts_a = flatten_outputs(call(args_a) if first_output is _NO_OUTPUT else first_output)
         if not parts_a:
             return False, "no_tensor_output: the launcher returned no tensor to check"
         snap = [t.detach().clone() for t in parts_a]
@@ -831,186 +684,7 @@ def assert_independent_outputs(call, args_a, args_b):
         return False, f"independence_check_raised: {e!r}"
 
 
-def check_correct_multi(call, cases, tol):
-    """Run every case, KEEP all outputs live, THEN compare each to its oracle (this is what defeats a
-    shared-buffer return — a later call would have overwritten an earlier return before we check it).
-
-    `cases` is a list of dicts: {"args": <opaque args passed to call>, "ref": <golden tensor>,
-    "sig": <label>}. `call(args) -> out`. Returns (all_ok, per_case_list). When there are >=2 cases it
-    also runs `assert_independent_outputs` on cases[0] and cases[1] (the shared-storage/data_ptr check
-    catches a persistent buffer regardless of whether those two inputs differ) and folds its verdict into
-    `all_ok` (reported as a synthetic per-case entry)."""
-    outs = [call(c["args"]) for c in cases]        # all live simultaneously — no reuse allowed
-    per_case = []
-    all_ok = True
-    for c, out in zip(cases, outs):
-        ok, err = correct(out, c["ref"], tol)
-        all_ok = all_ok and ok
-        per_case.append({"case": c.get("sig", ""), "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
-    if len(cases) >= 2:
-        ok, reason = assert_independent_outputs(call, cases[0]["args"], cases[1]["args"])
-        all_ok = all_ok and ok
-        per_case.append({"case": "output_independence", "correct": ok,
-                         "max_rel_err": None, "note": reason})
-    return all_ok, per_case
-
-
-def check_correct_sequence(call, ordered_cases, tol):
-    """Replay cases in their RECORDED TEMPORAL ORDER (not the deduped set) and compare each to its
-    oracle, keeping all outputs live. This surfaces cross-call STALE STATE that single-shape isolated
-    testing misses: the deployment interleaves shapes (chunked-prefill big-M → decode M=1 → …), and a
-    kernel that stashes shape-dependent state (a cached scale layout, a persistent workspace sized to
-    the first shape it saw) is only wrong on the SECOND, differently-shaped call. `check_correct_multi`
-    dedups by shape and can miss the order; this runs the literal sequence.
-
-    `ordered_cases` is a list (WITH repeats, in call order) of {"args", "ref", "sig"}. Returns
-    (all_ok, per_case_list). Outputs are held live before comparison (same shared-buffer defeat as
-    check_correct_multi)."""
-    outs = [call(c["args"]) for c in ordered_cases]     # all live — a shared-buffer return is caught
-    per_case = []
-    all_ok = True
-    for i, (c, out) in enumerate(zip(ordered_cases, outs)):
-        ok, err = correct(out, c["ref"], tol)
-        all_ok = all_ok and ok
-        per_case.append({"case": f"seq[{i}]:{c.get('sig','')}", "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
-    return all_ok, per_case
-
-
-def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3):
-    """Reproduce the DEPLOYMENT capture-once / replay-many path with a STATIC buffer reused ACROSS
-    shapes — the exact context a single-shape isolated UT cannot see, and the one that faults on the
-    live server. Decode runs inside the server's CUDA graph: the graph is captured ONCE against fixed
-    static input/output storage, then replayed every step with fresh data copied into that SAME storage.
-    A kernel that (a) allocates an internal workspace / captures a scale-layout pointer during capture
-    that does not match what replay feeds it, or (b) writes past the static output on a differently
-    shaped case, OOB-faults or returns stale data ONLY under replay — never in eager per-call testing.
-
-    The UT supplies three closures bound to PRE-ALLOCATED static tensors (allocate them once, at the
-    capture case's shape; smaller cases pad into them, exactly as the server pads decode batches):
-      fill(case) -> copy this case's inputs INTO the static input buffers (honor captured dtype/stride/
-                    layout). MUST copy into existing storage, never reallocate.
-      run()      -> issue ONE op launch reading static inputs, writing the static output. This is what
-                    is captured; MUST be graph-safe (no host sync, no dynamic alloc).
-      read_out() -> return the current static output tensor (compared to each case's "ref").
-
-    Capture on cases[capture_idx], then for EVERY case: fill(), graph.replay(), compare read_out() to
-    that case's oracle. Returns (all_ok, per_case_list). If CUDA-graph capture is unavailable/unsupported
-    on this image, returns a PASS no-op entry (so eager-only boxes don't false-fail) — the e2e gate still
-    catches it. A replay that FAULTS is caught (recorded correct=False), not swallowed."""
-    torch = _torch()
-    if not torch.cuda.is_available() or not cases:
-        return True, [{"case": "graph_replay", "correct": True, "max_rel_err": None,
-                       "note": "skipped: no CUDA / no cases"}]
-    try:
-        fill(cases[capture_idx])
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(max(1, warmup)):
-                run()
-        torch.cuda.current_stream().wait_stream(s)
-        sync(torch)
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            run()
-    except Exception as e:
-        return True, [{"case": "graph_replay", "correct": True, "max_rel_err": None,
-                       "note": f"skipped: capture unavailable ({e!r})"}]
-    per_case = []
-    all_ok = True
-    for c in cases:
-        try:
-            fill(c)                      # copy THIS case's inputs into the SAME captured storage
-            g.replay()
-            sync(torch)
-            ok, err = correct(read_out(), c["ref"], tol)
-            per_case.append({"case": c.get("sig", ""), "correct": ok,
-                             "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                             "note": "graph_replay"})
-        except Exception as e:
-            ok = False
-            per_case.append({"case": c.get("sig", ""), "correct": False, "max_rel_err": None,
-                             "note": f"graph_replay_raised (OOB/stale under replay): {e!r}"})
-        all_ok = all_ok and ok
-    return all_ok, per_case
-
-
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
-def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
-                             draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
-                             baseline_outputs=None):
-    """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
-    SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
-    frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
-    that single draw misses (masking, NaN/denormal handling, accumulation across magnitudes) by using the
-    real production kernel as the truth source for each fresh draw — no stored golden needed.
-
-    CORRECTNESS is a HARD GATE: for every shape × every draw, `correct(candidate_out, baseline_out, tol)`
-    must pass, else `all_ok=False`. The baseline output is snapshotted (clone) BEFORE the candidate runs,
-    so a candidate that aliases the baseline's storage (or returns a shared/static buffer) is caught.
-    SPEEDUP is REPORT-ONLY: `baseline_ms / current_ms` per draw is recorded as a secondary robustness
-    signal (value-independent perf variance / cliff detection), NOT the win metric — the primary metric
-    stays the workload-weighted oracle speedup. Both times are `time_op` DEVICE time (CUDA events), taken
-    with the L2/Infinity cache flushed cold before each iteration; `inner=1` (one launch per event window)
-    since events time the GPU timeline directly — no host-side amortization loop is needed.
-
-    `baseline_outputs` (PREFERRED) = the dict `baseline_random_outputs(...)` recorded by the BASELINE
-        leg in its OWN subprocess (`leg_runner.py --mode oracle` under `baseline_overlay/`), keyed
-        `"<sig>|<draw>"`. Same seed => same inputs, so the two legs never have to be co-resident. When
-        it is given, `baseline_call` is ignored and `speedup` is None here (timing comes from
-        `measure_legs`).
-    `baseline_call(args) -> out` is the LEGACY in-process form, kept for op_bench / single-process tasks.
-        `current_call(args) -> out` invokes the candidate in kernel_src/.
-    `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
-        FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
-        regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
-    Returns (all_ok, per_case_list).
-    """
-    torch = _torch()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    per_case = []
-    all_ok = True
-    for shape in shapes:
-        sig = shape.get("sig", "")
-        make_inputs = shape["make_inputs"]
-        for i in range(max(1, int(draws))):
-            rng = torch.Generator(device=device).manual_seed(int(seed) + i)
-            try:
-                args = make_inputs(rng)
-                if baseline_outputs is not None:
-                    ref = baseline_outputs.get(f"{sig}|{i}")
-                    if ref is None:
-                        raise KeyError(f"no recorded baseline output for {sig}|{i}")
-                    cand_out = current_call(args)
-                    parts = flatten_outputs(cand_out)
-                    if not parts:
-                        raise TypeError(f"candidate returned no tensor for {sig}|{i}")
-                    base_snap = to_device_like(ref, parts[0].device)
-                else:
-                    base_out = baseline_call(args)
-                    # snapshot BEFORE current runs (anti-alias)
-                    base_snap = [t.detach().clone() for t in flatten_outputs(base_out)]
-                    cand_out = current_call(args)
-            except Exception as e:
-                all_ok = False
-                per_case.append({"case": f"random[{i}]:{sig}", "correct": False, "max_rel_err": None,
-                                 "speedup": None, "note": f"value-parity raised: {e!r}"})
-                continue
-            ok, err = correct(cand_out, base_snap, tol)
-            all_ok = all_ok and ok
-            if baseline_outputs is not None:
-                speedup = None                             # timing belongs to measure_legs, not here
-            else:
-                ms_base = time_op(lambda: baseline_call(args), warmup, repeats, inner, graph)
-                ms_cand = time_op(lambda: current_call(args), warmup, repeats, inner, graph)
-                speedup = (ms_base / ms_cand) if (ms_base and ms_cand) else None
-            per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
-                             "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                             "speedup": round(speedup, 3) if speedup else None,
-                             "note": "value-parity vs live baseline (correctness gates; speedup reports)"})
-    return all_ok, per_case
 
 
 # --------------------------------------------------------------------------- (b) Amdahl gate
@@ -1111,6 +785,58 @@ def _observed_workload_cases(meta):
         if not regime:
             raise HarnessIncompleteError(f"Observed case {sig}: regime must be a nonempty workload phase")
         out[sig] = {**case, "regime": regime, "effective_calls": mass}
+    tagged = [sig for sig, case in out.items() if case.get("config_id") not in (None, "")]
+    if tagged and len(tagged) != len(out):
+        raise HarnessIncompleteError("Observed workload cases must all carry config_id, or none: "
+                                     f"untagged {sorted(set(out) - set(tagged))}")
+    return out
+
+
+CONFIG_WEIGHTING = ("calls", "time")
+
+
+def _config_weighting(meta):
+    """How configs are pooled (serving_weight_model.config_weighting):
+
+    calls (default)  w(case) = alpha_c * calls(case) / sum(calls of config c), then x baseline_ms.
+                     Each config's call distribution is normalized to 1 and the configs'
+                     distributions are averaged: w(M) = sum_c alpha_c * freq_c(M), metric
+                     sum_M w(M) * t(M). A kernel only sees M, never the concurrency, so this
+                     pools "a launch at M" across concurrencies; a config whose launches cost
+                     more (larger M) counts for more GPU time. This is how the 2026-11-02 Muse
+                     Spark c8+c32 merge weighted its union UTs (weights.json).
+    time             each config's baseline-time mass is normalized to alpha_c: the pooled
+                     metric is the alpha-weighted harmonic mean of the per-config speedups, so
+                     every config's speedup counts the same regardless of its kernel time."""
+    model = (((meta or {}).get("workload") or {}).get("serving_weight_model") or {})
+    mode = model.get("config_weighting", "calls")
+    if mode not in CONFIG_WEIGHTING:
+        raise HarnessIncompleteError(f"serving_weight_model.config_weighting must be one of {CONFIG_WEIGHTING}")
+    return mode
+
+
+def _config_weights(meta, observed):
+    """Per-config share alpha_c of the merged metric, or None when the cases carry no config_id.
+
+    A multi-config task merges several deployments (InferenceX search-space points) into
+    one UT. Each config's call mass is on its own scale (a c64 point launches far more
+    than a c1 point), so the cases are normalized per config before they are pooled (see
+    _config_weighting for how). Shares come from serving_weight_model.config_weights when
+    given, else equal."""
+    if not observed or not any(c.get("config_id") not in (None, "") for c in observed.values()):
+        return None
+    ids = sorted({str(c["config_id"]) for c in observed.values()})
+    model = (((meta or {}).get("workload") or {}).get("serving_weight_model") or {})
+    given = model.get("config_weights")
+    if given is None:
+        return {cid: 1.0 for cid in ids}
+    if not isinstance(given, dict) or set(map(str, given)) != set(ids):
+        raise HarnessIncompleteError(f"serving_weight_model.config_weights must name exactly the configs {ids}")
+    out = {}
+    for cid, w in given.items():
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0:
+            raise HarnessIncompleteError(f"config_weights[{cid!r}] must be finite and nonnegative")
+        out[str(cid)] = float(w)
     return out
 
 
@@ -1256,6 +982,8 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             spd = b / o
         rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
                      "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+        if c.get("branch") not in (None, ""):
+            rows[-1]["branch"] = str(c["branch"])
         if observed is not None:
             sig = rows[-1]["sig"]
             if sig in seen or sig not in observed:
@@ -1267,6 +995,10 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             if mass > 0 and any(v is None or not math.isfinite(v) or v <= 0 for v in (b, o)):
                 raise HarnessIncompleteError(f"Observed timed case {sig}: positive call mass requires both measured latencies")
             rows[-1]["calls"] = mass
+            if case.get("config_id") not in (None, ""):
+                rows[-1]["config_id"] = str(case["config_id"])
+            if case.get("branch") not in (None, ""):
+                rows[-1]["branch"] = str(case["branch"])
             seen.add(sig)
 
     if observed is not None:
@@ -1315,6 +1047,44 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
                 "reason": ("no measurable non-identity bucket survived (all identity/zero-weight or "
                            "dropped by served-regimes) — weighted speedup is UNTRUSTED; re-measure "
                            "per-bucket ms in a fresh subprocess under the deployment graph/compile.")}
+
+    # Multi-config: rescale each config's baseline-time mass to its share, so a config's
+    # weight in the pooled metric does not depend on how many launches its load produced.
+    # A config where this task carries no time (its kernels do not run there) is left out.
+    shares = _config_weights(meta, observed)
+    per_config = None
+    if shares is not None:
+        mode = _config_weighting(meta)
+        mass = {}
+        for r in included:
+            mass[r["config_id"]] = mass.get(r["config_id"], 0.0) + r["weight"]
+        # the config's whole served call distribution, timed or not, is the denominator of freq_c
+        calls_total = {}
+        for case in observed.values():
+            if case["effective_calls"] > 0 and (not served or case["regime"] in served):
+                cid = str(case["config_id"])
+                calls_total[cid] = calls_total.get(cid, 0.0) + case["effective_calls"]
+        live = {cid: shares[cid] for cid, m in mass.items() if m > 0 and shares.get(cid, 0) > 0}
+        total = sum(live.values())
+        if not total:
+            raise HarnessIncompleteError("multi-config UT: no config carries both time and a positive share")
+        per_config = {}
+        for cid in sorted(mass):
+            members = [r for r in included if r["config_id"] == cid]
+            Wc = sum(r["weight"] for r in members)
+            Dc = sum(r["weight"] / r["speedup"] for r in members)
+            per_config[cid] = {"weighted": (Wc / Dc) if Dc else None,
+                               "share": (live.get(cid, 0.0) / total), "cases": len(members),
+                               "time_per_call_ms": Wc / calls_total[cid] if calls_total.get(cid) else None}
+        for r in included:
+            r["weight_raw"] = r["weight"]
+            alpha = live.get(r["config_id"], 0.0) / total
+            if mode == "calls":
+                r["weight"] = r["weight"] / calls_total[r["config_id"]] * alpha
+            else:
+                r["weight"] = r["weight"] / mass[r["config_id"]] * alpha
+        included = [r for r in included if r["weight"] > 0]
+
     W = sum(r["weight"] for r in included)
     D = sum(r["weight"] / r["speedup"] for r in included)
     weighted = (W / D) if D else None
@@ -1322,137 +1092,31 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     if geomean:
         spds = [r["speedup"] for r in included]
         gm = math.exp(sum(math.log(s) for s in spds) / len(spds)) if spds else None
-    return {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
-            "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
-            "reason": ""}
+    out = {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
+           "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
+           "reason": ""}
+    if per_config is not None:
+        out["per_config"] = per_config
+        out["config_weighting"] = mode
+    # A merged branch group (meta.merge, profile merge_policy.py): one figure per branch, so a
+    # gain on one branch cannot hide a loss on another. Raw baseline time x calls weights each
+    # branch's own cases; `worst_branch` is what a keep decision must look at.
+    branches = sorted({r["branch"] for r in included if r.get("branch")})
+    if branches:
+        per_branch = {}
+        for br in branches:
+            members = [r for r in included if r.get("branch") == br]
+            Wb = sum(r.get("weight_raw", r["weight"]) for r in members)
+            Db = sum(r.get("weight_raw", r["weight"]) / r["speedup"] for r in members)
+            per_branch[br] = {"weighted": (Wb / Db) if Db else None, "cases": len(members)}
+        out["per_branch"] = per_branch
+        worst = min((v["weighted"], k) for k, v in per_branch.items() if v["weighted"] is not None)
+        out["worst_branch"] = {"branch": worst[1], "weighted": worst[0]}
+    return out
 
 
 class HarnessIncompleteError(Exception):
-    """The generated UT is INCOMPLETE for this kernel (a harness/GENERATION defect), NOT a kernel-
-    correctness failure. Raised by `run_correctness` when a graph-deploy kernel is handed no usable
-    (>=2-shape) replay bundle. `run_correctness` has ALREADY printed the `UT_HARNESS_INCOMPLETE:` sentinel
-    to stdout before raising, so the UT's main() should just catch this and exit 3 (do NOT re-print the
-    sentinel) — the smoke-test then REGENERATES the UT (add the replay leg) instead of blaming the
-    candidate. Distinct from a correctness FAIL (exit 1) and an env error (exit 2)."""
-
-
-UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
-
-
-# --------------------------------------------------------------------------- (c) fail-closed correctness suite
-# WHY: `check_graph_replay` already reproduces the deploy path that faults (capture-once / replay-many /
-# static-buffer reuse across shapes), but it was (1) gated on the fragile `meta.graph_replayed` flag
-# (which CUDA-graph REPLAY makes unobservable at the Python seam, so it was often absent -> the gate never
-# fired) and (2) LLM-EMITTED (the generated UT could just omit it). A decode kernel that OOB-writes on a
-# ragged real shape under replay then passes the eager isolated UT and only faults e2e (0/320 served) —
-# the h2 paged_attention failure. `run_correctness` closes both holes: the trigger is the AUTHORITATIVE
-# deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
-# graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
-def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
-                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
-    """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
-      1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
-      2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
-      3. FAIL-CLOSED deployment-context replay: when `deployment_graph_mode(regime)` is True, a
-         `replay` bundle with >=2 BOUNDARY shapes is MANDATORY (single-shape replay cannot expose a
-         static-buffer-reuse OOB). Missing / too-few cases => hard FAIL (never a silent skip).
-
-    `replay` (required when the op deploys under a graph) = {
-        "fill": fn(case)->None (copy case inputs INTO pre-allocated static buffers; never realloc),
-        "run":  fn()->None     (one graph-safe launch reading/writing those static buffers),
-        "read_out": fn()->Tensor (the static output to compare),
-        "cases": [{"args":..., "ref": <golden>, "sig": <label>}, ...]  (>=2, boundary-spanning),
-        "capture_idx": <index of the LARGEST case to capture on> (default 0),
-    }
-    Returns (all_ok, report) where report has keys eager / random / graph_replay.
-    """
-    report = {}
-    ok = True
-
-    c_ok, per = check_correct_multi(current_call, eager_cases, tol)
-    report["eager"] = per
-    ok = ok and c_ok
-
-    if baseline_call is None and baseline_outputs is None:
-        raise ValueError("run_correctness needs baseline_outputs (preferred: recorded by the baseline "
-                         "leg via baseline_random_outputs) or a legacy in-process baseline_call")
-    r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
-                                          draws=draws, graph=deployment_graph_mode(regime),
-                                          baseline_outputs=baseline_outputs)
-    report["random"] = perr
-    ok = ok and r_ok
-
-    if deployment_graph_mode(regime):
-        cases = (replay or {}).get("cases") or []
-        missing = [k for k in ("fill", "run", "read_out") if not callable((replay or {}).get(k))]
-        if replay is None or missing or len(cases) < 2:
-            why = ("no replay bundle" if replay is None
-                   else f"missing closures {missing}" if missing
-                   else f"only {len(cases)} replay case(s); need >=2 boundary shapes")
-            reason = ("deploys under CUDA graph (deployment_graph_mode=True) but " + why
-                      + " — a graph-deploy kernel MUST be replay-checked across >=2 boundary shapes "
-                        "(capture-once/replay-many reused static buffer). This is a UT-GENERATION defect "
-                        "(the harness is incomplete), NOT a kernel-correctness failure: regenerate the UT "
-                        "with a replay bundle rather than blaming the candidate.")
-            # Print the sentinel HERE — this is the SINGLE source of the stdout line, so the smoke-test
-            # recognizes "regenerate UT" even if the generated main() forgets to catch the exception.
-            # main() must NOT re-print it (just exit 3); then raise the DISTINCT harness error (never a
-            # silent correctness FAIL that would wrongly reject the candidate).
-            print(f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}")
-            report["graph_replay"] = [{"case": "graph_replay", "correct": None,
-                                       "note": f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}"}]
-            raise HarnessIncompleteError(reason)
-        g_ok, perg = check_graph_replay(replay["fill"], replay["run"], replay["read_out"],
-                                        cases, tol, capture_idx=int(replay.get("capture_idx", 0)))
-        report["graph_replay"] = perg
-        ok = ok and g_ok
-
-    # torch.compile deployment context (calibrated DIFFERENTLY from the graph gate — see _compile_parity):
-    # generic (no UT bundle to forget => NOT fail-closed/regenerate). Fusion-induced numeric drift is a
-    # real correctness FAIL; an isolated bare-op compile ERROR is a surfaced NON-FATAL note.
-    if deployment_compile_mode(regime):
-        cp_ok, cp = _compile_parity(current_call, eager_cases, regime, tol)
-        report["compile_parity"] = cp
-        ok = ok and cp_ok
-
-    return ok, report
-
-
-def _compile_parity(current_call, cases, regime, tol):
-    """Deployment-context correctness for torch.compile. Unlike the graph-replay gate this is GENERIC
-    (built here from `compiled_op`, no per-op bundle the UT could forget) and therefore NOT fail-closed /
-    regenerate. Two outcomes:
-      * compiled(candidate) vs eager(candidate) DRIFT beyond tol  -> correct=False (a REAL correctness
-        failure: fusion changed the numerics — matters for fusible ops like rmsnorm/rope/silu; for an
-        opaque custom op the two are identical, so this is a cheap pass).
-      * `compiled_op` raised (`_geak_compile_error`)              -> surfaced NON-FATAL note (an isolated
-        bare-op fullgraph compile != the server's whole-model compile, where an opaque custom op is not
-        traced into), so we DO NOT auto-reject the candidate on it — we make it visible.
-    Returns (all_ok, per_case_list)."""
-    compiled = compiled_op(current_call, regime)
-    err = getattr(compiled, "_geak_compile_error", None) or getattr(current_call, "_geak_compile_error", None)
-    if err:
-        return True, [{"case": "compile_parity", "correct": True, "max_rel_err": None,
-                       "note": (f"compile_soft_degrade (NON-FATAL): {err}. Isolated bare-op fullgraph "
-                                "compile != server whole-model compile (opaque custom ops are not traced "
-                                "into) — surfaced, not auto-rejected. Verify at the e2e gate.")}]
-    per = []
-    all_ok = True
-    for c in cases:
-        try:
-            eo = current_call(c["args"])
-            co = compiled(c["args"])
-            k, e = correct(co, eo, tol)
-            per.append({"case": c.get("sig", ""), "correct": k,
-                        "max_rel_err": round(e, 5) if math.isfinite(e) else None,
-                        "note": "compile_parity(compiled vs eager)"})
-            all_ok = all_ok and k
-        except Exception as e:
-            # A raise DURING compiled execution (not build) is a real deployability problem, but keep it
-            # visible-and-soft here (the e2e gate is authoritative); do not silently pass as correct.
-            per.append({"case": c.get("sig", ""), "correct": True, "max_rel_err": None,
-                        "note": f"compile_parity soft-skip (compiled call raised): {e!r}"})
-    return all_ok, per
+    """Missing or inconsistent evidence prevents harness qualification."""
 
 
 # --------------------------------------------------------------------------- boundary-shape helpers (attn)
@@ -1711,13 +1375,3 @@ def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_ext
             "reps": len(bms),
             "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
                                if len(pair_sp) > 1 else 0.0)}
-
-
-def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
-    """Random-draw outputs recorded by the BASELINE leg in its own process, for
-    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
-    task = os.path.abspath(task_dir)
-    out = os.path.join(task, "_baseline_random.pt")
-    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
-             out=out, seed=seed, draws=draws, timeout=timeout)
-    return _torch().load(out, map_location="cpu")

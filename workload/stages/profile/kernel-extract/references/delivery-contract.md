@@ -63,13 +63,15 @@ or dispatch markers, not by discarding calls missing the desired kernel.
 If the saved declaration is wrong, revise the task plan using evidence before
 continuing. Do not infer a different request from a passing result. A changed
 entry requires signature/state adaptation and new binding, correctness, graph
-and timing checks; a selection probe cannot inherit an old entry's UT pass.
+checks; optimization must also remeasure timing. A selection probe cannot inherit an old entry's UT pass.
 
 ## Required real tests
 
 - Complete executable UT: oracle/random-value correctness, full output semantics,
   deployment modes and input refresh, actual leaf execution, numerical negative
-  controls, restored-source checks and both timing legs for all weighted cases.
+  controls and restored-source checks. UT extraction uses
+  `--validation-mode correctness` and does not require timing. Preserve weighted cases
+  and the executable timing interface; optimization requires both timing legs.
 - Actual native/JIT computation source for all requested leaves, build/import
   instructions and resources. An installed-library dispatcher is insufficient.
 - Frozen baseline identity and candidate isolation in separate processes.

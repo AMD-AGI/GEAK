@@ -40,11 +40,17 @@ The driver supplies its context through these environment variables:
 | `OUT` | This stage's artifact directory, `$RUN_ROOT/<stage>/out` |
 | `CONFIG`, `PARAMS` | Merged config and stage parameters as read-only JSON |
 | `RUNNER` | Agent CLI adapter |
+| `TASKS_DIR` | Only with root config `task_source_stage`: `$RUN_ROOT/<task_source_stage>/out/tasks`, the configured task producer (e.g. `ut`) that optimize and applyback consume |
 
 Write artifacts to `OUT`. Parameters override implementation defaults.
 Resolve other upstream inputs explicitly through `RUN_ROOT`, not by splicing paths
 onto `IN`. Direct module calls supply the environment required by any tool they reuse,
 without adopting the driver's entire sequence.
+
+Split scenarios insert `ut` after `profile` and set `task_source_stage: "ut"`; Roofline's
+normal `$IN` then becomes UT output. Combined scenarios keep their order and profile task
+path. Changing the stage boundary does not relax any GPU UT gate
+([profile/HANDOFF.md](../../stages/profile/HANDOFF.md)).
 
 ## Execution shapes
 

@@ -1,0 +1,12 @@
+{
+  "file_count": 1,
+  "files": {
+    "SKILL.md": "2af2299d2a478cc3800a22ccab2dcf50465bd8888a9636899c8bf14d38252fb3"
+  },
+  "modified_from_origin": false,
+  "note": "Profile cleanup: one shared observation planner for single/multiple configs; remove the superseded point-count and fixed-rate time-budget planners plus the unused Top-N/rocprof/analytic profile-report pipeline. Keep the live forward-name parser in trace_names.py. Coverage rejects truncated Top-N summaries. run_points always emits profile evidence only; UT drafting is explicit after handoff. Existing trace, instance accounting, graph/eager fallback, per-config projection and source checks remain.",
+  "origin": "Local GEAK split profile/UT workflow",
+  "skill": "kernel-profile",
+  "stage": "profile",
+  "tree_sha256": "9e6ccf0f511896377913eab8c9de776331563d201e78f38be36b99ce8a1290b1"
+}

@@ -22,12 +22,23 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 | [Setup](stages/setup/README.md) | Prepare runtime and resources | [runtime](stages/setup/runtime/SKILL.md) |
 | [Baseline](stages/baseline/README.md) | Establish or revalidate a reference | [adopt](stages/baseline/adopt/SKILL.md), [measure](stages/baseline/measure/SKILL.md) |
 | [Profile](stages/profile/README.md) | Diagnose the serving bottleneck | [kernel-extract](stages/profile/kernel-extract/SKILL.md), scoped to observations |
-| [UT](stages/ut/README.md) | Define and qualify a computation boundary | [kernel-extract](stages/ut/kernel-extract/SKILL.md), reusing the existing tools |
+| [UT](stages/ut/README.md) | Define and qualify a computation boundary | [kernel-extract](stages/ut/kernel-extract/SKILL.md), reusing the existing tools; [kernel-ut](stages/ut/kernel-ut/SKILL.md) from a verified profile handoff |
 | [Roofline](stages/roofline/README.md) | Assess bounds and search priority | [kernel-roofline](stages/roofline/kernel-roofline/SKILL.md), [CPU fixture](stages/roofline/stub-roofline/SKILL.md) |
 | [Optimize](stages/optimize/README.md) | Produce an isolated candidate | [Kernel Workflow](stages/optimize/geak-kernel-workflow/SKILL.md), [kernel dynamic loop](stages/optimize/kernel-dynamic-loop/SKILL.md), [OOB](stages/optimize/oob/SKILL.md) |
 | [Apply back](stages/applyback/README.md) | Integrate a candidate and prove it took effect | [kernel overlay](stages/applyback/overlay-ab/SKILL.md), [system runtime](stages/applyback/system-runtime/SKILL.md) |
 | [Evaluate](stages/evaluate/README.md) | Judge a serving comparison | [native-e2e](stages/evaluate/native-e2e/SKILL.md) |
 | [Report](stages/report/README.md) | Explain decisions, calls and parallel work | [HTML timeline](stages/report/html-timeline/SKILL.md) and [example](stages/report/html-timeline/assets/example.html) |
+
+### Multi-config scenarios
+
+A multi-config scenario (`multi_config: true`) optimizes every CI point of one EP group in one
+campaign along the split route `baseline → profile → ut → roofline → optimize → applyback`:
+`profile: kernel-profile` locates runtime dispatch and shapes and freezes a hashed
+`profile_handoff.json`; `ut: kernel-ut` consumes it and generates/qualifies the fixed-template
+UTs, one UT per task pooling every config (`kernel-extract/scripts/merge_policy.py` decides
+what pools). Set `task_source_stage: "ut"` so consumers use the separate task output, and
+run or retry `ut` without repeating captures. See [profile/HANDOFF.md](stages/profile/HANDOFF.md)
+and [the UT module](stages/ut/README.md). Existing combined-profile configs remain supported.
 
 ## Where things live
 

@@ -6,6 +6,13 @@ Produce an isolated candidate under the [invocation contract](../CONTRACT.md#dir
 **Acceptance:** the selected method preserves the module's verification and budget contract.
 A local improvement does not establish serving gain.
 
+UT generation can deliver a correctness-qualified task with
+`validation_mode: "correctness"` and `performance_measured: false`. Its weighted shapes
+and timing implementation are ready, but no baseline latency or 1.0 ratio was measured.
+For the shared driver, evaluate with `unittest.py --validation-mode performance --reuse`
+(the bare command also defaults to performance). Reuse unchanged correctness gates;
+measure the baseline/candidate pair before reporting speedup or keeping an optimization.
+
 ## Implementations
 
 | Skill | Method |
@@ -18,12 +25,21 @@ Select by skill path in the plan or `stages.optimize.skill` in the sequential dr
 System experiments use the plan's native quality/effect checks and need no artificial UT.
 Kernel methods share the contract below. Historical method labels remain in their receipts.
 
+A task from UT generation may be correctness-qualified only (`validation_mode: "correctness"`,
+`performance_measured: false`): its weighted shapes and timing are ready, but no baseline
+latency was measured. Run `unittest.py --validation-mode performance --reuse` (the bare
+command also defaults to performance), reusing unchanged correctness gates, and measure the
+baseline/candidate pair before reporting a speedup or keeping a candidate.
+
 ## Kernel calls
 
 Use separate working copies of the plan's qualified tasks and a fresh scheduler work
 root. The sequential driver supplies the full configured Profile delivery; a smaller
-direct scope does not establish full-campaign completion. Roofline orders the tasks by
-expected system savings; unknown bounds retain task-plan order and do not remove work.
+direct scope does not establish full-campaign completion. Tasks are ordered by descending share of profiled GPU time (`params.order_by=share`, the
+default, from the task producer's sibling `results.json`); `order_by=roofline` uses Roofline's
+expected system savings instead. Unknown bounds or shares retain task-plan order and do not
+remove work. Roofline is optional in the default order because a model it cannot bound would
+leave the largest tasks unranked.
 
 Read existing qualification before dispatch. Compare `source_tree.py editable <task>`
 with the declared computation; a binding adapter is not necessarily an editable kernel.
@@ -49,7 +65,8 @@ Do not edit launchers or shared inputs while active processes are reading them.
 python3 "$WORKLOAD_ROOT/engine/campaign/scheduler.py" run \
     --work-root "$OUT/work" --tasks-dir "$TASKS_DIR" \
     --skill-root "$SKILL_ROOT" --runner "$RUNNER" \
-    --gpus <list> --target <seconds> --backend docker --image <image>
+    --gpus <list> --target <seconds> --backend docker --image <image> \
+    [--order-by share|roofline] [--order-file "$RUN_ROOT/roofline/out/roofline.json"]
 ```
 
 Resolve flags from the plan/scenario, including order file, task widths, attempt/measurement

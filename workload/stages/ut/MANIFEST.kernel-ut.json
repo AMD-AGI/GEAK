@@ -1,0 +1,16 @@
+{
+  "file_count": 5,
+  "files": {
+    "SKILL.md": "dbc6acd5083ece22863776d30928d18ba3579d42c046a1f8268341feced18625",
+    "references": "symlink:../../profile/kernel-extract/references",
+    "scripts": "symlink:../../profile/kernel-extract/scripts",
+    "shared": "symlink:../../profile/kernel-extract/shared",
+    "ut_contracts": "symlink:../../profile/kernel-extract/ut_contracts"
+  },
+  "modified_from_origin": false,
+  "note": "Gate count in SKILL.md follows the new process_state gate (twelve non-timing gates).",
+  "origin": "Local GEAK split profile/UT workflow",
+  "skill": "kernel-ut",
+  "stage": "ut",
+  "tree_sha256": "c8a5e463902aad5934ad373b05510b883a4a1d126d17a1de82f32571fb7fe9c9"
+}

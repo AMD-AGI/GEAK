@@ -69,21 +69,35 @@ def probe_points(paths):
     return out
 
 
-def build(cov, eager_captured=(), probes=()):
+def build(cov, eager_captured=(), probes=(), eager_points=()):
     phases = cov.get("phases") or {}
     if not phases:
         raise SystemExit("build_ranking: the ledger has no phases; no census was given to it")
+    eager_points = set(eager_points)
+    known = {p["point_id"] for e in phases.values() for p in e.get("points", [])}
+    if eager_points - known:
+        raise ValueError("eager points absent from ledger: %s" % sorted(eager_points - known))
     excluded, phase_total = {}, {}
     for ph, e in phases.items():
         total = e["total_mass_us"]
+        phase_wait = sum(k["mass_us"] for k in e["kernels"] if k["kernel"] == WAIT)
+        selected = [p for p in e.get("points", []) if p["point_id"] in eager_points]
         if ph in eager_captured:
-            wait = sum(k["mass_us"] for k in e["kernels"] if k["kernel"] == WAIT)
-            if wait:
-                excluded[ph] = {"kernel": WAIT, "mass_us": round(wait, 1),
-                                "pct_of_captured_phase": round(100 * wait / total, 3),
-                                "why": "captured eagerly, deployed under a CUDA graph: the "
-                                       "peer spin is an artifact of eager launch"}
-                total -= wait
+            wait = phase_wait
+        else:
+            if any("collective_wait_mass_us" not in p for p in selected):
+                raise ValueError("point wait mass missing; regenerate coverage_ledger")
+            wait = min(phase_wait, sum(p["collective_wait_mass_us"] for p in selected))
+        wait = round(wait, 1)
+        if wait:
+            excluded[ph] = {"kernel": WAIT, "mass_us": round(wait, 1),
+                            "point_ids": ([p["point_id"] for p in e.get("points", [])]
+                                          if ph in eager_captured else
+                                          [p["point_id"] for p in selected]),
+                            "pct_of_captured_phase": round(100 * wait / total, 3),
+                            "why": "these points were captured eagerly, deployed under a CUDA "
+                                   "graph: their peer spin is an artifact of eager launch"}
+            total -= wait
         phase_total[ph] = total
     grand = sum(phase_total.values())
     if grand <= 0:
@@ -93,13 +107,16 @@ def build(cov, eager_captured=(), probes=()):
     for ph, e in phases.items():
         for k in e["kernels"]:
             name = k["kernel"]
-            if ph in excluded and name == WAIT:
+            mass = k["mass_us"]
+            if name == WAIT and ph in excluded:
+                mass = max(0.0, mass - excluded[ph]["mass_us"])
+            if mass == 0:
                 continue
-            share = 100.0 * k["mass_us"] / phase_total[ph] if phase_total[ph] else 0.0
+            share = 100.0 * mass / phase_total[ph] if phase_total[ph] else 0.0
             dest = nonsel if name in NON_KERNEL else rows
             r = dest.setdefault(name, {"id": name, "name": name, "kind": kind(name),
                                        "mass_us": 0.0, "share_of_phase_pct": {}})
-            r["mass_us"] += k["mass_us"]
+            r["mass_us"] += mass
             r["share_of_phase_pct"][ph] = round(share, 4)
     for r in list(rows.values()) + list(nonsel.values()):
         for ph in phases:
@@ -139,12 +156,15 @@ def main():
     ap.add_argument("--coverage", required=True, help="coverage_ledger.py --out")
     ap.add_argument("--eager-captured", nargs="*", default=[],
                     help="phases deployed under a CUDA graph but captured eagerly")
+    ap.add_argument("--eager-point", action="append", default=[],
+                    help="individual eager-captured point; retain graph points' wait mass")
     ap.add_argument("--probe-result", nargs="*", default=[],
                     help="serving_probe.py --out files (globs allowed), for phase_share.points")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     paths = sorted({p for g in a.probe_result for p in (glob.glob(g) or [g])})
-    out = build(json.load(open(a.coverage)), set(a.eager_captured), probe_points(paths))
+    out = build(json.load(open(a.coverage)), set(a.eager_captured), probe_points(paths),
+                a.eager_point)
     with open(a.out, "w") as fh:
         json.dump(out, fh, indent=1)
     d = out["denominators"]
