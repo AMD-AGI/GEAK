@@ -53,10 +53,19 @@ import json; d=json.load(open('$OUT/launch.json'))
 open('$OUT/server.env','w').write(''.join('%s=%s\n' % kv for kv in d['env'].items()))
 open('$OUT/server_argv.txt','w').write('\n'.join(d['server_argv']) + '\n')"
 mapfile -t SARGV < "$OUT/server_argv.txt"
+# The client is the CI's recorded argv with only url/output dir/tokenizer pin swapped in; built
+# before any GPU time so a recipe the leg cannot replay fails here, not after the window.
+python3 "$PINS" client "$PD" "http://127.0.0.1:$PORT" "$OUT/aiperf_artifacts" ${DURATION:+"$DURATION"} \
+  > "$OUT/client_argv.txt" || { st failed '"error":"no CI client argv to replay"'; exit 1; }
+mapfile -t CARGV < "$OUT/client_argv.txt"
 EXTRA=()
 if [ -n "$OV" ]; then
   [ -f "$OV/_overlay_manifest.json" ] || { st failed '"error":"overlay dir has no _overlay_manifest.json"'; exit 1; }
-  EXTRA+=(-e "PYTHONPATH=$OV")
+  # prepend, never replace: the image's own PYTHONPATH is part of the CI launch
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null \
+    || { st failed '"error":"cannot pull the CI image"'; exit 1; }
+  IMG_PP=$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^PYTHONPATH=//p')
+  EXTRA+=(-e "PYTHONPATH=$OV${IMG_PP:+:$IMG_PP}")
 fi
 MOUNTS=(-v /shared_nfs:/shared_nfs); for m in ${CI_MODEL_MOUNTS:-}; do MOUNTS+=(-v "$m"); done
 
@@ -93,7 +102,13 @@ curl -s -m 600 "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: ap
   -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 17*23? Answer with just the number.\"}],\"max_tokens\":200,\"temperature\":0}" \
   > "$OUT/sanity.json"
 grep -q 391 "$OUT/sanity.json" || { st failed '"error":"correctness probe failed (17*23)"'; exit 1; }
-[ -n "$OV" ] && docker logs "$NAME" 2>&1 | grep -E '^\[overlay\]' | sort | uniq -c > "$OUT/overlay_engaged.txt"
+if [ -n "$OV" ]; then
+  docker logs "$NAME" 2>&1 | grep -E '^\[overlay\]' | sort | uniq -c > "$OUT/overlay_engaged.txt"
+  # A candidate leg whose overlay never injected anything is a stock leg under another name.
+  grep -qE 'injected module|installed ' "$OUT/overlay_engaged.txt" \
+    && ! grep -qE 'FAILED|bad module entry' "$OUT/overlay_engaged.txt" \
+    || { st failed '"error":"the overlay did not engage (overlay_engaged.txt)"'; exit 1; }
+fi
 
 st benchmark_running
 TMP=$(mktemp -d "/tmp/ci_point_${PID}.XXXX")
@@ -112,11 +127,7 @@ import json,shlex; d=json.load(open('$OUT/launch.json'))
 print('\n'.join('export %s=%s' % (k, shlex.quote(v)) for k, v in d['client_env'].items()))")"
   export HF_HUB_CACHE="$CHUB" HF_DATASETS_CACHE="$TMP/datasets" AIPERF_DATASET_MMAP_CACHE_DIR="$TMP/mmap"
   cd "$TMP"
-  "$AGENTX_BIN" profile --url "http://127.0.0.1:$PORT" --model "$MODEL" --tokenizer "$MODEL" \
-    --concurrency "$CONC" --benchmark-duration "$DUR" --tokenizer-trust-remote-code \
-    --tokenizer-revision "$MODEL_REV" \
-    --server-metrics "http://127.0.0.1:$PORT/metrics" --output-artifact-dir "$OUT/aiperf_artifacts" \
-    --public-dataset semianalysis_cc_traces_weka_062126
+  "$AGENTX_BIN" "${CARGV[@]}"
   echo "client_exit=$?"
 ) > "$OUT/benchmark.log" 2>&1 &
 CPID=$!

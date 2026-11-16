@@ -23,6 +23,9 @@ A CI point's records (adopt-ci-artifacts: baseline/out/points/<pid>/server_logs/
                                                         pinned commit of every repo and its client
                                                         ran the CI's argv (url/output dir aside,
                                                         plus --tokenizer-revision <pinned commit>)
+    ci_pins.py client <point_dir> <url> <artifact_dir> [duration]
+                                                     -> the CI's client argv, one token per line,
+                                                        with this leg's url/output dir and the pin
 
 Stdlib + PyYAML.
 """
@@ -146,6 +149,30 @@ def prove(point_dir, server_log, bench_log, out_path):
     return 0 if doc["proven"] else 1
 
 
+def client_argv(point_dir, url, artifact_dir, duration=None):
+    """The CI's recorded client argv (program name dropped), with only this leg's plumbing
+    swapped in and --tokenizer-revision pinned: exactly what `prove` will accept."""
+    p = pins(point_dir)
+    if not p["client_cli"]:
+        raise SystemExit("the CI client log records no CLI Command")
+    own = {"--url": [url], "--server-metrics": [url + "/metrics"],
+           "--output-artifact-dir": [artifact_dir],
+           "--tokenizer-revision": [p["revisions"][p["model"]]]}
+    if duration:
+        own["--benchmark-duration"] = [str(duration)]
+    out, toks, i = [], p["client_cli"][1:], 0
+    while i < len(toks):
+        j = i + 1
+        while j < len(toks) and not toks[j].startswith("--"):
+            j += 1
+        if toks[i] not in own:
+            out += toks[i:j]
+        i = j
+    for k, v in own.items():
+        out += [k] + v
+    return out
+
+
 def main(argv):
     if len(argv) == 2 and argv[0] == "pins":
         print(json.dumps(pins(argv[1]), indent=1, default=sorted))
@@ -154,6 +181,9 @@ def main(argv):
         return check_hub(argv[1], argv[2])
     if len(argv) == 5 and argv[0] == "prove":
         return prove(*argv[1:])
+    if len(argv) in (4, 5) and argv[0] == "client":
+        print("\n".join(client_argv(*argv[1:])))
+        return 0
     print(__doc__, file=sys.stderr)
     return 2
 

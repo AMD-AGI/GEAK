@@ -386,7 +386,7 @@ def main():
             download_zip(remote[name]["archive_download_url"], token, d)
         return d
 
-    points, problems = [], []
+    points, problems, seen_pids = [], [], set()
     for key, kinds in sorted(by_point.items()):
         if "bmk_agentic" not in kinds:
             continue
@@ -403,6 +403,11 @@ def main():
         if not matches(bmk, params.get("select")):
             continue
         pid = pid_of(bmk)
+        # pid_of names tp/ep/conc/kv/spec only; two CI points that differ elsewhere (e.g. DP
+        # attention, MoE backend) must not share points/<pid>/, so a repeat gets its artifact key.
+        if pid in seen_pids:
+            pid += "-" + hashlib.sha256(key.encode()).hexdigest()[:8]
+        seen_pids.add(pid)
         pdir = os.path.join(out, "points", pid)
         os.makedirs(pdir, exist_ok=True)
         try:

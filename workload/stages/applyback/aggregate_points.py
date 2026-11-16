@@ -39,7 +39,7 @@ def main():
         else:
             missing[pid] = res.get("notes") or "no ab.json"
     verdicts = {p: ab["verdict"] for p, ab in points.items()}
-    if missing:
+    if missing or not pids:     # nothing selected is not "no change": nothing was measured
         verdict = "incomplete"
     elif "regression" in verdicts.values():
         verdict = "regression"
@@ -88,7 +88,7 @@ def main():
         metrics["e2e_delta_pct_geomean"] = ab["e2e_delta_pct"]
     for p, a in points.items():
         metrics["e2e_delta_pct:" + p] = a["e2e_delta_pct"]
-    status = "fail" if missing and not points else ("blocked" if missing else "ok")
+    status = "fail" if missing and not points else ("blocked" if missing or not pids else "ok")
     return emit(status, artifacts={"ab": "ab.json", "applied": "applied.json", "overlay": "overlay"},
                 metrics=metrics, notes=notes)
 

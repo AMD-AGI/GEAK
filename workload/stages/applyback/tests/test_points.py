@@ -97,6 +97,26 @@ class PointsTest(unittest.TestCase):
         self.assertIn("never measured", never["notes"])
         self.assertIn("tp8-ep8-c13-x", result["notes"])
 
+    def test_finalize_with_no_point_to_measure_is_not_ok(self):
+        # every config the UT covered is outside this baseline: nothing measured is not no_change
+        write(self.tasks / "moe" / "meta.json", {"workload": {"cases": [{"config_id": "tp8-ep8-c13-x"}]}})
+        (self.tasks / "norm" / "meta.json").unlink()
+        run = self.tmp / "run_empty"
+        write(run / "baseline" / "out" / "baseline.json", baseline())
+        out = run / "applyback" / "out"
+        (out / "overlay").mkdir(parents=True)
+        (out / "applied.json").write_text(json.dumps({"applied": [{"name": "moe"}]}))
+        params = out / "params.json"
+        params.write_text(json.dumps({"reference": "ci"}))
+        env = dict(os.environ, OUT=str(out), RUN_ROOT=str(run), PARAMS=str(params),
+                   TASKS_DIR=str(self.tasks), STAGE="applyback", STAGE_SKILL="overlay-ab",
+                   WORKLOAD_ROOT=str(SLOT.parents[1]))
+        subprocess.run([sys.executable, str(SLOT / "finalize.py")], env=env,
+                       capture_output=True, text=True)
+        result = json.loads((out / "result.json").read_text())
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(json.loads((out / "ab.json").read_text())["verdict"], "incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()
