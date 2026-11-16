@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--ranking", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--source-map", type=Path,
-                        help="reviewed operator attribution from kernel-extract")
+                        help="reviewed operator attribution from kernel-profile")
     args = parser.parse_args()
     try:
         out = Path(os.environ["OUT"])

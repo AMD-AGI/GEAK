@@ -1,0 +1,110 @@
+# Setup and required inputs
+
+Use the tools bundled with this skill:
+
+```bash
+export SKILL_ROOT=/absolute/path/to/workload/stages/ut/kernel-ut
+export SHARED_TOOLS="$SKILL_ROOT/shared"
+export EVAL_DIR=/absolute/path/to/ut-output   # holds task_plan.json and tasks/
+export KERNEL_ENV_SKIP_ENUM_REAP=1
+```
+
+Use `kernel_selection.py --strict-launch` for single-anchor evidence; joint
+verification already uses strict launch attribution. `KERNEL_ENV_SKIP_ENUM_REAP=1`
+keeps GPU wrappers from cleaning up unrelated processes. Export it into capture
+and analysis processes, including remote/container commands.
+
+Use Python 3.10+ and Node.js 18+. Real tensor/GPU work requires the serving
+environment's PyTorch/backend. The helpers do not install or upgrade packages.
+Node must also be reachable in each UT container, on `PATH` or through
+`KERNEL_EXTRACT_NODE`; the driver checks its native source owner before GPU gates.
+
+For actual extraction, the user supplies an accessible serving environment,
+model and backend, appropriate native/JIT compilers, baseline logs and exports,
+compatible raw traces or resources for bounded new capture, and GPU allocation.
+Record graph/compile settings, current source/build versions and accepted overlays.
+Do not invent these from an old run. A trace-only environment can support
+inventory/ranking work but cannot validate new GPU execution.
+
+The GPU wrappers target Linux/Bash/flock and the AMD/ROCm environment
+from which the skill was developed. Their idleness heuristic is not proof of
+exclusive physical ownership. Map caller allocation to device indices and
+verify scheduler/container isolation first. Different logical IDs or separate
+containers do not by themselves prove disjoint devices. Other GPU backends need
+an equivalent verified allocation/visibility mechanism before GPU work; the
+portable skill does not claim new backend support.
+
+The legacy variable names `GEAK_GPU_ALLOWED`, `GEAK_GPU_REQUIRE_IDLE` and related
+`GEAK_*` names inside vendored helpers are local configuration keys, not imports
+or dependencies on GEAK. Set `GEAK_GPU_ALLOWED` to the caller's actual allocated
+set. Preserve an inherited `ROCR_VISIBLE_DEVICES` allocation mask. A set lease
+restores the requested `HIP_VISIBLE_DEVICES` only after acquiring all locks.
+Do not copy the variable values from a previous run.
+
+The UT wave uses command-scoped leases. Start `ut_wave.py start` on the host whose
+physical GPUs were allocated. The pool defaults to the
+workload's `serving.json:gpus`; explicit `--gpus` may only choose a subset, never
+expand it, even if more devices are idle or the host allocation is larger. This
+pool is also fenced by `GEAK_GPU_ALLOWED` and inherited numeric `ROCR_VISIBLE_DEVICES`.
+Resolve UUID/container-local mappings on the host first. Release any outer campaign
+pool lock before starting this mode; its broker must acquire the same global locks.
+Keep the scheduler allocation while releasing only each command's advisory lease.
+
+Inside a CPU author lane:
+
+```bash
+python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- \
+  python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse
+```
+
+`gpu --count N` leases N free, idle GPUs together, without holding partial sets while
+waiting. Default N is `required_gpu_count`. The broker holds host lock files, starts a
+GPU worker in the same pinned image, drains descendants before unlocking, and reports
+devices/wait/runtime under `ut_wave/gpu_queue/<request>/`. `--timeout` includes queue
+wait. Source checks run before/after the command and build caches stay task-local.
+`--author-workers` controls CPU concurrency independently (default 8). Docker authors
+have no GPU devices; the GPU worker mounts only leased render nodes. Both need the
+skill/task paths mounted identically (default `/shared_nfs`; other paths use
+`UT_WAVE_DOCKER_EXTRA` mounts). Do not grant the author a Docker socket or GPU devices.
+Container names default to a wave-specific prefix; an explicit
+`UT_WAVE_CONTAINER_PREFIX` must be unique per campaign and is saved for resume.
+Command-specific exports require `gpu --env K=V`; CPU-container `/tmp` is not shared.
+Local mode uses visibility masks and a Linux subreaper for trusted runners/tests.
+After controller death the broker drains jobs before releasing locks; resume drains
+the previous broker and authors before launching new writers. If Docker cannot confirm
+cleanup, the broker retains the locks and retries; restore Docker access before resume.
+
+Outside an on-demand wave, run every GPU command from its task directory under a lease:
+
+```bash
+cd "$TASK_DIR"
+bash "$WORKLOAD_ROOT/stages/_shared/gpu_lock.sh" "$GPU_ID" python3 unittest.py
+# For actual multi-rank tests or serving captures, lease the whole allocated set:
+python3 "$WORKLOAD_ROOT/stages/_shared/gpu_lock_set.py" "$GPU_SET" -- <foreground-command>
+```
+
+A single-lock comma list is a pool that leases ONE device; a set lock holds every
+requested device (the legacy set wrapper acquires sorted locks sequentially).
+Reconcile device IDs with the physical allocation. Serialize captures
+and UTs if isolation cannot be established, and let no detached GPU child outlive the
+lease.
+
+All participating processes/containers must share the same
+`/tmp/team_gpu_locks` lock directory (bind-mount it when necessary), or set
+`KERNEL_EXTRACT_LOCK_DIR` explicitly to another writable directory shared by
+all participants. Never silently fall back to a task-private lock path when
+the shared directory is inaccessible. Existing
+serving jobs outside that locking scheme must be accounted for by scheduler
+exclusivity or serialization. Never disable idleness checks to bypass contention.
+The wrapper also keeps build caches task-local and checks source provenance
+using `stages/_shared/workspace_sources.py`; it requires no external provenance service.
+
+When no accepted overlay exists, create an empty task-local `baseline_overlay/`;
+imports then resolve the installed serving baseline outside the task. If an
+accepted overlay exists, stage its configuration while retaining its immutable
+external source references. Copying baseline source into the candidate task
+does not establish an independent baseline.
+
+Put model artifacts, captures and outputs under `EVAL_DIR`, not inside the skill.
+Keep credential handling and remote/container access in the user's existing
+tools. Keep run-specific credentials and model data outside the repository.

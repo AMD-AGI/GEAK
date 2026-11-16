@@ -21,8 +21,8 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 | --- | --- | --- |
 | [Setup](stages/setup/README.md) | Prepare runtime and resources | [runtime](stages/setup/runtime/SKILL.md) |
 | [Baseline](stages/baseline/README.md) | Establish or revalidate a reference | [adopt](stages/baseline/adopt/SKILL.md), [measure](stages/baseline/measure/SKILL.md) |
-| [Profile](stages/profile/README.md) | Diagnose the serving bottleneck | [kernel-extract](stages/profile/kernel-extract/SKILL.md), scoped to observations |
-| [UT](stages/ut/README.md) | Define and qualify a computation boundary | [kernel-extract](stages/ut/kernel-extract/SKILL.md), reusing the existing tools |
+| [Profile](stages/profile/README.md) | Diagnose the serving bottleneck | [kernel-profile](stages/profile/kernel-profile/SKILL.md): one config's kernels, their source path, served shapes and weights (`kernels.json`) |
+| [UT](stages/ut/README.md) | Define and qualify a computation boundary | [kernel-ut](stages/ut/kernel-ut/SKILL.md): writes and qualifies the tasks a `ut_request.json` names ([request tools](brain/tools/README.md)) |
 | [Roofline](stages/roofline/README.md) | Assess bounds and search priority | [kernel-roofline](stages/roofline/kernel-roofline/SKILL.md), [CPU fixture](stages/roofline/stub-roofline/SKILL.md) |
 | [Optimize](stages/optimize/README.md) | Produce an isolated candidate | [Kernel Workflow](stages/optimize/geak-kernel-workflow/SKILL.md), [kernel dynamic loop](stages/optimize/kernel-dynamic-loop/SKILL.md), [OOB](stages/optimize/oob/SKILL.md) |
 | [Apply back](stages/applyback/README.md) | Integrate a candidate and prove it took effect | [kernel overlay](stages/applyback/overlay-ab/SKILL.md), [system runtime](stages/applyback/system-runtime/SKILL.md) |

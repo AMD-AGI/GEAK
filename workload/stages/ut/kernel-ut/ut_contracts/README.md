@@ -1,0 +1,275 @@
+# UT contracts: per-operator templates for extracted kernel tests
+
+A delivered task used to be ~500 hand-written lines of `unittest.py` plus a `cases.py`
+whose operand construction, tolerance and gate logic were reinvented per kernel. Most UT
+defects found in review came from that reinvention: a dropped `is_shuffled` flag that timed
+the wrong kernel, one task-wide `tol` applied to integer top-k indices, uniform MoE routing
+timed as if served, a negative control that only failed to compile, a padded graph tail
+compared raw. This directory moves what is the same for every kernel of one operator family
+into a declared **contract** and one **driver**, the way SIKL's `OpContract`
+(`sikl/core/contract`) does for its kernels, so a task only writes what is specific to it.
+
+| Piece | What it is |
+|---|---|
+| `families/<family>.json` | the contract of one operator family (18 today, `scaffold_ut.py list`) |
+| `ut_contract.py` | contract loading, CPU lint, seeded operand construction, input checks, the bound compares |
+| `reference_f64.py` | float64 references, one per family that has one, row-subsettable |
+| `ut_driver.py` | every gate, driven by the frozen contract; a task's `unittest.py` calls it |
+| `scaffold_ut.py` | `new` / `sync-meta` / `lint` / `list` |
+| `templates/` | the generated `cases.py` and `unittest.py` |
+| `tests/` | CPU tests, including a scaffolded task run through every gate |
+
+`ut_contract.py`, `reference_f64.py` and `ut_driver.py` are copied into each task beside
+`harness_lib.py` and frozen with it; the family contract is frozen as `run/ut_contract.json`.
+Nothing in a task imports this directory at run time.
+
+## Workflow
+
+```bash
+UTC="$SKILL_ROOT/ut_contracts"
+python3 "$UTC/scaffold_ut.py" list
+python3 "$UTC/scaffold_ut.py" new --family gemm_a8w8_blockscale --task "$EVAL_DIR/tasks/<name>" \
+    --target <module:entry> --bind-module <module> --bind-file kernel_src/<file>.py \
+    --attr fp8_dtype=float8_e4m3fn --axis n=7168 --axis k=2048 \
+    --manifest <cases.json> --phase-regimes <regimes.json> [--override <overrides.json>]
+# fill the FILL markers: cases.py HOOKS and call(), replay_bundle() for graph phases,
+# meta.json evidence_path and negative_controls, run/ut_cases.json if no --manifest
+python3 "$UTC/scaffold_ut.py" sync-meta --task "$EVAL_DIR/tasks/<name>"
+python3 "$EVAL_DIR/tasks/<name>/ut_contract.py" "$EVAL_DIR/tasks/<name>"     # CPU lint, exit 0/1
+cd "$EVAL_DIR/tasks/<name>" && bash "$WORKLOAD_ROOT/stages/_shared/gpu_lock.sh" "$GPU_ID" python3 unittest.py --validation-mode correctness
+```
+
+With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the driver shards
+its correctness legs by case and spreads timing buckets over them. `--quick` runs every gate
+but timing on the smallest, middle and largest case of each phase (one draw, a few server
+calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
+Every finished gate is also written at once to `run/ut_report.checkpoint.json` (removed when the
+full report is written), so a run cut short by a preempted node keeps what it measured.
+`--reuse` keeps the gates that passed in `run/ut_report.json` or that checkpoint when nothing they read changed,
+including correctness receipts reused later by performance validation.
+
+UT extraction runs `--validation-mode correctness`: all twelve non-timing gates are
+required, and no timing gate executes. Reports explicitly name the validation contract,
+mode, required gates and `performance_measured: false`; a pass certifies the UT.
+Optimization runs `--validation-mode performance --reuse` (performance remains the
+bare command's default for existing optimizer callers). It requires all thirteen gates,
+measures timing, and only then reports a weighted speedup. Preserve `timed: true` cases
+and their workload weights even when extraction does not measure them.
+
+The lint needs no GPU and no torch; run it before every GPU session. `unittest.py` writes
+`run/ut_report.json` (every gate's measures) and `run/ut_result.json` (verdict, exit code,
+snapshot hash, gate statuses), prints `UT_GATE <gate> <status>` lines and, when timing ran,
+`GEAK_WEIGHTED_SPEEDUP=<value>`. Exit 0 = every gate required by the validation mode passed; 1 = a required gate failed or did not
+run (`--skip` makes the verdict `partial`, never `pass`); 3 = `UT_HARNESS_INCOMPLETE`, the UT
+itself is missing something (a graph phase without a replay bundle) — fix the UT, do not
+blame the candidate.
+
+## Temporary tensor lifecycle
+
+New scaffolds freeze `input_generation.protocol: "weight_substreams/v1"` in
+`run/ut_contract.json`. Built-in read-only `lifetime: "weight"` operands use a named
+random stream keyed by round seed, input name, resolved shape/dtype/distribution.
+Changing activation shape does not redraw the same weight. A per-process LRU cache
+holds at most `input_generation.weight_cache_bytes` (default 2 GiB). Every caller
+receives a private copy, so kernel writes cannot poison the cached original. Writable
+state, active layout hooks and custom/produced distributions remain independently
+constructed. Different draw seeds still produce different weights. A zero cache budget
+retains exactly the same random-stream recipe while disabling retention.
+
+This explicit generation recipe applies to newly scaffolded tests. Existing frozen
+contracts/helpers keep their previous inputs; do not retrofit completed experiments.
+After deliberately changing a contract, sync metadata and qualify it again.
+
+Input reproducibility builds twice and returns the second set for layout/value checks.
+Checks compare exact tensor bytes on-device where possible, including NaN payloads and
+signed zero. Snapshots use at most 256 MiB of GPU storage; larger operands fall back to
+CPU snapshots with chunked comparison. Isolation reuses its first execution for the
+output-independence check instead of invoking the kernel again.
+
+Correctness compares all cases/draws in bounded batches, controlled
+by `meta.ut_contract.oracle_batch_cases` (default 32) and `oracle_batch_bytes` (default
+256 MiB of estimated output across the legs). A single larger case stays whole and is
+reported; the output budget is not a total host/GPU-memory guarantee. Baseline/candidate
+workers keep separate, unchanged overlays across batches, so batching does not pay a new
+Torch import for every case. Controls get their own worker lifetime; workers stop before
+source restoration. Each batch's temporary `.pt` files are loaded and removed before
+the next batch. Negative controls regenerate bounded baseline batches instead of retaining
+suite-wide oracles. Each negative control searches for a numerical witness as described
+below; its rejection margin is unchanged.
+
+`ut_report.json.data_handling` records worker starts, batches, peak temporary oracle-file
+bytes and weight-cache statistics. Unneeded input copies are omitted from comparisons;
+reference operands and top-k score inputs retain their original comparison semantics.
+Only completed batches contribute results; missing case/draw outputs fail validation.
+
+## Negative-control witness search
+
+A mutation needs a completed numerical comparison that fails by at least the configured
+`min_control_margin`. It does not need to fail every case. The driver first tries a small
+case, then bounded batches of every remaining random case until it finds that witness.
+Stop applies only to the current control; every other declared control still runs.
+Correctness, input checks and replay keep their existing coverage.
+
+An author can optionally order known leaf/branch probes in the control declaration:
+
+```json
+{"leaf": "kernel_src/op.py", "find": "...", "replace": "...",
+ "expect": "...", "probe_sigs": ["DECODE_m4", "PREFILL_m200"]}
+```
+
+These must be unique random-case signatures from the manifest. They are tried one at a
+time, followed by the remaining cases if needed; they never narrow the fallback scope.
+Without a hint, the first probe has the smallest estimated output. A quick run stays
+within its own selected cases and still cannot qualify a UT. A hint is not proof of leaf
+execution: retain the normal source/binding and per-leaf delivery evidence.
+
+Weak numerical deviations continue the search. Import/build/launch failure, missing
+batch outputs and missing/incorrectly shaped returns cannot themselves qualify a
+control. If no sufficiently strong numerical witness exists, all eligible cases are
+checked and the control fails. Workers stop and the original source is restored and
+hashed on both success and failure.
+
+Each control reports `available_cases`, `checked_cases`, `early_stopped` and
+`witness_case`, alongside the existing margin and completed case comparisons. Early
+stopping happens after a completed batch; cases already executed in that batch remain
+in the report. The full UT manifest and workload weights are never reduced.
+
+## The case manifest (`run/ut_cases.json`)
+
+```json
+{"cases": [{"sig": "DECODE_m4", "regime": "DECODE", "axes": {"m": 4},
+            "effective_calls": 1840.0, "timed": true, "random": true,
+            "evidence": "observed_workload.json#..."}],
+ "replay_sigs": ["DECODE_m1", "DECODE_m64"]}
+```
+
+`axes` holds the case's var axes (and may restate const ones, which must agree with the
+task's). `regime` is the phase label and must be a `meta.phase_regimes` key. Timed cases need
+finite `effective_calls` from the observed workload; `random` cases feed the value-parity and
+negative-control gates; `replay_sigs` must hold at least two cases of every graph-deployed
+phase. `meta.workload.cases` is derived from this file by `sync-meta` and the lint rejects
+any drift between them.
+
+## What a contract declares
+
+| Field | Meaning |
+|---|---|
+| `match` | `{kernel: [regex], op: [regex]}`: device-kernel names and launching ops this family covers; `brain/tools/draft_task_decls.py` proposes the family whose patterns fit most of a task's kernels |
+| `axes` | `{lo, hi, multiple_of}`; `var: true` marks an axis that varies by case (tokens, context), others are pinned per task with `--axis`; `expr` derives one (`"ceil_div(k, 128)"`) |
+| `attrs` | variant selectors with their legal `values` (dtype, layout, activation...); pinned per task with `--attr`, default = first value |
+| `constraints` | expressions every case must satisfy (`"topk <= n_experts"`) |
+| `inputs.<name>` | `shape` (axis expressions, or `{"by": attr, "cases": {...}}`), `dtype` (`"attr:<name>"` allowed), `dist`, `lifetime` (`weight`/`per_call`/`state`), optional `layout` hook, `present_when`, `writable` (the live entry writes it in place: `call()` must clone) |
+| `outputs.<name>` | `shape`, `dtype`, `bound` (below), optional `max_violation_fraction`, `sort_by` (compare rows in another output's order: weights follow their ids), `present_when`, `optional_if_not_produced: {poison}` (exact outputs: the harness fills the buffer with `poison` before the call; all-poison = `not_produced`, part-poison = FAIL, any poison on the compared-against side = FAIL), `require_finite` (outputs the harness poisons with NaN: a non-finite value on either side fails, so NaN left at the same places on every leg is not agreement) |
+| `compare` | `determinism` (`bitwise` = the candidate must reproduce itself byte for byte), `max_violation_fraction`, `element_order` |
+| `layout_facts` | attributes the dispatcher reads that the built operands must carry (`b.is_shuffled`) |
+| `reference`, `reference_rows` | the float64 reference and how many rows of the token axis it computes; or `"oracle:<name>"`, a leg of `oracles` (bounds that read float64 values -- `dot_product`, `baseline_relative`, `output_rounding`, `scores: "ref:..."` -- need a float64 reference) |
+| `oracles` | named legs that recompute the step another way (`{path, overlay, outputs?, bounds?, controls?, cases?: all \| per_width_smallest}`); `bounds` replace the outputs' own for that leg, `outputs` must be a subset of the contract's |
+| `required_control_categories` | kinds of injected bug the negative controls must cover: a list, or `{by: <attr>, cases: {<value>: [...]}}` |
+| `hooks`, `call` | what the task must write, and how |
+| `timing`, `negative_controls`, `pitfalls` | the cache condition to record, controls known to work, and failures seen on this family |
+
+A task departs from its family only through `--override` items `{"path", "value", "why"}`;
+an override without a `why` is refused, and every applied override is printed by the lint.
+For an operator no family covers, write a contract file in the same format and pass
+`--family-file`; the same driver and lint apply.
+
+### Bounds
+
+Every compare happens on the CPU in float64. `y` is the float64 reference, `b` the frozen
+baseline's output, `u` the output dtype's unit roundoff.
+
+| `kind` | Passes when | Use for |
+|---|---|---|
+| `dot_product` | `|c - y| <= 2(6 sqrt(n_eff) + 2) u_acc (|a|@|b|) + u|y|`, n_eff from `length` and `max_split_k`; unbiased | GEMMs whose accumulation follows the IEEE model (bf16, MXFP4 operands) |
+| `baseline_relative` | `|c - y| <= 2 max(|b - y|, rms_row(b - y)) + u|y|`; unbiased or no more biased than the baseline | the default where the installed kernel is itself inexact (FP8 MFMA, atomics, attention) |
+| `output_rounding` | `|c - y| <= 2u|y|` | ops every correct kernel computes to one rounding (residual add) |
+| `tolerance` | `|c - y| <= atol + (rtol + u)|y|` (`against: baseline` uses `b`); `per_row: true` counts violating rows (last axis = a row) against the budget | norms, activations, rope, KV rows |
+| `noise_relative` | `|c - b| <= m max(|b2 - b|, rms_row(b2 - b)) + k u|b|`, b2 a second baseline run | quantized outputs whose last code flips at rounding boundaries |
+| `sqnr` | `20 log10(|y|/|c - y|) >= min_db` | whole-output checks when no elementwise model holds |
+| `delta` (on `tolerance` / `sqnr`) | `{minus: <output>, along?: <axis>}`: judge `out - minus` (or consecutive differences over `along`, the first against `minus`) instead of `out`; a tolerance adds `2u|y|` for storing the undifferenced value; a zero reference change fails | residual streams, where the pass-through residual would dominate a relative bound or an SQNR |
+| `exact`, `multiset_rows` | equal, or equal as per-row multisets; `value` compares to a constant instead | integer outputs, routing ids, stray-write counts |
+| `topk_equivalent` | per row: same count of valid entries, distinct, in range, and the selected `scores` equal the baseline's selected scores (within `score_atol/rtol`) | top-k indices; ties may pick either index; `scores: "ref:<name>"` for a fused score+top-k |
+| `bytes_exact` | equal bytes (up to `max_violation_fraction`) | packed FP4, caches |
+| `harness` | `harness_lib.correct` with `tol` | legacy; the lint warns |
+
+A non-finite subject value where the compared-against value is finite is a violation under
+every kind (error `+inf`, SQNR `-inf`, counted in `nonfinite_mismatches`, never budgeted): a
+poisoned buffer the kernel never wrote must not pass because `NaN > limit` is False. NaN on
+both sides is agreement.
+
+"Unbiased" is SIKL's test `|mean(e)| / rms(e) <= 5 / sqrt(n)`: a candidate whose errors all
+lean one way (a dropped scale, a truncating cast) fails even inside the elementwise bound.
+
+### Distributions
+
+`normal {mean, std}`, `lecun_normal {fan_in}` (unit-variance GEMM outputs), `uniform`,
+`log_uniform {log2_lo, log2_hi}` (scales), `int_range {lo, hi, distinct}`, `permutation`
+(tie-free rows), `routing {experts, load: uniform | zipf:<s> | observed, counts}`, `simplex`
+(routing weights), `cu_seqlens`, `seq_lens`, `page_table {pool}` (a shuffled pool),
+`sparse_indices {context, pad}` (distinct slots stratified over the whole context), `constant`,
+`hook` (a task function; may produce several inputs, e.g. packed values and their scales),
+`produced {by}` and `fixture` (structural state loaded by cases.py). Parameters may be
+expressions over the case's axes. Every draw comes from the leg's seeded generator, so the
+baseline leg, the candidate leg and the driver rebuild identical operands.
+
+## Gates (`ut_driver.py`)
+
+| Gate | Process | Fails when |
+|---|---|---|
+| `contract` | driver, CPU | the lint finds an error (for a whole-package bind: a file of `kernel_src/<package>/` differs from `run/baseline_package.json`, the installed package, and is neither an editable leaf nor a `frozen_differs: [{path, why}]` entry) |
+| `inputs` | driver | a case does not rebuild byte-identically from its seed, a layout fact is missing, an integer input leaves its range |
+| `binding` | legs | both legs import the same code, or the baseline resolves inside the task; for a whole-package bind, `run/baseline_package.json` differs from the package the baseline leg imports (the report lists every differing file and the `frozen_differs`) |
+| `launches` | baseline, every case once under `torch.profiler` (`meta.expected_launches` only) | a phase never launches a task kernel the server launched in it -- a stage, a dispatch branch or the other phase the UT does not reach -- unless waived (`launch_waivers: [{kernel, phase, why}]`); `seen` records what it did launch |
+| `correctness` | baseline + candidate oracle legs (fresh processes, deployment compile mode applied) | any random case/draw violates its output bound; with `bitwise` determinism, two candidate runs differ |
+| `isolation` | candidate | `call()` modified an input, or two calls share an output buffer |
+| `process_state` | baseline + candidate oracle legs on each phase's smallest and largest case, with a snapshot of process-wide state before and after (`leg_runner._process_state`) | the candidate changes process-wide state the baseline leaves alone: an environment variable, a torch backend/BLAS/precision/determinism switch, TunableOp, or the identity of a shared torch callable. A UT runs the op alone; in a server every other op then runs under that change (a candidate that enabled TunableOp for its own GEMM passed every other gate and faulted all serving ranks, 2026-11-06). A deliberate change is declared in `process_state_allow: [{prefix, why}]`. A value that differs per leg by design (a source-keyed JIT cache directory) is declared in `meta.leg_env` and set before the first snapshot, so it is no change (report: `leg_env`) |
+| `replay` | baseline eager refs, candidate graph replay | a graph phase lacks a bundle (exit 3), capture fails, or a replayed case violates its bound |
+| `server_calls` | baseline + candidate replay of `run/server_calls.json` (server evidence only) | the candidate raises or differs from the baseline (beyond `server_call_tol`, default `replay_tol`) on a call the baseline replays; calls the baseline cannot rebuild are listed, and their variants fall to `compile_variants`. `server_call_postprocess: true` (with `server_call_postprocess_why`) applies the task's `cases.server_call_postprocess(call, args, kwargs, ret)` to the return in BOTH legs before the compare, for an entry whose return is only partly defined -- a routed expert kernel allocates its output with `torch.empty` and writes only this rank's rows, the deployed caller masks the rest by the same routing and never reads them, and those elements differ between two identical calls of the unmodified entry. The hook is frozen task source outside the candidate overlay, so it reduces both legs identically and cannot hide a difference in what the caller reads |
+| `compile_variants` | the baseline legs above, under `compile_watch` | a Triton variant in `run/server_variants.json` is built by no baseline leg and not waived (`compile_variant_waivers: [{id, why}]`), or the legs' Triton/torch namespaces differ from the server's (`server_preimports`) |
+| `negative_controls` | candidate oracle per mutation | a mutation passes the compare, fails by < `min_control_margin` (default 10x the bound), or does not run at all; the source is restored and re-hashed either way. Every editable leaf needs its own control unless `leaf_control_waivers: [{leaf, why}]` names it (a whole-package bind's layouts, configs and device runtime that no single mutation isolates; any other bind is a lint error, as is a waiver outside the bound package); at least one leaf keeps a control, and the report lists the waivers |
+| `restore` | driver | any `kernel_src` byte differs from the start of the run |
+| `timing` | `harness_lib.measure_legs` | no measurable weighted speedup |
+
+Timing is unchanged from the shared harness (`measure_legs` + `serving_weighted_speedup`) so
+the optimize stage reads the same number it always has; the report adds which buckets
+stopped before `--max-reps` and the recorded cache condition.
+
+The timing gate also refuses a number that is not the deployed device time, whatever the
+speedup: every leg carries a receipt (`baseline_timing` / `optimized_timing`: timers, `primed`,
+`host_ms`), and the gate fails when a phase that deploys under a CUDA graph was timed by any
+other timer (`time_op`'s silent eager fallback), when `primed` is False (host-bound: the number
+is dispatch latency) or when it is absent. A UT that timed ~100 ms of host work around a
+~0.15 ms monokernel passed this gate before the receipt was carried.
+
+## Whole-layer monokernels (`mono_layer`, timing `rank_chain`)
+
+A persistent monokernel that runs a whole decoder layer and exchanges data with its peer
+ranks inside the kernel cannot be timed by `time_op(call)`: rank 0 alone waits on its peers,
+and a `call()` that drives them puts the host-side rank harness in the window. Its family
+declares `timing.kind: rank_chain`; `scaffold_ut.py new` then writes `meta.timing`, copies
+`shared/rank_timing.py` and appends a `rank_chain()` stub to `cases.py`.
+
+| | correctness gates | timing |
+|---|---|---|
+| entry | `call()` through the task's rank harness (collective-ut.md) | `cases.rank_chain(rank, world, group, case)` |
+| processes | the harness's | `rank_timing.py`: one process per rank, `world` devices per leg, buckets one at a time |
+| what is timed | -- | CUDA-graph replays of a chain of `chain_length` DISTINCT layers minus the bootstrap step, every rank after a barrier, bucket = max over ranks |
+
+The method is the Muse Spark layer team's frozen benchmark (`bench_worker.target_chain`)
+built on sgl-amd-mono `test/kernels` (`test_muse_spark_layer.py`, `test_muse_spark_k3_tp8.py`);
+write `rank_chain` from those, at the manifest's served rows and contexts. Ground truth on
+MI355X for the Muse Spark target layer: ~130-180 us a launch at TP8 (rows 8/16).
+
+## Limits
+
+- A family contract is not a substitute for reading the live call: shapes, dtypes and the
+  boundary come from the trace and the installed source; the contract checks them.
+- `all_reduce` is declared but the single-process driver cannot run a collective; use the
+  rank harness of `references/collective-ut.md` with the contract's bound.
+- `mono_layer` times through `rank_chain` only; its correctness still runs through `call()`
+  and the task's rank harness. Draft-style monokernels driven from one process on all devices
+  need a per-rank `rank_chain` all the same.
+- Hooks that quantize or shuffle must call the installed functions; the CPU tests use
+  stand-ins and prove nothing about a real quantizer.
+- The float64 references are the operator's mathematics. When the installed baseline fails
+  its own family bound, find out why before overriding it.

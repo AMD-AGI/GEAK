@@ -4,15 +4,19 @@ Diagnose the serving bottleneck under the
 [invocation contract](../CONTRACT.md#direct-module-calls).
 
 **Input:** workload/runtime identities, the bottleneck question and compatible run evidence.
-**Output:** observations, attributed costs, coverage and uncertainty in `REPORT.md`.
+**Output:** observations, attributed costs, coverage and uncertainty in `REPORT.md`;
+for kernel work, `kernels.json` -- one config's selected kernels with their source path,
+served shapes and workload weights ([kernels.py](kernels.py)).
 **Acceptance:** evidence matches the declared workload, phase and resource scope;
-missing coverage stays visible. A diagnostic observation need not produce UTs.
+missing coverage stays visible. Profile decides no task boundary and writes no UT.
 
-Implementation: the observation and attribution parts of
-[kernel-extract](kernel-extract/SKILL.md), or a profiler explicitly named in the plan.
-Use traces, native telemetry and CPU/device, queue, cache or communication evidence
-as the question requires. Hand computation boundaries needing qualification to
-[UT](../ut/README.md); use Roofline when a bound would help the next decision.
+Implementation: [kernel-profile](kernel-profile/SKILL.md) for one config's kernels, or a
+profiler explicitly named in the plan. Several configs are several calls; an identical
+deployment's captures can be reused (`plan_points.py --reuse-capture`). Use traces,
+native telemetry and CPU/device, queue, cache or communication evidence as the question
+requires. Computation boundaries needing qualification become a `ut_request.json`
+([request tools](../../brain/tools/README.md)) for [UT](../ut/README.md); use Roofline
+when a bound would help the next decision.
 
 For an unqualified capture path or a collection defect, establish capture, export and
 readable evidence within a bounded call before expanding the census; reuse a qualified
@@ -29,11 +33,11 @@ remaining attribution/coverage gap through the contract.
 ## Candidate scope
 
 The scenario's selection parameters override the extractor's defaults.
-For the bundled extractor, `select_candidates.py` forwards
+For the bundled profiler, `select_candidates.py` forwards
 `selection_top_k`, `selection_overall_pct_gt` and `selection_phases` to its native
-selector. Set `SKILL_ROOT` to `kernel-extract/`, `SHARED_TOOLS` to its `shared/`,
-and `EVAL_DIR=OUT`; see the vendored
-[pipeline handoff](kernel-extract/references/pipeline-handoff.md).
+selector. Set `SKILL_ROOT` to `kernel-profile/`, `SHARED_TOOLS` to its `shared/`,
+and `EVAL_DIR=OUT`; see its
+[pipeline handoff](kernel-profile/references/pipeline-handoff.md).
 
 ```bash
 python3 "$WORKLOAD_ROOT/stages/profile/select_candidates.py" \
@@ -46,45 +50,32 @@ the ranking, map, selector and arguments; changed inputs need a fresh output pat
 When using the native capture orchestrator, pass the same configured scope through its
 `--select-arg` interface.
 
-`selection_candidates.json` is the broad inventory, not one UT per row. Reconcile
-complete nonoverlapping operator boundaries with source availability and existing
-deliveries. Preserve every selected identity's task or blocker, whole-workload shares,
-phase leaders and deferred work. GPU capacity limits concurrency, not extraction scope.
-Keep `selection_scope`, `candidate_inventory` and `coverage_summary`; inventory,
-task completion and tested-case coverage are separate claims.
-Reuse compatible captures when expanding scope and qualify only the added tasks.
+`selection_candidates.json` is the broad inventory, not one UT per row. Preserve every
+selected identity, whole-workload shares, phase leaders and deferred work in
+`kernels.json`; task boundaries are drawn downstream. GPU capacity limits concurrency,
+not profile scope. Keep `selection_scope`, `candidate_inventory` and `coverage_summary`;
+inventory and tested-case coverage are separate claims. Reuse compatible captures when
+expanding scope.
 
 ## Driver delivery
 
-`run.py run profile` still requests the combined configured Profile/UT delivery.
-Its [finalize.py](finalize.py) remains the mapping and acceptance owner; a scoped
-diagnostic is not submitted as though this whole delivery were complete.
-Use the [UT implementation](../ut/kernel-extract/SKILL.md) for task qualification.
+`run.py run profile` requests one config's kernel profile. [finalize.py](finalize.py)
+checks the configured selection scope, the denominator and the inventory, then exports
+`kernels.json` ([kernels.py](kernels.py)); `kernels.py verify` re-derives it from the
+unchanged evidence.
 
 | Artifact | Purpose |
 | --- | --- |
+| `kernels.json` | Selected kernels: path (entry, files, frames), points/shapes, weights, gaps; SHA-256 of its evidence |
 | `kernel_ranking.json` | Kernel inventory and selection/coverage evidence |
-| `selection_targets.json` | Explicit selected scope, policy receipt and whole-workload shares for Roofline |
+| `selection_targets.json` | Explicit selected scope, policy receipt and whole-workload shares |
 | `kernel_workload.json` or ranking `denominators` | Nameable census denominator |
-| `task_plan.json` | Boundaries, ownership and blockers |
-| `task_gpu_requirements.json` | Optional device widths when frozen metadata lacks them |
-| `tasks/<name>/` | Qualified tasks with `unittest.py`, `meta.json`, `kernel_src/` and `cases.py` |
-| `tasks/<name>/run/ut_result.json` | Native full-test verdict |
-| `tasks/<name>/run/RETURN.json` | Native delivery-gate receipt |
-| `results.json`, `REPORT.md` | Identity dispositions and declared/achieved coverage |
-
-The finalizer checks configured scope and delivery consistency using native receipts.
-A CPU preflight and the full GPU test are separate evidence; unavailable GPUs leave
-qualification incomplete. The vendored skill stays byte-identical.
+| `sampling_points_final.json`, `evidence/` | Points, censuses, shapes, source map, adjacency, compile variants |
+| `REPORT.md` | Sampling plan, achieved coverage, gaps |
 
 ## Measurement meaning
 
 Measure weights in the actual workload phase, excluding warmup. Keep whole-workload,
 capture-window and within-call shares distinct; do not renormalize missing mass.
 Map observed requests to executed tensor geometry, including graph padding and routing
-occupancy/scope, before freezing cases. Source evidence must support the mapping.
-
-Keep fixture staging and checks outside the scored call while preserving the target's
-actual dispatch, allocations and copies. Timing and correctness must exercise the same
-computation. Qualify unchanged-source repeatability and timing sensitivity under the
-serving execution mode; a timing repair requires fresh performance qualification.
+occupancy/scope; source evidence must support the mapping.
