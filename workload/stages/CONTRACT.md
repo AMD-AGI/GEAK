@@ -13,6 +13,8 @@ evidence. State which decision the call should inform and which prerequisites it
 consumes. The task and explicit plan govern scope, including over implementation defaults.
 
 Invoke the skill or tool with those inputs and a separate candidate/output directory.
+A source snapshot is not the complete input contract: preserve declared data and fixture
+dependencies when copying or isolating a call, including its implementation's workspaces.
 A call may use part of a larger implementation, combine tools or return a running handle.
 For ongoing work, return its location, progress/blockers and affected input identities
 so the controller can respond before completion.
