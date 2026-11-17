@@ -44,6 +44,39 @@ skills:
   constraint_validation_status: ''
   auto_apply: true
   explicit_pin_modes: []
+- id: apply_mono_kernel_to_framework
+  file: skills/apply_mono_kernel_to_framework/skill.md
+  scope: e2e
+  revision: ''
+  playbook_file: skills/apply_mono_kernel_to_framework/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/apply_mono_kernel_to_framework/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    from_backend: ''
+    to_backend: flydsl
+  expects:
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
 - id: ensure_flydsl
   file: skills/ensure_flydsl/skill.md
   scope: dependency
@@ -443,6 +476,39 @@ skills:
     to_backend: triton
   expects:
     isolated_speedup_min: 1.15
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
+- id: mono_kernel_layer
+  file: skills/mono_kernel_layer/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/mono_kernel_layer/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/mono_kernel_layer/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    from_backend: ''
+    to_backend: flydsl
+  expects:
+    isolated_speedup_min: 1.05
     parity: required
   validation_status: draft
   reference_evidence_status: ''
