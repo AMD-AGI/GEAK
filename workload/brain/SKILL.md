@@ -31,9 +31,11 @@ preserve the inputs and evidence of in-flight calls.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md). Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
-3. Invoke the implementation and retain asynchronous handles. Dispatch ready independent
-   work on disjoint measurement resources as its native delivery permits. Inspect progress,
-   valid measurements and remaining budget; a heartbeat alone is insufficient.
+3. Bind invocation options to their native prerequisites and actual receipts; similar
+   labels from another module do not prove native preparation ran. Invoke the implementation
+   and retain asynchronous handles. Dispatch ready independent work on disjoint measurement
+   resources as its native delivery permits. Inspect progress, valid measurements and
+   remaining budget; a heartbeat alone is insufficient.
 4. Read native receipts and `REPORT.md`, including partial reports. Reconcile their input
    versions, update open work, then adopt, reject, repair, investigate or wait. Preserve
    failed and superseded calls; stale evidence cannot qualify a replacement.
