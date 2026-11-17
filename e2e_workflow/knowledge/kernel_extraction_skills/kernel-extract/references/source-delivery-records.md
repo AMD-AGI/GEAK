@@ -38,8 +38,29 @@ locked `gpu` set and a hashed task-local `log_ref`. Execution records include
 positive `invocations` at the actual editable leaf. Negative controls include
 `launch_succeeded:true` and positive `numerical_mismatches`; build/import errors
 do not count. Record the clean snapshot the reversible mutation tested; retain
-the actual mutation and mutated-source identity in the log, restore it, and
-run the normal final UT. For a joint task, record each requested leaf separately.
+the actual mutation and mutated-source identity in the log, and restore it. Run a
+mutated generated task as `python3 unittest.py --mutation <leaf>` (correctness only):
+its result goes to `run/mutations/<leaf>/ut_result.json`, never to the delivered
+`run/ut_result.json`. After restoring, run `python3 unittest.py --correctness-only`
+once: when its `full_result.current` is true (the last full UT passed with the same
+contract and source snapshot), that full UT result is delivered as it is; otherwise
+rerun the full UT. The delivery gates still check the result's snapshot and contract
+hashes. Run the UT, `verify_ut.py` and every mutation inside one lease, as the chain
+in [SKILL.md](../SKILL.md) step 5 shows. For a joint task, record each requested leaf
+separately.
+
+A multi-rank generated task (`meta.capabilities.multi_rank.world_size` > 1) adds
+one row per rank `0..world_size-1` to its `numerical_rejection` record:
+`"ranks": [{"rank": 0, "launch_succeeded": true, "numerical_mismatches": 12}, ...]`.
+The mutation counts as rejected only when every rank launched and reported
+positive mismatches; one rank that accepts the mutated source fails the record.
+The top-level `launch_succeeded` and `numerical_mismatches` cover all ranks. The
+extraction agent produces the record as for one GPU: mutate `kernel_src`, run
+`python3 unittest.py --mutation <leaf>` under the group lease of `SERVING_GPU`, take
+each rank's row from `correctness.by_rank` of `run/mutations/<leaf>/ut_result.json`
+(`rank`, `launch_succeeded`, `numerical_mismatches`; a case whose call raised is not a
+mismatch), keep its output as the record's log, then restore the clean source and check
+it with one `--correctness-only` run as above.
 
 Generate records from actual test outcomes. Hashing a file or copying these
 field names does not prove GPU execution. The checker enforces consistency,

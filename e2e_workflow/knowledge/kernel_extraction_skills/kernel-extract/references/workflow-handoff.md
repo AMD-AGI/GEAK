@@ -16,7 +16,7 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 | `EVAL_DIR`, `EVIDENCE_DIR` | Allowed output root and this round's evidence directory |
 | `BASELINE_LOG`, `BASELINE_BENCH_DIR`, `BASELINE_SUMMARY` | Completed measured baseline evidence; exclude warmup/discarded intervals |
 | `MODEL_PATH`, `CURRENT_FLAGS`, `CURRENT_ENV`, `CURRENT_OVERLAY` | Effective installed stack and accepted baseline |
-| `SERVING_TP`, `SERVING_GPU`, `GPU_ID` | Serving layout and allocated test devices; reconcile physical ownership before leasing |
+| `SERVING_TP`, `SERVING_GPU`, `GPU_ID` | Serving layout and allocated test devices; reconcile physical ownership before leasing. `SERVING_GPU` is the set a multi-rank UT leases whole, as one group (`gpu_lock.sh "group:$SERVING_GPU"`); single-GPU UTs lease `GPU_ID` |
 | `TASK`, `WORKLOAD` | User scope and replay specification |
 | `PREVIOUS_WORKLOAD_JSON`, `PREVIOUS_RANKING_JSON`, `PREVIOUS_UT_DELIVERY` | Reuse compatible evidence and passing tasks on resume/refresh |
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
@@ -48,15 +48,24 @@ Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast
 and deep modes retain their head-only scheduling. Missing or stale UT evidence
 fails that task rather than invoking another extractor from an optimization phase.
 
-Declare `required_gpu_count` for multi-rank tasks in `run/requested_kernel.json`.
-Current head/milestone lanes allocate one GPU per task. Completed multi-GPU UTs
-remain in the delivery and are listed as deferred for optimization, with evidence
-paths; they are not retried on one card. A collective without an explicit rank
-requirement is deferred as well. Its extraction coverage remains recorded.
+Declare `required_gpu_count` for multi-rank tasks in `run/requested_kernel.json`;
+a count in `run/RETURN.json` and a generated UT's
+`meta.capabilities.multi_rank.world_size` must be the same. A completed multi-GPU UT
+enters the head or kernel queue carrying `required_gpu_count` when both hold: its UT
+result has per-rank time and alignment for every timed case (the timing `receipt`, or
+`timing.cases[].baseline.per_rank_us` with `timing.alignment` in an older UT), and its
+GPU count is declared explicitly and consistently (every count the declaration and the
+result state is the same positive integer). Otherwise it remains in the delivery and is
+listed as deferred for optimization, naming what is missing, with evidence paths; it is
+not retried on one card. A collective without an explicit rank requirement is deferred
+as well. The workflow, not packaging, decides before dispatch whether a GPU pool can
+hold the task and defers it with a reason when none can. Deferred tasks keep their
+extraction coverage.
 
 ## Package the completed tasks
 
-Run the skill's own per-task preflight first, preserving `run/requested_kernel.json`
+Run the skill's own per-task preflight first, in its full form (without `--prepared`;
+only the full form writes `run/RETURN.json`), preserving `run/requested_kernel.json`
 and `run/RETURN.json`. The workflow adapter reads these existing files; it does not
 repeat kernel selection or GPU validation. Write a `workflow_tasks.json` containing:
 

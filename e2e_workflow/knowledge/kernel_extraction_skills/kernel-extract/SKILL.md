@@ -121,7 +121,35 @@ frozen case manifest; it never launches serving, profiles, or captures shapes.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
 `unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
 optional; preserve minimal structural fixtures only where needed.
-Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
+
+Write `cases.py` and `meta.json` (declared capabilities, case manifest, tolerance,
+observed workload; every `kernel_src/` file is either copied source with its origin in
+`kernel_extraction.source_origins` or a binding file you wrote, listed in
+`kernel_extraction.binding_files`), then scaffold, check and freeze the UT with the
+generator:
+
+```bash
+python3 "$SHARED_TOOLS/generate_ut.py" all "$TASK_DIR" --ranking "$RANKING_JSON"
+```
+
+`$RANKING_JSON` is the kernel ranking of this extraction: `PREVIOUS_RANKING_JSON` on an
+AgentX resume, in a baseline round the `kernel_ranking.json` written in step 2 (the
+`ranking_json` of `workflow_tasks.json`). `--ranking` writes its absolute path into
+`meta.kernel_extraction.ranking_json` (or fill that field yourself), so give it on the
+first `all`, before freeze: a later change of the path is a change of `meta.json` and
+voids the UT results. The check refuses a phase in which the kernel has calls in that
+ranking without timing and correctness cases (task-authoring.md, "Every phase the
+kernel has calls in").
+
+It copies `harness_lib.py`, `leg_runner.py`, `overlay_setup.py` and `ut_runner.py`
+unchanged, writes the fixed `unittest.py` (never hand-write or edit it), checks the
+hooks, metadata and coverage on the CPU, and freezes the test contract in
+`run/ut_contract.json`. Rerun it after any change to `cases.py` or `meta.json`; a
+changed test invalidates every earlier result. `python3 unittest.py` then runs the whole
+UT: binding, independent baseline references, correctness, timing, weighting and the
+timing receipt. A kernel that runs on several GPUs at once (a collective, or a fused
+kernel exchanging data with other ranks inside the kernel) is declared in
+`capabilities.multi_rank` and follows [multi-rank UT](references/collective-ut.md).
 
 Deliver actual native/JIT/generated computation source for every claimed leaf,
 with build resources and version/hash provenance. A copied dispatcher that
@@ -132,7 +160,14 @@ routing semantics, cache/page state and complete outputs.
 
 Run every GPU command from its task directory under the lease tools in
 [setup](references/setup.md) — `gpu_lock.sh` for one device, `gpu_lock_set.py` for the
-whole allocated set. Never run a GPU command outside a lease.
+whole allocated set. Never run a GPU command outside a lease. A multi-rank UT instead
+leases `SERVING_GPU` as one group, bounded by the UT's total time limit; its
+`verify_ut.py` and source-mutation runs lease the same way:
+
+```bash
+GEAK_GPU_RUN_TIMEOUT=<meta.timeouts.total_s> \
+  bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "group:$SERVING_GPU" -- python3 unittest.py
+```
 
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input
@@ -157,18 +192,60 @@ missing structural state. Synthetic structural cases may extend correctness cove
 but do not claim they reproduce serving performance without evidence. Any necessary
 capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
 
-Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
-harness. Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and
-`serving_weight_model.source="observed_workload"` with an evidence path.
-Each case has a unique `sig`, observed `regime` and finite nonnegative
+The generated UT times with `h.measure_legs()` and weights with
+`h.serving_weighted_speedup()`. Set `workload.kind="agentx_trace_replay"`,
+`weighting="observed"`, and `serving_weight_model.source="observed_workload"` with an
+evidence path. Each case has a unique `sig`, observed `regime` and finite nonnegative
 `effective_calls` on one consistent basis. Aggregate as
 `sum(baseline_ms * calls) / sum(candidate_ms * calls)`; no fixed-load fallback
 or weighted geometric mean. A near-1x unmodified extraction is expected.
 
 ## 5. Validate and deliver
 
-Read [source records](references/source-delivery-records.md), freeze the task
+Read [UT validation](references/ut-validation.md) and
+[source records](references/source-delivery-records.md), freeze the task
 snapshot before GPU validation and generate records from actual outcomes.
+Run the UT, the verification of the test itself (`verify_ut.py`) and the per-leaf
+source mutations as one chain: one script under ONE lease call, so the GPUs are not
+released and queued for again in between.
+
+```bash
+cd "$TASK_DIR"
+cat > run/gpu_chain.sh <<'EOF'
+python3 unittest.py || exit                              # full UT -> run/ut_result.json
+python3 "$SHARED_TOOLS/verify_ut.py" --task . || exit    # -> run/verify_ut.json, exit 0 on PASS
+for leaf in <leaf> ...; do                               # one reversible mutation per editable leaf
+  <apply the mutation of $leaf to its kernel_src/ file, logging what changed>
+  python3 unittest.py --mutation "$leaf" > "run/mutation_$leaf.log" 2>&1   # rejected: exit 1
+  <restore that file byte for byte>
+done
+python3 unittest.py --correctness-only > run/restored_check.log 2>&1
+grep -Eq '^\[ut\] full UT result [^ ]+: current' run/restored_check.log || python3 unittest.py
+EOF
+bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "$GPU_ID" bash run/gpu_chain.sh
+# a multi-rank UT: the group lease of SERVING_GPU, its time limit covering the whole chain
+GEAK_GPU_RUN_TIMEOUT=<several x meta.timeouts.total_s> \
+  bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "group:$SERVING_GPU" -- bash run/gpu_chain.sh
+```
+
+The chain stops at a failing UT or verification; fix it and run the chain again.
+Only a `PASS` bound to the current contract and source snapshot is deliverable; the
+delivery gate checks it. `INCONCLUSIVE` (the run was stopped from outside: GPU memory,
+lock wait, IPC fault, time limit) is not a task defect: run it again. A `FAIL` names the
+check or control that failed; fix `cases.py`/`meta.json`, regenerate, rerun the UT and
+verify again. The per-leaf source mutations are still required: controls prove the
+test is sensitive, mutations prove it executes the extracted source. A mutation run
+(`--mutation <leaf>`, correctness only) writes `run/mutations/<leaf>/ut_result.json`,
+never the delivered `run/ut_result.json`. After the restore, one `--correctness-only`
+run decides: its `full_result.current` is true when the last full UT passed with the
+same contract and source snapshot, and that result is delivered as it is; otherwise the
+restored task differs from the tested one, the full UT runs again, and `verify_ut.py`
+and the mutations, bound to the same hashes, must run again too. The delivery gates
+still check the hashes. Keep one full UT to about 10 minutes (`wall_s` in
+`run/ut_result.json`): if it takes longer, merge timing cases that fall in the same
+deployment bucket (in a graph-deployed phase: the same deployment graph, M padded to
+the same captured size with the other case dimensions equal -- see "Graph replay
+groups" in task-authoring.md) and drop duplicates; the coverage rules do not change.
 After real GPU tests, preflight the exact return with the shared delivery gate:
 
 ```bash
@@ -182,6 +259,14 @@ Use `extract_op` for the whole-op return form defined in the contract. Both
 forms require actual source delivery in this skill. The gate reads workflow
 schemas and hashed evidence; it does not execute or independently certify GPU
 tests. Keep failures visible and continue independent tasks when possible.
+Only this full form writes `run/RETURN.json` (with `--out`, on pass). A failing full
+preflight is a defect to fix; `--prepared` is the workflow's packing check and must not
+be used to write `RETURN.json`. `target_callable` in `run/requested_kernel.json`,
+`RETURN.json` and `meta.json` is the entry the `kernel_selection.py` verdict certifies,
+e.g. `SiluAndMul.forward`, not the class; `candidate_bind` may still bind the class.
+When that entry resolves to the same code on both legs (a `forward` inherited from a
+base class), the candidate overrides that entry itself so the legs differ there; never
+change `target_callable` to pass `legs_differ`.
 
 Write `REPORT.md` and `results.json` with all selected identities, task/source
 locations, actual commands and devices, per-gate status, declared and achieved

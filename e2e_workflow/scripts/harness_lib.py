@@ -60,6 +60,115 @@ def sync(torch=None):
         torch.cuda.synchronize()
 
 
+# --------------------------------------------------------------------------- rank context
+class RankContext:
+    """Which rank this process is, and which rank's DATA it builds, for seeded input factories.
+
+    Outside a multi-rank pool this is rank 0 of 1. `rank` is the process's real rank (its device and
+    its place in the collectives); `data_rank` is the rank whose inputs it generates. They differ only
+    under verify_ut's `rank_skew` control, where one rank builds another rank's data on purpose (it
+    "reads the wrong rank's data") and the UT must reject that rank. So every input that differs per
+    rank -- weight shards, KV pages, per-rank activations -- must be drawn from this context
+    (`rank_rng`, `generator(seed)`, `data_rank`), never from os.environ["RANK"].
+
+    `rank_rng` is set by `for_draw(seed)`: a torch.Generator seeded with that draw's seed AND
+    data_rank. The plain `rng` a factory receives stays the same on every rank (replicated inputs)."""
+
+    def __init__(self, rank=0, world=1, data_rank=None, local_rank=None, device=None):
+        self.rank = int(rank)
+        self.world = max(1, int(world))
+        self.data_rank = self.rank if data_rank is None else int(data_rank)
+        self.local_rank = self.rank if local_rank is None else int(local_rank)
+        self.device = device
+        self.seed = None
+        self._rank_rng = None
+
+    @property
+    def rank_rng(self):
+        """This draw's per-rank generator, created on first use (a factory that never asks for it costs
+        nothing and draws exactly what it drew before)."""
+        if self._rank_rng is None and self.seed is not None:
+            self._rank_rng = self.generator(self.seed)
+        return self._rank_rng
+
+    def seed_for(self, seed):
+        """Deterministic per-rank seed derived from `seed` and `data_rank` (63-bit)."""
+        import hashlib
+        digest = hashlib.sha256(f"geak-ut|{int(seed)}|rank{self.data_rank}".encode()).digest()
+        return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
+
+    def generator(self, seed, device=None):
+        """A torch.Generator for per-rank data, seeded by (`seed`, data_rank)."""
+        torch = _torch()
+        dev = device or self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.Generator(device=dev).manual_seed(self.seed_for(seed))
+
+    def for_draw(self, seed, device=None):
+        """A copy bound to one seeded draw: `seed` and `rank_rng` set for that draw."""
+        ctx = RankContext(self.rank, self.world, self.data_rank, self.local_rank, device or self.device)
+        ctx.seed = int(seed)
+        return ctx
+
+    def as_dict(self):
+        return {"rank": self.rank, "world": self.world, "data_rank": self.data_rank,
+                "local_rank": self.local_rank}
+
+
+_RANK_CONTEXT = None
+
+
+def rank_context():
+    """The current process's `RankContext` (rank 0 of 1 unless a rank pool set one)."""
+    return _RANK_CONTEXT if _RANK_CONTEXT is not None else RankContext()
+
+
+def set_rank_context(ctx):
+    """Install `ctx` as this process's rank context (rank-pool workers only)."""
+    global _RANK_CONTEXT
+    _RANK_CONTEXT = ctx
+    return ctx
+
+
+def _positional_arity(fn):
+    """Number of REQUIRED positional parameters `fn` takes (None = unknown / *args). Parameters with a
+    default are not counted: `lambda rng, sig=sig: ...` -- the usual loop-closure idiom -- is a
+    one-argument factory."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    n = 0
+    for p in params:
+        if p.kind == p.VAR_POSITIONAL:
+            return None
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty:
+            n += 1
+    return n
+
+
+def _takes_ctx_keyword(fn):
+    import inspect
+    try:
+        p = inspect.signature(fn).parameters.get("ctx")
+    except (TypeError, ValueError):
+        return False
+    return p is not None and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+
+
+def call_make_inputs(make_inputs, rng, ctx=None):
+    """Call a seeded input factory written either as make_inputs(rng) (every existing task) or as
+    make_inputs(rng, ctx): two required positional parameters, or a parameter named `ctx`, get the
+    `RankContext`; anything else is called with `rng` alone, exactly as before."""
+    ctx = ctx if ctx is not None else rank_context()
+    n = _positional_arity(make_inputs)
+    if n is not None and n >= 2:
+        return make_inputs(rng, ctx)
+    if _takes_ctx_keyword(make_inputs):
+        return make_inputs(rng, ctx=ctx)
+    return make_inputs(rng)
+
+
 # --------------------------------------------------------------------------- regime-driven synthesis
 # The SINGLE source of truth for building operands in the LIVE serving regime. The #1 cause of
 # "isolated win / e2e loss-or-crash" is a unittest that SYNTHESIZES its inputs with OFFLINE DEFAULTS
@@ -311,7 +420,8 @@ def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
         return fn
 
 
-def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
+def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False, samples=False,
+            pre_sample=None, capture=None, capture_context=None, spin=None):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
     `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
@@ -320,6 +430,10 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
         win by collapsing dispatch (a graph wrapper), and no amortization is needed: inner=1 gives clean
         device time for any kernel whose runtime >> event resolution (~1us). Raise `inner` only for
         sub-microsecond kernels (amortizes event/launch resolution).
+        That exclusion needs the host to be AHEAD of the GPU. Every sample starts on a DRAINED queue (cache
+        flush + sync), so an eager window opens with the GPU idle, waiting for the host to issue the first
+        launch: with an empty queue the eager window CONTAINS the dispatch latency, and for an op that
+        dispatches slower than it computes the reading is that latency. `spin` (below) closes that gap.
       - WALL time (perf_counter+sync) is measured in the SAME loop and reported as a REFERENCE only
         (host+device); a large wall≫device gap flags a host-bound op.
     CACHE CONDITION. Before each timed sample the harness runs one eviction pass over a buffer larger
@@ -346,7 +460,33 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
 
     Returns median device ms (float), or {ms, wall_ms, timer} when detail=True — plus {primed, host_ms}
     whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
-    unavailable so ms == wall_ms and timer='wall'."""
+    unavailable so ms == wall_ms and timer='wall'.
+
+    Optional hooks, all OFF by default (the single-rank numbers above are unchanged when unused):
+      samples=True      with detail, also return `samples`: every timed sample's device ms, unsorted, in
+                        the order taken. A multi-rank caller merges ranks PER SAMPLE (max over ranks, then
+                        the median); the median of each rank alone cannot give that.
+      pre_sample()      runs inside every sample after the cache flush and the device sync, right before
+                        the start event is recorded (outside the window). A multi-rank caller passes its
+                        cross-rank barrier / release here, so single- and multi-rank share ONE loop.
+      capture(torch, call, inner) -> (graph, inner) | None
+                        replaces the per-process capture (a multi-rank caller needs every rank to agree).
+      capture_context() context manager entered around the capture (e.g. a framework's graph_capture()).
+      spin              EAGER timing only (ignored for a graph replay); generated tasks pass it for a phase
+                        the server does not run under a CUDA graph (A16). Each sample queues a GPU spin on
+                        the current stream after the cache flush + sync and BEFORE the start event, so while
+                        the GPU spins the host issues the start event, the `inner` calls and the end event,
+                        and the window holds the GPU executing them back to back -- GPU execution time, not
+                        the host's dispatch latency (which differs between two legs' bindings). True = the
+                        defaults; a dict may set `us` (a fixed spin), `min_us`, `factor`, `late_limit`. The
+                        spin lasts max(min_us, factor x inner x host_ms) -- longer than issuing the window,
+                        with margin. A sample is LATE when the spin had already ended once the end event was
+                        queued; more late samples than `late_limit` x repeats doubles the spin and measures
+                        the case once more, and if that is late too the reading is reported as including
+                        dispatch. The result then also carries `spin` {queued, us, samples, late, retried,
+                        includes_dispatch, late_limit} and `latency_ms`; `wall_ms` keeps its meaning (host +
+                        device of an un-spun sample) and `latency_ms` is the device reading of those un-spun
+                        samples -- the dispatch-inclusive latency, a reference that is never scored."""
     policy = cache_policy()   # outside the try: a bad size must raise, not read as "call raised"
     torch = _torch()
     inner = max(1, int(inner))
@@ -354,25 +494,46 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
         have_cuda = bool(torch.cuda.is_available())
     except Exception:
         have_cuda = False
+    keep = [] if (samples and detail) else None
     try:
         if have_cuda:
             _flush_buffer(torch, policy["bytes"])   # allocate once BEFORE warmup, never inside a sample
         if have_cuda and graph:
-            g = _try_capture(torch, call, inner)
+            if capture is not None:
+                g = capture(torch, call, inner)
+            else:
+                g = _try_capture(torch, call, inner, capture_context=capture_context)
             if g is not None:
-                dev, wall = _time_graph(torch, g, warmup, repeats, policy)
+                dev, wall = _time_graph(torch, g, warmup, repeats, policy, pre_sample=pre_sample, keep=keep)
                 # One replay issues all `inner` launches, so divide to put host on the SAME per-launch
                 # basis as `dev` -- otherwise a clean inner>1 graph reads as host-bound.
                 host = _host_dispatch_ms(torch, lambda: g[0].replay()) / g[1]
-                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev, policy)
+                return _with_samples(_timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev,
+                                                    policy), keep)
+        if have_cuda and spin is not None:
+            dev, wall, host, latency, record = _time_spun(torch, call, warmup, repeats, inner, policy, spin,
+                                                          pre_sample=pre_sample, keep=keep)
+            res = _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy)
+            if isinstance(res, dict):
+                res["spin"] = record
+                res["latency_ms"] = latency
+            return _with_samples(res, keep)
         if have_cuda:
-            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy)
+            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy, pre_sample=pre_sample,
+                                     keep=keep)
             host = _host_dispatch_ms(torch, call)
-            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy)
-        wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
-        return _timing_result(wall, wall, "wall", detail, policy=policy)
+            return _with_samples(_timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy), keep)
+        wall = _time_wall(torch, call, warmup, repeats, inner, pre_sample=pre_sample, keep=keep, policy=policy)
+        return _with_samples(_timing_result(wall, wall, "wall", detail, policy=policy), keep)
     except Exception:
         return None
+
+
+def _with_samples(result, keep):
+    """Attach the raw per-sample device times (taken order) when the caller asked for them."""
+    if keep is not None and isinstance(result, dict):
+        result["samples"] = list(keep)
+    return result
 
 
 def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, policy=None):
@@ -485,7 +646,7 @@ def flush_cache(torch=None, mb=None):
     _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
 
 
-def _time_events(torch, call, warmup, repeats, inner, policy):
+def _time_events(torch, call, warmup, repeats, inner, policy, pre_sample=None, keep=None):
     """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
     cuda.Event (host-free), wall via perf_counter (reference). `policy` names the cache preparation run
     before each sample, so a memory-bound kernel is not timed on lines the previous sample left resident.
@@ -503,8 +664,12 @@ def _time_events(torch, call, warmup, repeats, inner, policy):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
+        # flush_cache is looked up as this module's global on every sample (never bound locally), so a
+        # wrapper installed on the module (e.g. a start-skew injection) sees every sample.
         flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
+        if pre_sample is not None:
+            pre_sample()
         t0 = time.perf_counter()
         start.record()
         for _ in range(inner):
@@ -513,27 +678,154 @@ def _time_events(torch, call, warmup, repeats, inner, policy):
         end.synchronize()
         wall.append((time.perf_counter() - t0) * 1e3 / inner)
         dev.append(start.elapsed_time(end) / inner)
+        if keep is not None:
+            keep.append(dev[-1])
     dev.sort(); wall.sort()
     return dev[len(dev) // 2], wall[len(wall) // 2]
 
 
-def _time_wall(torch, call, warmup, repeats, inner):
-    """Wall-clock-only fallback for boxes with no CUDA-event device timeline (CPU/no-CUDA)."""
+# --------------------------------------------------------------------------- queued GPU spin (A16)
+SPIN_MIN_US = 200.0        # floor of the spin queued before an eager sample (A03's multi-rank default)
+SPIN_FACTOR = 2.0          # spin >= SPIN_FACTOR x inner x the measured dispatch of one call
+SPIN_LATE_LIMIT = 0.05     # more late samples than this share: double the spin, measure the case once more
+SPIN_REF_SAMPLES = 5       # un-spun samples for wall_ms and the dispatch-inclusive latency (reference only)
+_SPIN_RATE = {}            # device -> torch.cuda._sleep cycles per microsecond, calibrated once per process
+
+
+def spin_us(spin, inner, host_ms):
+    """Length (us) of the spin queued before each sample: a fixed `us`, else
+    max(min_us, factor x inner x host_ms) -- longer than the host takes to issue the window, with margin."""
+    cfg = spin if isinstance(spin, dict) else {}
+    if cfg.get("us"):
+        return float(cfg["us"])
+    floor = float(cfg.get("min_us") or SPIN_MIN_US)
+    factor = float(cfg.get("factor") or SPIN_FACTOR)
+    return max(floor, factor * max(1, int(inner)) * float(host_ms) * 1000.0)
+
+
+def _spin_cycles_per_us(torch):
+    """torch.cuda._sleep cycles per microsecond on the current device, measured once per process."""
+    try:
+        device = torch.cuda.current_device()
+    except Exception:
+        device = None
+    rate = _SPIN_RATE.get(device)
+    if rate is None:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        cycles = 1_000_000
+        for _ in range(3):
+            sync(torch)
+            start.record()
+            torch.cuda._sleep(cycles)
+            end.record()
+            end.synchronize()
+            ms = start.elapsed_time(end)
+            if ms > 0:
+                rate = cycles / (ms * 1000.0)
+        if not rate:
+            raise RuntimeError("cannot calibrate the GPU spin: torch.cuda._sleep measured no time")
+        _SPIN_RATE[device] = rate
+    return rate
+
+
+def _time_events_spun(torch, call, repeats, inner, policy, cycles, pre_sample=None, keep=None):
+    """`repeats` samples of `inner` back-to-back launches, each on a GPU spin of `cycles` queued after the
+    cache flush + sync and before the start event. Returns (median device ms, late samples).
+
+    Order per sample: flush_cache (this module's global, see `_time_events`) -> sync -> [pre_sample] ->
+    spin -> `spun` event -> start event -> inner calls -> end event -> query `spun`. A sample is LATE when
+    `spun` has already completed by the time the end event is queued: the GPU ran out of spin before the
+    host had issued the whole window, so the window may hold dispatch gaps."""
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    spun = torch.cuda.Event()
+    dev, late = [], 0
+    for _ in range(max(1, repeats)):
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
+        sync(torch)
+        if pre_sample is not None:
+            pre_sample()
+        torch.cuda._sleep(cycles)
+        spun.record()
+        start.record()
+        for _ in range(inner):
+            call()
+        end.record()
+        if spun.query():
+            late += 1
+        end.synchronize()
+        dev.append(start.elapsed_time(end) / inner)
+        if keep is not None:
+            keep.append(dev[-1])
+    dev.sort()
+    return dev[len(dev) // 2], late
+
+
+def _time_spun(torch, call, warmup, repeats, inner, policy, spin, pre_sample=None, keep=None):
+    """Eager timing on a queued GPU spin (`time_op(spin=...)`). Returns
+    (device ms, wall ms, host ms, dispatch-inclusive latency ms, spin record)."""
+    for _ in range(max(1, warmup)):
+        call()
+    sync(torch)
+    host = _host_dispatch_ms(torch, call)            # measured first: it sizes the spin
+    cfg = spin if isinstance(spin, dict) else {}
+    limit = float(cfg.get("late_limit") or SPIN_LATE_LIMIT)
+    us = spin_us(spin, inner, host)
+    rate = _spin_cycles_per_us(torch)
+    n = max(1, int(repeats))
+    record = {"queued": "gpu_spin_before_start", "samples": n, "late_limit": limit}
+    dev, late, kept = None, 0, []
+    for attempt in range(2):
+        kept = [] if keep is not None else None
+        dev, late = _time_events_spun(torch, call, n, inner, policy, max(1, int(round(us * rate))),
+                                      pre_sample=pre_sample, keep=kept)
+        if late <= limit * n or attempt:
+            break
+        record["first"] = {"us": round(us, 1), "late": late}
+        us *= 2.0                                    # too many late samples: double the spin, once
+    record.update(us=round(us, 1), late=late, retried="first" in record, includes_dispatch=late > limit * n)
+    if keep is not None:
+        keep.extend(kept)
+    # wall_ms keeps its meaning (host + device of an un-spun sample); the device reading of the same un-spun
+    # samples is the dispatch-inclusive latency. A few extra samples, reference only, never scored.
+    latency, wall = _time_events(torch, call, 1, SPIN_REF_SAMPLES, inner, policy)
+    return dev, wall, host, latency, record
+
+
+def _time_wall(torch, call, warmup, repeats, inner, pre_sample=None, keep=None, policy=None):
+    """Wall-clock-only fallback for boxes with no CUDA-event device timeline (CPU/no-CUDA). The sample
+    loop has the same shape as the device loops (cache preparation -- a no-op without CUDA -- then the
+    per-sample hook), so a wrapper of `flush_cache` sees every sample here too."""
     for _ in range(max(1, warmup)):
         call()
     sync(torch)
     samples = []
     for _ in range(max(1, repeats)):
+        if policy is not None:
+            flush_cache(torch, mb=policy["bytes"] // (1 << 20))
+        if pre_sample is not None:
+            pre_sample()
         t0 = time.perf_counter()
         for _ in range(inner):
             call()
         sync(torch)
         samples.append((time.perf_counter() - t0) * 1e3 / inner)
+        if keep is not None:
+            keep.append(samples[-1])
     samples.sort()
     return samples[len(samples) // 2]
 
 
-def _try_capture(torch, call, inner):
+def _capture_scope(capture_context):
+    """The context entered around a capture: the task's `capture_context()` or a no-op."""
+    if capture_context is None:
+        import contextlib
+        return contextlib.nullcontext()
+    return capture_context()
+
+
+def _try_capture(torch, call, inner, capture_context=None):
     """Capture `inner` launches into a CUDA graph. Returns the graph or None if capture is unsafe
     (host sync in the op, dynamic alloc, etc.) — the caller then falls back to eager event timing."""
     try:
@@ -545,18 +837,19 @@ def _try_capture(torch, call, inner):
         torch.cuda.current_stream().wait_stream(s)
         sync(torch)
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            for _ in range(inner):
-                call()
+        with _capture_scope(capture_context):
+            with torch.cuda.graph(g):
+                for _ in range(inner):
+                    call()
         return (g, inner)
     except Exception:
         return None
 
 
-def _time_graph(torch, g, warmup, repeats, policy):
+def _time_graph(torch, g, warmup, repeats, policy, pre_sample=None, keep=None):
     """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, with `policy`'s
     read eviction before each sample so replay's static buffers do not keep weights resident across
-    samples."""
+    samples. `pre_sample` / `keep`: see `time_op`."""
     graph, inner = g
     for _ in range(max(1, warmup)):
         graph.replay()
@@ -565,8 +858,10 @@ def _time_graph(torch, g, warmup, repeats, policy):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))   # module global: see _time_events
         sync(torch)
+        if pre_sample is not None:
+            pre_sample()
         t0 = time.perf_counter()
         start.record()
         graph.replay()
@@ -574,6 +869,8 @@ def _time_graph(torch, g, warmup, repeats, policy):
         end.synchronize()
         wall.append((time.perf_counter() - t0) * 1e3 / inner)
         dev.append(start.elapsed_time(end) / inner)
+        if keep is not None:
+            keep.append(dev[-1])
     dev.sort(); wall.sort()
     return dev[len(dev) // 2], wall[len(wall) // 2]
 
@@ -698,7 +995,7 @@ def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
         ok, err = correct(out, case["ref"], tol)
         all_ok = all_ok and ok
         per_case.append({"case": case.get("sig", ""), "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
+                         "max_rel_err": round(err, 5) if math.isfinite(err) else None, **_row_extra(err)})
         if len(first_two_args) < 2:
             first_two_args.append(case["args"])
         live.append(out)
@@ -791,6 +1088,55 @@ def _correct_one_nonfinite(out, ref, tol):
         return False, float("inf")
 
 
+def _row_extra(err):
+    """The fields a comparison adds to its row besides `correct` and `max_rel_err`. correct()'s err is a plain float
+    and adds none; a per-output comparison of a generated UT (leg_runner, A42) returns an err carrying
+    `row_fields` -- the output that err belongs to and that output's tolerance -- and every check copies them."""
+    extra = getattr(err, "row_fields", None)
+    return dict(extra) if isinstance(extra, dict) else {}
+
+
+def noise_rel(out, ref):
+    """A37: the difference of `out` from `ref` on correct()'s own pass/fail scale (read-only; correct() itself is
+    unchanged): the largest |out - ref| / (|ref| + RMS(ref)) over the finite elements, RMS taken as correct()
+    takes it (the finite part, clamp_min 1e-6). Non-finite positions must be identical on both sides, as in
+    correct(); a component count or shape mismatch, or differing non-finite positions, is inf. A multi-tensor
+    return takes its worst component. For the same pair, correct(out, ref, t) passes exactly when
+    noise_rel(out, ref) <= t: unlike correct()'s err, whose denominator holds tol * RMS, it does not depend on
+    the tolerance."""
+    po, pr = flatten_outputs(out), flatten_outputs(ref)
+    if len(po) != 1 or len(pr) != 1:
+        if not po or len(po) != len(pr):
+            return float("inf")
+        return max(_noise_rel_one(o, r) for o, r in zip(po, pr))
+    return _noise_rel_one(po[0], pr[0])
+
+
+def _noise_rel_one(out, ref):
+    """noise_rel of one tensor pair, following _correct_one / _correct_one_nonfinite step by step."""
+    torch = _torch()
+    try:
+        if tuple(out.shape) != tuple(ref.shape):
+            return float("inf")
+        out = out.float()
+        ref = ref.float()
+        finite = torch.isfinite(out) & torch.isfinite(ref)
+        if bool(finite.all()):
+            rms = ref.pow(2).mean().sqrt().clamp_min(1e-6)            # _correct_one's floor
+        else:
+            if bool(((~finite) & (out != ref)).any()):
+                return float("inf")
+            zero = torch.zeros((), device=ref.device, dtype=ref.dtype)
+            ref = torch.where(finite, ref, zero)
+            out = torch.where(finite, out, zero)
+            n = max(1, int(finite.sum().item()))
+            rms = (ref.pow(2).sum() / n).sqrt().clamp_min(1e-6)      # _correct_one_nonfinite's floor
+        v = (out - ref).abs().div(ref.abs() + rms).max().item()      # an empty output raises, as in correct()
+        return v if math.isfinite(v) else float("inf")
+    except Exception:
+        return float("inf")
+
+
 def assert_independent_outputs(call, args_a, args_b):
     """Catch a candidate that returns a shared/persistent buffer (the graph-replay `static_out`
     shortcut). Call with two DIFFERENT inputs and verify:
@@ -847,7 +1193,7 @@ def check_correct_multi(call, cases, tol):
         ok, err = correct(out, c["ref"], tol)
         all_ok = all_ok and ok
         per_case.append({"case": c.get("sig", ""), "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
+                         "max_rel_err": round(err, 5) if math.isfinite(err) else None, **_row_extra(err)})
     if len(cases) >= 2:
         ok, reason = assert_independent_outputs(call, cases[0]["args"], cases[1]["args"])
         all_ok = all_ok and ok
@@ -874,11 +1220,12 @@ def check_correct_sequence(call, ordered_cases, tol):
         ok, err = correct(out, c["ref"], tol)
         all_ok = all_ok and ok
         per_case.append({"case": f"seq[{i}]:{c.get('sig','')}", "correct": ok,
-                         "max_rel_err": round(err, 5) if math.isfinite(err) else None})
+                         "max_rel_err": round(err, 5) if math.isfinite(err) else None, **_row_extra(err)})
     return all_ok, per_case
 
 
-def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3):
+def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3, *, strict=False,
+                       capture_context=None):
     """Reproduce the DEPLOYMENT capture-once / replay-many path with a STATIC buffer reused ACROSS
     shapes — the exact context a single-shape isolated UT cannot see, and the one that faults on the
     live server. Decode runs inside the server's CUDA graph: the graph is captured ONCE against fixed
@@ -898,7 +1245,10 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
     Capture on cases[capture_idx], then for EVERY case: fill(), graph.replay(), compare read_out() to
     that case's oracle. Returns (all_ok, per_case_list). If CUDA-graph capture is unavailable/unsupported
     on this image, returns a PASS no-op entry (so eager-only boxes don't false-fail) — the e2e gate still
-    catches it. A replay that FAULTS is caught (recorded correct=False), not swallowed."""
+    catches it. A replay that FAULTS is caught (recorded correct=False), not swallowed.
+
+    `strict=True` (generated UTs, see ut_runner.py): the op deploys under the graph, so a capture that
+    fails is a FAIL, never a skip. `capture_context` is entered around the capture (see time_op)."""
     torch = _torch()
     if not torch.cuda.is_available() or not cases:
         return True, [{"case": "graph_replay", "correct": True, "max_rel_err": None,
@@ -913,9 +1263,13 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
         torch.cuda.current_stream().wait_stream(s)
         sync(torch)
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            run()
+        with _capture_scope(capture_context):
+            with torch.cuda.graph(g):
+                run()
     except Exception as e:
+        if strict:
+            return False, [{"case": "graph_replay", "correct": False, "max_rel_err": None,
+                            "note": f"graph_capture_failed (graph deployment, strict): {e!r}"}]
         return True, [{"case": "graph_replay", "correct": True, "max_rel_err": None,
                        "note": f"skipped: capture unavailable ({e!r})"}]
     per_case = []
@@ -928,7 +1282,7 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
             ok, err = correct(read_out(), c["ref"], tol)
             per_case.append({"case": c.get("sig", ""), "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
-                             "note": "graph_replay"})
+                             "note": "graph_replay", **_row_extra(err)})
         except Exception as e:
             ok = False
             per_case.append({"case": c.get("sig", ""), "correct": False, "max_rel_err": None,
@@ -940,7 +1294,7 @@ def check_graph_replay(fill, run, read_out, cases, tol, capture_idx=0, warmup=3)
 # --------------------------------------------------------------------------- (b) random-value parity vs live baseline
 def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
                              draws=3, warmup=10, repeats=50, inner=1, graph=False, seed=0,
-                             baseline_outputs=None):
+                             baseline_outputs=None, rank_ctx=None):
     """Validate the candidate against the LIVE frozen baseline on MANY RANDOM INPUT VALUE DRAWS at the
     SAME online-aligned shapes (NOT random shapes — dims are fixed per `sig`, only values vary). The
     frozen oracle (`reference_io.pt`) pins ONE recorded input+golden; this catches value-dependent bugs
@@ -965,7 +1319,10 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
         `current_call(args) -> out` invokes the candidate in kernel_src/.
     `shapes` is a list of {"sig": <label>, "make_inputs": callable(rng) -> args}. `make_inputs` builds a
         FRESH random in-regime input set for that shape's fixed dims (the unittest closes over
-        regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility.
+        regime_spec/synth_kv_cache); `rng` is a seeded torch.Generator for reproducibility. A factory
+        that takes TWO positional arguments is called as make_inputs(rng, ctx) (see `RankContext`):
+        `ctx.rank_rng` is seeded with this draw's seed AND the rank, for inputs that differ per rank.
+    `rank_ctx` defaults to `rank_context()` (rank 0 of 1 outside a multi-rank pool).
     Returns (all_ok, per_case_list).
     """
     torch = _torch()
@@ -978,7 +1335,8 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
         for i in range(max(1, int(draws))):
             rng = torch.Generator(device=device).manual_seed(int(seed) + i)
             try:
-                args = make_inputs(rng)
+                args = call_make_inputs(make_inputs, rng, (rank_ctx or rank_context()).for_draw(int(seed) + i,
+                                                                                             device))
                 if baseline_outputs is not None:
                     ref = baseline_outputs.get(f"{sig}|{i}")
                     if ref is None:
@@ -1009,7 +1367,8 @@ def check_random_vs_baseline(baseline_call, current_call, shapes, tol,
             per_case.append({"case": f"random[{i}]:{sig}", "correct": ok,
                              "max_rel_err": round(err, 5) if math.isfinite(err) else None,
                              "speedup": round(speedup, 3) if speedup else None,
-                             "note": "value-parity vs live baseline (correctness gates; speedup reports)"})
+                             "note": "value-parity vs live baseline (correctness gates; speedup reports)",
+                             **_row_extra(err)})
     return all_ok, per_case
 
 
@@ -1349,7 +1708,8 @@ UT_HARNESS_INCOMPLETE_SENTINEL = "UT_HARNESS_INCOMPLETE"
 # deployment fact `deployment_graph_mode(regime)` (regime.cuda_graph, from the launch flags), and a
 # graph-deploy kernel that supplies no >=2-shape replay bundle FAILS CLOSED instead of silently passing.
 def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
-                    baseline_call=None, baseline_outputs=None, replay=None, draws=3):
+                    baseline_call=None, baseline_outputs=None, replay=None, draws=3,
+                    sequence=None, strict_graph=False, capture_context=None, rank_ctx=None):
     """The SINGLE correctness entrypoint every generated unittest must call. Runs, in order:
       1. eager multi-case vs oracle (`check_correct_multi`) — also the output-independence check;
       2. random-value parity vs the frozen live baseline (`check_random_vs_baseline`);
@@ -1364,7 +1724,11 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
         "cases": [{"args":..., "ref": <golden>, "sig": <label>}, ...]  (>=2, boundary-spanning),
         "capture_idx": <index of the LARGEST case to capture on> (default 0),
     }
-    Returns (all_ok, report) where report has keys eager / random / graph_replay.
+    Optional (all default OFF; hand-written UTs keep their behaviour):
+      sequence=[{args, ref, sig}, ...] ordered steps -> `check_correct_sequence` (report["sequence"]);
+      strict_graph=True -> a graph capture that fails is a FAIL (check_graph_replay strict);
+      capture_context -> entered around graph capture; rank_ctx -> see check_random_vs_baseline.
+    Returns (all_ok, report) where report has keys eager / random / graph_replay (/ sequence).
     """
     report = {}
     ok = True
@@ -1378,7 +1742,7 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
                          "leg via baseline_random_outputs) or a legacy in-process baseline_call")
     r_ok, perr = check_random_vs_baseline(baseline_call, current_call, random_shapes, tol,
                                           draws=draws, graph=deployment_graph_mode(regime),
-                                          baseline_outputs=baseline_outputs)
+                                          baseline_outputs=baseline_outputs, rank_ctx=rank_ctx)
     report["random"] = perr
     ok = ok and r_ok
 
@@ -1402,10 +1766,20 @@ def run_correctness(regime, *, eager_cases, current_call, random_shapes, tol,
             report["graph_replay"] = [{"case": "graph_replay", "correct": None,
                                        "note": f"{UT_HARNESS_INCOMPLETE_SENTINEL}: {reason}"}]
             raise HarnessIncompleteError(reason)
+        extra = {}
+        if strict_graph:
+            extra["strict"] = True
+        if capture_context is not None:
+            extra["capture_context"] = capture_context
         g_ok, perg = check_graph_replay(replay["fill"], replay["run"], replay["read_out"],
-                                        cases, tol, capture_idx=int(replay.get("capture_idx", 0)))
+                                        cases, tol, capture_idx=int(replay.get("capture_idx", 0)), **extra)
         report["graph_replay"] = perg
         ok = ok and g_ok
+
+    if sequence is not None:
+        s_ok, pers = check_correct_sequence(current_call, list(sequence), tol)
+        report["sequence"] = pers
+        ok = ok and s_ok
 
     # torch.compile deployment context (calibrated DIFFERENTLY from the graph gate — see _compile_parity):
     # generic (no UT bundle to forget => NOT fail-closed/regenerate). Fusion-induced numeric drift is a
@@ -1445,7 +1819,7 @@ def _compile_parity(current_call, cases, regime, tol):
             k, e = correct(co, eo, tol)
             per.append({"case": c.get("sig", ""), "correct": k,
                         "max_rel_err": round(e, 5) if math.isfinite(e) else None,
-                        "note": "compile_parity(compiled vs eager)"})
+                        "note": "compile_parity(compiled vs eager)", **_row_extra(e)})
             all_ok = all_ok and k
         except Exception as e:
             # A raise DURING compiled execution (not build) is a real deployability problem, but keep it
@@ -1453,6 +1827,260 @@ def _compile_parity(current_call, cases, regime, tol):
             per.append({"case": c.get("sig", ""), "correct": True, "max_rel_err": None,
                         "note": f"compile_parity soft-skip (compiled call raised): {e!r}"})
     return all_ok, per
+
+
+# --------------------------------------------------------------------------- deployment graph coverage (A18)
+# Pure metadata helpers (no torch) shared by generate_ut.py (CPU check), leg_runner.py (the generated UT's
+# replay checks) and ut_runner.py (coverage record). Hand-written tasks never call them.
+GRAPH_PADS = ("up", "exact")
+
+
+def graph_capture_spec(regime):
+    """`regime.graph_capture` as declared -- {sizes, pad, dims, evidence} -- or None."""
+    g = (regime or {}).get("graph_capture")
+    return g if isinstance(g, dict) else None
+
+
+def graph_capture_problems(spec, label):
+    """Format problems of one phase's graph_capture declaration ([] = well formed)."""
+    where = f"graph_capture of phase {label!r}" if label else "graph_capture"
+    if not isinstance(spec, dict):
+        return [f"{where} is required for a graph-deployed phase: {{sizes: [the captured M sizes], "
+                f"pad: 'up'|'exact', dims: [manifest dims besides m that select another graph]}}"]
+    out = []
+    sizes = spec.get("sizes")
+    if not isinstance(sizes, list) or not sizes or any(isinstance(s, bool) or not isinstance(s, int) or s < 1
+                                                       for s in sizes) or len(set(sizes)) != len(sizes):
+        out.append(f"{where}.sizes must be a non-empty list of distinct positive integers (the captured sizes)")
+    if spec.get("pad", "up") not in GRAPH_PADS:
+        out.append(f"{where}.pad must be one of {list(GRAPH_PADS)}")
+    dims = spec.get("dims")
+    if dims is not None and (not isinstance(dims, list) or any(not isinstance(d, str) or not d or d == "m"
+                                                                for d in dims) or len(set(dims)) != len(dims)):
+        out.append(f"{where}.dims must be a list of distinct dimension names other than m")
+    return out
+
+
+def graph_dims(meta):
+    """The dimensions besides M that identify a deployment graph: every case_manifest dimension except
+    `regime` (the phase) and `m` -- the graph a case replays in has M padded to a captured size and every
+    other dimension as in the case (A18.2)."""
+    man = (meta or {}).get("case_manifest") if isinstance((meta or {}).get("case_manifest"), dict) else {}
+    dims = man.get("dims") or ["regime"]
+    return [d for d in dims if isinstance(d, str) and d not in ("regime", "m")]
+
+
+def padded_graph_m(m, sizes, pad="up"):
+    """The captured size the deployment replays for a step of `m` rows, or None (no captured graph holds it)."""
+    sizes = sorted(int(s) for s in sizes)
+    if pad == "exact":
+        return m if m in sizes else None
+    bigger = [s for s in sizes if s >= m]
+    return bigger[0] if bigger else None
+
+
+def graph_key(graph):
+    """Canonical identity of one deployment graph {m, <dims>} (for set comparisons)."""
+    return json.dumps(graph, sort_keys=True, default=str)
+
+
+def _phase_items(meta):
+    """[(phase label, regime)]: meta.phase_regimes, or [("", meta.regime)] without it."""
+    pr = (meta or {}).get("phase_regimes")
+    if isinstance(pr, dict) and pr:
+        return [(p, r) for p, r in pr.items() if isinstance(r, dict)]
+    return [("", (meta or {}).get("regime") or {})]
+
+
+def _same_phase(label, case_regime):
+    return not label or str(case_regime or "").strip().lower() == str(label).strip().lower()
+
+
+def deployment_graphs(meta):
+    """Every graph-deployed phase's deployment graphs that the UT must replay (A18.2).
+
+    For each timing case WITH CALL MASS in a graph-deployed phase (observed `effective_calls > 0`; every
+    timing case of `meta.case_manifest` when the task has no observed workload) the graph it sits in at
+    deployment is {"m": M padded to a captured size by graph_capture.pad, <dim>: the case's value for every
+    other case_manifest dimension (graph_dims)}; M is the case's `m` in the case manifest (else in
+    meta.workload.cases). graph_capture.dims may be left out; when given it must name exactly those dims.
+    Returns {phase: {"capture": spec, "dims": [...], "graphs": [graph, ...], "cases": {sig: graph},
+    "problems": [...]}}."""
+    man = (meta or {}).get("case_manifest") or {}
+    man_cases = {c.get("sig"): c for c in (man.get("cases") or []) if isinstance(c, dict) and c.get("sig")}
+    wl_cases = {c.get("sig"): c for c in (((meta or {}).get("workload") or {}).get("cases") or [])
+                if isinstance(c, dict) and c.get("sig")}
+    try:
+        observed = _observed_workload_cases(meta)
+    except HarnessIncompleteError:
+        observed = None
+    served = served_regimes(meta)
+    if observed is not None:
+        with_calls = [(sig, c["regime"]) for sig, c in observed.items()
+                      if c["effective_calls"] > 0 and (not served or c["regime"] in served)]
+    else:
+        with_calls = [(sig, c.get("regime", "")) for sig, c in man_cases.items()
+                      if "timing" in (c.get("roles") or [])]
+    out = {}
+    for label, regime in _phase_items(meta):
+        if not deployment_graph_mode(regime):
+            continue
+        spec = graph_capture_spec(regime)
+        problems = graph_capture_problems(spec, label)
+        dims = graph_dims(meta)
+        entry = {"capture": spec, "dims": dims, "graphs": [], "cases": {}, "problems": problems}
+        out[label] = entry
+        if not problems and spec.get("dims") is not None and sorted(spec["dims"]) != sorted(dims):
+            problems.append(f"graph_capture.dims {spec['dims']} of phase {label!r} must be the case_manifest "
+                            f"dims besides regime and m, {dims} (a deployment graph is M padded plus every other "
+                            "dimension of the case), or be left out")
+        if problems:
+            continue
+        sizes, pad = spec["sizes"], spec.get("pad", "up")
+        seen = {}
+        for sig, reg in sorted(with_calls):
+            if not _same_phase(label, reg):
+                continue
+            src = [c for c in (man_cases.get(sig), wl_cases.get(sig)) if c]
+            m = next((c.get("m") for c in src if c.get("m") is not None), None)
+            if isinstance(m, bool) or not isinstance(m, int) or m < 1:
+                problems.append(f"timing case {sig} (phase {label!r}) needs a positive integer m in its "
+                                f"case_manifest entry (the rows of one deployment step), got {m!r}")
+                continue
+            graph = {"m": padded_graph_m(m, sizes, pad)}
+            if graph["m"] is None:
+                problems.append(f"timing case {sig} (phase {label!r}): m={m} has no captured graph "
+                                f"(sizes {sorted(sizes)}, pad {pad!r}); a case above the captured sizes is not "
+                                f"graph-replayed in deployment -- declare it in an eager phase")
+                continue
+            for d in dims:
+                v = next((c.get(d) for c in src if d in c), None)
+                if v is None:
+                    problems.append(f"timing case {sig} (phase {label!r}) lacks the case_manifest dimension {d!r}")
+                    break
+                graph[d] = v
+            else:
+                entry["cases"][sig] = graph
+                seen.setdefault(graph_key(graph), graph)
+        entry["graphs"] = [seen[k] for k in sorted(seen, key=lambda k: (seen[k]["m"], k))]
+    return out
+
+
+def declared_graph_problems(graphs, spec, where, dims=None):
+    """A replay group's `graphs` against its phase's graph_capture and graph dims ([] = well formed)."""
+    if not isinstance(graphs, (list, tuple)) or not graphs:
+        return [f"{where}: `graphs` must list the deployment graph(s) this group's capture reproduces "
+                "([{m: <captured size>, <dim>: value, ...}])"]
+    sizes = set((spec or {}).get("sizes") or [])
+    dims = set((spec or {}).get("dims") or []) if dims is None else set(dims)
+    out = []
+    for g in graphs:
+        if not isinstance(g, dict) or set(g) != {"m"} | dims:
+            out.append(f"{where}: graph {g!r} must have exactly the keys m + the case_manifest dims besides "
+                       f"regime and m {sorted(dims)}")
+        elif g["m"] not in sizes:
+            out.append(f"{where}: graph {g!r} has m={g['m']!r}, not a captured size {sorted(sizes)}")
+    return out
+
+
+def stateful_tiers(meta):
+    """Names of meta.capabilities.stateful_tiers (A18.4); [] when none are declared."""
+    tiers = ((meta or {}).get("capabilities") or {}).get("stateful_tiers")
+    if not isinstance(tiers, list):
+        return []
+    return [t.get("name") for t in tiers if isinstance(t, dict) and isinstance(t.get("name"), str)]
+
+
+def stateful_tier_problems(meta):
+    """Format problems of meta.capabilities.stateful_tiers for a stateful task ([] = well formed)."""
+    tiers = ((meta or {}).get("capabilities") or {}).get("stateful_tiers")
+    msg = ("capabilities.stateful needs capabilities.stateful_tiers: [{name, transition}] -- the state "
+           "transitions the deployment produces (prefill tail then decode, ring wrap, odd/even boundary, "
+           "several requests per step, ...), each covered by sequence_cases steps naming it")
+    if not isinstance(tiers, list) or not tiers:
+        return [msg]
+    out, names = [], []
+    for t in tiers:
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str) or not t["name"].strip() \
+                or not isinstance(t.get("transition"), str) or not t["transition"].strip():
+            out.append(f"stateful tier {t!r} needs a non-empty name and transition")
+            continue
+        names.append(t["name"])
+    if len(set(names)) != len(names):
+        out.append("capabilities.stateful_tiers has duplicate names")
+    return out
+
+
+def step_tiers(step):
+    """The tier names one sequence step declares: `tier` (one name) or `tiers` (a list)."""
+    if not isinstance(step, dict):
+        return []
+    if isinstance(step.get("tiers"), (list, tuple)):
+        return [t for t in step["tiers"] if isinstance(t, str)]
+    return [step["tier"]] if isinstance(step.get("tier"), str) else []
+
+
+# --------------------------------------------------------------------------- per-output tolerances (A42)
+# A pure metadata helper (no torch) shared by generate_ut.py (CPU check) and leg_runner.py (the generated UT's
+# comparisons). Hand-written tasks never call it; correct() itself keeps its one tolerance.
+def is_output_position(key):
+    """Is a meta.tolerance.per_output key an output position ("0", "1", ...: digits, no sign, no leading zero)?"""
+    return isinstance(key, str) and key.isascii() and key.isdigit() and (key == "0" or not key.startswith("0"))
+
+
+def per_output_tolerances(meta):
+    """(per_output, problems) of meta.tolerance.per_output (A42): {output: tolerance}, None when the task gives none
+    (absent, null or {}), and its format problems ([] = well formed; per_output is None then too).
+
+    An output is named by its position in flatten_outputs order ("0", "1", ...), or -- when what the task compares
+    is a dict -- by its key, which covers every tensor under that key. One task names its outputs one way. A
+    tolerance is a finite number >= 0; an output per_output does not name is compared at meta.tolerance.tol."""
+    tol = (meta or {}).get("tolerance")
+    per = tol.get("per_output") if isinstance(tol, dict) else None
+    if per is None or per == {}:
+        return None, []
+    if not isinstance(per, dict):
+        return None, ["meta.tolerance.per_output must map outputs to tolerances: "
+                      "{\"<position or key>\": <tolerance>, ...}"]
+    problems, out = [], {}
+    for key, value in per.items():
+        if not isinstance(key, str) or not key.strip():
+            problems.append(f"meta.tolerance.per_output key {key!r} must name an output: its position "
+                            "(\"0\", \"1\", ...) or, when the compared output is a dict, its key")
+            continue
+        if not is_output_position(key) and key.strip().lstrip("+-").replace(".", "", 1).isdigit():
+            problems.append(f"meta.tolerance.per_output key {key!r}: write an output position as plain digits "
+                            "(\"0\", \"1\", ...: no sign, no leading zero, no decimal point)")
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            problems.append(f"meta.tolerance.per_output[{key!r}] must be a finite non-negative number, not {value!r}")
+            continue
+        out[key] = float(value)
+    positions = sorted((k for k in out if is_output_position(k)), key=int)
+    names = sorted(k for k in out if not is_output_position(k))
+    if positions and names:
+        problems.append(f"meta.tolerance.per_output names outputs both by position {positions} and by key {names}: "
+                        "name them by key when the compared output is a dict, else by position")
+    return (None, problems) if problems else (out, [])
+
+
+def compare_plugin_problem(meta):
+    """The problem of a declared comparison plugin (A42), None when the task declares none
+    (capabilities.per_output_compare absent or false; meta.compare absent, null or {}). The generated UT compares
+    every output with correct() -- at meta.tolerance.tol or at its own per_output tolerance -- and loads no plugin,
+    so a declared one is refused instead of being frozen and never called."""
+    meta = meta or {}
+    caps = meta.get("capabilities")
+    declared = []
+    if isinstance(caps, dict) and caps.get("per_output_compare"):
+        declared.append("capabilities.per_output_compare")
+    if meta.get("compare") not in (None, {}):
+        declared.append("meta.compare")
+    if not declared:
+        return None
+    return (f"{' and '.join(declared)}: a comparison plugin is not supported -- the generated UT compares every "
+            "output with correct(); give an output whose dtype or scale differs its own tolerance in "
+            "meta.tolerance.per_output instead (task-authoring.md, step 0 (b))")
 
 
 # --------------------------------------------------------------------------- boundary-shape helpers (attn)
@@ -1508,8 +2136,10 @@ def _kill_process_group(proc, grace=5.0):
 
 
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable=""):
+             target_callable="", extra=(), env_extra=None):
     env = dict(os.environ)
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
            "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
@@ -1523,6 +2153,7 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         if mode != "resolve":
             raise ValueError("target_callable override is only valid for identity resolution")
         cmd += ["--target-callable", target_callable]
+    cmd += [str(x) for x in extra]
     # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
@@ -1608,7 +2239,36 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
+def _leg_summary(rows):
+    """One leg's timing receipt over the pairs a bucket ran: the timer (or "mixed"), primed ANDed over
+    the reps (absent when any rep could not tell), the median host_ms, the cache condition and every
+    rep's ms -- plus, for an eager timing on a queued GPU spin (A16), the spin record and the median
+    dispatch-inclusive latency. This is what a hand-rolled UT used to drop between leg_runner and the result."""
+    timers = {r.get("timer") for r in rows}
+    out = {"timer": (timers.pop() if len(timers) == 1 else "mixed"),
+           "cache_condition": rows[0].get("cache_condition") if rows else None,
+           "ms_reps": [r.get("ms") for r in rows]}
+    primed = [r.get("primed") for r in rows]
+    if rows and all(p is not None for p in primed):
+        out["primed"] = all(bool(p) for p in primed)
+        hosts = [r.get("host_ms") for r in rows if isinstance(r.get("host_ms"), (int, float))]
+        out["host_ms"] = _median(hosts) if hosts else None
+    spins = [r.get("spin") for r in rows if isinstance(r.get("spin"), dict)]
+    if spins:
+        # A16: the queued GPU spin of each rep, summed (late / samples) and ORed (retried / includes_dispatch).
+        out["spin"] = {"queued": spins[0].get("queued"), "reps": len(spins),
+                       "us": max(float(s.get("us") or 0) for s in spins),
+                       "samples": sum(int(s.get("samples") or 0) for s in spins),
+                       "late": sum(int(s.get("late") or 0) for s in spins),
+                       "retried": any(bool(s.get("retried")) for s in spins),
+                       "includes_dispatch": any(bool(s.get("includes_dispatch")) for s in spins)}
+        lat = [r.get("latency_ms") for r in rows if isinstance(r.get("latency_ms"), (int, float))]
+        out["latency_ms"] = _median(lat) if lat else None
+    return out
+
+
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), early_stop=True,
+                 base=None, cand=None, check_differ=True, sigs=None, inner=None):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
     Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
@@ -1634,27 +2294,44 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
 
     `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
     cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
-    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
+
+    Each row also carries the timing receipt of both legs (`legs`: timer, primed, host_ms,
+    cache_condition, every rep's ms, and spin + latency_ms for a spun eager timing; `timer` = the common
+    timer or "mixed"), additive only.
+    `early_stop=False` always runs `max_reps` pairs (an A/A measurement must not stop on one outlier);
+    `base`/`cand` reuse already-built overlays and `check_differ=False` skips the direction assert (an
+    A/A run times the baseline overlay against itself). `sigs` times only those buckets and `inner`
+    ({sig: n}) times a bucket with n launches per sample on both legs (a generated UT raising `inner` for
+    a host-dominated graph reading, A20). Defaults keep the original behaviour."""
     task = os.path.abspath(task_dir)
-    base, cand = build_candidate_overlay(task, meta)
-    assert_legs_differ(task, base, cand, meta)
+    if base is None or cand is None:
+        base, cand = build_candidate_overlay(task, meta)
+    if check_differ:
+        assert_legs_differ(task, base, cand, meta)
     lo, hi = undecided
     per_case = []
     for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
-        row, bms, oms = None, [], []
+        if sigs is not None and sig not in sigs:
+            continue
+        n = (inner or {}).get(sig)
+        kw = {"extra": ("--inner", str(int(n)))} if n else {}
+        row, bms, oms, brows, orows = None, [], [], [], []
         for _ in range(max(1, int(max_reps))):
-            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
-            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
+            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout, **kw)["cases"]
+            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout, **kw)["cases"]
             if not b or not o:
                 break
             if row is None:
                 row = b[0]
+            brows.append(b[0])
+            orows.append(o[0])
             bms.append(b[0].get("ms"))
             oms.append(o[0].get("ms"))
             good_b, good_o = [x for x in bms if x], [y for y in oms if y]
             if not good_b or not good_o:
                 break                      # nothing timable here; more pairs cannot change that
-            if not (lo <= _median(good_b) / _median(good_o) <= hi):
+            if early_stop and not (lo <= _median(good_b) / _median(good_o) <= hi):
                 break                      # decisive already — do not buy resolution we do not need
         if row is None:
             continue
@@ -1662,20 +2339,26 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
         bm = _median(good_b) if good_b else None
         om = _median(good_o) if good_o else None
         pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+        legs = {"baseline": _leg_summary(brows), "current": _leg_summary(orows)}
+        timers = {legs["baseline"]["timer"], legs["current"]["timer"]}
         per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
                          "baseline_ms": bm, "optimized_ms": om,
                          "speedup": (bm / om) if (bm and om) else None,
                          "reps": len(bms),
                          "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
-                                            if len(pair_sp) > 1 else 0.0)})
+                                            if len(pair_sp) > 1 else 0.0),
+                         "timer": timers.pop() if len(timers) == 1 else "mixed",
+                         "legs": legs})
+        if row.get("inner") is not None:
+            per_case[-1]["inner"] = row["inner"]      # generated tasks only (leg_runner reports it)
     return per_case
 
 
-def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600, out=None):
     """Random-draw outputs recorded by the BASELINE leg in its own process, for
     `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
     task = os.path.abspath(task_dir)
-    out = os.path.join(task, "_baseline_random.pt")
+    out = out or os.path.join(task, "_baseline_random.pt")
     _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
              out=out, seed=seed, draws=draws, timeout=timeout)
     return _torch().load(out, map_location="cpu")

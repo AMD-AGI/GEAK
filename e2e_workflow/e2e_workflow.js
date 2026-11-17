@@ -2979,6 +2979,12 @@ async function tryCorrectiveReauthor(spec) {
   const eligible = HEAD_CORRECTIVE_MAX > 0 && !((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT)
     && (spec.kernel_eval_dir || spec.task_dir) && (spec.isolated || 0) > 1.0 && fixClass !== '';
   if (!eligible) return { banked: false };
+  // The surgeon and the re-author lane lease one GPU: a multi-GPU candidate is deferred, never fixed on one.
+  const need = gpuNeed(spec);
+  if (need !== 1) {
+    deferMultiGpu({ short_name: spec.short_name, task_dir: spec.task_dir || '' }, need, multiGpuBlocker(need, 'corrective'));
+    return { banked: false };
+  }
   const curTput = (spec.cur && spec.cur.tput) || 0;
   // Class-specific, generic instructions: `integration` = wrong posture (JIT/capture/host-sync);
   // `correctness` = wrong live output. Both keep the algorithm and isolated win.
@@ -3280,20 +3286,101 @@ async function validateDeadlineArgs() {
   };
 }
 
-// GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one): exclusive
-// leases of physical card ids, so concurrent isolated measurements never share a GPU. Deadlock-free:
-// a waiter holds no cards and acquires its full count atomically.
+// GPU semaphore (FAST MODE only for head jobs; deep mode's co-opt pools also use one, and so do a
+// Milestone or serial HeadKernel holding a multi-GPU candidate): exclusive leases of physical card ids,
+// so concurrent isolated measurements never share a GPU. Deadlock-free: a waiter holds no cards and
+// acquires its full request atomically. A request is a count (any n free cards) or a list of ids
+// (exactly those cards). One the pool can never hold throws at once instead of waiting forever.
 function makeSem(ids) {
   const free = ids.slice(); const waiters = [];
-  const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
-    const w = waiters.shift(); w.resolve(free.splice(0, w.n)); } };
+  const fits = (n) => (Array.isArray(n) ? n.every((id) => free.includes(id)) : n <= free.length);
+  const take = (n) => (Array.isArray(n) ? n.map((id) => free.splice(free.indexOf(id), 1)[0])
+    : free.splice(0, n).sort((a, b) => ids.indexOf(a) - ids.indexOf(b)));   // a group in pool order
+  const pump = () => { while (waiters.length && fits(waiters[0].n)) {
+    const w = waiters.shift(); w.resolve(take(w.n)); } };
   return {
     size: ids.length,
-    acquire(n = 1) { if (n <= free.length) return Promise.resolve(free.splice(0, n));
+    acquire(n = 1) {
+      const k = Array.isArray(n) ? n.length : n;
+      if (!(Number.isInteger(k) && k >= 1 && k <= ids.length)
+          || (Array.isArray(n) && (new Set(n).size !== k || !n.every((id) => ids.includes(id)))))
+        throw new Error(`GPU request for ${Array.isArray(n) ? `{${n.join(',')}}` : `${n} card(s)`} cannot be ` +
+          `held by the ${ids.length}-card pool {${ids.join(',')}}`);
+      if (fits(n)) return Promise.resolve(take(n));
       return new Promise((resolve) => { waiters.push({ n, resolve }); }); },
     release(got) { free.push(...got); pump(); },
     async with(n, fn) { const g = await this.acquire(n); try { return await fn(g); } finally { this.release(g); } },
   };
+}
+
+// ---- Multi-GPU candidates (A06/A07/A22) ----
+// required_gpu_count as packed (absent => 1). Callers test `!== 1`, so a malformed count is never
+// mistaken for a single-GPU task.
+function gpuNeed(c) {
+  const v = c ? (c.required_gpu_count ?? c.prepared_ut?.result?.required_gpu_count) : null;
+  return v == null ? 1 : Number(v);
+}
+// Runs fn inside c's lease from sem: a multi-GPU candidate gets its whole group g; any other task
+// leases its own card and gets g = null, so its call objects stay byte-identical. No sem: fn(null).
+function withGpus(sem, c, fn) {
+  if (!sem) return fn(null);
+  const n = gpuNeed(c);
+  return n === 1 ? sem.with([c.gpu_id], () => fn(null)) : sem.with(n, fn);
+}
+// kernel_lane.js args of a candidate holding group g (A07, A22): only the lane's own multi-GPU
+// arguments: the group as ONE job and HeadKernel's op_spec from prepared_ut.result. The lane reads
+// the UT's time limit from the task itself. Without a group: nothing, so the call is unchanged.
+function multiGpuLaneArgs(c, ext, g) {
+  if (!g) return {};
+  return { gpu_ids: g.join(','), gpus_per_job: g.length,
+    op_spec: { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16',
+      regime: ext.regime || c.regime || '', cuda_graph_safe: true,
+      ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) } };
+}
+// The path a queue takes in THIS run ('' = not dispatched here; the run that dispatches it decides).
+// Milestone and serial HeadKernel lease a group from GPU_LIST; fast and deep head lanes lease one
+// card each (makeSem.with(1)), so they are not wired for multi-GPU jobs.
+function queuePath(track) {
+  if (track === 'kernel') return want('kernel') ? 'milestone' : '';
+  if (!(want('head') && HEAD_BUDGET > 0)) return '';
+  return DEEP ? 'deep' : (FAST_MODE && GPU_LIST.length > 1 ? 'fast' : 'serial');
+}
+// Why an n-GPU candidate cannot take `path` ('' = it can). Deep mode sizes its two pools separately.
+function multiGpuBlocker(n, path) {
+  const where = { milestone: 'Milestone', serial: 'serial HeadKernel', fast: 'fast-mode HeadKernel',
+    deep: 'deep-mode HeadKernel', corrective: 'corrective re-author' }[path] || path;
+  if (!(Number.isInteger(n) && n > 1)) return `required_gpu_count ${n} is not a GPU count`;
+  if (path === 'milestone' || path === 'serial')
+    return n > GPU_LIST.length ? `the ${where} pool GPU_LIST {${GPU_LIST.join(',')}} holds only ${GPU_LIST.length}` : '';
+  let pools = '';
+  if (path === 'deep') {
+    const serving = SERVING_GPU.split(',').map((s) => s.trim()).filter(Boolean);
+    const dedicated = GPU_LIST.filter((g) => !serving.includes(g));
+    const serve = dedicated.length ? serving : GPU_LIST;
+    pools = ` (dedicated pool {${dedicated.join(',')}} holds ${dedicated.length}, serving pool ` +
+      `{${serve.join(',')}} holds ${serve.length})`;
+  }
+  return `${where} lanes lease one GPU each; that path is not wired for multi-GPU jobs${pools}`;
+}
+// A multi-GPU candidate this run will not place goes to deferred_tasks with the reason.
+function deferMultiGpu(c, n, why) {
+  const ref = c.prepared_ut || {};
+  const entry = { ...c, ...(ref.result && ref.result.task_dir ? { task_dir: ref.result.task_dir } : {}),
+    ...(ref.result_path ? { result_path: ref.result_path } : {}),
+    required_gpu_count: n, reason: `needs ${n} GPUs: ${why}` };
+  // A new array: in a resumed run the old one is the caller's args.state.
+  if (profile) profile.deferred_tasks = (Array.isArray(profile.deferred_tasks) ? profile.deferred_tasks : []).concat([entry]);
+  log(`[multi-gpu] ${c.short_name || '(unnamed)'} moved to deferred_tasks (${entry.reason}).`);
+}
+// Keeps a multi-GPU candidate only if the path its queue takes in this run can hold it.
+function deferUnplaceable(queue, track) {
+  const path = queuePath(track);
+  if (!path) return queue;
+  return queue.filter((c) => {
+    const n = gpuNeed(c), why = n === 1 ? '' : multiGpuBlocker(n, path);
+    if (why) deferMultiGpu(c, n, why);
+    return !why;
+  });
 }
 
 // ---- SINGLE-KERNEL PASS-THROUGH: delegate straight to the kernel layer ----
@@ -4504,6 +4591,13 @@ print(json.dumps(res))
 }
 
 // ===========================================================================
+// Multi-GPU candidates vs this run's GPU pools (A06): judged once the envelope or the carried state
+// is read and before any dispatch, on the path each queue takes in THIS run.
+// ===========================================================================
+headQueue = deferUnplaceable(headQueue, 'head');
+kernelQueue = deferUnplaceable(kernelQueue, 'kernel');
+
+// ===========================================================================
 // PHASE: Config sweep (Config Tuner) — FIRST, reshapes the profile
 // ===========================================================================
 // A carried phase-partial state wins (already measured); kbSeedTput is 0 unless Module A adopted.
@@ -5524,7 +5618,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
   } else {
+  // A multi-GPU head holds ONE group of required_gpu_count GPU_LIST cards for its bake-off and author
+  // lanes (AgentX extraction reuses the prepared UT: no GPU work); heads run one at a time, so the
+  // group is released when the next head starts.
+  const headGpus = heads.some((h) => gpuNeed(h) !== 1) ? makeSem(GPU_LIST) : null;
+  let headGroup = null;
   for (const h of heads) {
+    if (headGroup) { headGpus.release(headGroup); headGroup = null; }
     // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
     // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
     if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
@@ -5535,6 +5635,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
     // B4 measures THIS head's trial against its own start, not the run clock.
     const ablHeadStart = ELAPSED_MS;
+    if (headGpus && gpuNeed(h) !== 1) headGroup = await headGpus.acquire(gpuNeed(h));
     // (h1) Extract the op into a standalone immutable unittest (fused heads stay fused: gemmSynthFor).
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
@@ -5563,11 +5664,15 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
     const bake = await safeAgent(
-      roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
+      roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.' + (headGroup
+        ? ` This op's UT runs ${headGroup.length} ranks: run it only under ONE lease of the whole UT_GPU_SET ` +
+          '(bash $KERNEL_WF_DIR/scripts/gpu_lock.sh group:$UT_GPU_SET -- python3 unittest.py), never on GPU_ID ' +
+          'alone and never inside another lease; a single-process bench cannot time it.' : ''), {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         CURRENT_ENV: curEnv,
+        ...(headGroup ? { GPU_ID: headGroup[0], UT_GPU_SET: headGroup.join(',') } : {}),
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
@@ -5684,6 +5789,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
+            ...multiGpuLaneArgs(h, ext, headGroup),
           }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
         const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
@@ -5787,7 +5893,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
-              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              gpu_id: h.gpu_id, required_gpu_count: gpuNeed(h), kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
@@ -5813,7 +5919,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
-              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              gpu_id: h.gpu_id, required_gpu_count: gpuNeed(h), kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
@@ -5830,6 +5936,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
   }
+  if (headGroup) headGpus.release(headGroup);
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
   // Head wins reshape the profile: re-profile before the kernel loop.
   if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
@@ -5908,7 +6015,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
   // --- (b) PARALLEL optimize (extract + kernel layer per candidate, on distinct GPUs), then SERIAL
   // integrate: e2e A/Bs must not overlap, and accepted overlays compound in order.
-  const optimized = await parallel(cands.map((c) => async () => {
+  // With a multi-GPU candidate in the batch every task leases from ONE GPU_LIST allocator: it takes a
+  // whole group of required_gpu_count cards, each other task its own card. Without one, none is made.
+  const milestoneGpus = cands.some((c) => gpuNeed(c) !== 1) ? makeSem(GPU_LIST) : null;
+  const optimized = await parallel(cands.map((c) => async () => withGpus(milestoneGpus, c, async (g) => {
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
@@ -5930,6 +6040,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
+        ...multiGpuLaneArgs(c, ext, g),
       }, String(c.short_name || ext.op_kind || 'milestone'));
       if (r == null && IS_AGENTX) {
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
@@ -5943,7 +6054,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       kl = { ran: false, final_patch: '', final_geomean: 0, isolated_speedup: 0, validation_status: 'error', note: String(e) };
     }
     return { c, ext, kl };
-  }));
+  })));
 
   // --- serial integrate (compounding overlay, isolated measurement) ---
   let milestoneImproved = false;
@@ -5991,7 +6102,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
-            gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
+            gpu_id: c.gpu_id, required_gpu_count: gpuNeed(c), kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
             isolated: kl.isolated_speedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })

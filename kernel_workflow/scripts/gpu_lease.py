@@ -190,6 +190,11 @@ class GpuLease:
         self.lease_id = f"{os.getpid()}-{time.time_ns()}"
         self.metadata_path = self.lock_dir / f"lease_{self.lease_id}.json"
         self.request_path = self.lock_dir / f"request_{self.lease_id}.json"
+        # Held (flock) for as long as the request waits: the liveness proof that managers in
+        # other PID namespaces can check, since our pid means nothing to them.
+        self.request_lock_path = self.lock_dir / f"request_{self.lease_id}.lock"
+        self._request_lock_fd = None
+        self._request = None
         self._metadata = {
             "lease_id": self.lease_id,
             "manager_pid": os.getpid(),
@@ -224,15 +229,20 @@ class GpuLease:
         deadline = time.monotonic() + self.wait_timeout_s
         attempted = False
         rejected_groups = set()
-        self._write_request()
-        # Clear OUR OWN leaked orphans up front so a self-inflicted busy pool does not
-        # turn into a dead-wait to timeout. Foreign/unattributable procs are untouched.
-        self._maybe_reap()
         try:
+            self._open_request()
+            # Clear OUR OWN leaked orphans up front so a self-inflicted busy pool does not
+            # turn into a dead-wait to timeout. Foreign/unattributable procs are untouched.
+            self._maybe_reap()
             while True:
                 if attempted and time.monotonic() >= deadline:
                     self._raise_timeout()
                 attempted = True
+                if not self.request_path.exists():
+                    # Deleted by another manager (gpu_lease.py from before the request lock
+                    # deletes requests from other PID namespaces): restore it unchanged, so it
+                    # keeps its original started_at_ns and its place in the queue.
+                    self._write_request()
                 acquired = self._try_acquire_group(excluded=rejected_groups)
                 if acquired:
                     if (
@@ -261,7 +271,7 @@ class GpuLease:
             self.release()
             raise
         finally:
-            self.request_path.unlink(missing_ok=True)
+            self._close_request()
 
     def _maybe_reap(self) -> None:
         if self.reap_root is None:
@@ -320,8 +330,18 @@ class GpuLease:
         temporary.write_text(json.dumps(self._metadata, sort_keys=True))
         os.replace(temporary, self.metadata_path)
 
-    def _write_request(self) -> None:
-        request = {
+    def _open_request(self) -> None:
+        # Lock request_<id>.lock first, then write request_<id>.json. The lock is taken on a
+        # temporary name and renamed into place, so the lock file is never visible unlocked
+        # while we live (the orphan sweep in _is_request_turn relies on that).
+        temporary = self.lock_dir / f"{self.request_lock_path.name}.tmp"
+        self._request_lock_fd = os.open(temporary, os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            fcntl.flock(self._request_lock_fd, fcntl.LOCK_EX)
+            os.replace(temporary, self.request_lock_path)
+        finally:
+            temporary.unlink(missing_ok=True)  # only left if the rename did not happen
+        self._request = {
             "request_id": self.lease_id,
             "manager_pid": os.getpid(),
             "pid_namespace": _pid_namespace(),
@@ -329,8 +349,21 @@ class GpuLease:
             "count": self.request.count,
             "started_at_ns": time.time_ns(),
         }
+        self._write_request()
+
+    def _close_request(self) -> None:
+        # The json first, then the lock: a request json whose lock nobody holds is a dead one.
+        self.request_path.unlink(missing_ok=True)
+        fd, self._request_lock_fd = self._request_lock_fd, None
+        if fd is not None:
+            try:
+                self.request_lock_path.unlink(missing_ok=True)
+            finally:
+                os.close(fd)
+
+    def _write_request(self) -> None:
         temporary = self.request_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(request, sort_keys=True))
+        temporary.write_text(json.dumps(self._request, sort_keys=True))
         os.replace(temporary, self.request_path)
 
     def _has_live_stale_overlap(self) -> bool:
@@ -405,9 +438,15 @@ class GpuLease:
             os.close(allocator_fd)
 
     def _is_request_turn(self) -> bool:
+        # Runs under the allocator lock, so every "try a request lock -> delete" below is
+        # serialized with the queue scans of all other managers.
         requested_pool = set(self.request.pool_ids)
-        contenders = []
+        # Ours counts with its original priority even if its file was just deleted by another
+        # manager (acquire() restores the file on every poll).
+        contenders = [(int(self._request["started_at_ns"]), self.lease_id)]
         for path in self.lock_dir.glob("request_*.json"):
+            if path == self.request_path:
+                continue
             try:
                 data = json.loads(path.read_text())
                 manager_pid = int(data["manager_pid"])
@@ -415,20 +454,52 @@ class GpuLease:
                 pool_ids = {int(gpu_id) for gpu_id in data["pool_ids"]}
                 request_id = str(data["request_id"])
                 priority = (int(data["started_at_ns"]), request_id)
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            except OSError:
+                continue  # gone, or unreadable for us: no proof of anything
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
                 path.unlink(missing_ok=True)
                 continue
-            if _pid_namespace_for_pid(manager_pid) != namespace or not _pid_is_live(
-                manager_pid
+            # A request for other GPUs is never touched, whatever state its manager is in.
+            if requested_pool & pool_ids and self._request_is_live(
+                path, manager_pid, namespace, started_at_ns=priority[0]
             ):
+                contenders.append(priority)
+        # A request lock without its json that nobody holds was left by a manager that died
+        # (or whose json a gpu_lease.py from before the lock deleted). A live manager holds its
+        # lock from before its json exists until after it is gone, so this never hits one.
+        for lock_path in self.lock_dir.glob("request_*.lock"):
+            json_path = lock_path.with_suffix(".json")
+            if lock_path != self.request_lock_path and not json_path.exists():
+                _probe_request_lock(json_path)
+        return min(contenders)[1] == self.lease_id
+
+    def _request_is_live(
+        self, path: Path, manager_pid: int, namespace: str, *, started_at_ns: int
+    ) -> bool:
+        """Whether another manager's request still waits; a dead one is deleted."""
+        own_namespace = self._request["pid_namespace"]
+        if namespace == own_namespace and own_namespace != "unknown":
+            # Same PID namespace: judged by its pid, as before. A gpu_lease.py from before the
+            # request lock may be queueing here without one, so the lock must not decide.
+            probed = _pid_namespace_for_pid(manager_pid)
+            if probed is not None or _pid_is_dead(manager_pid):
+                if probed == namespace and _pid_is_live(manager_pid):
+                    return True
                 path.unlink(missing_ok=True)
-                continue
-            if requested_pool & pool_ids:
-                contenders.append((priority, request_id))
-        if not contenders:
-            return False
-        _, winner = min(contenders)
-        return winner == self.lease_id
+                _probe_request_lock(path)  # drops its lock file too, if nobody holds it
+                return False
+            # /proc/<pid>/ns/pid is unreadable (e.g. another user's process): that is no proof
+            # of death, so judge it like a request from another namespace.
+        # Another PID namespace: its pid means nothing here, the lock its manager holds does.
+        held = _probe_request_lock(path)
+        if held is not None:
+            return held
+        # No lock file: a gpu_lease.py from before the request lock. It queues like any other
+        # request until it is older than twice our own wait limit; then it is stale.
+        if time.time_ns() - started_at_ns <= 2e9 * self.wait_timeout_s:
+            return True
+        path.unlink(missing_ok=True)
+        return False
 
 
 def _read_int(path: Path) -> Optional[int]:
@@ -458,6 +529,41 @@ def _pid_is_live(pid: int) -> bool:
         return suffix.strip().split()[0] != "Z"
     except (OSError, IndexError):
         return False
+
+
+def _pid_is_dead(pid: int) -> bool:
+    """Proof of death: /proc/<pid> is gone or a zombie. An unreadable process is not dead."""
+    try:
+        suffix = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1]
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    except (OSError, IndexError):
+        return False
+    return suffix.split()[:1] == ["Z"]
+
+
+def _probe_request_lock(request_path: Path) -> Optional[bool]:
+    """Probe the lock a waiting manager holds on request_<id>.lock; call under the allocator lock.
+
+    None: no lock file (a gpu_lease.py from before the request lock). True: held, so its manager
+    is alive. False: nobody holds it, so its manager is gone; the request json is then deleted,
+    followed by the lock file.
+    """
+    lock_path = request_path.with_suffix(".lock")
+    try:
+        fd = os.open(lock_path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        request_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _proc_ppid(pid: int) -> Optional[int]:
