@@ -659,9 +659,11 @@ for (let round = 1; round <= BUDGET && !stoppedBy; round++) {
   // plain champion (source_golden/), not the anchor, so its ratio is never assumed to be 1.
   let ver = null;
   let p = 0;
+  // The provided anchor is measured whatever the engineer set (it may report no_change, and its own
+  // correctness run is optional there): verify runs correctness itself.
   const anchorAsIs = stage === 'transcribe' && r.anchor_provided === true;
-  const measured = !r.no_change;
-  if (measured && says(r.correctness, 'pass')) {
+  const measured = anchorAsIs || !r.no_change;
+  if (measured && (anchorAsIs || says(r.correctness, 'pass'))) {
     ver = await agentT(
       rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify', anchorAsIs
         ? 'Independently measure the anchor the canonical workspace already contains. PATCH is intentionally empty: ' +

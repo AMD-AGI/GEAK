@@ -96,6 +96,18 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     ok(!r3.kept, 'a round below the kept line is not kept', r3);
     ok(!x.result.accepted && x.result.outcome === 'negative_revert_plain', 'nothing beat the frozen champion: revert', x.result.outcome);
   }
+  {
+    // What the engineer actually returns for a provided anchor (run5): no_change, no correctness run.
+    const x = await launch({ budget: 2, max_recover_rounds: 1 }, (label, prompt) => {
+      if (label === 'gluon_engineer:transcribe r1') return engineerReturn(prompt, { anchor_provided: true, no_change: true,
+        correctness: 'not_run', patch_file: '', track_tag: 'geak_base' });
+      if (label === 'verify r1 (anchor as is)') return { status: 'regression', correctness: 'pass', verified_geomean: 0.786 };
+      return undefined;
+    }, { entry: 'port' });
+    ok(x.labels.includes('verify r1 (anchor as is)'), 'a no_change anchor is still verified', x.labels);
+    ok(x.result.rounds[0].status !== 'anchor_incorrect' && x.result.rounds[0].vs_baseline === 0.786 && x.labels.includes('gluon_engineer:recover r2'),
+      'and the run goes on to recover from its measured line', x.result.rounds[0]);
+  }
 
   console.log('\n# 3. parity_gate exit 2 blocks climbing');
   {
