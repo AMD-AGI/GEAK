@@ -11,11 +11,15 @@
 // patch and merged another (observed: a patch rewritten 5 min after its verify finished and 2 min
 // before the integrator read it). Under test, on the REAL Verify-stage callback of kernel_lane.js:
 //   - verify is handed FROZEN_PATCH, and the stage returns that frozen path as the candidate's patch
-//     (which is what integrate and commit read), never best_patch.diff;
+//     (which is what integrate and commit read), never best_patch.diff; with EVO on it returns EVO's
+//     immutable object, from which the frozen copy is made;
 //   - STOP_ENGINEER is passed exactly when the engineer's return is missing, and not for an engineer
 //     that returned (even with status "failed": it has finished);
+//   - a verify that could not stop the engineer (status "stop_failed") is logged and never verified,
+//     and routing books it as no_result;
 //   - a trustworthy below-floor return still skips verify;
-//   - the role files carry the matching instructions.
+//   - engineers are told to save through save_patch.sh (atomic), and the role files carry the
+//     matching stop / freeze / stop_failed instructions.
 //
 // Run:  node kernel_workflow/scripts/test_engineer_timeout_fence.js
 'use strict';
@@ -104,6 +108,30 @@ function verifyStage(opts = {}) {
     ok(calls.length === 0 && r && r.ver === null, 'verify is still skipped');
   }
 
+  console.log('EVO on (patch already an immutable archive object):');
+  {
+    const obj = '/eval/evo/objects/' + 'a'.repeat(64);
+    const evo = { checkPatch: async () => ({ patch_object_path: obj }) };
+    const { fn, calls } = verifyStage({ evo });
+    const r = await fn({ d, eng: null });
+    const inp = calls.length === 1 ? calls[0].prompt.inputs : {};
+    ok(inp.PATCH === obj, 'verify reads EVO\'s object', inp.PATCH);
+    ok(inp.FROZEN_PATCH === frozen && inp.STOP_ENGINEER === d.out_dir, 'and still stops + freezes');
+    ok(r && r.patch === obj, 'EVO keeps receiving its own object path', r && r.patch);
+  }
+
+  console.log('verify could not stop the engineer:');
+  {
+    const ver = { status: 'stop_failed', correctness: 'not_checked', notes: 'STOP_FAILED: 1 process(es) still running' };
+    const { fn, logs } = verifyStage({ ver });
+    const r = await fn({ d, eng: null });
+    ok(r && r.ver === ver, 'stage returns the stop_failed verdict');
+    ok(logs.some((m) => /could not stop the engineer/.test(m) && /STOP_FAILED/.test(m)), 'it is logged with the reason');
+    const verifiedFilter = src.match(/const verified = clean\.filter\(r => r\.ver && says\(r\.ver\.status, 'verified'\)/);
+    ok(!!verifiedFilter, 'only status "verified" becomes a candidate (stop_failed never does)');
+    ok(/says\(r\.ver\.status, 'stop_failed'\) \? 'no_result'/.test(src), 'routing books stop_failed as no_result');
+  }
+
   console.log('downstream reads the stage result, not best_patch.diff:');
   {
     const after = src.slice(src.indexOf('  const clean = results.filter(Boolean);'));
@@ -115,19 +143,35 @@ function verifyStage(opts = {}) {
     ok(!merge.includes('best_patch.diff'), 'no step after verify names best_patch.diff');
   }
 
-  console.log('role contracts:');
+  console.log('engineers save atomically:');
   {
-    const ver = fs.readFileSync(path.join(KW, 'roles', 'verify_engineer.md'), 'utf8');
-    ok(ver.includes('scripts/stop_engineer.sh" "$STOP_ENGINEER"'), 'verify runs stop_engineer.sh when STOP_ENGINEER is set');
-    ok(ver.includes('cp "$PATCH" "$FROZEN_PATCH"'), 'verify freezes the patch');
-    ok(ver.indexOf('stop_engineer.sh') < ver.indexOf('cp "$PATCH" "$FROZEN_PATCH"'), 'stop happens before the copy');
-    ok(ver.indexOf('cp "$PATCH" "$FROZEN_PATCH"') < ver.indexOf('\n0. '), 'freeze happens before step 0');
-    ok(ver.includes('git apply "$FROZEN_PATCH"') && !ver.includes('git apply "$PATCH"'), 'verify applies only the frozen copy');
+    ok(/Save best_patch\.diff via \\`bash \$\{WORKFLOW_DIR\}\/scripts\/save_patch\.sh <KERNEL_PATH> \$\{d\.out_dir\}\\`/.test(src),
+      'the Optimize prompt saves through save_patch.sh');
+    ok(!/git diff > \$\{d\.out_dir\}\/best_patch\.diff/.test(src), 'the Optimize prompt no longer writes it with git diff >');
     for (const role of ['engineer.md', 'deep_engineer.md']) {
       const s = fs.readFileSync(path.join(KW, 'roles', role), 'utf8');
-      ok(s.includes('test ! -e $OUTPUT_DIR/STOP &&'), `${role} honours $OUTPUT_DIR/STOP`);
+      ok(s.includes('bash $SKILL_DIR/scripts/save_patch.sh $KERNEL_PATH $OUTPUT_DIR'), `${role} saves through save_patch.sh`);
+      ok(!/git diff > \$OUTPUT_DIR\/best_patch\.diff/.test(s), `${role} has no in-place git diff > best_patch.diff`);
+      ok(s.includes('exit 87, `GEAK_ENGINEER_STOPPED`'), `${role} explains the stop refusals`);
     }
-    ok(fs.existsSync(path.join(KW, 'scripts', 'stop_engineer.sh')), 'stop_engineer.sh exists');
+  }
+
+  console.log('verify role contract:');
+  {
+    const ver = fs.readFileSync(path.join(KW, 'roles', 'verify_engineer.md'), 'utf8');
+    const stopAt = ver.indexOf('scripts/stop_engineer.sh" "$STOP_ENGINEER" || FENCE=STOP_FAILED');
+    const freezeAt = ver.indexOf('scripts/freeze_patch.sh" "$PATCH" "$FROZEN_PATCH" || FENCE=FREEZE_FAILED');
+    ok(stopAt > 0, 'a failed stop is caught (FENCE=STOP_FAILED)');
+    ok(freezeAt > 0, 'the patch is frozen by freeze_patch.sh, and a failed freeze is caught');
+    ok(stopAt < freezeAt && freezeAt < ver.indexOf('\n0. '), 'stop, then freeze, both before step 0');
+    ok(/\[ "\$FENCE" = ok \] && \{ bash/.test(ver), 'no freeze after a failed stop');
+    ok(/STOP HERE: do not build, apply or measure/.test(ver) && ver.includes('status:"stop_failed"'),
+      'on a fence failure verify measures nothing and returns stop_failed');
+    ok(!ver.includes('cp "$PATCH"'), 'no unchecked copy of the live patch is left');
+    ok(ver.includes('git apply "$FROZEN_PATCH"') && !ver.includes('git apply "$PATCH"'), 'verify applies only the frozen copy');
+    for (const f of ['stop_engineer.sh', 'freeze_patch.sh', 'save_patch.sh']) {
+      ok(fs.existsSync(path.join(KW, 'scripts', f)), `${f} exists`);
+    }
   }
 
   if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }

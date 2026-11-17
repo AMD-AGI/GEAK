@@ -41,6 +41,23 @@ if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
     exit 2
 fi
 
+# ---- Stopped-engineer fence -----------------------------------------------------------------------
+# When the lane stops waiting for an engineer (AGENT_TIMEOUT_MS), its verify runs stop_engineer.sh,
+# which writes <engineer_dir>/STOP next to the engineer's <engineer_dir>/workspace. The engineer agent
+# itself cannot be cancelled, so any GPU command it still issues from that workspace is refused here,
+# before any lock is taken: its results can no longer be measured or adopted, and it must not hold the
+# GPUs its own verify is waiting for. Only a directory literally named "workspace" with a STOP beside it
+# matches, so verify/integrate clones and the canonical tree are never affected.
+_sd="$PWD"
+while [ -n "$_sd" ] && [ "$_sd" != "/" ]; do
+    if [ "$(basename "$_sd")" = "workspace" ] && [ -e "$(dirname "$_sd")/STOP" ]; then
+        echo "GEAK_ENGINEER_STOPPED: the lane stopped this engineer ($(dirname "$_sd")/STOP); no further GPU work" >&2
+        echo "from this workspace will run. Stop now and return your result." >&2
+        exit 87
+    fi
+    _sd="$(dirname "$_sd")"
+done
+
 # Source provenance is checked before executing any command and again on exit:
 # generated builders can recreate a stale overlay during the command itself.
 # Exit 86 invalidates all output from that invocation, even if it printed PASS.

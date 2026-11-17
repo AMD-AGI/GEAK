@@ -9,6 +9,10 @@
 # else — not the verify's own scratch under <out_dir>/verify, not a sibling directory that merely
 # shares the name prefix, and not the caller that runs the script, even from inside the workspace.
 #
+# A stop that does not take fails loudly: processes that keep reappearing in the workspace, or a STOP
+# that cannot be written, give exit 3 with STOP_FAILED. And once STOP is written, gpu_lock.sh refuses any
+# command from that workspace (exit 87) while verify clones and the canonical tree are not fenced.
+#
 # Run:  bash kernel_workflow/scripts/test_stop_engineer.sh
 set -uo pipefail
 
@@ -85,6 +89,69 @@ done
 out2="$(STOP_ENGINEER_GRACE_SEC=1 bash "$STOP" "$ENG")"; rc=$?
 [ $rc -eq 0 ] && echo "$out2" | grep -q "stopped 0 process" && ok "re-run with nothing to stop -> exit 0" \
     || bad "re-run should exit 0 and stop 0 processes (rc=$rc: $out2)"
+
+# --- a process that reappears once after the first kill is caught by a later round -------------
+# (an engineer whose command was killed and that immediately issues one more)
+ENG1="$T/round_1b/engineer_0"
+mkdir -p "$ENG1/workspace"
+once=$(spawn "$T/elsewhere" "(cd '$ENG1/workspace' && exec sleep 300) & wait \$!; (cd '$ENG1/workspace' && exec sleep 300) & wait \$!")
+PIDS+=("$once")
+sleep 1
+out4="$(STOP_ENGINEER_GRACE_SEC=1 bash "$STOP" "$ENG1" 2>&1)"; rc=$?
+sleep 1
+left=$(for d in /proc/[0-9]*; do c=$(readlink "$d/cwd" 2>/dev/null) && [ "$c" = "$ENG1/workspace" ] && echo "${d#/proc/}"; done)
+[ $rc -eq 0 ] && [ -z "$left" ] && ok "a process started after the first kill round is stopped too" \
+    || bad "re-spawned process not handled (rc=$rc, left: $left): $out4"
+
+# --- a stop that does not take must fail loudly (exit 3), never report success ------------------
+# Something outside the workspace keeps starting new processes inside it (as the uncancellable engineer
+# agent can): every round kills them, more appear, and the script must give up with STOP_FAILED.
+ENG2="$T/round_2/engineer_0"
+mkdir -p "$ENG2/workspace"
+respawner=$(spawn "$T/elsewhere" "while :; do (cd '$ENG2/workspace' && exec sleep 30) & sleep 0.2; done")
+PIDS+=("$respawner")
+sleep 1
+err="$(STOP_ENGINEER_GRACE_SEC=1 STOP_ENGINEER_ROUNDS=2 bash "$STOP" "$ENG2" 2>&1 >/dev/null)"; rc=$?
+[ $rc -eq 3 ] && ok "processes that keep coming back -> exit 3" || bad "expected exit 3, got $rc"
+echo "$err" | grep -q "STOP_FAILED: .* still running under $ENG2/workspace" && ok "survivors are reported" \
+    || bad "no STOP_FAILED report: $err"
+echo "$err" | grep -q "pid=" && ok "survivors are listed by pid" || bad "survivor list missing"
+kill -KILL "$respawner" 2>/dev/null
+sleep 1
+out3="$(STOP_ENGINEER_GRACE_SEC=1 bash "$STOP" "$ENG2" 2>&1)"; rc=$?
+[ $rc -eq 0 ] && ok "once the source is gone the stop succeeds" || bad "expected exit 0 after the respawner died: $out3"
+
+# STOP that cannot be written is a failed stop (skipped as root, where permissions do not bite).
+if [ "$(id -u)" != "0" ]; then
+    ENG3="$T/round_3/engineer_0"
+    mkdir -p "$ENG3/workspace"
+    chmod a-w "$ENG3"
+    err="$(bash "$STOP" "$ENG3" 2>&1 >/dev/null)"; rc=$?
+    chmod u+w "$ENG3"
+    [ $rc -eq 3 ] && echo "$err" | grep -q "STOP_FAILED: cannot write" && ok "unwritable STOP -> exit 3" \
+        || bad "unwritable STOP should exit 3 with STOP_FAILED (rc=$rc: $err)"
+else
+    echo "  skip: unwritable STOP check (running as root)"
+fi
+
+# --- gpu_lock.sh refuses a stopped engineer's workspace, and only that -------------------------
+LOCK="$HERE/gpu_lock.sh"
+FENCE="$T/fence"
+mkdir -p "$FENCE/eng/workspace/sub" "$FENCE/eng/verify/ws_1" "$FENCE/eval/workspace"
+touch "$FENCE/eng/STOP"
+for where in "$FENCE/eng/workspace" "$FENCE/eng/workspace/sub"; do
+    res="$(cd "$where" && KERNEL_EXTRACT_LOCK_DIR="$T/locks" timeout 60 bash "$LOCK" 0 echo RAN_UNDER_LOCK 2>&1)"; rc=$?
+    [ $rc -eq 87 ] && ok "gpu_lock refuses from ${where#$FENCE/} (exit 87)" || bad "gpu_lock from ${where#$FENCE/}: expected 87, got $rc"
+    echo "$res" | grep -q GEAK_ENGINEER_STOPPED && ok "  ...and says why" || bad "  no GEAK_ENGINEER_STOPPED message"
+    echo "$res" | grep -q RAN_UNDER_LOCK && bad "  the command ran anyway" || ok "  ...and the command never runs"
+done
+# Verify clones under the same engineer dir, and a workspace with no STOP beside it, are not fenced.
+# (They may fail later for unrelated reasons on a GPU-less runner; only the fence verdict is checked.)
+for where in "$FENCE/eng/verify/ws_1" "$FENCE/eval/workspace"; do
+    res="$(cd "$where" && KERNEL_EXTRACT_LOCK_DIR="$T/locks" timeout 60 bash "$LOCK" 0 true 2>&1)"; rc=$?
+    [ $rc -ne 87 ] && ! echo "$res" | grep -q GEAK_ENGINEER_STOPPED && ok "gpu_lock does not fence ${where#$FENCE/}" \
+        || bad "gpu_lock wrongly fenced ${where#$FENCE/} (rc=$rc)"
+done
 
 if [ "$FAIL" -ne 0 ]; then
     echo "test_stop_engineer: $FAIL failure(s)" >&2

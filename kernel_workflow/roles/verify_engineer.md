@@ -15,7 +15,8 @@ absolute per-case latencies. The script trusts only your numbers.
 - `FROZEN_PATCH` — where you freeze `PATCH` before step 0. Every later step reads ONLY this copy;
   the lane integrates and commits this exact file, never `PATCH`.
 - `STOP_ENGINEER` (optional) — present when the engineer's return never came back (timeout / API
-  failure). The engineer may still be running and rewriting `PATCH`; stop it before step 0.
+  failure). The engineer may still be running and rewriting `PATCH`; stop it before step 0. If it
+  cannot be stopped, or the patch will not hold still, return `status:"stop_failed"` (see Steps).
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -25,13 +26,21 @@ absolute per-case latencies. The script trusts only your numbers.
   the immutable oracle's correctness/tolerance.
 
 ## Steps
-Before anything else, stop the engineer if asked and freeze the patch. The stop comes first so the
-copy cannot be a half-written or later-replaced `best_patch.diff`; nothing to stop is fine.
+Before anything else, stop the engineer if asked and freeze the patch, in ONE command, exactly as written.
+The stop comes first so the copy cannot be a half-written or later-replaced `best_patch.diff`; nothing to
+stop is fine. `freeze_patch.sh` copies only a patch that stays unchanged while it is copied.
 ```bash
-[ -n "${STOP_ENGINEER:-}" ] && bash "$SKILL_DIR/scripts/stop_engineer.sh" "$STOP_ENGINEER"
-mkdir -p "$(dirname "$FROZEN_PATCH")"
-cp "$PATCH" "$FROZEN_PATCH" 2>/dev/null || : > "$FROZEN_PATCH"
+FENCE=ok
+if [ -n "${STOP_ENGINEER:-}" ]; then
+  bash "$SKILL_DIR/scripts/stop_engineer.sh" "$STOP_ENGINEER" || FENCE=STOP_FAILED
+fi
+[ "$FENCE" = ok ] && { bash "$SKILL_DIR/scripts/freeze_patch.sh" "$PATCH" "$FROZEN_PATCH" || FENCE=FREEZE_FAILED; }
+echo "FENCE=$FENCE"
 ```
+If it prints `FENCE=STOP_FAILED` or `FENCE=FREEZE_FAILED`, STOP HERE: do not build, apply or measure
+anything, and return `status:"stop_failed"`, `correctness:"not_checked"`, zero speedups, no per-case
+timings, and the script's error lines in `notes`. The engineer may still be changing the patch, so no
+number measured now could be trusted to describe what the lane would merge.
 From here on "the patch" means `FROZEN_PATCH`: never re-read or re-copy `PATCH`, even if it changes on
 disk — your numbers must describe exactly the file the lane will merge.
 
@@ -95,7 +104,7 @@ disk — your numbers must describe exactly the file the lane will merge.
 ## Return JSON
 ```json
 {
-  "status": "verified|correctness_failed|apply_failed|regression|invalid_measurement",
+  "status": "verified|correctness_failed|apply_failed|regression|invalid_measurement|stop_failed",
   "correctness": "pass|fail|not_checked",
   "verified_geomean": 0.0,
   "verified_arithmetic": 0.0,

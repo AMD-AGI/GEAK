@@ -3051,7 +3051,7 @@ bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh \\
 `}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when geomean>${CANDIDATE_FLOOR_TXT}.
+Save best_patch.diff via \`bash ${WORKFLOW_DIR}/scripts/save_patch.sh <KERNEL_PATH> ${d.out_dir}\` (atomic; never \`git diff >\` it directly) when geomean>${CANDIDATE_FLOOR_TXT}.
 
 ## Inputs
 ${cfg({
@@ -3114,7 +3114,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // engineer: agent() cannot be cancelled, so it may still be rebuilding, benchmarking on the shared
       // GPUs and rewriting best_patch.diff while its verify runs. Verify therefore stops it first
       // (STOP_ENGINEER), then measures a frozen copy of the patch, and every later step (integrate,
-      // commit) uses that copy, so the patch merged is byte-for-byte the patch verified.
+      // commit) uses that copy, so the patch merged is byte-for-byte the patch verified. With EVO on,
+      // `patch` is already EVO's immutable content-addressed object, and the frozen copy is made from it
+      // byte for byte, so the stage keeps handing EVO its own object exactly as before.
+      // If the engineer cannot be stopped or its patch will not hold still, verify measures nothing and
+      // returns status "stop_failed": the direction is dropped rather than verified on a moving target.
       const frozen = `${d.out_dir}/verify/candidate.diff`;
       // eikos v2 E1 (R2): carry a host dispatch id for the verifier too, so its OWN terminal outcome can
       // reach P1's shadow (coverage beyond the engineer cycle + committer).
@@ -3154,7 +3158,11 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
             vUsable ? 'work_product' : (vInvalid ? 'invalid_measurement' : 'no_result'),
             'host', vlabel, vroute ? vroute.dispatch_id : null);
         }
-        return { d, eng, ver, patch: frozen, route };
+        if (ver && says(ver.status, 'stop_failed')) {
+          log(`Round ${round} dir ${d.id}: verify could not stop the engineer or freeze its patch — dropping ` +
+            `this direction unmeasured. ${String(ver.notes || '').slice(0, 300)}`);
+        }
+        return { d, eng, ver, patch: EVO ? patch : frozen, route };
       });
     }
   );
@@ -3178,6 +3186,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       : !r.ver ? 'non_improvement'
       : says(r.ver.status, 'invalid_measurement') ? 'invalid_measurement'
       : says(r.ver.status, 'apply_failed') && !r.eng ? 'no_result'
+      : says(r.ver.status, 'stop_failed') ? 'no_result'   // the engineer could not be stopped: nothing was measured
       : (says(r.ver.status, 'apply_failed') || says(r.ver.status, 'correctness_failed') ||
          says(r.ver.correctness, 'fail')) ? 'work_product'
       : 'non_improvement';
