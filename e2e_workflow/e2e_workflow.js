@@ -2282,10 +2282,23 @@ function templateArguments(value) {
   }
   return [fold(text.slice(start + 1)), false];
 }
-function kernelIdentitiesMatch(a, b) {
+// Mirror of _tensile_solution_variants in kernel_selection.py: two Cijk symbols that differ only in
+// the Tensile solution knobs SIA/SU/SUS/WGM are one kernel. Not between the members of a joint chain,
+// which are declared as distinct kernels: those checks pass tensileVariants=false (kernel_matches'
+// tensile_variants in verify_chain).
+function tensileSolutionVariants(x, y) {
+  const a = x.split('_'), b = y.split('_'), knob = /^(sia|su|sus|wgm)[0-9]+$/;
+  return a[0] === 'cijk' && b[0] === 'cijk' && a.length === b.length && a.every((t, i) => {
+    if (t === b[i]) return true;
+    const l = knob.exec(t), r = knob.exec(b[i]);
+    return Boolean(l && r && l[1] === r[1]);
+  });
+}
+function kernelIdentitiesMatch(a, b, tensileVariants = true) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x) &&
+      !(tensileVariants && tensileSolutionVariants(x, y))) return false;
   // The base token drops template arguments so a bare name matches its decorated spelling; when
   // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
@@ -2352,7 +2365,7 @@ function prepareHeadSelection(h) {
     ...out, seam_candidates: jointPhase.seam_candidates || out.seam_candidates,
   } : out).filter((candidate) => {
     if (jointPhase && !(jointPhase.required_device_kernels || []).every(k =>
-        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v)))) return false;
+        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v, false)))) return false;
     const role = String(candidate.role || '').toLowerCase();
     return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
   });
@@ -2405,8 +2418,8 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       const requiredMembers = spec.required_device_kernels;
       if (!Array.isArray(requiredMembers) || requiredMembers.length < 2 ||
           !requiredMembers.every(k => typeof k === 'string' && k.trim()) ||
-          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
-          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
+          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v, false))) ||
+          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel, false)))
         return { ok: false, why: `${regime}: joint phase must declare its anchor and companion kernels` };
       const matches = results.filter(r => r.regime === regime);
       if (matches.length !== 1)
@@ -2416,10 +2429,10 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
         return { ok: false, why: `${regime}: a leaf verdict cannot certify a joint chain` };
       const reported = verdict.required_device_kernels || [];
       if (reported.length !== requiredMembers.length ||
-          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
+          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v, false))))
         return { ok: false, why: `${regime}: joint verdict has the wrong member kernel set` };
       if (requiredMembers.some(k => !(verdict.chain_members || []).some(m =>
-          kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
+          kernelIdentitiesMatch(k, m.device_kernel, false) && Number(m.matched_kernel_calls) > 0)))
         return { ok: false, why: `${regime}: missing positive member-kernel execution evidence` };
       if (!Array.isArray(verdict.joint_call_coverage) || !verdict.joint_call_coverage.length ||
           verdict.joint_call_coverage.some(c => !Array.isArray(c.missing_members) || c.missing_members.length))
@@ -4984,6 +4997,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_ENV: curEnv,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
       // Lane roster: always tune the live kernel, author EVERY backend the bake-off proposes, then add
@@ -5339,6 +5353,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_ENV: curEnv,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -5554,6 +5569,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_ENV: curEnv,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
