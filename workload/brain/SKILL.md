@@ -63,6 +63,9 @@ Budget exploration and adoption evidence together using observed costs and autho
 resources. Do not reduce search to whatever remains after validating every proposal.
 Reallocate from new evidence while preserving explicit task commitments; compare policies
 from the same starting state and total resource allowance.
+After truncation, reprice from observed whole-method costs and verify what the native
+method can resume; retained files alone do not make a checkpoint. A local limit returns
+to Reasoning, including verification and delivery in the next budget.
 
 Only native evidence under the task's comparison and quality criteria admits a replacement.
 Adoption updates the verified candidate; rejection keeps the reference. Neither ends the
@@ -74,11 +77,20 @@ A kernel win or completed call does not establish serving improvement.
 At the user's cadence, otherwise `report.interval_sec`, send **Plan / Finish**: running
 and next work, blockers and verified completions with evidence. Say when nothing new has
 finished. Record the next inspection/report times; background logs are not conversation
-updates. Verify wake-up/delivery support before promising unattended reporting; otherwise
-state the limit and keep the controlling conversation active while monitoring is needed.
+updates. A status reply is an interim update, not a handoff: keep the controlling
+conversation active unless a verified mechanism will resume Brain for the next decision.
+Queued worker messages do not prove wake-up support. Inspect completion, failure and
+deadline reports and dispatch the next permitted work without waiting for a user prompt.
 
-Stop on demonstrated task completion, user stop, exhausted budget or unavailable
-prerequisites. Support a budget/resource stop with actual limits and remaining work,
-not a rejected candidate, an empty ready queue or a planner's decision to stop proposing.
+On allocation loss or expiry, preserve continuations and ask Setup to inspect the
+authorized resource pool. While budget remains and permitted capacity may arrive, keep
+watching it at the recorded inspection cadence, even with no workers running. A new
+allocation needs a usable-runtime handoff before resuming; watching grants no permission
+to submit, cancel or release resources.
+
+Stop on demonstrated task completion, user stop, exhausted budget or prerequisites that
+cannot be advanced through permitted work or monitoring. Support a budget/resource stop
+with actual limits and remaining work, not a rejected candidate, an empty ready queue
+or a planner's decision to stop proposing.
 Preserve continuations for unfinished work. At handoff or a requested route review,
 invoke [Report](../stages/report/README.md) to explain the actual route and parallel work.

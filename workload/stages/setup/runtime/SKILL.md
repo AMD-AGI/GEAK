@@ -11,6 +11,11 @@ Resolve the actual image/source versions, workload inputs, tool entrypoints and 
 availability. Use the selected benchmark's readiness checks when preparing a measurement;
 [measure](../../baseline/measure/SKILL.md) describes the bundled benchmark path.
 
+When asked to watch for replacement capacity, inspect the authorized resource pool until
+the plan's deadline or handoff. Report allocation changes promptly; distinguish a queued
+job, an allocated node and a usable runtime. Check current occupancy, runtime access and
+remaining lease before returning handles; a new job on the same host need not fix it.
+
 Return the usable handles, observed identities, remaining allocation time and blockers
 in `REPORT.md`. Preserve existing work and record what was changed. Preparing or
 recovering an environment does not authorize a benchmark or a resource release.
