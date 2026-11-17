@@ -5,7 +5,7 @@
 // the pack's gluon_profile.py with every layer's state stated.
 'use strict';
 
-const { launch, ok, done, engineerReturn, refsIn, goodAtt, goodProfileCmd, SKILL } = require('./harness');
+const { escapeRe, launch, ok, done, engineerReturn, refsIn, goodAtt, goodProfileCmd, SKILL } = require('./harness');
 
 const climbOnly = { budget: 1, entry_mode: 'incumbent' };
 
@@ -29,7 +29,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       'evidence_audit r1': ['references/method/index.md'],
     };
     for (const [label, rels] of Object.entries(expect)) {
-      const p = prompt(new RegExp(`^${label.replace(/[.+]/g, '\\$&')}$`));
+      const p = prompt(new RegExp(`^${escapeRe(label)}$`));
       const roleAt = p.indexOf('Then Read ');
       for (const rel of rels) {
         const at = p.indexOf(`${SKILL}/${rel}`);
@@ -49,7 +49,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       if (label === 'gluon_engineer:climb r1') { const r = engineerReturn(prompt); delete r.g3_occupancy; return r; }
       if (/^gluon_engineer:evidence r1/.test(label)) {
         ok(/g3_occupancy/.test(prompt) && /MISSING/.test(prompt), 're-ask names the missing gate');
-        return engineerReturn(prompt.replace('PHASE=climb', 'PHASE=climb'), { stage: 'climb' });
+        return engineerReturn(prompt, { stage: 'climb' });
       }
       return undefined;
     }, { entry: 'incumbent' });

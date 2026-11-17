@@ -27,8 +27,10 @@ const goodProfileCmd = 'python3 skill/scripts/gluon_profile.py /x/prof --kernel 
 const gate = (exit) => ({ command: 'python3 skill/scripts/parity_gate.py --champion-ms 1 --anchor-ms 1.2', exit_code: exit,
   ratio: exit === 0 ? 0.97 : 0.8, suspects: [], json_path: '/x/parity.json', mode: 'gate' });
 
+// Escape every regex metacharacter, backslash included, before building a pattern from a label.
+const escapeRe = (s) => String(s).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 const layerRefsIn = (prompt, layer) => {
-  const m = prompt.match(new RegExp(`^- layer ${layer.replace(/[.+]/g, '\\$&')}: (.*)$`, 'm'));
+  const m = prompt.match(new RegExp(`^- layer ${escapeRe(layer)}: (.*)$`, 'm'));
   return m ? m[1].split(', ') : [];
 };
 
@@ -108,4 +110,4 @@ const inOrder = (labels, sub) => {
   return true;
 };
 
-module.exports = { PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };
+module.exports = { escapeRe, PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };
