@@ -194,7 +194,8 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 
 Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_KIND` (gemm|attn),
 `PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
-`KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
+`KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`, `CURRENT_ENV` (the env the server
+runs with now; absent when there is no server, e.g. a standalone kernel_workflow bake-off).
 
 1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
    STOP, return `gate:"tamper"`.
@@ -203,11 +204,17 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    HIP_VISIBLE_DEVICES=<GPU_ID> CUDA_VISIBLE_DEVICES=<GPU_ID> \
    python3 "$SKILL_DIR/scripts/op_bench.py" --task "<OP_TASK_DIR>" \
      --backends "<ranked,backends>" --repeats 50 --warmup 10 \
-     --out "<OP_TASK_DIR>/opbench_result.json" \
+     --server-env "<CURRENT_ENV>" --out "<OP_TASK_DIR>/opbench_result.json" \
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
+   Pass `CURRENT_ENV` verbatim as one argument (quote it for the shell); drop `--server-env` when
+   `CURRENT_ENV` is absent.
    Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
-   `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
+   `isolated_speedup` vs the live BLAS default (`live_blas_default`: `TORCH_BLAS_PREFER_HIPBLASLT` or
+   `TORCH_BLAS_PREFER_CUBLASLT` in `CURRENT_ENV` when set there, else torch's default on this image,
+   rocBLAS on gfx1151; `live_blas_default_source` says which, and `assumed` means it could not be read;
+   an fp8 blockscale GEMM is scored against its live `aiter_blockscale` path instead), `winner_editable`,
+   `winner_kind`, `verdict_withheld` (+ `verdict_withheld_reason`: the live-default arm did not time), and
    > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
    > winner and `isolated_speedup` are scored on `ms`, timed with one eviction pass over the L2/Infinity
    > cache before each sample so the number is not read off lines the previous sample left resident. The
@@ -339,6 +346,10 @@ Return JSON:
   yourself. `measured:false` means no backend produced a timing, and then `isolated_speedup` is `null`,
   not `0.0`. `0.0` means the bake-off ran and nothing was faster — a different fact, and the acceptance
   gate needs to tell them apart.
+- `verdict_withheld:true` — op_bench timed something, but the live-default arm, its baseline, produced
+  no correct timing. `isolated_speedup` is then `null` with `measured:true`. Rerun once with `--backends` that time here; if it is still withheld, there is no
+  direct winner: return `gate:"author_recommended"` with the `author_plan` (never `have_winner` or
+  `no_win`), and put `verdict_withheld_reason` in `reason`.
 - `gate:"have_winner"` — a direct_light (env/flag) winner is ready to integrate now.
 - `gate:"author_recommended"` — no direct win, but `author_plan` is non-empty: the orchestrator should
   run `kernel_workflow` per the plan and integrate the fastest authored result that beats `best_known_ms`.

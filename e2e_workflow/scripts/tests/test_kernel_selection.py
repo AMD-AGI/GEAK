@@ -173,6 +173,23 @@ class TestJointChainSelection(unittest.TestCase):
         self.assertEqual(outer["deeper_live_candidates"], [deeper])
         self.assertTrue(self.verify(events, target=deeper, extra=[deeper])["ok"])
 
+    def test_members_that_are_tensile_solutions_of_one_kernel_stay_distinct(self):
+        # Every call launches the WGM1 solution only. As a single target, WGM8 is the same kernel
+        # (#605), but as a declared joint member it never ran and must not borrow WGM1's launches.
+        wgm1 = "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1"
+        wgm8 = wgm1[:-1] + "8"
+        events = [e for e in self.chain_trace() if e.get("name") != "topk_kernel"]
+        for event in events:
+            if event.get("name") == "score_kernel":
+                event["name"] = wgm1
+        meta = {"module": "pkg.indexer", "attr": "joint", "total_calls_observed": 1}
+        chain = ks.verify_chain(self.joint, wgm1, [wgm8], meta, events, [self.joint])
+        self.assertFalse(chain["ok"])
+        self.assertIn("joint_member_missing_in_call", chain["failed"])
+        self.assertEqual([m["matched_kernel_calls"] for m in chain["chain_members"]], [1, 0])
+        single = ks.verify(self.joint, wgm8, meta, events, [self.joint])
+        self.assertEqual(single["matched_kernel_calls"], 1)
+
     def test_disjoint_partial_calls_do_not_fake_a_complete_chain(self):
         events = self.chain_trace()
         for event in events:
@@ -380,6 +397,9 @@ class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):
             with self.subTest(why=case["why"]):
                 self.assertEqual(ks.kernel_matches(case["a"], case["b"]), case["match"])
                 self.assertEqual(ks.kernel_matches(case["b"], case["a"]), case["match"])
+                member = case.get("member_match", case["match"])
+                self.assertEqual(ks.kernel_matches(case["a"], case["b"], tensile_variants=False), member)
+                self.assertEqual(ks.kernel_matches(case["b"], case["a"], tensile_variants=False), member)
 
     def test_the_fixture_still_covers_symbols_taken_from_real_captures(self):
         """Hand-written C++ is what let the unnamed-namespace and bare-kernel defects through."""
