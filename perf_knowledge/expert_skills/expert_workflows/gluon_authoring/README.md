@@ -115,7 +115,7 @@ The return is `ROUND_SCHEMA`; `missingEvidence()` checks it per stage:
 | field | required for | check |
 | --- | --- | --- |
 | `references_read` | every stage | covers every required path (layer references for the round's layer) |
-| `track_tag`, `patch_file` | every candidate | present (an anchor that is already the baseline: `anchor_provided`, tag `geak_base`) |
+| `track_tag`, `patch_file` | every candidate | present (an anchor the workspace already ships: `anchor_provided`, tag `geak_base`; verify still measures it as it is, because the frozen baseline may be the plain champion, and it sets the track line, never a deliverable) |
 | `equivalence` | transcribe | `layout_diff` ∈ PASS/RECONCILED/FAIL from `ttgir_bridge.py verify`; `numeric`, `determinism`, `asm_parity` recorded |
 | `g3_occupancy` (G3) | transcribe, author, recover repayment, climb | `probe.py measure` command, exit 0, `ir_dir`, both limiters (`vgpr_wg_per_cu`, `lds_wg_per_cu`; `null` only with `missing_reason`), `binding` |
 | `g4_screen` (G4) | recover repayment, climb | `ab_bench.py ... --permute`, exit code, `json_path`, `resolved` |

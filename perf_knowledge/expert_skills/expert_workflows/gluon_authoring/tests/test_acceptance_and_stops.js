@@ -4,7 +4,7 @@
 // token budget.
 'use strict';
 
-const { launch, ok, done, inOrder, engineerReturn, gate, refsIn } = require('./harness');
+const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = require('./harness');
 
 (async () => {
   console.log('\n# 1. the engineer\'s claim never decides: verify does');
@@ -68,6 +68,33 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn } = require('./h
     const close = x.calls.find(c => c.label === 'gluon_lead:close').prompt;
     ok(/FINAL_PATCH_SOURCE: \/x\/champion\.diff/.test(close), 'the champion patch is what gets delivered');
     ok(x.labels.includes('director:validate'), 'the revert is validated by the director too');
+  }
+
+  console.log('\n# 2b. a provided anchor is measured: the frozen baseline may be the plain champion');
+  {
+    // The benchmark froze source_golden/ (the champion) as the baseline; the anchor runs at 0.786 of it.
+    const x = await launch({ budget: 3, max_recover_rounds: 2 }, (label, prompt) => {
+      if (label === 'gluon_lead:entry') return { entry_mode: 'port', references_read: refsIn(prompt),
+        source_is_anchor: true, champion_patch: '/x/champion.diff', track_ready: true,
+        champion_gate: { command: 'python3 champion_gate.py --champion b.json', exit_code: 0 } };
+      if (label === 'verify champion') return { status: 'verified', correctness: 'pass', verified_geomean: 0.999 };
+      if (label === 'gluon_engineer:transcribe r1') return engineerReturn(prompt, { anchor_provided: true, patch_file: '', track_tag: 'geak_base' });
+      if (label === 'verify r1 (anchor as is)') return { status: 'regression', correctness: 'pass', verified_geomean: 0.786 };
+      if (/^gluon_engineer:recover/.test(label)) return engineerReturn(prompt, { suspect: 'lost_pipeline', layer: '4', att: goodAtt, parity_gate: gate(2) });
+      if (label === 'verify r2') return { status: 'regression', correctness: 'pass', verified_geomean: 0.940 };
+      if (label === 'verify r3') return { status: 'regression', correctness: 'pass', verified_geomean: 0.936 };
+      return undefined;
+    });
+    const anchorVerify = x.calls.find(c => c.label === 'verify r1 (anchor as is)');
+    ok(anchorVerify && /PATCH is intentionally empty/.test(anchorVerify.prompt) && /MEASURE_AS_IS/.test(anchorVerify.prompt),
+      'the anchor is verified as it is, not assumed', x.labels);
+    const [r1, r2, r3] = x.result.rounds;
+    ok(r1.vs_baseline === 0.786 && r1.kept && !r1.accepted, 'the anchor sets the track line at its measured 0.786 and is not a deliverable', r1);
+    ok(r2.kept && r2.vs_baseline === 0.94, 'a recovery from 0.786 to 0.940 is kept, not read as a regression', r2);
+    const r3prompt = x.calls.find(c => c.label === 'gluon_engineer:recover r3').prompt;
+    ok(/TRACK_START: r2/.test(r3prompt) && /TRACK_BEST_VS_BASELINE: 0\.94/.test(r3prompt), 'the next round starts from r2', r3prompt.slice(0, 0));
+    ok(!r3.kept, 'a round below the kept line is not kept', r3);
+    ok(!x.result.accepted && x.result.outcome === 'negative_revert_plain', 'nothing beat the frozen champion: revert', x.result.outcome);
   }
 
   console.log('\n# 3. parity_gate exit 2 blocks climbing');

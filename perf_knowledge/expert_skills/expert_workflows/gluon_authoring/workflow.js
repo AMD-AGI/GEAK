@@ -654,21 +654,27 @@ for (let round = 1; round <= BUDGET && !stoppedBy; round++) {
     continue;
   }
 
-  // GEAK verify is the only measurement that counts. A gate-only round, or a transcribe round over an
-  // anchor that is already the frozen baseline, has no new candidate to measure.
+  // GEAK verify is the only measurement that counts; a gate-only round has nothing new to measure.
+  // An anchor the workspace already ships is measured too, as it is: the frozen baseline may be the
+  // plain champion (source_golden/), not the anchor, so its ratio is never assumed to be 1.
   let ver = null;
   let p = 0;
-  const measured = !r.no_change && !(stage === 'transcribe' && r.anchor_provided);
+  const anchorAsIs = stage === 'transcribe' && r.anchor_provided === true;
+  const measured = !r.no_change;
   if (measured && says(r.correctness, 'pass')) {
     ver = await agentT(
-      rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify', 'Independently re-measure this candidate patch.', {
-        CANONICAL, PATCH: r.patch_file, VERIFY_DIR: `${OUT}/verify`, ENGINEER_WORKSPACE: TRACK, EVAL_DIR,
+      rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify', anchorAsIs
+        ? 'Independently measure the anchor the canonical workspace already contains. PATCH is intentionally empty: ' +
+          'skip the apply step and measure the materialized copy of CANONICAL as it is (this is not apply_failed).'
+        : 'Independently re-measure this candidate patch.', {
+        CANONICAL, PATCH: anchorAsIs ? '' : r.patch_file, VERIFY_DIR: `${OUT}/verify`, ENGINEER_WORKSPACE: TRACK, EVAL_DIR,
         WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        ...(anchorAsIs ? { MEASURE_AS_IS: 'yes: the anchor is the workspace source; there is no patch to apply' } : {}),
       }),
-      { phase: STAGE_PHASE[stage], label: `verify r${round}`, schema: VERIFY_SCHEMA });
+      { phase: STAGE_PHASE[stage], label: anchorAsIs ? `verify r${round} (anchor as is)` : `verify r${round}`, schema: VERIFY_SCHEMA });
     p = ver && says(ver.correctness, 'pass') ? primary(ver) : 0;
   } else if (!measured) {
-    p = r.anchor_provided ? 1 : trackBest;
+    p = trackBest;
   }
   row.status = ver ? String(ver.status || '') : (measured ? 'not_verified' : 'not_measured');
   row.vs_baseline = p || null;
@@ -679,7 +685,8 @@ for (let round = 1; round <= BUDGET && !stoppedBy; round++) {
   const kept = p > 0 && (p > trackBest || (r.enabling_step === true && trackBest > 0 && p >= trackBest * (1 + PROGRESS_DELTA)));
   if (measured && kept) { trackBest = Math.max(trackBest, p); trackTag = r.track_tag; row.kept = true; }
   if (!measured && (stage === 'transcribe' || stage === 'author')) { trackBest = p; row.kept = true; }
-  if (ver && says(ver.correctness, 'pass') && p > (accepted ? accepted.primary : 1) * (1 + MIN_IMPROVE)) {
+  // The anchor the workspace already ships is the track's starting line, never a deliverable.
+  if (!anchorAsIs && ver && says(ver.correctness, 'pass') && p > (accepted ? accepted.primary : 1) * (1 + MIN_IMPROVE)) {
     accepted = { round, primary: p, vs_champion: vsChampion(p), patch: r.patch_file, layer: row.layer, per_case: ver.per_case || [] };
     row.accepted = true;
   }
