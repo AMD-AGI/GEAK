@@ -61,8 +61,9 @@ The [sequential driver](../engine/core/README.md) still supports the configured 
 Preserve task coverage, parallelism, selected method, required search credit, cold checks
 and a verified floor with recovery artifacts. A scoped alternative does not complete the
 starting route; revisit unfinished work when that alternative no longer advances the objective.
-Budget exploration and adoption evidence together using observed costs and authorized
-resources. Do not reduce search to whatever remains after validating every proposal.
+Budget exploration and adoption evidence together using observed costs at the intended
+concurrency and runtime, within authorized resources. Do not reduce search to whatever
+remains after validating every proposal.
 Reallocate from new evidence while preserving explicit task commitments; compare policies
 from the same starting state and total resource allowance.
 After truncation, reprice from observed whole-method costs and verify what the native
