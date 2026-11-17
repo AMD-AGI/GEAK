@@ -1561,6 +1561,10 @@ def build_candidate_overlay(task_dir, meta):
                 "--impl-attr", b["impl_attr"], "--impl-file", src]
     else:
         args = ["add-module", "--module", b["module"], "--patched-file", src]
+        # kernel_src/ was seeded from baseline_overlay's copy of the module, if it has one.
+        seed = os.path.join(base, "_patched", b["module"] + ".py")
+        if os.path.isfile(seed):
+            args += ["--src-file", seed]
     r = subprocess.run(tool + args + ["--overlay", cand, "--from", base], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")

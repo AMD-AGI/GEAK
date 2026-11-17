@@ -45,6 +45,11 @@ def trace(kernel=KERNEL, under_target=True):
     return events
 
 
+def compiled_marker(target, prefix="GEAK_COMPILED::"):
+    """seam_trace names a seam torch.compile traced through, since it leaves no span."""
+    return {"cat": "user_annotation", "name": prefix + target, "ph": "X", "pid": 1, "tid": 2, "ts": 93, "dur": 1}
+
+
 class TestJointChainSelection(unittest.TestCase):
     joint = "pkg.indexer:joint"
     score = "pkg.indexer:score"
@@ -167,6 +172,23 @@ class TestJointChainSelection(unittest.TestCase):
         self.assertFalse(outer["ok"])
         self.assertEqual(outer["deeper_live_candidates"], [deeper])
         self.assertTrue(self.verify(events, target=deeper, extra=[deeper])["ok"])
+
+    def test_members_that_are_tensile_solutions_of_one_kernel_stay_distinct(self):
+        # Every call launches the WGM1 solution only. As a single target, WGM8 is the same kernel
+        # (#605), but as a declared joint member it never ran and must not borrow WGM1's launches.
+        wgm1 = "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1"
+        wgm8 = wgm1[:-1] + "8"
+        events = [e for e in self.chain_trace() if e.get("name") != "topk_kernel"]
+        for event in events:
+            if event.get("name") == "score_kernel":
+                event["name"] = wgm1
+        meta = {"module": "pkg.indexer", "attr": "joint", "total_calls_observed": 1}
+        chain = ks.verify_chain(self.joint, wgm1, [wgm8], meta, events, [self.joint])
+        self.assertFalse(chain["ok"])
+        self.assertIn("joint_member_missing_in_call", chain["failed"])
+        self.assertEqual([m["matched_kernel_calls"] for m in chain["chain_members"]], [1, 0])
+        single = ks.verify(self.joint, wgm8, meta, events, [self.joint])
+        self.assertEqual(single["matched_kernel_calls"], 1)
 
     def test_disjoint_partial_calls_do_not_fake_a_complete_chain(self):
         events = self.chain_trace()
@@ -375,6 +397,9 @@ class TestTheSharedFixtureHoldsOnThisSide(unittest.TestCase):
             with self.subTest(why=case["why"]):
                 self.assertEqual(ks.kernel_matches(case["a"], case["b"]), case["match"])
                 self.assertEqual(ks.kernel_matches(case["b"], case["a"]), case["match"])
+                member = case.get("member_match", case["match"])
+                self.assertEqual(ks.kernel_matches(case["a"], case["b"], tensile_variants=False), member)
+                self.assertEqual(ks.kernel_matches(case["b"], case["a"], tensile_variants=False), member)
 
     def test_the_fixture_still_covers_symbols_taken_from_real_captures(self):
         """Hand-written C++ is what let the unnamed-namespace and bare-kernel defects through."""
@@ -612,6 +637,17 @@ class TestSelectionVerdict(unittest.TestCase):
         self.assertFalse(verdict["ok"])
         self.assertIn("device_kernel_not_under_target", verdict["failed"])
         self.assertNotIn("capture_compiled_unobservable", verdict["failed"])
+
+    def test_a_candidate_seen_only_under_torch_compile_fails_the_selection(self):
+        # It leaves no span, so it can never show up as deeper: the target cannot be verified deepest.
+        other = "vllm.model_executor.layers.utils:dispatch_unquantized_gemm"
+        events = trace() + [compiled_marker(other, ks.INSTALL_PREFIX), compiled_marker(other)]
+        verdict = ks.verify(TARGET, KERNEL, self.meta(), events, [other])
+        self.assertFalse(verdict["ok"])
+        self.assertFalse(verdict["deepest_verified"])
+        self.assertEqual(verdict["failed"], ["candidate_compiled_unobservable"])
+        self.assertEqual(verdict["compiled_passthrough_candidates"], [other])
+        self.assertEqual(verdict["installed_but_never_live_candidates"], [other])
 
     def test_cli_writes_the_same_machine_verdict(self):
         with tempfile.TemporaryDirectory() as root:
@@ -910,6 +946,21 @@ class TestCaptureStorageReclaim(unittest.TestCase):
         with open(trace_path, "w") as fh:
             json.dump({"traceEvents": trace()}, fh)
         return meta_path, trace_path
+
+    def test_a_seam_compiled_in_any_process_is_listed(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111)
+            meta_b, trace_b = self._write_capture(root, 222)
+            with open(trace_b, "w") as fh:
+                json.dump({"traceEvents": trace() + [compiled_marker(TARGET)]}, fh)
+            out_path = os.path.join(root, "selection.json")
+            ks.main(["--target", TARGET, "--device-kernel", KERNEL, "--capture-meta", meta_a, meta_b,
+                     "--torch-trace", trace_a, trace_b, "--out", out_path, "--no-reclaim-captures"])
+            with open(out_path) as fh:
+                verdict = json.load(fh)
+            self.assertEqual(verdict["compiled_passthrough_candidates"], [TARGET])
+            # The target itself was also observed eagerly: only another candidate fails the selection.
+            self.assertTrue(verdict["ok"] and verdict["deepest_verified"], verdict["failed"])
 
     def test_infer_task_dir_from_process_local_metas(self):
         with tempfile.TemporaryDirectory() as root:

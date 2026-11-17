@@ -25,6 +25,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     expectedPhysicalCuCount = 0,
     budget = 0,
     planDirections = null,
+    validate = null,
   } = extras;
   const globals = {
     args: {
@@ -89,6 +90,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       if (options.label.startsWith('tech_lead:plan')) {
         return { stop: false, directions: planDirections || [] };
       }
+      if (options.label === 'director:validate') return validate;
       if (options.label === 'update_experience') {
         return { action: 'skipped', card_path: '', key: '', note: 'test' };
       }
@@ -261,6 +263,31 @@ function mustInclude(hay, needle, msg) {
     throw new Error('gfx1250 did not keep the CDNA expert-skill path');
   }
 
+  // RDNA 3.5 (gfx115x) is isolated the same way, declared or only detected, and an accepted win is
+  // curated under the ISA that produced it. gfx950 is the control (test_gpu_family_table.js pins
+  // which ISAs isolate).
+  const accepted = { validation_status: 'accepted', director_verified_speedup_geomean: 1.5 };
+  // Only the 40-CU gfx1151 has a peaks.md row; any other gfx115x part has no peaks.
+  for (const [gfx, expected, isolated, cu, status] of [
+    ['gfx1151', 'gfx1151', true, 40, 'tabulated-gfx1151'], ['gfx1151', '', true, 32, 'unknown-gfx1151-not-tabulated'],
+    ['gfx1150', '', true, 16, 'unknown-gfx1150-not-tabulated'], ['gfx950', '', false, 256, 'non-rdna'],
+  ]) {
+    const where = `${expected ? 'declared' : 'detected'} ${gfx}`;
+    const lane = await run(gfx, expected, { physicalCuCount: cu, validate: accepted });
+    const analyzePrompt = lane.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(analyzePrompt, `- GFX: ${gfx}`, `${where}: GFX did not reach the analysis prompt`);
+    mustInclude(analyzePrompt, `- ROOFLINE_STATUS: ${status}`, `${where} at ${cu} CU: wrong roofline status`);
+    if (analyzePrompt.includes('Expert skills (ADVISORY') === isolated) {
+      throw new Error(`${where}: expert skills ${isolated ? 'reached an isolated' : 'missing on a CDNA'} lane`);
+    }
+    if (isolated && lane.prompts.some((entry) => entry.label.includes('warm_start'))) {
+      throw new Error(`${where}: attempted warm-start calls`);
+    }
+    const curate = (lane.prompts.find((entry) => entry.label === 'update_experience') || {}).prompt || '';
+    mustInclude(curate, `- CURATION_ISOLATE: ${isolated}`, `${where}: wrong CURATION_ISOLATE`);
+    mustInclude(curate, `- REQUIRED_PLATFORMS: ${isolated ? `["${gfx}"]` : '[]'}`, `${where}: card filed under the wrong platform`);
+  }
+
   const director = fs.readFileSync(path.join(wfDir, 'roles/director.md'), 'utf8');
   mustInclude(director, 'device_target');
   mustInclude(director, 'physical_cu_count');
@@ -277,12 +304,13 @@ function mustInclude(hay, needle, msg) {
   const dispatcher = fs.readFileSync(path.join(wfDir, 'kernel_workflow.js'), 'utf8');
   mustInclude(dispatcher, 'expected_gfx: LANE_GFX');
   mustInclude(dispatcher, 'expected_target: LANE_TARGET');
-  mustInclude(dispatcher, 'RDNA4_ISOLATE');
-  mustInclude(dispatcher, 'R9700 / gfx1201 ISOLATION');
+  mustInclude(dispatcher, 'gpuFamily(DETECTED_GFX).isolate');
 
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   mustInclude(e2e, 'E2E is vLLM-only');
   mustInclude(e2e, 'RDNA4_PRODUCT_E2E');
+  mustInclude(e2e, 'R9700 E2E is vLLM or SGLang only');
+  mustInclude(e2e, 'R9700_E2E');
 
   const rdna = fs.readFileSync(path.join(wfDir, 'knowledge/amd_rdna4.md'), 'utf8');
   mustInclude(rdna, 'rocprofv3-avail list --pmc');

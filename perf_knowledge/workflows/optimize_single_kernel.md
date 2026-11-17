@@ -51,7 +51,8 @@ Create the task dir the kernel layer consumes: `unittest.py` (correctness + timi
 ## Step 2 — Tier A: backend bake-off (DISCOVER, no source)
 Bench **every available backend** on the immutable oracle and record per-backend
 `{available, correct, ms, max_rel_err}`, the winner, `winner_editable`,
-`isolated_speedup` vs the default (hipBLASLt), and whether an editable impl exists.
+`isolated_speedup` vs the live BLAS default (`live_blas_default`: rocBLAS on gfx1151, hipBLASLt on
+CDNA; a serving run passes the server's env with `--server-env`), and whether an editable impl exists.
 
 ```bash
 HIP_VISIBLE_DEVICES=<id> python3 op_bench.py --task <OP_TASK_DIR> \

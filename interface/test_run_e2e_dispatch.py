@@ -50,6 +50,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import sys
@@ -352,18 +353,23 @@ class TestMapArgs(_RunE2ECase):
         os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
         self.assertEqual(rx._expected_gpu_identity({}), expected)
 
-    def test_r9600d_defaults_to_vllm_like_r9700(self):
-        for target, name, cus in (
-            ("r9700", "AMD Radeon AI PRO R9700", 64),
-            ("r9600d", "AMD Radeon AI PRO R9600D", 48),
+    def test_vllm_only_identities_default_to_vllm(self):
+        # R9700 / R9600D by product; gfx115x by ISA (no product key; ROCm 7.2.3 reports
+        # an empty name on gfx1151). Discrete RDNA3 keeps the global default.
+        for gfx, target, name, cus, backend in (
+            ("gfx1201", "r9700", "AMD Radeon AI PRO R9700", 64, "vllm"),
+            ("gfx1201", "r9600d", "AMD Radeon AI PRO R9600D", 48, "vllm"),
+            ("gfx1151", "unknown", "", 40, "vllm"),
+            ("gfx1150", "unknown", "", 16, "vllm"),
+            ("gfx1100", "unknown", "AMD Radeon RX 7900 XTX", 96, "sglang"),
         ):
-            with self.subTest(target=target):
+            with self.subTest(gfx=gfx, target=target):
                 mapped = rx.map_args(self._handoff(
-                    eval_dir=str(self.tmp / f"e2e_{target}_default"),
-                    expected_gfx="gfx1201", expected_target=target,
+                    eval_dir=str(self.tmp / f"e2e_{gfx}_{target}_default"),
+                    expected_gfx=gfx, expected_target=target,
                     expected_device_name=name, expected_physical_cu_count=cus,
                 ))
-                self.assertEqual(mapped["backend"], "vllm")
+                self.assertEqual(mapped["backend"], backend)
 
     def test_r9600d_identity_rejects_wrong_isa(self):
         with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
@@ -3115,6 +3121,26 @@ class TestMain(_RunE2ECase):
         self.assertIn("empty/invalid handoff", err.getvalue())
         self.assertFalse(self.result_path.exists())
 
+    def test_dry_run_gfx1151_default_backend_reaches_the_launcher(self):
+        # map_args resolves vllm from the identity; the launcher must use the same
+        # backend, or a vllm run is handed the sglang launch script.
+        self.patch_rx("invoke_workflow",
+                      lambda *a, **k: self.fail("dry-run must not invoke"))
+        os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
+        os.environ["MAGPIE_VLLM_SCRIPT"] = "/magpie/vllm.sh"
+        os.environ.pop("MAGPIE_LAUNCH_SCRIPT", None)
+        os.environ.pop("BENCH_LAUNCHER", None)
+        handoff = self._handoff(
+            framework="", expected_gfx="gfx1151", expected_target="unknown",
+            expected_device_name="", expected_physical_cu_count=40,
+        )
+        rc, stdout = self._run(handoff, "--dry-run")
+        self.assertEqual(rc, 0)
+        plan = json.loads(stdout)
+        self.assertEqual(plan["mapped_args"]["backend"], "vllm")
+        self.assertEqual(plan["bench_launcher"], "magpie")
+        self.assertEqual(plan["magpie_launch_script"], "/magpie/vllm.sh")
+
     def test_dry_run_reports_the_full_dispatch_plan_without_invoking(self):
         """--dry-run is the only way an operator can audit what GEAK is about to
         launch; it must show the mapped args AND every measurement export."""
@@ -3156,6 +3182,32 @@ class TestMain(_RunE2ECase):
         mapped = json.loads(stdout)["mapped_args"]
         self.assertEqual(mapped["gpu_identity_status"], "unavailable_dry_run")
         self.assertNotIn("expected_gfx", mapped)
+
+    def test_a_keep_rule_defers_the_kb_write_to_the_interface(self):
+        """The rule is applied after Normalize, so the workflow must leave the KB write to it.
+        An AgentX run that states none is held to GEAK's own on every axis but total."""
+        os.environ.pop("E2E_METRIC", None)
+
+        def deferred(spec):
+            env = dict(os.environ)
+            try:
+                extra = {"workload_spec": spec} if spec else {}
+                _rc, stdout = self._run(self._handoff(**extra), "--dry-run")
+            finally:
+                os.environ.clear()
+                os.environ.update(env)
+            return json.loads(stdout)["mapped_args"]["kb_defer_to_interface"]
+
+        agentx = {"kind": "agentx_trace_replay"}
+        hl_rule = {"objective": "e2e_norm_intvty_p50", "min_gain_pct": 3.0,
+                   "guard_max_drop_pct": {"e2e_norm_intvty_p90": 4.0}}
+        self.assertIs(deferred(agentx), True)
+        self.assertIs(deferred({**agentx, "metric_basis": "e2e_norm_intvty_p50",
+                                "acceptance": hl_rule}), True)
+        for basis in ("e2e_norm_intvty_p50", "aggregate_output_tok_s"):
+            self.assertIs(deferred({**agentx, "metric_basis": basis}), True, basis)
+        self.assertIs(deferred({**agentx, "metric_basis": "aggregate_total_token_tok_s"}), False)
+        self.assertIs(deferred(None), False)
 
     def test_protected_pgids_are_published_before_any_launch(self):
         """Pins the CALL SITE, not just the helper: the veto must be in the
@@ -3310,6 +3362,50 @@ class TestMain(_RunE2ECase):
                 _rc, stdout = self._run(self._handoff(accepted_env=accepted_env), "--dry-run")
                 self.assertEqual(
                     json.loads(stdout)["mapped_args"].get("correctness_unset_env"), expected)
+
+    def test_synthetic_speculative_config_gets_a_verifying_twin_for_correctness_probes(self):
+        """vLLM simulates acceptance inside --speculative-config rather than in the env, so
+        the workflow is handed the seed's config with real verification for its correctness
+        probes: the sampler becomes "block" and the length goes. A seed that verifies for
+        real, or has no readable config, maps nothing."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        draft = '"method":"dspark","model":"/models/draft","num_speculative_tokens":7'
+        verifying = f'{{{draft},"rejection_sample_method":"block"}}'
+        synthetic = (f'{{{draft},"rejection_sample_method":"synthetic",'
+                     '"synthetic_acceptance_length":3.69}')
+        cases = (
+            ("", None),
+            (f"--speculative-config {verifying}", None),
+            (f"--speculative-config {synthetic} --block-size 1", verifying),
+            ("--speculative-config {not-json", None),
+        )
+        for flags, expected in cases:
+            with self.subTest(flags=flags):
+                _rc, stdout = self._run(self._handoff(accepted_flags=flags), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("correctness_speculative_config"),
+                    expected)
+
+    def test_probe_speculative_config_reads_every_form_a_seed_arrives_in(self):
+        """Raw (the adapter word-splits it), `=`, and shell-quoted (a schema-v2 seed is
+        shlex.join-ed) all read; the last occurrence wins, as it does for argparse."""
+        synthetic = {"method": "mtp", "rejection_sample_method": "synthetic",
+                     "synthetic_acceptance_length": 2.5}
+        compact = json.dumps(synthetic, separators=(",", ":"))
+        verifying = '{"method":"mtp","rejection_sample_method":"block"}'
+        for args in (f"--speculative-config {compact}",
+                     f"--speculative_config={compact}",
+                     shlex.join(["--tp", "8", "--speculative-config", json.dumps(synthetic)]),
+                     '--speculative-config {"method":"mtp"} --speculative-config ' + compact,
+                     '--speculative-config {"method":"mtp","synthetic_acceptance_length":2.5}'):
+            with self.subTest(args=args):
+                self.assertEqual(rx._probe_speculative_config(args), verifying)
+        for args in (f'--speculative-config {compact} --speculative-config {{"method":"mtp"}}',
+                     '--speculative-config ["synthetic"]',
+                     "--speculative-config {not-json --label 'unclosed",
+                     "--speculative-config", None):
+            with self.subTest(args=args):
+                self.assertEqual(rx._probe_speculative_config(args), "")
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"

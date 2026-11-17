@@ -228,7 +228,7 @@ async function run(body, overrides = {}, reply = selection()) {
         integrated.push(inputs);
         return {e2e_throughput_tok_s: 110};
       },
-      integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
+      integAccepted: () => true, beatsCurTput: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
     await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
     return integrated;
@@ -397,5 +397,30 @@ async function run(body, overrides = {}, reply = selection()) {
   assert(!checkSelection({ ...jointHead, joint_ut: undefined,
     seam_candidates: jointPhases[0].spec.seam_candidates }, jointResult).ok,
     'a joint scope cannot silently weaken a single-kernel selection gate');
+  {
+    // Two Tensile solutions of one kernel declared as two members stay two members: the joint checks
+    // compare members exactly. The solution-variant match is for profile-vs-capture identity only.
+    const A = 'Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1';
+    const B = 'Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM8';
+    const target = 'pkg.gemm:joint_entry';
+    const seams = [{ target_callable: target, role: 'op_seam', depth: 1, device_kernels: [A, B] }];
+    const head = { entity_kind: 'gpu_kernel', device_kernel: A, op_kind: 'gemm', joint_ut: { phases: [
+      { regime: 'PREFILL', device_kernel: A, required_device_kernels: [A, B], seam_candidates: seams }] } };
+    const result = callsOfB => {
+      const verdict = { contract: 'kernel_selection', ok: true, target_callable: target, device_kernel: A,
+        total_calls_observed: 2, target_marker_calls: 2, matched_kernel_calls: 2, deepest_verified: true,
+        live_candidate_targets: [target], deeper_live_candidates: [], candidate_targets_tested: [target],
+        selection_scope: 'joint_chain', required_device_kernels: [A, B],
+        chain_members: [{ device_kernel: A, matched_kernel_calls: 2 }, { device_kernel: B, matched_kernel_calls: callsOfB }],
+        joint_call_coverage: [{ call: 0, missing_members: [] }, { call: 1, missing_members: [] }] };
+      return { target_callable: target, phase_selection_validations: [
+        { regime: 'PREFILL', target_callable: target, seam_candidates: seams, selection_validation: verdict }] };
+    };
+    const both = checkSelection(head, result(2));
+    assert(both.ok, `two Tensile solutions declared as two members are accepted (${both.why})`);
+    const missing = checkSelection(head, result(0));
+    assert(!missing.ok && /member-kernel execution evidence/.test(missing.why),
+      `a member that never ran is not credited with the other member's launches (${missing.why})`);
+  }
   console.log('PASS: baseline-to-skill dispatch, single preparation, downstream queue consumption, evidence gates and resumes; fixed-load dispatch preserved.');
 })().catch(e => { console.error(e); process.exitCode = 1; });

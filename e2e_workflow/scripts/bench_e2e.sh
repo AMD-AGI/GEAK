@@ -638,8 +638,9 @@ PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-sca
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
 LOG=${LOG:-$OUT_DIR/server.log}
 
-mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
+# Both server paths need it: adapters/vllm.sh writes its result JSON here even at PROFILE=0.
+mkdir -p "$OUT_DIR" "$PROFILE_DIR"
 # On ROCm 10.0 with torch 2.12 and vLLM 0.27 (gfx1201), vLLM's EngineCore inherits
 # ROCPROFILER_REGISTER_LIBRARY from its parent, and its torch profiler then records no GPU events.
 # The adapters/profile_env shim drops it at interpreter start-up. The vllm adapter and the magpie
@@ -650,6 +651,15 @@ if [ "$PROFILE" = "1" ]; then
     PROFILE_PYTHONPATH="$(dirname "$_profile_env")"
   else
     echo ">>> adapters/profile_env/sitecustomize.py not found; the trace may have no GPU events on ROCm." >&2
+  fi
+fi
+# AgentX extraction needs iteration geometry, which vLLM's throughput logger omits.
+if [ "$BACKEND" = "vllm" ] && [ "${GEAK_WORKLOAD_KIND:-}" = "agentx_trace_replay" ]; then
+  if _iteration_env="$(_stage_lookup adapters/iteration_env/sitecustomize.py)"; then
+    PROFILE_PYTHONPATH="$(dirname "$_iteration_env")${PROFILE_PYTHONPATH:+:$PROFILE_PYTHONPATH}"
+    export GEAK_ITERATION_LOG_DIR="${GEAK_ITERATION_LOG_DIR:-$OUT_DIR/iterations}"
+  else
+    echo "!!! vLLM iteration observer missing; extraction cannot derive batch shapes from server.log" >&2
   fi
 fi
 BASE_URL="http://${HOST}:${PORT}"
@@ -723,7 +733,6 @@ fi
 # shows up as SILENCE, while a legitimately slow cold start keeps printing. CEILING is only a backstop
 # against a server that spins printing forever, not a per-purpose budget.
 if [ "$REUSE_SERVER" != "1" ]; then
-  mkdir -p "$PROFILE_DIR"
   STALL_WINDOW_SEC=${STALL_WINDOW_SEC:-600}
   case "${SERVER_STARTUP_TIMEOUT_SEC:-}" in ''|*[!0-9]*) CEILING=7200 ;; *) CEILING="$SERVER_STARTUP_TIMEOUT_SEC" ;; esac
 
@@ -902,7 +911,6 @@ fi
 # ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
 if [ "$PROFILE" = "1" ]; then
-  mkdir -p "$PROFILE_DIR"
   # fix #1: if the caller didn't pin TPOT_MS, derive it from the timed bench we JUST ran (RESULT_JSONL
   # holds one result object per repeat, each with median_tpot_ms). This lets the vLLM time-window auto-
   # scale to the REAL per-decode-step time of THIS workload (below) instead of sitting at the flat floor.

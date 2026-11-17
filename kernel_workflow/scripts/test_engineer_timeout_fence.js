@@ -34,25 +34,30 @@ const ok = (cond, msg, detail) => {
 
 // Pull the Verify-stage callback (the 2nd pipeline stage of the Optimize -> Verify round) out of the
 // source, so the test exercises the code that ships rather than a restatement of it.
-function verifyStage() {
-  const start = src.indexOf('    (prev) => {\n      const { d, eng } = prev;\n');
+function verifyStage(opts = {}) {
+  const start = src.indexOf('    async (prev) => {\n      const { d, eng, route } = prev;\n');
   const end = src.indexOf('\n    }\n  );\n\n  const clean = results.filter(Boolean);', start);
   if (start < 0 || end < 0) throw new Error('could not locate the Verify stage in kernel_lane.js');
   const body = src.slice(start, end + '\n    }'.length);
   const calls = [];
+  const logs = [];
   const env = {
     round: 3,
     CANDIDATE_FLOOR: 1.0,
     primSpeedup: (r) => (r && typeof r.speedup_geomean === 'number' ? r.speedup_geomean : 0),
-    log: () => {},
+    says: (v, w) => String(v || '').toLowerCase() === w,
+    log: (m) => logs.push(m),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, inputs }),
-    agentT: async (p, o) => { calls.push({ prompt: p, opts: o }); return { status: 'verified' }; },
+    agentT: async (p, o) => { calls.push({ prompt: p, opts: o }); return opts.ver || { status: 'verified' }; },
     CANONICAL: '/eval/workspace', EVAL_DIR: '/eval', WORKFLOW_DIR: '/wf', COMMANDMENT: '/eval/COMMANDMENT.md',
     BASELINE_PER_CASE: [], HARNESS_ADDENDUM: '', REQUIRE_GRAPH_CAPTURE: false, VERIFY_SCHEMA: {},
+    // Default-off subsystems from main; EVO is switched on per case below.
+    EVO: opts.evo || null, ROUTING_ON: false,
+    __p1WorkerOutcome: () => {}, __routeScope: (x) => x,
   };
   const names = Object.keys(env);
   const fn = new Function(...names, `return (${body});`)(...names.map((k) => env[k]));
-  return { fn, calls };
+  return { fn, calls, logs };
 }
 
 (async () => {
