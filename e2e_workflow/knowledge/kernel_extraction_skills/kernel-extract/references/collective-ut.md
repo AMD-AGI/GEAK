@@ -153,7 +153,8 @@ also [task authoring](task-authoring.md), "Graph replay groups".
   setting, recorded in the receipt; a deployment that already sets it keeps its value).
 - **Time limits.** `meta.timeouts`: `setup_s` per pool start, `command_s` per pool
   command, `total_s` for the whole run (it also bounds the group lease; defaults 900,
-  1800 and 3600 s). A run that exceeds one stops cleanly with exit 2 and the reason.
+  1800 and 3600 s). `setup_s` and `command_s` must be above 0 (`generate_ut.py check`
+  refuses 0). A run that exceeds one stops cleanly with exit 2 and the reason.
 
 ## Lease and run
 

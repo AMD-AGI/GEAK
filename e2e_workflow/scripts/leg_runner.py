@@ -404,13 +404,19 @@ def _map_flat(out, f):
 
 
 def _off_by_much(t):
-    """A wrong value for a non-float output: bool flips, integers move by more than their range."""
+    """A wrong value for a non-float output: bool flips; an integer flips its top bit, so every value moves by
+    half its dtype's range (an added max + 1 wraps to 0 in a uint8 holding 255, e.g. packed MXFP4 values or e8m0
+    scales, and moves nothing); a complex value moves by more than its magnitude."""
     torch = sys.modules.get("torch") or importlib.import_module("torch")
     if t.dtype == torch.bool:
         return ~t
     if t.numel() == 0:
         return t
-    return t + (t.abs().max() + 1).to(t.dtype)
+    if t.is_complex():
+        return t + (t.abs().max() + 1).to(t.dtype)
+    info = torch.iinfo(t.dtype)
+    top = 1 << (info.bits - 1)
+    return t ^ (-top if info.min < 0 else top)
 
 
 def _tensor_args(args, kwargs=None):
@@ -633,18 +639,51 @@ def state_tensors(group):
     return list(s)
 
 
-def _same_values(a, b):
+_DIGEST_PIECE_BYTES = 4 << 20        # bytes of a state tensor digested at a time
+
+
+def _pieces(x, n):
+    """`x` as contiguous 1-D pieces of at most `n` elements, in row-major order: views of a contiguous tensor, and
+    of a strided one (a view into a larger buffer) copies of one piece at a time."""
+    if x.is_contiguous():
+        flat = x.reshape(-1)
+        for i in range(0, flat.numel(), n):
+            yield flat[i:i + n]
+    elif x.dim() <= 1:
+        for i in range(0, x.numel(), n):
+            yield x[i:i + n].contiguous()
+    else:
+        for j in range(x.shape[0]):
+            yield from _pieces(x[j], n)
+
+
+def _piece_sums(torch, piece, pos):
+    """(sum, position-weighted sum, count) in int64 of one piece read as integers of its element size (as bytes
+    for another size), `pos` the count before it; its temporaries are freed when it returns."""
+    as_int = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}.get(piece.element_size(), torch.uint8)
+    b = piece.view(as_int).to(torch.int64)
+    w = torch.arange(pos + 1, pos + 1 + b.numel(), dtype=torch.int64, device=b.device)
+    return b.sum(), (b * w).sum(), b.numel()
+
+
+def _state_digest(t):
+    """(plain sum, position-weighted sum, count) over the bits of one declared state tensor, in int64: a fill that
+    rewrites the state changes it. Taken piece by piece, so a state as large as a KV cache is never held twice."""
     torch = sys.modules.get("torch") or importlib.import_module("torch")
-    if a.is_floating_point():
-        return bool(((a == b) | (torch.isnan(a) & torch.isnan(b))).all())
-    return bool(torch.equal(a, b))
+    x = t.detach()
+    x = x.reshape(1) if x.dim() == 0 else x
+    plain = weighted = pos = 0
+    for piece in _pieces(x, max(1, _DIGEST_PIECE_BYTES // x.element_size())):
+        s, ws, n = _piece_sums(torch, piece, pos)
+        plain, weighted, pos = plain + s, weighted + ws, pos + n
+    return int(plain), int(weighted), pos
 
 
 def _carry_checked(group, steps_rewritten):
     """A carry_state group's fill, checked (A18.3): consecutive replays carry the declared state, so every
     fill after the first step's must leave it as it was. Fill call 0 prepares the capture and call 1 the
     first step (which may reset what the capture's warm-up launches wrote); a later step whose fill
-    rewrote the state is appended to `steps_rewritten`."""
+    rewrote the state (its _state_digest changed) is appended to `steps_rewritten`."""
     fill = group["fill"]
     calls = [0]
 
@@ -654,9 +693,9 @@ def _carry_checked(group, steps_rewritten):
         if i < 2:
             return fill(case)
         ts = state_tensors(group)
-        before = [t.detach().clone() for t in ts]
+        before = [_state_digest(t) for t in ts]
         out = fill(case)
-        if any(not _same_values(t, b) for t, b in zip(ts, before)):
+        if any(_state_digest(t) != b for t, b in zip(ts, before)):
             steps_rewritten.append(i - 1)
         return out
     return dict(group, fill=checked)
@@ -1107,9 +1146,10 @@ class SampleAligner:
 
     The spin outlasts the time a rank needs to queue the all-reduce, the start event and the kernel,
     so every GPU leaves the all-reduce together and the start events fire together whatever skew the
-    hosts still had. Without CUDA only the barrier and the release run."""
+    hosts still had. Without CUDA only the barrier and the release run. `spin_rate(torch)` is
+    harness_lib._spin_cycles_per_us: the spin is calibrated as the single-rank eager spin (A16) is."""
 
-    def __init__(self, torch, ctl, *, device, dev_group, spin_us, margin_us, align_call=None):
+    def __init__(self, torch, ctl, *, device, dev_group, spin_us, margin_us, spin_rate, align_call=None):
         self.torch, self.ctl, self.device = torch, ctl, device
         self.dev_group, self.align_call = dev_group, align_call
         self.spin_us, self.margin_ns = float(spin_us), int(float(margin_us) * 1000)
@@ -1120,23 +1160,13 @@ class SampleAligner:
             self.one = torch.ones(1, device="cuda")
             if align_call is None:
                 torch.distributed.all_reduce(self.one, group=dev_group)      # warm the device group up
-            self.spin_cycles = self._calibrate()
+            try:
+                self.spin_cycles = max(1, int(self.spin_us * spin_rate(torch)))
+            except RuntimeError as exc:
+                if "cannot calibrate the GPU spin" not in str(exc):          # harness_lib's "no reading"
+                    raise
+                self.spin_cycles = 0                                         # no reading: no spin
             torch.cuda.synchronize()
-
-    def _calibrate(self):
-        torch = self.torch
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        cycles, per_us = 1_000_000, None
-        for _ in range(3):
-            torch.cuda.synchronize()
-            start.record()
-            torch.cuda._sleep(cycles)
-            end.record()
-            end.synchronize()
-            ms = start.elapsed_time(end)
-            if ms > 0:
-                per_us = cycles / (ms * 1000.0)
-        return max(1, int(self.spin_us * per_us)) if per_us else 0
 
     def release(self):
         t = self.torch.tensor([time.monotonic_ns() + self.margin_ns], dtype=self.torch.int64)
@@ -1280,8 +1310,8 @@ class RankWorker:
         align_call = None
         if hasattr(self.cases, "align"):
             align_call = lambda: self.cases.align(self.h, self.meta, self.ctx)   # noqa: E731
-        self.aligner = SampleAligner(torch, self.ctl, device=self.cuda, dev_group=dev_group,
-                                     spin_us=spin_us, margin_us=margin_us, align_call=align_call)
+        self.aligner = SampleAligner(torch, self.ctl, device=self.cuda, dev_group=dev_group, spin_us=spin_us,
+                                     margin_us=margin_us, spin_rate=self.h._spin_cycles_per_us, align_call=align_call)
         if self.cuda:
             self.h.check_graph_replay = _agreed_graph_replay(self.h, torch, self.ctl, self.cases, self.settle_s)
         self.ctl.barrier()
@@ -1311,7 +1341,9 @@ class RankWorker:
                 if params.get("bucket") and c["sig"] != params["bucket"]:
                     continue
                 call, graph = self._case_execution(c)
-                kw = {"detail": True, "samples": True, "pre_sample": self.aligner,
+                # raise_errors: a rank whose timing raised must stop (serve_main), not leave its peers' sample
+                # collectives without a partner until the timeout
+                kw = {"detail": True, "samples": True, "pre_sample": self.aligner, "raise_errors": True,
                       "inner": max(1, int(params.get("inner") or c.get("inner") or 1))}
                 if capture is not None:
                     kw["capture"] = capture

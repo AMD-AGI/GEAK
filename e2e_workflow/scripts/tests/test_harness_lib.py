@@ -987,6 +987,19 @@ class TestTimeOpWall(_HarnessTestCase):
         self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1))
         self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1, detail=True))
 
+    def test_with_raise_errors_the_exception_of_a_call_or_a_sample_hook_propagates(self):
+        def boom():
+            raise RuntimeError("kernel launch failed")
+        with self.assertRaisesRegex(RuntimeError, "kernel launch failed"):
+            hl.time_op(boom, warmup=1, repeats=1, detail=True, raise_errors=True)
+
+        def peer_gone():
+            raise RuntimeError("Connection closed by peer")
+        _, call = self._counting_call()
+        with self.assertRaisesRegex(RuntimeError, "Connection closed by peer"):
+            hl.time_op(call, warmup=1, repeats=2, detail=True, pre_sample=peer_gone, raise_errors=True)
+        self.assertIsNone(hl.time_op(call, warmup=1, repeats=2, detail=True, pre_sample=peer_gone))
+
     def test_an_unqueryable_device_makes_the_op_untimeable(self):
         # SOURCE GAP, pinned as-is: time_op guards its is_available() probe so a broken runtime
         # still gets WALL timing, but the wall path immediately calls sync(), whose own

@@ -557,6 +557,7 @@ _real = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_real)
 RankContext = _real.RankContext
 call_make_inputs = _real.call_make_inputs
+_spin_cycles_per_us = _real._spin_cycles_per_us
 deployment_graph_mode = _real.deployment_graph_mode
 deployment_compile_mode = _real.deployment_compile_mode
 
@@ -595,16 +596,18 @@ def check_graph_replay(*args, **kwargs):
 
 
 def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False, samples=False,
-            pre_sample=None, capture=None, capture_context=None, spin=None):
-    """None when the call raises; a graph phase captured through `capture` (eager timing when it returns None);
-    pre_sample() once per sample before its launches; the per-sample times with samples=True; primed and
-    host_ms only with a device timer."""
+            pre_sample=None, capture=None, capture_context=None, spin=None, raise_errors=False):
+    """None when the call raises (with raise_errors, the exception); a graph phase captured through `capture` (eager
+    timing when it returns None); pre_sample() once per sample before its launches; the per-sample times with
+    samples=True; primed and host_ms only with a device timer."""
     torch = _torch()
     cuda = torch.cuda.is_available()
-    calls.append(("time_op", graph, inner, capture is not None))
+    calls.append(("time_op", graph, inner, capture is not None, raise_errors))
     try:
         call()
     except Exception:
+        if raise_errors:
+            raise
         return None
     timer = "wall"
     if cuda:
@@ -825,8 +828,9 @@ class TestSampleAligner(unittest.TestCase):
         torch = FakeTorch(self.gpu, self.dist)
         self.ctl = lr.RankControl(torch, 60)
         self.dev_group = types.SimpleNamespace(name="device", backend="nccl")
+        hl._SPIN_RATE.clear()                       # harness_lib calibrates once per device: once per test here
         return lr.SampleAligner(torch, self.ctl, device=device, dev_group=self.dev_group, spin_us=spin_us,
-                                margin_us=margin_us, align_call=align_call)
+                                margin_us=margin_us, spin_rate=hl._spin_cycles_per_us, align_call=align_call)
 
     def test_the_release_waits_for_the_last_rank_plus_the_margin(self):
         al = self.make(peers=lambda op, group, mine: [mine + 400_000])   # a peer arrived 400 us later
@@ -1170,7 +1174,7 @@ class TestRankWorkerCommands(_InProcessRank):
         self.assertEqual(prefill["alignment"]["samples"], 3)              # per case, not cumulative
         # each phase timed as deployed: decode as a graph, prefill compiled; no capture hook without CUDA
         self.assertEqual([c for c in w.h.calls if c[0] == "time_op"],
-                         [("time_op", True, 1, False), ("time_op", False, 4, False)])
+                         [("time_op", True, 1, False, True), ("time_op", False, 4, False, True)])
         self.assertIn(("compiled_call", "prefill_m8"), w.h.calls)
         # every case: a control barrier, one release per sample, a control barrier -- all on the control group
         new = self.dist.reduces[n0:]
@@ -1183,14 +1187,16 @@ class TestRankWorkerCommands(_InProcessRank):
         self.assertEqual([(r["sig"], r["inner"]) for r in out["cases"]], [("prefill_m8", 2)])
         self.assertEqual(w.do("time", {"bucket": "nope"})["cases"], [])
 
-    def test_time_of_an_op_that_raises_is_an_empty_row(self):
+    def test_time_of_an_op_that_raises_raises_and_joins_no_further_collective(self):
+        # A rank that went on would meet its peers' per-sample releases with its closing barrier and hang the pool
+        # until command_s; raising lets serve_main write the traceback and end the rank at once.
         w = self.worker()
         w.cases.RAISE.add("decode_m1")
-        row = w.do("time", {"bucket": "decode_m1"})["cases"][0]
-        self.assertEqual(row, {"sig": "decode_m1", "regime": "decode", "m": 1, "ms": None, "wall_ms": None,
-                               "timer": None, "cache_condition": None, "samples": None, "inner": 1,
-                               "alignment": {"samples": 0, "late_releases": 0, "max_late_us": 0.0, "spin_cycles": 0,
-                                             "device_sync": "none (no CUDA)"}})
+        n0 = len(self.dist.reduces)
+        with self.assertRaisesRegex(RuntimeError, "the op raised on decode_m1"):
+            w.do("time", {"bucket": "decode_m1"})
+        self.assertEqual([r.op for r in self.dist.reduces[n0:]], ["sum"])      # the opening barrier only
+        self.assertEqual([c for c in w.h.calls if c[0] == "time_op"], [("time_op", True, 1, False, True)])
 
     def test_time_on_a_cuda_rank_captures_by_agreement(self):
         w = self.worker(cuda=True)
@@ -1202,7 +1208,7 @@ class TestRankWorkerCommands(_InProcessRank):
         self.assertEqual(decode["alignment"], {"samples": 3, "late_releases": 0, "max_late_us": 0.0,
                                                "spin_cycles": 50_000, "device_sync": "rccl_all_reduce_1"})
         self.assertEqual([c for c in w.h.calls if c[0] == "time_op"],
-                         [("time_op", True, 1, True), ("time_op", False, 4, True)])
+                         [("time_op", True, 1, True, True), ("time_op", False, 4, True, True)])
         # one capture (the graph-deployed decode): the meta's settle, thread-local, agreed by one MIN vote
         self.assertEqual(self.clock.sleeps, [0.5])
         self.assertEqual(self.gpu.log.count(("capture_begin", "thread_local")), 1)

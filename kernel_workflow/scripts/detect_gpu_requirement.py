@@ -13,7 +13,9 @@ This is a static hint: the Director confirms it against the code (e.g. a rank co
 positional argument) before the workflow sizes its GPU leases. Directories are scanned two levels
 deep; pass the task's own test/bench files for a large repo. What an e2e extraction captured from
 the serving process (selection traces, shape captures) is skipped: its rank counts are the
-server's (e.g. a TP8 world_size), not the test's.
+server's (e.g. a TP8 world_size), not the test's. So is the runtime GEAK copies into a task
+(harness_lib.py, leg_runner.py, overlay_setup.py, ut_runner.py): its own process-group code says
+nothing about the task's.
 
 A GPU count the task itself declares comes first: `required_gpu_count` in run/requested_kernel.json
 or run/RETURN.json (kernel extraction), `capabilities.multi_rank.world_size` in meta.json (a generated
@@ -47,6 +49,8 @@ SKIP_DIRS = {".git", "__pycache__", "build", "node_modules", "third_party", "3rd
 SUFFIXES = {".py", ".sh", ".json", ".yaml", ".yml"}
 # e2e capture output: selection_trace*.json, capture_*.json, capture.pid-<pid>.rank-<rank>/
 CAPTURE_PREFIXES = ("selection_trace", "capture_", "capture.")
+# The runtime every UT task carries (e2e_workflow/scripts/ut_runner.py RUNTIME_FILES)
+RUNTIME_FILES = frozenset(("harness_lib.py", "leg_runner.py", "overlay_setup.py", "ut_runner.py"))
 # Task metadata: its numbers count without a collective in the same file. Other JSON is data.
 METADATA_NAMES = {"meta.json"}
 METADATA_SUFFIXES = {".yaml", ".yml"}
@@ -184,7 +188,7 @@ def _files(paths):
     for raw in paths:
         p = Path(raw)
         if p.is_file():
-            if not p.name.startswith(CAPTURE_PREFIXES):
+            if not p.name.startswith(CAPTURE_PREFIXES) and p.name not in RUNTIME_FILES:
                 out.append(p)
             continue
         if not p.is_dir():
@@ -194,7 +198,7 @@ def _files(paths):
             dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith(CAPTURE_PREFIXES)
                              and len(Path(root).parts) - base < 2)
             out.extend(Path(root) / f for f in sorted(files)
-                       if Path(f).suffix in SUFFIXES and not f.startswith(CAPTURE_PREFIXES))
+                       if Path(f).suffix in SUFFIXES and not f.startswith(CAPTURE_PREFIXES) and f not in RUNTIME_FILES)
     return out[:MAX_FILES]
 
 

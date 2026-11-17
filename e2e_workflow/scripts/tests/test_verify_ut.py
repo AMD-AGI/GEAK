@@ -134,6 +134,14 @@ class TestJudgeControl(unittest.TestCase):
         judged["ranks"][0]["report"] = _rep(eager=[_c("a", False, 0.4)])
         v, d = vu.judge_control("rank_skew", {}, 1, {"exit_code": 1, "correctness": {"candidate": judged}}, TOL, 2)
         self.assertEqual(v, "FAIL")
+        # the perturbed rank is world - 1 even when fewer ranks reported (a pool that stopped): rank 1 failing for
+        # another reason is no catch on rank 3, and a crashed control's one-rank record names the right rank
+        judged["ranks"][1]["report"] = _rep(eager=[_c("a", False, 0.4)])
+        v, d = vu.judge_control("rank_skew", {}, 1, {"exit_code": 1, "correctness": {"candidate": judged}}, TOL, 4)
+        self.assertEqual((v, d["why"]), ("FAIL", "the perturbed rank 3 has no correctness report (reports: rank 0, 1)"))
+        crashed = {"ok": False, "crashed": True, "ranks": [{"rank": 1, "ok": False, "report": {"raised": {"error": "x"}}}]}
+        v, d = vu.judge_control("rank_skew", {}, 1, {"exit_code": 1, "correctness": {"candidate": crashed}}, TOL, 4)
+        self.assertEqual((v, d["why"]), ("FAIL", "the perturbed rank 3 has no correctness report (reports: rank 1)"))
 
 
 class TestStatic(unittest.TestCase):
@@ -1115,7 +1123,7 @@ class TestVerifyRun(unittest.TestCase):
         self.assertEqual(doc["errors"], ["native reference run failed (exit 1): native self-check failed"])
         self.assertEqual([c["what"] for c in fake.calls], ["native_refs"])
         # stopped from outside every time: rerun with half as many pools alive, then INCONCLUSIVE without an error
-        lock = (2, {"reason": "ERROR: Failed to acquire GPU 3 lock after 600s", "pool_parallel": 4})
+        lock = (2, {"reason": "ERROR: Failed to acquire GPU 3 lock after 600s", "multi_rank": {"pool_parallel": 4}})
         code, doc, fake = self.verify(dict(_toy_controls(), native_refs=[lock]))
         self.assertEqual((code, doc["verdict"], doc["errors"], doc["controls"]), (2, "INCONCLUSIVE", [], {}))
         self.assertEqual([c["parallel"] for c in fake.calls], [None, "2", "1"])
@@ -1318,7 +1326,7 @@ class TestRunsWithoutAVerdict(unittest.TestCase):
     as many pools alive each time; _measure is one A/A timing run through that rule."""
 
     def test_a_run_is_rerun_until_it_has_a_verdict(self):
-        answers = [(2, {"reason": "ERROR: Failed to acquire GPU 3 lock after 600s", "pool_parallel": 4}),
+        answers = [(2, {"reason": "ERROR: Failed to acquire GPU 3 lock after 600s", "multi_rank": {"pool_parallel": 4}}),
                    (1, {"reason": "hipIpcOpenMemHandle failed: invalid device pointer"}),
                    (1, {"reason": "correctness failed on some rank"})]
         seen = []
@@ -1352,7 +1360,7 @@ class TestRunsWithoutAVerdict(unittest.TestCase):
         work, native = os.path.join(task, "run", "verify_ut"), os.path.join(task, "run", "verify_ut", "native")
         os.makedirs(work)
         out, log = os.path.join(work, "aa_1.json"), os.path.join(work, "aa_1.log")
-        foreign = (2, {"reason": "ERROR: GPU 3 still shows foreign work after 600s", "pool_parallel": 2})
+        foreign = (2, {"reason": "ERROR: GPU 3 still shows foreign work after 600s", "multi_rank": {"pool_parallel": 2}})
         fake = FakeUTRunner({"aa_1": [foreign, (0, {"timing": {"primary": 1.0}})]})
         rep = vu.Report(task)
         with mock.patch.dict(os.environ), mock.patch.object(vu, "subprocess", fake):

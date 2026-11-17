@@ -193,7 +193,8 @@ def run_with_retries(rep, label, fn):
                                     "log": res.get("log")})
         if not _no_verdict(code, res):
             return code, res, False
-        parallel = max(1, (parallel or res.get("pool_parallel") or 2) // 2)
+        mr = res.get("multi_rank")                 # ut_runner records the pools it ran there
+        parallel = max(1, (parallel or (mr.get("pool_parallel") if isinstance(mr, dict) else None) or 2) // 2)
     return code, res, True
 
 
@@ -732,7 +733,10 @@ def judge_control(name, spec, code, res, tol, world, tol_max=None):
         return "GAP", dict(detail, why="verified below tol on every case: a coverage gap the test cannot see")
     # expect reject
     if rank_rule == "last":
-        last = max(per_rank) if per_rank else world - 1
+        last = world - 1                        # the rank leg_runner shifts (GEAK_UT_DATA_RANK_SHIFT)
+        if last not in per_rank:
+            return "FAIL", dict(detail, why=f"the perturbed rank {last} has no correctness report (reports: rank "
+                                            f"{', '.join(map(str, per_rank)) or 'none'})")
         if not seen.get(last):
             return "FAIL", dict(detail, why=f"not rejected on the perturbed rank {last} "
                                             "(per-rank inputs must come from ctx / h.rank_context())")

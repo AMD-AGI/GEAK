@@ -29,6 +29,7 @@ import os
 import pickle
 import random
 import shutil
+import struct
 import sys
 import tempfile
 import types
@@ -825,10 +826,10 @@ class TestGraphLaunchFloorMultiRank(unittest.TestCase):
 
     def run_pools(self, model, speed=1.0, reps=1):
         pn, pc = _RankPoolStub(model), _RankPoolStub(model, speed=speed)
-        per_case, aligned = ur.measure_pools(pn, pc, early_stop=True, max_reps=reps)
+        per_case, aligned = ur.measure_pools(pn, pc, h=h, early_stop=True, max_reps=reps)
 
         def again(sig, inner, early_stop=True):    # as in ut_runner._multi_rank
-            rows, more = ur.measure_pools(pn, pc, early_stop=early_stop, max_reps=reps, sigs=[sig],
+            rows, more = ur.measure_pools(pn, pc, h=h, early_stop=early_stop, max_reps=reps, sigs=[sig],
                                           inner={sig: inner})
             aligned.extend(more)
             return rows
@@ -1554,8 +1555,63 @@ class FT:
     def add_(self, o):
         return self._write(lambda: (self + o).data)
 
+    # what leg_runner._state_digest reads: the layout, row / flat slices and the bytes (little-endian)
+    def dim(self):
+        return len(self.shape)
+
+    def element_size(self):
+        return 2 if self.dtype == "bfloat16" else struct.calcsize(_PACK[self.dtype])
+
+    def is_contiguous(self):
+        return True
+
+    def contiguous(self):
+        return self
+
+    def reshape(self, *shape):
+        return FT(self.data, tuple(len(self.data) if s == -1 else s for s in shape), self.dtype)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):                     # a flat slice of a 1-D tensor
+            return FT(self.data[key], dtype=self.dtype)
+        per = len(self.data) // self.shape[0]          # row `key` of an n-D tensor
+        return FT(self.data[key * per:(key + 1) * per], self.shape[1:], self.dtype)
+
+    def view(self, dtype):
+        """torch.Tensor.view(dtype) to an integer type: the same bytes (little-endian) read as `dtype`."""
+        raw = b"".join(_pack(self.dtype, v) for v in self.data)
+        fmt = _PACK[dtype][1]
+        vals = list(struct.unpack("<" + fmt * (len(raw) // struct.calcsize(fmt)), raw))
+        return FT(vals, (len(vals),), dtype)
+
+    def __int__(self):
+        return int(self.item())
+
     def __repr__(self):
         return f"FT({self.data}, shape={self.shape}, dtype={self.dtype})"
+
+
+_PACK = {"float32": "<f", "float64": "<d", "bfloat16": "<f", "int64": "<q", "int32": "<i", "int16": "<h", "bool": "<?",
+         "uint8": "<B"}
+
+
+def _pack(dtype, v):
+    """The bytes of one FT element as torch stores it (bfloat16: the upper half of its float32)."""
+    return struct.pack(_PACK[dtype], v)[2:] if dtype == "bfloat16" else struct.pack(_PACK[dtype], v)
+
+
+class StridedFT(FT):
+    """An FT laid out as a view into a larger buffer (not contiguous): its pieces are copied one at a time."""
+
+    def is_contiguous(self):
+        return False
+
+    def contiguous(self):
+        return FT(self.data, self.shape, self.dtype)
+
+    def __getitem__(self, key):
+        got = super().__getitem__(key)
+        return StridedFT(got.data, got.shape, got.dtype)
 
 
 class FakeGraph:
@@ -1632,8 +1688,10 @@ def fake_torch():
     """A `torch` module for FT: what harness_lib, leg_runner and the toy kernels above call; its cuda is a FakeCuda.
     save/load pickle to the path, as torch.save / torch.load do."""
     t = types.ModuleType("torch")
-    t.bool, t.float32, t.bfloat16, t.int64 = "bool", "float32", "bfloat16", "int64"
+    t.bool, t.float32, t.bfloat16, t.uint8 = "bool", "float32", "bfloat16", "uint8"
+    t.int16, t.int32, t.int64 = "int16", "int32", "int64"
     t.cuda = FakeCuda()
+    t.arange = lambda start, end, dtype="int64", device=None: FT(list(range(start, end)), dtype=dtype)
 
     class Generator:
         def __init__(self, device="cpu"):
@@ -1837,13 +1895,28 @@ class TestSuiteHelpersCPU(_FakeTorchCase):
             self.assertEqual([id(t) for t in lr.state_tensors({"state": state})], [id(t) for t in want])
         self.assertEqual(lr.state_tensors({}), [])
 
-    def test_same_values_reads_nan_positions_alike_and_compares_integers_exactly(self):
-        nan = math.nan
-        self.assertTrue(lr._same_values(FT([1.0, nan]), FT([1.0, nan])))
-        self.assertFalse(lr._same_values(FT([1.0, nan]), FT([1.0, 2.0])))
-        self.assertFalse(lr._same_values(FT([1.0, 2.0]), FT([1.0, 2.5])))
-        self.assertTrue(lr._same_values(FT([1, 2], dtype="int64"), FT([1, 2], dtype="int64")))
-        self.assertFalse(lr._same_values(FT([1, 2], dtype="int64"), FT([1, 3], dtype="int64")))
+    def test_the_state_digest_changes_with_any_byte_and_only_then(self):
+        nan, d = math.nan, lr._state_digest
+        self.assertEqual(d(FT([1.0, nan, 3.0])), d(FT([1.0, nan, 3.0])))          # a NaN reads as its bytes
+        self.assertNotEqual(d(FT([1.0, 2.0, 3.0])), d(FT([1.0, 2.5, 3.0])))
+        self.assertNotEqual(d(FT([1.0, 2.0, 3.0])), d(FT([2.0, 1.0, 3.0])))       # moved values: the weighted sum
+        self.assertNotEqual(d(FT([1, 2], dtype="int64")), d(FT([1, 3], dtype="int64")))
+        self.assertNotEqual(d(FT([1.0], dtype="bfloat16")), d(FT([1.0078125], dtype="bfloat16")))   # one bf16 ulp
+        self.assertEqual(d(FT([5.0], shape=())), d(FT([5.0])))                     # a 0-dim state
+        self.assertEqual(d(FT([], dtype="int64")), (0, 0, 0))
+        # a piece at a time: the same digest whatever the piece size
+        state = FT([float(v) for v in range(11)])
+        whole = d(state)
+        self.addCleanup(setattr, lr, "_DIGEST_PIECE_BYTES", lr._DIGEST_PIECE_BYTES)
+        for piece_bytes in (4, 12, 1):
+            lr._DIGEST_PIECE_BYTES = piece_bytes
+            self.assertEqual(d(state), whole, piece_bytes)
+
+    def test_a_strided_state_is_read_in_pieces_of_its_rows(self):
+        rows = StridedFT([float(v) for v in range(6)], (2, 3))
+        self.assertEqual([p.data for p in lr._pieces(rows, 2)], [[0.0, 1.0], [2.0], [3.0, 4.0], [5.0]])
+        self.assertTrue(all(type(p) is FT for p in lr._pieces(rows, 2)))         # each piece a copy of its own
+        self.assertEqual(lr._state_digest(rows), lr._state_digest(FT(rows.data, (2, 3))))
 
     def test_carry_checked_flags_only_a_later_step_whose_fill_rewrites_the_state(self):
         state, rewritten = FT([0.0, 0.0]), []

@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import generate_ut as gu  # noqa: E402
+import harness_lib as hl  # noqa: E402
 import ut_runner as ur  # noqa: E402
 import verify_ut as vu  # noqa: E402
 from ut_task_fixture import ToyTask, SCRIPTS, have_torch  # noqa: E402
@@ -618,6 +619,11 @@ class TestDriverBasics(unittest.TestCase):
         self.assertEqual(ur.timeouts(multi), {"setup_s": 900, "command_s": 600.0, "total_s": 3600})
         self.assertEqual(ur.timeouts({"timeouts": {"total_s": 7200}}),
                          {"setup_s": 900, "command_s": 3600, "total_s": 7200.0})
+        # a setup_s / command_s of 0 or less keeps the default (a pool cannot run with it); total_s 0 is no limit
+        zero = {"capabilities": {"multi_rank": {"world_size": 2}},
+                "timeouts": {"setup_s": 0, "command_s": -1, "total_s": 0}}
+        self.assertEqual(ur.timeouts(zero), {"setup_s": 900, "command_s": 1800, "total_s": 0.0})
+        self.assertEqual(ur.timeouts({"timeouts": {"command_s": 0}}), {"setup_s": 900, "command_s": 3600, "total_s": 0})
         for bad in ("two", [2]):
             with self.assertRaises(ur.UTStop) as cm:
                 ur.world_size({"capabilities": {"multi_rank": {"world_size": bad}}})
@@ -1272,6 +1278,12 @@ class TestRankPool(unittest.TestCase):
         args.update(kw)
         return ur.RankPool(self.t.task, "/ovl", **args)
 
+    def test_a_sub_second_time_limit_reaches_the_ranks_as_whole_seconds_of_at_least_one(self):
+        pool = self.pool(setup_s=0.4, command_s=29.5)
+        self.assertEqual({(proc.env["GEAK_UT_SETUP_S"], proc.env["GEAK_UT_COMMAND_S"]) for proc, _ in self.side.spawned},
+                         {("1", "30")})                     # int() made them "0" and "29": a 0 s gloo timeout
+        pool.close(kill=True)
+
     def test_a_pool_starts_its_ranks_runs_numbered_commands_and_exits_cleanly(self):
         pool = self.pool()
         self.assertEqual((pool.port, pool.seq, pool.closed, os.path.dirname(pool.dir)), (29501, 0, False, self.dirs))
@@ -1418,9 +1430,32 @@ class TestRankPool(unittest.TestCase):
         self.assertEqual((oom.kind, oom.rank, str(oom)), ("env", 0, "pool cand: time: rank 0 raised"))
         peers = pool._raised([{"rank": 0, "error": "x\nConnection reset by peer\n"},
                               {"rank": 1, "error": "y\nNCCL communicator was aborted\n"}], "time")
-        self.assertEqual((peers.kind, peers.rank), ("task", 0))          # only consequences: the first one is named
-        self.assertTrue(peers.tail.endswith("\n[other ranks] rank 1: NCCL communicator was aborted"))
+        self.assertEqual((peers.kind, peers.rank, str(peers)),       # only consequences, and nobody died: no verdict
+                         ("env", 0, "pool cand: time: the ranks that raised only saw a peer fail, and no other rank died"))
+        self.assertTrue(peers.tail.endswith("\n[ranks that saw it] rank 0: Connection reset by peer; "
+                                            "rank 1: NCCL communicator was aborted"))
         pool.close()
+
+    def test_when_every_rank_that_raised_saw_a_peer_fail_the_rank_that_did_not_raise_is_judged(self):
+        # e.g. the OOM killer: rank 1 is SIGKILLed with no traceback, ranks 0 and 2 raise "connection closed by
+        # peer" and exit 1 -- the run is the environment's (retried), not a candidate failure
+        peer = PEER_TB.strip().splitlines()[-1]
+        for dead, want in ((_Exit(-9), ("env", "pool cand: correct: rank 1 killed by signal 9")),
+                           (_Exit(-6, "HIP out of memory\n"),
+                            ("env", "pool cand: correct: rank 1 stopped by its environment (resources)")),
+                           (_Exit(3, "SystemExit: 3\n"), ("task", "pool cand: correct: rank 1 exited 3"))):
+            with self.subTest(want=want[1]):
+                def act(proc, work, attempt, dead=dead):
+                    if _mode(work) == "correct":
+                        return dead if proc.rank == 1 else _raises(proc.rank, PEER_TB)
+                    return _answer(proc, work, attempt)
+                pool = self.pool(act, world=3)
+                pool.wait_ready()
+                with self.assertRaises(ur.PoolError) as cm:
+                    pool.run("correct")
+                err = cm.exception
+                self.assertEqual((err.kind, str(err), err.rank, err.pool), (*want, 1, "cand"))
+                self.assertEqual(err.tail, dead.log + f"\n[ranks that saw it] rank 0: {peer}; rank 2: {peer}")
 
     def test_a_rank_gone_before_a_command_fails_it_and_a_port_error_only_counts_in_setup(self):
         pool = self.pool()
@@ -1491,7 +1526,7 @@ class TestMeasurePools(unittest.TestCase):
     def test_pairs_stop_once_decisive_or_after_max_reps_and_a_case_without_a_reading_is_dropped(self):
         pn = _TimingPool({"a": [[2.0, 2.0, 2.0]], "b": [[1.0], [1.1], [1.0]], "c": [[]], "d": [None]})
         pc = _TimingPool({"a": [[1.0, 1.0, 1.0]], "b": [[1.0]], "c": [[1.0]], "d": [[1.0]]})
-        per_case, aligned = ur.measure_pools(pn, pc)
+        per_case, aligned = ur.measure_pools(pn, pc, h=hl)
         self.assertEqual([r["sig"] for r in per_case], ["a", "b", "c"])              # d produced no row
         a, b, c = per_case
         self.assertEqual((a["baseline_ms"], a["optimized_ms"], a["speedup"], a["reps"], a["speedup_spread"]),
@@ -1512,7 +1547,7 @@ class TestMeasurePools(unittest.TestCase):
 
     def test_one_case_at_a_given_inner_times_every_pair_without_the_early_stop(self):
         pn, pc = _TimingPool({"a": [[2.0]], "b": [[1.0]]}), _TimingPool({"a": [[1.0]], "b": [[1.0]]})
-        per_case, aligned = ur.measure_pools(pn, pc, early_stop=False, sigs=["a"], inner={"a": 16})
+        per_case, aligned = ur.measure_pools(pn, pc, h=hl, early_stop=False, sigs=["a"], inner={"a": 16})
         self.assertEqual([(r["sig"], r["reps"], r["inner"]) for r in per_case], [("a", 3, 16)])
         self.assertEqual((pn.calls, pc.calls, len(aligned)), ([("a", 16)] * 3, [("a", 16)] * 3, 6))
 

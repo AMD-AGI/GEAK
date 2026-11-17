@@ -1017,6 +1017,10 @@ def test_a_candidate_rank_that_raises_fails_the_candidate(multi, capsys):
      "the aa pool's own code failed on this task's cases: pool candidate: correct: rank 0 raised: KeyError"),
     (("candidate", "time"), ur.PoolError("task", "pool candidate: time: rank 1 raised", 1, "IndexError"), (), 1,
      "correctness", "the candidate failed: pool candidate: time: rank 1 raised: IndexError"),
+    # the baseline (native) pool's timing raised: its own code, not the candidate's
+    (("native", "time"), ur.PoolError("task", "pool native: time: rank 1 raised", 1, "IndexError", pool="native"),
+     (), 3, "multi_rank",
+     ("the baseline pool's own code failed on this task's cases: pool native: time: rank 1 raised: IndexError")),
     (("candidate", "time"), ur.PoolError("task", "pool candidate: time: rank 1 raised", 1, "IndexError"),
      ("--aa", "--timing-only"), 3, "multi_rank",
      "the aa pool's own code failed on this task's cases: pool candidate: time: rank 1 raised: IndexError"),

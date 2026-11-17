@@ -421,7 +421,7 @@ def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
 
 
 def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False, samples=False,
-            pre_sample=None, capture=None, capture_context=None, spin=None):
+            pre_sample=None, capture=None, capture_context=None, spin=None, raise_errors=False):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
     `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
@@ -472,6 +472,8 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False, 
       capture(torch, call, inner) -> (graph, inner) | None
                         replaces the per-process capture (a multi-rank caller needs every rank to agree).
       capture_context() context manager entered around the capture (e.g. a framework's graph_capture()).
+      raise_errors=True an exception propagates instead of returning None. A multi-rank caller needs it: a rank
+                        that returned None would leave its peers' per-sample collectives without a partner.
       spin              EAGER timing only (ignored for a graph replay); generated tasks pass it for a phase
                         the server does not run under a CUDA graph (A16). Each sample queues a GPU spin on
                         the current stream after the cache flush + sync and BEFORE the start event, so while
@@ -526,6 +528,8 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False, 
         wall = _time_wall(torch, call, warmup, repeats, inner, pre_sample=pre_sample, keep=keep, policy=policy)
         return _with_samples(_timing_result(wall, wall, "wall", detail, policy=policy), keep)
     except Exception:
+        if raise_errors:
+            raise
         return None
 
 

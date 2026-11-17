@@ -282,8 +282,11 @@ def check_meta(task, meta, p, warnings):
             p.add("meta.timeouts may only hold setup_s, command_s, total_s")
         else:
             for k, v in tm.items():
-                if not _finite_number(v):
-                    p.add(f"meta.timeouts.{k} must be a non-negative number of seconds")
+                if k == "total_s" and not _finite_number(v):
+                    p.add("meta.timeouts.total_s must be a non-negative number of seconds (0: no whole-UT limit)")
+                elif k != "total_s" and not _finite_number(v, positive=True):
+                    # a multi-rank pool would wait 1 s for its ranks and give gloo a 0 s timeout: every run ENV
+                    p.add(f"meta.timeouts.{k} must be a positive number of seconds")
             if tm.get("total_s") and tm.get("command_s") and tm["command_s"] > tm["total_s"]:
                 p.add("meta.timeouts.command_s exceeds total_s")
     elif world > 1:

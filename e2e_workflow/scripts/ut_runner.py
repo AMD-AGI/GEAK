@@ -264,10 +264,12 @@ def world_size(meta):
 
 
 def timeouts(meta, world=None):
+    """The run's time limits: meta.timeouts over the defaults. A setup_s / command_s that is not above 0 keeps its
+    default (generate_ut.py check refuses one: a rank pool cannot start or wait with it); total_s 0 is no limit."""
     world = world_size(meta) if world is None else world
     base = dict(DEFAULT_TIMEOUTS_MULTI if world > 1 else DEFAULT_TIMEOUTS_SINGLE)
     for k, v in (meta.get("timeouts") or {}).items():
-        if k in base and v is not None:
+        if k in base and v is not None and (k == "total_s" or float(v) > 0):
             base[k] = float(v)
     return base
 
@@ -1063,11 +1065,11 @@ def deployed_env(meta):
 
 class PoolError(Exception):
     """kind: env (stopped from outside the code: signal, resources, IPC fault, lock), task (the task's
-    own code raised), timeout, port (rendezvous port taken)."""
+    own code raised), timeout, port (rendezvous port taken). pool: the label of the pool it ended."""
 
-    def __init__(self, kind, msg, rank=None, tail=""):
+    def __init__(self, kind, msg, rank=None, tail="", pool=None):
         super().__init__(msg)
-        self.kind, self.rank, self.tail = kind, rank, tail
+        self.kind, self.rank, self.tail, self.pool = kind, rank, tail, pool
 
 
 class RankPool:
@@ -1089,7 +1091,8 @@ class RankPool:
             ids = ",".join(self.devices[:self.world])
             env["HIP_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"] = ids     # always together (ISSUE-039)
         env.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(self.port), WORLD_SIZE=str(self.world),
-                   GEAK_UT_SETUP_S=str(int(self.setup_s)), GEAK_UT_COMMAND_S=str(int(self.command_s)))
+                   GEAK_UT_SETUP_S=str(max(1, math.ceil(self.setup_s))),
+                   GEAK_UT_COMMAND_S=str(max(1, math.ceil(self.command_s))))
         if threading.current_thread() is threading.main_thread():
             env["GEAK_UT_PARENT_PID"] = str(os.getpid())
         env.update({k: str(v) for k, v in self.env_extra.items()})
@@ -1123,38 +1126,56 @@ class RankPool:
             left = min(left, self.deadline - time.monotonic())
         return left
 
-    def _failure(self, what):
+    def _failure(self, what, among=None):
         """Classify a dead rank: its own exit code (a traceback) is the task's; a signal or an
-        environment signature in any rank's log is the environment's."""
+        environment signature in any rank's log is the environment's. `among` (the ranks that did not
+        raise) narrows the dead ranks to those: a rank that raised a peer's failure exits 1 for it."""
         exits = {r: p.poll() for r, p in enumerate(self.procs) if p.poll() is not None}
+        if among is not None:
+            exits = {r: c for r, c in exits.items() if r in among}
         logs = {r: self._log(r) for r in range(self.world)}
         own = [r for r, c in exits.items() if c is not None and c > 0]
         env = next((env_fault(logs[r]) for r in logs if env_fault(logs[r])), None)
         port = any(e in logs[r][-4000:].lower() for r in logs for e in PORT_ERRORS)
-        r = own[0] if own else (min(exits) if exits else 0)
+        r = own[0] if own else (min(exits) if exits else (min(among) if among else 0))
         tail = logs.get(r, "")[-2500:]
         if what == "setup" and port:
-            return PoolError("port", f"pool {self.label}: rendezvous port {self.port} taken", r, tail)
+            return PoolError("port", f"pool {self.label}: rendezvous port {self.port} taken", r, tail,
+                             pool=self.label)
         if env:
-            return PoolError("env", f"pool {self.label}: {what}: rank {r} stopped by its environment ({env})", r, tail)
+            return PoolError("env", f"pool {self.label}: {what}: rank {r} stopped by its environment ({env})", r, tail,
+                             pool=self.label)
         if own:
-            return PoolError("task", f"pool {self.label}: {what}: rank {r} exited {exits[r]}", r, tail)
+            return PoolError("task", f"pool {self.label}: {what}: rank {r} exited {exits[r]}", r, tail,
+                             pool=self.label)
+        if among is not None and not exits:
+            return PoolError("env", f"pool {self.label}: {what}: the ranks that raised only saw a peer fail, and no "
+                                    "other rank died", r, tail, pool=self.label)
         return PoolError("env", f"pool {self.label}: {what}: rank {r} killed by signal {-(exits.get(r) or 0)}",
-                         r, tail)
+                         r, tail, pool=self.label)
 
     def _raised(self, results, what):
         """The PoolError of the ranks whose command raised: the root cause first -- a rank that only
-        saw its peer die ("connection closed by peer") is a consequence, not the cause."""
+        saw its peer die ("connection closed by peer") is a consequence, not the cause. When every
+        error is such a consequence, the cause is a rank that did not raise (the OOM killer's SIGKILL
+        leaves no traceback): it is judged like a dead rank."""
         bad = [r for r in results if r.get("error")]
         if not bad:
             return None
-        root = [r for r in bad if not SECONDARY_RE.search(r["error"])] or bad
+        root = [r for r in bad if not SECONDARY_RE.search(r["error"])]
+        if not root:
+            raised = {r.get("rank") for r in bad}
+            err = self._failure(what, among=[i for i in range(self.world) if i not in raised])
+            err.tail += "\n[ranks that saw it] " + "; ".join(
+                f"rank {r.get('rank')}: {r['error'].strip().splitlines()[-1][:200]}" for r in bad)
+            return err
         first = root[0]
         others = "; ".join(f"rank {r.get('rank')}: {r['error'].strip().splitlines()[-1][:200]}"
                            for r in bad if r is not first)
         tail = first["error"][-2500:] + (f"\n[other ranks] {others}" if others else "")
         return PoolError("env" if env_fault(first["error"]) else "task",
-                         f"pool {self.label}: {what}: rank {first.get('rank')} raised", first.get("rank"), tail)
+                         f"pool {self.label}: {what}: rank {first.get('rank')} raised", first.get("rank"), tail,
+                         pool=self.label)
 
     def _wait(self, names, what, limit_s):
         t_end = time.monotonic() + max(1.0, self._limit(limit_s))
@@ -1175,7 +1196,8 @@ class RankPool:
                 raise self._failure(what)
             if time.monotonic() >= t_end:
                 raise PoolError("timeout", f"pool {self.label}: {what} exceeded its time limit "
-                                           f"({'setup_s' if what == 'setup' else 'command_s'} / total_s)")
+                                           f"({'setup_s' if what == 'setup' else 'command_s'} / total_s)",
+                                pool=self.label)
             time.sleep(0.05)
         out = []
         for p in paths:
@@ -1355,25 +1377,13 @@ def merge_correct(per_rank):
     return out
 
 
-def _rank_leg_summary(rows):
-    out = _leg_summary(rows)
+def _rank_leg_summary(rows, h):
+    """harness_lib's leg receipt of the pairs a bucket ran (the single-rank one), plus each rank's median."""
+    out = h._leg_summary(rows)
     ranks = [r.get("rank_ms") for r in rows if r.get("rank_ms")]
     if ranks:
         out["rank_ms"] = [_median([rk[i] for rk in ranks if rk[i] is not None]) if any(rk[i] is not None for rk in ranks)
                           else None for i in range(len(ranks[0]))]
-    return out
-
-
-def _leg_summary(rows):
-    timers = {r.get("timer") for r in rows}
-    out = {"timer": (timers.pop() if len(timers) == 1 else "mixed"),
-           "cache_condition": rows[0].get("cache_condition") if rows else None,
-           "ms_reps": [r.get("ms") for r in rows]}
-    primed = [r.get("primed") for r in rows]
-    if rows and all(p is not None for p in primed):
-        out["primed"] = all(bool(p) for p in primed)
-        hosts = [r.get("host_ms") for r in rows if _finite(r.get("host_ms"))]
-        out["host_ms"] = _median(hosts) if hosts else None
     return out
 
 
@@ -1385,10 +1395,11 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_pools(pn, pc, *, early_stop=True, max_reps=3, undecided=(0.95, 1.10), sigs=None, inner=None):
+def measure_pools(pn, pc, *, h, early_stop=True, max_reps=3, undecided=(0.95, 1.10), sigs=None, inner=None):
     """measure_legs' semantics over two pools: interleaved B,C pairs per case, at most `max_reps`,
     stopping once decisive (unless `early_stop` is off), medians of the pairs; only one pool times at a
-    time. `sigs` / `inner` ({sig: n}) as in harness_lib.measure_legs (A20). Returns (per_case, alignment rows)."""
+    time. `sigs` / `inner` ({sig: n}) as in harness_lib.measure_legs (A20); `h` the task's harness_lib (each
+    leg's receipt). Returns (per_case, alignment rows)."""
     lo, hi = undecided
     per_case, aligned = [], []
     for sig in pn.run("list")[0]["sigs"]:
@@ -1416,7 +1427,7 @@ def measure_pools(pn, pc, *, early_stop=True, max_reps=3, undecided=(0.95, 1.10)
         gb, go = [x for x in bms if x], [y for y in oms if y]
         bm, om = (_median(gb) if gb else None), (_median(go) if go else None)
         pair = [x / y for x, y in zip(bms, oms) if x and y]
-        legs = {"baseline": _rank_leg_summary(brows), "current": _rank_leg_summary(orows)}
+        legs = {"baseline": _rank_leg_summary(brows, h), "current": _rank_leg_summary(orows, h)}
         timers = {legs["baseline"]["timer"], legs["current"]["timer"]}
         per_case.append({"sig": sig, "regime": brows[0].get("regime", ""), "m": brows[0].get("m"),
                          "baseline_ms": bm, "optimized_ms": om, "speedup": (bm / om) if (bm and om) else None,
@@ -1624,17 +1635,17 @@ def _multi_rank(task, meta, h, args, result, ctx):
                 close_pool("candidate")
             pn = pools.get("native") or open_pool("native", base)
             pc = pools.get("candidate") or open_pool("candidate", cand)
-            per_case, aligned = measure_pools(pn, pc, early_stop=not args.no_early_stop, max_reps=args.reps)
+            per_case, aligned = measure_pools(pn, pc, h=h, early_stop=not args.no_early_stop, max_reps=args.reps)
 
             def again(sig, inner, early_stop=not args.no_early_stop):
-                rows, more = measure_pools(pn, pc, early_stop=early_stop, max_reps=args.reps,
+                rows, more = measure_pools(pn, pc, h=h, early_stop=early_stop, max_reps=args.reps,
                                            sigs=[sig], inner={sig: inner})
                 aligned.extend(more)
                 return rows
             per_case = raise_inner(h, meta, per_case, again,
                                    measure_all=lambda sig, inner: again(sig, inner, early_stop=False))
         except PoolError as exc:
-            raise _pool_stop(exc, "aa" if aa else "candidate")
+            raise _pool_stop(exc, "aa" if aa else ("baseline" if exc.pool == "native" else "candidate"))
         except RuntimeError as exc:
             raise UTStop(EXIT_INCOMPLETE, f"multi-rank timing: {exc}", "timing")
         return per_case, alignment_receipt(meta, aligned, harness_env)

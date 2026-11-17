@@ -1,10 +1,12 @@
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "detect_gpu_requirement.py"
+UT_SCRIPTS = Path(__file__).resolve().parents[3] / "e2e_workflow" / "scripts"
 
 
 def load():
@@ -105,6 +107,24 @@ def test_capture_traces_do_not_crowd_the_test_out_of_the_scan(tmp_path):
         (tmp_path / f"selection_trace.pid-1.rank-unknown.call-{i}.json").write_text("{}")
     (tmp_path / "unittest.py").write_text("import torch.multiprocessing as mp\nmp.spawn(run, nprocs=2)\n")
     assert module.detect([str(tmp_path)])["gpus_per_job"] == 2
+
+
+def test_the_runtime_a_task_carries_is_not_its_code(tmp_path):
+    # leg_runner.py (serve mode), ut_runner.py (rank pools) and overlay_setup.py mention torch.distributed: copied
+    # into a single-GPU task without a declared count, they made it `unknown`
+    module = load()
+    (tmp_path / "unittest.py").write_text("import torch\nout = a @ b\n")
+    for name in module.RUNTIME_FILES:
+        shutil.copy(UT_SCRIPTS / name, tmp_path / name)
+    assert module.detect([str(tmp_path)]) == {"kind": "single", "gpus_per_job": 1, "evidence": []}
+    assert module.detect([str(tmp_path / "leg_runner.py"), str(tmp_path / "unittest.py")])["kind"] == "single"
+
+
+def test_the_runtime_file_names_are_ut_runners():
+    spec = importlib.util.spec_from_file_location("ut_runner_for_detect_test", UT_SCRIPTS / "ut_runner.py")
+    ut_runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ut_runner)
+    assert load().RUNTIME_FILES == frozenset(ut_runner.RUNTIME_FILES)
 
 
 def test_only_meta_json_counts_as_json_metadata(tmp_path):

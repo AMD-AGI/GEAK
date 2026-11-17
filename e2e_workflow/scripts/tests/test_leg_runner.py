@@ -627,13 +627,14 @@ class Cli(_LegRunnerTestCase):
 hl = _load("harness_lib_for_test_leg_runner", "harness_lib.py")      # not registered in sys.modules
 
 _FLOAT_DTYPES = ("float16", "bfloat16", "float32", "float64")
-_DTYPES = _FLOAT_DTYPES + ("bool", "int32", "int64")
+_INT_DTYPES = {"uint8": (8, 0), "int8": (8, -(1 << 7)), "int32": (32, -(1 << 31)), "int64": (64, -(1 << 63))}
+_DTYPES = _FLOAT_DTYPES + ("bool", "complex64") + tuple(_INT_DTYPES)
 
 
 class _FT:
     """A 1-D fake tensor carrying exactly what leg_runner touches: shape, dtype, device, is_floating_point,
-    data_ptr, numel, detach/clone/to/cpu, abs/max, * + ~ ==, all, copy_. As in torch, the truth value of a
-    multi-element tensor raises, so no assertion can compare two of them by accident (compare _vals)."""
+    is_complex, data_ptr, numel, detach/clone/to/cpu, abs/max, * + ^ ~ ==, all, copy_. As in torch, the truth value
+    of a multi-element tensor raises, so no assertion can compare two of them by accident (compare _vals)."""
 
     def __init__(self, values, dtype="float32", device="cpu"):
         self.values = list(values)
@@ -646,6 +647,9 @@ class _FT:
 
     def is_floating_point(self):
         return self.dtype in _FLOAT_DTYPES
+
+    def is_complex(self):
+        return self.dtype.startswith("complex")
 
     def data_ptr(self):
         return id(self)
@@ -664,7 +668,7 @@ class _FT:
 
     def to(self, where):
         if where in _DTYPES:
-            cast = float if where in _FLOAT_DTYPES else (bool if where == "bool" else int)
+            cast = float if where in _FLOAT_DTYPES else {"bool": bool, "complex64": complex}.get(where, int)
             return _FT([cast(v) for v in self.values], where, self.device)
         return _FT(self.values, self.dtype, where)
 
@@ -684,6 +688,10 @@ class _FT:
 
     def __invert__(self):
         return _FT([not v for v in self.values], self.dtype, self.device)
+
+    def __xor__(self, k):
+        # Python's ^ on ints is two's complement, so within the dtype's range it equals torch's fixed-width ^
+        return _FT([v ^ k for v in self.values], self.dtype, self.device)
 
     def __eq__(self, other):
         if len(other.values) != len(self.values):
@@ -730,10 +738,12 @@ def _keep_modules(test, *names):
 
 
 def _install_dtype_torch(test):
-    """sys.modules["torch"] = a fake carrying only the dtype _off_by_much reads; restored after `test`."""
+    """sys.modules["torch"] = a fake carrying only what _off_by_much reads (torch.bool, torch.iinfo); restored
+    after `test`."""
     _keep_modules(test, "torch")
     fake = types.ModuleType("torch")
     fake.bool = "bool"
+    fake.iinfo = lambda dtype: types.SimpleNamespace(bits=_INT_DTYPES[dtype][0], min=_INT_DTYPES[dtype][1])
     sys.modules["torch"] = fake
     return fake
 
@@ -1063,7 +1073,11 @@ class ControlHelpers(unittest.TestCase):
         _install_dtype_torch(self)
         self.assertEqual(lr._off_by_much(_FT([True, False], dtype="bool")).values, [False, True])
         moved = lr._off_by_much(_FT([3, -5, 0], dtype="int64"))
-        self.assertEqual((moved.dtype, moved.values), ("int64", [9, 1, 6]))      # by more than the range
+        self.assertEqual((moved.dtype, moved.values), ("int64", [3 - 2**63, -5 + 2**63, -2**63]))   # top bit flipped
+        # a uint8 output holding 255 (packed MXFP4, e8m0 scales): max + 1 would wrap to 0 and move nothing
+        self.assertEqual(lr._off_by_much(_FT([0, 255, 128, 3], dtype="uint8")).values, [128, 127, 0, 131])
+        self.assertEqual(lr._off_by_much(_FT([-128, 127, 0], dtype="int8")).values, [0, -1, -128])
+        self.assertEqual(lr._off_by_much(_FT([1 + 1j, -2j], dtype="complex64")).values, [4 + 1j, 3 - 2j])
         empty = _FT([], dtype="int64")
         self.assertIs(lr._off_by_much(empty), empty)
 
@@ -1103,7 +1117,7 @@ class Controls(unittest.TestCase):
         w = lr.Control("within_tol", 0.02).wrap_call(call)((x, n))
         self.assertEqual(_vals(w), [[2.0 * (1.0 + 0.02 / 10.0), -4.0 * (1.0 + 0.02 / 10.0)], [3, -5]])
         s = lr.Control("scale_out", 0.02).wrap_call(call)((x, n))
-        self.assertEqual(_vals(s), [[2.0 * (1.0 + 4.0 * 0.02), -4.0 * (1.0 + 4.0 * 0.02)], [9, 1]])
+        self.assertEqual(_vals(s), [[2.0 * (1.0 + 4.0 * 0.02), -4.0 * (1.0 + 4.0 * 0.02)], [3 - 2**63, -5 + 2**63]])
         self.assertEqual(_vals((x, n)), [[2.0, -4.0], [3, -5]])        # the inputs are untouched
 
     def test_with_per_output_tolerances_each_output_moves_by_its_own(self):
@@ -1115,7 +1129,7 @@ class Controls(unittest.TestCase):
         self.assertEqual(_vals(ctl._perturb(((f0, f1), n), None)),
                          [[[1.0 * (1.0 + 0.02 / 10.0)], [2.0 * (1.0 + 0.001 / 10.0)]], [3]])
         self.assertEqual(_vals(lr.Control("scale_out", tol)._perturb(((f0, f1), n), None)),
-                         [[[1.0 * (1.0 + 4.0 * 0.02)], [2.0 * (1.0 + 4.0 * 0.001)]], [7]])
+                         [[[1.0 * (1.0 + 4.0 * 0.02)], [2.0 * (1.0 + 4.0 * 0.001)]], [3 - 2**63]])
         # a dict by key, its keys kept in the output's order
         w = lr.Control("within_tol", lr.TaskTol(0.02, {"mix": 0.001}, h=hl))._perturb({"mix": f0, "hid": f1}, None)
         self.assertEqual(list(w), ["mix", "hid"])

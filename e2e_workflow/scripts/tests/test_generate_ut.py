@@ -692,8 +692,14 @@ class TestMetaFields(_Case):
         for tm in ({"setup_s": 60, "wall_s": 10}, [600]):
             self.assertEqual(self.problems(timeouts=tm), ["meta.timeouts may only hold setup_s, command_s, total_s"], tm)
         self.assertEqual(self.problems(timeouts={"setup_s": -1, "command_s": "600"}),
-                         ["meta.timeouts.setup_s must be a non-negative number of seconds",
-                          "meta.timeouts.command_s must be a non-negative number of seconds"])
+                         ["meta.timeouts.setup_s must be a positive number of seconds",
+                          "meta.timeouts.command_s must be a positive number of seconds"])
+        # 0 would give a rank pool a 1 s setup wait and a 0 s gloo timeout; total_s 0 is no whole-UT limit
+        self.assertEqual(self.problems(timeouts={"setup_s": 0, "command_s": 0, "total_s": 0}),
+                         ["meta.timeouts.setup_s must be a positive number of seconds",
+                          "meta.timeouts.command_s must be a positive number of seconds"])
+        self.assertEqual(self.problems(timeouts={"total_s": -5}),
+                         ["meta.timeouts.total_s must be a non-negative number of seconds (0: no whole-UT limit)"])
         self.assertEqual(self.problems(timeouts={"command_s": 900, "total_s": 600}),
                          ["meta.timeouts.command_s exceeds total_s"])
         self.assertEqual(self.problems(timeouts={"setup_s": 60, "command_s": 600, "total_s": 900}), [])
