@@ -1,7 +1,9 @@
 # Kernel optimization through modular experiments
 
-Start with [SKILL.md](SKILL.md). The controller chooses a question, then a module and
-one implementation. Read [PRINCIPLES.md](PRINCIPLES.md) before changing this tree.
+Start with [SKILL.md](SKILL.md), then follow [Brain](brain/SKILL.md). As in workload,
+the persistent controller chooses a question, a module and then an implementation;
+each report can change the next plan while independent work continues.
+Read [PRINCIPLES.md](PRINCIPLES.md) before changing this tree.
 
 ## Modules
 
@@ -24,7 +26,9 @@ contract and [shared call contract](stages/CONTRACT.md). Select its path in the 
 the controller needs no code change or registry. Changing a method does not change
 what counts as passing.
 
-`SKILL.md` owns reasoning; `stages/` owns capabilities and their implementations.
+`SKILL.md` is the entry, `brain/` owns planning and `stages/` owns capabilities and
+their implementations. The [starting route](brain/SKILL.md#starting-route-and-continuation)
+remains available; it is not a mandatory pass through every module.
 The root `prompt.sh` and `measure.sh` adapt this method to workload's existing worker.
 The parent [Optimize contract](../README.md) still owns dispatch, KEEP and cold
 verification. Tests under `tests/` exercise these adapters without GPUs or agent calls.
