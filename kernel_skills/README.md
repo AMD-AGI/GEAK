@@ -6,6 +6,10 @@ Two ways to run, sharing the same instrument (`bin/`, the frozen eval) and knowl
   noise-aware eval, a candidate tree, a supervisor playbook, and `lessons.md`, which carries what
   worked from run to run. In the paper, a fixed four-role team scored 0.31× on its MLA task where
   the evolving team reached 0.74×.
+- **Fixed roles v3** ([`v3/`](v3/)): six skills (v2's five + `geak-roofline`) and shared `COMMON.md` rules.
+  A run may end only when a design-independent roofline cap shows ≥ 80% of the gap closed, or when an
+  independent role explains the rest. It also scales to one GPU and slow evals and survives restarts.
+  Changes and evidence: [`v3/EVIDENCE.md`](v3/EVIDENCE.md). Tools: `bin/roofline.py`, `bin/hbm_stream.py`.
 - **Fixed roles v2** ([`v2/`](v2/)): five skills (lead, engineer, investigator, benchmark, ship) distilled from
   the evolved EAT teams on four kernels; each rule is traced to its evidence in [`v2/EVIDENCE.md`](v2/EVIDENCE.md).
   Not yet compared head-to-head with EAT at equal budget.

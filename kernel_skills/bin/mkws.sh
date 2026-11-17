@@ -20,7 +20,8 @@ export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
 G=(git -c user.email=geak@local -c user.name=geak)
 git init -q
 printf '%s\n' build/ __pycache__/ '*.pyc' '*.so' '*.o' .torch_ext/ .torch_ext.stale_*/ \
-  .rocprofv3/ /.geak/ reference_io.pt >> .git/info/exclude
+  .rocprofv3/ /.geak/ reference_io.pt _cand_overlay/ 'run/ut_report*' 'run/ut_result*' '*.log' \
+  >> .git/info/exclude   # harness by-products never belong in a candidate patch
 "${G[@]}" add -A && "${G[@]}" commit -qm base --allow-empty && git tag base
 for p in "${PATCHES[@]}"; do
   [[ -s "$p" ]] || continue   # an empty patch (e.g. c000) is a no-op
