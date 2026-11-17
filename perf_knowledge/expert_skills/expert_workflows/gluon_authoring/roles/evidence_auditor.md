@@ -18,9 +18,15 @@ naming the field and what is wrong). `ok` is true only when `findings` is empty.
    limiters and the binding one must match the evidence.
 4. G4: the json at `g4_screen.json_path` has a non-null `permuted_results` (the `--permute` window),
    and its `validity.valid` equals `g4_screen.valid`.
-5. ATT `captured`: `att.output_dir` contains decoded ATT output (for `capture.sh`, `capture.json` with
-   an `att_state` that is not `decoder_absent`/`skipped`). `unavailable`: the cited command's output
-   shows the reason given.
+5. ATT `captured`: `att.output_dir` contains decoded ATT output (a `ui_output_agent_*` dir with
+   `code.json`), and the collection state on disk — `att/rocprofv3_safe.json` `state` under the
+   capture, or `profile.json` `layers.att.state` for `gluon_profile.py` — equals `att.state`; a state
+   other than `ok` (e.g. `partial` / `kernel_identity_unverified`) needs `att.reason` to say so.
+   `unavailable`: the cited command's output shows the reason given.
+8. Profile (climb): `profile_dir/profile.json` exists, was written by the `profile_command` cited
+   (same out dir), and its `source_sha256` is the sha256 of the round's kernel source in `TRACK` at
+   `track_tag`; `profile_dir/compare.md` exists when the command has `--compare`. Any claim the round
+   makes from a dial (cycles per MFMA, a hotspot, a limiter) matches `profile.json`.
 6. G2: if `parity_gate.command` is present, re-run it exactly (CPU only, it reads artifacts) and
    compare the exit code and ratio.
 7. Equivalence: `equivalence.output_path` shows the `ttgir_bridge.py verify` verdict claimed in

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Evidence is a contract checked in code: each stage's required references open its prompt, and a
-// round that is missing G3 / G4 / ATT (pipeline layers) or fails the artifact audit is sent back by
-// name once, then rejected without a verify.
+// round that is missing G3 / G4 / ATT (pipeline layers) / its gluon_profile.py re-profile or fails the
+// artifact audit is sent back by name once, then rejected without a verify. The baseline profile is
+// the pack's gluon_profile.py with every layer's state stated.
 'use strict';
 
-const { launch, ok, done, engineerReturn, refsIn, goodAtt, SKILL } = require('./harness');
+const { launch, ok, done, engineerReturn, refsIn, goodAtt, goodProfileCmd, SKILL } = require('./harness');
 
 const climbOnly = { budget: 1, entry_mode: 'incumbent' };
 
@@ -20,7 +21,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
     const expect = {
       'gluon_lead:entry': ['skill.md', 'references/method/entry.md'],
       'gluon_lead:budget': ['references/method/budget.md'],
-      'profile_engineer:baseline': ['references/method/profile.md'],
+      'gluon_profiler:baseline': ['references/method/profile.md'],
       'gluon_engineer:transcribe r1': ['references/method/transcribe.md'],
       'gluon_engineer:recover r2': ['references/method/recover.md', 'references/tile-programming/pipeline.md'],
       'gluon_engineer:climb r3': ['references/method/climb.md', 'references/method/profile.md'],
@@ -172,6 +173,65 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       return undefined;
     }, { entry: 'incumbent' });
     ok(x.result.rounds[0].status === 'rejected_missing_evidence', 'a vacuous parity gate on an incumbent is rejected', x.result.rounds[0]);
+  }
+  console.log('\n# 10. a pipeline layer\'s ATT must be a usable collection');
+  {
+    const partial = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { ...goodAtt, state: 'partial' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(partial.result.rounds[0].status === 'rejected_missing_evidence' &&
+      partial.result.rounds[0].missing.some(m => /att\.state/.test(m)), 'a partial ATT without a reason is rejected', partial.result.rounds[0]);
+    const reasoned = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { ...goodAtt, state: 'partial', reason: 'kernel_identity_unverified: two dispatches share the name' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(reasoned.result.rounds[0].status === 'verified', 'a partial ATT with its reason is accepted', reasoned.result.rounds[0]);
+    const viaProfile = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { status: 'captured', tool: 'gluon_profile.py', command: goodProfileCmd, exit_code: 0,
+          output_dir: '/x/prof/capture/att', state: 'ok' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(viaProfile.result.rounds[0].status === 'verified', 'the round\'s gluon_profile.py ATT layer is ATT evidence', viaProfile.result.rounds[0]);
+    const noAttLayer = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { status: 'captured', tool: 'gluon_profile.py', command: goodProfileCmd.replace('--gpu 6', '--gpu 6 --layers trace,pmc'),
+          exit_code: 0, output_dir: '/x/prof', state: 'ok' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(noAttLayer.result.rounds[0].status === 'rejected_missing_evidence', 'gluon_profile.py without its att layer is not ATT evidence', noAttLayer.result.rounds[0]);
+  }
+
+  console.log('\n# 11. a climb round re-profiles with gluon_profile.py');
+  {
+    const x = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb',
+        profile_command: 'bash kernel_workflow/scripts/profile_kernel.sh 6 "python run.py" /x/prof' });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(x.result.rounds[0].missing.some(m => /profile_command/.test(m)), 'a profile_kernel.sh re-profile is sent back', x.result.rounds[0]);
+    const prompt = x.calls.find(c => c.label === 'gluon_engineer:climb r1').prompt;
+    ok(/LAST_PROFILE: \/tmp\/eval\/gluon\/profile_baseline/.test(prompt), 'the first climb compares against the baseline profile dir');
+  }
+
+  console.log('\n# 12. the baseline profile states every layer; a degraded one needs its reason');
+  {
+    const plain = await launch(climbOnly, (label) => label.startsWith('gluon_profiler:')
+      ? { bottleneck: 'latency', command: 'bash profile_kernel.sh 6 "python run.py" /x', exit_code: 0, profile_dir: '/x', layers: {}, references_read: [] }
+      : undefined, { entry: 'incumbent' });
+    ok(plain.labels.includes('gluon_profiler:baseline (reask 1)'), 'an incomplete baseline profile is re-asked', plain.labels);
+    ok(plain.result.caveats.some(c => /baseline_profile_incomplete: .*gluon_profile\.py.*layers\./.test(c)),
+      'what stayed missing is a caveat', plain.result.caveats);
+    const degraded = await launch(climbOnly, (label, prompt) => label.startsWith('gluon_profiler:')
+      ? { bottleneck: 'latency', command: 'python3 s/gluon_profile.py /x --kernel k --source k.py -- python run.py', exit_code: 5,
+          profile_dir: '/x', references_read: refsIn(prompt), layers: { trace: 'ok', pmc: 'partial', att: 'ok', ir: 'ok' },
+          degraded_reason: 'pmc: SQ_WAIT_ANY aborts alone on this box (dropped by bisection)' }
+      : undefined, { entry: 'incumbent' });
+    ok(!degraded.labels.includes('gluon_profiler:baseline (reask 1)'), 'a reasoned degraded layer is accepted', degraded.labels);
+    ok(degraded.result.caveats.some(c => /baseline_profile_degraded: pmc/.test(c)), 'and recorded as a caveat', degraded.result.caveats);
   }
   done('evidence-gate');
 })();

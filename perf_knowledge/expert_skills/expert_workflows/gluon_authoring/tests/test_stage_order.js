@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // The stage machine is code: each entry mode runs its stages in order, and the reused GEAK roles
-// (director, benchmark_engineer, profile_engineer, verify_engineer) stay where acceptance needs them.
+// (director, benchmark_engineer, verify_engineer) stay where acceptance needs them; the baseline
+// profile is the pack's gluon_profiler.
 'use strict';
 
 const { launch, ok, done, inOrder, engineerReturn, refsIn } = require('./harness');
@@ -17,7 +18,7 @@ const { launch, ok, done, inOrder, engineerReturn, refsIn } = require('./harness
       return undefined;
     }, { entry: 'port' });
     ok(!x.error, 'runs to completion', x.error);
-    ok(inOrder(x.labels, ['director:setup', 'benchmark_engineer', 'profile_engineer:baseline', 'gluon_lead:entry',
+    ok(inOrder(x.labels, ['director:setup', 'benchmark_engineer', 'gluon_profiler:baseline', 'gluon_lead:entry',
       'gluon_lead:budget', 'gluon_engineer:transcribe r1', 'evidence_audit r1', 'verify r1',
       'gluon_engineer:recover r2', 'verify r2', 'gluon_engineer:climb r3', 'verify r3',
       'gluon_engineer:climb r4', 'verify r4', 'gluon_lead:close', 'director:validate']), 'port stage order', x.labels);

@@ -10,9 +10,18 @@ this directory adds no copy of it.
 
 This directory is self-contained: `workflow.js`, its roles and tests. Nothing in `kernel_workflow/` or
 `e2e_workflow/` refers to it. It reads from `kernel_workflow/` the GEAK roles that own correctness and
-acceptance (`director`, `benchmark_engineer`, `profile_engineer`, `verify_engineer`), the GPU lock
+acceptance (`director`, `benchmark_engineer`, `verify_engineer`), the GPU lock
 (`scripts/gpu_lock.sh`), `scripts/materialize_workspace.sh` and the shared tools in
 `scripts/kernel_tools/`; and from the skill pack its references and scripts.
+
+Profiling is the pack's own: the baseline and every round profile through
+`skills/gluon_authoring/scripts/gluon_profile.py`, not `kernel_workflow/scripts/profile_kernel.sh`
+(which is unchanged and still serves the kernel workflow). One call collects every dial of
+`profile.md ## 3.1` — kernel trace (D), PMC groups bisected on abort/timeout (C), ATT with the
+instruction readers (B), IR with both occupancy limiters (A) — puts a kernel filter and a timeout on
+every profiler pass, runs the workload from a generated `cmd.sh` (no profiler re-splits a quoted
+command), and records each layer's state in `profile.json`; `--compare <prev>` writes the profile
+delta a climb round lands on.
 
 ## Launch
 
@@ -44,7 +53,7 @@ directory, derived from `workflow_dir`). Single-GPU kernels only (`gpus_per_job`
 | --- | --- | --- | --- |
 | 1 | Setup | `director` (kernel_workflow, PHASE=setup, MODE=optimize) | EVAL_DIR, canonical workspace, GPU identity; refuses anything but gfx942/gfx950, a `target_arch` mismatch, or no frozen baseline |
 | 2 | Benchmark | `benchmark_engineer` (kernel_workflow) | `COMMANDMENT.md` and `BASELINE_PER_CASE` — the frozen baseline every speedup is measured against |
-| 3 | Profile | `profile_engineer` (kernel_workflow, PHASE=baseline) + `profile.md` | the baseline dials, handed to entry and round 1 |
+| 3 | Profile | `gluon_profiler` PHASE=baseline (`gluon_profile.py`) + `profile.md` | the baseline dials (`EVAL_DIR/gluon/profile_baseline`), handed to entry and round 1 as `LAST_PROFILE`; every layer's state stated (`trace`, `pmc`, `att`, `ir`), a non-`ok` one with `degraded_reason`; otherwise re-asked, then a `baseline_profile_incomplete` caveat |
 | 4 | Entry | `gluon_lead` PHASE=entry | entry mode (`port` / `incumbent` / `fresh`); champion bundle; **G1** `champion_gate.py` — exit ≠ 0 blocks the run before any edit; the track workspace `EVAL_DIR/gluon/track` tagged `geak_base`; `champion_patch` when the champion is not the frozen baseline |
 | 4b | Entry | `verify_engineer` on `champion_patch` | the champion's speedup vs the frozen baseline (`champion_vs_baseline`), so every later number also carries `vs_champion` |
 | 5 | Budget | `gluon_lead` PHASE=budget | `hw_budget.py` ran (exit 0, json written); otherwise re-asked, then a `budget_missing` caveat |
@@ -110,9 +119,9 @@ The return is `ROUND_SCHEMA`; `missingEvidence()` checks it per stage:
 | `equivalence` | transcribe | `layout_diff` ∈ PASS/RECONCILED/FAIL from `ttgir_bridge.py verify`; `numeric`, `determinism`, `asm_parity` recorded |
 | `g3_occupancy` (G3) | transcribe, author, recover repayment, climb | `probe.py measure` command, exit 0, `ir_dir`, both limiters (`vgpr_wg_per_cu`, `lds_wg_per_cu`; `null` only with `missing_reason`), `binding` |
 | `g4_screen` (G4) | recover repayment, climb | `ab_bench.py ... --permute`, exit code, `json_path`, `resolved` |
-| `att` | layers 1.5, 4, 4+ and a `lost_pipeline` repayment | `capture.sh` without `--no-att/--lite/--isa-only`, or `rocprofv3_safe.sh --att`, with `output_dir`; or `status: unavailable` with a reason (≥ 20 chars) |
+| `att` | layers 1.5, 4, 4+ and a `lost_pipeline` repayment | the round's `gluon_profile.py` (att layer on), `capture.sh` without `--no-att/--lite/--isa-only`, or `rocprofv3_safe.sh --att`, with `output_dir` and `state: ok` (another state needs a reason); or `status: unavailable` with a reason (≥ 20 chars) |
 | `parity_gate` (G2) | recover | `parity_gate.py` command, exit code, `mode: gate`; on an incumbent only `mode: diagnostic` is allowed |
-| `layer`, `profile_dir` | climb | layer ∈ 1.5/2/3/4/4+/5/6/7; this round's re-profile |
+| `layer`, `profile_dir`, `profile_command` | climb | layer ∈ 1.5/2/3/4/4+/5/6/7; this round's re-profile by `gluon_profile.py` (`--compare LAST_PROFILE` gives the profile delta) |
 | `suspect` | recover repayment | `lost_pipeline` / `lost_layout` / `lost_RA` (repaid at layer 4 / 3 / 5) |
 | `disassembly_ref` | inline-asm rounds | present |
 
@@ -154,10 +163,12 @@ copies.
 
 ```
 workflow.js   the stage machine (Setup -> ... -> Validate)
-roles/        gluon_lead (entry, budget, close), gluon_engineer (transcribe/author/recover/climb),
-              evidence_auditor (artifact audit); GEAK roles are read from kernel_workflow/roles/
+roles/        gluon_lead (entry, budget, close), gluon_profiler (baseline profile), gluon_engineer
+              (transcribe/author/recover/climb), evidence_auditor (artifact audit);
+              GEAK roles are read from kernel_workflow/roles/
 tests/        harness.js (runs workflow.js with synthetic agent responses) and test_*.js:
-              stage order per entry mode, required reading, evidence re-ask/reject (G3, G4, ATT, audit),
+              stage order per entry mode, required reading, evidence re-ask/reject (G3, G4, ATT state,
+              gluon_profile re-profile, baseline profile layers, audit),
               acceptance by verify and the commit gate, parity/G1/deadline/token/budget stops,
               launch contract (args, arch, reference paths, size, no injection left in kernel/e2e)
 ```

@@ -22,7 +22,8 @@ const goodG3 = { command: 'python3 kt/probe.py measure --dir ir/r --arch gfx942'
 const goodG4 = { command: 'python3 kt/ab_bench.py --module a.py --permute --json /x/ab.json', exit_code: 0,
   json_path: '/x/ab.json', delta_pct: 5, noise_band_pct: 1, resolved: true, valid: true };
 const goodAtt = { status: 'captured', tool: 'capture.sh', command: 'bash kt/capture.sh r /x/att --kernel k --source k.py -- python run.py',
-  exit_code: 0, output_dir: '/x/att' };
+  exit_code: 0, output_dir: '/x/att', state: 'ok' };
+const goodProfileCmd = 'python3 skill/scripts/gluon_profile.py /x/prof --kernel k --source k.py --gpu 6 --compare /x/prev -- python run.py';
 const gate = (exit) => ({ command: 'python3 skill/scripts/parity_gate.py --champion-ms 1 --anchor-ms 1.2', exit_code: exit,
   ratio: exit === 0 ? 0.97 : 0.8, suspects: [], json_path: '/x/parity.json', mode: 'gate' });
 
@@ -42,7 +43,7 @@ function engineerReturn(prompt, over) {
     equivalence: { layout_diff: 'PASS', numeric: 'pass', determinism: 'pass', asm_parity: 'pass', output_path: '/x/eq' } });
   if (stage === 'author') Object.assign(base, { g3_occupancy: goodG3 });
   if (stage === 'recover') Object.assign(base, { suspect: 'lost_layout', layer: '3', g3_occupancy: goodG3, g4_screen: goodG4, parity_gate: gate(0), claim: 'recovery' });
-  if (stage === 'climb') Object.assign(base, { layer: '3', profile_dir: '/x/prof', g3_occupancy: goodG3, g4_screen: goodG4, claim: 'win' });
+  if (stage === 'climb') Object.assign(base, { layer: '3', profile_dir: '/x/prof', profile_command: goodProfileCmd, g3_occupancy: goodG3, g4_screen: goodG4, claim: 'win' });
   return Object.assign(base, over || {});
 }
 
@@ -51,7 +52,10 @@ function defaults(label, prompt, ctx) {
     device_gfx: ctx.gfx || 'gfx942', device_target: 'unknown', physical_cu_count: 80, baseline_frozen: true };
   if (label === 'benchmark_engineer') return { commandment_path: '/tmp/eval/COMMANDMENT.md',
     baseline_per_case: [{ name: 'c0', latency_ms: 1 }], baseline_geomean_ms: 1 };
-  if (label === 'profile_engineer:baseline') return { bottleneck: 'latency', summary_path: '/tmp/eval/profile.md' };
+  if (label.startsWith('gluon_profiler:baseline')) return { bottleneck: 'latency', summary_path: '/tmp/eval/profile.md',
+    command: 'python3 skill/scripts/gluon_profile.py /tmp/eval/gluon/profile_baseline --kernel k --source k.py --gpu 6 -- python run.py',
+    exit_code: 0, profile_dir: '/tmp/eval/gluon/profile_baseline', references_read: refsIn(prompt),
+    layers: { trace: 'ok', pmc: 'ok', att: 'ok', ir: 'ok' } };
   if (label.startsWith('gluon_lead:entry')) return { entry_mode: ctx.entry || 'port', references_read: refsIn(prompt),
     champion_gate: { command: 'python3 champion_gate.py --champion b.json', exit_code: 0, output_path: '/x/g1.txt', flags: [] },
     track_ready: true, champion_bundle: '/x/plain_champion.json', source_is_anchor: false, champion_patch: '' };
@@ -104,4 +108,4 @@ const inOrder = (labels, sub) => {
   return true;
 };
 
-module.exports = { PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, ok, done, inOrder };
+module.exports = { PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };

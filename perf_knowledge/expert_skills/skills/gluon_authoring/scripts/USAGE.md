@@ -28,7 +28,7 @@ examples use `--arch gfx950`, the main line, with gfx942 as the downgrade.
 | budget | `$KT/hw_budget.py`, `calc_perf.py`, `mem_bw_probe.py`, `extract_sku.py` | the prize, the floor, the bound-class prior |
 | transcribe | `$SKILL/scripts/ttgir_bridge.py`, `recover_gluon.py`, `ttgir_to_gluon.py`; `$KT/dump_ir.sh`, `probe.py`, `amd_occupancy.py` | a faithful, equivalence-checked anchor |
 | recover | `$SKILL/scripts/parity_gate.py`, `pipeline_survey.py`; last resort: `gluon_swp.py`, `patch_reinject.py`, `patch_async_reinject.py` | who owes the gap; parity |
-| evidence | `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
+| evidence | `scripts/gluon_profile.py` (the pack's entry: all four dials, per-layer states, `--compare`); `kernel_workflow/scripts/profile_kernel.sh` (GEAK); `$KT/capture.sh`, `rocprofv3_safe.sh`, `rocprof_compute_probe.sh`, `parse_pmc.py`, `parse_rc.py`, `kernel_breakdown.py`, `hotspot_analyzer.py`, `att_opclass.py`, `asm_loop_audit.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py`, `layout_facts.py`, `gfx950_isa.py`, `hw_sources.sh` | the four dials |
 | measure | GEAK frozen task runner (acceptance); `$KT/ab_bench.py` (screening), `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | is the difference real |
 | climb | `pipeline_examples_cdna4.py` (gfx950), `pipeline_examples_cdna3.py` (gfx942 downgrade) | compiled examples for the agent's chosen hypothesis |
 | close / runtime | `$SKILL/scripts/toolctl.py`, `canonical_record.py`, `round_record.py`, `recordctl.py`, `close_audit.py`, `report_lint.py`, `served_envelope.py`, `run_state.py`, `stage_context.py`, `context_query.py`, `context_contracts.py`, `source_excerpt.py`, `profile_payload.py`, `debt.py`, `skill_index.py`, `wait_for.sh`, `locus.sh`, `runtime_env.sh` | the auditable record |
@@ -268,6 +268,7 @@ It uses the arch-aware profiler order from `profile_policy.sh` and writes raw ou
 
 | `$KT` tool | gives you |
 | --- | --- |
+| `gluon_profile.py <out> --kernel <substr> --source <kernel.py> --gpu <id> [--arch gfxNNN] [--layers trace,pmc,att] [--compare <prev>] -- <cmd...>` | the pack's profiling entry: trace + PMC groups (bisected) + ATT readers + IR/occupancy in one call → `profile.json` (per-layer `state`, dials A-D), `<out>/report.md`, `<out>/compare.md`; exit 0 all ok / 5 a layer degraded (recorded) / 4 nothing usable |
 | `capture.sh` | one command → supplementary kernel trace, optional decoded ATT, IR and static audit; runs under `gpu_lock.sh`, moves old outputs aside |
 | `rocprofv3_safe.sh --dev <gpu> --kernel <re> [--att] -- <cmd>` | rocprofv3 with a timeout, a mandatory kernel filter and the HIP/ROCR guard (touches `HIP_VISIBLE_DEVICES` only when ROCR is also set); `--no-timeout` for e2e serving, whose finalize is legitimately slow; exits 3 = degraded |
 | `rocprof_compute_probe.sh --dev <gpu> …` | Optional external native runner by default; explicit `--diagnostic` collects a whole-process no-roof report, and `--workload DIR` analyzes existing data |

@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Setup', detail: 'director (kernel_workflow role): isolated eval dir + workspace, GPU identity' },
     { title: 'Benchmark', detail: 'benchmark_engineer (kernel_workflow role): COMMANDMENT + frozen baseline' },
-    { title: 'Profile', detail: 'profile_engineer (kernel_workflow role): baseline profile, the four dials' },
+    { title: 'Profile', detail: 'gluon_profiler: gluon_profile.py baseline profile, the four dials (trace, PMC, ATT, IR)' },
     { title: 'Entry', detail: 'gluon_lead: entry mode, champion bundle, champion_gate.py (G1), track workspace' },
     { title: 'Budget', detail: 'gluon_lead: hw_budget.py, bound class and floor (no GPU)' },
     { title: 'Transcribe', detail: 'gluon_engineer: faithful anchor + equivalence (port) / first Gluon kernel (fresh)' },
@@ -220,9 +220,11 @@ const BENCH_SCHEMA = obj({
   baseline_geomean_ms: { type: 'number' }, reliable: { type: 'boolean' }, notes: { type: 'string' },
 }, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
 const PROFILE_SCHEMA = obj({
-  bottleneck: { type: 'string' }, summary_path: { type: 'string' }, key_metrics: anyObj,
-  top_opportunities: strs,
-}, ['bottleneck']);
+  bottleneck: { type: 'string' }, binding: { type: 'string' }, command: { type: 'string' },
+  exit_code: { type: ['number', 'null'] }, profile_dir: { type: 'string' }, profile_json: { type: 'string' },
+  layers: anyObj, degraded_reason: { type: 'string' }, case: { type: 'string' },
+  summary_path: { type: 'string' }, key_metrics: anyObj, top_opportunities: strs, references_read: strs,
+}, ['bottleneck', 'command', 'exit_code', 'profile_dir', 'layers', 'references_read']);
 const GATE_RUN = obj({
   command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, output_path: { type: 'string' },
   flags: strs, not_applicable_reason: { type: 'string' },
@@ -247,7 +249,7 @@ const ROUND_SCHEMA = obj({
   change_summary: { type: 'string' }, no_change: { type: 'boolean' }, anchor_provided: { type: 'boolean' },
   references_read: strs, track_tag: { type: 'string' }, patch_file: { type: 'string' },
   correctness: { type: 'string', enum: ['pass', 'fail', 'not_run'] },
-  profile_dir: { type: 'string' },
+  profile_dir: { type: 'string' }, profile_command: { type: 'string' },
   g3_occupancy: obj({
     command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, ir_dir: { type: 'string' },
     output_path: { type: 'string' }, vgpr_wg_per_cu: { type: ['number', 'null'] },
@@ -261,7 +263,7 @@ const ROUND_SCHEMA = obj({
   att: obj({
     status: { type: 'string', enum: ['captured', 'unavailable', 'not_required'] }, tool: { type: 'string' },
     command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, output_dir: { type: 'string' },
-    reason: { type: 'string' },
+    state: { type: 'string' }, reason: { type: 'string' },
   }),
   parity_gate: obj({
     command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, ratio: { type: ['number', 'null'] },
@@ -327,15 +329,24 @@ function g4Missing(g) {
   if (typeof g.resolved !== 'boolean') out.push('g4_screen.resolved');
   return out;
 }
+// The ATT a round cites: gluon_profile.py with its att layer (the pack's entry), or the shared
+// capture.sh / rocprofv3_safe.sh --att directly. A capture whose collection state is not `ok`
+// (rocprofv3_safe.json: partial, kernel identity unverified, ...) is evidence only with a reason.
+const ATT_CMD = 'gluon_profile.py (att layer on), capture.sh without --no-att, or rocprofv3_safe.sh --att';
 function attMissing(a) {
-  if (!a || typeof a !== 'object' || a.status === 'not_required') return ['att (capture.sh or rocprofv3_safe.sh --att; or status unavailable with a reason)'];
+  if (!a || typeof a !== 'object' || a.status === 'not_required') return [`att (${ATT_CMD}; or status unavailable with a reason)`];
   if (a.status === 'captured') {
     const out = [];
     const cmd = a.command || '';
+    const layersFlag = /--layers[ =](\S+)/.exec(cmd);
+    const viaProfile = /gluon_profile\.py/.test(cmd) && (!layersFlag || /\batt\b/.test(layersFlag[1]));
     const viaCapture = /capture\.sh/.test(cmd) && !/--no-att|--lite|--isa-only/.test(cmd);
     const viaSafe = /rocprofv3_safe\.sh/.test(cmd) && /--att/.test(cmd);
-    if (!viaCapture && !viaSafe) out.push('att.command (capture.sh without --no-att, or rocprofv3_safe.sh --att)');
+    if (!viaProfile && !viaCapture && !viaSafe) out.push(`att.command (${ATT_CMD})`);
     if (!has(a.output_dir)) out.push('att.output_dir');
+    if (a.state !== 'ok' && (a.reason || '').trim().length < 20) {
+      out.push('att.state (ok from rocprofv3_safe.json / profile.json layers.att; otherwise the reason it is not)');
+    }
     return out;
   }
   if (a.status === 'unavailable') return (a.reason || '').trim().length >= 20 ? [] : ['att.reason (why ATT is unavailable, e.g. capture.json att_state=decoder_absent)'];
@@ -369,6 +380,7 @@ function missingEvidence(stage, r, ctx) {
   if (stage === 'climb') {
     if (!LAYERS.includes(String(r.layer))) out.push(`layer (one of ${LAYERS.join(', ')})`);
     if (!has(r.profile_dir)) out.push('profile_dir (this round\'s re-profile)');
+    if (!/gluon_profile\.py/.test(r.profile_command || '')) out.push('profile_command (the gluon_profile.py call behind profile_dir, with --compare LAST_PROFILE)');
     out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
     if (PIPELINE_LAYERS.has(String(r.layer))) out.push(...attMissing(r.att));
     if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
@@ -378,7 +390,7 @@ function missingEvidence(stage, r, ctx) {
 }
 
 // ===========================================================================
-// PHASE: Setup / Benchmark / Profile — GEAK's own roles, unchanged.
+// PHASE: Setup / Benchmark — GEAK's own roles, unchanged. Profile — the pack's gluon_profiler.
 // ===========================================================================
 phase('Setup');
 const setup = await agentT(
@@ -416,14 +428,35 @@ const bench = await agentT(
 if (!bench || !Array.isArray(bench.baseline_per_case)) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
 
+// The pack's own profiling entry (gluon_profile.py) instead of profile_kernel.sh: every dial of the
+// method in one call, a kernel filter and a timeout on every profiler pass, per-layer states.
 phase('Profile');
-const profile = await agentT(
-  rolePrompt('profile_engineer', geakRole('profile_engineer'), 'baseline',
-    'Profile the baseline and classify the bottleneck; record the four dials A-D of the method.', {
-      WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0, COMMANDMENT,
-      GFX, KT,
-    }, { stage: 'profile' }),
-  { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
+const PROFILE_LAYERS = ['trace', 'pmc', 'att', 'ir'];
+const profileMissing = (p) => {
+  if (!p) return ['the whole return'];
+  const out = readsCover('profile', null, p.references_read);
+  if (!/gluon_profile\.py/.test(p.command || '') || !isNum(p.exit_code)) out.push('command (gluon_profile.py) and exit_code');
+  if (!has(p.profile_dir)) out.push('profile_dir');
+  const L = p.layers && typeof p.layers === 'object' ? p.layers : {};
+  const notOk = PROFILE_LAYERS.filter(k => String(L[k] || '') !== 'ok');
+  const unstated = PROFILE_LAYERS.filter(k => !has(L[k]));
+  if (unstated.length) out.push(`layers.${unstated.join('/')} (the state profile.json records)`);
+  if (notOk.length && (p.degraded_reason || '').trim().length < 20) out.push(`degraded_reason (layers ${notOk.join(', ')} are not ok)`);
+  return out;
+};
+let profile = null;
+for (let k = 0; k <= EVIDENCE_REASKS; k++) {
+  const prev = profile;
+  profile = await agentT(
+    rolePrompt('gluon_profiler', pkgRole('gluon_profiler'), 'baseline',
+      k ? 'Your previous profile return was incomplete.' : 'Profile the frozen baseline with gluon_profile.py and classify the bottleneck from the four dials.', {
+        WORKSPACE: CANONICAL, EVAL_DIR, GPU_ID: GPU_POOL, COMMANDMENT, GFX, KT, SKILL, WORKFLOW_DIR,
+        ...(k ? { PREVIOUS_RETURN: prev, MISSING: profileMissing(prev) } : {}),
+      }, { stage: 'profile', ...(k ? { tail: 'Complete exactly the MISSING items (run the commands; do not restate). Keep everything that was already valid.' } : {}) }),
+    { phase: 'Profile', label: k ? `gluon_profiler:baseline (reask ${k})` : 'gluon_profiler:baseline', schema: PROFILE_SCHEMA });
+  if (!profileMissing(profile).length) break;
+}
+const profileGaps = profileMissing(profile);
 
 // ===========================================================================
 // PHASE: Entry — mode, champion bundle, G1, the track workspace.
@@ -434,7 +467,7 @@ const leadInputs = { EVAL_DIR, WORKSPACE: CANONICAL, KERNEL_PATH_ORIG, TRACK, GL
 let entry = await agentT(
   rolePrompt('gluon_lead', pkgRole('gluon_lead'), 'entry',
     'Settle the entry mode, build and assert the champion bundle, and create the track workspace.', {
-      ...leadInputs, ENTRY_HINT, PROFILE_SUMMARY: profile ? profile.summary_path : '',
+      ...leadInputs, ENTRY_HINT, PROFILE_SUMMARY: profile ? profile.summary_path : '', PROFILE_DIR: profile ? profile.profile_dir : '',
     }, { stage: 'entry' }),
   { phase: 'Entry', label: 'gluon_lead:entry', schema: ENTRY_SCHEMA });
 const entryMissing = (e) => {
@@ -458,6 +491,8 @@ for (let k = 0; k < EVIDENCE_REASKS && entryMissing(entry).length; k++) {
     { phase: 'Entry', label: `gluon_lead:entry (reask ${k + 1})`, schema: ENTRY_SCHEMA });
 }
 const caveats = [];
+if (profileGaps.length) caveats.push(`baseline_profile_incomplete: ${profileGaps.join('; ')}`);
+if (profile && has(profile.degraded_reason)) caveats.push(`baseline_profile_degraded: ${profile.degraded_reason}`);
 const history = [];
 let blocked = '';
 const stillMissing = entryMissing(entry);
@@ -537,7 +572,7 @@ let noImprove = 0;
 let rejected = 0;
 let stoppedBy = blocked ? 'blocked' : '';
 let deadlineHit = false;
-let lastProfile = profile ? profile.summary_path : '';
+let lastProfile = profile ? (profile.profile_dir || profile.summary_path) : '';
 const requests = [];
 const STAGE_PHASE = { transcribe: 'Transcribe', author: 'Transcribe', recover: 'Recover', climb: 'Climb' };
 
@@ -546,7 +581,7 @@ function evidenceTail(stg) {
   if (stg === 'transcribe') lines.push('- equivalence: layout_diff (ttgir_bridge.py verify), numeric, determinism, asm_parity', '- g3_occupancy: probe.py measure on the anchor IR, BOTH limiters');
   if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters');
   if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only round (nothing left to repay or nothing attributable) sets no_change=true');
-  if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir (this round's re-profile)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', `- att for layers ${[...PIPELINE_LAYERS].join('/')}: capture.sh (ATT on) or rocprofv3_safe.sh --att, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
+  if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
   return lines.join('\n');
 }
 

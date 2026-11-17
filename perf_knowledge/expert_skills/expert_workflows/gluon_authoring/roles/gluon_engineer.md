@@ -53,12 +53,21 @@ field names the command you ran, its exit code and where its output is.
   rounds; never edit the task's own harness. Return `exit_code`, `json_path`, `delta_pct`, `noise_band_pct`, `resolved`
   (false = inside the band, `NOT RESOLVED`) and `valid` (the json's `validity.valid`). A screen is not
   acceptance; verify is.
+- Profiling: `python3 $SKILL/scripts/gluon_profile.py OUTPUT_DIR/profile --kernel <substr> --source <kernel.py> --gpu <one id of GPU_ID> --arch $GFX --compare LAST_PROFILE -- <cmd...>`
+  is this workflow's profiling entry (not `profile_kernel.sh`). One call gives the four dials of
+  `profile.md ## 3.1` — A from the IR (both occupancy limiters, spill, hot-loop mix), B from ATT
+  (cycles per MFMA, inter-MFMA intervals, stall hotspots by instruction and source line), C from the
+  PMC groups, D from the kernel trace — with `report.md`, `profile.json` (per-layer `state`) and, with
+  `--compare`, `compare.md`: the profile delta against the last kept round. Profile one representative
+  case with a few launches. A layer that is not `ok` is read from `logs/` and named, never as zero.
 - `att` — required for layers 1.5, 4 and 4+ (and a `lost_pipeline` repayment): instruction-level
-  evidence that the schedule changed the way you claim. `bash $KT/capture.sh <name> OUTPUT_DIR/att --kernel <substr> --source <kernel.py> -- <cmd>`
-  (ATT is on unless `--no-att`/`--lite`/`--isa-only`) or `bash $KT/rocprofv3_safe.sh --kernel <regex> --out OUTPUT_DIR/att --att -- <cmd>`,
-  inside `gpu_lock.sh`. If the decoder is absent (`capture.json` `att_state=decoder_absent`, exit 3
-  from `rocprofv3_safe.sh`) return `status: "unavailable"` with the command you ran and the reason; an
-  unattempted ATT is not "unavailable".
+  evidence that the schedule changed the way you claim. The round's `gluon_profile.py` call carries it
+  (cite that command, `output_dir` = `OUTPUT_DIR/profile/capture/att`); `$KT/capture.sh` or
+  `$KT/rocprofv3_safe.sh --att` directly are also accepted. Return `state` from
+  `profile.json` `layers.att.state` (or the capture's `att/rocprofv3_safe.json`): anything but `ok`
+  needs `reason`. If the decoder is absent (`decoder_absent`, exit 3 from `rocprofv3_safe.sh`) return
+  `status: "unavailable"` with the command you ran and the reason; an unattempted ATT is not
+  "unavailable".
 - `parity_gate` (G2, PHASE=recover only, port only): `python3 $SKILL/scripts/parity_gate.py --champion-ms <C> --anchor-ms <A> --champion-asm ... --anchor-asm ... [--champion-ttgir ... --anchor-ttgir ...] [--champion-lds N --anchor-lds N] --arch $GFX --threshold $PARITY_THRESHOLD --json OUTPUT_DIR/gates/parity.json`,
   `mode: "gate"`. Exit 2 means do not climb; the workflow also checks the verified ratio itself. On an
   incumbent never run it as a gate (`mode: "diagnostic"` if you use it at all).
@@ -84,7 +93,7 @@ optimization in this round.
 
 ## PHASE=recover (port)
 
-`recover.md`: re-profile the current track, attribute the anchor→champion gap with `parity_gate.py`
+`recover.md`: re-profile the current track (`gluon_profile.py`, above), attribute the anchor→champion gap with `parity_gate.py`
 across `lost_pipeline` / `lost_layout` / `lost_RA` (and the `plain@ns=1` control for
 `lost_pipeline`), then repay **one** named suspect by hand at its layer — `lost_pipeline` → layer 4
 (prefetch → authored ring → stage marker; re-injection is diagnostic only and its numbers are
@@ -96,11 +105,11 @@ the gate.
 
 ## PHASE=climb
 
-`climb.md`: re-profile (the four dials, `profile.md ## 3.1`) into `OUTPUT_DIR/profile` and return it as
-`profile_dir`; pick **one** coupled layer from the Layer Backbone that the evidence supports and that
+`climb.md`: re-profile the candidate with `gluon_profile.py ... --compare LAST_PROFILE` into
+`OUTPUT_DIR/profile` and return it as `profile_dir`, the exact call as `profile_command`; pick **one** coupled layer from the Layer Backbone that the evidence supports and that
 the archetype gives surface (`BUDGET_JSON`), read that layer's references (listed in your prompt for
 the layer you choose; open them before editing), make one attributable change, and land it on three
-pieces of evidence: budget consistent, profile delta, IR/asm signal. Return `layer`, `hypothesis`, the
+pieces of evidence: budget consistent, profile delta (`compare.md`), IR/asm signal. Return `layer`, `hypothesis`, the
 gates, `claim` (`win` | `enabling` | `negative`) and `enabling_step: true` only for a change that buys
 headroom a later layer spends (`climb.md ## A direction matures over rounds`). Inline asm needs its
 gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true` plus `disassembly_ref`. Read
@@ -113,12 +122,13 @@ gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true` plus `disa
  "hypothesis": "...", "change_summary": "...", "no_change": false, "anchor_provided": false,
  "references_read": ["<abs paths>"], "track_tag": "r3", "patch_file": "<OUTPUT_DIR>/best_patch.diff",
  "correctness": "pass|fail|not_run", "profile_dir": "<OUTPUT_DIR>/profile",
+ "profile_command": "python3 $SKILL/scripts/gluon_profile.py <OUTPUT_DIR>/profile ... --compare <LAST_PROFILE> -- ...",
  "g3_occupancy": {"command": "...", "exit_code": 0, "ir_dir": "...", "output_path": "...",
                   "vgpr_wg_per_cu": 2, "lds_wg_per_cu": 3, "binding": "registers", "missing_reason": ""},
  "g4_screen": {"command": "... --permute ...", "exit_code": 0, "json_path": "...", "delta_pct": 4.1,
                "noise_band_pct": 1.2, "resolved": true, "valid": true},
- "att": {"status": "captured|unavailable|not_required", "tool": "capture.sh", "command": "...",
-         "exit_code": 0, "output_dir": "...", "reason": ""},
+ "att": {"status": "captured|unavailable|not_required", "tool": "gluon_profile.py", "command": "...",
+         "exit_code": 0, "output_dir": "...", "state": "ok", "reason": ""},
  "parity_gate": {"command": "...", "exit_code": 2, "ratio": 0.81, "suspects": [], "json_path": "...", "mode": "gate"},
  "equivalence": {"layout_diff": "PASS", "numeric": "pass", "determinism": "pass", "asm_parity": "pass", "output_path": "..."},
  "inline_asm": false, "disassembly_ref": "", "enabling_step": false, "claim": "win",

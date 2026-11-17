@@ -11,10 +11,15 @@ round** of the climb on each layer candidate. Profiling reads the compiled ISA a
 counters, so it is independent of plain-vs-Gluon. The bound-class judgement is **yours** — this
 skill ships no classifier (relative-first rule engine); the tools emit signals, you read them.
 
-**Who profiles, in GEAK.** `profile_engineer` takes the baseline profile (Profile phase) and the
-post-merge re-profile; the deep_engineer re-profiles its own intermediate versions inside its loop
-(`OUTPUT_DIR/profile_rN`). Both go through GEAK's own entry, `kernel_workflow/scripts/profile_kernel.sh`,
-under `gpu_lock.sh`, inside the GEAK workspace — the profiler runs where GEAK runs the kernel. There is
+**Who profiles, in GEAK.** In the gluon_authoring expert workflow, `gluon_profiler` takes the
+baseline profile and every engineer round re-profiles its candidate, all through the pack's entry
+`scripts/gluon_profile.py` (`OUTPUT_DIR/profile`): one call fills the four dials below — trace (D),
+PMC groups bisected on abort (C), ATT with its readers (B), IR with both limiters (A) — with a kernel
+filter and a timeout on every pass, a per-layer state in `profile.json`, and `--compare <prev>` for
+the profile delta. Under the plain kernel workflow, `profile_engineer` and the deep_engineer use GEAK's
+`kernel_workflow/scripts/profile_kernel.sh` (`OUTPUT_DIR/profile_rN`); add the dials it does not give
+with `gluon_profile.py` or the shared tools below. Either way it runs under `gpu_lock.sh`, inside the
+GEAK workspace — the profiler runs where GEAK runs the kernel. There is
 no "no full profile before the port lands" exemption — the anchor is profiled in full like any other
 round. When the kernel under test lives in a separate container, the pack's execution-locus layer
 (`scripts/locus.sh`, optional) applies (`### Execution locus`).
