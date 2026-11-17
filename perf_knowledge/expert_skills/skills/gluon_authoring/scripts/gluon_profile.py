@@ -8,7 +8,8 @@ and records what each layer actually produced:
   trace  rocprofv3_safe.sh --kernel-trace           -> D: per-dispatch device time
   pmc    rocprofv3_safe.sh --pmc, one pass per       -> C: MfmaUtil / VALUBusy / MemUnitStalled /
          parse_pmc.PMC_GROUPS group, bisected on       wait-over-busy, fabric bytes and L2 hit
-         abort/timeout (collect_pmc_group)
+         abort/timeout (collect_pmc_group); the split
+         that worked is remembered per box (--pmc-plan)
   att    capture.sh (ATT + IR dump + static audit)   -> B: cycles per MFMA and the inter-MFMA
          + mfma_efficiency over every decoded wave,      intervals, stall hotspots by instruction
          hotspot_analyzer, att_opclass                   and source line
@@ -161,10 +162,23 @@ def layer_trace(a, out, cmd_sh):
     return {"state": st.get("state"), "rc": st.get("rc", rc), "dir": str(d)}, dial
 
 
+def _pmc_plan_path(a):
+    """Where the box's working PMC passes are remembered: the slot budget is box- and ROCm-dependent,
+    and an over-budget group costs a full timeout before bisection splits it."""
+    if a.pmc_plan:
+        return Path(a.pmc_plan)
+    import socket
+    tc = _toolchain()
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{socket.gethostname()}_{a.arch or 'unknown'}_{tc.get('rocm') or 'unknown'}")
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "geak" / f"gluon_pmc_plan_{key}.json"
+
+
 def layer_pmc(a, out, cmd_sh):
     import parse_pmc as P
     d = out / "pmc"
     d.mkdir(parents=True, exist_ok=True)
+    plan_path = _pmc_plan_path(a)
+    plan = (_read_json(plan_path) or {}).get("groups", {})
     groups = []
     for name, counters in P.PMC_GROUPS.items():
         n = [0]
@@ -178,10 +192,29 @@ def layer_pmc(a, out, cmd_sh):
             st = _read_json(pd / "rocprofv3_safe.json") or {}
             return {"rc": st.get("rc", rc), "state": st.get("state", "error")}
 
-        res = P.collect_pmc_group(counters, run_pass)
+        known = plan.get(name)
+        res = None
+        if known and sorted(c for p_ in known["passes"] for c in p_) + sorted(known["dropped"]) == sorted(counters):
+            # The remembered split: run its passes as they are; any failure falls back to bisection.
+            res = {"passes": [], "dropped": list(known["dropped"]), "failed": [], "partial": [], "plan": str(plan_path)}
+            for cs in known["passes"]:
+                o = run_pass(cs)
+                if o["rc"] != 0:
+                    res = None
+                    break
+                res["passes"].append(list(cs))
+        if res is None:
+            res = P.collect_pmc_group(counters, run_pass)
         res["group"] = name
         groups.append(res)
+        if not res["failed"] and not res["partial"] and res["passes"]:
+            plan[name] = {"passes": res["passes"], "dropped": res["dropped"]}
     state = P.collection_state(groups)
+    try:
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(json.dumps({"schema": "gluon_pmc_plan/1", "groups": plan}, indent=1))
+    except OSError:
+        pass
     parsed = P.parse_pmc(str(d), re.compile(a.kernel_regex))
     der = P.derived(parsed, arch=a.arch)
     with open(out / "analysis" / "pmc.txt", "w") as fh:
@@ -199,7 +232,8 @@ def layer_pmc(a, out, cmd_sh):
     info = {"state": "ok" if state == "collected" else state, "groups": [
         {"group": g["group"], "passes": g["passes"], "dropped": g["dropped"],
          "failed": [f.get("state") for f in g.get("failed", [])],
-         "partial": [p.get("state") for p in g.get("partial", [])]} for g in groups], "dir": str(d)}
+         "partial": [p.get("state") for p in g.get("partial", [])], "from_plan": bool(g.get("plan"))}
+        for g in groups], "dir": str(d), "pmc_plan": str(plan_path)}
     return info, dial
 
 
@@ -536,6 +570,8 @@ def main(argv=None):
     ap.add_argument("--arch", help="gfx target from the execution record, e.g. gfx942")
     ap.add_argument("--layers", default=",".join(LAYERS), help="comma list of trace,pmc,att (IR is always taken)")
     ap.add_argument("--timeout", default="300", help="seconds per profiler pass")
+    ap.add_argument("--pmc-plan", help="file remembering this box's working PMC passes "
+                    "(default ~/.cache/geak/gluon_pmc_plan_<host>_<arch>_<rocm>.json)")
     ap.add_argument("--busy-wait", default="600",
                     help="seconds to keep retrying a pass gpu_lock.sh refuses because another tenant is on the GPU")
     ap.add_argument("--compare", help="a previous gluon_profile out dir: write compare.md")

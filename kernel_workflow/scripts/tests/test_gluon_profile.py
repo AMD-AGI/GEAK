@@ -43,7 +43,8 @@ def _profile(tmp_path, out, *extra):
     _decoder(tmp_path)
     src = tmp_path / 'app.py'
     src.write_text(APP)
-    env = _env(tmp_path, arch='gfx942', ROCPROF_ATT_LIBRARY_PATH=str(tmp_path), GEAK_GLUON_PACK_DIR=str(tmp_path / 'none'))
+    env = _env(tmp_path, arch='gfx942', ROCPROF_ATT_LIBRARY_PATH=str(tmp_path), GEAK_GLUON_PACK_DIR=str(tmp_path / 'none'),
+               XDG_CACHE_HOME=str(tmp_path / 'cache'))
     env.pop('TILE_KERNEL_CONTAINER', None)
     return subprocess.run([sys.executable, str(GP), str(out), '--kernel', '_gemm_fwd_kernel', '--source', str(src),
                            '--gpu', '0', '--arch', 'gfx942', '--timeout', '60', *extra, '--',
@@ -84,11 +85,24 @@ def test_compare_writes_the_profile_delta(tmp_path):
     assert 'Profile delta' in text and 'C.MfmaUtil' in text.split('one side only')[-1]
 
 
+def test_the_pmc_split_that_worked_is_reused(tmp_path):
+    first = tmp_path / 'r1'
+    assert _profile(tmp_path, first).returncode == 0
+    p1 = json.loads((first / 'profile.json').read_text())['layers']['pmc']
+    plan = json.loads(Path(p1['pmc_plan']).read_text())
+    assert str(tmp_path / 'cache') in p1['pmc_plan'] and set(plan['groups']) >= {'memory', 'sol', 'waitbusy'}
+    assert not any(g['from_plan'] for g in p1['groups'])
+    second = tmp_path / 'r2'
+    assert _profile(tmp_path, second, '--layers', 'pmc').returncode == 0
+    p2 = json.loads((second / 'profile.json').read_text())['layers']['pmc']
+    assert p2['state'] == 'ok' and all(g['from_plan'] for g in p2['groups'])
+
+
 def test_a_failed_layer_is_recorded_not_zeroed(tmp_path):
     out = tmp_path / 'prof'
     r = subprocess.run([sys.executable, str(GP), str(out), '--kernel', 'no_such_kernel', '--source', str(GP),
                         '--gpu', '0', '--layers', 'trace', '--timeout', '30', '--', 'true'],
-                       env=_env(tmp_path), capture_output=True, text=True, timeout=300)
+                       env=_env(tmp_path, XDG_CACHE_HOME=str(tmp_path / 'cache')), capture_output=True, text=True, timeout=300)
     prof = json.loads((out / 'profile.json').read_text())
     assert r.returncode in (4, 5), r.stdout + r.stderr
     assert prof['layers']['trace']['state'] != 'ok' and prof['dials']['D'] is None
