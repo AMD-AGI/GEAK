@@ -162,7 +162,8 @@ PY_STATE
       echo "[rocprofv3_safe] ATT unavailable: ${KT_ATT_STATUS:-dependency_probe_failed}" >&2
       exit 3
     fi
-    ARGS=(--att "${KT_ATT_ARGS[@]}" --att-target-cu 0 --att-shader-engine-mask 0xF --kernel-include-regex "$KERNEL" -d "$LOCUS_OUT")
+    # --kernel-trace + csv: profiler_artifacts.py checks the decoded dispatch against kernel_trace.csv.
+    ARGS=(--att "${KT_ATT_ARGS[@]}" --att-target-cu 0 --att-shader-engine-mask 0xF --kernel-trace "${ARGS[@]}")
     [ "$MODE" = att-wide ] && ARGS+=(--att-simd-select 0xF) ;;
   *)
     # shellcheck disable=SC2206
