@@ -16,16 +16,14 @@ by an agent returning **structured JSON**.
 2. **Independent verification of every claimed speedup** — each engineer's patch is re-benchmarked
    by a separate `verify_engineer` in a clean workspace *as soon as it finishes* (pipelined). The
    script trusts only verified, absolute-latency numbers → the winner is genuinely the fastest.
-3. **Specialist engineers (A)** — `algorithm | memory | compute | host_runtime`; each loads only its
-   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable. Plus a
-   fifth **`deep_explore`** track: an open-ended deep optimizer the TechLead hands a high target (Nx
+3. **Specialist engineers (A)** — `algorithm | memory | compute | host_runtime | tune`; each loads only its
+   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable. `tune` is a
+   measured configuration search (tiles, waves, MFMA shape, per-shape dispatch; `knowledge/tuning_playbook.md`),
+   planned when the config is likely stale — typically right after a structural commit. Plus a
+   sixth **`deep_explore`** track: an open-ended deep optimizer the TechLead hands a high target (Nx
    and/or ~90% roofline) with minimal steering — broad authority (kernel + wrapper + binding), its own
    long measure→self-profile→rewrite loop. It costs `deep_cost` budget (default 2) and always runs in a
    dedicated round on its own (its ground-up rewrite isn't expected to merge with specialist patches).
-   Opt-in (`tune_engineer: "on"`): a sixth, **uncharged** `tune` engineer joins every round that is not
-   a deep_explore round — parameter-only (existing literals, config tables, per-shape config dispatch),
-   reading the vendored tuning skillset (`perf_knowledge/expert_skills/tuning/`). Its patch goes through
-   the same verify → integrate → commit path, so tuned knobs stack with that round's structural wins.
 4. **Host/Runtime as a first-class track (B)** — attacks the wall-clock floor (dispatch collapse,
    native layouts, CUDA graph, wrapper overhead). This is where the last 1.5–3x of geomean lives.
 5. **Cross-round memory (C)** — an insight blackboard + hypothesis ledger threads what was learned
@@ -79,9 +77,6 @@ Workflow({
                                //           cumulative best for a round winner to be committed
     deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
                                //           (heavyweight; always runs in its own dedicated round)
-    tune_engineer: "off",      // optional, default "off". "on": every non-deep_explore round also runs ONE
-                               //   uncharged parameter-only tune engineer (r<N>_tune, roles/tune_engineer.md)
-                               //   whose patch is verified/integrated like any other; see result.tune_engineer
     gpu_ids: "0",              // optional, comma-separated, default "0"
     gpus_per_job: 1,           // optional: GPUs each GPU command needs; detected from the task's
                                //   test when unset (see "Multi-GPU jobs"); >1 leases N of gpu_ids

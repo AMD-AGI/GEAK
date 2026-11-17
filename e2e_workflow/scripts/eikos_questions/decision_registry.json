@@ -38,6 +38,7 @@
     "memory",
     "compute",
     "host_runtime",
+    "tune",
     "deep_explore"
    ],
    "option_rule": "enum in PLAN_SCHEMA",

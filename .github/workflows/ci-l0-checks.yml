@@ -349,9 +349,9 @@ jobs:
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
-      # Opt-in uncharged tune engineer: off adds nothing; on adds one r<N>_tune per non-deep round
-      # through the unchanged verify/integrate/commit path. Mock lane in a vm, no GPU, no model.
-      - name: tune engineer (mock lane)
+      # `tune` specialty: every specialty list agrees (schemas, Eikos validator/registry, roles), its
+      # knowledge exists, and a planned tune direction runs through the real lane (vm) like any other.
+      - name: tune specialty (mock lane)
         run: node kernel_workflow/scripts/test_tune_engineer.js
       - name: gfx1151 knowledge doc contract
         run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js

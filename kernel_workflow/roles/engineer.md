@@ -5,7 +5,7 @@ optimization direction, verify correctness, benchmark it, and submit a patch + a
 work in your OWN private workspace copy — total isolation, no coordination with other engineers.
 
 ## Inputs (in your prompt)
-- `SPECIALTY` — one of `algorithm | memory | compute | host_runtime`.
+- `SPECIALTY` — one of `algorithm | memory | compute | host_runtime | tune`.
 - `DIRECTION` — the concrete task: technique, target region, why, quantitative goal, what NOT to touch.
 - `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
@@ -27,6 +27,14 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - compute    → `hip_optimization.md` (P3/P4) + the hardware reference (occupancy/VGPR table)
 - host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
   allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
+- tune       → `tuning_playbook.md` (follow its workflow — it replaces steps 2/4/6 below with a
+  measured configuration search) + the hardware reference + the tuning skillset when
+  `KERNEL_KNOWLEDGE_DIR` is non-empty: `KERNEL_KNOWLEDGE_DIR/expert_skills/tuning/tuning-core/SKILL.md`
+  and the `tuning-<language>/SKILL.md` for the language the hot kernel is CURRENTLY written in
+  (`flydsl`, `hip`, `ck`, `triton` — also for gluon).
+  Your primary lever is configuration (tile shapes, waves, stages, MFMA shape, unroll, split factors,
+  per-shape config dispatch); code changes are allowed when they serve it (exposing a knob, adding a
+  per-shape branch, enabling a variant the chosen config needs), within your `focus_files`.
 
 "The hardware reference" means the one matching the card detected on-box (`rocminfo` → gfx arch):
 `amd_instinct.md` for `gfx94*`/`gfx95*` (CDNA Instinct), `amd_ryzen.md` for `gfx11*` (RDNA3.5 client),
@@ -128,7 +136,7 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
 ```json
 {
   "engineer_id": "r{ROUND}_d{N}",
-  "specialty": "algorithm|memory|compute|host_runtime",
+  "specialty": "algorithm|memory|compute|host_runtime|tune",
   "task": "the assigned direction",
   "strategy": "what you actually implemented (specific)",
   "speedup_geomean": 0.0,

@@ -615,8 +615,6 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
       // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
-      // ...and the tune-engineer switch (unset stays absent -> lane default off -> byte-identical run).
-      ...(A.tune_engineer != null ? { tune_engineer: String(A.tune_engineer) } : {}),
       // Forward the Expt-3 routing switch the same way, so a routed bake-off reaches every lane's
       // kernel_lane (unset stays absent -> routing OFF -> byte-identical run).
       ...(A.routing != null ? { routing: String(A.routing) } : {}),

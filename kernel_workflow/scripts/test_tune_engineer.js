@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-// Mock-lane regression for the opt-in tune engineer (args.tune_engineer, no GPU, no model needed).
+// Regression for the `tune` engineer specialty (no GPU, no model needed).
 //
-// Runs the REAL kernel_lane.js in a vm with deterministic agent replies and checks:
-//   - off (the default) adds nothing: no tune dispatch, no TUNE_ENGINEER plan input, no result key;
-//   - on: every non-deep_explore round adds ONE uncharged `r<N>_tune` engineer whose patch goes through
-//     the unchanged verify -> integrate -> commit path, while the planned engineers' prompts, the budget
-//     accounting and direction_entropy are exactly what the same run gets with the switch off;
-//   - a deep_explore round gets no tune engineer; a tune-only win is committed alone.
-// BASE_LANE=/path/to/kernel_lane.js (optional) additionally checks that `off` replays a pre-feature
-// lane byte for byte.
+// `tune` is an ordinary specialty: the TechLead plans it, it is charged against the budget, the
+// engineer reads roles/engineer.md (+ knowledge/tuning_playbook.md), and its patch, history rows and
+// direction_entropy go through exactly the same structures as every other direction. Checks:
+//   - every list of specialties agrees (PLAN/RESEARCH schema, Eikos validator + registry, roles);
+//   - the knowledge the tune specialty is told to read exists;
+//   - a planned tune direction runs through the REAL kernel_lane.js (in a vm, deterministic agent
+//     replies) like any other direction, with no special-case code path.
 //
 // Run:  node kernel_workflow/scripts/test_tune_engineer.js
 'use strict';
@@ -19,13 +18,15 @@ const assert = require('assert');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const LANE = fs.readFileSync(path.join(ROOT, 'kernel_workflow', 'kernel_lane.js'), 'utf8');
-const ROLE = path.join(ROOT, 'kernel_workflow', 'roles', 'tune_engineer.md');
+const read = (...p) => fs.readFileSync(path.join(ROOT, ...p), 'utf8');
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
 const SPECIALISTS = (r) => [
   { id: `r${r}_d0`, title: 'a', specialty: 'algorithm', focus_files: ['src/a.py'], prompt: 'do a' },
   { id: `r${r}_d1`, title: 'b', specialty: 'memory', focus_files: ['src/b.py'], prompt: 'do b' },
 ];
+const WITH_TUNE = (r) => SPECIALISTS(r).concat([
+  { id: `r${r}_d2`, title: 'retune', specialty: 'tune', focus_files: ['src/config.py'], prompt: 'sweep tiles' }]);
 const DEEP = (r) => ({ stop: false, directions: [{ id: `r${r}_d0`, title: 'deep', specialty: 'deep_explore', prompt: 'go' }] });
 
 async function run(source, options = {}) {
@@ -36,7 +37,7 @@ async function run(source, options = {}) {
   const perCase = (s) => baseline.map((row) => ({ name: row.name, baseline_ms: row.latency_ms,
     optimized_ms: row.latency_ms / s, speedup: s }));
   // score(id) -> engineer-claimed == verified speedup of that direction id
-  const score = options.score || ((id) => (id.endsWith('_tune') ? 1.15 : id.endsWith('_d0') ? 1.2 : 1.1));
+  const score = options.score || ((id) => (id.endsWith('_d2') ? 1.15 : id.endsWith('_d0') ? 1.2 : 1.1));
   const plan = options.plan || ((r) => ({ stop: false, directions: SPECIALISTS(r) }));
   let cumulative = 1;
   const sandbox = {
@@ -114,106 +115,85 @@ const promptOf = (t, label) => {
   assert(p, `no prompt for ${label}`);
   return p.prompt;
 };
-const isTune = (l) => /r\d+_tune\b/.test(l);
-const TUNE_KEY_RE = /\n- TUNE_ENGINEER: [^\n]*/;
-const ON = { tune_engineer: 'on' };
+const plansTune = { plan: (r) => ({ stop: false, directions: WITH_TUNE(r) }) };
+const sorted = (xs) => Array.from(xs).sort();
 
-test('the role file exists and states the parameter boundary', async () => {
-  const role = fs.readFileSync(ROLE, 'utf8');
-  for (const s of ['parameter boundary', 'Per-shape config dispatch', 'FORBIDDEN', 'measurement_valid',
-    'invalid_measurement', 'A B A B', '"specialty": "tune"']) assert(role.includes(s), s);
+test('every list of specialties includes tune and they agree', async () => {
+  const enums = [...LANE.matchAll(/specialty: \{ type: 'string', enum: \[([^\]]*)\] \}/g)]
+    .map((m) => sorted(m[1].split(',').map((x) => x.trim().replace(/'/g, ''))));
+  assert(enums.length >= 2, 'PLAN_SCHEMA and RESEARCH_SCHEMA specialty enums not found');
+  const want = enums[0];
+  assert(want.includes('tune'), 'PLAN_SCHEMA enum lacks tune');
+  for (const e of enums) assert.deepStrictEqual(e, want);
+  const py = read('e2e_workflow', 'scripts', 'eikos_decide.py').match(/^SPECIALTIES = \{([^}]*)\}/m);
+  assert(py, 'eikos_decide.SPECIALTIES not found');
+  assert.deepStrictEqual(sorted(py[1].split(',').map((x) => x.trim().replace(/"/g, ''))), want,
+    'Eikos validator would reject a dispatched specialty');
+  const reg = JSON.parse(read('e2e_workflow', 'scripts', 'eikos_questions', 'decision_registry.json'));
+  const k2 = (reg.decisions || []).find((q) => q.id === 'K2');
+  assert(k2, 'registry K2 not found');
+  assert.deepStrictEqual(sorted(k2.options), want, 'registry K2 options drift from PLAN_SCHEMA');
+  const engLine = read('kernel_workflow', 'roles', 'engineer.md').match(/- `SPECIALTY` — one of `([^`]*)`/);
+  assert(engLine, 'engineer.md SPECIALTY line');
+  assert.deepStrictEqual(sorted(engLine[1].split('|').map((x) => x.trim())),
+    want.filter((x) => x !== 'deep_explore'), 'engineer.md SPECIALTY list');
+  assert(read('kernel_workflow', 'roles', 'tech_lead.md').includes('- **tune** —'), 'tech_lead.md specialty entry');
+  assert(read('kernel_workflow', 'roles', 'researcher.md').includes('| tune |'), 'researcher.md specialty list');
 });
 
-test('off is the default and adds nothing', async () => {
-  for (const args of [{}, { tune_engineer: 'off' }, { tune_engineer: 'nonsense' }]) {
-    const a = await run(LANE, { args });
-    assert(!a.labels.some(isTune), `tune dispatch with ${JSON.stringify(args)}`);
-    assert(!a.prompts.some((p) => TUNE_KEY_RE.test(p.prompt) || p.prompt.includes('tune_engineer.md')));
-    assert(!('tune_engineer' in a.result), 'result.tune_engineer must be absent when off');
-    assert(!a.logs.some((l) => /tune engineer/.test(l)));
+test('the knowledge the tune specialty reads exists', async () => {
+  const eng = read('kernel_workflow', 'roles', 'engineer.md');
+  assert(/- tune +→ `tuning_playbook\.md`/.test(eng), 'engineer.md knowledge map for tune');
+  assert(fs.existsSync(path.join(ROOT, 'kernel_workflow', 'knowledge', 'tuning_playbook.md')));
+  for (const d of ['tuning-core', 'tuning-flydsl', 'tuning-hip', 'tuning-ck', 'tuning-triton']) {
+    assert(fs.existsSync(path.join(ROOT, 'perf_knowledge', 'expert_skills', 'tuning', d, 'SKILL.md')), d);
   }
+  assert(read('kernel_workflow', 'roles', 'tech_lead.md').includes('2t. **When to plan a `tune` direction'));
 });
 
-test('on: one uncharged r<N>_tune per round; planned engineers unchanged', async () => {
-  const a = await run(LANE, { args: ON });
+test('no special-case code path for tune in the lane', async () => {
+  for (const s of ['tune_engineer', 'TUNE_ON', 'TUNE_ENGINEER', 'engineer_tune', "=== 'tune'"]) {
+    assert(!LANE.includes(s), `kernel_lane.js still special-cases tune: ${s}`);
+  }
+  const a = await run(LANE, plansTune);
+  assert(!('tune_engineer' in a.result));
+});
+
+test('a planned tune direction is charged and dispatched like any engineer', async () => {
+  const a = await run(LANE, plansTune);
   const b = await run(LANE, {});
-  assert.strictEqual(a.result.budget_used, b.result.budget_used, 'tune must not be charged');
-  assert.strictEqual(a.result.rounds, b.result.rounds);
-  const rounds = a.labels.filter((l) => /^tech_lead:plan r/.test(l)).length;
-  assert(rounds >= 2, `expected >= 2 rounds, got ${rounds}`);
-  for (let r = 1; r <= rounds; r++) {
-    assert(a.labels.includes(`eng r${r}_tune:tune`), `tune missing in round ${r}`);
-    assert(a.labels.includes(`verify r${r}_tune`), `tune not verified in round ${r}`);
-    for (const [d, sp] of [['d0', 'algorithm'], ['d1', 'memory']]) {
-      assert.strictEqual(promptOf(a, `eng r${r}_${d}:${sp}`), promptOf(b, `eng r${r}_${d}:${sp}`),
-        `planned engineer r${r}_${d} prompt changed`);
-    }
-  }
-  // Plan prompt: only the TUNE_ENGINEER input is added (round 1 has identical history).
-  const p1 = promptOf(a, 'tech_lead:plan r1');
-  assert(TUNE_KEY_RE.test(p1) && p1.includes('r1_tune') && p1.includes('NOT charged'));
-  assert.strictEqual(p1.replace(TUNE_KEY_RE, ''), promptOf(b, 'tech_lead:plan r1'));
-  // Tune prompt: tune role + tuning skillset, own out_dir, the ordinary engineer schema.
-  const tp = a.prompts.find((p) => p.label === 'eng r1_tune:tune');
-  for (const s of ['/repo/kernel_workflow/roles/tune_engineer.md', '/repo/kernel_workflow/knowledge/self_monitoring.md',
-    '/repo/perf_knowledge/expert_skills/tuning/', 'PARAMETERS ONLY', '/eval/round_1/engineer_tune/workspace',
-    'You are Engineer r1_tune (specialty=tune) for round 1.', '- SPECIALTY: tune']) {
-    assert(tp.prompt.includes(s), s);
-  }
-  assert(!tp.prompt.includes('roles/engineer.md'));
-  assert.deepStrictEqual(tp.schema, a.prompts.find((p) => p.label === 'eng r1_d0:algorithm').schema);
-  // The tune patch enters the round's integrate like any verified patch.
+  assert.strictEqual(a.result.budget_used, 6);
+  // 3 directions per round on a budget of 6 => 2 rounds; 2 per round => 3 rounds.
+  assert.strictEqual(a.labels.filter((l) => /^tech_lead:plan r/.test(l)).length, 2);
+  assert.strictEqual(b.labels.filter((l) => /^tech_lead:plan r/.test(l)).length, 3);
+  const tp = promptOf(a, 'eng r1_d2:tune');
+  for (const s of ['You are Engineer r1_d2 (specialty=tune) for round 1.', '/repo/kernel_workflow/roles/engineer.md',
+    '- SPECIALTY: tune', '/eval/round_1/engineer_2/workspace', 'src/config.py']) assert(tp.includes(s), s);
+  // Same prompt template as the other specialists: only the direction fields differ.
+  const norm = (p) => p.replace(/r1_d\d/g, 'ID').replace(/engineer_\d/g, 'E')
+    .replace(/specialty=\w+/g, 'S').replace(/- SPECIALTY: \w+/g, 'S').replace(/- DIRECTION: [^\n]*/, 'D');
+  assert.strictEqual(norm(tp), norm(promptOf(a, 'eng r1_d0:algorithm')));
+  assert.deepStrictEqual(a.prompts.find((p) => p.label === 'eng r1_d2:tune').schema,
+    a.prompts.find((p) => p.label === 'eng r1_d0:algorithm').schema);
+  assert(a.labels.includes('verify r1_d2'));
   const integ = promptOf(a, 'integrate r1');
-  assert(integ.includes('/eval/round_1/engineer_tune/best_patch.diff') && integ.includes('"id":"r1_tune"'));
-  // direction_entropy sees the TechLead's plan only.
-  assert.deepStrictEqual(a.result.direction_entropy, b.result.direction_entropy);
-  const te = a.result.tune_engineer;
-  assert.strictEqual(te.rounds_run, rounds);
-  assert.strictEqual(te.passed_verify, rounds);
-  assert.strictEqual(te.sent_to_integrate, rounds);
-  assert(te.per_round.every((t) => t.claimed === 1.15 && t.verified === 1.15 && !t.committed_alone));
+  assert(integ.includes('/eval/round_1/engineer_2/best_patch.diff') && integ.includes('"specialty":"tune"'));
 });
 
-test('deep_explore round: no tune engineer that round; the others still get one', async () => {
-  const a = await run(LANE, { args: ON,
-    plan: (r) => (r === 2 ? DEEP(r) : { stop: false, directions: SPECIALISTS(r) }) });
-  assert(a.labels.includes('eng r1_tune:tune'));
-  assert(!a.labels.some((l) => /r2_tune/.test(l)));
-  assert(a.logs.includes('Round 2: tune engineer skipped (dedicated deep_explore round)'));
-  assert(a.labels.includes('eng r3_tune:tune'));
-  assert(!a.result.tune_engineer.per_round.some((t) => t.round === 2));
+test('tune lands in the existing history structures', async () => {
+  const a = await run(LANE, plansTune);
+  const p2 = promptOf(a, 'tech_lead:plan r2');
+  assert(p2.includes('{"id":"r1_d2","title":"retune","specialty":"tune"'), 'history.rounds[].directions');
+  assert(/"results":\[[^\]]*\{"id":"r1_d2","claimed":1\.15,"verified":1\.15/.test(p2), 'history.rounds[].results');
+  assert(!p2.includes('"tune":{'), 'no separate tune record');
+  assert.deepStrictEqual(a.result.direction_entropy, { distinct: 3, issued: 6, ratio: 0.5 });
 });
 
 test('a tune-only win is committed alone', async () => {
-  const a = await run(LANE, { args: ON, score: (id) => (id.endsWith('_tune') ? 1.1 : 0.2) });
-  assert(/round 1 winner: engineer r1_tune \(1\.10x\)/.test(promptOf(a, 'commit r1')));
-  assert(!a.labels.includes('integrate r1'), 'one verified patch must not trigger integrate');
-  const t1 = a.result.tune_engineer.per_round[0];
-  assert(t1.round_winner && t1.committed_alone && !t1.sent_to_integrate);
-  assert.strictEqual(a.result.tune_engineer.committed_alone, 1);
+  const a = await run(LANE, { ...plansTune, score: (id) => (id.endsWith('_d2') ? 1.1 : 0.2) });
+  assert(/round 1 winner: engineer r1_d2 \(1\.10x\)/.test(promptOf(a, 'commit r1')));
+  assert(!a.labels.includes('integrate r1'));
 });
-
-test('the TechLead sees the tune record in HISTORY', async () => {
-  const a = await run(LANE, { args: ON });
-  assert(promptOf(a, 'tech_lead:plan r2').includes('"tune":{"id":"r1_tune"'));
-});
-
-test('a planned engineer that fails does not take the tune engineer down', async () => {
-  const a = await run(LANE, { args: ON, score: (id) => (id.endsWith('_tune') ? 1.1 : 0.2),
-    reply: (label) => (/^eng r1_d0:/.test(label) ? null : undefined) });
-  assert(a.labels.includes('verify r1_tune'));
-  assert(a.result.tune_engineer.per_round[0].passed_verify);
-});
-
-if (process.env.BASE_LANE) {
-  test('off replays the pre-feature lane byte for byte (BASE_LANE)', async () => {
-    const base = fs.readFileSync(process.env.BASE_LANE, 'utf8');
-    for (const opts of [{}, { score: (id) => (id.endsWith('_d1') ? 1.3 : 0.2) },
-      { plan: (r) => (r === 2 ? DEEP(r) : { stop: false, directions: SPECIALISTS(r) }) }]) {
-      assert.deepStrictEqual(await run(LANE, opts), await run(base, opts));
-    }
-  });
-}
 
 (async () => {
   for (const [name, fn] of cases) {
