@@ -222,6 +222,15 @@ Rules:
 2. **Diversity / orthogonality (this replaces any separate dedup step)**: every direction MUST have
    a distinct `specialty`+strategy AND a distinct primary `focus_files` set, so they don't collide
    and CAN be integrated. Never issue two near-duplicate directions in one round.
+2t. **The tune engineer (only if `TUNE_ENGINEER` is in your inputs).** Every round that is not a
+   dedicated deep_explore round automatically gets ONE extra parameter-only engineer
+   (`r<ROUND>_tune`, specialty `tune`), uncharged, in parallel with your directions on the same
+   canonical. So: do NOT plan a direction whose substance is sweeping existing literals / tile
+   configs / per-shape config tables of the current code — that slot is already covered. Spend your
+   directions on structural levers (algorithm, memory, compute, host_runtime, deep_explore). Its
+   results appear in `HISTORY.rounds[].tune` and in the round results like any other engineer; a
+   structural direction that exposes NEW knobs is fine — the next round's tune engineer sweeps them.
+   `tune` is not a specialty you may assign.
 2a. **Seed from perf_knowledge when available (REFERENCE ONLY).** If `KK_OPERATOR` is non-empty,
    skim the resolved cards (`KK_REFS`, plus `operators/<KK_OPERATOR>/tuning.md` and
    `KERNEL_KNOWLEDGE_DIR/index/{decision_trees,recipes}.md`) to *widen* the candidate techniques for

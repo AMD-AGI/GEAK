@@ -115,6 +115,12 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
+// Tune engineer (opt-in: tune_engineer="on"). Every round that is NOT a dedicated deep_explore round
+// gets ONE extra parameter-only engineer (id `r<N>_tune`, specialty `tune`) in parallel with the
+// planned directions, on the same canonical. It is NOT charged against BUDGET, reads
+// roles/tune_engineer.md + the tuning skillset, and its patch takes the unchanged
+// verify -> integrate -> commit path. OFF (the default) => every prompt is byte-identical.
+const TUNE_ON = String(A.tune_engineer != null ? A.tune_engineer : 'off').trim().toLowerCase() === 'on';
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
@@ -2574,6 +2580,25 @@ if (DRA_ENABLED) {
 // PHASE: Optimization loop (budget-controlled)
 // ===========================================================================
 let dispatched = 0;          // counts ONLY optimization-direction engineers (the budget)
+// Per-round tune-engineer outcomes (returned as `tune_engineer`). Stays empty when tune_engineer=off.
+const tuneLog = [];
+function tuneRecord(td, clean, verified, integrate, winner, improved) {
+  const r = clean.find(x => x.d.id === td.id);
+  const v = verified.find(x => x.d.id === td.id);
+  return {
+    id: td.id,
+    returned: !!(r && r.eng),
+    claimed: r && r.eng ? r.eng.speedup_geomean : null,
+    eng_status: r && r.eng ? r.eng.status : 'none',
+    verify_status: r && r.ver ? r.ver.status : 'none',
+    verified: r && r.ver && Number.isFinite(r.ver.verified_geomean) ? r.ver.verified_geomean : null,
+    passed_verify: !!v,
+    sent_to_integrate: !!(integrate && v),
+    round_winner: !!(winner && winner.id === td.id),
+    committed_alone: !!(winner && winner.id === td.id && improved),
+    strategy: r && r.eng ? r.eng.strategy || '' : '',
+  };
+}
 let round = 0;
 let cumulative = 1.0;        // best verified geomean speedup vs the TRUE baseline
 let bestSeen = 0;            // best verified geomean of any candidate, committed or not
@@ -2911,6 +2936,14 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         `whether the cards helped or merely crowded out what you would have tried anyway. ` : '') +
       `Read as much of the index as you like; the budget is on how much of the ROUND the KB steers, ` +
       `not on what you may look at.` } : {}),
+    // Absent when tune_engineer=off (or under optimizer=evo) => byte-identical plan prompt.
+    ...(TUNE_ON && !EVO ? { TUNE_ENGINEER:
+      `Unless this round is a dedicated deep_explore round, the lane AUTOMATICALLY adds one extra ` +
+      `parameter-only tune engineer (id r${round}_tune, specialty "tune", NOT charged to ` +
+      `BUDGET_REMAINING) that runs in parallel with your directions on the same canonical. It retunes ` +
+      `existing literals/config tables and per-shape config dispatch only. Do NOT spend a direction ` +
+      `on a pure parameter/tile sweep of the current code; plan structural directions. A structural ` +
+      `direction may expose NEW knobs — the next round's tune engineer will sweep them.` } : {}),
     // Both keys absent unless a deadline was passed => byte-identical prompt when OFF.
     ...(DEADLINE_EPOCH ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
     ...(forbidStop ? { STOP_NOT_PERMITTED:
@@ -3000,10 +3033,26 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   dispatched += roundCost;
   if (EIKOS_SHADOW_ON) directions.forEach((d) => eikosSpecialties.add(d.specialty));
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
+  // The uncharged tune engineer joins AFTER cost accounting and is kept OUT of `directions`, so the KB
+  // budget/citation bookkeeping and history.rounds[].directions (direction_entropy) see only the
+  // TechLead's plan. It runs everywhere `engineers` is used: optimize, verify, integrate, commit.
+  // Not under optimizer=evo: its parent-selection/donor contract is written for planned directions.
+  const tuneDir = (TUNE_ON && !EVO && !deepDir) ? {
+    id: `r${round}_tune`, idx: directions.length, specialty: 'tune',
+    title: 'parameter-only tuning of the current best',
+    focus_files: [], expected_speedup: null,
+    prompt: 'Retune the existing parameters of the current canonical (literals, config tables, ' +
+      'per-shape config dispatch) per roles/tune_engineer.md. No algorithmic or memory-access changes.',
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[directions.length % GPU_LIST.length] : GPU_POOL,
+    out_dir: `${EVAL_DIR}/round_${round}/engineer_tune`,
+  } : null;
+  const engineers = tuneDir ? directions.concat([tuneDir]) : directions;
+  if (tuneDir) log(`Round ${round}: + tune engineer ${tuneDir.id} (uncharged)`);
+  else if (TUNE_ON && !EVO) log(`Round ${round}: tune engineer skipped (dedicated deep_explore round)`);
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
-    directions,
+    engineers,
     async (d) => {
       if (EVO) {
         try {
@@ -3015,8 +3064,17 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         }
       }
       const isDeep = d.specialty === 'deep_explore';
-      // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
-      const readLine = isDeep
+      const isTune = d.specialty === 'tune';
+      // deep_explore reads its own role (broad authority + own iteration loop); the tune engineer reads
+      // tune_engineer.md; specialists read engineer.md.
+      const readLine = isTune
+        ? `Then Read ${WORKFLOW_DIR}/roles/tune_engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md` +
+          (KERNEL_KNOWLEDGE_DIR
+            ? `, then the tuning skills that role lists under ${KERNEL_KNOWLEDGE_DIR}/expert_skills/tuning/, and follow them. `
+            : `, and follow them (the tuning skillset is not available in this run). `) +
+          `You change PARAMETERS ONLY (existing literals/config tables + per-shape config dispatch) — no ` +
+          `algorithmic, memory-access or wrapper-structure change.`
+        : isDeep
         ? `Then Read ${WORKFLOW_DIR}/roles/deep_engineer.md and the knowledge files under ${WORKFLOW_DIR}/knowledge/ ` +
           (USE_LEARNED_READ ? '' : `— EXCLUDING knowledge/learned/, which is off for this run: do not open ` +
             `INDEX.md or any card there. `) +
@@ -3648,7 +3706,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
+    // Key absent when no tune engineer ran this round (off, evo, or a deep_explore round).
+    ...(tuneDir ? { tune: tuneRecord(tuneDir, clean, verified, integrate, winner, improved) } : {}),
   });
+  if (tuneDir) tuneLog.push({ round, ...history.rounds[history.rounds.length - 1].tune });
   log(`Round ${round} done. winner=${winner ? winner.source + ' ' + winner.geomean.toFixed(2) + 'x' : 'none'}, cumulative=${cumulative.toFixed(2)}x, noImprove=${noImprove}`);
 
   // Issue #429: reclaim superseded heavy copies after each round, then CONTINUE optimizing.
@@ -3961,6 +4022,14 @@ return {
     }
     return n ? { distinct: seen.size, issued: n, ratio: +(seen.size / n).toFixed(3) } : null;
   })(),
+  // Per-round tune engineer outcomes + summary counts. Absent when tune_engineer=off.
+  tune_engineer: TUNE_ON ? {
+    rounds_run: tuneLog.length,
+    passed_verify: tuneLog.filter(t => t.passed_verify).length,
+    committed_alone: tuneLog.filter(t => t.committed_alone).length,
+    sent_to_integrate: tuneLog.filter(t => t.sent_to_integrate).length,
+    per_round: tuneLog,
+  } : undefined,
   learned_card: learned_card && learned_card.card_path
     ? { action: learned_card.action || '', card_path: learned_card.card_path, key: learned_card.key || '' }
     : null,

@@ -181,6 +181,8 @@ const laneArgs = (wfArgs) => {
       ...(A.evolution_source_paths != null ? { evolution_source_paths: A.evolution_source_paths } : {}) } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+    // The lane's uncharged tune engineer is opt-in; forwarded only when the parent set it.
+    ...(A.tune_engineer != null ? { tune_engineer: String(A.tune_engineer) } : {}),
     // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
     // the child lane's helper scopes instead of the experiment silently covering the parent alone.
     ...(A.routing != null ? { routing: String(A.routing) } : {}),
