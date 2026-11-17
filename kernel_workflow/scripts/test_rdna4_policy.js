@@ -16,6 +16,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
   const logs = [];
   const {
     deviceName = '',
+    kernelName = 'kernel',
     deviceTarget,
     physicalCuCount,
     omitGfx = false,
@@ -52,7 +53,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
           eval_dir: '/tmp/eval',
           workspace: '/tmp/eval/workspace',
           baseline_dir: '/tmp/eval/baseline',
-          kernel_name: 'kernel',
+          kernel_name: kernelName,
           device_name: deviceName || 'fixture',
           baseline_frozen: true,
           source_files: ['kernel.py'],
@@ -211,6 +212,11 @@ function mustInclude(hay, needle, msg) {
     'deterministic expected CU count was not used for policy');
   if (identityDrift.logs.filter((line) => /identity telemetry differs/.test(line)).length !== 2) {
     throw new Error(`Director name/CU drift was not logged as telemetry: ${identityDrift.logs.join(' | ')}`);
+  }
+  // Not RDNA-specific; this file holds the only stubbed-lane harness. The name addresses the stores.
+  const annotated = await run('gfx950', '', { kernelName: 'gemm_x_task (triton, author mode; task dir h0_task)' });
+  if (annotated.result.kernel_name !== 'gemm_x') {
+    throw new Error(`the Director's note reached kernel_name: ${annotated.result.kernel_name}`);
   }
   await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 0, expectedTarget: 'r9700',
