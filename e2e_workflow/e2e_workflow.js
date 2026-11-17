@@ -1,8 +1,8 @@
 export const meta = {
   name: 'e2e-workflow',
 
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only), and RDNA 3.5 gfx115x (Strix Halo; validated only on a gfx1151 Radeon 8060S; vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 and gfx115x are vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
-  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 or gfx115x (Strix Halo) with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700 and on gfx115x) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM or SGLang only), and RDNA 3.5 gfx115x (Strix Halo; validated only on a gfx1151 Radeon 8060S; vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM or SGLang only; gfx115x is vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, on Radeon AI PRO R9700 with vLLM or SGLang, or on gfx115x (Strix Halo) with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm or sglang only on confirmed R9700; vllm only on gfx115x) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
 
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
@@ -133,6 +133,7 @@ const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
+const R9700_E2E = EXPECTED_TARGET === 'r9700';
 // ISA isolation and product policy are separate: any isolating family (GPU_FAMILIES) avoids CDNA
 // priors, but only an exact product identity selects calibrated peaks, serving backend and image policy.
 const GPU_FAMILY = gpuFamily(EXPECTED_GFX);
@@ -296,8 +297,11 @@ const LAUNCH_SCRIPT = A.launch_script || '';
 const VLLM_DEFAULT = RDNA4_PRODUCT_E2E || !!E2E_FAMILY.vllmOnly;
 const BACKEND = String(A.backend != null ? A.backend : (VLLM_DEFAULT ? 'vllm' : 'sglang')).trim()
   || (VLLM_DEFAULT ? 'vllm' : 'sglang');  // serving adapter
-if (RDNA4_PRODUCT_E2E && BACKEND !== 'vllm') {
+if (RDNA4_PRODUCT_E2E && !R9700_E2E && BACKEND !== 'vllm') {
   throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
+}
+if (R9700_E2E && !['vllm', 'sglang'].includes(BACKEND)) {
+  throw new Error(`R9700 E2E is vLLM or SGLang only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm or args.backend=sglang`);
 }
 // Model mode only: a single-kernel pass-through never starts a server.
 if (MODEL_PATH && E2E_FAMILY.vllmOnly && BACKEND !== 'vllm') {
@@ -2276,10 +2280,23 @@ function templateArguments(value) {
   }
   return [fold(text.slice(start + 1)), false];
 }
-function kernelIdentitiesMatch(a, b) {
+// Mirror of _tensile_solution_variants in kernel_selection.py: two Cijk symbols that differ only in
+// the Tensile solution knobs SIA/SU/SUS/WGM are one kernel. Not between the members of a joint chain,
+// which are declared as distinct kernels: those checks pass tensileVariants=false (kernel_matches'
+// tensile_variants in verify_chain).
+function tensileSolutionVariants(x, y) {
+  const a = x.split('_'), b = y.split('_'), knob = /^(sia|su|sus|wgm)[0-9]+$/;
+  return a[0] === 'cijk' && b[0] === 'cijk' && a.length === b.length && a.every((t, i) => {
+    if (t === b[i]) return true;
+    const l = knob.exec(t), r = knob.exec(b[i]);
+    return Boolean(l && r && l[1] === r[1]);
+  });
+}
+function kernelIdentitiesMatch(a, b, tensileVariants = true) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x) &&
+      !(tensileVariants && tensileSolutionVariants(x, y))) return false;
   // The base token drops template arguments so a bare name matches its decorated spelling; when
   // BOTH sides carry them they must agree (many kernels differ only by their template functor).
   const [xa, xc] = templateArguments(a), [ya, yc] = templateArguments(b);
@@ -2346,7 +2363,7 @@ function prepareHeadSelection(h) {
     ...out, seam_candidates: jointPhase.seam_candidates || out.seam_candidates,
   } : out).filter((candidate) => {
     if (jointPhase && !(jointPhase.required_device_kernels || []).every(k =>
-        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v)))) return false;
+        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v, false)))) return false;
     const role = String(candidate.role || '').toLowerCase();
     return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
   });
@@ -2399,8 +2416,8 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       const requiredMembers = spec.required_device_kernels;
       if (!Array.isArray(requiredMembers) || requiredMembers.length < 2 ||
           !requiredMembers.every(k => typeof k === 'string' && k.trim()) ||
-          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
-          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
+          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v, false))) ||
+          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel, false)))
         return { ok: false, why: `${regime}: joint phase must declare its anchor and companion kernels` };
       const matches = results.filter(r => r.regime === regime);
       if (matches.length !== 1)
@@ -2410,10 +2427,10 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
         return { ok: false, why: `${regime}: a leaf verdict cannot certify a joint chain` };
       const reported = verdict.required_device_kernels || [];
       if (reported.length !== requiredMembers.length ||
-          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
+          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v, false))))
         return { ok: false, why: `${regime}: joint verdict has the wrong member kernel set` };
       if (requiredMembers.some(k => !(verdict.chain_members || []).some(m =>
-          kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
+          kernelIdentitiesMatch(k, m.device_kernel, false) && Number(m.matched_kernel_calls) > 0)))
         return { ok: false, why: `${regime}: missing positive member-kernel execution evidence` };
       if (!Array.isArray(verdict.joint_call_coverage) || !verdict.joint_call_coverage.length ||
           verdict.joint_call_coverage.some(c => !Array.isArray(c.missing_members) || c.missing_members.length))
@@ -4978,6 +4995,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+          CURRENT_ENV: curEnv,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
       // Lane roster: always tune the live kernel, author EVERY backend the bake-off proposes, then add
@@ -5333,6 +5351,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+            CURRENT_ENV: curEnv,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
         return { h, gpu, ext, bake };
@@ -5548,6 +5567,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        CURRENT_ENV: curEnv,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {

@@ -162,12 +162,33 @@ def _template_arguments(value):
     return re.sub(r"[^a-z0-9]+", "_", text[start + 1:].lower()), False
 
 
-def kernel_matches(expected, observed):
+# Tensile (rocBLAS/hipBLASLt) picks a solution per shape and glues these knobs to their names
+# (ScheduleIterAlg, StaggerU, StaggerUStride, WorkGroupMapping: SIA3, SU32, SUS256, WGM8). Two Cijk
+# symbols that differ only in them are one kernel; dtype, layout, tile and ISA tokens must agree.
+_TENSILE_SOLUTION_KNOB = re.compile(r"(sia|su|sus|wgm)\d+")
+
+
+def _tensile_solution_variants(want, got):
+    want, got = want.split("_"), got.split("_")
+    if want[0] != "cijk" or got[0] != "cijk" or len(want) != len(got):
+        return False
+    for left, right in zip(want, got):
+        if left != right:
+            knobs = [_TENSILE_SOLUTION_KNOB.fullmatch(token) for token in (left, right)]
+            if not (all(knobs) and knobs[0].group(1) == knobs[1].group(1)):
+                return False
+    return True
+
+
+def kernel_matches(expected, observed, *, tensile_variants=True):
+    """``tensile_variants=False`` keeps Tensile solutions of one kernel apart: a joint chain declares
+    its members as distinct kernels, so two of them must not count as one (verify_chain)."""
     want = canonical_kernel_name(expected)
     got = canonical_kernel_name(observed)
     if not want or not got:
         return False
-    if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
+    if (want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want)
+            and not (tensile_variants and _tensile_solution_variants(want, got))):
         return False
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
@@ -254,7 +275,7 @@ def _within_any_span(event, spans, same_thread=False):
 
 
 def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_override=None,
-                            *, strict_launch=False):
+                            *, strict_launch=False, tensile_variants=True):
     marker = MARKER_PREFIX + target_callable
     spans = (_complete_spans(trace_events or [], marker)
              if spans_override is None else spans_override)
@@ -298,7 +319,8 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_
             corr is not None and corr in related_correlations)
         if strict_launch and corr is not None:
             linked = corr in related_correlations
-        if linked and kernel_matches(device_kernel, event.get("name")):
+        if linked and kernel_matches(device_kernel, event.get("name"),
+                                     tensile_variants=tensile_variants):
             matched.append(str(event.get("name") or ""))
     return {
         "target": target_callable,
@@ -325,7 +347,7 @@ def _is_nested(inner_spans, outer_spans):
 
 
 def verify(target_callable, device_kernel, capture_meta, trace_events, candidate_targets=None,
-           *, strict_launch=False):
+           *, strict_launch=False, tensile_variants=True):
     target_callable = str(target_callable or "").strip()
     device_kernel = str(device_kernel or "").strip()
     failed = []
@@ -364,7 +386,8 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         failed.append("invalid_candidate_target")
     evidence = {
         candidate: _marker_kernel_evidence(trace_events, candidate, device_kernel,
-                                           strict_launch=strict_launch)
+                                           strict_launch=strict_launch,
+                                           tensile_variants=tensile_variants)
         for candidate in candidates if valid_callable_spec(candidate)
     }
     installed_candidates = [
@@ -449,12 +472,16 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
     A score-only child may be deeper than the joint entry but cannot replace it.
     Each observed invocation must contain every required member, including when
     GPU execution is asynchronous and only host launch correlations establish it.
+    Members are matched exactly, to each other and to the launches: Tensile solutions
+    of one kernel stay distinct here, or a member that never ran would be credited
+    with another member's launches. A chain therefore names the solution its capture
+    ran; the solution-variant match applies to single-kernel selection only.
     """
     members = list(dict.fromkeys([device_kernel] + list(required_device_kernels)))
     if len(members) < 2 or any(not str(name or '').strip() for name in members):
         raise ValueError("joint selection requires at least two nonempty device kernel identities")
     verdicts = [verify(target_callable, name, capture_meta, trace_events, candidate_targets,
-                       strict_launch=True)
+                       strict_launch=True, tensile_variants=False)
                 for name in members]
     result = dict(verdicts[0])
     candidates = list(dict.fromkeys(list(candidate_targets or []) + [target_callable]))
@@ -464,7 +491,8 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
         coverage[candidate] = [
             {"call": index, "missing_members": [name for name in members
               if not _marker_kernel_evidence(trace_events, candidate, name, [span],
-                                              strict_launch=True)["matched"]]}
+                                              strict_launch=True,
+                                              tensile_variants=False)["matched"]]}
             for index, span in enumerate(spans)
         ]
     complete = {candidate for candidate, calls in coverage.items()
