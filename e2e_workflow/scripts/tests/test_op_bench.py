@@ -343,6 +343,7 @@ class _Stack:
         self.tunable_calls = []
         self.syncs = 0
         self.blas_unsupported = ("ck",)
+        self.live_blas = "_BlasBackend.Cublaslt"  # preferred_blas_library() before any switch (CDNA)
         self.have_tunable = True
         self.set_filename_raises = False
         self.write_file_raises = False
@@ -419,7 +420,9 @@ class _Stack:
         if self.have_tunable:
             cuda.tunable = tunable
 
-        def _prefer(lib):
+        def _prefer(lib=None):
+            if lib is None:
+                return stack.live_blas
             stack.blas.append(lib)
             if lib in stack.blas_unsupported:
                 raise RuntimeError("preferred_blas_library(%r) unsupported in this build" % lib)
@@ -646,15 +649,27 @@ ob_nolib = _load_without_harness_lib("op_bench_no_harness_lib", "op_bench.py")
 # mixins
 # --------------------------------------------------------------------------- #
 class _ObStateMixin:
-    """Restores every piece of op_bench module state a test may touch."""
+    """Restores every piece of op_bench module state a test may touch.
+
+    main() reads the live BLAS default through ``live_blas_default``; it is pinned to hipBLASLt (the
+    CDNA default) so a test does not depend on whether, and which, real torch is installed. ``_live``
+    sets another answer; the real function stays reachable as ``self.real_live_blas_default``."""
 
     def setUp(self):
         self._restore = []
         for mod in (ob, ob_nolib):
-            for attr in ("_GRAPH_MODE", "_TRITON_MM", "_hlib", "bench_gemm", "bench_attn"):
+            for attr in ("_GRAPH_MODE", "_TRITON_MM", "_hlib", "bench_gemm", "bench_attn",
+                         "live_blas_default"):
                 self._restore.append((mod, attr, getattr(mod, attr)))
+        self.real_live_blas_default = ob.live_blas_default
+        self._live("hipblaslt", "torch")
         ob._GRAPH_MODE = ob_nolib._GRAPH_MODE = False
         ob._TRITON_MM = ob_nolib._TRITON_MM = None
+
+    @staticmethod
+    def _live(library, source="torch", error=None):
+        answer = {"library": library, "source": source, "error": error}
+        ob.live_blas_default = ob_nolib.live_blas_default = lambda server_env="": dict(answer)
 
     def tearDown(self):
         for mod, attr, val in self._restore:
@@ -670,7 +685,7 @@ class _ObStateMixin:
 
     def _args(self, task="", **kw):
         ns = types.SimpleNamespace(task=task, backends="", repeats=3, warmup=2, tol=2e-2, seed=7,
-                                   out="", triton_autotune=False)
+                                   out="", triton_autotune=False, server_env="", live_blas="")
         for k, v in kw.items():
             setattr(ns, k, v)
         return ns
@@ -1196,6 +1211,51 @@ class TestGemmClosureAndSwitches(_FakeStackMixin, unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # bench_gemm -- the dispatch ladder
 # --------------------------------------------------------------------------- #
+class TestLiveBlasDefault(_FakeStackMixin, unittest.TestCase):
+    """live_blas_default() against the fake torch: what the server's dense GEMMs default to."""
+
+    def _read(self, server_env=""):
+        return self.real_live_blas_default(server_env)
+
+    def test_torch_preference_names_the_library(self):
+        self.stack.live_blas = "_BlasBackend.Cublas"          # gfx1151
+        self.assertEqual(self._read(), {"library": "rocblas", "source": "torch", "error": None})
+        self.stack.live_blas = "_BlasBackend.Cublaslt"        # CDNA
+        self.assertEqual(self._read()["library"], "hipblaslt")
+        self.assertEqual(self.stack.blas, [], "reading the default must not switch it")
+
+    def test_the_server_env_wins_over_this_process(self):
+        self.stack.live_blas = "_BlasBackend.Cublas"
+        # Measured on gfx1151 with torch 2.11, under `env $EXTRA_ENV` as the launchers apply it.
+        for env, lib in (("TORCH_BLAS_PREFER_HIPBLASLT=1", "hipblaslt"),
+                         ("A=1 TORCH_BLAS_PREFER_HIPBLASLT=1 B=2", "hipblaslt"),
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=0", "rocblas"),
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=0", "rocblas"),
+                         ("TORCH_BLAS_PREFER_CUBLASLT=1", "hipblaslt"),       # torch's other name
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=0 TORCH_BLAS_PREFER_CUBLASLT=1", "hipblaslt"),
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=1 TORCH_BLAS_PREFER_CUBLASLT=0", "hipblaslt"),
+                         ("PYTORCH_TUNABLEOP_ENABLED=1", "rocblas"),          # not set there: torch's
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=true", "rocblas"),     # torch honours only 1/0
+                         ('TORCH_BLAS_PREFER_HIPBLASLT="1"', "rocblas")):    # env keeps the quotes
+            got = self._read(env)
+            self.assertEqual(got["library"], lib, env)
+        self.assertEqual(self._read("TORCH_BLAS_PREFER_HIPBLASLT=1")["source"], "server_env")
+        self.assertEqual(self._read("PYTORCH_TUNABLEOP_ENABLED=1")["source"], "torch")
+
+    def test_an_unknown_or_unreadable_preference_is_an_explicit_assumption(self):
+        self.stack.live_blas = "_BlasBackend.Ck"
+        got = self._read()
+        self.assertEqual((got["library"], got["source"]), ("hipblaslt", "assumed"))
+        self.assertIn("'_BlasBackend.Ck'", got["error"])
+
+        def _raises(lib=None):
+            raise RuntimeError("no HIP device")
+        self.stack.torch.backends.cuda.preferred_blas_library = _raises
+        got = self._read()
+        self.assertEqual((got["library"], got["source"]), ("hipblaslt", "assumed"))
+        self.assertIn("no HIP device", got["error"])
+
+
 class TestBenchGemmDispatch(_FakeStackMixin, unittest.TestCase):
     META = {"op_kind": "gemm", "dtype": "bf16", "a_shape": [8, 16], "b_shape": [32, 16]}
 
@@ -1363,6 +1423,23 @@ class TestBenchGemmDispatch(_FakeStackMixin, unittest.TestCase):
     def test_unknown_backend_names_produce_no_results(self):
         _, res = self._run(backends="cutlass")
         self.assertEqual(res, [])
+
+    def test_the_live_blas_default_is_benched_when_backends_omit_it(self):
+        for backends, live, arms in (
+                ("hipblaslt,tunableop", "rocblas", ["hipblaslt", "tunableop", "rocblas"]),   # gfx1151
+                ("flydsl", "hipblaslt", ["hipblaslt", "flydsl"])):                            # CDNA
+            _, res = self._run(backends=backends, live_blas=live)
+            self.assertEqual([r["backend"] for r in res], arms)
+
+    def test_every_blas_switch_hands_the_live_default_back(self):
+        # gfx1151: the server runs rocBLAS, so after the hipBLASLt and ck arms the preference goes
+        # back to rocBLAS ("cublas"), not to hipBLASLt.
+        self._run(backends="hipblaslt,rocblas,ck", live_blas="rocblas")
+        self.assertEqual(self.stack.blas, ["hipblaslt", "cublas", "cublas", "ck", "cublas"])
+        # CDNA: the server runs hipBLASLt, which the hipBLASLt arm leaves in place.
+        self.stack.blas.clear()
+        self._run(backends="hipblaslt,rocblas,ck", live_blas="hipblaslt")
+        self.assertEqual(self.stack.blas, ["hipblaslt", "cublas", "hipblaslt", "ck", "hipblaslt"])
 
     def test_incorrect_backend_keeps_a_finite_error_and_a_timing(self):
         # A candidate that runs but returns the wrong values must stay AVAILABLE with a real ms:
@@ -1636,13 +1713,80 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
 
     def test_rocblas_winner_emits_the_blas_preference_env(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("rocblas", ms=1.0, correct=True)])
-        self.assertEqual(summary["apply_env"], "TORCH_BLAS_PREFER_HIPBLASLT=0")
+                                    results=[self._res("rocblas", ms=1.0, correct=True),
+                                             self._res("hipblaslt", ms=9.0, correct=True)])
+        self.assertEqual(summary["apply_env"], "TORCH_BLAS_PREFER_HIPBLASLT=0 TORCH_BLAS_PREFER_CUBLASLT=0")
         self.assertEqual(summary["winner_kind"], "env")
+
+    def test_a_blas_recipe_engages_on_top_of_the_server_env(self):
+        # The recipe is appended to the server's env (`env $EXTRA_ENV`), so it must select the winner there,
+        # read the way torch reads it (#582 review: the TORCH_BLAS_PREFER_CUBLASLT alias).
+        ob.live_blas_default = self.real_live_blas_default
+        for server_env, rows in (("TORCH_BLAS_PREFER_CUBLASLT=1", [("hipblaslt", 0.20), ("rocblas", 0.10)]),
+                                 ("TORCH_BLAS_PREFER_HIPBLASLT=1", [("hipblaslt", 0.20), ("rocblas", 0.10)]),
+                                 ("TORCH_BLAS_PREFER_HIPBLASLT=0", [("hipblaslt", 0.10), ("rocblas", 0.20)])):
+            summary, _ = self._run_main({"op_kind": "gemm"}, extra_argv=["--server-env", server_env],
+                                        results=[self._res(b, ms=ms, correct=True) for b, ms in rows])
+            self.assertEqual(summary["winner_kind"], "env", server_env)
+            effective = f"{server_env} {summary['apply_env']}"
+            self.assertEqual(ob._server_env_blas(effective), summary["winner_backend"], effective)
+
+    def test_the_speedup_is_scored_against_the_live_blas_default(self):
+        self._live("rocblas")
+        rows = [self._res("hipblaslt", ms=0.2453, correct=True),
+                self._res("tunableop", ms=0.2027, correct=True),
+                self._res("rocblas", ms=0.1170, correct=True),
+                self._res("triton", ms=0.1274, correct=True)]
+        summary, _ = self._run_main({"op_kind": "gemm"}, results=rows)
+        self.assertEqual((summary["baseline_backend"], summary["winner_backend"]), ("rocblas", "rocblas"))
+        self.assertEqual(summary["isolated_speedup"], 1.0)
+        self.assertEqual((summary["apply_env"], summary["winner_kind"]), ("", "none"))
+        self.assertEqual(summary["deployable_note"], "rocblas default already in use; nothing to deploy")
+        self.assertEqual(summary["live_blas_default"], "rocblas")
+        # hipBLASLt beating a live rocBLAS default is deployed by switching to it.
+        rows[0]["ms"] = 0.1
+        summary, _ = self._run_main({"op_kind": "gemm"}, results=rows)
+        self.assertEqual(summary["isolated_speedup"], 1.17)
+        self.assertEqual((summary["apply_env"], summary["winner_kind"]),
+                         ("TORCH_BLAS_PREFER_HIPBLASLT=1", "env"))
+
+    def _assert_no_verdict(self, summary, text, why):
+        self.assertTrue(summary["verdict_withheld"], why)
+        self.assertIn(why, summary["verdict_withheld_reason"])
+        for key in ("winner_backend", "baseline_backend", "isolated_speedup", "winner_kind", "apply_env",
+                    "deployable_note"):
+            self.assertIsNone(summary[key], f"{why}: {key}")
+        self.assertIn("OPBENCH NO_VERDICT harness_suspect=", text)
+        self.assertNotIn("OPBENCH winner=", text)
+
+    def test_a_winner_without_a_correct_live_default_publishes_no_verdict(self):
+        # Scoring against hipBLASLt when the live default's arm has no correct timing is what #603
+        # fixes, whichever arm is fastest (#582 review).
+        gemm = {"op_kind": "gemm"}
+        blockscale = {"op_kind": "gemm", "dtype": "fp8", "weight_block_size": [128, 128]}
+        for live, meta, rows, why in (
+                ("rocblas", gemm, [("hipblaslt", 0.20, True), ("tunableop", 0.18, True), ("rocblas", None, False)],
+                 "the rocblas arm produced no correct timing"),
+                ("rocblas", gemm, [("hipblaslt", 0.20, True), ("tunableop", 0.25, True), ("rocblas", None, False)],
+                 "the rocblas arm produced no correct timing"),
+                ("rocblas", gemm, [("hipblaslt", 0.20, True), ("rocblas", 0.15, False)],     # timed, wrong values
+                 "the rocblas arm produced no correct timing"),
+                ("hipblaslt", gemm, [("flydsl", 1.0, True), ("ck", 9.0, True)],
+                 "the hipblaslt arm produced no correct timing"),
+                ("hipblaslt", blockscale, [("aiter_blockscale", None, False), ("aiter_blockscale_target", 2.0, True),
+                                           ("aiter_bpreshuffle", 1.0, True)],
+                 "the aiter_blockscale arm produced no correct timing")):
+            self._live(live)
+            summary, text = self._run_main(meta, results=[self._res(b, ms=ms, correct=ok) for b, ms, ok in rows],
+                                           capture_stdout=True)
+            self._assert_no_verdict(summary, text, why)
+            self.assertTrue(summary["measured"])
+            self.assertEqual("(it is the live BLAS default)" in summary["verdict_withheld_reason"], meta is gemm)
 
     def test_ck_winner_is_flagged_for_deployability_verification(self):
         summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("ck", ms=1.0, correct=True)])
+                                    results=[self._res("ck", ms=1.0, correct=True),
+                                             self._res("hipblaslt", ms=9.0, correct=True)])
         self.assertEqual(summary["winner_kind"], "flag")
         self.assertEqual(summary["apply_env"], "")
         self.assertIn("verify deployability at the e2e gate", summary["deployable_note"])
@@ -1650,7 +1794,8 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
     def test_editable_winner_is_routed_to_a_kernel_rewrite(self):
         for backend in ("triton", "hip"):
             summary, _ = self._run_main({"op_kind": "gemm"},
-                                        results=[self._res(backend, ms=1.0, correct=True)])
+                                        results=[self._res(backend, ms=1.0, correct=True),
+                                                 self._res("hipblaslt", ms=9.0, correct=True)])
             self.assertTrue(summary["winner_editable"])
             self.assertEqual(summary["winner_kind"], "patch_candidate")
 
@@ -1661,14 +1806,40 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["isolated_speedup"], 1.0)      # it is its own baseline
         self.assertIn("nothing to deploy", summary["deployable_note"])
 
-    def test_library_winner_without_a_baseline_reports_a_neutral_speedup(self):
-        summary, _ = self._run_main({"op_kind": "gemm"},
-                                    results=[self._res("flydsl", ms=1.0, correct=True)])
-        self.assertEqual(summary["winner_backend"], "flydsl")
-        self.assertIsNone(summary["baseline_backend"])
-        self.assertEqual(summary["isolated_speedup"], 1.0)
-        self.assertEqual(summary["winner_kind"], "none")
-        self.assertIn("verify deployability", summary["deployable_note"])
+    def test_the_live_default_is_read_once_and_reaches_every_path(self):
+        reads = []
+
+        def live(server_env=""):
+            reads.append(server_env)
+            return {"library": "rocblas", "source": "server_env", "error": None}
+        ob.live_blas_default = live
+        for meta in ({"op_kind": "gemm"}, {"op_kind": "attn"}):
+            reads.clear()
+            summary, _ = self._run_main(meta, results=[], extra_argv=["--server-env", "X=1"])
+            self.assertEqual(reads, ["X=1"])
+            self.assertEqual(self.seen[0].live_blas, "rocblas")
+            self.assertEqual((summary["live_blas_default"], summary["live_blas_default_source"]),
+                             ("rocblas", "server_env"))
+
+    def test_every_bakeoff_gets_the_server_env(self):
+        # op_benchmarker.md runs op_bench with --server-env "<CURRENT_ENV>": each bake-off call in the
+        # e2e workflow must hand the role CURRENT_ENV, or a BLAS env accepted earlier goes unseen.
+        with open(os.path.join(os.path.dirname(SCRIPTS_DIR), "e2e_workflow.js")) as fh:
+            src = fh.read()
+        calls = src.split("roleAgent('op_benchmarker', 'bakeoff'")[1:]
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            self.assertIn("CURRENT_ENV: curEnv", call[:call.index("schema: OPBENCH_SCHEMA")])
+
+    def test_an_assumed_default_says_so(self):
+        self._live("hipblaslt", "assumed", "preferred_blas_library() is '_BlasBackend.Ck', neither "
+                                           "rocBLAS nor hipBLASLt")
+        rows = [self._res("hipblaslt", ms=1.0, correct=True)]
+        summary, _ = self._run_main({"op_kind": "gemm"}, results=rows)
+        self.assertEqual(summary["live_blas_default_source"], "assumed")
+        self.assertIn("_BlasBackend.Ck", summary["live_blas_default_error"])
+        self.assertIn("nothing to deploy (assumed: preferred_blas_library() is '_BlasBackend.Ck'",
+                      summary["deployable_note"])
 
     def test_no_correct_backend_means_no_winner_and_zero_speedup(self):
         summary, text = self._run_main(

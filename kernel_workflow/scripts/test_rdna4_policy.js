@@ -16,6 +16,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
   const logs = [];
   const {
     deviceName = '',
+    kernelName = 'kernel',
     deviceTarget,
     physicalCuCount,
     omitGfx = false,
@@ -52,7 +53,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
           eval_dir: '/tmp/eval',
           workspace: '/tmp/eval/workspace',
           baseline_dir: '/tmp/eval/baseline',
-          kernel_name: 'kernel',
+          kernel_name: kernelName,
           device_name: deviceName || 'fixture',
           baseline_frozen: true,
           source_files: ['kernel.py'],
@@ -212,6 +213,11 @@ function mustInclude(hay, needle, msg) {
   if (identityDrift.logs.filter((line) => /identity telemetry differs/.test(line)).length !== 2) {
     throw new Error(`Director name/CU drift was not logged as telemetry: ${identityDrift.logs.join(' | ')}`);
   }
+  // Not RDNA-specific; this file holds the only stubbed-lane harness. The name addresses the stores.
+  const annotated = await run('gfx950', '', { kernelName: 'gemm_x_task (triton, author mode; task dir h0_task)' });
+  if (annotated.result.kernel_name !== 'gemm_x') {
+    throw new Error(`the Director's note reached kernel_name: ${annotated.result.kernel_name}`);
+  }
   await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 0, expectedTarget: 'r9700',
   }).then(
@@ -267,13 +273,16 @@ function mustInclude(hay, needle, msg) {
   // curated under the ISA that produced it. gfx950 is the control (test_gpu_family_table.js pins
   // which ISAs isolate).
   const accepted = { validation_status: 'accepted', director_verified_speedup_geomean: 1.5 };
-  for (const [gfx, expected, isolated] of [
-    ['gfx1151', 'gfx1151', true], ['gfx1151', '', true], ['gfx1150', '', true], ['gfx950', '', false],
+  // Only the 40-CU gfx1151 has a peaks.md row; any other gfx115x part has no peaks.
+  for (const [gfx, expected, isolated, cu, status] of [
+    ['gfx1151', 'gfx1151', true, 40, 'tabulated-gfx1151'], ['gfx1151', '', true, 32, 'unknown-gfx1151-not-tabulated'],
+    ['gfx1150', '', true, 16, 'unknown-gfx1150-not-tabulated'], ['gfx950', '', false, 256, 'non-rdna'],
   ]) {
     const where = `${expected ? 'declared' : 'detected'} ${gfx}`;
-    const lane = await run(gfx, expected, { physicalCuCount: 40, validate: accepted });
+    const lane = await run(gfx, expected, { physicalCuCount: cu, validate: accepted });
     const analyzePrompt = lane.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
     mustInclude(analyzePrompt, `- GFX: ${gfx}`, `${where}: GFX did not reach the analysis prompt`);
+    mustInclude(analyzePrompt, `- ROOFLINE_STATUS: ${status}`, `${where} at ${cu} CU: wrong roofline status`);
     if (analyzePrompt.includes('Expert skills (ADVISORY') === isolated) {
       throw new Error(`${where}: expert skills ${isolated ? 'reached an isolated' : 'missing on a CDNA'} lane`);
     }
@@ -306,6 +315,8 @@ function mustInclude(hay, needle, msg) {
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
   mustInclude(e2e, 'E2E is vLLM-only');
   mustInclude(e2e, 'RDNA4_PRODUCT_E2E');
+  mustInclude(e2e, 'R9700 E2E is vLLM or SGLang only');
+  mustInclude(e2e, 'R9700_E2E');
 
   const rdna = fs.readFileSync(path.join(wfDir, 'knowledge/amd_rdna4.md'), 'utf8');
   mustInclude(rdna, 'rocprofv3-avail list --pmc');
