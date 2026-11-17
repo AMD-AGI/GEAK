@@ -104,3 +104,28 @@ def test_refuses_without_a_gpu_or_a_held_lock(tmp_path):
 
 def test_selftest():
     assert subprocess.run([sys.executable, str(GP), '--selftest'], capture_output=True, text=True).returncode == 0
+
+
+def test_a_busy_gpu_is_waited_out_never_measured(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gluon_profile_mod', GP)
+    gp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gp)
+    calls = []
+
+    def fake_run(cmd, log_path, timeout=None, env=None):
+        calls.append(cmd)
+        Path(log_path).write_text('ERROR: GPU 5 ' + gp.BUSY_MARK + ' after 30s' if len(calls) < 3 else 'ok')
+        return 1 if len(calls) < 3 else 0
+
+    monkeypatch.setattr(gp, '_run', fake_run)
+    monkeypatch.setattr(gp.time, 'sleep', lambda s: None)
+    a = type('A', (), {'busy_wait': '600'})()
+    assert gp._run_gpu(a, ['x'], tmp_path / 'l.log') == 0 and len(calls) == 3
+    assert [w['waited_s'] for w in gp.BUSY_LOG] == [60, 120]
+    gp.BUSY_LOG.clear(); calls.clear()
+    a.busy_wait = '60'
+    monkeypatch.setattr(gp, '_run', lambda cmd, log_path, timeout=None, env=None:
+                        (Path(log_path).write_text(gp.BUSY_MARK), 1)[1])
+    assert gp._run_gpu(a, ['x'], tmp_path / 'l.log') == 1
+    assert gp.BUSY_LOG[-1].get('gave_up') is True

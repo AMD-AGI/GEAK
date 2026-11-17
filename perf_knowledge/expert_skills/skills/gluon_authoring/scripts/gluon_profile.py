@@ -16,7 +16,8 @@ and records what each layer actually produced:
          deep_mfma_analysis, kernel_breakdown            mix, full-drain waits, MFMA stream breaks
 
 Every profiler call has a kernel filter and a timeout, and the workload runs from a generated
-cmd.sh so no profiler re-splits a quoted command. A layer that fails is recorded with its state and
+cmd.sh so no profiler re-splits a quoted command. A pass that gpu_lock.sh refuses because another
+tenant is on the GPU is retried after a wait (--busy-wait), never run on the busy GPU. A layer that fails is recorded with its state and
 reason (never as zeros); the exit code says whether every requested layer is usable.
 
 GPU: pass --gpu <id> (each tool takes the GEAK lock itself) or run the whole call under
@@ -72,6 +73,29 @@ def _run(cmd, log_path, timeout=None, env=None):
             return 124
 
 
+BUSY_MARK = "still shows foreign work"   # gpu_lock.sh refusing a GPU another tenant is using
+BUSY_LOG = []
+
+
+def _run_gpu(a, cmd, log_path, timeout=None):
+    """A GPU pass: when gpu_lock.sh refuses the GPU because another tenant is on it, wait and retry
+    (up to --busy-wait seconds in total), never measure on it. Each wait is recorded."""
+    waited, step = 0, 60
+    while True:
+        rc = _run(cmd, log_path, timeout=timeout)
+        try:
+            busy = rc != 0 and BUSY_MARK in Path(log_path).read_text()
+        except OSError:
+            busy = False
+        if not busy or waited >= int(a.busy_wait):
+            if busy:
+                BUSY_LOG.append({"log": str(log_path), "waited_s": waited, "gave_up": True})
+            return rc
+        time.sleep(step)
+        waited += step
+        BUSY_LOG.append({"log": str(log_path), "waited_s": waited})
+
+
 def _read_json(path):
     try:
         return json.loads(Path(path).read_text())
@@ -115,8 +139,8 @@ def _toolchain():
 # --------------------------------------------------------------------------- layers
 def layer_trace(a, out, cmd_sh):
     d = out / "trace"
-    rc = _run(["bash", KT / "rocprofv3_safe.sh", *_gpu_args("--gpu", a.gpu), "--kernel", a.kernel_regex,
-               "--out", d, "--kernel-trace", "--timeout", a.timeout, "--", cmd_sh], out / "logs" / "trace.log")
+    rc = _run_gpu(a, ["bash", KT / "rocprofv3_safe.sh", *_gpu_args("--gpu", a.gpu), "--kernel", a.kernel_regex,
+                      "--out", d, "--kernel-trace", "--timeout", a.timeout, "--", cmd_sh], out / "logs" / "trace.log")
     st = _read_json(d / "rocprofv3_safe.json") or {"state": "error", "rc": rc}
     durs = []
     for f in glob.glob(str(d / "**" / "*kernel_trace.csv"), recursive=True):
@@ -148,9 +172,9 @@ def layer_pmc(a, out, cmd_sh):
         def run_pass(cs, name=name, n=n):
             n[0] += 1
             pd = d / f"pmc_{name}" if n[0] == 1 else d / f"pmc_{name}_{n[0]}"
-            rc = _run(["bash", KT / "rocprofv3_safe.sh", *_gpu_args("--gpu", a.gpu), "--kernel", a.kernel_regex,
-                       "--out", pd, "--pmc", " ".join(cs), "--timeout", a.timeout, "--", cmd_sh],
-                      out / "logs" / f"pmc_{name}_{n[0]}.log")
+            rc = _run_gpu(a, ["bash", KT / "rocprofv3_safe.sh", *_gpu_args("--gpu", a.gpu), "--kernel", a.kernel_regex,
+                              "--out", pd, "--pmc", " ".join(cs), "--timeout", a.timeout, "--", cmd_sh],
+                          out / "logs" / f"pmc_{name}_{n[0]}.log")
             st = _read_json(pd / "rocprofv3_safe.json") or {}
             return {"rc": st.get("rc", rc), "state": st.get("state", "error")}
 
@@ -273,7 +297,7 @@ def static_dial(asm: Path, a, ana: Path):
 def layer_att(a, out, cmd_sh, want_att):
     cap = out / "capture"
     ana = out / "analysis"
-    rc = _run(["bash", KT / "capture.sh", a.name, cap, "--kernel", a.kernel, "--source", a.source,
+    rc = _run_gpu(a, ["bash", KT / "capture.sh", a.name, cap, "--kernel", a.kernel, "--source", a.source,
                *_gpu_args("--dev", a.gpu), *([] if want_att else ["--no-att"]), "--", cmd_sh],
               out / "logs" / "capture.log", timeout=int(a.timeout) * 4)
     cj = _read_json(cap / "capture.json") or {}
@@ -435,6 +459,7 @@ def profile(a, cmd):
     prof["dials"]["A"], prof["dials"]["B"] = a_dial, b_dial
     states = [v.get("state") for k, v in prof["layers"].items() if k in want or k == "ir"]
     prof["complete"] = all(s == "ok" for s in states)
+    prof["gpu_busy_waits"] = BUSY_LOG
     (out / "profile.json").write_text(json.dumps(prof, indent=1, default=str))
     write_report(prof, out / "report.md")
     if a.compare:
@@ -511,6 +536,8 @@ def main(argv=None):
     ap.add_argument("--arch", help="gfx target from the execution record, e.g. gfx942")
     ap.add_argument("--layers", default=",".join(LAYERS), help="comma list of trace,pmc,att (IR is always taken)")
     ap.add_argument("--timeout", default="300", help="seconds per profiler pass")
+    ap.add_argument("--busy-wait", default="600",
+                    help="seconds to keep retrying a pass gpu_lock.sh refuses because another tenant is on the GPU")
     ap.add_argument("--compare", help="a previous gluon_profile out dir: write compare.md")
     ap.add_argument("--name", help="capture name (default: out dir name)")
     a = ap.parse_args(argv)
