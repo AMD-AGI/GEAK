@@ -705,6 +705,21 @@
       "description": "Compatibility entry for the shared AMD ISA dispatcher, retaining the historic gfx950 default. New callers should use amd_isa --arch with an explicit target. Data/source caveats are printed per query; broad gfx950 coverage does not imply complete hardware validation."
     },
     {
+      "name": "gluon_profile",
+      "classification": "internal",
+      "path": "scripts/gluon_profile.py",
+      "command": [
+        "python3",
+        "scripts/gluon_profile.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "the pack's profiling entry (four dials, per-layer states); internal until registered as public"
+    },
+    {
       "name": "gluon_swp",
       "classification": "internal",
       "path": "scripts/gluon_swp.py",
