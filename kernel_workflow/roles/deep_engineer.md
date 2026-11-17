@@ -117,6 +117,11 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    as `best_patch.diff` for recovery and return `status:"invalid_measurement"`, `measurement_valid:false`,
    zero speedups and no per-case timings. Include `measurement_valid` in every return; true requires
    successful current-source checks and measurement commands.
+8. **`$OUTPUT_DIR/STOP` means stop now.** The lane writes it once it has stopped waiting for you
+   (your time limit passed), has killed your running processes and is verifying the patch it froze.
+   After that gpu_lock.sh refuses your commands (exit 87, `GEAK_ENGINEER_STOPPED`) and save_patch.sh
+   refuses to save (exit 3). On either refusal, or if STOP exists, run nothing more, change no file, and
+   return at once with `status:"failed"` and a note saying you were stopped.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the
@@ -124,7 +129,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 2. **Plan a stack**: pick a primary lever from the dominant bottleneck, plus 1–2 compounding levers
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
-   current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`)
+   current best. Save `best_patch.diff` (`bash $SKILL_DIR/scripts/save_patch.sh $KERNEL_PATH $OUTPUT_DIR`)
    the MOMENT you set a new best with geomean > 1.0 — not at the end. It is the RECOVERY artifact: if
    your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
    re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only

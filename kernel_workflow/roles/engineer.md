@@ -93,6 +93,11 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    Do not edit the frozen harness yourself. Keep `.geak/invalid_measurements.jsonl` as the audit trail.
    If unresolved, save the candidate diff as `best_patch.diff` for recovery, return
    `status:"invalid_measurement"`, `measurement_valid:false`, zero speedups and no per-case timings.
+9. **`$OUTPUT_DIR/STOP` means stop now.** The lane writes it once it has stopped waiting for you
+   (your time limit passed), has killed your running processes and is verifying the patch it froze.
+   After that gpu_lock.sh refuses your commands (exit 87, `GEAK_ENGINEER_STOPPED`) and save_patch.sh
+   refuses to save (exit 3). On either refusal, or if STOP exists, run nothing more, change no file, and
+   return at once with `status:"failed"` and a note saying you were stopped.
 
 ## Workflow
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record
@@ -104,7 +109,8 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO compute and report
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
-5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
+5. **Save patch** when geomean > 1.0: `bash $SKILL_DIR/scripts/save_patch.sh $KERNEL_PATH $OUTPUT_DIR`
+   (never `git diff > best_patch.diff`: it writes in place, so a reader can see half a patch).
    Do this the MOMENT you have a >1.0x result — not at the end. `best_patch.diff` is the RECOVERY
    artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
    the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk

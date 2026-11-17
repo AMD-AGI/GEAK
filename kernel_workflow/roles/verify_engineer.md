@@ -12,6 +12,11 @@ absolute per-case latencies. The script trusts only your numbers.
   on-disk patch to recover (measurement, not the engineer's return, is the source of truth). If the
   file is missing or empty, first check the Engineer's source audit (step 0). Without an invalid
   experiment, return `status:"apply_failed"`, `verified_geomean:0`.
+- `FROZEN_PATCH` — where you freeze `PATCH` before step 0. Every later step reads ONLY this copy;
+  the lane integrates and commits this exact file, never `PATCH`.
+- `STOP_ENGINEER` (optional) — present when the engineer's return never came back (timeout / API
+  failure). The engineer may still be running and rewriting `PATCH`; stop it before step 0. If it
+  cannot be stopped, or the patch will not hold still, return `status:"stop_failed"` (see Steps).
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
@@ -21,13 +26,31 @@ absolute per-case latencies. The script trusts only your numbers.
   the immutable oracle's correctness/tolerance.
 
 ## Steps
+Before anything else, stop the engineer if asked and freeze the patch, in ONE command, exactly as written.
+The stop comes first so the copy cannot be a half-written or later-replaced `best_patch.diff`; nothing to
+stop is fine. `freeze_patch.sh` copies only a patch that stays unchanged while it is copied.
+```bash
+FENCE=ok
+if [ -n "${STOP_ENGINEER:-}" ]; then
+  bash "$SKILL_DIR/scripts/stop_engineer.sh" "$STOP_ENGINEER" || FENCE=STOP_FAILED
+fi
+[ "$FENCE" = ok ] && { bash "$SKILL_DIR/scripts/freeze_patch.sh" "$PATCH" "$FROZEN_PATCH" || FENCE=FREEZE_FAILED; }
+echo "FENCE=$FENCE"
+```
+If it prints `FENCE=STOP_FAILED` or `FENCE=FREEZE_FAILED`, STOP HERE: do not build, apply or measure
+anything, and return `status:"stop_failed"`, `correctness:"not_checked"`, zero speedups, no per-case
+timings, and the script's error lines in `notes`. The engineer may still be changing the patch, so no
+number measured now could be trusted to describe what the lane would merge.
+From here on "the patch" means `FROZEN_PATCH`: never re-read or re-copy `PATCH`, even if it changes on
+disk — your numbers must describe exactly the file the lane will merge.
+
 0. When `ENGINEER_WORKSPACE` is supplied, read its `.geak/invalid_measurements.jsonl` if present.
    If the patch is missing/empty and this log records a source-binding failure, return
    `status:"invalid_measurement"`, `correctness:"not_checked"`, zero speedups, no per-case timings,
    and explain that the earlier candidate experiment was invalid. Do NOT treat this as a measured
    no-op or evidence that the edit had no benefit. For an available patch, preserve that history in
    `notes` and proceed with independent measurement after any build defect has been repaired.
-1. Build a clean copy and apply the patch:
+1. Build a clean copy and apply the FROZEN patch:
    ```bash
    # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
    # must never land in verify clones. Script excludes recursive *.so/*.o and aiter/jit, preserves
@@ -39,7 +62,7 @@ absolute per-case latencies. The script trusts only your numbers.
      --shared-root "${EVAL_DIR:-$(dirname "$VERIFY_DIR")}/_shared" --link-aiter
    cd "$WS"
    git checkout -- . 2>/dev/null || true
-   git apply "$PATCH" || { echo "PATCH_APPLY_FAILED"; }
+   git apply "$FROZEN_PATCH" || { echo "PATCH_APPLY_FAILED"; }
    ```
    (Use `$WS` as your verify workspace for all subsequent commands.)
    If the patch fails to apply → return `status:"apply_failed"`, `verified_geomean:0`.
@@ -81,7 +104,7 @@ absolute per-case latencies. The script trusts only your numbers.
 ## Return JSON
 ```json
 {
-  "status": "verified|correctness_failed|apply_failed|regression|invalid_measurement",
+  "status": "verified|correctness_failed|apply_failed|regression|invalid_measurement|stop_failed",
   "correctness": "pass|fail|not_checked",
   "verified_geomean": 0.0,
   "verified_arithmetic": 0.0,

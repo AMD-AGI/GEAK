@@ -479,8 +479,9 @@ async function main() {
       /const route = ROUTING_ON \? \{\} : null;/.test(eng) && /schema: ENG_SCHEMA \}, route\s*\)\.then\(\(eng\) => \(\{ d, eng, route \}\)\)/.test(eng) &&
       /const \{ d, eng, route \} = prev;/.test(eng) && /return \{ d, eng, ver: null, route \};/.test(eng) &&
       // R2 residual: the verify `.then` is now a BLOCK body (it first feeds the verifier's own terminal
-      // outcome to P1's shadow), still returning the host-owned ctx { d, eng, ver, patch, route }.
-      /\.then\(\(ver\) => \{/.test(eng) && /return \{ d, eng, ver, patch, route \};/.test(eng) &&
+      // outcome to P1's shadow), still returning the host-owned ctx { d, eng, ver, patch, route }. The
+      // patch is the one verify measured: its frozen copy, or EVO's immutable object when EVO is on (#577).
+      /\.then\(\(ver\) => \{/.test(eng) && /return \{ d, eng, ver, patch: EVO \? patch : frozen, route \};/.test(eng) &&
       // eikos v2 E1 (bug 5): the engineer outcome now also threads the shadow-only corrected kind (p1Kind)
       // as the final arg, after the host-owned dispatch id. The dispatch-id threading is still asserted.
       /r\.route \? r\.route\.dispatch_id : null, p1Kind\);/.test(eng));
