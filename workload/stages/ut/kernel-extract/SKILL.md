@@ -12,6 +12,7 @@ Set `SKILL_ROOT` to that vendored directory, `SHARED_TOOLS` to its `shared/`, an
 missing observations through Brain instead of silently launching another full replay.
 The plan sets scope; GPU capacity limits concurrent execution, not extraction coverage.
 
+Retained replay calls have distinct IDs within the task and preserve their compilation-variant links.
 Finish callable bindings, case geometry/weights, editable leaves and device requirements
 before freezing and running the full native UT and delivery gate. Use
 `workload/engine/campaign/run_task_entry.py <task-dir>` in the pinned runtime so the

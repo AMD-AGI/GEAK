@@ -34,8 +34,13 @@ Use `prompt.sh` for the attempt's handoff and invoke `kernel_workflow.js` with:
 | `exp_root` | `$RUN_DIR` | |
 | `budget` | config `optimize.params.budget` (default 4) | internal iterations within one attempt |
 | `min_improve` | config (default 0.05) | |
+| `deadline_epoch` | optional Unix epoch seconds | round-start cutoff only; reserve completion, verification and delivery before the outer timeout |
+| `no_stop_s` | optional seconds | with `deadline_epoch`, may refuse planner stops while remaining time exceeds this threshold |
 | `apply_to_original` | `"true"` | **critical**: changes land back in `kernel_src/`, so the next attempt continues from there — this is what lets short attempts accumulate |
 | `task` | natural-language task description | see below |
+
+Freeze and check arguments against the plan before dispatch; retain actual inputs.
+The [standalone runtime](../../../../interface/runtime/engine/README.md) is available.
 
 ## Four things the steer must state
 

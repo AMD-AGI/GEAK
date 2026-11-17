@@ -1,21 +1,30 @@
 # Using experience
 
-Consult relevant campaign reports and supplied version histories when choosing a plan.
-Match workload, hardware, runtime, quality constraints and measurement basis before
-transferring a result; retain negative and inconclusive findings too.
-Record information exclusions separately from allowed implementation/runtime changes in
-`BRIEF.md`; withholding a history does not itself narrow the permitted implementation set.
+Consult relevant campaign reports and supplied histories for the current decision.
+Retrieve by the present cause of cost and active implementation, matching workload,
+hardware, runtime, quality constraints and measurement basis. Retain negative and
+inconclusive findings. Record information exclusions separately from allowed
+implementation/runtime changes in `BRIEF.md`; withholding a history does not itself
+narrow the permitted implementation set.
 
-For a Docker/image evolution, follow the source and build revisions behind each image:
-identify the changed mechanism, when it became available, and whether the current launch
-actually enables it. An image diff suggests a hypothesis; a controlled measurement
+For image evolution, follow source/build revisions, availability and whether the current
+launch enables the change. An image diff suggests a hypothesis; a controlled measurement
 establishes its benefit. An incompatible implementation does not rule out its mechanism:
-identify what current-workload evidence would qualify a useful adaptation. Do not infer
-individual contributions from a bundled change.
+identify current evidence that could qualify an adaptation. Do not assign a bundled gain
+to individual changes.
 
-Keep detailed evidence with its campaign. When a finding is reusable, add a short,
-evidence-linked entry here: **conditions → mechanism → observed result → limits**,
-including the relevant versions. Refine or supersede it as new evidence arrives.
-Entries guide hypotheses and priorities; they do not become compulsory routes or
-override the current task's criteria. Compare planning changes under the same starting
-state and budget before claiming they improve the search.
+Form opportunities from current Profile hotspots and relevant historical mechanisms,
+retaining hotspots without historical matches. Rank by plausible serving impact, evidence
+of remaining headroom and full delivery cost. Dispatch qualified independent work in
+priority order on isolated resources; prepare unresolved high-impact opportunities
+concurrently. Revisit ordering as reports arrive.
+
+Translate useful experience into the existing `PLAN.md` question and deciding evidence;
+pass relevant conditions, differences and source links through the implementation's
+actual inputs. Revisit relevance when new reports change the bottleneck.
+
+Keep evidence and reusable notes with their campaign or supplied external index:
+**conditions → mechanism → observed result/cost → limits**, including versions and unknowns.
+Missing decision inputs and times remain unknown. Notes guide hypotheses and priorities;
+they do not become compulsory routes or override task criteria. Compare planning changes
+under the same starting state and budget before claiming improvement.

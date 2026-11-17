@@ -5,7 +5,9 @@ Define and qualify the computation boundary for an optimization task under the
 
 **Input:** selected workload evidence, source/callable identities, planned scope and runtime.
 **Output:** independently runnable frozen tasks, editable-source declarations, native
-qualification/delivery receipts and the covered or deferred identities.
+qualification/delivery receipts and the covered or deferred identities. Report separately
+the computation edited, computation timed, served regimes covered, and differences from
+the selected opportunity.
 **Acceptance:** the native task and delivery gates pass for representative inputs,
 the actual device width and the declared edit boundary. CPU preflight alone is incomplete.
 

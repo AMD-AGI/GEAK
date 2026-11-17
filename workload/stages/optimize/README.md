@@ -160,6 +160,7 @@ passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 | `RUN_DIR` / `EVAL_DIR` | the kernel's run root / this attempt's own directory |
 | `ATTEMPT_CAP` | this attempt's second limit (enforced externally) |
 | `PROMPT_OUT` | where to write the prompt |
+| `EXTRA_STEER` | optional controller guidance and relevant evidence paths forwarded into the method prompt |
 
 `measure.sh` is required. The worker passes `TASK_DIR`, `RUN_DIR`, `MEASURE_TIMEOUT`,
 and `MEASURE_NATIVE_RC_FILE`; the hook prints
