@@ -101,12 +101,12 @@
     "ut_contracts/tests/test_source_identity.py": "68989ae7bd10f43e0a9f646296b25055c1550f57172d54a64d32985d9b754a97",
     "ut_contracts/tests/test_ut_contracts.py": "77aa302cdc2b180740cc6f49895c08ef4239c7770cd0bda7854e97c77b4e0d70",
     "ut_contracts/ut_contract.py": "7f727eaa37ac45ab93c64069b9276d187f3bd7f4d9694152f8f06785cd91c75d",
-    "ut_contracts/ut_driver.py": "e22123811e21125aa0f9425759ccf9fc807994bfff025d31c1f3fb53fc2390a8"
+    "ut_contracts/ut_driver.py": "a66cdbe48b2ed734d410049b27d839002e6bb66634d156d791708df9eeed23ef"
   },
   "modified_from_origin": false,
-  "note": "Explicit native source update: accept detailed step annotations and retain target phase boundaries in point censuses. Skill bytes match source commit 7963667a87a3762cdd78e94c4657b9e82152e606; source-derived CPU trace regressions cover previously omitted phases, cross-phase draft pairing and mixed decode intervals. This changes analysis only, not the profiler backend or historical measurements.",
-  "origin": "AMD-AGI/GEAK geak-x@7963667a87a3762cdd78e94c4657b9e82152e606:workload/stages/profile/kernel-extract",
+  "note": "Upstream owned-extension fix: ut_contracts/ut_driver.py (PROVENANCE added_here/source null) leaves input conversion to the existing comparator. Original vendored-source files remain byte-identical; cases, references, gates and bounds are unchanged.",
+  "origin": "https://github.com/AMD-AGI/GEAK/tree/236ee037e4b9f90c0f48016de8a03a0b8783784f/workload/stages/profile/kernel-extract",
   "skill": "kernel-extract",
   "stage": "profile",
-  "tree_sha256": "ac1717f37326d249ce346113ffa1ee86c3033562695ae8b0ccba9607c46121ab"
+  "tree_sha256": "2ceb415235d5e410269ab6790c0dbc83c8f5da5a217f35416552b6afd35ae1c1"
 }
