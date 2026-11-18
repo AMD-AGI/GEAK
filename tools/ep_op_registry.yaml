@@ -86,3 +86,16 @@ ops:
     oracle: selfcheck
     arches: [gfx1151, gfx1150, gfx942, gfx950]
     shapes_preset: layernorm_default
+
+  - op: rmsnorm_selfcheck
+    template: rmsnorm                 # dir under tools/selfcheck_templates/
+    kernel_hip: rmsnorm_kernel.hip
+    test_cpp: test_rmsnorm.cpp
+    entry_points:
+      - rmsnorm_kernel                # __global__ body (editable)
+      - rmsnorm_launch               # launch wrapper (editable)
+    frozen_symbols:
+      - "rmsnorm_launch"             # extern C ABI in include/rmsnorm_op.h
+    oracle: selfcheck
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    shapes_preset: rmsnorm_default
