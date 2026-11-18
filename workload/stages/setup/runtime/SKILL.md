@@ -10,6 +10,9 @@ prepare the runtime specified by the plan using its native setup and resource to
 Resolve the actual image/source versions, workload inputs, tool entrypoints and resource
 availability. Use the selected benchmark's readiness checks when preparing a measurement;
 [measure](../../baseline/measure/SKILL.md) describes the bundled benchmark path.
+Follow resource selectors through native consumers that remask them; launcher affinity
+does not prove physical isolation. Resolve unwritable runtime state through its owner's
+supported controls before changing pinned sources.
 
 When asked to watch for replacement capacity, inspect the authorized resource pool until
 the plan's deadline or handoff. Report allocation changes promptly; distinguish a queued
