@@ -186,8 +186,8 @@ record enough environment information to reproduce the selected path
 and counter naming/semantics on RDNA4 client parts are not the same as on Instinct
 (CDNA), and client-GPU PMC profiling is less complete. CDNA counter names
 (`SQ_WAVES` / `VALUInsts` / the `MfmaUtil` / `VALUBusy` family) may be absent or differ.
-The ISA caveat may apply to other gfx1201 products, but GEAK's calibrated
-product policy and evidence remain R9700-only.
+This PMC evidence remains R9700-only. GEAK serving policy also covers R9600D;
+that policy does not validate PMC availability on another product.
 
 Decision rule (per-box preflight):
 - Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3-avail list --pmc` and
