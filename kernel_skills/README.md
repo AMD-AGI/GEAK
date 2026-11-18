@@ -6,6 +6,10 @@ Two ways to run, sharing the same instrument (`bin/`, the frozen eval) and knowl
   noise-aware eval, a candidate tree, a supervisor playbook, and `lessons.md`, which carries what
   worked from run to run. In the paper, a fixed four-role team scored 0.31× on its MLA task where
   the evolving team reached 0.74×.
+- **v4** ([`v4/`](v4/)): v3's roles, plus search as state + policy. `bin/archive.py` keeps every measured node with
+  per-regime results (best, noise-aware front, dispatch composites, families). Each round the lead reads a
+  search template (`v4/search/hillclimb|evo|avo.md`) and writes its actions to `decisions/round_<n>.json`:
+  mutate any node, crossover, fresh island, investigate, ship, stop. Evidence and offline replay: `v4/EVIDENCE.md`.
 - **Fixed roles v3** ([`v3/`](v3/)): six skills (v2's five + `geak-roofline`) and shared `COMMON.md` rules.
   A run may end only when a design-independent roofline cap shows ≥ 80% of the gap closed, or when an
   independent role explains the rest. It also scales to one GPU and slow evals and survives restarts.
