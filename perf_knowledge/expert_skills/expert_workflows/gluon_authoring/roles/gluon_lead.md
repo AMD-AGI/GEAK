@@ -92,8 +92,9 @@ denominator basis (`budget.md ## Roofline method`). Return:
 ## PHASE=close
 
 Inputs carry the outcome the workflow computed (`OUTCOME`), why the loop stopped (`STOPPED_BY`),
-`PARITY`, `CAVEATS`, `HISTORY` (one row per round: stage, layer, verify status, vs_baseline,
-vs_champion, kept, accepted), `REQUESTS` (resweep_request / structure_suspect), `ACCEPTED`, and
+`PARITY`, `CAVEATS`, `HISTORY` (one row per direction and per integration: round, id, stage,
+specialty, layer, verify status, vs_baseline, vs_champion, kept, accepted, claim, lesson),
+`INSIGHTS` (tech_lead's memory), `BUDGET_USED` of `BUDGET` (directions), `REQUESTS` (resweep_request / structure_suspect), `ACCEPTED`, and
 `FINAL_PATCH_SOURCE` (the patch to deliver, or empty). Do not change the outcome; you may argue with it
 in the report.
 
@@ -101,7 +102,8 @@ in the report.
    `final_patch: FINAL_PATCH`. Otherwise return `final_patch: ""`.
 2. Write `GLUON_DIR/final_report.json` (`close.md ## final_report.json (schema)`) and a short
    `GLUON_DIR/report.md`: both comparators on every number (`vs_baseline` and `vs_champion`), the
-   parity state, each round's layer and evidence refs (from `GLUON_DIR/round_N/`), caveats, deferred
+   parity state, each direction's layer and evidence refs (from `GLUON_DIR/round_N/d<i>/` and
+   `round_N/integrate/`), which directions composed and which were rivals, caveats, deferred
    work and the requests.
 3. For any outcome other than `win`, write the closure self-review `GLUON_DIR/closure_review.md` per
    `close.md ## Closure challenge` (strongest counter-evidence, untried alternatives, gotcha checks,

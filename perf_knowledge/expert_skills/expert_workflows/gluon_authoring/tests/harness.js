@@ -37,7 +37,7 @@ const layerRefsIn = (prompt, layer) => {
 // A complete engineer return for the stage in the prompt (round tag read from the prompt).
 function engineerReturn(prompt, over) {
   const stage = (prompt.match(/PHASE=(\w+)/) || [])[1];
-  const tag = (prompt.match(/ROUND_TAG: (r\d+)/) || [])[1];
+  const tag = (prompt.match(/ROUND_TAG: (r\d+(?:_\w+)?)/) || [])[1];
   const layer = (over && over.layer) || (stage === 'recover' || stage === 'climb' ? '3' : '');
   const reads = [...refsIn(prompt), ...(layer ? layerRefsIn(prompt, layer) : [])];
   const base = { stage, references_read: reads, track_tag: tag, patch_file: `/x/${tag}.diff`, correctness: 'pass' };
@@ -46,6 +46,23 @@ function engineerReturn(prompt, over) {
   if (stage === 'author') Object.assign(base, { g3_occupancy: goodG3 });
   if (stage === 'recover') Object.assign(base, { suspect: 'lost_layout', layer: '3', g3_occupancy: goodG3, g4_screen: goodG4, parity_gate: gate(0), claim: 'recovery' });
   if (stage === 'climb') Object.assign(base, { layer: '3', profile_dir: '/x/prof', profile_command: goodProfileCmd, g3_occupancy: goodG3, g4_screen: goodG4, claim: 'win' });
+  return Object.assign(base, over || {});
+}
+
+// A tech_lead plan: one direction per entry of `dirs` (default one layer-3 direction; a recover round
+// repays lost_layout).
+function planReturn(prompt, dirs) {
+  const recover = /STAGE: recover/.test(prompt);
+  const list = dirs || [recover ? { specialty: 'memory', layer: '3', suspect: 'lost_layout' } : { specialty: 'memory', layer: '3' }];
+  return { stop: false, reasoning: 'r', directions: list.map((d, i) => ({ id: `p${i}`, title: `t${i}`, prompt: 'do it', ...d })) };
+}
+
+// A complete integrate return for the prompt's ROUND_TAG.
+function integrateReturn(prompt, over) {
+  const tag = (prompt.match(/ROUND_TAG: (r\d+_int)/) || [])[1];
+  const base = { attempted: true, conclusion: 'improved', combos_tried: [{ patches: ['a', 'b'], relation: 'orthogonal' }],
+    references_read: refsIn(prompt), track_tag: tag, patch_file: `/x/${tag}.diff`, correctness: 'pass', g4_screen: goodG4 };
+  if (/STAGE: recover/.test(prompt)) base.parity_gate = gate(0);
   return Object.assign(base, over || {});
 }
 
@@ -66,6 +83,11 @@ function defaults(label, prompt, ctx) {
   if (label.startsWith('gluon_lead:close')) return { report_path: '/x/report.md', final_patch: '/tmp/eval/final_patch.diff',
     closure_review_path: '/x/closure_review.md', references_read: refsIn(prompt) };
   if (label.startsWith('gluon_engineer:')) return engineerReturn(prompt);
+  if (/^tech_lead:(re)?plan /.test(label)) return planReturn(prompt);
+  if (label.startsWith('tech_lead:memory')) return { insights: ['an insight'], ledger: [] };
+  if (label.startsWith('integrate r')) return integrateReturn(prompt);
+  if (label.startsWith('gluon_profiler:reprofile')) return { bottleneck: 'latency', command: 'python3 s/gluon_profile.py /x/rp --compare /x/prev -- python run.py',
+    exit_code: 0, profile_dir: '/x/reprofile', layers: { trace: 'ok', pmc: 'ok', att: 'ok', ir: 'ok' }, references_read: refsIn(prompt) };
   if (label.startsWith('evidence_audit')) return { ok: true, findings: [], checked: ['all'] };
   if (label === 'verify champion') return { status: 'verified', correctness: 'pass', verified_geomean: 1.0 };
   if (label.startsWith('verify r')) return { status: 'verified', correctness: 'pass', verified_geomean: 1.1 };
@@ -110,4 +132,4 @@ const inOrder = (labels, sub) => {
   return true;
 };
 
-module.exports = { escapeRe, PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };
+module.exports = { escapeRe, PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, planReturn, integrateReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };

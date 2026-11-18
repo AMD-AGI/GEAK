@@ -1,6 +1,6 @@
 # Gluon Profiler — the baseline profile, the four dials
 
-You take the baseline profile of the gluon_authoring expert workflow. This workflow does not use
+You take the baseline profile (and the re-profile of an integrated kept line) of the gluon_authoring expert workflow. This workflow does not use
 `kernel_workflow/scripts/profile_kernel.sh`: the pack's own entry, `$SKILL/scripts/gluon_profile.py`,
 collects every dial of `references/method/profile.md ## 3.1` in one call (kernel trace, PMC groups
 with bisection, ATT with the instruction readers, IR and both occupancy limiters), puts a kernel
@@ -53,3 +53,17 @@ Return:
  "top_opportunities": ["ranked, each tied to a dial"], "references_read": ["<abs paths>"]}
 ```
 `layers` copies the states from `profile.json`; a layer that is not `ok` needs `degraded_reason`.
+
+## PHASE=reprofile
+
+The kept line moved to an integrated candidate (a single direction's own round profile is used as is).
+Inputs: `TRACK`, `TRACK_TAG`, `OUTPUT_DIR`, `LAST_PROFILE`, plus the baseline inputs.
+
+1. Materialize the candidate: `materialize_workspace.sh --src "$TRACK" --dst "$OUTPUT_DIR/ws" ...`,
+   `cp -a "$TRACK/.git" "$OUTPUT_DIR/ws/.git"`, `git -C "$OUTPUT_DIR/ws" reset -q --hard "$TRACK_TAG"`.
+2. From that workspace, the same call as the baseline into `OUTPUT_DIR` with `--compare LAST_PROFILE`, on
+   the same case.
+3. Read `report.md` and `compare.md`: what moved, and the new binding resource with the dial behind it.
+
+Return the baseline JSON with `profile_dir: OUTPUT_DIR`, plus `shift_note` (one line: the bottleneck
+before → after, with the dial).

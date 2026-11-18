@@ -1094,9 +1094,9 @@ num_stages=1) that does not exist in the plain stage, so they never fan out here
 as the suggested best-of-N: **fan out one arm per axis + ③ card** you judge live (lite-profile each
 per `orchestration.md`, keep the winner as the plain **target line**), do not iterate them
 one-per-round in the tile loop. Fanning the arms out is a plain-front-end choice (in GEAK, tech_lead's
-parallel specialist directions in the plain rounds); this CLIMB-only deep pack never fans out, so inside
-the Gluon track the [D] set is worked sequentially (`orchestration.md`, `## Parallelism: bounded
-measurements only, never a fan-out of the port`). Completeness — did you leave a ceiling-raising
+parallel specialist directions in the plain rounds); inside the Gluon track the [D] set is not fanned out
+as within-layer arms, it is worked sequentially by the direction that owns that layer (`orchestration.md`,
+`## Parallelism: the transcription is never fanned out; recover and climb fan out by layer`). Completeness — did you leave a ceiling-raising
 structural bet untried before escalating? — is reviewed in the **closure self-review** (`close.md`), not
 a hard gate. The one binding rule at the transition is Non-Negotiable #3 (`index.md ##
 Non-Negotiable Rules`): the anchor is dumped from the pinned tuned-plain winner. "Prove the direction

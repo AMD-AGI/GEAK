@@ -28,8 +28,11 @@ per round:  profile -> analyze -> edit -> verify.  ONE attributable change, ONE 
             this IS `## 3. The round loop`, and it is the ONLY search this pack runs.
 ```
 
-Stage-Gluon advances a **single evolving candidate** over the layer backbone. It is a sequential
-hill-climb with a checkpoint and a backtrack — not a beam search and not a worker pool.
+Each direction advances a **single evolving candidate** over its layer: a sequential hill-climb
+with a checkpoint and a backtrack. Around it, GEAK's expert workflow runs several directions per round
+from the same checkpoint and integrates the verified ones; which layers may share a round, and when a
+coupled chain must be one paired direction instead of two, is [`orchestration.md`](orchestration.md)
+`## Parallelism: the transcription is never fanned out; recover and climb fan out by layer`. Never two arms of the same layer.
 
 **No SWEEP, no BRANCH.** SWEEP and structural branching belong to the front end
 ([`front-end.md`](front-end.md)). This deep role preserves the inherited configuration and structure
@@ -380,8 +383,8 @@ in `report.md`); the per-round summary rides GEAK's `worker_result` notes.
 ## Optional within-layer fan-out (`breadth_enabled: true` only)
 
 **In this pack this section is inert** — it ships `breadth_enabled: false` (`scripts/pack_facts.json`),
-and the track is one deep_engineer in one `deep_explore` direction ([`orchestration.md`](orchestration.md)
-`## Parallelism: bounded measurements only, never a fan-out of the port`). An undecidable within-layer choice
+and each direction is one engineer on one layer ([`orchestration.md`](orchestration.md)
+`## Parallelism: the transcription is never fanned out; recover and climb fan out by layer`). An undecidable within-layer choice
 is resolved sequentially in the same loop — narrow it with a compile-only probe (`probe.py`) and a screening
 A/B (`ab_bench.py`) on the engineer's own GPU, then confirm the keep with acceptance timing. The coupled
 backbone (memory → LDS → pipeline) is never split across engineers.

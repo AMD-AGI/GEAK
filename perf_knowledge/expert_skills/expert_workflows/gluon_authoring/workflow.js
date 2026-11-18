@@ -1,7 +1,7 @@
 export const meta = {
   name: 'gluon-authoring',
-  description: 'Expert workflow gluon_authoring: takes a kernel to Gluon on AMD CDNA (gfx942/gfx950) through the gluon_authoring method as a code-driven stage machine (entry -> budget -> transcribe -> recover -> climb -> close), with GEAK setup, frozen oracle, verify and director validation deciding acceptance.',
-  whenToUse: 'Launch this script directly to port a tuned Triton kernel to Gluon, or to climb an existing Gluon kernel, on gfx942/gfx950. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir: shared roles, GPU lock, kernel tools), args.gpu_ids, args.budget, optionally args.deadline_epoch, args.entry_mode (auto|port|incumbent|fresh) and args.target_arch. See this directory\'s README.md.',
+  description: 'Expert workflow gluon_authoring: takes a kernel to Gluon on AMD CDNA (gfx942/gfx950) through the gluon_authoring method as a code-driven stage machine (entry -> budget -> transcribe -> recover -> climb -> close). Recover and climb use the kernel workflow\'s search (tech_lead plans parallel directions, budget counts directions, an integrate step stacks the winners) with the Gluon method and its evidence gates inside each direction; GEAK setup, frozen oracle, verify and director validation decide acceptance.',
+  whenToUse: 'Launch this script directly to port a tuned Triton kernel to Gluon, or to climb an existing Gluon kernel, on gfx942/gfx950. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir: shared roles, GPU lock, kernel tools), args.gpu_ids, args.budget (directions, as in kernel-workflow), optionally args.deadline_epoch, args.entry_mode (auto|port|incumbent|fresh) and args.target_arch. See this directory\'s README.md.',
   phases: [
     { title: 'Setup', detail: 'director (kernel_workflow role): isolated eval dir + workspace, GPU identity' },
     { title: 'Benchmark', detail: 'benchmark_engineer (kernel_workflow role): COMMANDMENT + frozen baseline' },
@@ -9,8 +9,9 @@ export const meta = {
     { title: 'Entry', detail: 'gluon_lead: entry mode, champion bundle, champion_gate.py (G1), track workspace' },
     { title: 'Budget', detail: 'gluon_lead: hw_budget.py, bound class and floor (no GPU)' },
     { title: 'Transcribe', detail: 'gluon_engineer: faithful anchor + equivalence (port) / first Gluon kernel (fresh)' },
-    { title: 'Recover', detail: 'gluon_engineer: attribute and repay the debt; parity_gate.py (G2) gates the climb' },
-    { title: 'Climb', detail: 'gluon_engineer: one layer per round with G3/G4 (+ATT) evidence; verify_engineer measures' },
+    { title: 'Recover', detail: 'tech_lead plans one direction per debt suspect; gluon_engineers repay in parallel; parity_gate.py (G2) on the round winner gates the climb' },
+    { title: 'Climb', detail: 'tech_lead plans 2-3 directions (Gluon layers); gluon_engineers in parallel with G3/G4 (+ATT) evidence; verify_engineer measures each' },
+    { title: 'Integrate', detail: 'gluon_engineer PHASE=integrate: integrator.md strategy on the track tags, permuted screen; verify; tech_lead update_memory' },
     { title: 'Close', detail: 'gluon_lead: outcome, final report, closure self-review' },
     { title: 'Validate', detail: 'director (kernel_workflow role): independent validation vs the true baseline' },
   ],
@@ -45,12 +46,20 @@ const num = (v, d) => { const n = Number(v); return v == null || v === '' || !Nu
 const GPU_LIST = String(A.gpu_ids != null ? A.gpu_ids : '0').split(',').map(s => s.trim()).filter(Boolean);
 if (!GPU_LIST.length || GPU_LIST.some(id => !/^\d+$/.test(id))) throw new Error('args.gpu_ids must be a comma list of GPU ids');
 if (new Set(GPU_LIST).size !== GPU_LIST.length) throw new Error('args.gpu_ids contains duplicate GPU ids');
-// One sequential track: every GPU command takes one GPU from this pool through gpu_lock.sh.
+// Every GPU command takes one GPU from this pool through gpu_lock.sh; parallel directions queue on it.
 const GPU_POOL = GPU_LIST.join(',');
 if (num(A.gpus_per_job, 1) !== 1) throw new Error('gluon_authoring runs single-GPU kernels only (gpus_per_job must be 1)');
 
-// Rounds of the one engineer track (transcribe/author, recover and climb rounds all count).
+// The search knobs are kernel_lane.js's, with its defaults (tests/test_main_alignment.js checks them):
+// the budget counts directions (transcribe/author 1, each recover or climb direction 1, a deep_explore
+// direction DEEP_COST in a round of its own); the integrate step costs nothing.
 const BUDGET = Math.max(1, Math.floor(num(A.budget, 6)));
+const DEEP_COST = Math.max(1, Math.floor(num(A.deep_cost, 2)));
+// Optional cap on directions per round (0 = none: tech_lead paces 2-3 within the remaining budget).
+const MAX_DIRECTIONS = Math.max(0, Math.floor(num(A.max_directions, 0)));
+// With a deadline, a tech_lead stop is refused while more than NO_STOP_S remain (MAX_FORCED_REPLANS times).
+const NO_STOP_S = Math.max(0, num(A.no_stop_s, 900));
+const MAX_FORCED_REPLANS = Math.max(1, Math.floor(num(A.max_forced_replans, 6)));
 const ENTRY_HINT = String(A.entry_mode || 'auto').trim().toLowerCase();
 if (!['auto', 'port', 'incumbent', 'fresh'].includes(ENTRY_HINT)) {
   throw new Error(`args.entry_mode must be auto, port, incumbent or fresh, got '${ENTRY_HINT}'`);
@@ -106,6 +115,10 @@ const STAGE_REFS = {
     ['references/method/profile.md', '## 3.1 Required evidence — the four dials, every round'],
     ['references/method/benchmark-hygiene.md', '## The binding rule: GEAK\'s frozen task contract owns acceptance'],
   ],
+  integrate: [
+    ['references/method/climb.md', '## Layer Backbone (the gating order: which layers compose); ## 3. The round loop'],
+    ['references/method/benchmark-hygiene.md', '## The binding rule: GEAK\'s frozen task contract owns acceptance'],
+  ],
   close: [
     ['references/method/close.md', '## Stop conditions; ## Closure challenge; ## final_report.json (schema)'],
   ],
@@ -128,6 +141,12 @@ const LAYERS = Object.keys(LAYER_REFS);
 const PIPELINE_LAYERS = new Set(['1.5', '4', '4+']);
 // A debt suspect is repaid at one layer (recover.md ## 3).
 const SUSPECT_LAYER = { lost_pipeline: '4', lost_layout: '3', lost_RA: '5' };
+// The gating order of climb.md ## Layer Backbone, applied to the directions of one round (they all
+// start from the same kept line): a layer and a layer it gates never share a round (1.5 before 4 and 5,
+// 3 before 4, 4 before 4+), and the two layer-1.5 scheduling models are never two arms. A coupled pair
+// whose halves do not pay alone is one `paired` direction instead.
+const GATES = { '1.5': ['1.5', '4', '4+', '5'], '3': ['4'], '4': ['4+'] };
+const gates = (a, b) => (GATES[a] || []).includes(b);
 
 const refPath = (rel) => `${SKILL}/${rel}`;
 function requiredRefs(stage, layer) {
@@ -274,11 +293,43 @@ const ROUND_SCHEMA = obj({
     layout_diff: { type: 'string' }, numeric: { type: 'string' }, determinism: { type: 'string' },
     asm_parity: { type: 'string' }, output_path: { type: 'string' },
   }),
+  pair_screen: obj({
+    prerequisite_json: { type: 'string' }, prerequisite_delta_pct: { type: ['number', 'null'] },
+    pair_json: { type: 'string' }, pair_delta_pct: { type: ['number', 'null'] },
+  }),
   inline_asm: { type: 'boolean' }, disassembly_ref: { type: 'string' },
-  enabling_step: { type: 'boolean' }, claim: { type: 'string' },
+  enabling_step: { type: 'boolean' }, claim: { type: 'string' }, lesson: { type: 'string' },
   resweep_request: { type: 'string' }, structure_suspect: { type: 'string' }, notes: { type: 'string' },
 }, ['stage', 'references_read', 'patch_file', 'correctness']);
 const AUDIT_SCHEMA = obj({ ok: { type: 'boolean' }, findings: strs, checked: strs }, ['ok', 'findings']);
+// kernel_lane.js PLAN_SCHEMA, plus the Gluon fields of a direction (layer, suspect, paired).
+const SPECIALTIES = ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'];
+const PLAN_SCHEMA = obj({
+  stop: { type: 'boolean' }, reasoning: { type: 'string' },
+  directions: {
+    type: 'array',
+    items: obj({
+      id: { type: 'string' }, title: { type: 'string' },
+      specialty: { type: 'string', enum: SPECIALTIES },
+      focus_files: strs, expected_speedup: { type: 'number' }, prompt: { type: 'string' },
+      kk_refs: strs, learned_refs: strs,
+      layer: { type: 'string' }, suspect: { type: 'string' }, paired: { type: 'boolean' },
+    }, ['id', 'title', 'specialty', 'prompt']),
+  },
+}, ['stop', 'directions']);
+// kernel_lane.js MEMORY_SCHEMA (tech_lead PHASE=update_memory).
+const MEMORY_SCHEMA = obj({
+  insights: strs, ledger: { type: 'array', items: anyObj },
+  bottleneck_now: { type: 'string' }, suggest_next: { type: 'string' },
+}, ['insights']);
+// kernel_lane.js INTEGRATE_SCHEMA, plus what the track and verify need from an integrated candidate.
+const INTEGRATE_SCHEMA = obj({
+  attempted: { type: 'boolean' }, combos_tried: { type: 'array', items: anyObj }, best: anyObj,
+  improved_over_best_individual: { type: 'boolean' }, conclusion: { type: 'string' }, notes: { type: 'string' },
+  references_read: strs, track_tag: { type: 'string' }, patch_file: { type: 'string' },
+  correctness: { type: 'string', enum: ['pass', 'fail', 'not_run'] },
+  g4_screen: ROUND_SCHEMA.properties.g4_screen, parity_gate: ROUND_SCHEMA.properties.parity_gate,
+}, ['attempted', 'conclusion']);
 const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' }, verified_geomean: { type: 'number' },
   verified_weighted: { type: 'number' }, per_case: { type: 'array', items: anyObj }, notes: { type: 'string' },
@@ -385,6 +436,31 @@ function missingEvidence(stage, r, ctx) {
     if (PIPELINE_LAYERS.has(String(r.layer))) out.push(...attMissing(r.att));
     if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
     if (ctx.entry === 'incumbent' && r.parity_gate && r.parity_gate.mode === 'gate') out.push('parity_gate.mode=diagnostic (an incumbent has no parity gate)');
+  }
+  // A paired direction (a prerequisite + the lever it makes legal) shows that the pair, not one half, is the win.
+  if (!r.no_change && ((ctx.direction && ctx.direction.paired) || r.paired === true)) out.push(...pairMissing(r.pair_screen));
+  return out;
+}
+function pairMissing(s) {
+  if (!s || typeof s !== 'object') return ['pair_screen (ab_bench.py --permute: the prerequisite alone and the pair, each vs TRACK_START)'];
+  const out = [];
+  for (const k of ['prerequisite_json', 'pair_json']) if (!has(s[k])) out.push(`pair_screen.${k}`);
+  for (const k of ['prerequisite_delta_pct', 'pair_delta_pct']) if (!isNum(s[k])) out.push(`pair_screen.${k}`);
+  return out;
+}
+// An integrated candidate owes the track tag and patch, its correctness, the permuted screen against the
+// best individual and, below the parity gate, G2 on itself. A return that improved nothing owes nothing.
+function integrateMissing(stage, x) {
+  if (!x) return ['the whole return'];
+  if (x.conclusion !== 'improved') return [];
+  const out = readsCover('integrate', null, x.references_read);
+  if (!has(x.track_tag)) out.push('track_tag');
+  if (!has(x.patch_file)) out.push('patch_file');
+  if (x.correctness !== 'pass') out.push('correctness pass (COMMANDMENT correctness on the integrated candidate)');
+  out.push(...g4Missing(x.g4_screen));
+  if (stage === 'recover') {
+    const p = x.parity_gate;
+    if (!p || !/parity_gate\.py/.test(p.command || '') || !isNum(p.exit_code) || p.mode !== 'gate') out.push('parity_gate (parity_gate.py on the integrated candidate, mode=gate)');
   }
   return out;
 }
@@ -511,9 +587,13 @@ if (entry && Array.isArray(entry.caveats)) caveats.push(...entry.caveats);
 log(`Entry: mode=${ENTRY}${blocked ? `, BLOCKED: ${blocked}` : ''}`);
 
 // The loop shape follows the entry (G0 by construction): a port lands below the comparator and is
-// allowed to give ground; an incumbent keeps the ordinary shape.
+// allowed to give ground; an incumbent or fresh kernel keeps kernel_lane.js's defaults.
+// MAX_NO_IMPROVE: climb rounds in a row without progress. PROGRESS_DELTA: how far over the best
+// candidate seen a round's winner must land to count as progress (kernel_lane.js: MIN_IMPROVE).
+// ENABLING_DELTA: how far below the track best an `enabling_step` may sit and still be kept.
 const MAX_NO_IMPROVE = Math.max(1, Math.floor(num(A.max_no_improve, ENTRY === 'port' ? 6 : 2)));
-const PROGRESS_DELTA = num(A.progress_delta, ENTRY === 'port' ? -0.05 : 0);
+const PROGRESS_DELTA = num(A.progress_delta, ENTRY === 'port' ? -0.05 : MIN_IMPROVE);
+const ENABLING_DELTA = num(A.enabling_delta, ENTRY === 'port' ? -0.05 : 0);
 
 // ===========================================================================
 // PHASE: Budget — hw_budget.py before any authoring (no GPU).
@@ -558,7 +638,18 @@ const CHAMP_PRIMARY = champVer ? primary(champVer) : 1;
 const vsChampion = (p) => (p > 0 && CHAMP_PRIMARY > 0) ? p / CHAMP_PRIMARY : 0;
 
 // ===========================================================================
-// The track: Transcribe/Author -> Recover (port) -> Climb, one engineer round at a time.
+// The search. Transcribe/Author is one direction. Recover and Climb are kernel_lane.js's round loop
+// with the Gluon method inside each direction:
+//   kernel_lane.js                                 here
+//   tech_lead plan_round: ~2-3 orthogonal          the same role and phase, plus a Gluon addendum
+//     directions within the remaining budget         (layers, paired directions, the layer gating order)
+//   engineer per direction, then verify_engineer   gluon_engineer per direction (G3/G4/ATT, audit), then verify_engineer
+//   integrator when >= 2 verified                  gluon_engineer PHASE=integrate (integrator.md's strategy on the
+//                                                    track tags, permuted screen), then verify_engineer
+//   commit the winner, profile_engineer reprofile  the track moves to the winner's tag; its gluon_profile.py profile
+//   tech_lead update_memory                        the same role and phase
+// Every direction works in its own copy of the track and fetches its tag back, so the track is only a
+// store of tags; TRACK_START is the kept line every direction of a round starts from.
 // ===========================================================================
 const BASE_TAG = 'geak_base';
 let trackTag = BASE_TAG;
@@ -573,169 +664,418 @@ let rejected = 0;
 let stoppedBy = blocked ? 'blocked' : '';
 let deadlineHit = false;
 let lastProfile = profile ? (profile.profile_dir || profile.summary_path) : '';
+let bestSeen = 0;               // best verified candidate of any round, kept or not (kernel_lane.js)
+let dispatched = 0;             // budget spent, in directions
+let round = 0;
+let forcedReplans = 0;
+let bestPerCase = BASELINE_PER_CASE;
+const memory = { insights: [], ledger: [], bottleneck_now: '', suggest_next: '' };
 const requests = [];
 const STAGE_PHASE = { transcribe: 'Transcribe', author: 'Transcribe', recover: 'Recover', climb: 'Climb' };
 
-function evidenceTail(stg) {
+function evidenceTail(stg, d) {
   const lines = ['## Evidence this round must return (checked in code; a gap is sent back, then rejected)'];
   if (stg === 'transcribe') lines.push('- equivalence: layout_diff (ttgir_bridge.py verify), numeric, determinism, asm_parity', '- g3_occupancy: probe.py measure on the anchor IR, BOTH limiters');
   if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters');
-  if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only round (nothing left to repay or nothing attributable) sets no_change=true');
+  if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only direction (nothing left to repay or nothing attributable) sets no_change=true');
   if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
+  if (d && d.paired) lines.push('- pair_screen: ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
+  if (d && d.planned) lines.push('- lesson: one line on what this direction showed, for a null or negative result too (the next plan reads it)');
   return lines.join('\n');
 }
 
-for (let round = 1; round <= BUDGET && !stoppedBy; round++) {
-  if (TOKENS && TOKENS.total && TOKENS.remaining() < TOKEN_RESERVE) { stoppedBy = 'token_budget'; break; }
-  const clock = await secondsLeft(`r${round}`);
-  if (clock.left <= DEADLINE_RESERVE_S) {
-    deadlineHit = true; stoppedBy = 'deadline';
-    log(`Deadline: ${Math.round(clock.left / 60)} min left, ${Math.round(DEADLINE_RESERVE_S / 60)} reserved for close; no round ${round}.`);
-    break;
-  }
-  const roundEnd = Number.isFinite(clock.left)
-    ? clock.now + Math.min(ROUND_TIME_CAP_S, clock.left - DEADLINE_RESERVE_S) : 0;
-  // The hang guard tracks the round deadline too, with a grace period for the return itself.
-  const engTimeout = roundEnd && ENGINEER_TIMEOUT_MS > 0
-    ? Math.min(ENGINEER_TIMEOUT_MS, (roundEnd - clock.now + 900) * 1000) : ENGINEER_TIMEOUT_MS;
-  phase(STAGE_PHASE[stage]);
-  const OUT = `${GLUON_DIR}/round_${round}`;
-  const roundInputs = {
-    ROUND: round, STAGE: stage, ENTRY_MODE: ENTRY, TRACK, BASE_TAG, TRACK_START: trackTag,
-    ROUND_TAG: `r${round}`, OUTPUT_DIR: OUT, GPU_ID: GPU_POOL, GFX, SKILL, KT, WORKFLOW_DIR, EVAL_DIR,
-    COMMANDMENT, BASELINE_PER_CASE, CHAMPION_BUNDLE: entry ? entry.champion_bundle : '',
-    CHAMPION_VS_BASELINE: CHAMP_PRIMARY, PARITY_THRESHOLD, PARITY: parity,
-    TRACK_BEST_VS_BASELINE: trackBest, ACCEPTED_VS_BASELINE: accepted ? accepted.primary : 1,
-    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LAST_PROFILE: lastProfile,
-    HISTORY: history.slice(-8), ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
-  };
-  const engPrompt = (extra, tail) => rolePrompt('gluon_engineer', pkgRole('gluon_engineer'), stage,
-    `Carry round ${round} of the Gluon track: stage ${stage}, one attributable change.`,
-    { ...roundInputs, ...extra }, { stage, tail: tail || evidenceTail(stage) });
-  let r = await agentT(engPrompt({}), { phase: STAGE_PHASE[stage], label: `gluon_engineer:${stage} r${round}`, schema: ROUND_SCHEMA }, engTimeout);
+const verifyPrompt = (patch, out, anchorAsIs) => rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify', anchorAsIs
+  ? 'Independently measure the anchor the canonical workspace already contains. PATCH is intentionally empty: ' +
+    'skip the apply step and measure the materialized copy of CANONICAL as it is (this is not apply_failed).'
+  : 'Independently re-measure this candidate patch.', {
+  CANONICAL, PATCH: anchorAsIs ? '' : patch, VERIFY_DIR: `${out}/verify`, ENGINEER_WORKSPACE: `${out}/ws`, EVAL_DIR,
+  WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+  ...(anchorAsIs ? { MEASURE_AS_IS: 'yes: the anchor is the workspace source; there is no patch to apply' } : {}),
+});
+
+// One direction: engineer -> evidence check (re-asked by name) -> artifact audit -> verify. Returns a
+// history row and the verified primary metric `p` (0 unless verify measured it correct).
+async function runDirection(d, stg, roundInputs, engTimeout) {
+  const ph = STAGE_PHASE[stg];
+  const inputs = { ...roundInputs, ROUND_TAG: d.id, OUTPUT_DIR: d.out,
+    ...(d.planned ? { DIRECTION: { id: d.id, title: d.title, specialty: d.specialty, layer: d.layer || '',
+      suspect: d.suspect || '', paired: d.paired === true, expected_speedup: d.expected_speedup, prompt: d.prompt } } : {}) };
+  const intro = d.planned
+    ? `Carry direction ${d.id} (${d.specialty}${d.layer ? `, layer ${d.layer}` : ''}${d.paired ? ', a prerequisite + lever pair' : ''}) ` +
+      `of round ${inputs.ROUND}, stage ${stg}, in your own copy of the track.`
+    : `Carry round ${inputs.ROUND} of the Gluon track: stage ${stg}, one attributable change.`;
+  const engPrompt = (extra, tail) => rolePrompt('gluon_engineer', pkgRole('gluon_engineer'), stg, intro,
+    { ...inputs, ...extra }, { stage: stg, tail: tail || evidenceTail(stg, d) });
+  let r = await agentT(engPrompt({}), { phase: ph, label: `gluon_engineer:${stg} ${d.id}`, schema: ROUND_SCHEMA }, engTimeout);
+  const ctx = { entry: ENTRY, direction: d.planned ? d : null };
   // Completeness, then (optionally) an independent artifact audit; each gap is sent back by name.
-  let missing = missingEvidence(stage, r, { entry: ENTRY });
+  let missing = missingEvidence(stg, r, ctx);
   let audit = null;
   for (let k = 0; ; k++) {
     if (!missing.length && EVIDENCE_AUDIT && r) {
       audit = await agentT(
         rolePrompt('evidence_auditor', pkgRole('evidence_auditor'), 'audit', 'Check that the cited evidence exists and says what the round claims.', {
-          EVIDENCE: r, STAGE: stage, GFX, SKILL, KT, OUTPUT_DIR: OUT, TRACK, ROUND_TAG: `r${round}`,
+          EVIDENCE: r, STAGE: stg, GFX, SKILL, KT, OUTPUT_DIR: d.out, TRACK, ROUND_TAG: d.id,
         }, { stage: 'audit' }),
-        { phase: STAGE_PHASE[stage], label: `evidence_audit r${round}`, effort: 'low', schema: AUDIT_SCHEMA });
+        { phase: ph, label: `evidence_audit ${d.id}`, effort: 'low', schema: AUDIT_SCHEMA });
       if (audit && audit.ok === false) {
         missing = (audit.findings || []).map(f => `audit: ${f}`);
         if (!missing.length) missing = ['audit: failed without naming a finding; re-check every cited artifact'];
       }
       if (!audit) missing = [];   // a lost audit never blocks a complete round; the gap is logged
-      if (!audit) log(`  [audit] round ${round}: auditor returned nothing; structural check stands.`);
+      if (!audit) log(`  [audit] ${d.id}: auditor returned nothing; structural check stands.`);
     }
     if (!missing.length || k >= EVIDENCE_REASKS) break;
-    log(`Round ${round}: evidence incomplete (${missing.join('; ')}); asking for exactly that.`);
+    log(`${d.id}: evidence incomplete (${missing.join('; ')}); asking for exactly that.`);
     const prev = r;
     r = await agentT(engPrompt({ PREVIOUS_RETURN: prev, MISSING: missing },
-      'Complete exactly the MISSING items for the candidate already at TRACK (do NOT start a new edit, do NOT move ' +
-      'ROUND_TAG unless an item requires it). Return the whole object with the gaps filled.'),
-    { phase: STAGE_PHASE[stage], label: `gluon_engineer:evidence r${round} (reask ${k + 1})`, schema: ROUND_SCHEMA }, engTimeout);
-    missing = missingEvidence(stage, r, { entry: ENTRY });
+      'Complete exactly the MISSING items for the candidate already tagged ROUND_TAG in your workspace (do NOT start a ' +
+      'new edit, do NOT move ROUND_TAG unless an item requires it, and fetch it into TRACK again if you do). Return the ' +
+      'whole object with the gaps filled.'),
+    { phase: ph, label: `gluon_engineer:evidence ${d.id} (reask ${k + 1})`, schema: ROUND_SCHEMA }, engTimeout);
+    missing = missingEvidence(stg, r, ctx);
   }
-  const row = { round, stage, layer: r ? (stage === 'recover' ? (SUSPECT_LAYER[r.suspect] || r.layer || '') : (r.layer || '')) : '',
-    claim: r ? r.claim || '' : '', status: '', vs_baseline: null, vs_champion: null, kept: false, accepted: false };
-  if (r && has(r.resweep_request)) requests.push({ round, kind: 'resweep_request', ref: r.resweep_request });
-  if (r && has(r.structure_suspect)) requests.push({ round, kind: 'structure_suspect', ref: r.structure_suspect });
+  const row = { round: inputs.ROUND, id: d.id, stage: stg, specialty: d.specialty || '', title: d.title || '',
+    layer: r ? (stg === 'recover' ? (SUSPECT_LAYER[r.suspect] || r.layer || '') : (r.layer || '')) : (d.layer || ''),
+    claim: r ? r.claim || '' : '', lesson: r ? r.lesson || '' : '', status: '', vs_baseline: null, vs_champion: null,
+    kept: false, accepted: false };
+  if (r && has(r.resweep_request)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'resweep_request', ref: r.resweep_request });
+  if (r && has(r.structure_suspect)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'structure_suspect', ref: r.structure_suspect });
+  if (audit && Array.isArray(audit.findings) && audit.findings.length) row.audit = audit.findings.slice(0, 5);
   if (missing.length) {
     rejected++;
     row.status = 'rejected_missing_evidence'; row.missing = missing;
-    history.push(row);
-    log(`Round ${round} REJECTED: ${missing.join('; ')}. Track stays at ${trackTag}.`);
-    if (stage === 'climb' && ++noImprove >= MAX_NO_IMPROVE) stoppedBy = 'max_no_improve';
-    if (stage === 'recover' && ++recoverRounds >= MAX_RECOVER_ROUNDS) { parity = 'parity_unreached'; stoppedBy = 'parity_unreached'; }
-    if (stage === 'transcribe' || stage === 'author') { stoppedBy = `${stage}_failed`; }
-    continue;
+    log(`${d.id} REJECTED: ${missing.join('; ')}. Track stays at ${roundInputs.TRACK_START}.`);
+    return { d, r, row, ver: null, p: 0, rejected: true, measured: false, anchorAsIs: false };
   }
-
-  // GEAK verify is the only measurement that counts; a gate-only round has nothing new to measure.
-  // An anchor the workspace already ships is measured too, as it is: the frozen baseline may be the
-  // plain champion (source_golden/), not the anchor, so its ratio is never assumed to be 1.
+  // GEAK verify is the only measurement that counts; a gate-only direction has nothing new to measure.
+  // An anchor the workspace already ships is measured too, as it is, whatever the engineer set (it may
+  // report no_change): the frozen baseline may be the plain champion, so its ratio is never assumed 1.
+  const anchorAsIs = stg === 'transcribe' && r.anchor_provided === true;
+  const measured = anchorAsIs || !r.no_change;
   let ver = null;
   let p = 0;
-  // The provided anchor is measured whatever the engineer set (it may report no_change, and its own
-  // correctness run is optional there): verify runs correctness itself.
-  const anchorAsIs = stage === 'transcribe' && r.anchor_provided === true;
-  const measured = anchorAsIs || !r.no_change;
   if (measured && (anchorAsIs || says(r.correctness, 'pass'))) {
-    ver = await agentT(
-      rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify', anchorAsIs
-        ? 'Independently measure the anchor the canonical workspace already contains. PATCH is intentionally empty: ' +
-          'skip the apply step and measure the materialized copy of CANONICAL as it is (this is not apply_failed).'
-        : 'Independently re-measure this candidate patch.', {
-        CANONICAL, PATCH: anchorAsIs ? '' : r.patch_file, VERIFY_DIR: `${OUT}/verify`, ENGINEER_WORKSPACE: TRACK, EVAL_DIR,
-        WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
-        ...(anchorAsIs ? { MEASURE_AS_IS: 'yes: the anchor is the workspace source; there is no patch to apply' } : {}),
-      }),
-      { phase: STAGE_PHASE[stage], label: anchorAsIs ? `verify r${round} (anchor as is)` : `verify r${round}`, schema: VERIFY_SCHEMA });
+    ver = await agentT(verifyPrompt(r.patch_file, d.out, anchorAsIs),
+      { phase: ph, label: anchorAsIs ? `verify ${d.id} (anchor as is)` : `verify ${d.id}`, schema: VERIFY_SCHEMA });
     p = ver && says(ver.correctness, 'pass') ? primary(ver) : 0;
-  } else if (!measured) {
-    p = trackBest;
   }
   row.status = ver ? String(ver.status || '') : (measured ? 'not_verified' : 'not_measured');
   row.vs_baseline = p || null;
   row.vs_champion = p ? vsChampion(p) : null;
+  return { d, r, row, ver, p, rejected: false, measured, anchorAsIs };
+}
 
-  // Track keep (the engineer's line, may sit below the comparator) vs commit gate (GEAK acceptance).
-  const prevBest = trackBest;
-  const kept = p > 0 && (p > trackBest || (r.enabling_step === true && trackBest > 0 && p >= trackBest * (1 + PROGRESS_DELTA)));
-  if (measured && kept) { trackBest = Math.max(trackBest, p); trackTag = r.track_tag; row.kept = true; }
-  if (!measured && (stage === 'transcribe' || stage === 'author')) { trackBest = p; row.kept = true; }
-  // The anchor the workspace already ships is the track's starting line, never a deliverable.
-  if (!anchorAsIs && ver && says(ver.correctness, 'pass') && p > (accepted ? accepted.primary : 1) * (1 + MIN_IMPROVE)) {
-    accepted = { round, primary: p, vs_champion: vsChampion(p), patch: r.patch_file, layer: row.layer, per_case: ver.per_case || [] };
-    row.accepted = true;
+function planAddendum(stg) {
+  return [
+    '## This run: the gluon_authoring expert workflow (what changes in plan_round)',
+    `Every direction is carried by a gluon_engineer (${pkgRole('gluon_engineer')}) with the gluon_authoring method ` +
+      `(${SKILL}) and its evidence gates, from the kept line TRACK_START. Your rules hold, read this way:`,
+    `- Each direction also carries \`layer\`, one of ${LAYERS.join(', ')} (${refPath('references/method/climb.md')} ## Layer Backbone). ` +
+      'Read PROFILE_SUMMARY (a gluon_profile.py dir: report.md, profile.json dials, compare.md) and BUDGET_JSON ' +
+      '(hw_budget.py: which layers have surface on this archetype) before choosing.',
+    '- Orthogonality (rule 2): the kernel is one file, so a distinct `focus_files` set becomes a distinct `layer` and code ' +
+      'region. Layers that gate each other never share a round (1.5 with 4/4+/5, two layer-1.5 scheduling models, 3 with 4, ' +
+      '4 with 4+); the script defers the later one of such a pair without charging it. Coupled work goes in one paired direction.',
+    '- `paired: true` declares a prerequisite + the lever it makes legal or profitable when neither half pays alone (e.g. a ' +
+      'second LDS buffer for one operand + moving the barrier it frees). The engineer measures the prerequisite alone and ' +
+      'the pair. Use it when HISTORY shows a lever measured null for want of its prerequisite.',
+    '- HISTORY.rounds lists every direction with its verified number, `claim` and `lesson`, null and rejected ones included: ' +
+      'do not re-issue a lever measured null on the same body unless its lesson names what was missing, and then pair it.',
+    '- host_runtime is the launch side the frozen harness allows: grid order, GROUP_SIZE_M, XCD-aware pid remap, persistent CTAs (layer 6).',
+    `- deep_explore is a Gluon rewrite with broad authority (re-tile, layout, pipeline structure); it costs ${DEEP_COST} and ` +
+      'runs alone in its round. Use it on a structure_suspect in HISTORY or a plateau.',
+    ...(stg === 'recover' ? [
+      `- STAGE=recover (port; G2 is not cleared at ${PARITY_THRESHOLD} of the champion): each direction repays ONE ` +
+      'transcription-debt `suspect` (lost_pipeline -> layer 4, lost_layout -> layer 3, lost_RA -> layer 5; ' +
+      `${refPath('references/method/recover.md')}), at most one direction per suspect, no deep_explore. If the debt is not ` +
+      'attributed yet, one direction attributes it and repays the largest suspect.'] : []),
+    'Return the plan_round JSON with `layer` on every direction (and `suspect` / `paired` where they apply).',
+  ].join('\n');
+}
+
+// tech_lead plan_round (kernel_lane.js's planner), the deadline's no-early-stop rule, then the
+// script's filters: the remaining budget, a dedicated deep_explore round, the layer gating order.
+async function planRound(stg, left) {
+  const remaining = BUDGET - dispatched;
+  const cap = MAX_DIRECTIONS ? Math.min(remaining, MAX_DIRECTIONS) : remaining;
+  const planInputs = (forbidStop) => ({
+    EVAL_DIR, ROUND: round, STAGE: stg, BUDGET_REMAINING: cap, DEEP_COST,
+    CUMULATIVE_SPEEDUP: accepted ? accepted.primary : 1, TRACK_BEST_VS_BASELINE: trackBest,
+    CHAMPION_VS_BASELINE: CHAMP_PRIMARY, BASELINE_GEOMEAN_MS: bench.baseline_geomean_ms,
+    SKILL_DIR: WORKFLOW_DIR, SKILL, PROFILE_SUMMARY: lastProfile, CURRENT_BEST_PER_CASE: bestPerCase,
+    HISTORY: { insights: memory.insights, ledger: memory.ledger.slice(-20), rounds: history.slice(-12),
+      bottleneck_now: memory.bottleneck_now, suggest_next: memory.suggest_next },
+    GFX, DEVICE_TARGET: setup.device_target || '', PHYSICAL_CU_COUNT: setup.physical_cu_count || 0,
+    ROOFLINE_STATUS: budgetRes && budgetRes.exit_code === 0 ? `tabulated-${GFX}` : `unknown-${GFX}`,
+    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LEARNED_KB: 'off',
+    ...(Number.isFinite(left) ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
+    ...(forbidStop ? { STOP_NOT_PERMITTED:
+      `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still unspent. This run is a ` +
+      'FIXED-WINDOW measurement: plan at least one direction. Switch layer rather than re-running an exhausted one, or ' +
+      'issue a dedicated deep_explore; if every direction really is exhausted, re-measure the kept line and say so.' } : {}),
+  });
+  const ask = (forbidStop, label) => agentT(
+    rolePrompt('tech_lead', geakRole('tech_lead'), 'plan_round', forbidStop
+      ? 'Your stop was refused: plan at least one direction.' : 'Decide this round\'s orthogonal directions (or stop).',
+    planInputs(forbidStop), { tail: planAddendum(stg) }),
+    { phase: STAGE_PHASE[stg], label, schema: PLAN_SCHEMA });
+  const empty = (p) => !p || p.stop || !Array.isArray(p.directions) || !p.directions.length;
+  let plan = await ask(false, `tech_lead:plan r${round}`);
+  while (DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS && empty(plan)) {
+    forcedReplans++;
+    log(`Round ${round}: stop=true with ${Math.round(left / 60)} min left - refusing (#${forcedReplans}), re-planning.`);
+    plan = await ask(true, `tech_lead:replan r${round}#${forcedReplans}`);
+    left = (await secondsLeft(`replan-r${round}`)).left;
   }
+  if (empty(plan)) return { stop: true, reasoning: plan ? plan.reasoning || '' : 'no plan returned' };
+  let ds = plan.directions.filter(d => d && typeof d === 'object').slice(0, cap);
+  if (stg === 'recover' && ds.some(d => d.specialty === 'deep_explore')) {
+    log(`Round ${round}: deep_explore is not a recover direction; dropped.`);
+    ds = ds.filter(d => d.specialty !== 'deep_explore');
+  }
+  // deep_explore is a dedicated round (kernel_lane.js): the others are not dispatched.
+  const deep = ds.find(d => d.specialty === 'deep_explore');
+  if (deep) ds = [deep];
+  const kept = [];
+  for (const d of ds) {
+    const L = String(d.layer || '');
+    const clash = kept.find(k => gates(String(k.layer || ''), L) || gates(L, String(k.layer || '')));
+    if (clash) {
+      log(`Round ${round}: deferred "${d.title}" (layer ${L}): it and layer ${clash.layer} ("${clash.title}") gate each other ` +
+          '(climb.md ## Layer Backbone); not dispatched, not charged.');
+      continue;
+    }
+    kept.push(d);
+  }
+  if (!kept.length) return { stop: true, reasoning: 'no dispatchable direction after the filters' };
+  return { stop: false, reasoning: plan.reasoning || '', directions: kept.map((d, i) => ({ ...d, plan_id: d.id,
+    id: `r${round}_d${i}`, out: `${GLUON_DIR}/round_${round}/d${i}`, planned: true })) };
+}
 
-  if (stage === 'transcribe' || stage === 'author') {
+function integrateTail(stg) {
+  return ['## Evidence the integrated candidate must return (checked in code; a gap is sent back, then the integration is dropped)',
+    '- conclusion improved|no_improvement|all_failed and combos_tried (each add: patches, method, correctness, delta_pct, relation orthogonal|rival|conflict)',
+    '- for improved: track_tag (= ROUND_TAG, fetched into TRACK), patch_file (git diff geak_base ROUND_TAG), correctness, ' +
+      'g4_screen: ab_bench.py --permute of the integrated candidate vs the best individual tag',
+    ...(stg === 'recover' ? ['- parity_gate: parity_gate.py on the integrated candidate, mode=gate'] : []),
+  ].join('\n');
+}
+
+// kernel_lane.js integrates when >= 2 directions verified. Here the candidates are this round's verified
+// directions that move the kept line (or enable a later layer); the integrated candidate is verified too.
+async function integrate(stg, cands, roundInputs, engTimeout) {
+  const id = `r${round}_int`;
+  const out = `${GLUON_DIR}/round_${round}/integrate`;
+  phase('Integrate');
+  const inputs = { ...roundInputs, ROUND_TAG: id, OUTPUT_DIR: out, STAGE: stg, INTEGRATOR_ROLE: geakRole('integrator'),
+    BEST_INDIVIDUAL: Math.max(...cands.map(c => c.p)),
+    CANDIDATES: cands.map(c => ({ id: c.d.id, tag: c.r.track_tag, specialty: c.d.specialty, layer: c.row.layer,
+      title: c.d.title, paired: c.d.paired === true, verified_vs_baseline: c.p,
+      change_summary: c.r.change_summary || '', patch_file: c.r.patch_file })) };
+  const ask = (extra, tail, label) => agentT(
+    rolePrompt('gluon_engineer', pkgRole('gluon_engineer'), 'integrate',
+      `Combine this round's verified directions into one candidate on the track (stage ${stg}).`,
+      { ...inputs, ...extra }, { stage: 'integrate', tail: tail || integrateTail(stg) }),
+    { phase: 'Integrate', label, schema: INTEGRATE_SCHEMA }, engTimeout);
+  let x = await ask({}, '', `integrate r${round}`);
+  let missing = integrateMissing(stg, x);
+  for (let k = 0; k < EVIDENCE_REASKS && missing.length; k++) {
+    log(`${id}: integration evidence incomplete (${missing.join('; ')}); asking for exactly that.`);
+    x = await ask({ PREVIOUS_RETURN: x, MISSING: missing },
+      'Complete exactly the MISSING items for the integrated candidate already tagged ROUND_TAG (no new combination). ' +
+      'Return the whole object with the gaps filled.', `integrate r${round} (reask ${k + 1})`);
+    missing = integrateMissing(stg, x);
+  }
+  const row = { round, id, stage: stg, specialty: 'integrate', title: 'integrated',
+    layer: [...new Set(cands.map(c => c.row.layer).filter(Boolean))].join('+'),
+    claim: x ? String(x.conclusion || '') : '', lesson: x ? x.notes || '' : '', status: '', vs_baseline: null,
+    vs_champion: null, kept: false, accepted: false,
+    combos: x && Array.isArray(x.combos_tried) ? x.combos_tried.slice(0, 8) : [] };
+  const base = { d: { id, title: 'integrated', specialty: 'integrate', planned: true }, r: x || {}, row, ver: null, p: 0,
+    rejected: false, measured: true, anchorAsIs: false, integrated: true };
+  if (!x || x.conclusion !== 'improved') { row.status = x ? `integrate_${x.conclusion || 'none'}` : 'integrate_no_return'; return base; }
+  if (missing.length) {
+    rejected++;
+    row.status = 'rejected_missing_evidence'; row.missing = missing;
+    log(`${id} REJECTED: ${missing.join('; ')}.`);
+    return { ...base, rejected: true };
+  }
+  const ver = await agentT(verifyPrompt(x.patch_file, out, false),
+    { phase: 'Integrate', label: `verify ${id}`, schema: VERIFY_SCHEMA });
+  const p = ver && says(ver.correctness, 'pass') ? primary(ver) : 0;
+  row.status = ver ? String(ver.status || '') : 'not_verified';
+  row.vs_baseline = p || null;
+  row.vs_champion = p ? vsChampion(p) : null;
+  return { ...base, ver, p };
+}
+
+// The kept line's profile after an integrated winner (a single direction's own round profile is used as is).
+async function reprofile(tag) {
+  const pr = await agentT(
+    rolePrompt('gluon_profiler', pkgRole('gluon_profiler'), 'reprofile', 'Profile the new kept line against the last profile.', {
+      TRACK, TRACK_TAG: tag, OUTPUT_DIR: `${GLUON_DIR}/round_${round}/profile`, LAST_PROFILE: lastProfile,
+      EVAL_DIR, GPU_ID: GPU_POOL, COMMANDMENT, GFX, KT, SKILL, WORKFLOW_DIR,
+    }, { stage: 'profile' }),
+    { phase: 'Integrate', label: `gluon_profiler:reprofile r${round}`, schema: PROFILE_SCHEMA });
+  return pr && has(pr.profile_dir) ? pr.profile_dir : '';
+}
+
+while (!stoppedBy) {
+  if (dispatched >= BUDGET) { stoppedBy = 'budget'; break; }
+  if (TOKENS && TOKENS.total && TOKENS.remaining() < TOKEN_RESERVE) { stoppedBy = 'token_budget'; break; }
+  const clock = await secondsLeft(`r${round + 1}`);
+  if (clock.left <= DEADLINE_RESERVE_S) {
+    deadlineHit = true; stoppedBy = 'deadline';
+    log(`Deadline: ${Math.round(clock.left / 60)} min left, ${Math.round(DEADLINE_RESERVE_S / 60)} reserved for close; no round ${round + 1}.`);
+    break;
+  }
+  round++;
+  const stg = stage;
+  const roundEnd = Number.isFinite(clock.left)
+    ? clock.now + Math.min(ROUND_TIME_CAP_S, clock.left - DEADLINE_RESERVE_S) : 0;
+  // The hang guard tracks the round deadline too, with a grace period for the return itself.
+  const engTimeout = roundEnd && ENGINEER_TIMEOUT_MS > 0
+    ? Math.min(ENGINEER_TIMEOUT_MS, (roundEnd - clock.now + 900) * 1000) : ENGINEER_TIMEOUT_MS;
+  phase(STAGE_PHASE[stg]);
+  const roundInputs = {
+    ROUND: round, STAGE: stg, ENTRY_MODE: ENTRY, TRACK, BASE_TAG, TRACK_START: trackTag,
+    GPU_ID: GPU_POOL, GFX, SKILL, KT, WORKFLOW_DIR, EVAL_DIR,
+    COMMANDMENT, BASELINE_PER_CASE, CHAMPION_BUNDLE: entry ? entry.champion_bundle : '',
+    CHAMPION_VS_BASELINE: CHAMP_PRIMARY, PARITY_THRESHOLD, PARITY: parity,
+    TRACK_BEST_VS_BASELINE: trackBest, ACCEPTED_VS_BASELINE: accepted ? accepted.primary : 1,
+    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LAST_PROFILE: lastProfile,
+    HISTORY: history.slice(-12), INSIGHTS: memory.insights, ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
+  };
+
+  // --- Transcribe / Author: one direction, the anchor or the first Gluon kernel ---------------------
+  if (stg === 'transcribe' || stg === 'author') {
+    dispatched += 1;
+    const x = await runDirection({ id: `r${round}`, out: `${GLUON_DIR}/round_${round}`, planned: false }, stg, roundInputs, engTimeout);
+    const { r, row } = x;
+    history.push(row);
+    if (x.rejected) { stoppedBy = `${stg}_failed`; continue; }
+    const p = x.measured ? x.p : trackBest;
+    if (!x.measured) row.vs_baseline = p || null;
+    if (x.measured && p > 0 && (p > trackBest || (r.enabling_step === true && trackBest > 0 && p >= trackBest * (1 + ENABLING_DELTA)))) {
+      trackBest = Math.max(trackBest, p); trackTag = r.track_tag; row.kept = true;
+    }
+    if (!x.measured) { trackBest = p; row.kept = true; }
+    // The anchor the workspace already ships is the track's starting line, never a deliverable.
+    if (!x.anchorAsIs && x.ver && p > (accepted ? accepted.primary : 1) * (1 + MIN_IMPROVE)) {
+      accepted = { round, id: x.d.id, primary: p, vs_champion: vsChampion(p), patch: r.patch_file, layer: row.layer, per_case: x.ver.per_case || [] };
+      row.accepted = true;
+    }
     const eq = r.equivalence || {};
-    const equivalent = stage === 'author' || (['PASS', 'RECONCILED'].includes(String(eq.layout_diff).toUpperCase()) &&
+    const equivalent = stg === 'author' || (['PASS', 'RECONCILED'].includes(String(eq.layout_diff).toUpperCase()) &&
       ![eq.numeric, eq.determinism].some(v => /fail/i.test(String(v))));
     if (!equivalent || !(p > 0)) {
-      stoppedBy = `${stage}_failed`;
+      stoppedBy = `${stg}_failed`;
       row.status = equivalent ? 'anchor_incorrect' : 'equivalence_failed';
-      log(`Round ${round}: ${stage} did not produce a ${equivalent ? 'correct' : 'equivalent'} anchor; no recovery on a wrong anchor.`);
+      log(`Round ${round}: ${stg} did not produce a ${equivalent ? 'correct' : 'equivalent'} anchor; no recovery on a wrong anchor.`);
     } else {
-      if (r.anchor_provided || !measured) { trackTag = has(r.track_tag) ? r.track_tag : BASE_TAG; }
+      if (r.anchor_provided || !x.measured) { trackTag = has(r.track_tag) ? r.track_tag : BASE_TAG; }
+      if (p > bestSeen) bestSeen = p;
       stage = ENTRY === 'port' ? 'recover' : 'climb';
     }
-  } else if (stage === 'recover') {
+    log(`Round ${round} ${stg}: ${row.status} vs_baseline=${p ? p.toFixed(3) : '-'} vs_champion=${p ? vsChampion(p).toFixed(3) : '-'}` +
+        `${row.kept ? ' kept' : ''}${row.accepted ? ' ACCEPTED' : ''}; budget ${dispatched}/${BUDGET}`);
+    continue;
+  }
+
+  // --- Recover / Climb: plan -> directions in parallel -> integrate -> keep / accept -> memory ------
+  const plan = await planRound(stg, clock.left);
+  if (plan.stop) {
+    stoppedBy = 'tech_lead_stop';
+    log(`Round ${round}: tech_lead chose to stop. ${plan.reasoning}`);
+    break;
+  }
+  const dirs = plan.directions;
+  const cost = dirs.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
+  dispatched += cost;
+  log(`Round ${round}: ${dirs.length} direction(s) [${dirs.map(d => `${d.specialty}${d.layer ? ` L${d.layer}` : ''}` +
+      `${d.suspect ? ` ${d.suspect}` : ''}${d.paired ? ' paired' : ''}`).join(', ')}], cost ${cost}, budget ${dispatched}/${BUDGET}`);
+  const results = (await parallel(dirs.map((d) => () => runDirection(d, stg, roundInputs, engTimeout)))).filter(Boolean);
+  for (const x of results) history.push(x.row);
+
+  const cands = results.filter(x => x.p > 0);
+  const integrable = cands.filter(c => c.p > trackBest || c.r.enabling_step === true).sort((a, b) => b.p - a.p);
+  let integ = null;
+  if (integrable.length >= 2) {
+    integ = await integrate(stg, integrable, roundInputs, engTimeout);
+    history.push(integ.row);
+    if (integ.p > Math.max(...cands.map(c => c.p))) cands.push(integ);
+  }
+  cands.sort((a, b) => b.p - a.p);
+  const winner = cands[0] || null;
+  // Track keep: the best candidate above the kept line, else an enabling step within ENABLING_DELTA of it.
+  const keep = cands.find(c => c.p > trackBest) ||
+    cands.find(c => c.r.enabling_step === true && trackBest > 0 && c.p >= trackBest * (1 + ENABLING_DELTA));
+  if (keep) {
+    trackBest = Math.max(trackBest, keep.p); trackTag = keep.r.track_tag; keep.row.kept = true;
+    if (keep.ver && Array.isArray(keep.ver.per_case) && keep.ver.per_case.length) bestPerCase = keep.ver.per_case;
+    lastProfile = keep.integrated ? ((await reprofile(keep.r.track_tag)) || lastProfile) : (keep.r.profile_dir || lastProfile);
+  }
+  // Commit gate (GEAK acceptance) and the stall rule, as kernel_lane.js computes them.
+  const improved = !!(winner && winner.p > (accepted ? accepted.primary : 1) * (1 + MIN_IMPROVE));
+  if (improved) {
+    accepted = { round, id: winner.d.id, primary: winner.p, vs_champion: vsChampion(winner.p), patch: winner.r.patch_file,
+      layer: winner.row.layer, per_case: winner.ver.per_case || [] };
+    winner.row.accepted = true;
+  }
+  const madeProgress = !!(winner && bestSeen > 0 && winner.p > bestSeen * (1 + PROGRESS_DELTA));
+  if (winner && winner.p > bestSeen) bestSeen = winner.p;
+
+  if (stg === 'recover') {
     recoverRounds++;
-    // G2: the tool's exit code AND the verified ratio to the champion must both clear.
-    const pg = r.parity_gate;
+    // G2 on the kept line: the gate the kept candidate ran AND the verified ratio to the champion. A
+    // gate-only direction (no_change) speaks for the line when nothing new was kept.
+    const gateRun = keep ? keep.r.parity_gate
+      : (results.filter(x => !x.rejected && !x.measured).map(x => x.r.parity_gate).find(g => g && g.exit_code === 0) || null);
+    const gateExit = gateRun ? gateRun.exit_code : null;
     const ratio = vsChampion(trackBest);
-    if (pg.exit_code === 0 && ratio >= PARITY_THRESHOLD) {
+    if (gateExit === 0 && ratio >= PARITY_THRESHOLD) {
       parity = 'cleared'; stage = 'climb';
       log(`Round ${round}: parity CLEARED (parity_gate exit 0, verified ${ratio.toFixed(3)}x of the champion).`);
     } else {
-      if (pg.exit_code === 0) log(`Round ${round}: parity_gate exit 0 contradicted by verify (${ratio.toFixed(3)}x < ${PARITY_THRESHOLD}); not cleared.`);
+      if (gateExit === 0) log(`Round ${round}: parity_gate exit 0 contradicted by verify (${ratio.toFixed(3)}x < ${PARITY_THRESHOLD}); not cleared.`);
       if (recoverRounds >= MAX_RECOVER_ROUNDS) {
         parity = 'parity_unreached'; stoppedBy = 'parity_unreached';
         log(`Parity not reached in ${recoverRounds} recover round(s): do not climb (G2).`);
       }
     }
-    row.parity_exit = pg.exit_code;
-  } else if (stage === 'climb') {
-    noImprove = (row.kept && p > prevBest) ? 0 : noImprove + 1;
+  } else {
+    if (madeProgress || improved) noImprove = 0; else noImprove++;
     if (noImprove >= MAX_NO_IMPROVE) stoppedBy = 'max_no_improve';
   }
-  if (row.kept) lastProfile = r.profile_dir || lastProfile;
-  if (audit && Array.isArray(audit.findings) && audit.findings.length) row.audit = audit.findings.slice(0, 5);
-  history.push(row);
-  log(`Round ${round} ${row.stage}${row.layer ? ` L${row.layer}` : ''}: ${row.status} ` +
-      `vs_baseline=${p ? p.toFixed(3) : '-'} vs_champion=${p ? vsChampion(p).toFixed(3) : '-'}` +
-      `${row.kept ? ' kept' : ''}${row.accepted ? ' ACCEPTED' : ''}`);
+
+  // Cross-round memory (kernel_lane.js: tech_lead update_memory), read by the next plan.
+  const mem = await agentT(
+    rolePrompt('tech_lead', geakRole('tech_lead'), 'update_memory', 'Distill durable insights + update the hypothesis ledger.', {
+      EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
+      ROUND_RESULTS: results.map(x => ({ id: x.d.id, title: x.d.title, specialty: x.d.specialty, layer: x.row.layer,
+        expected: x.d.expected_speedup, claimed_screen_pct: x.r && x.r.g4_screen ? x.r.g4_screen.delta_pct : null,
+        verified: x.p, status: x.row.status, claim: x.row.claim, lesson: x.row.lesson, notes: x.r ? x.r.notes || '' : '' })),
+      INTEGRATE: integ ? { conclusion: integ.row.claim, status: integ.row.status, verified: integ.p, combos_tried: integ.row.combos } : null,
+      WINNER: winner ? { source: winner.d.id, geomean: winner.p } : null, IMPROVED: improved,
+      REPROFILE_SHIFT: keep ? lastProfile : '', PRIOR_HISTORY: { insights: memory.insights, ledger: memory.ledger },
+    }),
+    { phase: STAGE_PHASE[stg], label: `tech_lead:memory r${round}`, schema: MEMORY_SCHEMA });
+  if (mem) {
+    if (Array.isArray(mem.insights)) memory.insights = mem.insights;
+    if (Array.isArray(mem.ledger)) memory.ledger = memory.ledger.concat(mem.ledger);
+    if (has(mem.bottleneck_now)) memory.bottleneck_now = mem.bottleneck_now;
+    if (has(mem.suggest_next)) memory.suggest_next = mem.suggest_next;
+  }
+  log(`Round ${round} ${stg} done: winner=${winner ? `${winner.d.id} ${winner.p.toFixed(3)}x` : 'none'}, ` +
+      `track=${trackTag} ${trackBest ? trackBest.toFixed(3) : '-'}x, accepted=${accepted ? accepted.primary.toFixed(3) : '-'}x` +
+      `${stg === 'climb' ? `, noImprove=${noImprove}` : ''}, budget ${dispatched}/${BUDGET}`);
 }
 if (!stoppedBy) stoppedBy = 'budget';
 if (parity === 'pending' && ENTRY === 'port' && !blocked) parity = 'parity_unreached';
 if (parity === 'parity_unreached') caveats.push('parity_unreached');
-if (rejected) caveats.push(`${rejected} round(s) rejected for missing evidence`);
+if (rejected) caveats.push(`${rejected} direction(s) rejected for missing evidence`);
+const roundsUsed = new Set(history.map(h => h.round)).size;
 
 // ===========================================================================
 // PHASE: Close — the outcome is decided here; gluon_lead writes the report and closure review.
@@ -752,8 +1092,9 @@ const revertToChampion = !deliverable && ENTRY === 'port' && champVer && CHAMP_P
 const FINAL_SRC = deliverable ? accepted.patch : revertToChampion ? entry.champion_patch : '';
 const closeInputs = {
   ...leadInputs, ENTRY_MODE: ENTRY, OUTCOME: outcome, BLOCKED: blocked, STOPPED_BY: stoppedBy,
-  PARITY: parity, CAVEATS: caveats, HISTORY: history, REQUESTS: requests,
-  ACCEPTED: accepted ? { round: accepted.round, vs_baseline: accepted.primary, vs_champion: accepted.vs_champion,
+  PARITY: parity, CAVEATS: caveats, HISTORY: history, REQUESTS: requests, INSIGHTS: memory.insights,
+  BUDGET_USED: dispatched, BUDGET: BUDGET,
+  ACCEPTED: accepted ? { round: accepted.round, id: accepted.id, vs_baseline: accepted.primary, vs_champion: accepted.vs_champion,
     patch: accepted.patch } : null,
   CHAMPION_VS_BASELINE: CHAMP_PRIMARY, FINAL_PATCH_SOURCE: FINAL_SRC, FINAL_PATCH: `${EVAL_DIR}/final_patch.diff`,
 };
@@ -795,9 +1136,10 @@ log(`COMPLETE. ${KERNEL_NAME}: entry=${ENTRY} outcome=${outcome} stopped_by=${st
 return {
   workflow: 'gluon_authoring', kernel_name: KERNEL_NAME, eval_dir: EVAL_DIR, gfx: GFX,
   entry_mode: ENTRY, outcome, blocked, stopped_by: stoppedBy, deadline_hit: deadlineHit, parity,
-  caveats, requests, rounds: history, rounds_used: history.length, budget: BUDGET,
+  caveats, requests, rounds: history, rounds_used: roundsUsed, budget: BUDGET, budget_used: dispatched,
+  insights: memory.insights,
   champion_vs_baseline: CHAMP_PRIMARY,
-  accepted: accepted ? { round: accepted.round, vs_baseline: accepted.primary, vs_champion: accepted.vs_champion,
+  accepted: accepted ? { round: accepted.round, id: accepted.id, vs_baseline: accepted.primary, vs_champion: accepted.vs_champion,
     layer: accepted.layer, patch: accepted.patch } : null,
   final_patch: FINAL_SRC ? (closeRes && has(closeRes.final_patch) ? closeRes.final_patch : `${EVAL_DIR}/final_patch.diff`) : '',
   reverted_to_champion: !!revertToChampion,

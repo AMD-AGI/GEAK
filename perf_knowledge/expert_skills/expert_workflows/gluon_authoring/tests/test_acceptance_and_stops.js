@@ -12,7 +12,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     const x = await launch({ budget: 1, entry_mode: 'incumbent' }, (label, prompt) => {
       if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { g4_screen: { command: 'ab_bench.py --permute', exit_code: 0,
         json_path: '/x', delta_pct: 60, resolved: true, valid: true }, claim: 'win' });
-      if (label === 'verify r1') return { status: 'correctness_failed', correctness: 'fail', verified_geomean: 0 };
+      if (label === 'verify r1_d0') return { status: 'correctness_failed', correctness: 'fail', verified_geomean: 0 };
       return undefined;
     }, { entry: 'incumbent' });
     ok(!x.result.accepted && x.result.outcome === 'negative_keep_baseline', 'a 60% screen with a failed verify is not accepted', x.result);
@@ -20,7 +20,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
   }
   {
     const x = await launch({ budget: 1, entry_mode: 'incumbent' }, (label) => {
-      if (label === 'verify r1') return { status: 'verified', correctness: 'pass', verified_geomean: 1.015 };
+      if (label === 'verify r1_d0') return { status: 'verified', correctness: 'pass', verified_geomean: 1.015 };
       return undefined;
     }, { entry: 'incumbent' });
     ok(!x.result.accepted, 'a verified 1.5% is under the 2% commit gate', x.result.accepted);
@@ -30,18 +30,18 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
       if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { correctness: 'fail' });
       return undefined;
     }, { entry: 'incumbent' });
-    ok(!x.labels.includes('verify r1') && !x.result.accepted, 'a self-reported correctness failure is not a candidate', x.labels);
+    ok(!x.labels.includes('verify r1_d0') && !x.result.accepted, 'a self-reported correctness failure is not a candidate', x.labels);
   }
   {
     const x = await launch({ budget: 1, entry_mode: 'incumbent', min_improve: 0.1 }, (label) => {
-      if (label === 'verify r1') return { status: 'verified', correctness: 'pass', verified_geomean: 1.12, verified_weighted: 1.09 };
+      if (label === 'verify r1_d0') return { status: 'verified', correctness: 'pass', verified_geomean: 1.12, verified_weighted: 1.09 };
       return undefined;
     }, { entry: 'incumbent' });
     ok(!x.result.accepted, 'the weighted metric is primary when the oracle provides it (1.09 < 1.10)', x.result.accepted);
   }
   {
     const x = await launch({ budget: 1, entry_mode: 'incumbent' }, (label) => {
-      if (label === 'verify r1') return { status: 'verified', correctness: 'pass', verified_geomean: 1.3 };
+      if (label === 'verify r1_d0') return { status: 'verified', correctness: 'pass', verified_geomean: 1.3 };
       if (label === 'director:validate') return { validation_status: 'flagged', director_verified_speedup_geomean: 1.0 };
       return undefined;
     }, { entry: 'incumbent' });
@@ -59,8 +59,8 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
         champion_gate: { command: 'python3 champion_gate.py --champion b.json', exit_code: 0 } };
       if (label === 'verify champion') return { status: 'verified', correctness: 'pass', verified_geomean: 1.3 };
       if (label === 'gluon_engineer:transcribe r1') return engineerReturn(prompt, { anchor_provided: true, patch_file: '', track_tag: 'geak_base' });
-      if (label === 'verify r2') return { status: 'verified', correctness: 'pass', verified_geomean: 1.25 };
-      if (label === 'verify r3') return { status: 'verified', correctness: 'pass', verified_geomean: 1.26 };
+      if (label === 'verify r2_d0') return { status: 'verified', correctness: 'pass', verified_geomean: 1.25 };
+      if (label === 'verify r3_d0') return { status: 'verified', correctness: 'pass', verified_geomean: 1.26 };
       return undefined;
     });
     ok(x.result.accepted && x.result.accepted.vs_baseline === 1.25, 'GEAK gate accepts 1.25x vs the anchor', x.result.accepted);
@@ -81,8 +81,8 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
       if (label === 'gluon_engineer:transcribe r1') return engineerReturn(prompt, { anchor_provided: true, patch_file: '', track_tag: 'geak_base' });
       if (label === 'verify r1 (anchor as is)') return { status: 'regression', correctness: 'pass', verified_geomean: 0.786 };
       if (/^gluon_engineer:recover/.test(label)) return engineerReturn(prompt, { suspect: 'lost_pipeline', layer: '4', att: goodAtt, parity_gate: gate(2) });
-      if (label === 'verify r2') return { status: 'regression', correctness: 'pass', verified_geomean: 0.940 };
-      if (label === 'verify r3') return { status: 'regression', correctness: 'pass', verified_geomean: 0.936 };
+      if (label === 'verify r2_d0') return { status: 'regression', correctness: 'pass', verified_geomean: 0.940 };
+      if (label === 'verify r3_d0') return { status: 'regression', correctness: 'pass', verified_geomean: 0.936 };
       return undefined;
     });
     const anchorVerify = x.calls.find(c => c.label === 'verify r1 (anchor as is)');
@@ -91,7 +91,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     const [r1, r2, r3] = x.result.rounds;
     ok(r1.vs_baseline === 0.786 && r1.kept && !r1.accepted, 'the anchor sets the track line at its measured 0.786 and is not a deliverable', r1);
     ok(r2.kept && r2.vs_baseline === 0.94, 'a recovery from 0.786 to 0.940 is kept, not read as a regression', r2);
-    const r3prompt = x.calls.find(c => c.label === 'gluon_engineer:recover r3').prompt;
+    const r3prompt = x.calls.find(c => c.label === 'gluon_engineer:recover r3_d0').prompt;
     ok(/TRACK_START: r2/.test(r3prompt) && /TRACK_BEST_VS_BASELINE: 0\.94/.test(r3prompt), 'the next round starts from r2', r3prompt.slice(0, 0));
     ok(!r3.kept, 'a round below the kept line is not kept', r3);
     ok(!x.result.accepted && x.result.outcome === 'negative_revert_plain', 'nothing beat the frozen champion: revert', x.result.outcome);
@@ -105,7 +105,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
       return undefined;
     }, { entry: 'port' });
     ok(x.labels.includes('verify r1 (anchor as is)'), 'a no_change anchor is still verified', x.labels);
-    ok(x.result.rounds[0].status !== 'anchor_incorrect' && x.result.rounds[0].vs_baseline === 0.786 && x.labels.includes('gluon_engineer:recover r2'),
+    ok(x.result.rounds[0].status !== 'anchor_incorrect' && x.result.rounds[0].vs_baseline === 0.786 && x.labels.includes('gluon_engineer:recover r2_d0'),
       'and the run goes on to recover from its measured line', x.result.rounds[0]);
   }
 
@@ -114,7 +114,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     const x = await launch({ budget: 6, max_recover_rounds: 2 }, (label, prompt) => {
       if (label === 'verify r1') return { status: 'regression', correctness: 'pass', verified_geomean: 0.7 };
       if (/^gluon_engineer:recover/.test(label)) return engineerReturn(prompt, { parity_gate: gate(2) });
-      if (/^verify r[23]$/.test(label)) return { status: 'regression', correctness: 'pass', verified_geomean: 0.75 };
+      if (/^verify r[23]_d0$/.test(label)) return { status: 'regression', correctness: 'pass', verified_geomean: 0.75 };
       return undefined;
     }, { entry: 'port' });
     ok(!x.labels.some(l => /climb/.test(l)), 'no climb round runs', x.labels);
@@ -126,8 +126,8 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
   {
     const x = await launch({ budget: 4, max_recover_rounds: 1 }, (label, prompt) => {
       if (label === 'verify r1') return { status: 'regression', correctness: 'pass', verified_geomean: 0.7 };
-      if (label === 'gluon_engineer:recover r2') return engineerReturn(prompt, { parity_gate: gate(0) });
-      if (label === 'verify r2') return { status: 'regression', correctness: 'pass', verified_geomean: 0.8 };
+      if (label === 'gluon_engineer:recover r2_d0') return engineerReturn(prompt, { parity_gate: gate(0) });
+      if (label === 'verify r2_d0') return { status: 'regression', correctness: 'pass', verified_geomean: 0.8 };
       return undefined;
     }, { entry: 'port' });
     ok(!x.labels.some(l => /climb/.test(l)) && x.result.parity === 'parity_unreached',
@@ -163,10 +163,10 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
       if (label === 'clock r2') return { epoch: 1000 + 5500 };
       return undefined;
     }, { entry: 'incumbent' });
-    ok(inOrder(x.labels, ['clock r1', 'gluon_engineer:climb r1', 'verify r1', 'clock r2', 'gluon_lead:close']), 'round 1 runs, round 2 does not', x.labels);
-    ok(!x.labels.includes('gluon_engineer:climb r2'), 'no engineer after the reserve is reached');
+    ok(inOrder(x.labels, ['clock r1', 'gluon_engineer:climb r1_d0', 'verify r1_d0', 'clock r2', 'gluon_lead:close']), 'round 1 runs, round 2 does not', x.labels);
+    ok(!x.labels.includes('gluon_engineer:climb r2_d0'), 'no engineer after the reserve is reached');
     ok(x.result.stopped_by === 'deadline' && x.result.deadline_hit, 'stopped_by deadline', x.result.stopped_by);
-    const eng = x.calls.find(c => c.label === 'gluon_engineer:climb r1').prompt;
+    const eng = x.calls.find(c => c.label === 'gluon_engineer:climb r1_d0').prompt;
     ok(/ROUND_DEADLINE_EPOCH: 4600\b/.test(eng), 'the engineer gets a round deadline (now + min(cap, left - reserve))');
     const y = await launch({ budget: 5, entry_mode: 'incumbent', deadline_epoch: 2000 }, () => undefined, { entry: 'incumbent' });
     ok(y.result.outcome === 'timeout' && y.result.rounds_used === 0, 'no time at all: timeout without a round', y.result);
@@ -180,12 +180,12 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     let spent = 0;
     const tokens = { total: 1000000, spent: () => spent, remaining: () => 1000000 - spent };
     const x = await launch({ budget: 5, entry_mode: 'incumbent' }, (label) => {
-      if (label === 'verify r1') { spent = 900000; }
+      if (label === 'verify r1_d0') { spent = 900000; }
       return undefined;
     }, { entry: 'incumbent', tokens });
     ok(x.result.stopped_by === 'token_budget' && x.result.rounds_used === 1, 'stops when the token reserve is reached', x.result.stopped_by);
     const y = await launch({ budget: 2, entry_mode: 'incumbent', max_no_improve: 9 }, () => undefined, { entry: 'incumbent' });
-    ok(y.result.stopped_by === 'budget' && y.result.rounds_used === 2, 'budget counts engineer rounds', y.result);
+    ok(y.result.stopped_by === 'budget' && y.result.rounds_used === 2, 'budget counts directions (one per round here)', y.result);
     const z = await launch({ budget: 6, entry_mode: 'incumbent' }, (label) =>
       /^verify/.test(label) ? { status: 'regression', correctness: 'pass', verified_geomean: 0.95 } : undefined, { entry: 'incumbent' });
     ok(z.result.stopped_by === 'max_no_improve' && z.result.rounds_used === 2, 'incumbent stalls after 2 non-improving rounds', z.result);

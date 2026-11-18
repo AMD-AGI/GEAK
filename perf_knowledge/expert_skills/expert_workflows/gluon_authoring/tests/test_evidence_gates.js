@@ -14,7 +14,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
   {
     const port = await launch({ budget: 3 }, (label) => {
       if (label === 'verify r1') return { status: 'regression', correctness: 'pass', verified_geomean: 0.9 };
-      if (label === 'verify r2') return { status: 'regression', correctness: 'pass', verified_geomean: 0.97 };
+      if (label === 'verify r2_d0') return { status: 'regression', correctness: 'pass', verified_geomean: 0.97 };
       return undefined;
     }, { entry: 'port' });
     const prompt = (re) => (port.calls.find(c => re.test(c.label)) || {}).prompt || '';
@@ -23,8 +23,8 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       'gluon_lead:budget': ['references/method/budget.md'],
       'gluon_profiler:baseline': ['references/method/profile.md'],
       'gluon_engineer:transcribe r1': ['references/method/transcribe.md'],
-      'gluon_engineer:recover r2': ['references/method/recover.md', 'references/tile-programming/pipeline.md'],
-      'gluon_engineer:climb r3': ['references/method/climb.md', 'references/method/profile.md'],
+      'gluon_engineer:recover r2_d0': ['references/method/recover.md', 'references/tile-programming/pipeline.md'],
+      'gluon_engineer:climb r3_d0': ['references/method/climb.md', 'references/method/profile.md'],
       'gluon_lead:close': ['references/method/close.md'],
       'evidence_audit r1': ['references/method/index.md'],
     };
@@ -36,7 +36,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
         ok(at > 0 && at < roleAt && at < 1500, `${label}: ${rel} listed before the role file, near the top`, at);
       }
     }
-    const climb = prompt(/^gluon_engineer:climb r3$/);
+    const climb = prompt(/^gluon_engineer:climb r3_d0$/);
     ok(/- layer 4: \S+pipeline\.md/.test(climb), 'climb lists each layer\'s references (layer 4 -> pipeline.md)');
     for (const label of ['director:setup', 'benchmark_engineer', 'verify r1']) {
       ok(!prompt(new RegExp(`^${label}$`)).includes('Required reading'), `${label} (GEAK role) gets no method reading list`);
@@ -46,14 +46,14 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
   console.log('\n# 2. a climb round missing G3 is re-asked; the re-ask that supplies it is verified');
   {
     const x = await launch(climbOnly, (label, prompt) => {
-      if (label === 'gluon_engineer:climb r1') { const r = engineerReturn(prompt); delete r.g3_occupancy; return r; }
-      if (/^gluon_engineer:evidence r1/.test(label)) {
+      if (label === 'gluon_engineer:climb r1_d0') { const r = engineerReturn(prompt); delete r.g3_occupancy; return r; }
+      if (/^gluon_engineer:evidence r1_d0/.test(label)) {
         ok(/g3_occupancy/.test(prompt) && /MISSING/.test(prompt), 're-ask names the missing gate');
         return engineerReturn(prompt, { stage: 'climb' });
       }
       return undefined;
     }, { entry: 'incumbent' });
-    ok(x.labels.includes('gluon_engineer:evidence r1 (reask 1)') && x.labels.includes('verify r1'), 'reask then verify', x.labels);
+    ok(x.labels.includes('gluon_engineer:evidence r1_d0 (reask 1)') && x.labels.includes('verify r1_d0'), 'reask then verify', x.labels);
     ok(x.result.rounds[0].status === 'verified', 'round counted normally', x.result.rounds[0]);
   }
 
@@ -63,7 +63,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       if (/^gluon_engineer:/.test(label)) { const r = engineerReturn(prompt, { stage: 'climb' }); delete r.g4_screen; return r; }
       return undefined;
     }, { entry: 'incumbent' });
-    ok(!x.labels.includes('verify r1'), 'no verify for a rejected round', x.labels);
+    ok(!x.labels.includes('verify r1_d0'), 'no verify for a rejected round', x.labels);
     const r1 = x.result.rounds[0];
     ok(r1.status === 'rejected_missing_evidence' && r1.missing.some(m => /g4_screen/.test(m)), 'rejection names G4', r1);
     ok(x.result.outcome === 'negative_keep_baseline' && !x.result.final_patch, 'nothing delivered', x.result.outcome);
@@ -108,15 +108,15 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
   console.log('\n# 6. a pipeline/scheduling layer owes ATT evidence (captured, or unavailable with a reason)');
   {
     const x = await launch(climbOnly, (label, prompt) => {
-      if (label === 'gluon_engineer:climb r1') return engineerReturn(prompt, { layer: '4' });
-      if (/^gluon_engineer:evidence r1/.test(label)) {
+      if (label === 'gluon_engineer:climb r1_d0') return engineerReturn(prompt, { layer: '4' });
+      if (/^gluon_engineer:evidence r1_d0/.test(label)) {
         return engineerReturn(prompt, { stage: 'climb', layer: '4',
           att: { status: 'unavailable', tool: 'capture.sh', command: 'bash capture.sh ...', exit_code: 0,
             reason: 'capture.json att_state=decoder_absent: ROCPROF_ATT_LIBRARY_PATH unset in this container' } });
       }
       return undefined;
     }, { entry: 'incumbent' });
-    ok(x.labels.includes('gluon_engineer:evidence r1 (reask 1)'), 'layer 4 without ATT is re-asked', x.labels);
+    ok(x.labels.includes('gluon_engineer:evidence r1_d0 (reask 1)'), 'layer 4 without ATT is re-asked', x.labels);
     ok(x.result.rounds[0].status === 'verified', 'a reasoned "unavailable" is accepted', x.result.rounds[0]);
     const y = await launch(climbOnly, (label, prompt) => {
       if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '1.5',
@@ -155,13 +155,13 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
         ? { ok: false, findings: ['g3 re-run: binding lds, evidence says registers'] } : { ok: true, findings: [] };
       return undefined;
     }, { entry: 'incumbent' });
-    ok(audits === 2 && x.labels.includes('gluon_engineer:evidence r1 (reask 1)'), 'audit -> reask -> re-audit', x.labels);
-    const reask = x.calls.find(c => c.label === 'gluon_engineer:evidence r1 (reask 1)').prompt;
+    ok(audits === 2 && x.labels.includes('gluon_engineer:evidence r1_d0 (reask 1)'), 'audit -> reask -> re-audit', x.labels);
+    const reask = x.calls.find(c => c.label === 'gluon_engineer:evidence r1_d0 (reask 1)').prompt;
     ok(/audit: g3 re-run/.test(reask), 'the finding is quoted in the re-ask');
     ok(x.result.rounds[0].status === 'verified', 'verified after the clean audit');
     const y = await launch(climbOnly, (label) =>
       /^evidence_audit/.test(label) ? { ok: false, findings: [] } : undefined, { entry: 'incumbent' });
-    ok(y.result.rounds[0].status === 'rejected_missing_evidence' && !y.labels.includes('verify r1'),
+    ok(y.result.rounds[0].status === 'rejected_missing_evidence' && !y.labels.includes('verify r1_d0'),
       'a failed audit that names nothing still rejects the round', y.result.rounds[0]);
   }
 
@@ -213,7 +213,7 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       return undefined;
     }, { entry: 'incumbent' });
     ok(x.result.rounds[0].missing.some(m => /profile_command/.test(m)), 'a profile_kernel.sh re-profile is sent back', x.result.rounds[0]);
-    const prompt = x.calls.find(c => c.label === 'gluon_engineer:climb r1').prompt;
+    const prompt = x.calls.find(c => c.label === 'gluon_engineer:climb r1_d0').prompt;
     ok(/LAST_PROFILE: \/tmp\/eval\/gluon\/profile_baseline/.test(prompt), 'the first climb compares against the baseline profile dir');
   }
 

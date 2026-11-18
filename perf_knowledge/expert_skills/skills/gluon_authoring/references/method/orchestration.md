@@ -122,27 +122,43 @@ above apply to single-GPU kernels. The authoring pack does not start a schedulin
 
 ---
 
-## Parallelism: bounded measurements only, never a fan-out of the port
+## Parallelism: the transcription is never fanned out; recover and climb fan out by layer
 
-The engine is **one engineer running the sequential layer loop** ([`climb.md`](climb.md)). This pack is
-`breadth_enabled: false` (`scripts/pack_facts.json`, `lever-cards.json _search_policy`): there is no plain
-tier here (the champion arrives swept and pinned by GEAK's plain rounds), no structural branch, and the
-comparator is `champion_ms` from the bundle, never a `plain_baseline` computed in this track.
+The engine is **one engineer per direction, each running the sequential layer loop** of
+[`climb.md`](climb.md) for one layer. GEAK's JS owns the fan-out (the gluon_authoring expert workflow,
+`expert_workflows/gluon_authoring/README.md`): `tech_lead` plans ~2–3 directions per round from one
+checkpoint, an integrate step stacks the verified ones, and the budget counts directions. This pack is
+still `breadth_enabled: false` (`scripts/pack_facts.json`, `lever-cards.json _search_policy`): no
+within-layer arms, no plain tier here (the champion arrives swept and pinned by GEAK's plain rounds), no
+structural branch, and the comparator is `champion_ms` from the bundle, never a `plain_baseline` computed in
+this track.
 
 | level | what | how in GEAK |
 | --- | --- | --- |
 | plain search (L0) | diverse plain hypotheses, config sweeps | GEAK's own plain-Triton rounds (`tech_lead` + specialist `engineer`s), before or after the Gluon track — never during it |
-| Gluon backbone (L1) | transcribe → recover → climb over coupled layers | **one** `deep_explore` direction; the deep_engineer's own sequential greedy climb |
-| within a layer (L2) | a layer variant that is not budget-decidable | evaluated sequentially in the same loop; prefer a budget decision over sampling |
+| transcription | the faithful anchor and its equivalence | **one** engineer, never fanned out |
+| Gluon backbone (L1) | recover → climb over coupled layers | per round, `tech_lead`'s directions from one checkpoint (one suspect / one layer / one declared prerequisite + lever pair each), integrated, then the next round from the kept line |
+| within a layer (L2) | a layer variant that is not budget-decidable | evaluated sequentially in the same engineer's loop; prefer a budget decision over sampling |
 
-**Why the port is never fanned out.** Coupled transforms (layout → mempath → pipeline → slicing) are
-sequential because each layer's output is the next layer's input, and half-built coupled candidates cannot be
-compared fairly. Transcription is deterministic — parallel arms measure the same layouts and share the same
-bug. Splitting the track would fork the checkpoint, break the enabling-step look-ahead, and corrupt
-attribution. So the expert workflow runs the track as one engineer's sequence of rounds in one workspace
-and never pairs it with parallel directions expecting a merge. Decision rule for
-anything else: **split only what is independent; keep coupled work whole** — when in doubt, treat it as
-coupled; the cost of wrongly parallelizing coupled work is corrupted evidence, not just lost speed.
+**What is never fanned out, and why.** Transcription is deterministic — parallel arms measure the same
+layouts and share the same bug. Coupled transforms (layout → mempath → pipeline → slicing) where one
+layer's output is the next layer's input are not split across engineers: half-built coupled candidates
+cannot be compared fairly. So the gating order of [`climb.md`](climb.md) `## Layer Backbone` decides which
+layers may share a round (the script defers 4/4+/5 next to 1.5, a second 1.5 model, 4 next to 3, 4+ next to 4), and a
+coupled chain whose halves do not pay alone is **one paired direction** (prerequisite + lever, both
+screened), not two. Independent layers — the scale epilogue (7), the launch side (6), a register
+prefetch, a memory-path change — are separate directions from the same checkpoint and meet in the
+integrate step, which records each add as orthogonal, rival or conflict. Decision rule: **split only what
+is independent; keep coupled work whole** — when in doubt, treat it as coupled (pair it); the cost of
+wrongly parallelizing coupled work is corrupted evidence, not just lost speed.
+
+**Why the climb fans out at all** (measured, a8w8 blockscale fp8 GEMM from the same Gluon anchor, MI325X):
+the one-engineer climb found the scale and prefetch levers in three rounds, then measured the barrier
+move alone twice as null and stopped at 1.34×. GEAK's kernel workflow, three directions per round, found
+three independent levers in its first round and stacked them (1.30×), and its decisive lever was a pair —
+a second LDS buffer for B, which alone measured 0.98×, plus the WAR barrier move it made legal — reaching
+1.55×. The single track lost to breadth and to the one-change rule, not to evidence: its ATT had named
+the barrier.
 
 **Bounded experiments are the deep_engineer's own work.** A timing across shapes, a knob / tile probe, a
 Tier-0 / A1–A4 anomaly check — self-contained measurements that do not advance the coupled backbone — are run
