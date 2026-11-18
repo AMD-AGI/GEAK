@@ -32,12 +32,22 @@ collective state.
 
 ## Rank execution and acceptance
 
-Launch all ranks under one full-set lease using `gpu_lock_set.py`. Use bounded
-process-group initialization and a launcher that terminates failed rank groups.
+Launch all ranks under one full-set lease: inside a wave use `ut_wave.py gpu
+--count N -- ...`; outside a wave use `gpu_lock_set.py`. Never nest the locks.
+Use bounded process-group initialization and a launcher that terminates failed rank groups.
 Collect per-rank results; a successful launcher or rank 0 alone is insufficient.
 Keep numerical inputs distinct across ranks and compare every rank's output
 with an independent sum/reference. Validate eager execution and the deployed
 graph mode, including graph replay after in-place changes to rank inputs.
+
+Reserve the rendezvous endpoint until rank 0 owns its listener. Choosing a free
+ephemeral port, closing it and importing/spawning peers before rank 0 binds can
+fail with `EADDRINUSE`: peer connections can claim that port in the meantime.
+Prefer an already-bound store/listener and communicate its actual endpoint to
+peers. Give any parent IPC listener a backlog at least as large as the peer count,
+bound handshakes and drain every started child on initialization failure. Test
+repeated baseline/candidate group creation, including numerical-control legs;
+an initialization failure never counts as a numerical rejection.
 
 Follow the native communicator's graph-registration lifecycle. Some APIs
 register captured buffers when their capture context exits; replaying before
