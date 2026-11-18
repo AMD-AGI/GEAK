@@ -315,7 +315,7 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
                 continue
             args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=True)
             refs, mags, sel = _references(T, args)
-            inputs = {k: v for k, v in _cpu(args).items() if not str(k).startswith("_")}
+            inputs = {k: v for k, v in args.items() if not str(k).startswith("_")}
             res = T.U.compare_outputs(T.doc, cand_blob[key], base_blob[key], sym=args["_sym"],
                                       refs=refs, magnitudes=mags, inputs=inputs, rows=sel,
                                       base_noise=(noise_blob or {}).get(key))
