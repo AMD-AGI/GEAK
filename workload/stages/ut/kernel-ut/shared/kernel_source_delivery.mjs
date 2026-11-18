@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const sourceExt = /\.(py|c|cc|cpp|cxx|h|hpp|cu|cuh|hip|s|mlir)$/i;
 export const UT_DRIVER_SNAPSHOT_CONTRACT = 'ut_driver/path_sha256_concat/v1';
-const fullUtGates = ['contract', 'inputs', 'binding', 'launches', 'correctness', 'server_calls',
+export const UT_DRIVER_SOURCE_SNAPSHOT_CONTRACT = 'ut_driver/source_snapshot/v1';
+const legacyFullUtGates = ['contract', 'inputs', 'binding', 'launches', 'correctness', 'server_calls',
   'compile_variants', 'isolation', 'replay', 'negative_controls', 'restore', 'timing'];
+const fullUtGates = [...legacyFullUtGates.slice(0, 8), 'process_state', ...legacyFullUtGates.slice(8)];
+const driverContracts = [UT_DRIVER_SNAPSHOT_CONTRACT, UT_DRIVER_SOURCE_SNAPSHOT_CONTRACT];
 const hexDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 // Python sorts Unicode code points, whereas Array.sort() compares UTF-16 units.
 const pythonSorted = names => [...names].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
@@ -128,12 +131,14 @@ export async function sourceSnapshot(taskDir) {
   return { files, snapshot_sha256: sha(JSON.stringify(files)) };
 }
 
-export async function utDriverSnapshot(taskDir) {
+export async function utDriverSnapshot(taskDir, contract = UT_DRIVER_SNAPSHOT_CONTRACT) {
   // Reproduce the versioned ut_driver.py _snapshot/_reuse_key algorithms without
-  // importing or executing a task's Python. This intentionally differs from the
-  // canonical sourceSnapshot above: fixed concatenation order and ALL kernel_src
-  // files (including build data), plus helpers/server evidence in the reuse key.
+  // importing or executing a task's Python. Legacy receipts use path concatenation;
+  // current receipts use sourceSnapshot and seed that same reuse-file sequence
+  // with its digest. Both include helpers/server evidence in the reuse key.
   const task = await fs.realpath(taskDir), tree = [];
+  if (!driverContracts.includes(contract)) throw new Error('unsupported UT snapshot contract');
+  const canonical = contract === UT_DRIVER_SOURCE_SNAPSHOT_CONTRACT ? await sourceSnapshot(task) : null;
   const isFile = async name => {
     try { return (await fs.stat(path.join(task, name))).isFile(); }
     catch (e) { if (e.code === 'ENOENT') return false; throw e; }
@@ -166,8 +171,9 @@ export async function utDriverSnapshot(taskDir) {
     ...pythonSorted((await list('run/server_calls')).map(n => `run/server_calls/${n}`)),
     ...pythonSorted(tree),
   ];
-  const digest = async (names, included) => {
+  const digest = async (names, included, prefix = '') => {
     const h = createHash('sha256');
+    h.update(prefix, 'utf8');
     for (const name of names) {
       if (!(await included(name))) continue;
       // Hash the original relative spelling, not fileRef's resolved symlink path.
@@ -176,8 +182,9 @@ export async function utDriverSnapshot(taskDir) {
     }
     return h.digest('hex');
   };
-  return { contract: UT_DRIVER_SNAPSHOT_CONTRACT,
-    snapshot_sha256: await digest(snapshotNames, exists), reuse_key: await digest(reuseNames, isFile) };
+  return { contract,
+    snapshot_sha256: canonical?.snapshot_sha256 || await digest(snapshotNames, exists),
+    reuse_key: await digest(reuseNames, isFile, canonical?.snapshot_sha256 || '') };
 }
 
 async function verifyUtSnapshot(task, manifest, ut) {
@@ -190,10 +197,10 @@ async function verifyUtSnapshot(task, manifest, ut) {
     return;
   }
   const spec = manifest.ut_snapshot;
-  if (spec?.contract !== UT_DRIVER_SNAPSHOT_CONTRACT)
+  if (!driverContracts.includes(spec?.contract))
     throw new Error('unsupported UT snapshot contract');
   const report = await readRef(task, spec.report_ref, 'ut_report');
-  const current = await utDriverSnapshot(task);
+  const current = await utDriverSnapshot(task, spec.contract);
   if (ut.snapshot_sha256 !== current.snapshot_sha256 || report.snapshot_sha256 !== current.snapshot_sha256)
     throw new Error('UT driver snapshot does not match current task inputs/source');
   if (!hexDigest(report.reuse_key) || report.reuse_key !== current.reuse_key)
@@ -207,14 +214,17 @@ async function verifyUtSnapshot(task, manifest, ut) {
       !hexDigest(report.contract_sha256) || report.contract_sha256 !== ut.contract_sha256)
     throw new Error('UT result and full report do not identify the same validation run and contract');
   const passed = r => r && ['pass', 'not_required'].includes(r.status);
-  let required = fullUtGates;
+  // The versioned legacy driver predates process_state. Current canonical
+  // receipts require it; choosing a different contract cannot match their hashes.
+  const gates = spec.contract === UT_DRIVER_SOURCE_SNAPSHOT_CONTRACT ? fullUtGates : legacyFullUtGates;
+  let required = gates;
   const scoped = [report, ut].some(d => d.validation_contract !== undefined || d.validation_mode !== undefined);
   if (scoped) {
     const mode = report.validation_mode;
     if (!['correctness', 'performance'].includes(mode) || ut.validation_mode !== mode ||
         [report, ut].some(d => d.validation_contract !== 'kernel_ut_validation/v1'))
       throw new Error('UT result/report must declare the same supported validation mode');
-    required = mode === 'correctness' ? fullUtGates.filter(g => g !== 'timing') : fullUtGates;
+    required = mode === 'correctness' ? gates.filter(g => g !== 'timing') : gates;
     const sameGates = a => Array.isArray(a) && a.length === required.length &&
       new Set(a).size === required.length && required.every(g => a.includes(g));
     if ([report, ut].some(d => !sameGates(d.required_gates) || !sameGates(Object.keys(d.gates || {})) ||
@@ -256,7 +266,7 @@ export async function verifySourceDelivery(kernel, result) {
         throw new Error(`missing native/JIT implementation files for ${k}`);
       for (const [field, kind] of [['execution_ref', 'candidate_execution'], ['negative_control_ref', 'numerical_rejection']]) {
         const pythonArtifact = kind === 'numerical_rejection' &&
-          m.ut_snapshot?.contract === UT_DRIVER_SNAPSHOT_CONTRACT ? 'negative_control' : null;
+          driverContracts.includes(m.ut_snapshot?.contract) ? 'negative_control' : null;
         const e = await readRef(task, row[field], pythonArtifact);
         if (e.kind !== kind || e.ok !== true || e.device_kernel !== k ||
             e.snapshot_sha256 !== m.snapshot_sha256 || e.target_callable !== m.target_callable ||
@@ -282,6 +292,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [mode, task, name] = process.argv.slice(2);
   if (mode === 'snapshot' && task) console.log(JSON.stringify(await sourceSnapshot(task), null, 2));
   else if (mode === 'ut-driver-snapshot' && task) console.log(JSON.stringify(await utDriverSnapshot(task), null, 2));
+  else if (mode === 'ut-driver-source-snapshot' && task)
+    console.log(JSON.stringify(await utDriverSnapshot(task, UT_DRIVER_SOURCE_SNAPSHOT_CONTRACT), null, 2));
   else if (mode === 'ref' && task && name) console.log(JSON.stringify(await fileRef(task, name), null, 2));
-  else { console.error('Usage: kernel_source_delivery.mjs snapshot TASK | ut-driver-snapshot TASK | ref TASK FILE'); process.exitCode = 2; }
+  else { console.error('Usage: kernel_source_delivery.mjs snapshot TASK | ut-driver-snapshot TASK | ut-driver-source-snapshot TASK | ref TASK FILE'); process.exitCode = 2; }
 }

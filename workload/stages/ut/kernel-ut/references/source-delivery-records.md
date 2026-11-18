@@ -33,8 +33,27 @@ result from the standard UT and complete the gates in the main contract.
 
 ### Existing `ut_driver.py` receipts
 
-The current Python UT driver reports the canonical `sourceSnapshot` itself (it runs the
-task's `kernel_source_delivery.mjs snapshot`), so new deliveries need nothing here.
+The current Python UT driver reports the canonical `sourceSnapshot` itself and
+seeds its `reuse_key` with that digest. Scoped correctness/performance receipts
+also require the hashed full report. For current tasks, put this explicit record
+in the **source-delivery manifest**, keeping the original UT receipts unchanged:
+
+```json
+{
+  "ut_snapshot": {
+    "contract": "ut_driver/source_snapshot/v1",
+    "report_ref": {"path": "run/ut_report.json", "sha256": "..."}
+  }
+}
+```
+
+The verifier recomputes both the canonical snapshot and the canonical-seeded
+reuse key, checks the matching full report/result, and requires all twelve
+non-timing gates (including `process_state`) in correctness mode, or all thirteen
+in performance mode. Inspect those hashes with
+`node "$SHARED_TOOLS/kernel_source_delivery.mjs" ut-driver-source-snapshot "$TASK"`.
+Changing a contract name cannot make a stale or different algorithm's digest pass.
+
 Drivers before that change used a different snapshot algorithm: relative paths followed
 by their file SHA-256 strings, in a fixed order. Do not rewrite such a receipt, replace the
 canonical `snapshot_sha256`, or accept two unrelated digests merely because
@@ -57,7 +76,7 @@ contract is accepted only when all of the following hold:
 - The canonical `sourceSnapshot`, `files`, target callable, per-leaf source
   hashes, execution records and numerical rejection records still validate
   under the original source-delivery rules.
-- Both Python receipts have the current driver snapshot: concatenate
+- Both Python receipts have the legacy driver snapshot: concatenate
   `meta.json`, `cases.py`, `unittest.py`, `run/ut_cases.json`,
   `run/ut_contract.json`, then the sorted files under `kernel_src/`, excluding
   paths containing `__pycache__`. Each contribution is the relative path in
@@ -74,16 +93,18 @@ contract is accepted only when all of the following hold:
 - The result is `ok:true`, both result and report have `verdict:"pass"` and
   `exit_code:0`, and they identify the same `started`, `target_callable`,
   `family` and `contract_sha256`. The full report must not be a quick run.
-  New receipts explicitly carry `validation_contract: "kernel_ut_validation/v1"`,
-  matching `validation_mode` and `required_gates`. In `correctness` mode all twelve
-  non-timing gates must appear and pass (or be `not_required`), the timing gate is
-  absent, and `performance_measured` is false. In `performance` mode all thirteen gates
+  Scoped legacy receipts carry `validation_contract: "kernel_ut_validation/v1"`,
+  matching `validation_mode` and `required_gates`. This historical contract predates
+  `process_state`: in `correctness` mode all eleven of its non-timing gates
+  must appear and pass (or be `not_required`), the timing gate is
+  absent, and `performance_measured` is false. In `performance` mode all twelve legacy gates
   including timing must pass and `performance_measured` is true. Legacy receipts
-  without a validation mode still require all thirteen gates. Missing/skipped/failed
+  without a validation mode still require all twelve legacy gates. Current canonical
+  receipts use the contract above, including `process_state`. Missing/skipped/failed
   required gates, mismatched modes, altered hashes and unknown contracts are rejected.
   A correctness pass never supplies a speedup or an invented baseline time.
 
-Inspect the current Python-compatible hashes without running Python or a GPU:
+Inspect the legacy Python-compatible hashes without running Python or a GPU:
 
 ```bash
 node "$SHARED_TOOLS/kernel_source_delivery.mjs" ut-driver-snapshot "$TASK"
