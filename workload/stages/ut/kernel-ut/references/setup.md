@@ -71,6 +71,10 @@ Authors and workers use the invoking host UID/GID, with `HOME` and the default
 directories and copying unreadable image JIT caches. Keep these paths writable
 and pass `KERNEL_EXTRACT_NODE` when Node is supplied outside the image's PATH.
 Broker liveness uses a shared file lock, so Docker needs no host PID namespace.
+FlyDSL's runtime cache is also task-local, and a writable per-task directory is
+mounted at AITER's hardcoded `/tmp/aiter_configs`. Both regenerate from the pinned
+image's code/configs. `USER` and `LOGNAME` identify the host user even when the
+image lacks that UID's passwd entry, for libraries using `getpass.getuser()`.
 Container names default to a wave-specific prefix; an explicit
 `UT_WAVE_CONTAINER_PREFIX` must be unique per campaign and is saved for resume.
 Command-specific exports require `gpu --env K=V`; CPU-container `/tmp` is not shared.

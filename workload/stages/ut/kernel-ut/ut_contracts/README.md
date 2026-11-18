@@ -230,9 +230,38 @@ baseline leg, the candidate leg and the driver rebuild identical operands.
 | `restore` | driver | any `kernel_src` byte differs from the start of the run |
 | `timing` | `harness_lib.measure_legs` | no measurable weighted speedup |
 
-Timing is unchanged from the shared harness (`measure_legs` + `serving_weighted_speedup`) so
-the optimize stage reads the same number it always has; the report adds which buckets
-stopped before `--max-reps` and the recorded cache condition.
+Timing uses `measure_legs` + `serving_weighted_speedup`. By default it
+starts one baseline process for all pending shapes,
+then one candidate process for the same shapes, per round and per GPU shard.
+`--max-reps 1` means two timing processes on one GPU; identity/listing checks are
+separate. Subsequent rounds reverse side and shape order; each shape can stop
+early under the existing ratio rule. Tensor operands are constructed one shape
+at a time and released between shapes. Weight/JIT caches remain process-local.
+Baseline and candidate never share an interpreter or run concurrently on a shard.
+
+The UT entrypoint needs no process-mode flag. Internal harness tests can call
+`measure_legs(..., process_mode="fresh")` for per-shape A/A comparisons;
+this is not a second user workflow. Process policy is recorded in timing checkpoint
+reuse. Warmup, device-event windows, graph policy and read eviction are the same
+in both modes; cold imports and input construction are outside those windows.
+Shape-dependent autotune/global caches can still change later measurements, and
+reversing whole sweeps does not eliminate every kind of drift. Compare per-shape
+results and dispersion on a new task before interpreting small speedups.
+
+The standard factory separates metadata-only `timing_specs(h, meta)` from
+`make_timing_case(spec)`. Hand-written tasks should implement these hooks rather
+than returning a list of every shape's tensors. Existing `timing_cases` factories
+still work, including their allocation behavior; changing frozen helpers/factories
+requires a new task snapshot and requalification.
+
+Per-leg receipts include `diagnostics`: process PID/wall time, environment/import
+and runtime initialization, each shape's synchronized `inputs_s`, cache allocation,
+warmup, graph preparation, sampling loop, cleanup, and live tensor bytes after
+cleanup. Warmup/graph preparation can include compilation or cache loading; these
+are not claimed as separately measured compiler time. `sampling_s` includes cache
+flush/synchronization overhead, while `ms` remains the device-event measurement.
+The specialized `rank_chain` launcher retains its per-bucket rank processes and
+labels rows `fresh_rank_chain`.
 
 The timing gate also refuses a number that is not the deployed device time, whatever the
 speedup: every leg carries a receipt (`baseline_timing` / `optimized_timing`: timers, `primed`,

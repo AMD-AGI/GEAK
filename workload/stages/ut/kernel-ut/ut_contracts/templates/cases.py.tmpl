@@ -115,17 +115,25 @@ def _argv_opt(flag):
     return None
 
 
+def timing_specs(h, meta):
+    """Metadata only: listing/filtering/reordering shapes allocates no operands."""
+    return list(manifest_cases(timed=True))
+
+
+def make_timing_case(spec):
+    return {{"sig": spec["sig"], "regime": spec["regime"], "m": spec.get("m"),
+             "args": make_args(spec)}}
+
+
 def timing_cases(h, meta):
-    """Timed rows. leg_runner filters by --bucket AFTER calling this, so build only the requested
-    bucket's operands, and none for --mode list: same rows, a fraction of the allocation."""
+    """Compatibility iterator; native legs use timing_specs + make_timing_case."""
     mode, bucket = _argv_opt("--mode"), _argv_opt("--bucket")
-    rows = list(manifest_cases(timed=True))
+    rows = timing_specs(h, meta)
     if mode == "list":
         return [{{"sig": c["sig"], "regime": c["regime"], "m": c.get("m"), "args": None}} for c in rows]
     if bucket:
         rows = [c for c in rows if c["sig"] == bucket]
-    return [{{"sig": c["sig"], "regime": c["regime"], "m": c.get("m"), "args": make_args(c)}}
-            for c in rows]
+    return (make_timing_case(c) for c in rows)
 
 
 def random_shapes(h, meta):

@@ -31,6 +31,10 @@ import json
 import os
 import sys
 import weakref
+import time
+
+_STARTED = time.perf_counter()
+_SETUP = {}
 
 SENTINEL = "UT_HARNESS_INCOMPLETE"
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -290,6 +294,7 @@ def main():
             raise SystemExit(f"server_preimports: import {mod} failed: {type(exc).__name__}: {exc}")
     state_out = os.environ.get("PROCESS_STATE_OUT")
     before = _process_state() if state_out else None
+    _SETUP['environment_and_preimports_s'] = time.perf_counter() - _STARTED
     try:
         _run(a, task, meta)
     finally:
@@ -377,6 +382,27 @@ def _server_calls(a, task, meta):
                                  for s in ("ok", "error", "unreplayable")}}))
 
 
+def timing_rows(cases, h, meta, bucket='', sigs=None, metadata_only=False):
+    """Stream one case's operands; modern factories filter before allocation."""
+    modern = callable(getattr(cases, 'timing_specs', None)) and callable(getattr(cases, 'make_timing_case', None))
+    requested = sigs.split(',') if sigs is not None else None
+    if modern:
+        specs = list(cases.timing_specs(h, meta))
+        if bucket:
+            specs = [c for c in specs if c['sig'] == bucket]
+        if requested is not None:
+            order = {sig: i for i, sig in enumerate(requested)}
+            specs = sorted((c for c in specs if c['sig'] in order), key=lambda c: order[c['sig']])
+        for spec in specs:
+            yield spec if metadata_only else cases.make_timing_case(spec)
+    else:
+        # Existing hand-written tasks retain their own factory semantics. They
+        # can implement the two metadata/factory hooks to avoid eager allocation.
+        for case in cases.timing_cases(h, meta):
+            if (not bucket or case['sig'] == bucket) and (requested is None or case['sig'] in requested):
+                yield case
+
+
 def _run(a, task, meta):
     if a.mode == "server_calls":
         _server_calls(a, task, meta)
@@ -389,12 +415,14 @@ def _run(a, task, meta):
     if a.oracle_path != "call" and a.mode != "oracle":
         raise SystemExit("--oracle-path is only valid with --mode oracle (a worker reads it per request)")
 
+    imports_started = time.perf_counter()
     h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
     cases = _load("cases", os.path.join(task, "cases.py"))
+    _SETUP['task_import_s'] = time.perf_counter() - imports_started
     regime = meta.get("regime", {})
 
     if a.mode == "list":
-        print(json.dumps({"sigs": [c["sig"] for c in cases.timing_cases(h, meta)]}))
+        print(json.dumps({"sigs": [c["sig"] for c in timing_rows(cases, h, meta, metadata_only=True)]}))
         return
 
     call = cases.call
@@ -425,25 +453,61 @@ def _run(a, task, meta):
             out = [rt.time_bucket(task, c, meta, spec) for c in rt.timed_rows(task, a.bucket)]
             print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
             return
-        sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
+        import gc
+        init_started = time.perf_counter()
+        torch = h._torch()
+        have_cuda = torch.cuda.is_available()
+        if have_cuda:
+            torch.cuda.init()
+            h.sync(torch)
+        _SETUP['runtime_init_s'] = time.perf_counter() - init_started
+        sel = iter(timing_rows(cases, h, meta, a.bucket, a.sigs))
         out = []
-        for c in sel:
+        while True:
+            input_started = time.perf_counter()
+            try:
+                c = next(sel)
+            except StopIteration:
+                break
+            h.sync(torch)
+            inputs_s = time.perf_counter() - input_started
             case_call, case_graph = case_execution(c)
+            timing_started = time.perf_counter()
             r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True)
+            timing_s = time.perf_counter() - timing_started
             row = {"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
                    "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
                    "timer": (r or {}).get("timer"),
                    # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
                    # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
                    # see harness_lib.cache_policy), so the two must never be folded together.
-                   "cache_condition": (r or {}).get("cache_condition")}
+                   "cache_condition": (r or {}).get("cache_condition"),
+                   **({'error': r['error']} if r and r.get('error') else {}),
+                   "diagnostics": dict((r or {}).get('stages_s') or {}, inputs_s=inputs_s,
+                                       time_op_s=timing_s)}
             # Whether `ms` is device work or host dispatch latency (time_op's three states:
             # True / False / ABSENT). Dropping it here is how a host-bound UT passed the timing
             # gate; carry both keys or neither.
             if r and "primed" in r:
                 row["primed"], row["host_ms"] = r["primed"], r.get("host_ms")
             out.append(row)
-        print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
+            # Do not keep previous operands alive while constructing the next
+            # case. JIT/autotune state stays warm; unused tensor storage is freed.
+            cleanup_started = time.perf_counter()
+            del c, case_call, r
+            # A full scan of Torch/SGLang's long-lived Python heap per shape
+            # can cost hundreds of ms. Refcounts release normal tensor owners;
+            # collect new cycles here and periodically scan older generations.
+            gc.collect(0)
+            if len(out) % 32 == 0:
+                gc.collect()
+            if have_cuda:
+                h.sync(torch)
+                torch.cuda.empty_cache()
+                row['diagnostics']['live_tensor_bytes_after'] = torch.cuda.memory_allocated()
+            row['diagnostics']['cleanup_s'] = time.perf_counter() - cleanup_started
+        print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"]),
+                          "process": dict(_SETUP, child_s=time.perf_counter() - _STARTED)}))
         return
 
     torch = h._torch()

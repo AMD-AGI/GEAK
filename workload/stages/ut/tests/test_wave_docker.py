@@ -47,7 +47,7 @@ class DockerHandoffTest(unittest.TestCase):
         W.save(wave + '/wave.json', cfg)
         W.save(wave + '/state/smoke.token', {'task': 'smoke', 'token': 'fixture-token'})
         author = self.wave / 'author.py'
-        author.write_text('''import os,sys,json
+        author.write_text('''import os,sys,json,getpass
 from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0, %r)
@@ -55,6 +55,9 @@ import ut_gpu_queue as Q
 wave=Path(os.environ['UT_WAVE_DIR'])
 (wave/'task/run/.ut_writer.lock').touch()
 (wave/'identity.json').write_text(json.dumps({'uid':os.getuid(),'gid':os.getgid()}))
+assert getpass.getuser() == os.environ['USER']
+Path('/tmp/aiter_configs/writable').touch()
+assert os.environ['FLYDSL_RUNTIME_CACHE_DIR'].startswith(str(wave))
 # The deadline expires before the broker can acquire devices. This exercises
 # real submit, liveness, finish and result transport without any GPU access.
 rc=Q.submit(SimpleNamespace(count=1,timeout=.000001,command=['true'],env=[],cwd=None))
@@ -72,6 +75,7 @@ rc=Q.submit(SimpleNamespace(count=1,timeout=.000001,command=['true'],env=[],cwd=
             self.wait_file(self.wave / 'author_result.json')
             self.assertEqual(W.load(wave + '/author_result.json'), {'rc': 124})
             self.assertEqual(W.load(wave + '/identity.json')['uid'], os.getuid())
+            self.assertEqual((self.wave / 'homes/smoke/.cache/aiter-configs/writable').stat().st_uid, os.getuid())
             results = list((self.wave / 'gpu_queue').glob('*/result.json'))
             self.assertEqual(len(results), 1)
             self.assertEqual(W.load(str(results[0]))['gpus'], [])

@@ -65,7 +65,9 @@ The generated `cases.py` supplies:
 - Family hooks and case axes: construct valid layouts, quantization, routing and state.
 - `replay_bundle()`: when required, refresh inputs and replay observed boundary cases
   through the same static buffers.
-- `random_shapes()` and `timing_cases()`: template adapters for the leg runner. Keep
+- `random_shapes()` and `timing_specs()` / `make_timing_case(spec)`: template adapters
+  for the leg runner. Timing specs contain metadata only; the factory constructs
+  one shape's operands on demand. `timing_cases()` remains a compatibility iterator. Keep
   all served signatures, phase/config IDs and observed weights.
 
 Joint tasks retain `phase_target_callables` and `phase_regimes`; dispatch comes from
@@ -134,6 +136,11 @@ performance mode. The same driver calls `measure_legs` and `serving_weighted_spe
 with isolated baseline/candidate legs and the recorded cache/graph policy. Every
 positive-mass signature needs finite timings on both sides; per-config weighting and
 `GEAK_WEIGHTED_SPEEDUP` remain part of this interface.
+Ordinary timing defaults to one isolated process per side and round, streaming the
+shapes through `timing_specs` and `make_timing_case`; no scheduling flag is needed.
+The UT report retains
+per-process and per-shape setup timings outside the device-event measurements;
+see [timing policy](../ut_contracts/README.md).
 
 Retain the raw gate logs and `run/ut_result.json` / `run/ut_report.json`, including
 `performance_measured:false` for correctness qualification. Generate the actual

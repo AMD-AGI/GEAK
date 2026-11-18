@@ -1230,7 +1230,7 @@ def _timing_resume(T, a, state):
     """Buckets an interrupted timing gate already measured under the same task state and rep
     budget (--reuse only), and the callback that persists each new one at once."""
     path = os.path.join(T.dir, "run", TIMING_CHECKPOINT)
-    key = [state.get("reuse_key"), int(a.max_reps)]
+    key = [state.get("reuse_key"), int(a.max_reps), 'batched/v1']
     quick, out = getattr(a, "quick", False), getattr(a, "out", None)
     done = {}
     if getattr(a, "reuse", False) and not quick:
@@ -1270,6 +1270,7 @@ def gate_timing(T, a, state):
     if w.get("primary") is not None:
         print("GEAK_WEIGHTED_SPEEDUP=%s" % w["primary"], flush=True)
     return {"status": "pass" if w.get("primary") is not None else "fail",
+            "process_mode": 'batched',
             "weighted_speedup": w.get("primary"), "geomean": w.get("geomean"),
             "aggregate": w, "per_case": per, "stopped_before_max_reps": early,
             "resumed_buckets": sorted(done),
@@ -1567,6 +1568,8 @@ def _reusable(T, a, key):
             continue
         out.update({g: r for g, r in (prev.get("gates") or {}).items()
                     if r.get("status") in ("pass", "not_required") and g != "restore"})
+    if out.get('timing', {}).get('process_mode') != 'batched':
+        out.pop('timing', None)
     return out
 
 

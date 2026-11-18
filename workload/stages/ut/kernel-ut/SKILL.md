@@ -121,6 +121,11 @@ validation mode, retain every weighted signature, and report performance as unme
 Optimization later measures both timing legs for every positive-mass signature. Compilation
 failure is not a successful numerical negative control. Report missing cases
 and mass; do not renormalize survivors into full coverage.
+Generated UTs default to one isolated timing process per side and round, streaming
+all shapes without a scheduling flag. Keep metadata-only `timing_specs` and a
+one-shape `make_timing_case` factory; never preallocate all shapes' tensors.
+Changing the harness, driver or case factory requires fresh qualification under
+the updated helper/source identity, even if an older snapshot format omitted them.
 
 The UT must also cover what the server compiled, in the server's import environment:
 

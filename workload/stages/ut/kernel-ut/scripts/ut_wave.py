@@ -317,6 +317,19 @@ class Docker(object):
         # which can include unreadable prebuilt cache files. Its supported cache
         # override keeps new builds writable and shared with this task's workers.
         env.setdefault('AITER_JIT_DIR', os.path.join(home, '.cache', 'aiter'))
+        env.setdefault('FLYDSL_RUNTIME_CACHE_DIR', os.path.join(home, '.cache', 'flydsl'))
+        # The image may have no passwd entry for this numeric UID. Libraries
+        # commonly resolve their cache owner with getpass.getuser().
+        import pwd
+        username = pwd.getpwuid(os.getuid()).pw_name
+        env.setdefault('USER', username)
+        env.setdefault('LOGNAME', username)
+        # AITER hardcodes this merged-config/lock directory. A private writable
+        # mount regenerates it from the pinned image's CSVs without changing them.
+        if not any('/tmp/aiter_configs' in value for value in extra):
+            configs = os.path.join(home, '.cache', 'aiter-configs')
+            os.makedirs(configs, exist_ok=True)
+            cmd += ['-v', configs + ':/tmp/aiter_configs']
         # Mounted render nodes define the physical set. HIP indices are local
         # to that set; a serving.json mask must not override the new allocation.
         env.pop('ROCR_VISIBLE_DEVICES', None)
