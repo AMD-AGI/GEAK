@@ -60,7 +60,7 @@ gates), the ship rule in `SYNTHESIS.md`, `LEARNINGS.md`, `inbox.md`, and each ca
    - cross-over against the shipped candidate;
    - one official run for non-inferiority.
    Apply the pre-registered rule exactly. If it blocks a gain that is real on every instrument, tell the lead.
-5. **Ship** = record it in `ledger.md`, `RUN/shipped/patch.diff` and `RUN/shipped/ID` (the archive's `best_id`), rerun correctness, and write the decision
+5. **Ship** = record it in `ledger.md` and `RUN/shipped/patch.diff`, rerun correctness, and write the decision
    and its numbers to `SYNTHESIS.md`. Then ask geak-roofline to rerun its gap step.
 
 ## MODE=final

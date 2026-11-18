@@ -11,8 +11,7 @@ execute. Read `$SK/v4/COMMON.md` first. Evidence: `../EVIDENCE.md`.
 
 ## Paths and inputs
 - `SK` = `kernel_skills/`; `KW` = `$SK/../kernel_workflow`. Inputs: `INPUT`, `GPUS`, optional `TASK`,
-  `DEADLINE`, `TARGET`, `APPLY=1`, `SEARCH` (template, default `evo` = GEAK-evo / PR #580; `hillclimb` = v3),
-  `EVOLUTION_START` (`first_stall` default | `search_start`), and for a population `LINEAGE`, `POP_ROOT`, `PEERS`.
+  `DEADLINE`, `TARGET`, `APPLY=1`, `SEARCH` (template name, default `evo`; `hillclimb` is the v3 behaviour).
 - `RUN` holds: `ledger.md`, `SYNTHESIS.md`, `LEARNINGS.md`, `inbox.md`, `cands/`, `roles/`, `archive.json`,
   `decisions/round_<n>.json`.
 
@@ -41,8 +40,7 @@ geak-benchmark `MODE=setup`; geak-roofline; investigator `budget` and `deploymen
    verdicts → `instrument`; ideas only from inside → `prior-art`; engineers quitting early → deliverables;
    verified work unshipped → ship first.
 4. **Decide.** Write `decisions/round_<n>.json`: a list of actions, each one of
-   - `{"op": "mutate", "parent_id": id, "donor_ids": [...], "approach": ..., "cut": ..., "direction": ...,
-     "retain": "best|development", "question": ..., "why": ...}` → geak-engineer (donors = crossover by the engineer);
+   - `{"op": "mutate", "parent": id, "cut": ..., "direction": ..., "why": ...}` → geak-engineer;
    - `{"op": "fresh", "cut": ..., "why": ...}` → geak-engineer `MODE=fresh-arch` (seeds a new family);
    - `{"op": "crossover", "parents": [ids], "kind": "merge|dispatch", "why": ...}` → geak-ship;
    - `{"op": "investigate", "mode": ..., "question": ..., "why": ...}` → geak-investigator;

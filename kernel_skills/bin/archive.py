@@ -53,42 +53,12 @@ def build_run(run):
             if sig and c.get("speedup"):
                 per[sig].append(c["speedup"])
                 weights[sig] = (c.get("weight", 1.0), c.get("regime", ""))
-        sp = res.get("speedup")
-        rs = (res.get("status") or "").lower()
-        if rs in ("incorrect", "apply_failed", "frozen_touched", "broken", "invalid"):
-            evo_status = "incorrect"
-        elif not isinstance(sp, (int, float)):
-            evo_status = "unverified"
-        else:
-            evo_status = "slower" if sp <= 1.0 else "correct"
-        patch = os.path.join(d, "patch.diff")
-        sha = None
-        if os.path.exists(patch):
-            import hashlib
-            sha = hashlib.sha256(open(patch, "rb").read()).hexdigest()
-        parents = meta.get("parents", [])
-        nodes[nid] = {"id": nid, "parent_id": parents[0] if parents else "ORIGINAL", "donor_ids": meta.get("donors", parents[1:]),
-                      "approach": meta.get("approach") or meta.get("family", ""), "evo_status": evo_status,
-                      "patch_ref": {"path": patch if sha else None, "sha256": sha},
-                      "parents": parents, "family": meta.get("approach") or meta.get("family", ""),
+        nodes[nid] = {"id": nid, "parents": meta.get("parents", []), "family": meta.get("family", ""),
                       "cut": meta.get("cut", ""), "role": meta.get("role", ""), "status": res.get("status", meta.get("status", "")),
                       "official": res.get("speedup"), "cost_usd": meta.get("cost_usd"),
                       "cases": {s: {"speedup": statistics.median(v), "n": len(v), "weight": weights[s][0],
                                     "regime": weights[s][1]} for s, v in per.items()}}
-    best = None
-    sp_f = os.path.join(run, "shipped", "ID")
-    if os.path.exists(sp_f):
-        best = open(sp_f).read().strip()
-    if not best:
-        ok = [n for n in nodes.values() if n["evo_status"] == "correct" and isinstance(n.get("official"), (int, float))]
-        best = max(ok, key=lambda n: n["official"])["id"] if ok else "ORIGINAL"
-    # geak.evolution/1-compatible view (PR #580): entries with parent/donors/approach/status/patch_ref
-    entries = [{"id": n["id"], "parent_id": n["parent_id"], "donor_ids": n["donor_ids"], "approach": n["approach"],
-                "specialty": n.get("cut", ""), "patch_ref": n["patch_ref"], "verified": n["evo_status"] in ("correct", "slower"),
-                "speedup": n.get("official"), "status": n["evo_status"], "case_rows": len(n["cases"])}
-               for n in nodes.values()]
-    return {"schema": "geak.evolution/1", "base": os.path.join(run, "orig"), "best_id": best,
-            "entries": entries, "source": run, "nodes": nodes}
+    return {"source": run, "nodes": nodes}
 
 
 def build_reports(pattern):

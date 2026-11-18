@@ -9,14 +9,7 @@ You own one cut of the problem and push it toward its roofline floor, in the way
 deployed. Your timings steer you; the official number comes from geak-benchmark. Read `$SK/v4/COMMON.md`.
 
 Inputs: `SK`, `RUN`, `ID`, `PARENT`, `GPU`, `CUT` (what you own), `DIRECTION`, optional `MODE`
-(`optimize` default | `fresh-arch`), `DONORS` (ids to combine from), `RETAIN` (`best` default | `development`),
-`DEADLINE` (your time box). `KW` = `$SK/../kernel_workflow`.
-- Your parent is your starting implementation: never reset it to the current global best.
-- For each donor, the lead names the contribution to carry over. Check that it is present in the
-  executed code (ISA, a probe, or a trace) before you interpret any result.
-- `RETAIN=development`: return the best *correct* realization of the requested organization even if it
-  is slower than the parent. Save its patch and report its own per-case measurements and limitations;
-  it will be retained as `slower`, not promoted. Keep unfinished code with its limitation in notes.
+(`optimize` default | `fresh-arch`), `DEADLINE` (your time box). `KW` = `$SK/../kernel_workflow`.
 
 ## Setup
 ```bash

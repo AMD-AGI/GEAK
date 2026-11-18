@@ -31,12 +31,11 @@ Every role reads this file first. `SK` = `kernel_skills/`, `KW` = `$SK/../kernel
   bit-exactness that the contract does not require. Measure the tolerance before designing around numerics.
 
 ## Candidates and the search archive
-- Every attempt with source is a node, including slower, incorrect and unfinished ones. Retention never promotes.
-  `cands/<id>/meta.json` holds `id`, `parents` (`[parent_id]`), `donors` (`donor_ids`), `role`, `cut`,
-  `approach` (a stable label of the computational organization, e.g. `triton-1d-grid` or `hip-lds-ring`; keep
-  the parent's label unless the organization changed), `action` (the decision that made it), and `status`. `result.json` per-case rows carry `sig`, `regime`, `weight` and `speedup` (geak-benchmark).
-- `python3 $SK/bin/archive.py build --run $RUN` rebuilds `RUN/archive.json`; It also emits the `geak.evolution/1` entry view (PR #580: parent / donors / approach / status
-  correct|slower|incorrect|unverified / patch_ref). `archive.py views` shows best,
+- Every candidate is a node of the search. `cands/<id>/meta.json` holds `id`, `parents` (one for a mutation,
+  several for a crossover), `role`, `cut`, `family` (a short tag for its design family, e.g. `triton-1d-grid`,
+  `hip-lds-ring`; reuse the parent's tag unless the structure changed), `action` (the decision that made it),
+  and `status`. `result.json` per-case rows carry `sig`, `regime`, `weight` and `speedup` (geak-benchmark).
+- `python3 $SK/bin/archive.py build --run $RUN` rebuilds `RUN/archive.json`; `archive.py views` shows best,
   the noise-aware front, the per-regime dispatch composite and the families. Rebuild after every result.
 - Workspaces: `bash $SK/bin/mkws.sh $RUN <dst> [parent patch]`.
 - Save only editable paths: `git add -A && git diff --binary --cached base -- <EDITABLE> > patch.diff`
