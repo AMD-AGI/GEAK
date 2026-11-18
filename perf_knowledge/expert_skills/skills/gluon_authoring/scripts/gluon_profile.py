@@ -26,9 +26,14 @@ GPU: pass --gpu <id> (each tool takes the GEAK lock itself) or run the whole cal
 
 Usage:
   gluon_profile.py <out_dir> --kernel <substr> --source <kernel.py> [--gpu N] [--arch gfx942]
-                   [--layers trace,pmc,att] [--timeout 300] [--compare <prev_out_dir>] -- <cmd...>
+                   [--layers trace,pmc,att] [--timeout 300] [--compare <prev_out_dir>]
+                   [--flops <per dispatch>] -- <cmd...>
   gluon_profile.py --compare-only <before_dir> <after_dir> [--out <dir>]
   gluon_profile.py --selftest
+
+--flops (the operation count of ONE dispatch of the profiled case) adds the achieved rate to D. It is
+the number to set against a peak (hw_budget.py --measured-tflops / --measured-ms); MfmaUtil and MFMA
+busy cycles say how often the matrix pipe is occupied, which is not the fraction of peak throughput.
 
 Outputs in <out_dir>: profile.json (layers + dials), report.md, compare.md (with --compare),
 cmd.sh, trace/, pmc/, capture/ (att/, ir/), analysis/.
@@ -56,6 +61,9 @@ KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
 sys.path.insert(0, str(KT))
 
 LAYERS = ("trace", "pmc", "att")
+# Always collected (the IR / A dial rides the capture pass); accepted in --layers so a caller that
+# names every layer profile.json reports is not refused.
+ALWAYS = ("ir", "capture")
 SCHEMA = "gluon_profile/1"
 
 
@@ -462,6 +470,9 @@ def write_report(prof, path):
     L += ["", "## D - device time under the profiler (screening only)", "",
           f"{_fmt(t.get('median_us'))} us median (p10 {_fmt(t.get('p10_us'))}, p90 {_fmt(t.get('p90_us'))}), "
           f"{_fmt(t.get('dispatches'))} dispatches" if t else "trace not available: see layers.",
+          *([f"achieved {_fmt(t.get('achieved_tflops'))} TFLOP/s at {t.get('flops_per_dispatch'):.4g} op/dispatch: set "
+             "it against the peak with hw_budget.py --measured-tflops; MfmaUtil (C) is pipe occupancy, not % of peak"]
+            if t.get("achieved_tflops") else []),
           "", "Full tool outputs: analysis/ (hotspot.txt, opclass.txt, asm_audit.txt, deep_mfma.txt, "
           "breakdown.txt, probe.txt, pmc.txt), logs/."]
     Path(path).write_text("\n".join(L) + "\n")
@@ -480,9 +491,13 @@ def profile(a, cmd):
     prof = {"schema": SCHEMA, "name": a.name, "kernel": a.kernel, "source": str(Path(a.source).resolve()),
             "source_sha256": hashlib.sha256(Path(a.source).read_bytes()).hexdigest(),
             "arch": a.arch, "command": cmd, "toolchain": _toolchain(), "layers": {}, "dials": {}}
-    want = [x for x in a.layers.split(",") if x]
+    want = [x for x in a.layers.split(",") if x and x not in ALWAYS]
     if "trace" in want:
         prof["layers"]["trace"], prof["dials"]["D"] = layer_trace(a, out, cmd_sh)
+        dd = prof["dials"]["D"]
+        if dd and getattr(a, "flops", None) and dd.get("median_us"):
+            dd["flops_per_dispatch"] = a.flops
+            dd["achieved_tflops"] = round(a.flops / (dd["median_us"] * 1e-6) / 1e12, 2)
     if "pmc" in want:
         prof["layers"]["pmc"], prof["dials"]["C"] = layer_pmc(a, out, cmd_sh)
     cap, att, ir, a_dial, b_dial = layer_att(a, out, cmd_sh, "att" in want)
@@ -538,6 +553,21 @@ def _selftest():
         out.mkdir()
         sh = _write_cmd(out, ["python3", "x.py", "a b", "--flag=1"])
         chk("exec python3 x.py 'a b' --flag=1" in sh.read_text(), "cmd.sh keeps argument boundaries")
+        prof = {"name": "n", "kernel": "k", "source": "k.py", "toolchain": {}, "layers": {}, "dials": {"D": {
+            "median_us": 100.0, "p10_us": 99.0, "p90_us": 101.0, "dispatches": 5,
+            "flops_per_dispatch": 2e12, "achieved_tflops": 20.0}}}
+        write_report(prof, Path(t) / "r.md")
+        chk("achieved 20 TFLOP/s" in (Path(t) / "r.md").read_text(), "report carries the achieved rate")
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try:
+            main(["/nonexistent/o", "--kernel", "k", "--source", "/nonexistent/k.py", "--layers", "trace,ir", "--", "true"])
+        except SystemExit:
+            pass
+    chk("unknown layer" not in err.getvalue() and "--source not found" in err.getvalue(),
+        "ir is accepted in --layers (it is always collected)")
     print("gluon_profile selftest:", "FAIL" if fail else "OK")
     return fail
 
@@ -568,7 +598,10 @@ def main(argv=None):
     ap.add_argument("--source", required=True, help="the kernel source file being profiled")
     ap.add_argument("--gpu", help="GPU id; each tool takes the GEAK lock itself (else run under gpu_lock.sh)")
     ap.add_argument("--arch", help="gfx target from the execution record, e.g. gfx942")
-    ap.add_argument("--layers", default=",".join(LAYERS), help="comma list of trace,pmc,att (IR is always taken)")
+    ap.add_argument("--layers", default=",".join(LAYERS),
+                    help="comma list of trace,pmc,att (ir/capture are always taken and may be named)")
+    ap.add_argument("--flops", type=float,
+                    help="operations of ONE dispatch of the profiled case: D gains the achieved TFLOP/s")
     ap.add_argument("--timeout", default="300", help="seconds per profiler pass")
     ap.add_argument("--pmc-plan", help="file remembering this box's working PMC passes "
                     "(default ~/.cache/geak/gluon_pmc_plan_<host>_<arch>_<rocm>.json)")
@@ -579,7 +612,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if not cmd:
         ap.error("the workload command goes after --")
-    bad = [x for x in a.layers.split(",") if x and x not in LAYERS]
+    bad = [x for x in a.layers.split(",") if x and x not in LAYERS + ALWAYS]
     if bad:
         ap.error(f"unknown layer(s): {bad}")
     if not Path(a.source).is_file():

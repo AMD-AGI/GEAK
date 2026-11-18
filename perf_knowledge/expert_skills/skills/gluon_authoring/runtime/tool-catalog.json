@@ -1555,6 +1555,36 @@
         "side_effect_free": true
       },
       "reason": "Gluon-specific adapter called only after successful shared IR capture; source transcription remains in the authoring pack."
+    },
+    {
+      "name": "track_variants",
+      "classification": "internal",
+      "path": "scripts/track_variants.py",
+      "command": [
+        "python3",
+        "scripts/track_variants.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "one source file at several track revisions + manifest, for A/B arms named by revision; internal until registered as public"
+    },
+    {
+      "name": "edge_shapes",
+      "classification": "internal",
+      "path": "scripts/edge_shapes.py",
+      "command": [
+        "python3",
+        "scripts/edge_shapes.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "boundary-shape correctness for every variant vs a reference: regression vs shared limitation; internal until registered as public"
     }
   ]
 }
