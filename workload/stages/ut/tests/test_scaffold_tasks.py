@@ -82,10 +82,12 @@ class ScaffoldTasksTest(unittest.TestCase):
         self.assertTrue(any("changed" in p for p in problems), problems)
 
     def test_a_case_without_weight_is_refused(self):
-        self.doc["tasks"][0]["manifest"]["cases"][0]["effective_calls"] = -1
-        self.path.write_text(json.dumps(self.doc))
-        _, _, problems = S.check_request(str(self.path))
-        self.assertTrue(any("effective_calls" in p for p in problems), problems)
+        for bad in [-1, True, float('nan'), float('inf'), -float('inf')]:
+            with self.subTest(weight=bad):
+                self.doc["tasks"][0]["manifest"]["cases"][0]["effective_calls"] = bad
+                self.path.write_text(json.dumps(self.doc))
+                _, _, problems = S.check_request(str(self.path))
+                self.assertTrue(any("effective_calls" in p for p in problems), problems)
 
     def test_finalize_without_an_installed_request_is_blocked(self):
         out = self.root / "empty"

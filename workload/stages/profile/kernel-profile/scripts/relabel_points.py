@@ -24,6 +24,7 @@ A point without a census is kept with `counted: false` and represents nothing.
 Stdlib only.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -109,14 +110,18 @@ def prefill_probe_context(probe):
 
 
 def bands_2d(rows, tol, tol_ctx, phase, live):
-    """Outside rows (shape, n, nearest, ctx) grouped on a grid of one tolerance per axis."""
+    """Group outside rows by owner and tolerance cell, preserving instance ownership.
+
+    A geometric neighbour of the centre can supply a cost reference, but must never
+    inherit instances assigned to a different sampling partition.
+    """
     import math as _m
     cells = defaultdict(list)
     for shape, n, near, ctx in rows:
-        cells[(int(_m.log(shape) // _m.log(tol)),
+        cells[(near, int(_m.log(shape) // _m.log(tol)),
                int(_m.log(ctx) // _m.log(tol_ctx)))].append((shape, n, near, ctx))
     out = []
-    for rs in cells.values():
+    for cell, rs in sorted(cells.items()):
         tot = sum(n for _s, n, _p, _c in rs)
         shape = int(round(_m.exp(sum(n * _m.log(s) for s, n, _p, _c in rs) / tot)))
         ctx = int(round(_m.exp(sum(n * _m.log(c) for _s, n, _p, c in rs) / tot)))
@@ -125,7 +130,8 @@ def bands_2d(rows, tol, tol_ctx, phase, live):
             abs(_m.log(ctx / p["achieved_context"])) / _m.log(tol_ctx)))
         out.append({"lo": min(s for s, *_ in rs), "hi": max(s for s, *_ in rs),
                     "shape": shape, "context": ctx, "instances": tot,
-                    "nearest_point": near[0]["point_id"],
+                    "nearest_point": cell[0],
+                    "band_id": hashlib.sha256(json.dumps([phase, *cell]).encode()).hexdigest()[:16],
                     "bracketing_points_2d": [p["point_id"] for p in near[:2]],
                     "proxy_mass": sum((s if phase == "PREFILL" else 1) * n for s, n, _p, _c in rs)})
     return out

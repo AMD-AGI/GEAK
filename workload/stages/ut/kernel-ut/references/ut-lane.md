@@ -60,11 +60,32 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
    perform no timing measurements and report `performance_measured: false`.
    Fix failures and reuse unchanged passing gates. A quick run never substitutes for
    qualification. Performance measurements belong to the optimizer.
+7. **Finish boundary and source delivery.** Follow [the main skill](../SKILL.md),
+   including `seam_trace.py` and `kernel_selection.py --strict-launch` for every
+   requested phase, and [source delivery records](source-delivery-records.md).
+   Standalone task boundary traces are allowed through the GPU broker; do not
+   restart the serving workload or modify frozen profile evidence. Freeze the
+   source snapshot before qualification; retain actual per-leaf execution logs
+   and numerical negative-control outcomes. If this needs source/harness changes,
+   rerun qualification with `--reuse`. Build `run/draft_return.json` with hashed
+   task-local selection and source records, then run:
+
+   ```bash
+   "${KERNEL_EXTRACT_NODE:-node}" "$SHARED_TOOLS/kernel_extraction_delivery.mjs" \
+     --kernel "$TASK_DIR/run/requested_kernel.json" \
+     --result "$TASK_DIR/run/draft_return.json" --phase extract \
+     --out "$TASK_DIR/run/RETURN.json"
+   ```
+
+   Use `extract_op` for the whole-op return schema. Do not use `--prepared` to
+   bypass selection verification. A delivery-only resume should reuse unchanged
+   correctness evidence and collect the missing delivery records.
 
 
-The lane ends by itself once the receipt (`run/ut_result.json`, written by the UT, newer
-than every file it reads) shows every required gate passing. Do not write the receipt, do
-not edit reports, do not loosen a bound or a gate to get there: a departure from the family
+The lane ends only after a fresh `run/ut_result.json` passes and the native delivery
+gate accepts `run/RETURN.json` for this task. The wave rechecks the hashed evidence;
+the existence of a return file alone is insufficient. Do not write the UT receipt,
+edit reports or loosen a bound or a gate to get there: a departure from the family
 is an `--override` with a stated reason, recorded by the lint.
 
 ## Reading the gates

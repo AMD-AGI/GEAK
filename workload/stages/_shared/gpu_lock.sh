@@ -50,7 +50,6 @@ _check_sources_on_exit() {
 trap _check_sources_on_exit EXIT
 
 LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
-mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------
 # GEAK_GPU_ALLOWED (comma list) is the set of GPUs the CALLER was actually allocated. When it is
@@ -106,6 +105,12 @@ _gpu_is_idle() {
     [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
 }
 
+_lock_paths=()
+for _g in ${GPU_SPEC//,/ }; do
+    _lock_paths+=("${LOCK_DIR}/gpu_${_g}.lock")
+done
+python3 "$(dirname "$SOURCE_GUARD")/gpu_lock_files.py" "${_lock_paths[@]}"
+
 case "$GPU_SPEC" in
   *,*)
     # --- pool mode: block until some lane is free AND idle, then hold it for the whole command ---
@@ -120,7 +125,7 @@ case "$GPU_SPEC" in
     while [ -z "$GPU_ID" ]; do
         for _g in $POOL; do
             # (1) flock: exclusive lane. Held until this process exits.
-            exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
+            exec {_fd}<"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
                 if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] && ! _gpu_is_idle "$_g"; then
@@ -251,5 +256,5 @@ else
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         "$@"
-    ) 200>"$LOCK_FILE"
+    ) 200<"$LOCK_FILE"
 fi

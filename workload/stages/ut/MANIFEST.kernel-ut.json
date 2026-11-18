@@ -1,20 +1,20 @@
 {
   "file_count": 52,
   "files": {
-    "PROVENANCE.json": "a918f89914e0206e3912644b175ad81d6a2bd7f25cef6cdfc5dd8e726c7c3840",
-    "SKILL.md": "6142101f531b825eae237d8bb273af931652fe51423d97025505d77d15e0d702",
+    "PROVENANCE.json": "823177baae75c91e96cf104ac6ec76b4882fc4f80f17c9852dd70eedf729610b",
+    "SKILL.md": "f6ba2bde754d8e8df22366c5725712ee4c08b27ecbf6a64ff4c2af60fd31b505",
     "references/collective-ut.md": "a2c1eb73f426c278115dcc09b902662b3e4f73d7f4034050f4f774f6415476a4",
     "references/delivery-contract.md": "888be480426fdda80d0c7d4304fd610976fe5ed68349bbb467488ed8e78ac996",
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
     "references/pipeline-handoff.md": "fcecedc1add2c2f1f09c85e832ec835e548c8ad4ed1ea64a3b8afd733cffb28d",
-    "references/setup.md": "8c23adabe218cde824c4e296d1476c5d4db6e5b5d23fc8b942d85963805f8804",
+    "references/setup.md": "1208f06d7162b7eb1a10691de8890882580cc53d8d91dbbcfe36e864ae465809",
     "references/source-delivery-records.md": "1f4e924f4f360d33aceeb0875b45217e37a32c2b56036df2f226da1d7d176abf",
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
     "references/task-authoring.md": "a844264f0480ccfe923e25b8406be1068d12e6d97cd702e8333b58eb953ee5d6",
-    "references/ut-lane.md": "48050dbe3a594b459ddc6813804baead36f28d9ece58875a4a6cab6375d119b9",
-    "scripts/scaffold_tasks.py": "5de77b1ec4d3fea928ba9e95ac2ff3eb3fe4cd581570480566f4f11accced9ea",
-    "scripts/ut_gpu_queue.py": "c550083b62244f7714dd76f18312b6fc8731b32ee5502eb453ac1a65d070003f",
-    "scripts/ut_wave.py": "89f37a085ec469d708de5063efc1c9378fe7ff55e7c3dee31df28b8b4ecd5ec5",
+    "references/ut-lane.md": "4afe39295d343deda8f1be94045023e47aaba1071423eba79af1bd6db9c72b3d",
+    "scripts/scaffold_tasks.py": "e0bfde7cf8efe55d3b5c06dd5b74bee3c57b9af64870a12f064863351e46bca5",
+    "scripts/ut_gpu_queue.py": "98fb2b624e4b5b4ef44428523d6f8954fc93693958b62720a77c969187c43183",
+    "scripts/ut_wave.py": "40a4d6b04669e6b4a5c2956a690595703d1225307b68b564906abb97bebc43d9",
     "shared/delivery_contract.mjs": "3b8674016eaf1c7e70278911d5dcc181587b29d87cbc1882f4e895b0415f96ce",
     "shared/harness_lib.py": "546acccf572f3c0b039c70999f090cb963ea06a43450c6b4af83759a33c08886",
     "shared/kernel_extraction_delivery.mjs": "212ee4a108b77fc9fba056a059e0a01a6cd728331a9b0aa9378e30cffb3a44f9",
@@ -55,9 +55,9 @@
     "ut_contracts/ut_driver.py": "7b203606e73a17ecfb7653d879a2b86faeb5b858ffcf60b2547a0ee0e8595f4f"
   },
   "modified_from_origin": false,
-  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md.",
+  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md. c28 regression: host UID/GID Docker writers with writable AITER cache, shared-lock broker liveness across PID namespaces, read-only GPU flock handles, and native delivery verification before wave completion. Explicit resumes retain logs and renew attempts; finite request weights are enforced. Rebased onto geak-x f3d2153; keep the split driver's selective CPU copy of top-k score inputs, which already avoids copying unused comparison inputs (236ee03).",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: UT half of kernel-extract",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "dc64570635622801d96718cc842dd5b37795f8ecc2e0a0ccc47ad45e0aeaf88e"
+  "tree_sha256": "27e7f4de5f2c789a77d8d827b3d194fa517e8ac1ee0926e66667f134f1435121"
 }

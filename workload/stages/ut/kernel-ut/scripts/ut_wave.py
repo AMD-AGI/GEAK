@@ -97,6 +97,37 @@ def passed(tdir):
     return verdict == "pass" and fresh
 
 
+def delivery_status(tdir):
+    """Revalidate the existing return using the native gate; never synthesize it."""
+    path = os.path.join(tdir, 'run', 'RETURN.json')
+    result = load(path)
+    if not isinstance(result, dict) or not result:
+        return False, 'missing or invalid run/RETURN.json'
+    if (result.get('short_name') not in (None, '', os.path.basename(os.path.abspath(tdir)))
+            or not isinstance(result.get('task_dir'), str)
+            or os.path.realpath(result['task_dir']) != os.path.realpath(tdir)):
+        return False, 'run/RETURN.json belongs to another task'
+    phase = 'extract' if 'unittest_smoke' in result else 'extract_op'
+    try:
+        proc = subprocess.run([
+            os.environ.get('KERNEL_EXTRACT_NODE', 'node'),
+            os.path.join(SKILL, 'shared', 'kernel_extraction_delivery.mjs'),
+            '--kernel', os.path.join(tdir, 'run', 'requested_kernel.json'),
+            '--result', path, '--phase', phase,
+        ], capture_output=True, text=True, timeout=120)
+        report = json.loads(proc.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, 'delivery verification unavailable: %s' % exc
+    if proc.returncode == 0 and report.get('ok') is True:
+        return True, None
+    failed = [k for k, v in report.get('checks', {}).items() if not v.get('ok')]
+    return False, 'delivery gate failed: %s' % (', '.join(failed) or report.get('error', 'invalid return'))
+
+
+def completed(tdir):
+    return passed(tdir) and delivery_status(tdir)[0]
+
+
 # ----------------------------------------------------------------------------- planning
 def task_rows(eval_dir, only=None):
     plan = load(os.path.join(eval_dir, "task_plan.json"))
@@ -257,7 +288,15 @@ class Docker(object):
         if any(x.split('=', 1)[0] in ('--device', '--device-cgroup-rule', '--gpus', '--privileged')
                or '/dev/' in x or 'docker.sock' in x for x in extra):
             raise ValueError("UT_WAVE_DOCKER_EXTRA must not grant GPU devices or a Docker socket")
+        if any(x == '-u' or x.startswith('-u') or x.split('=', 1)[0] == '--user' for x in extra):
+            raise ValueError("UT_WAVE_DOCKER_EXTRA must not override the host UID/GID")
         cmd += extra
+        # Both author and GPU worker write into the host broker's workspace.
+        # Image-default root produces 0755 request directories the broker cannot
+        # complete. Use one identity throughout, with a writable per-task home.
+        cmd += ['--user', '%d:%d' % (os.getuid(), os.getgid())]
+        for gid in sorted(set(os.getgroups())):
+            cmd += ['--group-add', str(gid)]
         if gpus:
             cmd += ["--device", "/dev/kfd"]
         for g in gpus:
@@ -267,7 +306,17 @@ class Docker(object):
                     % (node, self.base, self.step))
                 return False
             cmd += ["--device", node]
+            cmd += ['--group-add', str(os.stat(node).st_gid)]
+        if gpus:
+            cmd += ['--group-add', str(os.stat('/dev/kfd').st_gid)]
         env = dict(env, GPU_IDS=",".join(str(i) for i in range(len(gpus))))
+        home = os.path.join(self.wave, 'homes', env.get('UT_WAVE_TASK') or name)
+        os.makedirs(home, exist_ok=True)
+        env.setdefault('HOME', home)
+        # AITER otherwise copies the image's root-owned JIT cache into HOME,
+        # which can include unreadable prebuilt cache files. Its supported cache
+        # override keeps new builds writable and shared with this task's workers.
+        env.setdefault('AITER_JIT_DIR', os.path.join(home, '.cache', 'aiter'))
         # Mounted render nodes define the physical set. HIP indices are local
         # to that set; a serving.json mask must not override the new allocation.
         env.pop('ROCR_VISIBLE_DEVICES', None)
@@ -304,7 +353,7 @@ def default_container_prefix(wave):
 
 
 PASS_ENV = ("WORKLOAD_AGENT_ENV_FILE", "WORKLOAD_AGENT_STATE_BASE", "WORKLOAD_AGENT_MODEL",
-            "CLAUDE_BIN", "GEAK_ROOT", "WORKLOAD_ROOT", "SHARED_TOOLS", "HF_HOME")
+            "CLAUDE_BIN", "KERNEL_EXTRACT_NODE", "GEAK_ROOT", "WORKLOAD_ROOT", "SHARED_TOOLS", "HF_HOME")
 
 
 def lane_env(eval_dir, extra):
@@ -405,7 +454,7 @@ def controller_run(a):
     running = {}
     for row in rows:
         st = status_of(wave, row["label"])
-        if st.get("status") not in FINAL or st.get("status") == "passed" and not passed(row["task_dir"]):
+        if st.get("status") not in FINAL or st.get("status") == "passed" and not completed(row["task_dir"]):
             set_status(wave, row["label"], status="pending")
     t0 = now()
     log(wave, "wave: %d CPU authors, GPU pool %s, backend %s" %
@@ -477,6 +526,7 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
         "GPUS            allocated only inside GPU commands; authoring is CPU-only",
         "DEADLINE        %s (epoch %d)" % (time.strftime("%F %T", time.localtime(deadline)), deadline),
         "VALIDATION      unittest.py --validation-mode correctness --reuse; no timing measurements",
+        "COMPLETION      fresh passing UT AND run/RETURN.json accepted by the native delivery gate",
         "",
     ]
     lines += ["GPU MODE: on-demand. This author container is CPU-only and holds no GPU lease.",
@@ -486,6 +536,10 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
               % row['need'],
               "Use --env K=V for command-specific environment; cwd defaults to TASK_DIR.",
               "Do not nest gpu_lock wrappers; the host broker holds the locks until workers drain.", ""]
+    if passed(tdir):
+        lines += ["The existing correctness UT passes. Resume boundary/source delivery work; "
+                  "reuse unchanged passing gates. Changes to source, harness or test inputs "
+                  "require requalification. A passing UT alone does not finish this lane.", ""]
     if attempt > 1:
         verdict, fresh, rep = receipt(tdir)
         quick = load(os.path.join(tdir, "run", "ut_report.quick.json"), {})
@@ -494,7 +548,7 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
                                                        "fix_missing", "fix_env")}
                for g, r in (last.get("gates") or {}).items()
                if r.get("status") not in ("pass", "not_required", "skipped")}
-        lines += ["THIS IS ATTEMPT %d. The previous session ended without a passing receipt%s. "
+        lines += ["THIS IS ATTEMPT %d. The previous session did not complete UT and delivery%s. "
                   "Do not start over: read the task directory and continue. The last UT report "
                   "(%s) said:" % (attempt, " (%s)" % st.get("why") if st.get("why") else "",
                                   "run/ut_report.json" if rep else "run/ut_report.quick.json"),
@@ -526,7 +580,8 @@ def lane_run(a):
     st = status_of(wave, row["label"])
     deadline = (st.get("started") or now()) + cfg["lane_sec"] * cfg["attempts"]
     try:
-        for attempt in range(int(st.get("attempts") or 0) + 1, cfg["attempts"] + 1):
+        for attempt in range(int(st.get("attempts") or 0) + 1,
+                             int(st.get('attempt_limit') or cfg['attempts']) + 1):
             left = int(min(cfg["lane_sec"], deadline - now()))
             if left < 120:
                 set_status(wave, row["label"], status="failed", why="lane budget spent")
@@ -554,14 +609,19 @@ def lane_run(a):
             if blocker:
                 set_status(wave, row["label"], status="blocked", why=blocker.get("reason"))
                 return 0
-            gpu_ok = GPU.last_command_passed(wave, row['label'])
-            if gpu_ok and passed(tdir):
-                set_status(wave, row["label"], status="passed", ended=now(), why=None)
+            gpu_ok = GPU.last_command_passed(wave, row['label'], allow_missing=True)
+            ut_ok = passed(tdir)
+            delivery_ok, delivery_why = delivery_status(tdir) if ut_ok else (False, 'UT not qualified')
+            if gpu_ok and ut_ok and delivery_ok:
+                set_status(wave, row["label"], status="passed", ended=now(), why=None,
+                           ut_passed=True, delivery_ok=True)
                 return 0
             verdict, fresh, _ = receipt(tdir)
             st = set_status(wave, row["label"],
-                            why="session exited %d; receipt %s%s" % (
-                                rc, verdict or "absent", "" if fresh or not verdict else " (stale)"))
+                            ut_passed=ut_ok, delivery_ok=delivery_ok,
+                            why="session exited %d; receipt %s%s; %s; GPU command ok=%s" % (
+                                rc, verdict or "absent", "" if fresh or not verdict else " (stale)",
+                                delivery_why or 'delivery verified', gpu_ok))
         set_status(wave, row["label"], status="failed", ended=now())
         return 1
     finally:
@@ -569,6 +629,15 @@ def lane_run(a):
 
 
 # ----------------------------------------------------------------------------- CLI
+def resume_rows(wave, rows, attempts):
+    """Each explicit start grants a new budget, retaining numbered session logs."""
+    for row in rows:
+        previous = status_of(wave, row['label'])
+        set_status(wave, row['label'], status='pending', lost=0, started=None, ended=None,
+                   attempt_limit=int(previous.get('attempts') or 0) + attempts,
+                   resumed_from=previous.get('status'))
+
+
 def cmd_plan(a, quiet=False):
     eval_dir = os.path.abspath(a.eval_dir)
     workload_gpus = deployment_gpus(eval_dir)
@@ -592,9 +661,9 @@ def cmd_plan(a, quiet=False):
     only = set(a.tasks.split(",")) if a.tasks else None
     rows = task_rows(eval_dir, only)
     previous = load(os.path.join(wave_dir(eval_dir), 'wave.json'), {})
-    rows = [r for r in rows if a.force or not passed(r["task_dir"])
+    rows = [r for r in rows if a.force or not completed(r["task_dir"])
             or previous.get('gpu_mode') == 'on-demand'
-            and not GPU.last_command_passed(wave_dir(eval_dir), r['label'])]
+            and not GPU.last_command_passed(wave_dir(eval_dir), r['label'], allow_missing=True)]
     big = [r for r in rows if r["need"] > len(gpus)]
     if big:
         raise SystemExit("ut_wave: %s need more GPUs than the wave has (%d)"
@@ -635,7 +704,7 @@ def cmd_start(a):
             old_backend.stop(row['label'])
             old_backend.stop('timing_' + row['label'])
     if not rows:
-        print("ut_wave: every task already has a passing receipt")
+        print("ut_wave: every task already has passing UT and verified delivery")
         return 0
     if a.backend == "docker" and not a.image:
         raise SystemExit("ut_wave: --backend docker needs --image (the serving image)")
@@ -644,9 +713,7 @@ def cmd_start(a):
         raise SystemExit("ut_wave: runner %s does not exist" % runner)
     for d in ("state", "logs", "prompts"):
         os.makedirs(os.path.join(wave, d), exist_ok=True)
-    if a.force:
-        for row in rows:
-            set_status(wave, row['label'], status='pending', attempts=0, lost=0, started=None, why=None)
+    resume_rows(wave, rows, a.attempts)
     save(os.path.join(wave, "wave.json"), {
         "eval_dir": eval_dir, "gpus": gpus, "rows": rows,
         "backend": a.backend, "image": a.image, "render_base": a.render_base,

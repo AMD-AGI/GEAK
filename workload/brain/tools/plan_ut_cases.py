@@ -28,6 +28,7 @@ case, each labelled:
 Stdlib only.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -122,6 +123,23 @@ def invocation_rate(task, point):
 
 def plan(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
     pts = {p["point_id"]: p for p in points_final["points"] if p.get("counted")}
+    # Validate the complete ledger before filtering by task or bucket quota. Old
+    # relabel output could transfer a whole cell to a geometric neighbour and
+    # subtract more instances than it owns. Clamping would hide lost workload.
+    for phase, summary in points_final.get("phase_summary", {}).items():
+        moved = defaultdict(int)
+        for b in summary.get("unrepresented_bands", []):
+            pid, n = b["nearest_point"], b["instances"]
+            if pid not in pts or pts[pid]["phase"] != phase or type(n) is not int or n < 0:
+                raise ValueError("invalid band owner/instances; rerun relabel_points.py")
+            moved[pid] += n
+        for pid, p in pts.items():
+            if p["phase"] != phase:
+                continue
+            n = p["represented"]["instances"]
+            if type(n) is not int or n < 0 or moved[pid] > n:
+                raise ValueError("%s: bands own %s instances but point represents %s; "
+                                 "rerun relabel_points.py" % (pid, moved[pid], n))
     shapes = {}
     for pid in pts:
         f = os.path.join(shapes_dir, pid + ".json")
@@ -192,10 +210,13 @@ def plan(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
                 ctx = ([b["context"]] if b.get("context") else
                        [context_of(pts[r]) for r in ref if context_of(pts[r])])
                 cases.append({
-                    "case_id": "%s__%s_bucket_%d%s" % (label, phase.lower(), b["shape"],
+                    "case_id": "%s__%s_bucket_%d%s_%s" % (label, phase.lower(), b["shape"],
                                                        "_c%dk" % round(b["context"] / 1000)
-                                                       if b.get("context") else ""),
+                                                       if b.get("context") else "",
+                                                       b.get("band_id") or hashlib.sha256(
+                                                           json.dumps(b, sort_keys=True).encode()).hexdigest()[:16]),
                     "kind": "bucket", "phase": phase, "shape": b["shape"],
+                    "represented_by_point": b["nearest_point"],
                     "range": [b["lo"], b["hi"]], "cost_reference_points": ref,
                     "context": int(round(sum(ctx) / len(ctx))) if ctx else None,
                     "launches_per_instance": launches, "kernel_launches_per_instance": launches,

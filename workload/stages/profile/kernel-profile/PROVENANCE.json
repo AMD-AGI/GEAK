@@ -43,7 +43,8 @@
     "Split of kernel-extract (2026-11-16) into stages/profile/kernel-profile (one config's sampling, capture, census, ranking, selection and kernels.json) and stages/ut/kernel-ut (scaffold_tasks.py installs a ut_request.json; contracts, driver, harness, delivery gates, UT wave). This copy is kernel-profile. Task-boundary drafting (draft_task_decls, plan_ut_cases, the planning half of build_task_plan as build_ut_request) moved to brain/tools; compile_watch, gpu_lock, gpu_lock_set and workspace_sources moved to stages/_shared, used by both stages. select_targets.py reads the UT family catalogue directly for its phase-branch rule. The combined kernel-extract skill and stages/ut/kernel-extract are removed.",
     "Tests: plan_points --reuse-capture (identical deployment reused and resumed, different deployment refused).",
     "Tests trimmed (2026-11-16) to one end-to-end check per module plus the mono_layer lint: kernel-profile keeps test_profile_fast_path, test_vllm_profile (CI) and test_plan_points_reuse; kernel-ut keeps test_ut_contracts and test_mono_layer_lint.",
-    "plan_points.py counts observed rows whose log reports no context (sglang '#token: 0' decode rows, 19 of 7305 in InferenceX run 42879019953 c10) under rows_without_context instead of failing the plan."
+    "plan_points.py counts observed rows whose log reports no context (sglang '#token: 0' decode rows, 19 of 7305 in InferenceX run 42879019953 c10) under rows_without_context instead of failing the plan.",
+    "c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared."
   ],
   "files": [
     {

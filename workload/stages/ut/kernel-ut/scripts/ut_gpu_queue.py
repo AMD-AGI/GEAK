@@ -15,6 +15,9 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / '_shared'))
+from gpu_lock_files import open_lock
+
 
 def identity(pid):
     try:
@@ -33,9 +36,8 @@ def try_lease(pool, count, lock_dir, idle):
     """Never wait while holding a partial set; share gpu_lock.sh's physical locks."""
     fds, selected = [], []
     try:
-        os.makedirs(lock_dir, exist_ok=True)
         for gpu in sorted(pool):
-            fd = os.open(os.path.join(lock_dir, 'gpu_%d.lock' % gpu), os.O_CREAT | os.O_RDWR, 0o666)
+            fd = open_lock(os.path.join(lock_dir, 'gpu_%d.lock' % gpu))
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if not idle(gpu):
@@ -77,6 +79,23 @@ def backend_for(wave, cfg):
     prefix = cfg.get('container_prefix', os.environ.get('UT_WAVE_CONTAINER_PREFIX', 'ut_lane_'))
     return (Docker(wave, cfg['image'], cfg['render_base'], cfg['render_step'], prefix)
             if cfg['backend'] == 'docker' else Local(wave))
+
+
+def broker_alive(wave):
+    """A host PID is not visible in an author's Docker PID namespace.
+
+    The broker holds this shared-file lock for its lifetime; process exit releases
+    it even after a crash. Checking it needs neither a Docker socket nor host PIDs.
+    """
+    try:
+        with open(os.path.join(wave, 'broker.lock'), 'r') as guard:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+    except FileNotFoundError:
+        pass
+    return False
 
 
 def submit(a):
@@ -138,8 +157,7 @@ def submit(a):
                 if result.get('error'):
                     print(result['error'], file=sys.stderr)
                 return result['returncode']
-            broker = load(os.path.join(wave, 'broker.json'), {})
-            if not broker or identity(broker['pid']) != broker['identity']:
+            if not broker_alive(wave):
                 Path(request, 'cancel').touch()
                 raise SystemExit('GPU broker exited; request cancelled; inspect gpu_queue before resuming')
             time.sleep(.2)
@@ -163,24 +181,29 @@ def drain_owner(wave, owner):
                 pending.append(path)
         if not pending:
             return
-        broker = load(os.path.join(wave, 'broker.json'), {})
-        if not broker or identity(broker['pid']) != broker['identity']:
+        if not broker_alive(wave):
             raise RuntimeError('GPU broker lost before task drained; do not relaunch writer')
         time.sleep(.2)
 
 
-def last_command_passed(wave, task):
+def last_command_passed(wave, task, allow_missing=False):
     """A UT receipt cannot override a failed source audit / cancelled GPU command."""
     from ut_wave import load
     requests = [(load(str(p), {}), p.parent) for p in Path(wave, 'gpu_queue').glob('*/request.json')]
     requests = [(req, path) for req, path in requests if req.get('task') == task]
     if not requests:
-        return False
+        return allow_missing
     _, path = max(requests, key=lambda pair: pair[0]['submitted'])
     return load(str(path / 'result.json'), {}).get('returncode') == 0
 
 
 def broker(wave, controller_pid):
+    with open(os.path.join(wave, 'broker.lock'), 'a') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return broker_run(wave, controller_pid)
+
+
+def broker_run(wave, controller_pid):
     from ut_wave import load, save, log
     cfg = load(os.path.join(wave, 'wave.json'))
     parent_id = identity(controller_pid)
@@ -260,6 +283,7 @@ def broker(wave, controller_pid):
                 job = {'name': name, 'fds': fds, 'gpus': gpus, 'owner': req['owner'], 'started': time.time()}
                 active[path] = job
                 env = dict(cfg['env'], **req.get('env', {}))
+                env['UT_WAVE_TASK'] = req['task']
                 env['GEAK_GPU_LOCKED_SET'] = ','.join(map(str, gpus))
                 argv = [os.path.abspath(__file__), 'execute', path]
                 save(os.path.join(path, 'lease.json'), {'gpus': gpus, 'started': job['started']})

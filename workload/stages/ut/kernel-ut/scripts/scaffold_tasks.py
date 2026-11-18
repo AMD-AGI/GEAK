@@ -24,6 +24,7 @@ writes nothing. Stdlib only.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -90,8 +91,8 @@ def check_request(path):
         for c in (t.get("manifest") or {}).get("cases") or []:
             calls = c.get("effective_calls")
             if (not c.get("sig") or isinstance(calls, bool) or not isinstance(calls, (int, float))
-                    or calls < 0):
-                problems.append("%s: every case needs a sig and a nonnegative effective_calls" % lab)
+                    or not math.isfinite(calls) or calls < 0):
+                problems.append("%s: every case needs a sig and a finite nonnegative effective_calls" % lab)
                 break
     if not req.get("tasks") and not req.get("blocked_identities"):
         problems.append("the request names no task and no blocked identity")

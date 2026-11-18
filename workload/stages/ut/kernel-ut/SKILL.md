@@ -185,6 +185,12 @@ Use `extract_op` for the whole-op return form defined in the contract. Both
 forms require actual source delivery in this skill. The gate reads workflow
 schemas and hashed evidence; it does not execute or independently certify GPU
 tests. Keep failures visible and continue independent tasks when possible.
+`ut_wave.py` marks a task passed only after both its fresh UT and native delivery
+verification pass. A resume includes tasks with passing correctness but missing,
+stale or invalid delivery; the task owner completes those records, reusing unchanged
+UT gates. Docker authors and GPU workers run as the host UID/GID with a writable
+per-task home so the host broker can finish their queue requests. Keep build outputs
+in task-local writable trees; installed image sources remain the frozen baseline.
 
 Write `REPORT.md` and `results.json` with all requested identities, task/source
 locations, actual commands and devices, per-gate status, declared and achieved

@@ -1,7 +1,7 @@
 {
   "file_count": 29,
   "files": {
-    "PROVENANCE.json": "d7ffd2771d9536dae2c8800baaa81533d7c6457fd2cb3127ea982e3690de6d2b",
+    "PROVENANCE.json": "a10e780d3c8f41211c4e0629cff0c619dd324db1b765275c87cebe1cb149dd3c",
     "SKILL.md": "a1a76a48d088eb4e9edbbed18672b8041b2c29fbcb0ba89e1cf3a489da753423",
     "references/capture.md": "e1c7d8d3f2ca541853103ae57c701c13ed7ed7aae1391912a33873279cfbb001",
     "references/dynamic-workloads.md": "1ecb71f979d0e145e251cfcddb6b244eb4ab4619b82d6264c35546adb60a5c40",
@@ -18,7 +18,7 @@
     "scripts/plan_points.py": "0351a606f24204a0069119b75b6b93c8028a314d8489694c7d5acda07c0cc856",
     "scripts/point_census.py": "76bfe455477af8e95d47bd8a60d100be8e9bdaa602fefcd442b9dc8ac94cfae1",
     "scripts/probe_server.py": "8fc6b536ae029f3a5e750550286ebb111274f8d81d1b04495eca383ef69121f7",
-    "scripts/relabel_points.py": "821551bf30a46a0c16ed4f62cf73011c84da7264d438819654711c81d7199b95",
+    "scripts/relabel_points.py": "a114dd87748cd1e359bc3ea7a5e40bcc8900cdd55362e9317a0a29135663dca8",
     "scripts/run_points.py": "8b60c818e15689a6990ff7e7b4722289c0836885a21f70b562e3a987d234d152",
     "scripts/select_targets.py": "2132a0d627086a06ff8739736e10dbdf08deaad3307525f4948e013d33e38b86",
     "scripts/serving_probe.py": "72b16aedebff3eca32ad740f97ac13be4dbbd59ef4330386f69845b66414dd92",
@@ -32,9 +32,9 @@
     "tests/test_vllm_profile.py": "d601f4820648062580eda4e32c2a0586a1464b2ea05127cfbc59fce77f2cfdd5"
   },
   "modified_from_origin": false,
-  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py.",
+  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py. c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared.",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: profile half of kernel-extract",
   "skill": "kernel-profile",
   "stage": "profile",
-  "tree_sha256": "fd975f3c05bfccd888797e0652bdae756af97cd443feaca271e58f6a8dd7c952"
+  "tree_sha256": "98de868d22813f31456a6a91099353019fcda8d4e5a90eabc3d37a06d8a6d0fb"
 }

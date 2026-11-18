@@ -66,6 +66,11 @@ wait. Source checks run before/after the command and build caches stay task-loca
 have no GPU devices; the GPU worker mounts only leased render nodes. Both need the
 skill/task paths mounted identically (default `/shared_nfs`; other paths use
 `UT_WAVE_DOCKER_EXTRA` mounts). Do not grant the author a Docker socket or GPU devices.
+Authors and workers use the invoking host UID/GID, with `HOME` and the default
+`AITER_JIT_DIR` under the wave's per-task home. This avoids root-owned queue
+directories and copying unreadable image JIT caches. Keep these paths writable
+and pass `KERNEL_EXTRACT_NODE` when Node is supplied outside the image's PATH.
+Broker liveness uses a shared file lock, so Docker needs no host PID namespace.
 Container names default to a wave-specific prefix; an explicit
 `UT_WAVE_CONTAINER_PREFIX` must be unique per campaign and is saved for resume.
 Command-specific exports require `gpu --env K=V`; CPU-container `/tmp` is not shared.
@@ -73,6 +78,10 @@ Local mode uses visibility masks and a Linux subreaper for trusted runners/tests
 After controller death the broker drains jobs before releasing locks; resume drains
 the previous broker and authors before launching new writers. If Docker cannot confirm
 cleanup, the broker retains the locks and retries; restore Docker access before resume.
+Completion requires a fresh passing UT plus a return accepted by the native delivery
+gate. An explicit `start` schedules missing/stale delivery even when correctness
+already passed, grants another attempt budget and retains earlier numbered logs.
+The task owner reuses unchanged UT gates while completing selection/source records.
 
 Outside an on-demand wave, run every GPU command from its task directory under a lease:
 
