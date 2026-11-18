@@ -115,8 +115,8 @@ recomputes the hashes itself rather than trusting values copied into a manifest.
 Per-leaf execution and negative-control records continue to name the **canonical
 source-delivery snapshot**, not the Python driver snapshot.
 
-This explicit compatibility contract also accepts the Python JSON serializer's
-literal positive `Infinity` in two successful negative-control margin locations:
+These explicit driver contracts also accept the Python JSON serializer's
+literal positive `Infinity` in the following successful numerical diagnostics:
 
 - Full report: `gates.negative_controls.controls[i].margin`, where `controls`
   is an array, the gate has `status:"pass"`, and that control has `caught:true`,
@@ -125,6 +125,12 @@ literal positive `Infinity` in two successful negative-control margin locations:
   where the outer record has `kind:"numerical_rejection"`, `ok:true`,
   `launch_succeeded:true` and finite positive `numerical_mismatches`, and the
   nested control has `caught:true`, `ok:true` and `restored:true`.
+- Full report SQNR comparisons: `gates.correctness.cases[i][output].sqnr_db` or
+  `gates.replay.phases[phase].cases[i][output].sqnr_db`. Zero comparison error
+  gives infinite SQNR. The gate, replay phase and case must pass; the comparison
+  must have `kind:"sqnr"`, `ok:true`, `nonfinite_mismatches:0`, a finite `min_db`
+  and `against:"baseline"` or `"reference"`. The same locations' `baseline_sqnr_db`
+  accept positive infinity only for `against:"reference"`.
 
 The verifier hashes the original artifact bytes before parsing. It normalizes
 only lexical tokens outside JSON strings, without evaluating code or rewriting

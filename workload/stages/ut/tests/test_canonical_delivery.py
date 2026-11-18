@@ -1,5 +1,6 @@
 """Current Python UT identities must pass the native full-report delivery verifier."""
 import importlib.util
+import copy
 import json
 import hashlib
 import os
@@ -157,6 +158,34 @@ class CanonicalDeliveryTest(unittest.TestCase):
             (self.task / 'helper.py').write_text('# changed\n')
             os.utime(self.task / 'helper.py', (1, 1))
             self.assertFalse(W.passed(str(self.task)))
+
+    def test_exact_sqnr_comparisons_deliver_without_rewriting_python_receipts(self):
+        self.report = copy.deepcopy(self.report)
+        comparison = dict(kind='sqnr', ok=True, nonfinite_mismatches=0,
+                          min_db=30.0, against='reference', sqnr_db=float('inf'),
+                          baseline_sqnr_db=float('inf'))
+        row = {'case': 'fixture', 'ok': True, 'output': comparison}
+        self.report['gates']['correctness'] = {'status': 'pass', 'cases': [row]}
+        self.report['gates']['replay'] = {'status': 'pass', 'phases': {
+            'DECODE': {'status': 'pass', 'cases': [copy.deepcopy(row)]}}}
+        self.assertTrue(self.check()['ok'])
+        original = copy.deepcopy(self.report)
+        for key, value in [('ok', False), ('kind', 'tolerance'), ('nonfinite_mismatches', 1),
+                           ('min_db', float('inf')), ('against', 'unknown'),
+                           ('sqnr_db', float('nan')), ('sqnr_db', -float('inf'))]:
+            with self.subTest(key=key, value=value):
+                self.report = copy.deepcopy(original)
+                self.report['gates']['correctness']['cases'][0]['output'][key] = value
+                self.assertFalse(self.check()['ok'])
+        self.report = copy.deepcopy(original)
+        self.report['gates']['replay']['phases']['DECODE']['status'] = 'fail'
+        self.assertFalse(self.check()['ok'])
+        self.report = copy.deepcopy(original)
+        self.report['gates']['correctness']['cases'][0]['ok'] = False
+        self.assertFalse(self.check()['ok'])
+        self.report = copy.deepcopy(original)
+        self.report['gates']['correctness']['latency_ms'] = float('inf')
+        self.assertFalse(self.check()['ok'])
 
 
 if __name__ == '__main__':

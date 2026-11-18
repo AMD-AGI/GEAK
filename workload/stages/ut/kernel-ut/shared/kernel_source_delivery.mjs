@@ -28,8 +28,29 @@ export async function fileRef(taskDir, name) {
   const task = await fs.realpath(taskDir), file = await localFile(task, name);
   return { path: path.relative(task, file), sha256: sha(await fs.readFile(file)) };
 }
-function allowedInfiniteMargin(kind, parts, document) {
+function allowedPositiveInfinity(kind, parts, document) {
   const caught = c => c?.caught === true && c.ok === true && c.restored === true;
+  // SQNR is +infinity for exactly zero comparison error. Only the successful
+  // driver's numerical comparison fields may carry it, never bounds or timings.
+  if (kind === 'ut_report' && parts[0] === 'gates' &&
+      ['sqnr_db', 'baseline_sqnr_db'].includes(parts.at(-1))) {
+    const gate = document?.gates?.[parts[1]];
+    let rows, index, output;
+    if (parts.length === 6 && parts[1] === 'correctness' && parts[2] === 'cases') {
+      rows = gate?.cases; index = parts[3]; output = parts[4];
+    } else if (parts.length === 8 && parts[1] === 'replay' &&
+               parts[2] === 'phases' && parts[4] === 'cases') {
+      const phase = gate?.phases?.[parts[3]];
+      if (phase?.status !== 'pass') return false;
+      rows = phase.cases; index = parts[5]; output = parts[6];
+    } else return false;
+    const row = Array.isArray(rows) && /^(0|[1-9][0-9]*)$/.test(index) ? rows[Number(index)] : null;
+    const comparison = row?.[output];
+    return gate?.status === 'pass' && row?.ok === true && comparison?.kind === 'sqnr' &&
+      comparison.ok === true && comparison.nonfinite_mismatches === 0 &&
+      Number.isFinite(comparison.min_db) && ['baseline', 'reference'].includes(comparison.against) &&
+      (parts.at(-1) !== 'baseline_sqnr_db' || comparison.against === 'reference');
+  }
   if (kind === 'ut_report' && parts.length === 5 && parts[0] === 'gates' &&
       parts[1] === 'negative_controls' && parts[2] === 'controls' && parts[4] === 'margin' &&
       /^(0|[1-9][0-9]*)$/.test(parts[3])) {
@@ -47,7 +68,7 @@ function finiteEvidence(document, markers = new Set(), kind = null) {
   let consumed = 0;
   const visit = (value, parts) => {
     if (typeof value === 'string' && markers.has(value)) {
-      if (!allowedInfiniteMargin(kind, parts, document))
+      if (!allowedPositiveInfinity(kind, parts, document))
         throw new Error(`positive Infinity is not allowed at /${parts.join('/')}`);
       consumed++;
       return Infinity;
