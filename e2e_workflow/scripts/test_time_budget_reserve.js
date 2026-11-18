@@ -600,7 +600,8 @@ const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12
   'the Finalize-gate stops, leaving the rest in pending_integrations, at the first A/B that cannot finish');
   const authorGate = src.indexOf('if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {');
   ok(authorGate > src.indexOf("const lang = ap.language || 'triton';") && authorGate < src.indexOf('const AUTHOR_TRIES', authorGate)
-    && /verdict: 'paused'[\s\S]{0,200}break;/.test(src.slice(authorGate, authorGate + 400)),
+    && /verdict: 'paused'[\s\S]{0,200}return null;/.test(src.slice(authorGate, authorGate + 400))
+    && /const r = await onCard\(h, \(gpu, group\) => authorLane\(ap, gpu, group\)\);\s*if \(!r\) break;/.test(src),
   "a head's next author language is not started without room for a lane, and is ledgered as paused");
   const ms = src.indexOf("phase('Milestone');");
   ok(src.indexOf('await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }', ms) > ms

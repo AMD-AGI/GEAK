@@ -397,6 +397,10 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # On a trace replay the default head track prepares every head at once, one card per job,
+      # then A/Bs serially in head order; fixed ISL/OSL stays serial. No GPU, no model.
+      - name: AgentX parallel head lanes regression
+        run: node e2e_workflow/scripts/test_agentx_parallel_head_lanes.js
       # The final phase measures on GPUs the search may still hold: the tuning window and the
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
