@@ -13,6 +13,9 @@ Keep `BRIEF.md` for objectives, quality/comparison criteria, allowed changes, re
 permissions, budgets and the reference to preserve. Keep `STATE.md` as a compact index of
 open work, decisions, versions, invocation paths, running handles and next inspection/report
 times. Native receipts own measured results and credited time; resume from these records.
+State each budget's accounting basis (elapsed time, effective work or task credit) and
+remaining allowance; account for waits and parallel overlap under that basis. A renewable
+watch-call limit is not the campaign deadline.
 
 A user-selected optimization mode is an external file with at most five short, nonempty
 guidance lines. Record its path in `BRIEF.md`. It takes priority over experience and default
