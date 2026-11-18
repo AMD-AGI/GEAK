@@ -792,6 +792,8 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 10800000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// Labels whose agent the guard gave up on. The agent is still running; stopAfterTimeout() reads this.
+const TIMED_OUT_LABELS = new Set();
 // GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
 // agent instead of getting an agent of their own. In the historical Qwen3 run the
 // storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
@@ -1979,6 +1981,7 @@ async function agentTCore(p, o) {
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          TIMED_OUT_LABELS.add(label);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
@@ -2041,7 +2044,15 @@ async function stopLaneWork(evalDir, reason, phaseName) {
   if (!r) { log(`  [lane-stop] ${reason}: the stop step returned nothing (NON-FATAL).`); return null; }
   const n = Array.isArray(r.stopped) ? r.stopped.length : 0;
   const left = Array.isArray(r.survivors) ? r.survivors.length : 0;
-  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under EVAL_DIR${left ? `, ${left} still up` : ''}; gpu_lock.sh ${r.blocked ? 'blocked' : 'NOT blocked'} there.`);
+  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under ${evalDir}${left ? `, ${left} still up` : ''}; gpu_lock.sh ${r.blocked ? 'blocked' : 'NOT blocked'} there.`);
+  return r;
+}
+
+// The same release when the lane carries on without a timed-out agent (engineer, verify, integrate):
+// stop and block only that agent's own dir, so the next round does not queue behind its GPU work.
+// `dir` must be where the agent runs gpu_lock.sh, and nothing the lane still needs may run under it.
+async function stopAfterTimeout(r, label, dir, phaseName) {
+  if (r == null && TIMED_OUT_LABELS.delete(label)) await stopLaneWork(dir, `${label} timed out`, phaseName);
   return r;
 }
 
@@ -3140,6 +3151,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
     async (prev) => {
       const { d, eng, route } = prev;
+      // Engineers run gpu_lock.sh from KERNEL_PATH; verify works in out_dir/verify, so it is not blocked.
+      await stopAfterTimeout(eng, `${d.specialty === 'deep_explore' ? 'deep' : 'eng'} ${d.id}:${d.specialty}`,
+        `${d.out_dir}/workspace`, 'Optimize');
       if (EVO && prev.evo_prepare_failed) return { d, eng, ver: null };
       let patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
@@ -3181,7 +3195,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: vlabel, schema: VERIFY_SCHEMA }, vroute
-      ).then((ver) => {
+      ).then((ver) => stopAfterTimeout(ver, vlabel, `${d.out_dir}/verify`, 'Verify')).then((ver) => {
         // eikos v2 E1 (R2): feed the verifier's own terminal outcome to P1 (shadow by default). A verifier
         // that produced a USABLE measurement did its job — SUCCESS — even if it found a bad kernel; an
         // `invalid_measurement` is INFRA (not the verifier's fault) and moves nothing; a null return is
@@ -3270,6 +3284,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+    await stopAfterTimeout(integrate, `integrate r${round}`, `${EVAL_DIR}/round_${round}/integrate`, 'Merge');
     const integrateCustody = EVO && integrate && integrate.best && integrate.best.patch_file
       ? await EVO.checkPatch({ id: `r${round}_integrated` }, integrate.best.patch_file) : null;
     const integPrim = integrate && integrate.best ? primSpeedup({

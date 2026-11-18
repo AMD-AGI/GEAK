@@ -376,6 +376,8 @@ jobs:
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
       - name: lane cleanup under a saturated agent queue
         run: node --test interface/runtime/engine/test_lane_stop.mjs
+      - name: AgentX milestone retries an errored kernel lane once
+        run: node e2e_workflow/scripts/test_milestone_lane_retry.js
       - name: GPU family table (identical in every workflow)
         run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression

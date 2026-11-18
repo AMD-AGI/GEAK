@@ -5935,7 +5935,9 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
-          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
+          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || '') +
+          // Distinct prompts, so the retry never replays the failed attempt's cached agents.
+          (c.lane_retried ? ' (Retry after a kernel-lane error.)' : ''),
         apply_to_original: 'false',
       }, String(c.short_name || ext.op_kind || 'milestone'));
       if (r == null && IS_AGENTX) {
@@ -5954,6 +5956,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 
   // --- serial integrate (compounding overlay, isolated measurement) ---
   let milestoneImproved = false;
+  const laneRetry = [];
   for (const o of optimized) {
     if (!o) continue;
     const c = o.c;
@@ -5963,6 +5966,15 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       continue;
     }
     const { ext, kl } = o;
+    // A lane that threw (agent timeout or API fault, a GPU held by abandoned work) measured nothing
+    // about the kernel. Retry it once, behind the untried prepared UTs: otherwise the queue empties and
+    // the run enters Finalize with most of its budget unused (GEAK #606).
+    if (KERNEL_EXTRACT_ON && kl && kl.ran === false && !c.lane_retried) {
+      laneRetry.push({ ...c, lane_retried: true });
+      log(`  ${c.short_name}: kernel lane errored (${String(kl.note || '').slice(0, 160)}); re-queued for one retry.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: 0, verdict: 'harness_error', lesson: `lane error, retried once: ${String(kl.note || '').slice(0, 200)}` });
+      continue;
+    }
     if (!kl || !kl.ran || !(kl.isolated_speedup > 1.0) || !kl.final_patch) {
       log(`  ${c.short_name}: kernel layer produced no speedup (${kl ? kl.isolated_speedup : '?'}x); skipping integrate.`);
       history.ledger.push({ direction: c.short_name, isolated_speedup: kl ? kl.isolated_speedup : 0, verdict: 'dead_end', lesson: 'no isolated speedup' });
@@ -6022,6 +6034,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     }
   }
 
+  if (laneRetry.length) kernelQueue = kernelQueue.concat(laneRetry);
+  // A milestone whose every lane errored measured no kernel, so it is not evidence of no improvement.
+  const allLanesErrored = laneRetry.length > 0 && laneRetry.length === optimized.filter(Boolean).length;
+
   // --- (c) If improved: re-profile
   if (milestoneImproved) {
     noImprove = 0;
@@ -6034,7 +6050,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         }),
         { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
     }
-  } else {
+  } else if (!allLanesErrored) {
     noImprove++;
   }
 
