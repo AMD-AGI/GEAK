@@ -772,12 +772,15 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // terminal API errors to null but NOT an indefinite hang. So bound every agent()
 // call: if it has not returned after AGENT_TIMEOUT_MS, resolve it to null (which
 // every .filter(Boolean)/null-check downstream already tolerates) and let the
-// round proceed. VERY generous default (60min): a true hang never returns, so this only fires on a
+// round proceed. VERY generous default (3h): a true hang never returns, so this only fires on a
 // hang, NEVER on a legitimately-long agent. Inner agents include benchmark/profile/verify that build
-// (hipcc/ninja) and run benches — minutes, well under 60min — plus the LLM-heavy optimize engineers
-// (the ones observed hanging). A too-short bound would kill legit long agents (e.g. a slow rocprof or
-// build), so keep it large. Cache keys (prompt, opts) are unchanged so resume still works. Falls back
-// to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// (hipcc/ninja) and run benches, plus the LLM-heavy optimize engineers (the ones observed hanging).
+// On a prepared extract UT one full run takes 20-40 min, so a MOE verify (one run + patch/build/
+// correctness) plus a wait for another lane's GPU lock is ~95 min; a non-weighted UT still runs 3x
+// in benchmark setup (~135 min). 60min killed every such lane (GEAK #606). Keep it under the
+// standalone runtime's 4h spawn backstop (run_workflow.mjs), which must stay the longer of the two.
+// Cache keys (prompt, opts) are unchanged so resume still works. Falls back to raw agent() if
+// setTimeout is unavailable. args.agent_timeout_ms=0 disables.
 // API-FAULT TOLERANCE: a transient API failure (gateway 4xx/5xx, rate-limit, dropped connection, the
 // model API going down mid-run) must NOT crash the whole workflow. agentT retries the call up to
 // AGENT_RETRIES times on a thrown API/agent error, then resolves to null (every .filter(Boolean)/
@@ -787,7 +790,7 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // (e.g. an auth/header requirement the client doesn't send), retries are exhausted then the run
 // degrades — re-run with Workflow({resumeFromRunId}) once the client/API is fixed; cached agent results
 // make resume cheap.
-const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 10800000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
 // GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
 // agent instead of getting an agent of their own. In the historical Qwen3 run the

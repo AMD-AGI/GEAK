@@ -181,7 +181,7 @@ const laneArgs = (wfArgs) => {
       ...(A.evolution_source_paths != null ? { evolution_source_paths: A.evolution_source_paths } : {}) } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
-    // The lane's own per-agent guard (lane default 60min), separate from this workflow's
+    // The lane's own per-agent guard (lane default 3h), separate from this workflow's
     // agent_timeout_ms. Forwarded only when set, so the lane default stays unless asked (GEAK #606).
     ...(A.lane_agent_timeout_ms != null ? { agent_timeout_ms: String(A.lane_agent_timeout_ms) } : {}),
     // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
