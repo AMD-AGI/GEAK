@@ -311,6 +311,20 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0,
     return False, last.get("num_running_reqs"), last.get("gen_throughput")
 
 
+def vllm_prefix_problem(prefix):
+    """Why vLLM's validate_profile_prefix (vllm/config/profiler.py) would refuse this
+    /start_profile prefix with HTTP 400, or None. 1-128 ASCII characters, the first a
+    letter or digit, the rest letters, digits, '.', '_' or '-'."""
+    if not 1 <= len(prefix) <= 128:
+        return "length %d is outside 1-128" % len(prefix)
+    if not prefix.isascii() or not prefix[0].isalnum():
+        return "must be ASCII and start with a letter or digit"
+    bad = sorted({c for c in prefix[1:] if not (c.isalnum() or c in "._-")})
+    if bad:
+        return "characters %s are not allowed (only letters, digits, '.', '_', '-')" % bad
+    return None
+
+
 def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True,
                   max_iterations=None):
     """Arm once. profile_by_stage is deliberately not offered -- see rule 2.
@@ -767,6 +781,23 @@ def main():
     verify = {}
     ex, rids = None, []
     down = False
+    # exactly the prefix start_profile will send (os.path.basename(out_dir))
+    bad_prefix = (vllm_prefix_problem(os.path.basename(server_dir))
+                  if FRAMEWORK == "vllm" else None)
+    if bad_prefix:
+        # Refused before any request: the window would be armed with this prefix and vLLM
+        # answers 400 only after the batch is resident (minutes of warmup, then a drain).
+        reason = ("trace directory name %r is not a valid vLLM profile_prefix: %s"
+                  % (os.path.basename(server_dir), bad_prefix))
+        journal.append({"event": "probe_failed", "error": reason})
+        result = {"point_id": args.point_id, "point": point, "status": "failed",
+                  "trace_verified": False, "verify_reason": reason, "server_down": False,
+                  "wall_s": round(time.time() - t_start, 1), "traces": [],
+                  "journal": journal}
+        with open(args.out, "w") as fh:
+            json.dump(result, fh, indent=1)
+        print("%s: failed (%s) -> %s" % (args.point_id, reason, args.out))
+        return 1
 
     try:
         if phase == "DECODE":
@@ -823,8 +854,14 @@ def main():
             drive_prefill(args.base_url, prefixes, news, args, journal)
         ok = True
     except Exception as exc:
-        journal.append({"event": "probe_failed", "error": "%s: %s"
-                        % (type(exc).__name__, exc)})
+        detail = ""
+        if isinstance(exc, urllib.error.HTTPError):
+            try:
+                detail = " -- " + exc.read().decode(errors="replace")[:300]
+            except Exception:       # the body is diagnostics only
+                pass
+        journal.append({"event": "probe_failed", "error": "%s: %s%s"
+                        % (type(exc).__name__, exc, detail)})
     finally:
         # Rule 3: always, even on the failure path.
         stop_profile(args.base_url, journal)
@@ -858,9 +895,12 @@ def main():
             point.get("new_tokens") if phase == "PREFILL" else point.get("batch_size"),
             journal)
     else:
-        journal.append({"event": "verify", "verified": False,
-                        "reason": "no trace files appeared under %s" % args.trace_dir})
-        verify = {"verified": False}
+        reason = "no trace files appeared under %s" % args.trace_dir
+        failed = [e["error"] for e in journal if e.get("event") == "probe_failed"]
+        if failed:
+            reason += " (probe_failed: %s)" % failed[-1]
+        journal.append({"event": "verify", "verified": False, "reason": reason})
+        verify = {"verified": False, "reason": reason}
 
     result = {
         "point_id": args.point_id,

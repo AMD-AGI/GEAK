@@ -572,7 +572,7 @@ class EagerEvidenceTest(unittest.TestCase):
         p = self.run_points(eager, *obs, "--evidence-capture")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(len(eager.profile_bodies), 1)          # one window, nothing redone
-        self.assertTrue((ev / "evidence" / "shapes" / "de_1@eager.json").exists())
+        self.assertTrue((ev / "evidence" / "shapes" / "de_1.eager.json").exists())
         sm = json.loads((ev / "evidence" / "source_map.json").read_text())
         self.assertFalse(sm["kernels"]["sparse_mla_attn"]["graph_replayed_only"])
         self.assertEqual(sm["kernels"]["sparse_mla_attn"]["frames"][0]["frame"], MLA_FRAME)

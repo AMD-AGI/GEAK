@@ -363,10 +363,12 @@ def controller(a):
     backend = GPU.backend_for(wave, cfg)
     try:
         os.makedirs(os.path.join(wave, 'gpu_queue'), exist_ok=True)
-        try:
-            os.unlink(os.path.join(wave, 'broker.json'))
-        except FileNotFoundError:
-            pass
+        # A previous broker's heartbeat must not vouch for the new one.
+        for stale in ('broker.json', 'broker.hb'):
+            try:
+                os.unlink(os.path.join(wave, stale))
+            except FileNotFoundError:
+                pass
         with open(os.path.join(wave, 'broker.log'), 'a') as out:
             broker = subprocess.Popen([sys.executable, GPU.__file__, 'broker', wave, str(os.getpid())],
                                       stdout=out, stderr=subprocess.STDOUT, start_new_session=True)

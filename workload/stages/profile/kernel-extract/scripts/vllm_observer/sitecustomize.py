@@ -4,8 +4,10 @@ import os
 import sys
 
 from geak_vllm_observer import install
+from geak_profiler_release import install as install_profiler_release
 
 install()
+install_profiler_release()
 
 
 def _chain():

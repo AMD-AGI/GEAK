@@ -371,13 +371,22 @@ def server_evidence(eval_dir, task, tdir):
                                 "bytes_referenced_in_place": sum(referenced)}}
 
 
+def base_point_id(pid):
+    """The planned point an evidence id belongs to: "<pid>.eager" (eager evidence
+    window, run_points.EAGER_SUFFIX) and the legacy "<pid>@eager" both map to <pid>."""
+    for suffix in (".eager", "@eager"):
+        if pid.endswith(suffix):
+            return pid[:-len(suffix)]
+    return pid.split("@")[0]
+
+
 def expected_launches(task, launched, phase_of):
     """{phase: kernels} -- every task kernel the server launched at that phase's points.
     ut_driver's `launches` gate requires the UT's baseline to launch each of them."""
     names = set(task.get("kernels") or []) | {c.get("kernel") for c in task.get("companions") or []}
     out = {}
     for pid, ks in launched.items():
-        ph = phase_of.get(pid.split("@")[0])
+        ph = phase_of.get(base_point_id(pid))
         if ph:
             out.setdefault(ph, set()).update(ks & names)
     return {ph: sorted(ks) for ph, ks in sorted(out.items()) if ks}

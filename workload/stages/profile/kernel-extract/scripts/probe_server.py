@@ -70,6 +70,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHARED = os.path.join(os.path.dirname(HERE), "shared")
 sys.path.insert(0, SHARED)
+from run_points import MEMORY_RESTART, RUNNING, eager_shapes_names  # noqa: E402  (same directory)
 import compile_watch  # noqa: E402
 
 TEMPLATE = {
@@ -470,6 +471,17 @@ def graph_hidden_points(cmd):
             and "census" not in p]
 
 
+def run_status(cmd):
+    """profile_run.json status of a run_points.py command, or None."""
+    if "--eval-dir" not in cmd:
+        return None
+    try:
+        return json.load(open(os.path.join(cmd[cmd.index("--eval-dir") + 1],
+                                           "profile_run.json"))).get("status")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def evidence_requested(cmd):
     """run_points.py asked for an eager evidence window and has not had it yet."""
     if "--eval-dir" not in cmd:
@@ -478,9 +490,18 @@ def evidence_requested(cmd):
     req = os.path.join(ev, "evidence", "eager_evidence_request.json")
     if not os.path.exists(req):
         return False
+    try:
+        status = json.load(open(os.path.join(ev, "profile_run.json"))).get("status")
+    except (OSError, ValueError):
+        status = None
+    if status in ("server down", MEMORY_RESTART, RUNNING):
+        # The capture did not finish (RUNNING: run_points died before writing its final
+        # status): an eager server must not take the missing points.
+        return False
     r = json.load(open(req))
-    got = os.path.join(ev, "evidence", "shapes", r["point"] + "@eager.json")
-    if not os.path.exists(got):
+    names = [os.path.join(ev, "evidence", "shapes", n) for n in eager_shapes_names(r["point"])]
+    got = next((n for n in names if os.path.exists(n)), None)
+    if got is None:
         return True
     # an earlier window may have been taken for fewer kernels (a narrower selection)
     d = json.load(open(got))
@@ -502,7 +523,12 @@ def cmd_run(a, cfg):
         rc = subprocess.call(a.command)
         hidden = graph_hidden_points(a.command)
         eager = json.load(open(srv.state_path))["decode_capture"] == "eager"
-        if hidden and not eager:
+        if hidden and run_status(a.command) == MEMORY_RESTART:
+            # run_points stopped at a point boundary for a fresh server; an eager restart
+            # here would capture every remaining point eagerly. The caller reruns the argv.
+            log("capture stopped for a memory restart; graph-hidden points %s are left to "
+                "the rerun" % hidden)
+        elif hidden and not eager:
             log("decode points %s were graph-hidden; restarting eagerly and resuming" % hidden)
             srv.stop()
             start_with_fallback(srv, "eager", a.ready_timeout)

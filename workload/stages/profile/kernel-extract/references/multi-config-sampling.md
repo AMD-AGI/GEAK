@@ -124,7 +124,9 @@ points; `project --merge` then reweights the expanded pool. A failed or shape-sh
 probe needs the ordinary probe diagnosis/recapture as well; increasing a planning
 budget is not proof that it achieved the requested shape. Changed input hashes or
 deployment identities require replanning. Changed capture signatures require explicit
-recapture or a new pool, never reuse of an unsigned census.
+recapture or a new pool, never reuse of an unsigned census. A capture that was killed
+or preempted leaves `profile_run.json` as a `running` checkpoint of every census it had
+signed; rerunning it resumes those and recaptures the points it left unsigned.
 
 The context binning and strict deployment matching favor conservative reuse. The
 planner can therefore report little or no cross-config sharing when a CI sweep changes
