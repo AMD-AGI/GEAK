@@ -96,6 +96,18 @@ class WaveHandoffTest(unittest.TestCase):
         self.assertEqual(state['attempt_limit'], 6)
         self.assertIsNone(state['started'])
 
+    def test_resume_reconciles_valid_delivery_interrupted_before_terminal_state(self):
+        wave = str(self.root / 'ut_wave')
+        W.set_status(wave, 'op', status='running', attempts=2, started=1)
+        args = self.args()
+        args.author_workers = 1
+        with patch.object(W, 'completed', return_value=True):
+            self.assertEqual(W.cmd_start(args), 0)
+        state = W.status_of(wave, 'op')
+        self.assertEqual(state['status'], 'passed')
+        self.assertEqual(state['attempts'], 2)
+        self.assertTrue(state['delivery_ok'])
+
     def test_wrong_task_return_never_reaches_gate(self):
         W.save(str(self.task / 'run/RETURN.json'), {'short_name': 'another', 'task_dir': str(self.task)})
         with patch.object(W.subprocess, 'run') as run:

@@ -760,6 +760,17 @@ def cmd_start(a):
         for row in old['rows']:
             old_backend.stop(row['label'])
             old_backend.stop('timing_' + row['label'])
+    # Drain can publish the last command outcome. Recheck before deciding which
+    # tasks to resume, and reconcile a lane interrupted after valid delivery but
+    # before it published its terminal state. Such a task needs no new author.
+    eval_dir, gpus, rows = cmd_plan(a, quiet=True)
+    pending = {row['label'] for row in rows}
+    only = set(a.tasks.split(',')) if a.tasks else None
+    for row in task_rows(eval_dir, only):
+        if row['label'] not in pending:
+            prior = status_of(wave, row['label'])
+            set_status(wave, row['label'], status='passed', why=None,
+                       ended=prior.get('ended') or now(), ut_passed=True, delivery_ok=True)
     if not rows:
         print("ut_wave: every task already has passing UT and verified delivery")
         return 0
