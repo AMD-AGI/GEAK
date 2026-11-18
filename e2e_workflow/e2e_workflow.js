@@ -5524,15 +5524,24 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
   } else {
-  for (const h of heads) {
-    // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
-    // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
+  // AgentX heads reuse UTs prepared against the baseline, so with more than one card every head's
+  // bake-off and author lanes run at once, one leased card each, on the serial loop's per-lane
+  // budgets; the A/Bs below stay serial, in head order. Fixed ISL/OSL extracts each head on the
+  // stack the previous one left, and an ablation arm times each head on its own clock: both serial.
+  const headPool = KERNEL_EXTRACT_ON && !ABLATION_ARM && GPU_LIST.length > 1 && heads.length ? makeSem(GPU_LIST) : null;
+  const onCard = (h, fn) => (headPool ? headPool.with(1, (g) => fn(g[0])) : fn(h.gpu_id));
+  // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
+  // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
+  const dispatchHead = (h) => {
     if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
       log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
-      break;
+      return false;
     }
     headDispatched++;
     if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
+    return true;
+  };
+  const prepareHead = async (h) => {
     // B4 measures THIS head's trial against its own start, not the run clock.
     const ablHeadStart = ELAPSED_MS;
     // (h1) Extract the op into a standalone immutable unittest (fused heads stay fused: gemmSynthFor).
@@ -5559,17 +5568,17 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
         history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'op extraction failed' });
       }
-      continue;
+      return null;
     }
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
-    const bake = await safeAgent(
+    const bake = await onCard(h, (gpu) => safeAgent(
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
-        GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         CURRENT_ENV: curEnv,
       }),
-      { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
+      { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA }));
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
       const gate = bake ? bake.gate : 'null';
       const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
@@ -5580,12 +5589,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ⚠️ FLAG ${h.short_name}: ${isDominant ? `DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU)` : 'head'} bake-off gate=${gate}${harness ? ' (HARNESS ERROR — bake-off could not measure; NOT a real no-win)' : ''}. ${hasPlan ? 'Proceeding to author route anyway.' : 'No author_plan to fall back on.'}`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate, harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || gate : 'bakeoff returned null' });
         history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: harness ? 'harness_error' : 'flagged', lesson: bake ? bake.reason || gate : 'bakeoff null' });
-        if (!hasPlan) continue;       // can't author -> FLAGGED (surfaced in report), not a silent skip
-        // else: fall through to the author route below (do NOT continue)
+        if (!hasPlan) return null;    // can't author -> FLAGGED (surfaced in report), not a silent skip
+        // else: fall through to the author route below (do NOT return)
       } else {
         log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || gate : 'none'}); skipping.`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
-        continue;
+        return null;
       }
     }
 
@@ -5636,27 +5645,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           candidates: headCands.length, impl_cap_ms: ablImplCap });
       }
     }
-    for (const ap of plan) {
-      // GATE 2 -- implementation: the cap is checked before every language AND handed to the
-      // nested workflow, the only boundary that can contain work already in flight.
-      if (ABL('B4')) {
-        const implMs = ELAPSED_MS - ablImplStart;
-        if (implMs >= ablImplCap) {
-          ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
-            impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
-            remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
-          log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: implementation trial budget expired` });
-          break;
-        }
-        ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
-      }
+    // One author lane: its start check, then the kernel layer, retried if it dies transiently.
+    const authorLane = async (ap, gpu) => {
       const lang = ap.language || 'triton';
       if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
           lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
-        break;
+        return null;
       }
       let al;
       // Retry a TRANSIENT failure (threw, or no final_geomean) so a language is not silently dropped;
@@ -5671,7 +5666,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             ...KB_ARGS,
-            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: gpu, exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
               `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
@@ -5690,6 +5685,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
+      return { lang, al };
+    };
+    const addAuthored = ({ lang, al }) => {
       // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
       // geomean; only fixed-load runs fall back to the geomean.
       const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
@@ -5702,7 +5700,51 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
       }
+    };
+    if (headPool) {
+      const lanes = await parallel(plan.map((ap) => () => onCard(h, (gpu) => {
+        log(`  ${h.short_name}: author ${ap.language || 'triton'} lane on GPU ${gpu}.`);
+        return authorLane(ap, gpu);
+      })));
+      for (const r of lanes) if (r) addAuthored(r);
+    } else {
+      for (const ap of plan) {
+        // GATE 2 -- implementation: the cap is checked before every language AND handed to the
+        // nested workflow, the only boundary that can contain work already in flight.
+        if (ABL('B4')) {
+          const implMs = ELAPSED_MS - ablImplStart;
+          if (implMs >= ablImplCap) {
+            ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
+              impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
+              remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
+            log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
+            history.ledger.push({ direction: h.short_name, verdict: 'paused',
+              lesson: `${ABLATION_ARM}: implementation trial budget expired` });
+            break;
+          }
+          ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
+        }
+        const r = await authorLane(ap, h.gpu_id);
+        if (!r) break;
+        addAuthored(r);
+      }
     }
+    return { ext, isDominant, headCands };
+  };
+  // Parallel: dispatch every head now, then wait for all of their lanes before the first A/B.
+  let prepared = null;
+  if (headPool) {
+    const live = [];
+    for (const h of heads) { if (!dispatchHead(h)) break; live.push(h); }
+    log(`  [heads] ${live.length} head(s) at once on GPUs {${GPU_LIST.join(',')}}, one card per bake-off or author lane; their A/Bs follow serially, in head order.`);
+    const got = await parallel(live.map((h) => () => prepareHead(h)));
+    prepared = new Map(live.map((h, i) => [h, got[i]]));
+  }
+  for (const h of heads) {
+    if (prepared ? !prepared.has(h) : !dispatchHead(h)) break;
+    const p = prepared ? prepared.get(h) : await prepareHead(h);
+    if (!p) continue;
+    const { ext, isDominant, headCands } = p;
     if (!headCands.length) {
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) produced NO candidate (bake-off + author route both empty) — flagged, NOT silently skipped.`);
@@ -5830,7 +5872,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
   }
-  } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
+  } // end default head track (normal mode and fast-mode-single-GPU; A/Bs always serial)
   // Head wins reshape the profile: re-profile before the kernel loop.
   if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
