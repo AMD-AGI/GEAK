@@ -20,7 +20,7 @@ gates), the ship rule in `SYNTHESIS.md`, `LEARNINGS.md`, `inbox.md`, and each ca
 
 ## MODE=round
 1. **Ship first.** A candidate that already passed the rule and is unshipped gets shipped before anything else.
-2. **Crossover** (`decisions/round_<n>.json` names the parents and the kind). `merge` combines the code;
+2. **Combine** (`decisions/round_<n>.json` names the parents and the kind). `merge` combines the code;
    `dispatch` keeps each parent's implementation for the regimes or size bands where it wins (from
    `archive.py views`), behind one entry point that branches on the regime or band. Never branch on one
    benchmark shape. Either way the child is a new node with `parents` = all of them. For a merge:

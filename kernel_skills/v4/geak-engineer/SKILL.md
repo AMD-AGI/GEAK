@@ -16,8 +16,9 @@ Inputs: `SK`, `RUN`, `ID`, `PARENT`, `GPU`, `CUT` (what you own), `DIRECTION`, o
 C=$RUN/cands/$ID; mkdir -p $C
 bash $SK/bin/mkws.sh $RUN $C/ws $RUN/cands/$PARENT/patch.diff   # omit the patch for c000
 ```
-Write `meta.json` = `{"id","parents":[PARENT],"role":"engineer","cut","mode","family","action","operator"}`.
-`family`: the parent's tag, or a new tag when your design changes the structure (always new for fresh-arch).
+Write `meta.json` = `{"id","parents":[PARENT],"role":"engineer","cut","mode","tags","action"}`. `tags`: the
+values the lead passed in `TAGS`; `family` is the parent's unless your design changes the structure (always new
+for fresh-arch). `REFS`: siblings or donors to read first; do not repeat their change without a new reason.
 `operator`: the variation the lead asked for (`targeted`, `contrastive`, `counterfactual`, `numerics`,
 `structural`), when there is one. Read the failure brief, if the lead gave one: do not repeat a sibling's
 change without a new reason. Read `COMMANDMENT.md`,

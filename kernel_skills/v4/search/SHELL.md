@@ -1,4 +1,4 @@
-# Search shell: the contract a search strategy plugs into (design, not yet wired)
+# Search shell: the contract a search strategy plugs into
 
 Goal: anyone can write a search strategy without touching roles or tools. A strategy chooses **what to
 try next**. The shell owns **how anything is tried and judged**: workspaces, measurement, ship rule,
@@ -48,7 +48,7 @@ status, score delta, whether shipped).
 1. **observe**: rebuild the archive and core views; load cap, past decisions, strategy state.
 2. **policy hook**: run `policy.py` if present; keep its proposals and state.
 3. **reason**: the lead reads `STRATEGY.md` + state + proposals, and writes `decisions/round_<n>.json`.
-4. **check**: `bin/check_decision.py` (to build) validates the schema (`decision.schema.json`), that
+4. **check**: `bin/check_decision.py` validates the schema (`decision.schema.json`), that
    referenced nodes exist with source, that ops are in the strategy's declared set, and that the GPU-heavy
    count fits the pool.
 5. **dispatch**: the shell maps ops to executors; executors write nodes with the requested tags.
@@ -70,3 +70,8 @@ restart protocol, audit. A strategy may stop earlier than the end rule allows on
 ## 7. Comparing strategies
 Same task, GPUs, hours and model; ≥ 2 seeds. Report: final verified score, gap closed, score vs cost curve,
 and from the decision files the yield per op type (share of actions whose child joined the front / shipped).
+
+## 8. Where it lives
+`geak-lead` "Each round" runs this loop. Tools: `bin/archive.py` (state, views, `--group-tag`),
+`bin/check_decision.py` (step 4). Strategies shipped as examples: `hillclimb/`, `evo/` (with `policy.py`, the
+reference hook), `avo/`. Write a new one from `_template/STRATEGY.md`; no role or tool changes are needed.

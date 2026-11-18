@@ -7,14 +7,15 @@ Usage:
   archive.py build  --ut-reports 'GLOB' --out F  # any set of UT reports (grouped by snapshot_sha256)
   archive.py views  ARCHIVE [--noise 0.01] [--cap RUN/roofline/cap.json] [--md OUT.md]
 
-A node = one code version: id, parents, design-family tag, cut, status, cost, per-case {speedup, weight, n}.
+A node = one code version: id, parents, tags (free-form, set on a strategy's request), cut, status, per-case
+{speedup, weight, n}.
 Repeated measurements of the same node are pooled per case (median, spread). Views:
   best        the node with the best weighted score (score = sum(w) / sum(w / s), the GEAK metric)
   front       noise-aware Pareto front over regimes: a node is dominated only if another is better by
               more than NOISE on every regime and better overall
   per_case    the fastest node per case and, beyond noise, the "dispatch composite": the score if each
               regime ran its best node (an upper bound for crossover by per-regime dispatch)
-  families    best score and node count per design family (diversity / exhausted families)
+  groups      best score and node count per value of one tag (--group-tag, default `family`)
   gap         per regime: best speedup vs roofline cap, and the weighted gap left (needs --cap)
 """
 import argparse, collections, glob, json, os, statistics, sys
@@ -53,7 +54,11 @@ def build_run(run):
             if sig and c.get("speedup"):
                 per[sig].append(c["speedup"])
                 weights[sig] = (c.get("weight", 1.0), c.get("regime", ""))
-        nodes[nid] = {"id": nid, "parents": meta.get("parents", []), "family": meta.get("family", ""),
+        tags = dict(meta.get("tags") or {})
+        if meta.get("family") and "family" not in tags:
+            tags["family"] = meta["family"]
+        nodes[nid] = {"id": nid, "parents": meta.get("parents", []), "tags": tags, "family": tags.get("family", ""),
+                      "patch": os.path.join(d, "patch.diff") if os.path.exists(os.path.join(d, "patch.diff")) else None,
                       "cut": meta.get("cut", ""), "role": meta.get("role", ""), "status": res.get("status", meta.get("status", "")),
                       "official": res.get("speedup"), "cost_usd": meta.get("cost_usd"),
                       "cases": {s: {"speedup": statistics.median(v), "n": len(v), "weight": weights[s][0],
@@ -88,7 +93,7 @@ def build_reports(pattern):
     return {"source": pattern, "nodes": nodes}
 
 
-def views(arch, noise, cap_path):
+def views(arch, noise, cap_path, group_tag="family"):
     nodes = {k: n for k, n in arch["nodes"].items() if n["cases"]}
     if not nodes:
         sys.exit("archive has no node with per-case results")
@@ -137,7 +142,7 @@ def views(arch, noise, cap_path):
     band_comp = wscore({s: full[bpick[B[s]]]["cases"][s] for s in common})
     fam = collections.defaultdict(list)
     for k, n in full.items():
-        fam[n.get("family") or "-"].append(score[k])
+        fam[(n.get("tags") or {}).get(group_tag) or n.get("family") or "-"].append(score[k])
     out = {"n_nodes": len(full), "regimes": regimes, "best": {"id": best, "score": round(score[best], 4)},
            "front": sorted(({"id": k, "score": round(score[k], 4), "regimes": {r: round(v, 4) for r, v in regs[k].items()}}
                             for k in front), key=lambda x: -x["score"]),
@@ -145,7 +150,10 @@ def views(arch, noise, cap_path):
                                   "pick": pick},
            "band_composite": {"score": round(band_comp, 4), "gain_over_best": round(band_comp / score[best] - 1, 4),
                               "pick": bpick},
-           "families": {f: {"n": len(v), "best": round(max(v), 4)} for f, v in fam.items()}}
+           "group_tag": group_tag,
+           "groups": {f: {"n": len(v), "best": round(max(v), 4)} for f, v in fam.items()},
+           "scores": {k: round(v, 4) for k, v in score.items()},
+           "regime_scores": {k: {r: round(x, 4) for r, x in v.items()} for k, v in regs.items()}}
     if cap_path and os.path.exists(cap_path):
         cap = json.load(open(cap_path))
         caps = {r["name"]: r["cap"] for r in cap.get("rows", [])}
@@ -165,7 +173,7 @@ def to_md(v):
          "", "| front node | score | " + " | ".join(v["regimes"]) + " |", "|---|---|" + "---|" * len(v["regimes"])]
     for f in v["front"]:
         L.append(f"| {f['id']} | {f['score']} | " + " | ".join(str(f["regimes"][r]) for r in v["regimes"]) + " |")
-    L.append("\nFamilies: " + ", ".join(f"{k}: n={x['n']} best={x['best']}" for k, x in v["families"].items()))
+    L.append(f"\nGroups by tag `{v['group_tag']}`: " + ", ".join(f"{k}: n={x['n']} best={x['best']}" for k, x in v["groups"].items()))
     return "\n".join(L)
 
 
@@ -174,7 +182,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build"); b.add_argument("--run"); b.add_argument("--ut-reports"); b.add_argument("--out")
     w = sub.add_parser("views"); w.add_argument("archive"); w.add_argument("--noise", type=float, default=0.01)
-    w.add_argument("--cap"); w.add_argument("--md"); w.add_argument("--json")
+    w.add_argument("--cap"); w.add_argument("--md"); w.add_argument("--json"); w.add_argument("--group-tag", default="family")
     a = ap.parse_args()
     if a.cmd == "build":
         arch = build_run(a.run) if a.run else build_reports(a.ut_reports)
@@ -182,7 +190,7 @@ def main():
         json.dump(arch, open(out, "w"), indent=1)
         print(f"{len(arch['nodes'])} nodes -> {out}")
     else:
-        v = views(json.load(open(a.archive)), a.noise, a.cap)
+        v = views(json.load(open(a.archive)), a.noise, a.cap, a.group_tag)
         md = to_md(v)
         print(md)
         if a.md:

@@ -2,8 +2,8 @@
 
 v4 keeps every v3 role and rule (`../v3/EVIDENCE.md`). Its only change is how a lead picks what to do
 next. Optimization is a search over an **archive** of measured nodes (`bin/archive.py`). Each round the lead
-reads a **search template** (`search/hillclimb.md`, `evo.md`, `avo.md`) and writes its **decision** as data
-(`decisions/round_<n>.json`: mutate / crossover / fresh / investigate / ship / stop, each with a reason and,
+reads a **strategy package** (`search/<name>/STRATEGY.md` + optional `policy.py`; examples `hillclimb`, `evo`, `avo`) and writes its **decision** as data
+(`decisions/round_<n>.json`, checked by `bin/check_decision.py`: mutate / fresh / combine / measure / investigate / ship / custom / stop, each with a reason and,
 later, its outcome).
 
 Why:
@@ -28,7 +28,7 @@ have beaten the best single node by:
 So recombining what a hillclimb already measured buys little. The archive held mostly mainline snapshots
 (only shipped or contested nodes got official evals). `evo` therefore spends its budget on diverse parents and
 new islands (where EAT's largest steps came from: gqa's architect family, norm's prefill rewrite), not on
-crossover. Its 20% crossover share is the first knob to cut if runs confirm this.
+`combine`. Its 20% `combine` share is the first knob to cut if runs confirm this.
 
 Not yet run on GPU. Next: hillclimb vs evo (vs avo) from c000, same GPUs and hours, ≥ 2 seeds per arm.
 "avo" here means agentic variation operators (the agent as a directed mutation operator with failure

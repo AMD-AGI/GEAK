@@ -32,8 +32,9 @@ Every role reads this file first. `SK` = `kernel_skills/`, `KW` = `$SK/../kernel
 
 ## Candidates and the search archive
 - Every candidate is a node of the search. `cands/<id>/meta.json` holds `id`, `parents` (one for a mutation,
-  several for a crossover), `role`, `cut`, `family` (a short tag for its design family, e.g. `triton-1d-grid`,
-  `hip-lds-ring`; reuse the parent's tag unless the structure changed), `action` (the decision that made it),
+  several for a combine), `role`, `cut`, `tags` (key/values the active strategy asks for; by default `family`,
+  a short design-family label such as `triton-1d-grid` or `hip-lds-ring`, kept from the parent unless the
+  structure changed), `action` (the decision that made it),
   and `status`. `result.json` per-case rows carry `sig`, `regime`, `weight` and `speedup` (geak-benchmark).
 - `python3 $SK/bin/archive.py build --run $RUN` rebuilds `RUN/archive.json`; `archive.py views` shows best,
   the noise-aware front, the per-regime dispatch composite and the families. Rebuild after every result.
