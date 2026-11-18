@@ -15,6 +15,8 @@ When asked to watch for replacement capacity, inspect the authorized resource po
 the plan's deadline or handoff. Report allocation changes promptly; distinguish a queued
 job, an allocated node and a usable runtime. Check current occupancy, runtime access and
 remaining lease before returning handles; a new job on the same host need not fix it.
+Match each candidate to the declared resource scope, including any pool restriction,
+using allocation metadata; account ownership or a job label alone may not establish it.
 
 Return the usable handles, observed identities, remaining allocation time and blockers
 in `REPORT.md`. Preserve existing work and record what was changed. Preparing or
