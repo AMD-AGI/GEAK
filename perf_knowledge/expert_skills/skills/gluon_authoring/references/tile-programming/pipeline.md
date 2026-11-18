@@ -29,7 +29,25 @@ compiler's version is the lowest rung, kept as a diagnostic and a last resort.
 | tier | who builds the overlap | your first move |
 | --- | --- | --- |
 | **plain Triton** | the compiler, in `make_ttgir` | afford it and verify it fired: `## Plain Triton: the pipeliner runs for you` |
-| **Gluon, climbing above plain** | **you do** | walk `### The order to reach for these in`: register prefetch, then the authored ring (`## Authoring the overlap yourself (the climb default on the Gluon path)`), then the scheduling model — instruction pacing (`## Intra-wave: pacing the stream the staging created`) and, where the stage rules allow, the wave-level phase offset (`## Inter-wave: the two-group phase offset`) |
+| **Gluon, climbing above plain** | **you do** | walk `### The order to reach for these in`: register prefetch, then the authored ring (`## Authoring the overlap yourself (the climb default on the Gluon path)`), then the scheduling model — instruction pacing (`**Price a ring in LDS and in workgroups before writing it.** LDS per workgroup is
+`sum over operands of slots x tile bytes`; workgroups per CU by LDS is `floor(LDS per CU / LDS per
+workgroup)`, and the register limiter gives its own count -- take the smaller (`slicing.md ## Occupancy
+budget (P8)`). A second slot that halves the workgroups per CU trades one form of latency hiding
+(another workgroup's waves) for another (in-workgroup overlap); write both counts down before choosing.
+A ring on one operand only (the larger reuse, or the one whose wait is on the critical path) is the
+cheaper form when two full rings do not fit.
+
+**Shrinking BLOCK_K to fit a ring does not change the barrier cost per MFMA.** With a fixed number of
+barriers per K iteration, halving BLOCK_K halves the MFMAs per iteration and doubles the iterations:
+barriers per MFMA stay the same. Only fewer barriers per iteration (more slots, or a barrier the
+buffering makes unnecessary) or more MFMAs per iteration changes it.
+
+**On a single slot, a prefetch can move the stall rather than remove it.** Each iteration still meets
+at the workgroup barrier, so the cycles a prefetch takes off a memory wait can reappear as barrier
+wait. After a prefetch, read the barrier share of stalls and of inter-MFMA cycles in the ATT dial
+alongside the memory-wait share before reading the change as "overlap gained".
+
+## Intra-wave: pacing the stream the staging created`) and, where the stage rules allow, the wave-level phase offset (`## Inter-wave: the two-group phase offset`) |
 | **Gluon, still below the parity gate** | **you do**, re-authoring what plain built | repay the named `lost_pipeline` debt with the same hand-written rungs, starting from the recovered scaffold (`## Recovering the structure, then improving on it`); only if they cannot reach parity, or to *measure* the debt, re-inject plain's pipeliner (`## Reproduce plain's software pipeline on the Gluon path (the parity-recovery route)`) |
 
 **Read re-injection as a measuring instrument and a last resort, not as a lever.** It reaches

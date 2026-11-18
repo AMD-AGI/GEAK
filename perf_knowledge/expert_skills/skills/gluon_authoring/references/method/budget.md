@@ -209,6 +209,10 @@ one.
 
 ### 3.3 Before you report a "% of roofline" or a "gap = X us"
 
+A utilization counter is not a % of roofline: the fraction of peak is the achieved rate (operations or
+bytes per second, from device time) over the peak for this dtype and SKU
+([`profile.md`](profile.md) `### Rule: pipe busy is not a fraction of peak`).
+
 Nine lines, each one a way a roofline number has been wrong in practice — and each owned by a dial in
 [`profile.md`](profile.md) (C1–C4, trap 5), which is the point: the number is only as good as the
 reading under it. Detail + the worked examples: `../hardware/roofline-models.md ## Calibration`.

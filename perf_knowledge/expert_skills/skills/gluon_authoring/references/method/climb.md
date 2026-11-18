@@ -279,6 +279,25 @@ direction looks like the same lever failing repeatedly and gets abandoned one ro
 paid. (GEAK's `max_no_improve` / `progress_delta` launch args are what let a maturing direction
 survive the loop — [`index.md`](index.md) G0.)
 
+## A verdict belongs to the body that measured it
+
+A null, a regression or a "rival" (two changes that each win alone and lose together) is a statement
+about the kernel as it was when it was measured: its binding occupancy limiter, its register headroom,
+its bottleneck class. When a later kept change moves any of those, the verdict is stale. Record each
+null with the condition it depended on (`lesson`: "loses while registers bind at N workgroups per CU",
+not "does not work"), and re-screen it when the profile delta of a kept change (`gluon_profile.py
+--compare`) shows that condition moved. A rival of one
+kept line can stack on the next; a register-hungry lever that lost at one limiter can win once the
+limiter is LDS.
+
+**Occupancy before depth.** When both limiters (`probe.py`: registers and LDS) bind at one workgroup per
+CU and the stall sits on waits a second workgroup's waves could cover, the cheapest overlap is a second
+workgroup, not a deeper pipeline in the one that is there. Getting it usually means a smaller tile or
+fewer warps -- structure, which this loop does not change in place: return a `structure_suspect` (or
+`resweep_request`) with the arithmetic (both limiters and workgroups per CU for the current and the
+proposed tile), and the re-cut runs as its own deep_explore direction with every gate re-run on the new
+tile (masks included: `scripts/edge_shapes.py`).
+
 ## Fallback ladder (escalate scope only after the finer scope is exhausted)
 
 1. **Next mechanism, same layer.** On a stall, or a crash-loop under threshold (same error <3×: roll back

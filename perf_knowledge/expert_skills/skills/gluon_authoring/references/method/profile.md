@@ -99,7 +99,17 @@ grep -c <your_kernel_name> /tmp/kt/*/*kernel_trace.csv   # 0 => target was not o
   ATT decoder/decoded artifacts separately; a trace does not prove those capabilities.
 - **0 dispatches** → fall back to the **native ISA path** (`kernel_tools/dump_ir.sh` →
   `.amdgcn`/`.s` → `asm_loop_audit.py`, with VGPR/AGPR/spill from the `.amdgcn` / compile stats)
-  **+ the floor probe** (`### Rule: floor probe (quantify overlap headroom exactly)`). No
+  **+ the floor probe** (`### Rule: pipe busy is not a fraction of peak
+
+`MfmaUtil` and MFMA busy-cycle counters say what fraction of cycles the matrix pipe was occupied. They
+are not the fraction of peak throughput: the instruction mix may run below the dtype's peak rate per
+busy cycle, and the counters are normalized per SIMD or per CU depending on the source. Before calling
+a kernel "at the MFMA ceiling" (and before stopping on it), compute the achieved rate -- operations per
+dispatch over device time (`gluon_profile.py --flops`) -- and set it against the peak for this dtype and
+SKU (`hw_budget.py --measured-tflops`, `budget.md`). A high busy reading with a low achieved fraction
+is a schedule or instruction-rate problem, not a ceiling.
+
+### Rule: floor probe (quantify overlap headroom exactly)`). No
   `inspect_source.py` is needed — the Triton cache already emits loose ISA. Record the live path in
   the contract's `Profiler preflight` field.
 

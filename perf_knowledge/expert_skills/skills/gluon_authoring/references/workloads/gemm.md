@@ -374,6 +374,27 @@ what sits between the matmuls) rather than as standalone recipes:
   work than it adds (`../pitfalls/negative-patterns.md`,
   `../tile-programming/low-precision.md`). Record scale scope / descale point /
   overflow risk for delayed descale.
+- **The scale feed is part of the hot loop, so size it like an operand.** Three moves recur, each a
+  separate, attributable change:
+  - *Uniform scale along a tile dimension.* When the scale group along N (or M) is a multiple of the
+    tile there (`group % BLOCK == 0`), every lane of the tile reads the same scale for a K step: load
+    one scalar per K step instead of a per-lane vector gather. Keep the general path for tiles that
+    straddle a group, and branch outside the K loop, not inside it (an in-loop branch can cost the
+    pipelining it was meant to help).
+  - *Rank-1 scales fold to one FMA.* `dot * a_s[:, None] * b_s[None, :]` is a rank-1 rescale: combine
+    the two scales into one per-row (or per-column) vector first and apply it with a single fused
+    multiply-add into the accumulator, instead of two multiplies and an add per element. Check the
+    reassociation against the task tolerance on boundary shapes, not only on the task cases.
+  - *Hoist the per-step scale load.* A scale load issued in the same K step that consumes it is a
+    memory wait on the critical path; load the scales for the next step (or a few steps) ahead, the
+    same way an operand is prefetched.
+- **One accumulator instead of two.** The fresh-accumulator-per-step form keeps a second fp32 tile live
+  (the partial product before scaling). Carrying the accumulator in the units of the current scale
+  removes it: `U_k = P_k + (s_{k-1} / s_k) * U_{k-1}`, then multiply by the last scale once in the
+  epilogue (scales must be non-zero; the ratio changes rounding, so re-check tolerance). It returns a
+  tile's worth of registers but puts the rescale on the MFMA dependency chain: it pays when the loop
+  has independent work to hide that chain and can lose on a body that does not -- so a null result is
+  conditional on the body it was measured on (`../method/climb.md ## A verdict belongs to the body that measured it`).
 - **The software scale group and the instruction's K extent are different numbers, and the ratio
   is the thing to write down.** A scaled matrix instruction's K extent is much wider than the
   hardware scale group it is built from, so one instruction spans **several** scale groups rather

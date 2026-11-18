@@ -152,13 +152,12 @@ integrate step, which records each add as orthogonal, rival or conflict. Decisio
 is independent; keep coupled work whole** — when in doubt, treat it as coupled (pair it); the cost of
 wrongly parallelizing coupled work is corrupted evidence, not just lost speed.
 
-**Why the climb fans out at all** (measured, a8w8 blockscale fp8 GEMM from the same Gluon anchor, MI325X):
-the one-engineer climb found the scale and prefetch levers in three rounds, then measured the barrier
-move alone twice as null and stopped at 1.34×. GEAK's kernel workflow, three directions per round, found
-three independent levers in its first round and stacked them (1.30×), and its decisive lever was a pair —
-a second LDS buffer for B, which alone measured 0.98×, plus the WAR barrier move it made legal — reaching
-1.55×. The single track lost to breadth and to the one-change rule, not to evidence: its ATT had named
-the barrier.
+**Why the climb fans out at all.** A single track can only test one lever per round, so independent
+levers that would each pay arrive one round apart, and a lever whose halves only pay together is
+measured half at a time and closed as null. Several directions from one checkpoint find the independent
+levers in the same round, the integrate step tells which of them stack, and a paired direction keeps a
+coupled lever whole. The sequential discipline still holds inside each direction: one engineer, one
+layer, one attributable change, every gate.
 
 **Bounded experiments are the deep_engineer's own work.** A timing across shapes, a knob / tile probe, a
 Tier-0 / A1–A4 anomaly check — self-contained measurements that do not advance the coupled backbone — are run

@@ -560,7 +560,8 @@ literal `<out>/<variant>/<variant>.{ttgir,amdgcn}` pairs (`recover.md`).
 
 ```text
 PASS  if layout-equivalence  (ttgir_bridge verify: PASS or RECONCILED vs plain)
-      AND correctness == plain (same oracle, same tolerance)
+      AND correctness == plain (same oracle, same tolerance), on the task cases AND on the
+          boundary shapes (scripts/edge_shapes.py, plain as --baseline: exit 1 = not equivalent)
       AND deterministic      (same-input maxdiff == 0 over N>=~40 launches -- race gate)
       AND asm parity         (unroll-normalized instruction MIX + class SEQUENCE vs plain)
 record perf delta vs plain (may be neutral or slower)
@@ -570,6 +571,13 @@ record perf delta vs plain (may be neutral or slower)
 permission to skip the two that catch a *silent* mis-recovery — layout-equivalence is the one that fires
 when numerics pass anyway, and asm parity is what separates "the compiler's overlap is missing" from
 "the transcription is wrong". `asm looks perfect` is not one of the four.
+
+**Correctness includes the shapes the task does not run.** Plain Triton gets its tail masks from the
+compiler; a Gluon transcription writes every mask, index wrap and loop bound by hand, and a task's
+correctness cases are usually multiples of the tile, so a missing mask passes them. Run
+`scripts/edge_shapes.py` with plain as the baseline: a boundary shape plain handles and the anchor
+does not is a divergence to fix here, before any recovery or climb builds on it. A shape plain fails
+too (exit 3) is the operator's limitation; name it, it is not this stage's to fix.
 
 ### 5.1 Layout equivalence — `ttgir_bridge.py verify`
 

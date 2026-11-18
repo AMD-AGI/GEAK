@@ -80,6 +80,13 @@ tier has room for it. [On one attention-bwd kernel, streaming the loop-invariant
 operands was blocked because they did not fit the free LDS, so the register wall
 could not be relieved that way; gfx950/MI350, one build.]
 
+**A second live result tile is the largest single register cost after the accumulator.** Forms that
+keep a per-step partial tile beside the accumulator (scaled accumulation, split reductions, an epilogue
+that needs the unscaled value) pay for it in VGPRs and often in workgroups per CU. An algebraic rewrite
+that carries one tile (`../workloads/gemm.md ## Preshuffled / block-scaled signals`, one accumulator
+instead of two) is a register lever of the same order as slicing; budget it here before reaching for
+spill-prone unrolls.
+
 ### Occupancy budget (P8)
 
 > The overlap/occupancy/ILP **tri-lemma** derived here is indexed in the lever-applicability

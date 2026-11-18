@@ -290,6 +290,16 @@ A candidate that changes the boundary, oracle, shapes, or markers is rejected (`
 the task contract (the frozen oracle and `unittest.py`) plays this role; do not author a
 second one that disagrees with it.
 
+## A noisy baseline arm is not a null candidate
+
+A screen is NOT RESOLVED when the delta sits inside the window's noise band. Read which arm sets the
+band (`ab_bench.py` reports `noise_band_arm`): when it is the baseline, the window was noisy and the
+candidate is unmeasured, not null -- re-measure (more cells, `--preload` to settle the clock) before
+recording a verdict. When it is the candidate, its own timing varies (contention, a data-dependent
+path) and that is information about the candidate. A disagreement between a screen and a longer
+interleaved bench is settled by the measurement with the tighter band, and GEAK verify decides
+acceptance either way.
+
 ## Harness stability
 
 The same benchmark must keep identical shape ordering, warmup/repetition counts, benchmark boundary,
