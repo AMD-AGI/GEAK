@@ -327,6 +327,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # the workflow script growth check compares against HEAD^1
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -337,6 +339,15 @@ jobs:
       # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
       - name: workflow script size limit
         run: node e2e_workflow/scripts/test_workflow_script_size.js
+      # Advisory, never fails: a PR that grows the workflow scripts by more than 10 KB net gets a
+      # warning annotation and a size table in the job summary. On a pull_request run HEAD is the
+      # merge commit, so HEAD^1 is the base branch it would merge into.
+      - name: workflow script growth check regression
+        run: node e2e_workflow/scripts/test_check_workflow_growth.js
+      - name: workflow script growth (advisory)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: node e2e_workflow/scripts/check_workflow_growth.js HEAD^1
       - name: Candidate coverage and independent speedup review regression
         run: node --test e2e_workflow/scripts/test_speedup_review.js
       - name: AgentX-only kernel extraction and fixed-load compatibility
