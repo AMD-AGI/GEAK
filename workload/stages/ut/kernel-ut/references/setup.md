@@ -85,6 +85,9 @@ cleanup, the broker retains the locks and retries; restore Docker access before 
 Completion requires a fresh passing UT plus a return accepted by the native delivery
 gate. An explicit `start` schedules missing/stale delivery even when correctness
 already passed, grants another attempt budget and retains earlier numbered logs.
+Scoped receipts use the native snapshot and reuse key for freshness: later delivery
+notes/build artifacts do not force qualification, and older timestamps cannot hide
+changed source, helpers or server inputs. Unscoped legacy drivers retain timestamp checks.
 The task owner reuses unchanged UT gates while completing selection/source records.
 
 Outside an on-demand wave, run every GPU command from its task directory under a lease:

@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,8 @@ SKILL = Path(__file__).resolve().parents[1] / 'kernel-ut'
 NODE = os.environ.get('KERNEL_EXTRACT_NODE') or shutil.which('node')
 spec = importlib.util.spec_from_file_location('canonical_driver', SKILL / 'ut_contracts/ut_driver.py')
 D = importlib.util.module_from_spec(spec); spec.loader.exec_module(D)
+sys.path.insert(0, str(SKILL / 'scripts'))
+import ut_wave as W
 
 
 @unittest.skipUnless(NODE, 'native verifier needs Node')
@@ -104,6 +107,56 @@ class CanonicalDeliveryTest(unittest.TestCase):
         self.assertTrue(self.check()['ok'])
         self.report['gates']['negative_controls']['controls'][0]['margin'] = float('nan')
         self.assertFalse(self.check()['ok'])
+
+    def test_wave_freshness_uses_bound_inputs_not_delivery_notes_or_timestamps(self):
+        self.assertTrue(self.check()['ok'])
+        # A delivery builder is not an input to the UT; it may be authored later.
+        (self.task / 'tools').mkdir()
+        builder = self.task / 'tools/build_return.py'
+        builder.write_text('# delivery bookkeeping only\n')
+        os.utime(builder, (2000000000, 2000000000))
+        with patch.dict(os.environ, {'KERNEL_EXTRACT_NODE': NODE}):
+            self.assertTrue(W.passed(str(self.task)))
+            for name in ['helper.py', 'kernel_src/leaf.py', 'run/ut_cases.json']:
+                path = self.task / name
+                original = path.read_bytes()
+                path.write_bytes(original + b'\n')
+                os.utime(path, (1, 1))
+                self.assertFalse(W.passed(str(self.task)), name)
+                path.write_bytes(original)
+                self.assertTrue(W.passed(str(self.task)), name)
+            self.write('run/server_new.json', {'new_input': True})
+            os.utime(self.task / 'run/server_new.json', (1, 1))
+            self.assertFalse(W.passed(str(self.task)))
+
+    def test_wave_requires_matching_report_and_fails_closed_without_native_owner(self):
+        self.assertTrue(self.check()['ok'])
+        with patch.dict(os.environ, {'KERNEL_EXTRACT_NODE': NODE}):
+            self.assertTrue(W.passed(str(self.task)))
+            self.report['reuse_key'] = '0' * 64
+            self.write('run/ut_report.json', self.report)
+            self.assertFalse(W.passed(str(self.task)))
+        with patch.dict(os.environ, {'KERNEL_EXTRACT_NODE': '/missing/native/node'}):
+            self.assertFalse(W.passed(str(self.task)))
+
+    def test_wave_retains_explicit_legacy_scoped_receipt_identity(self):
+        legacy = json.loads(subprocess.check_output([NODE,
+            str(SKILL / 'shared/kernel_source_delivery.mjs'),
+            'ut-driver-snapshot', str(self.task)], text=True))
+        for doc in (self.ut, self.report):
+            doc['snapshot_sha256'] = legacy['snapshot_sha256']
+            doc['required_gates'] = [g for g in doc['required_gates'] if g != 'process_state']
+            doc['gates'].pop('process_state', None)
+        self.report['reuse_key'] = legacy['reuse_key']
+        self.manifest['ut_snapshot']['contract'] = 'ut_driver/path_sha256_concat/v1'
+        self.assertTrue(self.check()['ok'])
+        self.write('run/RETURN.json', {'source_delivery_ref': {
+            'path': 'run/source.json'}})
+        with patch.dict(os.environ, {'KERNEL_EXTRACT_NODE': NODE}):
+            self.assertTrue(W.passed(str(self.task)))
+            (self.task / 'helper.py').write_text('# changed\n')
+            os.utime(self.task / 'helper.py', (1, 1))
+            self.assertFalse(W.passed(str(self.task)))
 
 
 if __name__ == '__main__':

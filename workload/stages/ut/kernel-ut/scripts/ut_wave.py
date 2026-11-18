@@ -76,11 +76,48 @@ def log(wave, msg):
 
 # ----------------------------------------------------------------------------- receipts
 def receipt(tdir):
-    """(verdict, fresh, report) of a task's last full UT run. `fresh` = written after the
-    last change to anything the UT reads, so an old receipt never passes a changed task."""
+    """(verdict, fresh, report), using the driver's source/input identity when present.
+
+    Delivery scripts, notes and build caches can be written after qualification.
+    Their timestamps do not invalidate unchanged scoped UT evidence. Conversely,
+    restored timestamps must not hide changed source, helpers or server inputs.
+    The final native delivery gate separately checks complete gates and evidence.
+    """
     res = load(os.path.join(tdir, "run", "ut_result.json"))
     if not res:
         return None, False, None
+    report = load(os.path.join(tdir, "run", "ut_report.json"), {})
+    if res.get('validation_contract'):
+        command = 'ut-driver-source-snapshot'
+        # Historical scoped receipts opt in to their algorithm in the delivery
+        # manifest. Never reinterpret their digest or silently accept a mismatch.
+        result = load(os.path.join(tdir, 'run', 'RETURN.json'), {})
+        ref = (result.get('source_delivery_ref') or {}).get('path')
+        if isinstance(ref, str):
+            manifest_path = os.path.realpath(os.path.join(tdir, ref))
+            if os.path.commonpath([os.path.realpath(tdir), manifest_path]) != os.path.realpath(tdir):
+                return res.get('verdict'), False, report
+            manifest = load(manifest_path, {})
+            contract = (manifest.get('ut_snapshot') or {}).get('contract')
+            if contract == 'ut_driver/path_sha256_concat/v1':
+                command = 'ut-driver-snapshot'
+            elif contract not in (None, 'ut_driver/source_snapshot/v1'):
+                return res.get('verdict'), False, report
+        try:
+            proc = subprocess.run([
+                os.environ.get('KERNEL_EXTRACT_NODE', 'node'),
+                os.path.join(SKILL, 'shared', 'kernel_source_delivery.mjs'), command, tdir,
+            ], capture_output=True, text=True, timeout=120)
+            current = json.loads(proc.stdout)
+            fresh = (proc.returncode == 0
+                     and isinstance(current.get('reuse_key'), str)
+                     and res.get('snapshot_sha256') == current['snapshot_sha256']
+                     and report.get('snapshot_sha256') == current['snapshot_sha256']
+                     and report.get('reuse_key') == current['reuse_key'])
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            fresh = False
+        return res.get('verdict'), fresh, report
+    # Unscoped historical/custom drivers retain their conservative timestamp rule.
     newest = 0.0
     for root, dirs, files in os.walk(tdir):
         rel = os.path.relpath(root, tdir)
@@ -89,7 +126,7 @@ def receipt(tdir):
         for f in files:
             newest = max(newest, os.path.getmtime(os.path.join(root, f)))
     fresh = os.path.getmtime(os.path.join(tdir, "run", "ut_result.json")) >= newest
-    return res.get("verdict"), fresh, load(os.path.join(tdir, "run", "ut_report.json"), {})
+    return res.get("verdict"), fresh, report
 
 
 def passed(tdir):
