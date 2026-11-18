@@ -5,9 +5,11 @@ provider for AMD GPUs, validated on Strix Halo (gfx1151) with Qwen3.8-27B int4. 
 rebuilds the release's kernel library, measures TTFT and decode with an A/A of the rebuild,
 profiles the prefill and decode forwards, and refreshes hip-ep's own autotune tables
 (matmul_nbits, gqa) for the model wherever their kernels hold at least 20% of the
-prefill or of a decode step (the tuning lane). A candidate is accepted only through an
-interleaved A/B and a logits parity gate, and the final package is re-measured against
-the release. The design is in [DESIGN.md](DESIGN.md).
+prefill or of a decode step (the tuning lane). It then runs GEAK's unchanged
+`kernel_workflow` on a task built from hip-ep's own unit tests (the 4-bit MatMulNBits
+prefill GEMM) and rebuilds the library with its patch (the kernel lane). A candidate
+is accepted only through an interleaved A/B and a logits parity gate, and the final
+package is re-measured against the release. The design is in [DESIGN.md](DESIGN.md).
 
 ## Prerequisites
 
@@ -28,6 +30,7 @@ With the Workflow tool, `scriptPath` = `hip_ep_e2e_workflow.js`:
 {"model_path": "/models/qwen3.8-27b-int4-oga019",
  "hipep_pkg": "/opt/hip-ep-0.5.3",
  "tools_dir": "<GEAK>/tools/hip_ep_e2e",
+ "kernel_workflow_dir": "<GEAK>/kernel_workflow",
  "exp_root": "/work/hipep-runs",
  "therock": "/opt/therock-10.1.0",
  "sysroot": "/opt/sysroot-u2604",
@@ -36,7 +39,8 @@ With the Workflow tool, `scriptPath` = `hip_ep_e2e_workflow.js`:
  "hipep_build": "/work/hip-ep-build"}
 ```
 
-Optional: `lens` (`1024,2048`), `gen` (128), `reps` (3), `rounds` (2), `aa` (`true`).
+Optional: `lens` (`1024,2048`), `gen` (128), `reps` (3), `rounds` (2), `aa` (`true`),
+`kernel_budget` (6) and `kernel_hours` (6; no kernel-lane round starts after it).
 The run writes `report.md` and `workflow_return.json` into its eval dir.
 
 Each tool also runs alone with the `HIPEP_*` variables set, e.g.
@@ -66,6 +70,19 @@ matmul_nbits table is refreshed. The lane's A/B against the release:
 The table changed all 49 measured rows; seven are rows for the gate_up shape
 (N=34816), which the shipped table did not hold. Logits are bit-identical: the new rows
 are WMMA configs that keep the fp32 K-order accumulation.
+
+**Kernel lane** (same run): `kernel_workflow` ran on the matmul_nbits u4 prefill task;
+its Director verified 1.043x (weighted over the model's shapes). The patch adds an
+instruction-scheduling variant of the extended WMMA core, and extended config entries:
+128x128 tiles that select it, and 256x128 / 128x256 tiles. With the
+table re-swept on the changed kernel (21 of 49 rows changed), the lane's A/B against the
+tuning lane's package: TTFT −1.64% at 1024 and −1.62% at 2048, decode −0.02%, logits
+bit-identical. The validator's final A/B against the release:
+
+| Prompt | TTFT release | TTFT final | Change | Decode change |
+|---|---|---|---|---|
+| 1024 | 2042.4 ms | 1831.4 ms | −10.33% | −0.07% |
+| 2048 | 4164.1 ms | 3661.5 ms | −12.07% | −0.03% |
 
 **Qwen3-0.6B int4 (fp16)** (eval `e2e_qwen3-0.6b-int4-fp16_20261119T073508`):
 matmul_nbits holds 64.0% of the prefill and gqa 27.3% of a decode step, so both tables

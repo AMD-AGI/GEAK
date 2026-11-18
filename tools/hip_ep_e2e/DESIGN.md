@@ -8,8 +8,9 @@ provider for AMD GPUs: the model is an OGA export, measured with OGA's
 seams, a serving client and launch scripts. hip-ep is a C++ runtime; its kernels live
 in one shared library, `libcustom_kernels_<arch>.so`, which the EP opens at session
 creation. So the runtime-facing steps need their own tools, and this workflow runs
-the loop over them. Its lane is the tuning lane: hip-ep's own autotune tables,
-refreshed for the model.
+the loop over them. Two lanes: the tuning lane refreshes hip-ep's own autotune tables
+for the model, and the kernel lane runs GEAK's unchanged `kernel_workflow` on a kernel
+itself.
 
 ## Runtime
 
@@ -34,7 +35,9 @@ models in the temp dir, keyed by the model alone, and kernel changes can leave t
 | `kprof.py` | `heads.json`: rocprofv3 kernel shares of the prefill pass and the decode passes, with each kernel's source file |
 | `build_kernels.sh` | the kernel library from the release tag plus an overlay of files under `lib/`, under the lock `tools/ep_task_runner.py` takes for EP builds |
 | `make_pkg.sh` | a candidate package: the base package with its kernel library swapped |
-| `lut_refresh.py` | the kernel library rebuilt with hip-ep's autotune tables (matmul_nbits, gqa) refreshed for this model |
+| `lut_refresh.py` | the kernel library rebuilt with hip-ep's autotune tables (matmul_nbits, gqa) refreshed for this model, over an optional overlay |
+| `make_task.py` + `leaf_runner.py` | a GEAK kernel task for one op: the kernel sources (editable), two of the release's kernel unit tests as frozen oracles, and the `compile` / `correctness` / `performance` runner |
+| `integrate.py` | an overlay from the kernel lane's final patch; refuses a patch that changes anything but the editable files, and leaves out new files an agent left outside `src/` |
 
 A tool deletes its verdict file before it starts and writes it only on success, so a
 failed rerun never leaves an earlier verdict in place.
@@ -85,14 +88,54 @@ on): on Qwen3.8-27B that is matmul_nbits (82% of the prefill; gqa is under 1%), 
 Qwen3-0.6B both (gqa is 27% of a decode step). One overlay carries every changed
 table, so one library, A/B and parity cover them together.
 
+## Kernel lane
+
+`make_task.py` describes each op it can write a task for (`OPS`: the kernel source and
+the headers GEAK may edit, the target and frozen functions, the autotune, the oracle
+leaves); the 4-bit MatMulNBits prefill GEMM is the one described. The lane runs on it
+under the same 20% rule: `kernel_workflow` in optimize mode (`target_language: hip`)
+on the task, with a wall-clock cap (`kernel_hours`: no round starts after it, and the
+TechLead may stop earlier). Only a patch whose isolated speedup the lane's own
+Director re-measured and accepted (`validation_status: accepted`, the bar
+`kernel_lane.js` sets for the experience store) is integrated: `integrate.py` makes an
+overlay on top of the tuning lane's, `lut_refresh.py` re-sweeps the op's tables on the
+changed kernel, and the candidate goes through the same gates, against the tuning
+lane's package. The task dir is `<op>_task`, so the lane's experience-store entries
+are named after the op.
+
+The task is a different cut of matmul_nbits than `tools/gen_ep_task.py`'s (the whole
+`.hip` file editable, the `gemm_fp16u2` example harness, fixed flags, preset shapes),
+in the same `config.yaml` format:
+
+- **Oracles:** the release's own unit-test leaves. matmul_nbits `Xfp16_Wu4_Yfp16`
+  checks the model's shapes, M=1 guards, its coverage sweep and every extended WMMA
+  entry. qmoe_ragged_mm compiles the same editable WMMA core; its test also calls the
+  matmul_nbits small-M grouped entry, so it links the task's matmul_nbits object.
+  Generation refuses a release where another kernel compiles the core.
+- **Flags:** each source compiles with the release build's own command line (`ninja
+  -t commands`): `-O3`, where the leaves' Makefiles use `-O2 -ffp-contract=fast`.
+- **Shapes:** the model's, weighted by calls per forward times baseline time.
+- **Baseline:** timing runs the kernel's online autotune, so a config choice alone does
+  not count as a kernel win; the tuning lane owns the table.
+- **Not timed:** for some K (K=6144 on Qwen3.8-27B) production pads B's row stride and
+  runs a padded-B variant the leaf does not have; only the A/B and the parity bound
+  see an edit's effect on it.
+
+`leaf_runner.py` is the task's runner, as `ep_task_runner.py` is for `gen_ep_task.py`'s
+tasks, with the same modes and reports; it is kept apart so those tasks do not change.
+It rebuilds before `correctness` or `performance` when the sources changed since the
+last `compile`.
+
 ## Phases
 
 | Phase | What happens |
 |---|---|
 | Setup | Check the export, package and device; rebuild the release library; record the baseline; A/A of the shipped library against the rebuild, for the lanes' noise band and a logits check |
 | Profile | `kprof.py` → `heads.json` |
-| Strategize | The tuning lane runs for the ops whose kernels hold at least 20% of the prefill or of a decode step |
+| Strategize | Each lane runs for the ops whose kernels hold at least 20% of the prefill or of a decode step |
 | Tuning | `lut_refresh.py` → `make_pkg.sh` → A/B and parity against the release |
+| HeadKernel | `make_task.py` → baseline → `kernel_workflow` |
+| Integrate | `integrate.py` → `lut_refresh.py` on the changed kernel → `make_pkg.sh` → A/B against the current package, parity against the release |
 | Validate | Re-measure the final package against the release independently; the report |
 
 A failed Setup step stops the run. Long steps (10–30 minutes) follow
@@ -104,10 +147,12 @@ report as text, and the workflow saves it as `report.md`.
 ## Testing
 
 - `node tools/hip_ep_e2e/tests/test_workflow.js`: the workflow on stub agents (phase
-  order, when the lane runs, how its verdict moves the final package, refusals, what
-  reaches the tools and the report), and the long-command
+  order, when the lanes run, how their verdicts move the current package, what the
+  kernel lane is handed, refusals, what reaches the tools and the report), and the
+  long-command
   template run through bash with job control on, as the agents' shell has it.
 - pytest (no GPU), `tools/hip_ep_e2e/tests/`: the `model_benchmark` parser and the
   gate, the parity comparison, the trace split, `build_kernels.sh` on a fake checkout,
-  `make_pkg.sh`, `hipep_env.py`, `lut_refresh.py`'s shape view and private tree.
+  `make_pkg.sh`, `hipep_env.py`, `lut_refresh.py`'s shape view and overlays, the kernel
+  task's layout, runner and QMoE link, and `integrate.py`'s refusals.
 - On the GPU, every run starts with the A/A.

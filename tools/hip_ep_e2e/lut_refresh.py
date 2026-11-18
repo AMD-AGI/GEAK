@@ -12,15 +12,17 @@ Each op refreshes its table, hip/autotune/<op>/lut/<arch>.{json,fb}, for the mod
     a config at least MIN_GAIN faster in the same sweep;
   - gqa: the model's attention geometry (genai_config.json), prefill and decode,
     when hip-ep's sweep grid has that geometry.
-Every op sweeps on a private copy of the kernel sources at the release tag, so the
-shared hip-ep tree is never touched, with a driver built by the release's compile
-command for the op's kernel, under the serving-GPU lock. One overlay holds every
-changed table, and build_kernels.sh builds the library from it. lut_refresh.json
+Every op sweeps on a private copy of the kernel sources at the release tag plus
+--overlay, so the sweep measures the code that will ship and the shared hip-ep tree
+is never touched, with a driver built by the release's compile command for the op's
+kernel, under the serving-GPU lock. The output overlay is --overlay plus every
+changed table, and build_kernels.sh builds the library from it. The integrator
+passes the kernel lane's overlay, so the tables are re-swept on the changed kernel. lut_refresh.json
 records, per op, whether its table changed or why it was skipped. The hip-ep
 checkout and build dir are HIPEP_SRC and HIPEP_BUILD, the ones build_kernels.sh
 reads, so the tables are swept on the tree the library is built from.
 
-    python3 lut_refresh.py --model M --out DIR --arch gfx1151 [--ops matmul_nbits,gqa]
+    python3 lut_refresh.py --model M --out DIR --arch gfx1151 [--ops matmul_nbits,gqa] [--overlay IN]
 """
 import argparse
 import importlib.util
@@ -182,19 +184,24 @@ def clear_outputs(out):
             os.remove(os.path.join(out, f))
 
 
-def private_tree(src, out_dir):
-    """lib/Runtime/Kernels/{hip,include} as committed at the release tag."""
+def private_tree(src, overlay, out_dir):
+    """lib/Runtime/Kernels/{hip,include} at the release tag, with the overlay applied."""
     root = os.path.join(out_dir, "src")
     for sub in ("hip", "include"):
         dst = os.path.join(root, K, sub)
         if os.path.isdir(dst):
             shutil.rmtree(dst)
     hipep_env.export_tree(src, root, [f"{K}/hip", f"{K}/include"])
+    if overlay:
+        shutil.copytree(overlay, root, dirs_exist_ok=True)
     return root
 
 
-def write_overlay(root, luts, overlay_out):
-    """The overlay to build: each changed table, given as its path under root without the extension."""
+def write_overlay(overlay_in, root, luts, overlay_out):
+    """The overlay to build: the input overlay (a kernel lane's edits) plus each changed table,
+    given as its path under root without the extension."""
+    if overlay_in:
+        shutil.copytree(overlay_in, overlay_out)
     for lut in luts:
         dst = os.path.join(overlay_out, os.path.relpath(os.path.dirname(lut), root))
         os.makedirs(dst, exist_ok=True)
@@ -227,6 +234,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--arch", required=True, help="the device's gfx name; hip-ep loads that table")
     ap.add_argument("--ops", type=_ops, default="matmul_nbits,gqa")
+    ap.add_argument("--overlay", default=None, help="overlay the sweeps and the build start from")
     a = ap.parse_args()
     src, build = hipep_env.require("HIPEP_SRC"), hipep_env.require("HIPEP_BUILD")
     env = hipep_env.Env.from_environ()
@@ -234,7 +242,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     clear_outputs(out)
     log = os.path.join(out, "lut_refresh.log")
-    root = private_tree(src, out)
+    root = private_tree(src, a.overlay, out)
 
     result, planned = {}, []
     for name in a.ops:
@@ -265,14 +273,15 @@ def main():
         if result[op.name]["changed"]:
             changed.append(lut)
 
-    if changed:
+    if a.overlay or changed:
         overlay = os.path.join(out, "overlay")
-        write_overlay(root, changed, overlay)
+        write_overlay(a.overlay, root, changed, overlay)
         _run(["bash", os.path.join(HERE, "build_kernels.sh"), overlay, os.path.join(out, "kbuild")], log)
     hipep_env.write_json(os.path.join(out, "lut_refresh.json"), {"arch": a.arch, "ops": result})
     for name, r in result.items():
         print(f"[lut_refresh] {name}: {'changed' if r['changed'] else 'unchanged'} {r['skipped']}".rstrip())
-    print(f"[lut_refresh] wrote {out}/lut_refresh.json; kernel library in {out}/kbuild when a table changed")
+    print(f"[lut_refresh] wrote {out}/lut_refresh.json; kernel library in {out}/kbuild "
+          "when it differs from the release")
 
 
 if __name__ == "__main__":
