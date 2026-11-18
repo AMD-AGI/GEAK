@@ -64,6 +64,8 @@ starting route; revisit unfinished work when that alternative no longer advances
 Budget exploration and adoption evidence together using observed costs at the intended
 concurrency and runtime, within authorized resources. Do not reduce search to whatever
 remains after validating every proposal.
+Reconcile inner and outer execution limits before dispatch; a larger outer allowance
+does not extend an implementation's phase deadline.
 Reallocate from new evidence while preserving explicit task commitments; compare policies
 from the same starting state and total resource allowance.
 After truncation, reprice from observed whole-method costs and verify what the native
